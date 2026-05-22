@@ -1,0 +1,18 @@
+{
+  "id": "v1-6-cdn-dominant-route",
+  "channel": "subscription-url",
+  "description": "Phase FRP-9 V1.6 primary metric seed. A mixed direct_vps + cdn_fronted RelayPack is provisioned with a valid §11.7 CDN attestation and the recipient reaches connected posture through the cdn_fronted candidate within the 60 s budget. This is the synthetic half of V1.6-P1; the live pilot provides the real two-FRP observation.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_cdn_provision_attestation",
+      "args": {
+        "frp_id": "frp-alpha-1",
+        "relay_pack_id": "rp-v1-6-alpha-1",
+        "connected_within_seconds": 42,
+        "cdn_fronted_share_percent": 68
+      }
+    }
+  ]
+}

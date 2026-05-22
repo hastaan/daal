@@ -1,0 +1,15 @@
+{
+    "$comment": "Sample redacted diagnostics export. Exercised by tools/check-diagnostics-redaction.sh; if a future engine change leaks raw IPs / fingerprints / FQDNs, this fixture must be regenerated and the redaction test will catch the regression.",
+    "version": "daal-core 0.9.x",
+    "mode": "normal",
+    "posture": "ok",
+    "state": "Connected",
+    "route_count": 3,
+    "bucket": "5min",
+    "budgets": [],
+    "route_health": [],
+    "skipped_families": [],
+    "current_network_id": "redacted-network-hash-9bF3cQ",
+    "secrets_unlocked": true,
+    "storage_profile": "vault"
+}

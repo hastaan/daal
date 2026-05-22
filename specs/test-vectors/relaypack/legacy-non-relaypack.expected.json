@@ -1,0 +1,18 @@
+{
+  "vector": "legacy-non-relaypack",
+  "purpose": "Bundle with no _relaypack and no Manifest.relay_pack slot. Validator is inert; importer takes legacy path with sentinel-empty RouteRow columns.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": true
+    },
+    {
+      "phase": "V1.6",
+      "pass": true
+    },
+    {
+      "phase": "PostV2",
+      "pass": true
+    }
+  ]
+}

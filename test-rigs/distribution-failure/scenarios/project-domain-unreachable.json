@@ -1,0 +1,6 @@
+{
+  "id": "project-domain-unreachable",
+  "channel": "project-domain",
+  "description": "Primary project domain unreachable; fallback pointer set must be used.",
+  "blocks": ["project-primary"]
+}

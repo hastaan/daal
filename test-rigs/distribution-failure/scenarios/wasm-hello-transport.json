@@ -1,0 +1,33 @@
+{
+  "id": "wasm-hello-transport",
+  "channel": "subscription-url",
+  "description": "Phase 3E. Exercises the WASM transport-slot end-to-end activation lifecycle and the locked-at-3E resource caps. Day 1 enables the experimental-families gate so transport_module routes are selectable. Day 3 the rig drives a soak-only WASM module load (slug `hello-https`, sha256 prefix `a1b2c3d4`); diagnostics MUST surface the slug + sha256_prefix in `loaded_wasm_modules`. Day 7 the rig records 100 successful dial outcomes; `last_wasm_module_dial_outcome` MUST be `ok`. Day 10 the rig drives a deliberately-too-much-fuel module load and a dial against it; the outcome MUST be `fuel_exhausted`; the runaway module MUST be unloaded; `wasm_kill_switched_count` MUST NOT increment (fuel exhaustion is not a kill-switch). Day 14 the rig clears all loaded modules; `loaded_wasm_modules` MUST clear to `[]`. The legacy subscription-url block layers so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 3,
+      "name": "soak_load_wasm_module",
+      "args": { "slug": "hello-https", "sha256": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" }
+    },
+    {
+      "day": 7,
+      "name": "soak_record_wasm_outcome",
+      "args": { "outcome": "ok" }
+    },
+    {
+      "day": 10,
+      "name": "soak_record_wasm_outcome",
+      "args": { "outcome": "fuel_exhausted" }
+    },
+    {
+      "day": 14,
+      "name": "soak_load_wasm_module",
+      "args": { "slug": "", "sha256": "" }
+    }
+  ]
+}

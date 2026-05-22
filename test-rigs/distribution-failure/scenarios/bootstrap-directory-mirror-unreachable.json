@@ -1,0 +1,6 @@
+{
+  "id": "bootstrap-directory-mirror-unreachable",
+  "channel": "bootstrap-directory",
+  "description": "Primary bootstrap-directory mirror unreachable; fallback pointer set across diverse ASNs/TLDs/IPFS/onion must be used.",
+  "blocks": ["directory-primary"]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "v1-5-mode-aware-schema-end-to-end",
+  "channel": "subscription-url",
+  "description": "Phase FRP-7 V1.5 schema metric. Exercises the v2.3.4 mode-aware schema (exposure_mode + public_risk_tags[] + origin_risk_tags[]) end-to-end through validator (relaypackvalidate) \u2192 importer (Tauri preview_bundle) \u2192 store (engine route directory) \u2192 selector (FRP-3 pipeline) \u2192 UI (FRP-6 recipient screens). At V1.5 every candidate is exposure_mode=direct_vps. Asserts: (a) RP021 freshness-url-empty enforced; (b) cdn_fronted-only rules (e.g. cdn:* cooldown propagation) are inert no-ops; (c) the FRP-7 rotation recommender returns 'no cdn_fronted candidates available at V1.5' when invoked on a synthetic cdn_fronted exposure_mode input.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_v1_5_mode_aware_record",
+      "args": {
+        "operator_id": "v1-5-op-1",
+        "exposure_mode": "direct_vps",
+        "public_risk_tags": ["public_ip:198.51.100.10", "public_asn:24940"],
+        "origin_risk_tags": []
+      }
+    },
+    {
+      "day": 1,
+      "name": "soak_assert_validator_phase",
+      "args": { "phase": "V1.5", "rp021_enforced": true }
+    },
+    {
+      "day": 2,
+      "name": "soak_assert_cdn_rules_inert",
+      "args": { "expected_propagation_count": 0 }
+    },
+    {
+      "day": 3,
+      "name": "soak_assert_recommender_no_cdn",
+      "args": { "input_exposure_mode": "cdn_fronted", "expect_reason_substring": "no cdn_fronted candidates" }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "v1-6-origin-ip-scan-rejected",
+  "channel": "subscription-url",
+  "description": "Phase FRP-9 V1.6 §19.2.6 origin-leak probe scenario. A lab scanner attempts to reach the origin IP directly without Cloudflare Authenticated Origin Pulls. The expected result is AOP rejection, no origin disclosure to recipients, and no RelayPack drift.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_simulate_origin_ip_scan",
+      "args": {
+        "origin_ipv4": "5.75.99.99",
+        "aop_rejected": true,
+        "family_visible_event": false
+      }
+    }
+  ]
+}

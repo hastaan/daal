@@ -1,0 +1,43 @@
+{
+  "id": "snowflake-rendezvous-fallback",
+  "channel": "subscription-url",
+  "description": "Phase 3B. Exercises the multi-channel rendezvous taxonomy end-to-end: the engine's experimental-families gate is enabled on day 1; the rendezvous priority is overridden on day 2 to put `sqs` ahead of the default `domain_fronted_broker`; the gate is then briefly disabled on day 12 and re-enabled on day 13 to assert that the rendezvous override survives session-relevant toggles. The legacy 1.5C-class subscription-url block is layered on so the soak invariant ledger continues to assert the distribution-failure gates. Per-route + per-network winning-channel persistence is the principal regression: the engine MUST persist the channel that wins its first Solicit, and on day 22 (after a network roam at day 20) the netmem hint MUST bias the next Selector race to the winner from the prior network.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 2,
+      "name": "set_rendezvous_priority",
+      "args": { "priority": ["sqs", "domain_fronted_broker", "amp_cache", "offline_hint"] }
+    },
+    {
+      "day": 5,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "experimental" }
+    },
+    {
+      "day": 12,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": false }
+    },
+    {
+      "day": 13,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 20,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "PostRoamNet" }
+    },
+    {
+      "day": 22,
+      "name": "set_rendezvous_priority",
+      "args": { "priority": ["domain_fronted_broker", "sqs", "amp_cache", "offline_hint"] }
+    }
+  ]
+}

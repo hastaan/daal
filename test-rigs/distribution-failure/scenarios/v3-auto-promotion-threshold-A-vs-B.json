@@ -1,0 +1,23 @@
+{
+  "id": "v3-auto-promotion-threshold-A-vs-B",
+  "channel": "subscription-url",
+  "description": "Phase 3-Soak carry-over scenario. Drives the auto-promotion threshold A-vs-B comparison harness: the engine runs with the LOCKED-A 2G defaults (3 families × 30 min × ladder ≥ 3) AND the rig records every Skipped-family snapshot through the threshold_compare harness which evaluates LOCKED-B (4 families × 20 min × ladder ≥ 4) in parallel. The harness does NOT reconfigure the engine — neither set is promoted to engine default at 3-Soak per locked decision 9; the comparison memo informs V4 freeze. Day 1 the rig enables auto-promotion. Day 7 the rig synthesises a burst of route burns to exercise the detector. Day 14 the rig calls the comparison harness; a `comparison-memo.md` artifact is written under the run output dir. The v2-superset distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_auto_promotion",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 7,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 14,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    }
+  ]
+}

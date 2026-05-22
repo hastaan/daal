@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Daal brand color tokens (D-2 §5A)",
+  "type": "object",
+  "required": ["version", "themes", "typography", "shape", "motion"],
+  "additionalProperties": true,
+  "properties": {
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "themes": {
+      "type": "object",
+      "required": ["dark", "light"],
+      "properties": {
+        "dark":  { "$ref": "#/definitions/theme" },
+        "light": { "$ref": "#/definitions/theme" }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "required": ["font_display", "font_body", "font_mono", "font_fa"],
+      "additionalProperties": false,
+      "properties": {
+        "font_display": { "type": "string" },
+        "font_body":    { "type": "string" },
+        "font_mono":    { "type": "string" },
+        "font_fa":      { "type": "string" }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "motion": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "theme": {
+      "type": "object",
+      "required": ["tokens"],
+      "additionalProperties": true,
+      "properties": {
+        "tokens": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9-]*$": { "$ref": "#/definitions/token" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "token": {
+      "type": "object",
+      "required": ["oklch", "srgb"],
+      "additionalProperties": true,
+      "properties": {
+        "oklch": { "type": "string" },
+        "srgb":  { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "use":   { "type": "string" }
+      }
+    }
+  }
+}

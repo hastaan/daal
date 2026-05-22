@@ -1,0 +1,6 @@
+{
+  "id": "subscription-url-unreachable",
+  "channel": "subscription-url",
+  "description": "User-pasted subscription URL unreachable; cached profiles must persist; tunneled refresh path must be offered.",
+  "blocks": ["subscription-url"]
+}

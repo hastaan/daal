@@ -1,0 +1,19 @@
+{
+  "id": "v1-6-public-surface-rotation",
+  "channel": "subscription-url",
+  "description": "Phase FRP-9 V1.6 public-surface rotation scenario. A hostname/path burn drives the L7/L8 path: Cloudflare API rotation, RelayPack re-sign, freshness document republish, recipient atomic swap, no QR re-scan, no re-TOFU.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_rotate_public_surface",
+      "args": {
+        "rotation_kind": "cdn_path",
+        "duration_seconds": 24,
+        "freshness_republished": true,
+        "qr_rescan": false,
+        "re_tofu": false
+      }
+    }
+  ]
+}

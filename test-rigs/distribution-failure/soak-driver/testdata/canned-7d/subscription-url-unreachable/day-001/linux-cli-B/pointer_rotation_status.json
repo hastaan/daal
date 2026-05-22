@@ -1,0 +1,9 @@
+{
+  "have_persisted": false,
+  "primary_valid_until": "2027-04-26T19:27:31Z",
+  "fallback_valid_until": "2027-04-26T19:27:31Z",
+  "primary_source": "embedded",
+  "fallback_source": "embedded",
+  "embedded_primary_until": "2027-04-26T19:27:31Z",
+  "embedded_fallback_until": "2027-04-26T19:27:31Z"
+}

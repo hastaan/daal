@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "report_id": "01HZX9F3QK5R8PVCM2T7AB6J0Y",
+  "generated_hour_bucket": "2026-04-26T19:00Z",
+  "platform": "linux",
+  "country_hint": "unknown",
+  "carrier_class": "wifi",
+  "probes": [
+    { "name": "dns_resolves_default", "result": "bogon" },
+    { "name": "tcp_443_to_canary", "result": "ok" },
+    { "name": "udp_echo", "result": "blocked" },
+    { "name": "bootstrap_directory_reachable", "result": "blocked" }
+  ],
+  "failures": [
+    { "category": "dns_poisoned", "count_bucket": 3 },
+    { "category": "udp_unavailable", "count_bucket": 1 },
+    { "category": "subscription_unreachable", "count_bucket": 1 }
+  ],
+  "notes": ""
+}

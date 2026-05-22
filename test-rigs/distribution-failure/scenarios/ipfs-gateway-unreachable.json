@@ -1,0 +1,6 @@
+{
+  "id": "ipfs-gateway-unreachable",
+  "channel": "ipfs",
+  "description": "Public IPFS gateways unreachable; alternate gateways or onion fallback must be used.",
+  "blocks": ["ipfs-gateway-a", "ipfs-gateway-b"]
+}

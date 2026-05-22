@@ -1,0 +1,21 @@
+{
+  "vector": "direct-vps-with-origin-tag-rejected",
+  "purpose": "direct_vps candidate carrying origin_* tag (in direct mode the origin IS the public surface). RP010 at all phases.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP010"
+    },
+    {
+      "phase": "V1.6",
+      "pass": false,
+      "error_code": "RP010"
+    },
+    {
+      "phase": "PostV2",
+      "pass": false,
+      "error_code": "RP010"
+    }
+  ]
+}

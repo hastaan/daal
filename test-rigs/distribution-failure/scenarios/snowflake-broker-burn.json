@@ -1,0 +1,38 @@
+{
+  "id": "snowflake-broker-burn",
+  "channel": "subscription-url",
+  "description": "Phase 3B. Exercises hedged-at-4s fallback behaviour: the soak knob `soak_burn_rendezvous_channel` marks the priority[0] channel (`domain_fronted_broker`) as burned for 5 consecutive attempts on day 7. The Selector MUST observe priority[0] failing within hedge_interval, fire the rest of the priority list in parallel, and a lower-priority channel (`sqs`) MUST win and be recorded as the per-route + per-network last_winning_rendezvous_channel. Burn pressure is then released on day 9 and the engine MUST resume preferring the netmem-hinted winner from day 7. The legacy subscription-url block holds throughout so the distribution-failure invariants are preserved.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 5,
+      "name": "set_rendezvous_priority",
+      "args": { "priority": ["domain_fronted_broker", "sqs", "amp_cache", "offline_hint"] }
+    },
+    {
+      "day": 7,
+      "name": "soak_burn_rendezvous_channel",
+      "args": { "channel_id": "domain_fronted_broker", "attempts": 5 }
+    },
+    {
+      "day": 9,
+      "name": "soak_burn_rendezvous_channel",
+      "args": { "channel_id": "domain_fronted_broker", "attempts": 0 }
+    },
+    {
+      "day": 14,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 16,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    }
+  ]
+}

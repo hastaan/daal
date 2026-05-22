@@ -1,0 +1,15 @@
+{
+  "scenario_id": "ipfs-gateway-unreachable",
+  "channel": "ipfs",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "ipfs-gateway-a",
+    "ipfs-gateway-b"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}

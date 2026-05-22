@@ -1,0 +1,14 @@
+{
+  "id": "doh-dot-sni-block",
+  "v0_failure_categories": ["dns_timeout", "tls_sni_or_cert_block_suspected"],
+  "description": "Encrypted DNS bootstrap kill: SNI block on resolver hostnames; UDP/853 dropped.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {
+    "tls_sni_rst": { "block_list": ["cloudflare-dns.example", "dns.google.example", "dns.quad9.example"] },
+    "udp_blackhole": { "except_ports": [53] }
+  },
+  "expectations": [
+    { "flow": "doh_handshake", "outcome": "tcp_reset" },
+    { "flow": "dot_udp_853", "outcome": "blocked" }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "stateless-sni-rst",
+  "v0_failure_categories": ["tls_sni_or_cert_block_suspected", "tcp_reset"],
+  "description": "Iran-style first-two-packets stateless DPI; RST-injects on SNI match.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24", "latency_ms": 80, "jitter_ms": 20, "loss_pct": 0.5 },
+  "censor": {
+    "tls_sni_rst": { "block_list": ["blocked.example"] },
+    "protocol_whitelist": { "enabled": false }
+  },
+  "expectations": [
+    { "flow": "tls_to_blocked", "outcome": "tcp_reset" },
+    { "flow": "tls_to_allowed", "outcome": "ok" }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "vector": "mixed-relaypack-direct-only",
+  "purpose": "Three direct_vps siblings on a single VPS. V1.5-positive single-VPS multi-candidate shape.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "V1.6",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "vector": "legacy-flat-tags-rejected",
+  "purpose": "Candidate with pre-v2.3.4 flat shared_risk_tags array. Always rejected with RP017.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP017"
+    },
+    {
+      "phase": "V1.6",
+      "pass": false,
+      "error_code": "RP017"
+    },
+    {
+      "phase": "PostV2",
+      "pass": false,
+      "error_code": "RP017"
+    }
+  ]
+}

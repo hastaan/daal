@@ -1,0 +1,7 @@
+{
+  "scenario_id": "iran-protocol-whitelist",
+  "category": "tls_handshake_failed",
+  "outcome": "tcp_connect_timeout",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "raw_wireguard_init"
+}

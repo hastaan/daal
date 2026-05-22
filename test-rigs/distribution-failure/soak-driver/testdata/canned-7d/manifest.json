@@ -1,0 +1,18 @@
+{
+  "run_id": "soak-7d",
+  "started_at": "2026-04-26T21:57:17Z",
+  "simulated_days": 7,
+  "scenarios": [
+    "bootstrap-directory-mirror-unreachable",
+    "github-unreachable",
+    "publisher-revocation-url-unreachable",
+    "subscription-url-unreachable",
+    "telegram-unreachable"
+  ],
+  "clients": [
+    "linux-cli-A",
+    "linux-cli-B"
+  ],
+  "engine_lib": "/tmp/daal-soak-engine-soak",
+  "engine_version": "daal-core 0.4.1+desktop"
+}

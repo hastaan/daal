@@ -1,0 +1,28 @@
+{
+  "id": "v1-5-1-rotation-under-60s",
+  "channel": "subscription-url",
+  "description": "Phase FRP-7 V1.5 supplement §22.1 rotation metric. Asserts at least one selector-driven rotation occurs in the 7-day window AND the recipient sees a plain-language Explanation AND end-to-end recovery wall-clock \u2264 60 s. Drives a synthetic public_ip:* cooldown on day 3, asserts the recommender returns L3 high confidence (per supplement §14.1), asserts the executor performs the floating-IP swap, asserts the recipient's RouteHealthBanner re-attaches inside the budget. The Explanation produced on the recipient side carries reason='Used X because tcp_reset on previous IP', not an identifier.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_v1_5_rotation_target",
+      "args": { "operator_id": "v1-5-op-1" }
+    },
+    {
+      "day": 3,
+      "name": "soak_inject_public_ip_cooldown",
+      "args": { "tag": "public_ip:198.51.100.10", "reason": "tcp_reset" }
+    },
+    {
+      "day": 3,
+      "name": "soak_assert_rotation_observed",
+      "args": { "expect_level": "L3", "max_recovery_seconds": 60 }
+    },
+    {
+      "day": 4,
+      "name": "soak_assert_recipient_explanation_present",
+      "args": { "must_contain_reason_token": "Used" }
+    }
+  ]
+}

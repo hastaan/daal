@@ -1,0 +1,17 @@
+{
+  "scenario_id": "publisher-revocation-url-unreachable",
+  "channel": "publisher-revocation",
+  "outcome": "subscription_unreachable",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "publisher-revocation"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    },
+    {
+      "rule": "no_false_positive_revocation"
+    }
+  ]
+}

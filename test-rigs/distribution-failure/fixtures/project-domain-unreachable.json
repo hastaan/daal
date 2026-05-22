@@ -1,0 +1,14 @@
+{
+  "scenario_id": "project-domain-unreachable",
+  "channel": "project-domain",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "project-primary"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}

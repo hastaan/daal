@@ -1,0 +1,20 @@
+{
+  "name": "daal-shell-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tauri shell that loads client-ui/dist. One binary build pipeline for desktop today + Android/iOS via Tauri Mobile later.",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build",
+    "ios:init": "tauri ios init",
+    "ios:dev": "tauri ios dev",
+    "ios:build": "tauri ios build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.1"
+  }
+}

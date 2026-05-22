@@ -1,0 +1,107 @@
+/* tokens.css — v0.3.0 design system source of truth.
+ *
+ * Adopted verbatim from client-shared/designs/daal-mobile-app.html.
+ * Every primitive component reads from these custom properties; no
+ * other CSS file is allowed to redefine palette/typography. Shells
+ * may add layout-specific tokens (--max-content-width, etc.) but
+ * must not override colors.
+ */
+
+:root {
+  /* palette (oklch teal + warm gold accent) */
+  --bg:         oklch(28% 0.04 215);
+  --bg-deep:    oklch(22% 0.045 215);
+  --surface:    oklch(33% 0.04 215);
+  --surface-2:  oklch(38% 0.04 215);
+  --surface-3:  oklch(43% 0.035 215);
+  --line:       oklch(45% 0.025 215);
+  --line-soft:  oklch(40% 0.03 215);
+  --fg:         oklch(96% 0.012 80);
+  --muted:      oklch(72% 0.012 215);
+  --dim:        oklch(58% 0.015 215);
+  --gold:       #C9A23A;
+  --gold-warm:  oklch(78% 0.12 80);
+  --gold-deep:  oklch(60% 0.12 75);
+  --green:      oklch(72% 0.14 150);
+  --green-dim:  oklch(52% 0.10 150);
+  --amber:      oklch(76% 0.14 80);
+  --red:        oklch(64% 0.18 25);
+
+  /* legacy aliases used by Phase B+ files that still reference the
+   * old "teal-*" / "paper" names. Both names point at the same token
+   * for the duration of the migration; old names will be removed at
+   * the end of Phase 7. */
+  --teal-surface:  var(--surface);
+  --teal-deep:     var(--bg);
+  --teal-raised:   var(--surface-2);
+  --teal-border:   var(--line);
+  --paper:         var(--fg);
+  --paper-dim:     var(--muted);
+  --ink-soft:      var(--muted);
+  --ink-mute:      var(--dim);
+  --danger:        var(--red);
+  --cyan:          oklch(72% 0.10 200);
+
+  /* typography */
+  --font-display:  'Iowan Old Style', 'Charter', 'Newsreader',
+                   'Palatino Linotype', 'Book Antiqua', Palatino,
+                   Georgia, serif;
+  --font-body:     -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                   system-ui, sans-serif;
+  --font-mono:     ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo,
+                   monospace;
+  --font-fa:       'Vazirmatn', 'IRANSans', 'Geeza Pro', 'SF Arabic',
+                   Tahoma, sans-serif;
+
+  /* radii */
+  --r-phone:    44px;
+  --r-card:     16px;
+  --r-tile:     12px;
+  --r-pill:     999px;
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  16px;
+
+  /* layout — overlaid per-shell */
+  --gutter:     20px;
+  --max-content-width: 1320px;
+
+  /* motion */
+  --t-fast:     120ms;
+  --t-base:     180ms;
+  --t-slow:     280ms;
+}
+
+/* global resets */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg-deep);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background-image:
+    radial-gradient(1100px 600px at 12% -10%, oklch(35% 0.05 215) 0%, transparent 60%),
+    radial-gradient(900px 500px at 92% 8%, oklch(34% 0.05 195) 0%, transparent 60%);
+  background-attachment: fixed;
+}
+
+/* density override hooks — useDensity adds [data-density="phone|tablet|desktop"]
+ * to <html>. We don't change palette here, only spacing/sizing. */
+@keyframes daal-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(1.18); }
+}
+
+html[data-density="phone"] {
+  --gutter: 14px;
+}
+html[data-density="tablet"] {
+  --gutter: 18px;
+}
+html[data-density="desktop"] {
+  --gutter: 24px;
+}

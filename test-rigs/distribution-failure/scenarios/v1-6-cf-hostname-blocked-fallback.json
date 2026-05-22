@@ -1,0 +1,18 @@
+{
+  "id": "v1-6-cf-hostname-blocked-fallback",
+  "channel": "cdn-primary",
+  "description": "Phase FRP-9 V1.6 §13.4 mode-aware fallback scenario. The rig simulates a cdn_hostname_blocked classification against the cdn_fronted sibling and asserts the selector falls back to a direct_vps sibling without operator intervention.",
+  "blocks": ["cdn-primary"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_simulate_cf_hostname_block",
+      "args": {
+        "classification": "cdn_hostname_blocked",
+        "cooled_tag": "cdn:cloudflare",
+        "fallback_family": "direct_vps",
+        "recovery_seconds": 18
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "bundle-tampering",
+  "v0_failure_categories": ["bundle_signature_invalid", "bundle_corrupted"],
+  "description": "Tampered .sbp archives: corrupt zip, invalid signature, invalid canonical JSON.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {},
+  "expectations": [
+    { "flow": "import_corrupt_zip", "outcome": "bundle_corrupted" },
+    { "flow": "import_bad_signature", "outcome": "bundle_signature_invalid" }
+  ]
+}

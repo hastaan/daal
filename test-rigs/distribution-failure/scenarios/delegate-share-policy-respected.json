@@ -1,0 +1,22 @@
+{
+  "id": "delegate-share-policy-respected",
+  "channel": "subscription-url",
+  "description": "Phase 3F. Exercises the closed-enum redistribution_policy honour at engine_redistribute_route. Day 1 the rig seeds three routes: `r-share-none` (policy=none, cap=0), `r-share-deln` (policy=delegated_n, cap=2), `r-share-trans` (policy=transitive, cap=0). Day 3 the rig invokes engine_redistribute_route on `r-share-none`; the envelope MUST be `{\"error\":\"policy_refuses\"}`; `last_delegate_share_outcome` MUST be `policy_refuses`. Day 5 the rig invokes against `r-share-deln`; envelope MUST be `ok`; counter MUST be 1. Day 7 the rig invokes against `r-share-trans`; envelope MUST be `ok`; transitive policy admits unconditionally at the sender side (depth is enforced receiver-side, exercised by delegate-share-chain-depth-5). Day 10 the rig invokes engine_redistribute_route on a non-existent route id `r-bogus`; envelope MUST be `{\"error\":\"route_unknown\"}`. Day 14 ledger MUST surface the four distinct closed-enum outcomes (`policy_refuses`, `ok`, `ok`, `route_unknown`) in the audit. The legacy subscription-url block layers so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    { "day": 1, "name": "soak_seed_delegate_route",
+      "args": { "route_id": "r-share-none", "policy": "none", "cap": 0 } },
+    { "day": 1, "name": "soak_seed_delegate_route",
+      "args": { "route_id": "r-share-deln", "policy": "delegated_n", "cap": 2 } },
+    { "day": 1, "name": "soak_seed_delegate_route",
+      "args": { "route_id": "r-share-trans", "policy": "transitive", "cap": 0 } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-none", "recipient_fp_hex": "alice-fp" } },
+    { "day": 5, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-deln", "recipient_fp_hex": "bob-fp" } },
+    { "day": 7, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-trans", "recipient_fp_hex": "carol-fp" } },
+    { "day": 10, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-bogus", "recipient_fp_hex": "dan-fp" } }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "lifeline-strict-policy",
+  "channel": "subscription-url",
+  "description": "Phase 2D: user toggles to lifeline-strict on day 1. Channel-blocking is identical to subscription-url-unreachable. Asserts the V2.5 behavioural overlay: scheduled refresh is gated out (skipped_lifeline_strict), user-triggered refresh fires, the per-session bulk-capable opt-in flag round-trips through diagnostics, and toggling back to normal restores cadence.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "normal" }
+    },
+    {
+      "day": 1,
+      "name": "set_mode",
+      "args": { "mode": "lifeline-strict" }
+    },
+    {
+      "day": 2,
+      "name": "set_allow_bulk",
+      "args": { "allow": true }
+    },
+    {
+      "day": 4,
+      "name": "set_allow_bulk",
+      "args": { "allow": false }
+    },
+    {
+      "day": 6,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "vector": "bundle-with-freshness-url-v15-rejected",
+  "purpose": "Non-empty Manifest.relay_pack.freshness_url at V1.5. Rejected RP021; V1.6 accepts (FRP-8 lifts).",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP021"
+    },
+    {
+      "phase": "V1.6",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    }
+  ]
+}

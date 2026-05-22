@@ -1,0 +1,10 @@
+{
+  "id": "tcp-reset-mid-handshake",
+  "v0_failure_categories": ["tcp_reset"],
+  "description": "RST injected mid-handshake against suspected proxy IPs.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": { "ip_rst": { "ip_block_list": ["10.0.0.3"] } },
+  "expectations": [
+    { "flow": "tcp_to_blocked_ip", "outcome": "tcp_reset" }
+  ]
+}

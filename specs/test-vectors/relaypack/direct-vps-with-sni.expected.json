@@ -1,0 +1,27 @@
+{
+  "vector": "direct-vps-with-sni",
+  "purpose": "direct_vps candidates carrying public_domain:, host:, and sni: tags (legitimate visible domain on own VPS).",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": true,
+      "warnings": [
+        "RP020"
+      ]
+    },
+    {
+      "phase": "V1.6",
+      "pass": true,
+      "warnings": [
+        "RP020"
+      ]
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP020"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "id": "masque-lifeline-rung",
+  "channel": "subscription-url",
+  "description": "Phase 3C. Exercises the masque_lifeline rung selection. Day 1 enables the experimental-families gate and switches to lifeline-strict — the chooseSubmode cascade MUST hint masque_lifeline regardless of UDP probe outcome (locked decision: lifeline-strict + masque family auto-pins lifeline rung). Day 7 burns masque_h2_connect under the 2G classifier; even if the user is in plain `lifeline` mode rather than strict, the cascade's step 6 MUST drop to masque_lifeline. Day 14 releases the burn and lifts to normal mode; the cascade returns to the H3/H2 rungs per UDP probe outcome. Day 20 the user pins an h3 override under lifeline-strict; the cascade clamps the override down to masque_lifeline (locked invariant: the strict budget rules win over override).",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 1,
+      "name": "set_mode",
+      "args": { "mode": "lifeline-strict" }
+    },
+    {
+      "day": 5,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 7,
+      "name": "soak_burn_masque_submode",
+      "args": { "submode": "masque_h2_connect", "attempts": 5 }
+    },
+    {
+      "day": 14,
+      "name": "soak_burn_masque_submode",
+      "args": { "submode": "masque_h2_connect", "attempts": 0 }
+    },
+    {
+      "day": 14,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 20,
+      "name": "set_mode",
+      "args": { "mode": "lifeline-strict" }
+    },
+    {
+      "day": 20,
+      "name": "set_masque_submode_override",
+      "args": { "submode": "masque_h3_quic" }
+    }
+  ]
+}

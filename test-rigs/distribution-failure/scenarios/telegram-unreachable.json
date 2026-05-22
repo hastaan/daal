@@ -1,0 +1,6 @@
+{
+  "id": "telegram-unreachable",
+  "channel": "telegram",
+  "description": "Telegram CDNs and apps unreachable; client must continue via remaining channels.",
+  "blocks": ["telegram-cdn", "telegram-api"]
+}

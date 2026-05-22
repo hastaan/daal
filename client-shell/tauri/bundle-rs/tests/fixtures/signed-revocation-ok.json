@@ -1,0 +1,1 @@
+{"v":1,"issued_at":"2026-04-26T12:00:00Z","revoked_publishers":["f66b3c7274fb5276477ee5fb64ea42ab43582601d248bd5b30654ede48456312"],"revoked_routes":["route-x"],"reason":"key compromised","signature_hex":"7c99fd0ffb651eb0abc4df2fa138039c9e849f9e140297b52016451af8dab0108618d86c05bf0194a8f47b514d0c00b6654ad5c37dbf48dbf57f89e77d080209"}

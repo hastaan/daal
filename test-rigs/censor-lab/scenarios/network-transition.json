@@ -1,0 +1,11 @@
+{
+  "id": "network-transition",
+  "v0_failure_categories": ["udp_unavailable", "tcp_connect_timeout"],
+  "description": "Client moves from 'wifi-like' to 'mobile-like' network mid-flow; engine should re-probe.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24", "transitions": [{ "after_ms": 2000, "to": "mobile-like" }] },
+  "censor": { "udp_blackhole": { "after_transition": true, "except_ports": [53] } },
+  "expectations": [
+    { "flow": "udp_pre_transition", "outcome": "ok" },
+    { "flow": "udp_post_transition", "outcome": "blocked" }
+  ]
+}

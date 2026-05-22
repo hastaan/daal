@@ -1,0 +1,13 @@
+{
+  "id": "v1-5-family-online-under-60s",
+  "channel": "subscription-url",
+  "description": "Phase FRP-7 V1.5 primary metric (supplement §22.1). Asserts that recipient.scan \u2192 first-tunnel-up completes in \u2264 60 seconds. Drives the FRP-6 recipient screens (RouteHealthBanner + AnimatedQrTab + WhyThisRouteScreen) against a synthetic .sbp import; verifies the engine reaches engine_diagnostics_explain.posture == 'connected' inside the budget. Recovery action on miss: surface a banner pointing to the recipient-side WhyThisRouteScreen plain-language explanation; the FRP can paste the resulting Explanation into the rotate modal.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_v1_5_family_online",
+      "args": { "recipient_id": "v1-5-recipient-1", "budget_seconds": 60 }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "_doc": "Snapshot of FRP-4a publisher/deploy/provider/types.go OperatorRecord JSON keys, plus FRP-5 wizard-extras. Drift between this file and either side is a build error.",
+  "_source_go_struct": "publisher/deploy/provider/types.go::OperatorRecord (FRP-4a)",
+  "_source_rust_struct": "client-shell/tauri/daal-wizard/src/staging.rs::PreProvisionRecord (FRP-5)",
+  "frp_4a_operator_record_keys": [
+    "provider",
+    "server_id",
+    "server_type",
+    "region",
+    "public_ip",
+    "public_ipv6",
+    "floating_ip_id",
+    "toolbox_profile",
+    "publisher_pub_key",
+    "candidates",
+    "provisioned_at",
+    "last_reprovisioned_at"
+  ],
+  "frp_5_wizard_extras": {
+    "_doc": "Fields the wizard adds to the pre-provision record. enabled_families is propagated into ProvisionOpts at FRP-4b binder time; freshness_url is reserved here (empty at V1.5) and populated at FRP-8.",
+    "keys": [
+      "enabled_families",
+      "freshness_url"
+    ]
+  },
+  "_invariant_25": "freshness_url is present and equal to '' at FRP-5; FRP-8 populates."
+}

@@ -1,0 +1,513 @@
+# appveyor.yml — AppVeyor build manifest for Daal (Windows, macOS, iOS).
+#
+# Why AppVeyor: hastaan/daal's GitHub Actions queue is soft-throttled at the
+# account level (cross-repo metered-usage hold even though daal is public),
+# leaving the runner queue parked indefinitely. AppVeyor's FOSS plan gives
+# us free Windows + macOS workers without payment info, so we offload the
+# three platforms WSL cannot build locally (Win/Mac/iOS) to AppVeyor while
+# Linux + Android keep building on the WSL dev host.
+#
+# Job matrix:
+#   - Visual Studio 2022 image  -> Daal_<v>_x64-setup.exe + Daal_<v>_x64.msi
+#   - macos image (DESKTOP=1)   -> Daal_<v>_aarch64.dmg + Daal_<v>.app
+#   - macos image (IOS=1)       -> Daal_<v>_unsigned.ipa
+#
+# Concurrency: free OSS plan = 1 concurrent job. The three jobs serialize.
+# Total wall time for a clean tag run is roughly 40-60 minutes.
+#
+# Artifacts: each job uploads its bundle(s) to AppVeyor's per-build artifact
+# store; download them from the AppVeyor UI (Build -> Artifacts tab) and
+# attach to the GitHub Release manually. We intentionally do NOT give the
+# AppVeyor OAuth token write access to GitHub Releases — keeps blast radius
+# minimal if the AppVeyor account is ever compromised.
+
+version: 0.1.0.{build}
+
+# `branches.only` triggers builds for version tags only (vX.Y.Z). We
+# intentionally do NOT build every main push because every release in
+# this repo is a single signed commit pushed together with a matching
+# tag (force-amend workflow), and a tag-push + main-push to the same
+# SHA would otherwise double-queue every release on the free OSS plan
+# (1 concurrent job → 4-build pileup observed in v0.1.0).
+#
+# To build an untagged commit on demand: AppVeyor UI → "New build" → pick
+# the commit. Pull requests from forks are still built automatically per
+# AppVeyor default.
+branches:
+  only:
+    - /v\d+\.\d+\.\d+.*/
+
+# Skip commits that only touch text/doc folders to save free-tier minutes.
+skip_commits:
+  files:
+    - '*.md'
+    - 'docs/**/*'
+    - 'specs/**/*'
+    - 'development-phases/**/*'
+    - 'research/**/*'
+    - 'CHANGELOG.md'
+    - 'LICENSE'
+
+# Default cache rules apply to every matrix image. Per-image overrides
+# below add image-specific paths (e.g. Windows uses backslash paths under
+# %USERPROFILE%).
+cache:
+  - '%USERPROFILE%\.cargo -> Cargo.lock'
+  - '%USERPROFILE%\.rustup -> Cargo.lock'
+  - 'client-shell\tauri\src-tauri\target -> Cargo.lock'
+  - 'client-ui\node_modules -> client-ui\package-lock.json'
+  - 'client-shell\tauri\node_modules -> client-shell\tauri\package-lock.json'
+  - '$HOME/.cargo -> Cargo.lock'
+  - '$HOME/.rustup -> Cargo.lock'
+  - 'client-shell/tauri/src-tauri/target -> Cargo.lock'
+  - 'client-ui/node_modules -> client-ui/package-lock.json'
+  - 'client-shell/tauri/node_modules -> client-shell/tauri/package-lock.json'
+
+# Matrix entries. AppVeyor invokes the install/build/after_build phases
+# once per image. We further split the macOS image into a desktop job and
+# an iOS job via the DAAL_TARGET env var.
+environment:
+  matrix:
+    - APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+      DAAL_TARGET: windows
+    - APPVEYOR_BUILD_WORKER_IMAGE: macOS
+      DAAL_TARGET: macos
+    - APPVEYOR_BUILD_WORKER_IMAGE: macOS
+      DAAL_TARGET: ios
+
+# AppVeyor exposes the matrix image via APPVEYOR_BUILD_WORKER_IMAGE.
+# `for:` clauses below let us scope install/build steps to one image.
+
+#######################################################################
+# Shared helpers (run on every image before the install phase).       #
+#######################################################################
+init:
+  - cmd: echo "Daal build on Windows. image=%APPVEYOR_BUILD_WORKER_IMAGE% target=%DAAL_TARGET%"
+  - sh: echo "Daal build on $(uname -s). image=$APPVEYOR_BUILD_WORKER_IMAGE target=$DAAL_TARGET"
+
+#######################################################################
+# WINDOWS (Visual Studio 2022) — produces NSIS .exe + WiX .msi.        #
+#######################################################################
+for:
+  - matrix:
+      only:
+        - APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+    install:
+      # Go 1.25.x. AppVeyor's Visual Studio 2022 image ALREADY ships a
+      # Go 1.25.x install at $USERPROFILE\go\ (typically a later patch
+      # version, e.g. 1.25.3). If we Expand-Archive on top of it with
+      # `-Force`, file-replacement is partial — go.exe gets overwritten
+      # to 1.25.0 but pkg\tool\windows_amd64\compile.exe and friends
+      # stay at the preinstalled patch, producing the error:
+      #   "compile: version go1.25.0 does not match go tool go1.25.3"
+      #
+      # Fix: install our pinned Go into an ISOLATED root (C:\go125),
+      # wipe it first if it exists from a previous build's cache, and
+      # explicitly put C:\go125\bin AT THE FRONT of PATH so it wins over
+      # the preinstalled %USERPROFILE%\go\bin.
+      - ps: |
+          $goVer = '1.25.0'
+          $goRoot = 'C:\go125'
+          $goUrl  = "https://go.dev/dl/go$goVer.windows-amd64.zip"
+          if (Test-Path $goRoot) {
+            Write-Host "wiping existing $goRoot before re-extract"
+            Remove-Item -Recurse -Force $goRoot
+          }
+          New-Item -ItemType Directory -Force -Path $goRoot | Out-Null
+          Write-Host "Downloading $goUrl"
+          Invoke-WebRequest -Uri $goUrl -OutFile go.zip
+          # The zip contains a top-level `go/` directory; extract to C:\
+          # so it lands at C:\go, then move to C:\go125.
+          $tmp = Join-Path $env:TEMP "go-extract"
+          if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+          Expand-Archive -Path go.zip -DestinationPath $tmp -Force
+          # The zip's root is `go\`; copy its contents into C:\go125.
+          Copy-Item -Recurse -Force -Path "$tmp\go\*" -Destination $goRoot
+          Remove-Item -Recurse -Force $tmp
+          # Put our pinned Go AT THE FRONT of PATH (Machine scope so it
+          # survives across AppVeyor step boundaries).
+          $env:GOROOT = $goRoot
+          $env:Path   = "$goRoot\bin;$env:Path"
+          [Environment]::SetEnvironmentVariable('GOROOT', $goRoot, 'Machine')
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          [Environment]::SetEnvironmentVariable(
+            'Path', "$goRoot\bin;$machinePath", 'Machine')
+          Write-Host "go.exe location:" (Get-Command go).Source
+          go version
+          go env GOROOT GOTOOLDIR
+      # Rust stable via rustup. The Visual Studio 2022 image ships a
+      # pre-existing rustup settings file at C:\Users\appveyor\.rustup\
+      # but does NOT put rustup on PATH. Detection order:
+      #   1. If $USERPROFILE\.cargo\bin\rustup.exe exists, just put
+      #      .cargo\bin on PATH and `rustup update stable` (idempotent,
+      #      quiet, no "existing settings file" warning).
+      #   2. Else download rustup-init.exe and run it.
+      # We also redirect rustup-init's stderr so PowerShell doesn't
+      # wrap every native `info:`/`warn:` line in a scary
+      # NativeCommandError frame ($ErrorActionPreference='Continue'
+      # plus `2>&1` to merge streams before PowerShell sees them).
+      - ps: |
+          $ErrorActionPreference = 'Continue'
+          $cargoBin = "$env:USERPROFILE\.cargo\bin"
+          if (Test-Path "$cargoBin\rustup.exe") {
+            Write-Host "rustup already installed at $cargoBin\rustup.exe"
+            $env:Path = "$cargoBin;$env:Path"
+            [Environment]::SetEnvironmentVariable('Path', "$cargoBin;$env:Path", 'User')
+            & rustup self update      2>&1 | Out-String | Write-Host
+            & rustup update stable    2>&1 | Out-String | Write-Host
+            & rustup default stable   2>&1 | Out-String | Write-Host
+          } else {
+            Write-Host "rustup not found; bootstrapping via rustup-init.exe"
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile rustup-init.exe
+            & .\rustup-init.exe -q -y `
+              --default-host x86_64-pc-windows-msvc `
+              --default-toolchain stable `
+              --profile minimal `
+              --no-modify-path 2>&1 | Out-String | Write-Host
+            $env:Path = "$cargoBin;$env:Path"
+            [Environment]::SetEnvironmentVariable('Path', "$cargoBin;$env:Path", 'User')
+          }
+          rustc --version
+          cargo --version
+      # Node.js 20 LTS. The Visual Studio 2022 image preinstalls Node;
+      # we pin via nvm-windows where available, otherwise rely on the
+      # bundled version.
+      - cmd: node --version
+      - cmd: npm --version
+      # ImageMagick for tools/gen-assets.sh. choco modifies PATH only in
+      # NEW shells, so we run choco AND verify in a single PowerShell
+      # block that refreshes the process PATH via refreshenv (provided
+      # by chocolatey-core.extension installed transitively).
+      - ps: |
+          choco install imagemagick.app -y --no-progress --limit-output
+          # Pull the updated Machine + User PATH into the current process
+          # so `magick` resolves in this same step (cmd: blocks below
+          # inherit the AppVeyor-refreshed env, but this `ps:` block
+          # would otherwise still hold the pre-install snapshot).
+          Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+          refreshenv
+          magick --version
+      # MinGW gcc — required by `go build -buildmode=c-shared` (CGO).
+      # AppVeyor's VS 2022 image ships msys2 at C:\msys64; we just put
+      # mingw64\bin on PATH so `gcc.exe` is resolvable from later steps.
+      #
+      # NB: implemented as a `ps:` block because AppVeyor's `cmd:` mode
+      # invokes each YAML-block line in a SEPARATE cmd.exe — a
+      # multi-line `if exist (...)` block does not survive that, exits
+      # 255. PowerShell here-strings work as one process so the if/else
+      # works as expected.
+      - ps: |
+          $gcc = 'C:\msys64\mingw64\bin\gcc.exe'
+          if (Test-Path $gcc) {
+            Write-Host "Using preinstalled msys2 mingw64 gcc at $gcc"
+            $env:Path = "C:\msys64\mingw64\bin;$env:Path"
+            [Environment]::SetEnvironmentVariable(
+              'Path', "C:\msys64\mingw64\bin;$([Environment]::GetEnvironmentVariable('Path','Machine'))",
+              'Machine')
+          } else {
+            Write-Host "No preinstalled msys2 gcc; installing via Chocolatey..."
+            choco install mingw -y --no-progress --limit-output
+            Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+            refreshenv
+          }
+          gcc --version
+      # WiX 3 — Tauri's MSI bundler downloads candle/light automatically
+      # on first invocation if not already on PATH, so we don't need to
+      # pre-install or probe for it here. (Previously we ran a `where
+      # candle.exe || echo ...` probe, but AppVeyor's `cmd:` step
+      # propagates the `where` exit=1 to the step exit regardless of
+      # the `||` short-circuit — failing the install phase. Removed.)
+    build_script:
+      # 1. libdaalcore.dll via Go cshared. CGO needs a host gcc and Go's
+      #    cshared mode wants it as the linker — ensure mingw64\bin is
+      #    on PATH for THIS process (setx /M above modifies the registry
+      #    but new processes started from this script inherit the env
+      #    from AppVeyor's own snapshot, which already includes the
+      #    refreshed Machine PATH on step boundaries).
+      - ps: |
+          if (Test-Path "C:\msys64\mingw64\bin\gcc.exe") {
+            $env:Path = "C:\msys64\mingw64\bin;$env:Path"
+          }
+          # Go 1.25 refuses to operate without GOPATH or GOMODCACHE
+          # set explicitly. AppVeyor's clean image has neither set.
+          $env:GOPATH = "$env:USERPROFILE\go-work"
+          $env:GOMODCACHE = "$env:GOPATH\pkg\mod"
+          New-Item -ItemType Directory -Force -Path "$env:GOMODCACHE" | Out-Null
+          [Environment]::SetEnvironmentVariable('GOPATH', $env:GOPATH, 'User')
+          [Environment]::SetEnvironmentVariable('GOMODCACHE', $env:GOMODCACHE, 'User')
+          # GOTOOLCHAIN=local forbids auto-download of a patch version
+          # (e.g. 1.25.0 vs 1.25.3) which causes
+          # "compile: version go1.25.0 does not match go tool go1.25.3"
+          # because go.exe is from our zip extract but the compile.exe
+          # gets pulled from $GOTOOLCHAIN cache at a later patch.
+          $env:GOTOOLCHAIN = 'local'
+          [Environment]::SetEnvironmentVariable('GOTOOLCHAIN', 'local', 'User')
+          Write-Host "gcc:" (Get-Command gcc -ErrorAction SilentlyContinue)
+          Write-Host "GOPATH:" $env:GOPATH
+          Write-Host "GOMODCACHE:" $env:GOMODCACHE
+          go env GOPATH GOMODCACHE
+          New-Item -ItemType Directory -Force -Path "client-shell\tauri\src-tauri\resources" | Out-Null
+          Push-Location core
+          $env:CGO_ENABLED = '1'
+          go build -buildmode=c-shared -tags cshared `
+            -o "..\client-shell\tauri\src-tauri\resources\libdaalcore.dll" `
+            .\cmd\libdaalcore
+          Pop-Location
+          Get-Item "client-shell\tauri\src-tauri\resources\libdaalcore.dll"
+      # 2. npm install (client-ui + tauri shell).
+      - cmd: npm --prefix client-ui install --no-audit --no-fund
+      - cmd: npm --prefix client-shell\tauri install --no-audit --no-fund
+      # 3. Regenerate brand assets so icons match the source SVGs.
+      #    gen-assets.sh is bash, so we invoke Git Bash (preinstalled on
+      #    AppVeyor's VS images at C:\Program Files\Git\bin\bash.exe).
+      - cmd: '"C:\Program Files\Git\bin\bash.exe" tools/gen-assets.sh'
+      # 4. Tauri build. Produces NSIS .exe + WiX .msi in
+      #    client-shell\tauri\src-tauri\target\release\bundle\.
+      #
+      # NB: AppVeyor sets `CI=True` (capitalized) which Tauri 2's clap
+      # parser rejects: `error: invalid value 'True' for '--ci'`
+      # (clap only accepts lowercase `true`/`false`). We override CI
+      # to lowercase `true` before invoking tauri.
+      - ps: |
+          $env:CI = 'true'
+          [Environment]::SetEnvironmentVariable('CI', 'true', 'Process')
+          Push-Location client-shell\tauri
+          npm run tauri -- build --bundles nsis,msi
+          $rc = $LASTEXITCODE
+          Pop-Location
+          if ($rc -ne 0) { throw "tauri build failed with exit code $rc" }
+    after_build:
+      - ps: |
+          $version = (Get-Content VERSION).Trim()
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Get-ChildItem -Path client-shell\tauri\src-tauri\target\release\bundle -Recurse -Include '*.exe','*.msi' | ForEach-Object {
+            $src = $_.FullName
+            $dst = switch -Wildcard ($_.Name) {
+              '*.exe' { "release-assets\Daal_${version}_x64-setup.exe" }
+              '*.msi' { "release-assets\Daal_${version}_x64.msi" }
+            }
+            if ($dst) {
+              Write-Host "rename $src -> $dst"
+              Copy-Item -Path $src -Destination $dst -Force
+            }
+          }
+          Get-ChildItem release-assets
+    artifacts:
+      - path: release-assets\*.exe
+        name: daal-windows-exe
+      - path: release-assets\*.msi
+        name: daal-windows-msi
+
+  ###################################################################
+  # macOS DESKTOP — produces .app + .dmg (aarch64).                  #
+  ###################################################################
+  - matrix:
+      only:
+        - APPVEYOR_BUILD_WORKER_IMAGE: macOS
+          DAAL_TARGET: macos
+    install:
+      - sh: |
+          set -euo pipefail
+          # Go 1.25 via Homebrew (AppVeyor's macOS image preinstalls go;
+          # may lag the 1.25.x release-check requirement, so refresh).
+          brew list go >/dev/null 2>&1 || brew install go
+          go version
+          # Rust stable.
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          source "$HOME/.cargo/env"
+          rustc --version
+          # Node.js 20 LTS.
+          brew list node >/dev/null 2>&1 || brew install node
+          node --version
+          # ImageMagick for gen-assets.sh.
+          brew list imagemagick >/dev/null 2>&1 || brew install imagemagick
+          magick --version | head -1
+    build_script:
+      - sh: |
+          set -euo pipefail
+          source "$HOME/.cargo/env"
+          # Go 1.25 requires GOPATH/GOMODCACHE set explicitly.
+          # GOTOOLCHAIN=local forbids patch-version auto-download.
+          export GOPATH="$HOME/go-work"
+          export GOMODCACHE="$GOPATH/pkg/mod"
+          export GOTOOLCHAIN=local
+          mkdir -p "$GOMODCACHE"
+          go env GOPATH GOMODCACHE GOTOOLCHAIN
+          # 1. libdaalcore.dylib (host-arch — AppVeyor macOS image is
+          #    Apple Silicon, so this produces an arm64 dylib).
+          mkdir -p client-shell/tauri/src-tauri/resources
+          (cd core && CGO_ENABLED=1 go build -buildmode=c-shared -tags cshared \
+            -o "$APPVEYOR_BUILD_FOLDER/client-shell/tauri/src-tauri/resources/libdaalcore.dylib" \
+            ./cmd/libdaalcore)
+          file client-shell/tauri/src-tauri/resources/libdaalcore.dylib
+          # 2. npm install.
+          npm --prefix client-ui install --no-audit --no-fund
+          npm --prefix client-shell/tauri install --no-audit --no-fund
+          # 3. Brand assets.
+          bash tools/gen-assets.sh
+          # 4. Tauri build — produces .app + .dmg under
+          #    client-shell/tauri/src-tauri/target/release/bundle/.
+          # Force CI=true (lowercase) — AppVeyor exports CI=True which
+          # Tauri 2's clap parser rejects.
+          (cd client-shell/tauri && CI=true npm run tauri -- build --bundles app,dmg)
+    after_build:
+      - sh: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          mkdir -p release-assets
+          find client-shell/tauri/src-tauri/target/release/bundle/ -maxdepth 3 \
+            \( -name '*.dmg' -o -name '*.app' \) | while read -r path; do
+            base="$(basename "$path")"
+            case "$base" in
+              *.dmg) cp -v "$path" "release-assets/Daal_${version}_aarch64.dmg" ;;
+              *.app)
+                # Zip the .app bundle for transport — AppVeyor's artifact
+                # uploader cannot preserve directory bundles directly.
+                (cd "$(dirname "$path")" && zip -qry "$APPVEYOR_BUILD_FOLDER/release-assets/Daal_${version}_aarch64.app.zip" "$base")
+                ;;
+            esac
+          done
+          ls -la release-assets/
+    artifacts:
+      - path: release-assets/*.dmg
+        name: daal-macos-dmg
+      - path: release-assets/*.app.zip
+        name: daal-macos-app
+
+  ###################################################################
+  # iOS — produces unsigned .ipa (re-sign with Sideloadly).          #
+  ###################################################################
+  - matrix:
+      only:
+        - APPVEYOR_BUILD_WORKER_IMAGE: macOS
+          DAAL_TARGET: ios
+    install:
+      - sh: |
+          set -euo pipefail
+          brew list go >/dev/null 2>&1 || brew install go
+          go version
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          source "$HOME/.cargo/env"
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+          rustc --version
+          brew list node >/dev/null 2>&1 || brew install node
+          node --version
+          brew list imagemagick >/dev/null 2>&1 || brew install imagemagick
+    build_script:
+      - sh: |
+          set -euo pipefail
+          source "$HOME/.cargo/env"
+          # Go 1.25: pin GOPATH/GOMODCACHE; GOTOOLCHAIN=local prevents
+          # auto-downloading a different patch version (which causes
+          # 'compile: version go1.25.0 does not match go tool go1.25.3').
+          export GOPATH="$HOME/go-work"
+          export GOMODCACHE="$GOPATH/pkg/mod"
+          export GOTOOLCHAIN=local
+          mkdir -p "$GOMODCACHE"
+          # npm install
+          npm --prefix client-ui install --no-audit --no-fund
+          npm --prefix client-shell/tauri install --no-audit --no-fund
+          # Brand assets
+          bash tools/gen-assets.sh
+          # Tauri iOS scaffolding
+          (cd client-shell/tauri && npx tauri ios init)
+          # Replace Tauri-scaffolded AppIcon with Daal AppIcon set
+          SRC="client-shared/branding/generated/launcher/ios/AppIcon.appiconset"
+          DST="$(find client-shell/tauri/src-tauri/gen/apple -type d -name 'AppIcon.appiconset' | head -n 1)"
+          if [ -z "$DST" ]; then
+            echo "FATAL: no AppIcon.appiconset under gen/apple" >&2
+            find client-shell/tauri/src-tauri/gen/apple -maxdepth 6 -type d | head -40 >&2
+            exit 1
+          fi
+          rm -f "$DST"/*.png "$DST/Contents.json"
+          cp "$SRC"/* "$DST"/
+          # libdaalcore.dylib for iOS device (arm64)
+          bash tools/build-engine-ios.sh
+          # Strip signing requirements from the pbxproj
+          bash tools/patch-ios-signing.sh
+          # tauri ios build will succeed at `xcodebuild archive` then
+          # fail at `xcodebuild -exportArchive` (no Apple account). We
+          # tolerate that failure and extract the .app from the
+          # xcarchive ourselves.
+          set +e
+          (cd client-shell/tauri && CI=true APPLE_DEVELOPMENT_TEAM='0000000000' npx tauri ios build -v)
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] && echo "tauri ios build exited $rc — expected; extracting xcarchive next" >&2
+          true
+    after_build:
+      - sh: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          mkdir -p release-assets
+          GEN="client-shell/tauri/src-tauri/gen/apple"
+          XCARCHIVE="$(find "$GEN" -name '*.xcarchive' -type d 2>/dev/null | head -n 1)"
+          APP=""
+          if [ -n "$XCARCHIVE" ]; then
+            APP="$(find "$XCARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -n 1)"
+            echo "Found xcarchive: $XCARCHIVE"
+          fi
+          if [ -z "$APP" ]; then
+            APP="$(find "$GEN" -path '*/iphoneos/*.app' -type d 2>/dev/null | head -n 1)"
+          fi
+          if [ -z "$APP" ]; then
+            APP="$(find "$GEN" -name '*.app' -type d 2>/dev/null | head -n 1)"
+          fi
+          if [ -z "$APP" ]; then
+            echo "no .app found under $GEN" >&2
+            find "$GEN" -maxdepth 8 \( -name '*.app' -o -name '*.ipa' -o -name '*.xcarchive' \) 2>/dev/null | head -50 >&2
+            exit 1
+          fi
+          echo "Packaging app: $APP"
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP" "$STAGE/Payload/"
+          IPA_OUT="$APPVEYOR_BUILD_FOLDER/release-assets/Daal_${version}_unsigned.ipa"
+          (cd "$STAGE" && zip -qr "$IPA_OUT" Payload)
+          ls -la release-assets/
+          unzip -l "$IPA_OUT" | head -30
+    artifacts:
+      - path: release-assets/*.ipa
+        name: daal-ios-ipa
+
+# Disable email notifications — AppVeyor's free OSS plan defaults to
+# sending build emails, which gets noisy on free tier.
+notifications:
+  - provider: Email
+    on_build_success: false
+    on_build_failure: false
+    on_build_status_changed: false
+
+# Auto-publish AppVeyor-built artifacts to the matching GitHub Release.
+#
+# Trigger: only on version-tag builds (vX.Y.Z), never on branch builds.
+# The release MUST already exist on GitHub (we create it locally via
+# `gh release create vX.Y.Z` after the local Linux+Android build);
+# AppVeyor's job is to *attach* the Win/Mac/iOS artifacts to it.
+#
+# Auth: needs a GitHub Personal Access Token with `repo` scope, exposed
+# to the build as a secret env var. One-time setup:
+#   1. github.com → Settings → Developer settings → Personal access tokens
+#      (classic) → Generate new token → scope `repo` → no expiry.
+#   2. ci.appveyor.com → daal project → Settings → Environment →
+#      "Add variable" → Name: GITHUB_TOKEN → Value: <paste PAT> →
+#      tick "Variable is secret" → Save.
+#
+# After that, every tag push goes: AppVeyor builds Win/Mac/iOS → uploads
+# the artifacts to the v$TAG GitHub Release automatically. Zero manual
+# download+upload.
+#
+# `force_update: true` lets AppVeyor overwrite an asset of the same name
+# (handy when rebuilding the same tag). `prerelease/draft: false` keeps
+# the existing release's state intact (it was created by `gh release
+# create` locally with whatever state we picked there).
+deploy:
+  - provider: GitHub
+    release: $(APPVEYOR_REPO_TAG_NAME)
+    auth_token: $(GITHUB_TOKEN)
+    artifact: /.*\.(exe|msi|dmg|zip|ipa)/
+    draft: false
+    prerelease: false
+    force_update: true
+    on:
+      APPVEYOR_REPO_TAG: true

@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "issued_at": "2026-05-22T17:29:58Z",
+  "revoked_routes": [
+    "sample-route-1"
+  ],
+  "reason": "sample bundle revocation for Phase 1B testing",
+  "signature_hex": "52226482e630062df98f4a8768ff0d41b2e061f7b4ac73bb9de705b80cea620b5704f01bcff03a7478c3aef1da624cf7313c1fb22241372946d05a42aa314a05"
+}

@@ -1,0 +1,16 @@
+{
+  "scenario_id": "app-store-unreachable",
+  "channel": "app-store",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "play-store",
+    "app-store",
+    "fdroid"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}
