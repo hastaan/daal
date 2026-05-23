@@ -11,8 +11,15 @@
       content="Daal is a privacy-first anti-censorship client for hostile networks. Download desktop, Android, and iOS builds — no analytics, no telemetry, no accounts."
     />
 
+    <!-- Multi-size + multi-format favicons. .ico first as the broadest
+         fallback (every browser, including ancient ones); .svg for
+         crisp rendering on high-DPI displays; sized PNGs for Android
+         Chrome and iOS Safari home-screen pin. -->
+    <link rel="icon" type="image/x-icon" href="./daal-favicon.ico" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="alternate icon" type="image/x-icon" href="./daal-favicon.ico" />
+    <link rel="icon" type="image/png" sizes="16x16" href="./daal-favicon-16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./daal-favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="./daal-favicon-96.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="./daal-icon-bg-180.png" />
 
     <meta property="og:title" content="Daal — anti-censorship client" />
