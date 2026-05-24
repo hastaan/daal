@@ -1,0 +1,16 @@
+{
+  "scenario_id": "cdn-unreachable",
+  "channel": "cdn",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "cdn-a",
+    "cdn-b",
+    "cdn-c"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}

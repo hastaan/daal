@@ -1,0 +1,7 @@
+{
+  "scenario_id": "doh-dot-sni-block",
+  "category": "dns_timeout",
+  "outcome": "tcp_reset",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "doh_handshake"
+}

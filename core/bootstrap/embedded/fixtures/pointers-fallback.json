@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "kind": "bootstrap_pointers",
+  "set": "fallback",
+  "issued_at": "2026-05-07T08:45:45Z",
+  "valid_until": "2027-05-07T08:45:45Z",
+  "pointers": [
+    {
+      "url": "https://bootstrap-fallback.daal.example/dir.sbp",
+      "expected_publisher_fingerprint_hex": "488c160475debbfa08ef2f0adff05376ffdf57238a88d2629a2a990afeed60d7"
+    }
+  ],
+  "signature_hex": "97c3ea9a639b34dc74c64e9e70ae8d09679bbf43ad5bda101847f872925dec7f6565f3248d94949274c58533b25ef1382baf577f2ed88d220eef7b01a44e6c0e"
+}

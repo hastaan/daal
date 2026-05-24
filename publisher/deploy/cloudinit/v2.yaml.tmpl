@@ -1,0 +1,261 @@
+#cloud-config
+# Daal relay cloud-init V2 — supplement §9.5.2 (verbatim shape).
+# Extends V1.5 template with daal-relay-mgmt installation and the
+# V2 cloud-provider firewall + persistent narrow-API mgmt service
+# posture. Rendered by publisher/deploy/cloudinit/template.go::RenderV2.
+hostname: daal-relay
+manage_etc_hosts: true
+package_update: true
+package_upgrade: false
+
+bootcmd:
+  - |
+    mkdir -p /root/.ssh
+    cat >/root/.ssh/authorized_keys <<'EOF'
+    {{ .EphemeralSSHPublicKey }}
+    EOF
+    chmod 700 /root/.ssh
+    chmod 600 /root/.ssh/authorized_keys
+
+packages:
+  - curl
+  - ca-certificates
+  - openssl
+  - python3
+  - ufw
+
+users:
+  - name: daal
+    sudo: false
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+
+ssh_authorized_keys:
+  - {{ .EphemeralSSHPublicKey }}
+
+write_files:
+  - path: /etc/daal/artifacts.json
+    permissions: '0644'
+    content: |
+{{ .PinnedArtifactManifest | indent 6 }}
+
+  - path: /etc/daal/release.pub
+    permissions: '0644'
+    content: |
+{{ .DaalReleasePubKey | indent 6 }}
+
+  - path: /usr/local/bin/daal-fetch-verify
+    permissions: '0755'
+    content: |
+{{ .VerifierShim | indent 6 }}
+
+  - path: /etc/sing-box/config.json
+    permissions: '0600'
+    owner: root:root
+    content: |
+{{ .SingBoxConfigJSON | indent 6 }}
+
+  # FRP-14 §6 kick wrapper. /users/revoke calls this to evict live
+  # sessions within ≤ 10 s. We send SIGUSR2 (sing-box ≥ v1.10 honors
+  # it as a graceful inbound drop), wait briefly, then ask systemd
+  # for a clean reload to settle config on disk.
+  - path: /usr/local/lib/daal/singbox-kick.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/sh
+      set -eu
+      pid="$(systemctl show -p MainPID --value sing-box.service)"
+      if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+        kill -USR2 "$pid" || true
+      fi
+      sleep 2
+      systemctl reload sing-box.service || systemctl restart sing-box.service
+
+  # FRP-10 V2 mgmt-plane: per-deploy publisher pubkey + listening
+  # port + sing-box config path are written by cloud-init from the
+  # wizard's RenderInputV2. The cert/key are generated on the box
+  # at first boot by daal-relay-mgmt itself.
+  - path: /etc/daal/mgmt/pubkey
+    permissions: '0644'
+    owner: root:root
+    content: |
+      {{ .MgmtPubKeyHex }}
+
+  - path: /etc/daal/mgmt/port
+    permissions: '0644'
+    owner: root:root
+    content: |
+      {{ .MgmtPort }}
+{{ if .CDNEnabled }}
+  - path: /etc/daal/cdn/origin_ca.pem
+    permissions: '0644'
+    owner: root:root
+    content: |
+{{ .OriginCACertPEM | indent 6 }}
+
+  - path: /etc/daal/cdn/origin_ca.key
+    permissions: '0600'
+    owner: root:root
+    content: |
+{{ .OriginCAPrivPEM | indent 6 }}
+
+  - path: /etc/daal/cdn/aop_client.pem
+    permissions: '0600'
+    owner: root:root
+    content: |
+{{ .AOPClientCertPEM | indent 6 }}
+{{ end }}
+
+  - path: /etc/daal-health/config.json
+    permissions: '0600'
+    content: |
+      {
+        "one_time_token": "{{ .HealthToken }}",
+        "allowed_client_ip": "{{ .ProvisioningClientIP }}",
+        "auto_close_after_seconds": 300,
+        "publish_mgmt_fingerprint_path": "/var/log/daal/mgmt-tls.fpr"
+      }
+
+  - path: /etc/systemd/system/sing-box.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=sing-box (Daal relay)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+      Restart=on-failure
+      RestartSec=5
+      LimitNOFILE=1048576
+      AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+      CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+      NoNewPrivileges=true
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/daal-health.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Daal relay health endpoint (provisioning-window only, §9.6)
+      After=sing-box.service
+      Wants=sing-box.service
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/daal-relay-health -config /etc/daal-health/config.json
+      Restart=no
+      User=daal
+      Group=daal
+      NoNewPrivileges=true
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/daal-relay-mgmt.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Daal relay V2 management plane (§9.5.2)
+      After=sing-box.service network-online.target
+      Wants=sing-box.service network-online.target
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/daal-relay-mgmt
+      Restart=on-failure
+      RestartSec=5
+      User=root
+      Group=root
+      NoNewPrivileges=true
+      AmbientCapabilities=CAP_NET_BIND_SERVICE
+      CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # FRP-10: box-side ufw is closed for mgmt; cloud-provider firewall
+  # is the gate (§9.5.2). We open 443 for sing-box and the helper-
+  # bound 22 + 9876 health windows for the provisioning step only.
+  - |
+    bash -euo pipefail <<'DAAL_PROVISION'
+    fail() {
+      mkdir -p /var/log/daal
+      printf '%s\n' "$1" | tee /var/log/daal-provision.fail
+      exit 1
+    }
+    run() {
+      "$@" || fail "$* failed"
+    }
+    run ufw default deny incoming
+    run ufw default allow outgoing
+    run ufw allow 443/tcp
+    run ufw allow 443/udp
+    run ufw allow from {{ .ProvisioningClientIP }} to any port 22 proto tcp
+    run ufw allow from {{ .ProvisioningClientIP }} to any port 9876 proto tcp
+    # FRP-14 fix: open the V2 mgmt port at the box-side firewall too.
+    # FRP-10 invariant 18 says the cloud-provider firewall is the
+    # gate for the mgmt port — that's true for SOURCE filtering, but
+    # the packet still has to traverse the box-side ufw. If we keep
+    # ufw default-deny and add no rule, every mgmt request is
+    # dropped at the box even after the cloud firewall lets it
+    # through (this caused the /users/provision context-deadline
+    # timeout). Opening the port at the box is safe because the
+    # cloud-provider firewall still restricts the SOURCE to the
+    # ephemeral helper-IP window.
+    run ufw allow {{ .MgmtPort }}/tcp
+    run ufw --force enable
+    chown daal:daal /etc/daal-health/config.json || fail "chown /etc/daal-health/config.json failed"
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || fail "enable provisioning ssh failed"
+    systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service || fail "restart ssh failed"
+    /usr/local/bin/daal-fetch-verify /etc/daal/artifacts.json /etc/daal/release.pub /usr/local/bin/ || fail "artifact verification failed"
+    # FRP-14: the canonical sing-box config ships with an empty
+    # REALITY private_key; sing-box refuses to start without one.
+    # Mint a real X25519 keypair on first boot, then surgically
+    # inject the priv into every vless-in inbound's TLS/reality
+    # block. The PUBLIC key is written next to it so future rotate-
+    # credentials calls (and per-recipient .sbpx bundling) can read
+    # it without re-running keygen.
+    keys="$(/usr/local/bin/sing-box generate reality-keypair)" || fail "reality-keypair gen failed"
+    reality_priv="$(printf '%s\n' "$keys" | awk '/PrivateKey:/ {print $2}')"
+    reality_pub="$(printf '%s\n' "$keys" | awk '/PublicKey:/ {print $2}')"
+    [ -n "$reality_priv" ] || fail "reality-keypair: empty PrivateKey"
+    mkdir -p /etc/daal
+    printf '%s\n' "$reality_pub" > /etc/daal/reality.pub
+    chmod 0644 /etc/daal/reality.pub
+    REALITY_PRIV="$reality_priv" python3 -c "$(printf '%s\n' \
+      'import json, os, sys' \
+      'path = "/etc/sing-box/config.json"' \
+      'cfg = json.load(open(path))' \
+      'priv = os.environ["REALITY_PRIV"]' \
+      'patched = False' \
+      'for inb in cfg.get("inbounds") or []:' \
+      '    tls = inb.get("tls")' \
+      '    if not isinstance(tls, dict):' \
+      '        continue' \
+      '    reality = tls.get("reality")' \
+      '    if isinstance(reality, dict) and reality.get("enabled"):' \
+      '        reality["private_key"] = priv' \
+      '        patched = True' \
+      'if not patched:' \
+      '    sys.exit("no reality inbound found in sing-box config")' \
+      'json.dump(cfg, open(path, "w"))')" || fail "inject reality priv failed"
+    run systemctl daemon-reload
+    run systemctl enable --now sing-box
+    run systemctl enable --now daal-health
+    run systemctl enable --now daal-relay-mgmt
+    sleep 300
+    rm -f /root/.ssh/authorized_keys
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config || true
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config || true
+    systemctl disable --now ssh.service 2>/dev/null || systemctl disable --now sshd.service || true
+    ufw --force delete allow from {{ .ProvisioningClientIP }} to any port 22 proto tcp || true
+    ufw --force delete allow from {{ .ProvisioningClientIP }} to any port 9876 proto tcp || true
+    systemctl stop daal-health || true
+    systemctl disable daal-health || true
+    DAAL_PROVISION
+  # FRP-10 invariant 18: box-side ufw does NOT open the mgmt port.
+  # The cloud-provider firewall (per Provider.SetEphemeralFirewallRule)
+  # is the gate, opened by the Helper for ~5 minutes per L1/L2 op.
+
+final_message: "Daal relay V2 ready in $UPTIME seconds"

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "bundle-rs",
+    "daal-desktop-core",
+    "daal-recipient-addr",
+    "daal-wizard",
+    "tun-helper",
+]
+# `win-service` and the Tauri 2 GUI shell are out-of-tree builds today:
+# the Tauri shell depends on a Node toolchain (Vite + React) which is
+# wired in CI per packaging/ scripts. The Rust library that the Tauri
+# shell depends on lives in `daal-desktop-core` and is buildable with
+# only cargo.
+
+# Sane defaults for every workspace crate.
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+repository = "https://example.invalid/daal"
+authors = ["Daal contributors"]
+
+[workspace.dependencies]
+# Crypto and parsing — pinned to avoid surprise minor-version churn.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+thiserror = "1.0"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

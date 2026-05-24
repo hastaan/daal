@@ -1,0 +1,16 @@
+{
+  "pick": {
+    "route_id": "",
+    "family": "",
+    "exposure_mode": "",
+    "family_class": "",
+    "probing_risk_class": ""
+  },
+  "shortlist": [],
+  "failures": [],
+  "active_cooldowns": [],
+  "network_signals": [],
+  "reason": "No candidates available.",
+  "decision_id": "frp3-fixture-empty-decision-001",
+  "phase": "V1.5"
+}

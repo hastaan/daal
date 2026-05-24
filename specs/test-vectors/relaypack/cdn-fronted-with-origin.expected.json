@@ -1,0 +1,25 @@
+{
+  "vector": "cdn-fronted-with-origin",
+  "purpose": "cdn_fronted candidate with full origin_risk_tags array. Rejected at V15 (RP004), accepted at V16+.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP004"
+    },
+    {
+      "phase": "V1.6",
+      "pass": true,
+      "warnings": [
+        "RP020"
+      ]
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP020"
+      ]
+    }
+  ]
+}

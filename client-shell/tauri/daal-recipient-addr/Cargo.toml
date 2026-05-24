@@ -1,0 +1,24 @@
+[package]
+name = "daal-recipient-addr"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Branded daal1... bech32m recipient-address codec; Rust mirror of core/recipient/address."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = { workspace = true }
+hex  = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

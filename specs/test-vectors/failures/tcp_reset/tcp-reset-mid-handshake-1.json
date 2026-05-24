@@ -1,0 +1,7 @@
+{
+  "scenario_id": "tcp-reset-mid-handshake",
+  "category": "tcp_reset",
+  "outcome": "tcp_reset",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "tcp_to_blocked_ip"
+}

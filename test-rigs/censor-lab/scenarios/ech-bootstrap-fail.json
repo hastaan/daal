@@ -1,0 +1,10 @@
+{
+  "id": "ech-bootstrap-fail",
+  "v0_failure_categories": ["dns_poisoned", "tls_handshake_failed"],
+  "description": "HTTPS/SVCB record withheld so client cannot fetch ECHConfig.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": { "dns": { "withhold_https_svcb": true } },
+  "expectations": [
+    { "flow": "ech_handshake", "outcome": "tls_handshake_failed" }
+  ]
+}

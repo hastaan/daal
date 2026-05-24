@@ -1,0 +1,10 @@
+{
+  "id": "route-expired",
+  "v0_failure_categories": ["route_expired"],
+  "description": "Route's valid_until has passed; route disabled and refresh path offered.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {},
+  "expectations": [
+    { "flow": "use_expired_route", "outcome": "route_expired" }
+  ]
+}

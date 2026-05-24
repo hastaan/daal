@@ -1,0 +1,31 @@
+{
+  "id": "ios-extension-memory",
+  "channel": "subscription-url",
+  "description": "Phase 2E: simulates the iOS Network Extension's ~50 MiB memory ceiling by running the soak engine subprocess with GOMEMLIMIT=50MiB. Drives the same 1.5C-class channel block (subscription-url-unreachable) and asserts the soak invariant ledger passes unchanged; the engine must continue to behave correctly under the GOMEMLIMIT constraint. The bridge fires a `memory_pressure_warning` lifecycle event mid-run; the engine must record it in diagnostics without bumping the session epoch or otherwise mutating engine state.",
+  "blocks": ["subscription-url"],
+  "engine_env": {
+    "GOMEMLIMIT": "50MiB"
+  },
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "normal" }
+    },
+    {
+      "day": 2,
+      "name": "lifecycle_event",
+      "args": { "token": "memory_pressure_warning" }
+    },
+    {
+      "day": 3,
+      "name": "lifecycle_event",
+      "args": { "token": "will_sleep" }
+    },
+    {
+      "day": 3,
+      "name": "lifecycle_event",
+      "args": { "token": "did_wake" }
+    }
+  ]
+}

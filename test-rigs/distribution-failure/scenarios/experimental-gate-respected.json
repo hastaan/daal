@@ -1,0 +1,38 @@
+{
+  "id": "experimental-gate-respected",
+  "channel": "subscription-url",
+  "description": "Phase 3A. Drives the engine through the spec-locked experimental-families gate transitions: default-OFF at Init, user toggles ON mid-soak, mode change does not clear the flag, network change does not clear the flag. The same 1.5C-class subscription-url block is layered on so the soak invariant ledger continues to assert the legacy distribution-failure gates. The Iranian-region caveat banner has no soak-side surface (it is a UI affordance gated by the trust-UI subsystem; tested in client-android / client-desktop integration tests).",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": false }
+    },
+    {
+      "day": 5,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 10,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 11,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 15,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "" }
+    },
+    {
+      "day": 25,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": false }
+    }
+  ]
+}

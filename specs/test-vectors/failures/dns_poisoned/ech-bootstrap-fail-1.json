@@ -1,0 +1,7 @@
+{
+  "scenario_id": "ech-bootstrap-fail",
+  "category": "dns_poisoned",
+  "outcome": "tls_handshake_failed",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "ech_handshake"
+}

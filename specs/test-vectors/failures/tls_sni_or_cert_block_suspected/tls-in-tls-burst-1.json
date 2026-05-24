@@ -1,0 +1,7 @@
+{
+  "scenario_id": "tls-in-tls-burst",
+  "category": "tls_sni_or_cert_block_suspected",
+  "outcome": "tcp_reset",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "nested_tls_handshake"
+}

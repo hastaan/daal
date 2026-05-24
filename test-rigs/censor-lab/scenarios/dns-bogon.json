@@ -1,0 +1,19 @@
+{
+  "id": "dns-bogon",
+  "v0_failure_categories": ["dns_poisoned"],
+  "description": "Iran SHOMA-style DNS forgery returning RFC1918 sinkholes 10.10.34.34/.35/.36.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {
+    "dns": {
+      "poison": {
+        "blocked.example": ["10.10.34.34"],
+        "another.example": ["10.10.34.35"],
+        "third.example": ["10.10.34.36"]
+      }
+    }
+  },
+  "expectations": [
+    { "flow": "dns_blocked", "outcome": "bogon" },
+    { "flow": "dns_allowed", "outcome": "ok" }
+  ]
+}

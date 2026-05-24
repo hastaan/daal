@@ -1,0 +1,28 @@
+{
+  "id": "ios-wireguard-handoff",
+  "channel": "subscription-url",
+  "description": "Phase 2E: drives the soak-only WG sub-engine memory gauge past the 38 MiB watermark on day 2, then forces a one-way handoff event. Asserts the diagnostics surface carries `wg_subengine_memory_kib` and `wg_subengine_handoff_at` after the forced handoff. The boringtun side is mocked as a Go shim for soak purposes; the real Rust archive is exercised only on Apple CI / partner-mac on-device.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "normal" }
+    },
+    {
+      "day": 2,
+      "name": "soak_set_wg_memory_kib",
+      "args": { "kib": 38912 }
+    },
+    {
+      "day": 2,
+      "name": "soak_force_wg_handoff",
+      "args": {}
+    },
+    {
+      "day": 4,
+      "name": "lifecycle_event",
+      "args": { "token": "memory_pressure_warning" }
+    }
+  ]
+}

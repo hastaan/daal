@@ -1,0 +1,106 @@
+[
+  {
+    "vector": "valid-v2",
+    "description": "spec_version=2, valid signature, future expiry",
+    "sbp_file": "valid-v2.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ok"
+  },
+  {
+    "vector": "valid-v1",
+    "description": "spec_version=1 (legacy), valid signature",
+    "sbp_file": "valid-v1.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ok"
+  },
+  {
+    "vector": "invalid-spec-v3",
+    "description": "spec_version=3 must be rejected",
+    "sbp_file": "invalid-spec-v3.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrUnsupportedSpec"
+  },
+  {
+    "vector": "invalid-signature",
+    "description": "manifest.sig flipped",
+    "sbp_file": "invalid-signature.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrInvalidSignature"
+  },
+  {
+    "vector": "expired-route",
+    "description": "route ValidUntil in the past",
+    "sbp_file": "expired-route.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrExpiredRoute"
+  },
+  {
+    "vector": "expired-bundle",
+    "description": "bundle ExpiresAt in the past",
+    "sbp_file": "expired-bundle.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrExpiredBundle"
+  },
+  {
+    "vector": "unknown-transport",
+    "description": "transport_family=unknown-family",
+    "sbp_file": "unknown-transport.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrInvalidEnum"
+  },
+  {
+    "vector": "unknown-scarcity",
+    "description": "scarcity_class=unknown",
+    "sbp_file": "unknown-scarcity.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrInvalidEnum"
+  },
+  {
+    "vector": "missing-profile",
+    "description": "manifest references missing profile",
+    "sbp_file": "missing-profile.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrMissingProfile"
+  },
+  {
+    "vector": "fingerprint-mismatch",
+    "description": "manifest declares wrong KeyFingerprintHex",
+    "sbp_file": "fingerprint-mismatch.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrFingerprintMismatch"
+  },
+  {
+    "vector": "v2-pointer-rotation-ref",
+    "description": "v2 directory bundle with pointer_rotation_ref present",
+    "sbp_file": "v2-pointer-rotation-ref.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ok"
+  },
+  {
+    "vector": "signed-revocation-ok",
+    "description": "valid SignedRevocation v=1",
+    "sbp_file": "signed-revocation-ok.json",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ok"
+  },
+  {
+    "vector": "signed-revocation-tampered",
+    "description": "SignedRevocation with corrupted signature_hex",
+    "sbp_file": "signed-revocation-tampered.json",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrInvalidSignature"
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "id": "v3-cross-platform-pickup",
+  "channel": "subscription-url",
+  "description": "Phase 3-Soak primary metric. Drives the V3 success-metric assertion: a fresh `transport_module` published into the directory mid-soak is activatable on every platform stub (Linux + Android + iOS) within 24 simulated hours of bundle publication. Day 1 the rig seeds the baseline V3 family-mix directory. Day 7 a publisher emits `pickup-tm-v1` (a 3E hello-world module) into the subscription URL. Day 8 (24h later) the rig snapshots `engine_loaded_wasm_modules` on every platform stub and asserts `pickup-tm-v1` is present on Linux, Android, and iOS. Day 14 final ledger: cross_platform_pickup_pass = true. Locked at 3-Soak per `phases of development/27-phase-3-soak-success-metric.md` §6 primary; the rig's v3verifier walks the per-platform observation tuples and computes the aggregate.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_delegate_route",
+      "args": { "route_id": "v3-mix-baseline", "policy": "none", "cap": 0 }
+    },
+    {
+      "day": 7,
+      "name": "soak_load_wasm_module",
+      "args": { "slug": "pickup-tm-v1", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }
+    },
+    {
+      "day": 8,
+      "name": "soak_record_wasm_outcome",
+      "args": { "outcome": "ok" }
+    }
+  ]
+}

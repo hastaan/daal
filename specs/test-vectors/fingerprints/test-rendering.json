@@ -1,0 +1,13 @@
+{
+  "status": "test-only",
+  "note": "Persian words in this file are placeholders until the curated 2048-word list is reviewed.",
+  "input": {
+    "public_key_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+  },
+  "expected_properties": [
+    "hex_is_sha256_of_public_key",
+    "english_rendering_is_deterministic",
+    "persian_rendering_is_deterministic",
+    "visual_checksum_is_deterministic"
+  ]
+}

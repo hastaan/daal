@@ -1,0 +1,48 @@
+{
+  "id": "push-rendezvous-opt-in",
+  "channel": "subscription-url",
+  "description": "Phase 3B. Exercises the `push` rendezvous channel through its full opt-in lifecycle. Day 1 enables the experimental-families gate; day 2 the user opts into push (engine returns 0 because the soak driver runs the keystore profile, not vault); day 4 a synthetic FCM/APNS data-message is delivered through `soak_simulate_push_payload` and the verifier MUST accept it because the sender publisher is pinned in the soak fixture; day 6 a tampered payload is delivered and the verifier MUST reject it (-5). On day 14 the user opts back out and a subsequent simulated push MUST be rejected (-2) because the engine treats opt-out as a hard gate before the verifier even runs. The legacy subscription-url block holds throughout so the distribution-failure invariants are preserved. Note: the vault-profile rejection (-2 from SetPushRendezvousEnabled) is unit-tested at the ABI layer; this scenario is the soak-level proof that an opted-in keystore engine does NOT regress the 30-day in-engine ledger.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 2,
+      "name": "set_push_rendezvous_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 3,
+      "name": "set_rendezvous_priority",
+      "args": { "priority": ["push", "domain_fronted_broker", "sqs", "amp_cache", "offline_hint"] }
+    },
+    {
+      "day": 4,
+      "name": "soak_simulate_push_payload",
+      "args": { "bridge": "203.0.113.5:443", "fp": "deadbeef" }
+    },
+    {
+      "day": 6,
+      "name": "soak_simulate_push_payload",
+      "args": { "bridge": "evil.attacker:443", "fp": "deadbeef" }
+    },
+    {
+      "day": 14,
+      "name": "set_push_rendezvous_enabled",
+      "args": { "enabled": false }
+    },
+    {
+      "day": 16,
+      "name": "soak_simulate_push_payload",
+      "args": { "bridge": "203.0.113.5:443", "fp": "deadbeef" }
+    },
+    {
+      "day": 22,
+      "name": "set_push_rendezvous_enabled",
+      "args": { "enabled": true }
+    }
+  ]
+}

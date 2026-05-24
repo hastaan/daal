@@ -1,0 +1,7 @@
+{
+  "scenario_id": "network-transition",
+  "category": "tcp_connect_timeout",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "udp_post_transition"
+}

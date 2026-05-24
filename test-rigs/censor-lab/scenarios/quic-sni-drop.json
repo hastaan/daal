@@ -1,0 +1,11 @@
+{
+  "id": "quic-sni-drop",
+  "v0_failure_categories": ["quic_unavailable"],
+  "description": "GFW-style QUIC-SNI extractor; drops 3-tuple for ~3 minutes after SNI match. Behavior-level only.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": { "quic_sni_drop": { "block_list": ["blocked.example"], "residual_seconds": 180 } },
+  "expectations": [
+    { "flow": "quic_to_blocked", "outcome": "blocked" },
+    { "flow": "quic_to_allowed", "outcome": "ok" }
+  ]
+}

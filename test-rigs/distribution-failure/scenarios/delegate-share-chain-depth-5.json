@@ -1,0 +1,22 @@
+{
+  "id": "delegate-share-chain-depth-5",
+  "channel": "subscription-url",
+  "description": "Phase 3F. Exercises the locked-at-3F MaxChainDepth = 5 invariant on the transitive-policy redistribution chain. Day 1 the rig seeds a route `r-share-chain` with policy=transitive cap=0. Day 3 the rig invokes engine_redistribute_route five times; each call MUST return an `ok` envelope (each call appends one delegate hop on the device-local share path). Day 5 a sixth invocation MUST still return `ok` because the engine-side chain depth check is local — the engine considers only the device's own outbound re-share counter. The depth-cap rejection is asserted receiver-side via the bundle parser (`bundle/go/bundle/v3f_test.go::TestSBPv1_RedistributionChainTooDeepRejected`); this scenario asserts that the SENDER side does not silently saturate at 5 (cap arithmetic is uint8 saturating; transitive has no per-route share cap). Day 10 `last_delegate_share_outcome` MUST still be `ok`; `delegate_share_counters[r-share-chain]` MUST surface a positive `shared_with_count` (saturating at 255). The transitive scenario asserts the DOC's depth invariant lives on the receiver-side parser surface, which is a distinct test surface from the engine. The legacy subscription-url block layers so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    { "day": 1, "name": "soak_seed_delegate_route",
+      "args": { "route_id": "r-share-chain", "policy": "transitive", "cap": 0 } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-chain", "recipient_fp_hex": "hop1-fp" } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-chain", "recipient_fp_hex": "hop2-fp" } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-chain", "recipient_fp_hex": "hop3-fp" } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-chain", "recipient_fp_hex": "hop4-fp" } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-chain", "recipient_fp_hex": "hop5-fp" } },
+    { "day": 5, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-chain", "recipient_fp_hex": "hop6-fp" } }
+  ]
+}

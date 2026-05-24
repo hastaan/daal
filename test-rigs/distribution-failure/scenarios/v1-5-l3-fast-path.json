@@ -1,0 +1,18 @@
+{
+  "id": "v1-5-l3-fast-path",
+  "channel": "subscription-url",
+  "description": "Phase FRP-7 V1.5 wall-clock pin (supplement §14.1 V1.5 column). Asserts the L3 floating-IP fast path completes end-to-end in < 15 seconds. Drives Provider.UnassignFloatingIP + AssignFloatingIP against a Hetzner mock; the soak-driver records the synthetic-clock wall-clock and fails the day if the budget breaks. The wall-clock pin matches the publisher/deploy/rotation/executor.go ErrL3WallClockBudget constant (15 * time.Second). Recovery action on miss: the supplement §14.1 'V2 in-box mgmt API' will bring L3 to ~5 s once FRP-10 lands; until then 15 s is the V1.5 ship invariant.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_v1_5_l3_target",
+      "args": { "operator_id": "v1-5-op-1", "old_fip": "fip-old", "new_fip": "fip-new" }
+    },
+    {
+      "day": 1,
+      "name": "soak_assert_l3_under_budget",
+      "args": { "max_wallclock_seconds": 15 }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "github-unreachable",
+  "channel": "github",
+  "description": "GitHub raw, releases, and api unreachable.",
+  "blocks": ["github-raw", "github-releases", "github-api"]
+}

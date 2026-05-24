@@ -1,0 +1,13 @@
+{
+  "id": "v1-5-provisioning-under-10min",
+  "channel": "subscription-url",
+  "description": "Phase FRP-7 V1.5 primary metric (supplement §22.1). Asserts that wizard.start \u2192 operator-record-persisted completes in \u2264 10 minutes under the rig's accelerated clock. Drives the FRP-5 wizard against a synthetic Hetzner provider mock + the FRP-4b BindAndSign codepath, then asserts the resulting OperatorRecord JSON is on disk and the V002 signed_sbp_* projection columns are populated. Recovery action on miss: re-run with a fresh ephemeral SSH key (the V1.5 provisioning path is idempotent on rerun).",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_v1_5_provisioning",
+      "args": { "operator_id": "v1-5-op-1", "budget_seconds": 600 }
+    }
+  ]
+}

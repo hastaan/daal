@@ -1,0 +1,17 @@
+{
+  "id": "iran-protocol-whitelist",
+  "v0_failure_categories": ["tcp_connect_timeout", "tls_handshake_failed"],
+  "description": "TIC-style protocol whitelist: only flows beginning with DNS / HTTP-verbs / TLS record 0x16 forwarded.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24", "latency_ms": 60 },
+  "censor": {
+    "protocol_whitelist": {
+      "enabled": true,
+      "allow_first_bytes": ["GET ", "POST", "HEAD", "CONNECT", "OPTIONS", "DELETE", "PUT ", "0x16"]
+    }
+  },
+  "expectations": [
+    { "flow": "raw_random_bytes", "outcome": "tcp_connect_timeout" },
+    { "flow": "raw_wireguard_init", "outcome": "tcp_connect_timeout" },
+    { "flow": "tls_clienthello", "outcome": "ok" }
+  ]
+}

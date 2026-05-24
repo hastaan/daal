@@ -1,0 +1,38 @@
+{
+  "id": "webtunnel-handshake",
+  "channel": "subscription-url",
+  "description": "Phase 3A. Exercises the WebTunnel transport family end-to-end at the soak surface: the experimental-families gate is enabled on day 1, the engine ranks bundles that include a webtunnel route alongside stable families, and the legacy 1.5C-class subscription-url block is layered on so the soak invariant ledger continues to assert the distribution-failure gates. Parse-time `bulk-capable` rejection and per-route Iranian-region caveat banner are exercised in unit tests; this scenario is the soak-level proof that an enabled gate plus a present webtunnel route does NOT regress the 30-day in-engine ledger.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 5,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "experimental" }
+    },
+    {
+      "day": 12,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 13,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 20,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": false }
+    },
+    {
+      "day": 22,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    }
+  ]
+}

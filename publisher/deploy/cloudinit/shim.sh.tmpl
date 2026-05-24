@@ -1,0 +1,41 @@
+#!/bin/bash
+# daal-fetch-verify — base-image-only artefact verifier (supplement §9.2.1).
+# Uses bash + python3 stdlib + openssl. No bootstrap binary downloaded
+# before signature verification.
+#
+# Args: $1=manifest.json $2=release.pub $3=target-bin-dir
+set -euo pipefail
+MANIFEST=$1
+PUBKEY=$2
+TARGET=$3
+python3 -c "$(cat <<'PY'
+import json, hashlib, subprocess, sys, urllib.request, os, tempfile
+m = json.load(open(sys.argv[1]))
+pub = sys.argv[2]; target = sys.argv[3]
+for art in m["artefacts"]:
+    ok = False
+    for url in art["mirrors"]:
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                data = urllib.request.urlopen(url, timeout=30).read()
+                f.write(data); f.flush()
+            if hashlib.sha256(data).hexdigest() != art["sha256"]:
+                continue
+            sig_path = f.name + ".sig"
+            open(sig_path, "wb").write(bytes.fromhex(art["sig_hex"]))
+            r = subprocess.run(
+                ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", pub,
+                 "-rawin", "-in", f.name, "-sigfile", sig_path],
+                capture_output=True)
+            if r.returncode != 0:
+                continue
+            dst = os.path.join(target, art["install_as"])
+            os.replace(f.name, dst); os.chmod(dst, 0o755)
+            ok = True; break
+        except Exception:
+            continue
+    if not ok:
+        print(f"FAIL: no mirror passed verification for {art['name']}", file=sys.stderr)
+        sys.exit(1)
+PY
+)" "$MANIFEST" "$PUBKEY" "$TARGET"

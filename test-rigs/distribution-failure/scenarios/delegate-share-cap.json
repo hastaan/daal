@@ -1,0 +1,22 @@
+{
+  "id": "delegate-share-cap",
+  "channel": "subscription-url",
+  "description": "Phase 3F. Exercises the locked-at-3F per-route uint8 share cap. Day 1 the rig seeds a route `r-share-cap` with policy=delegated_n cap=3. Day 3 the rig invokes engine_redistribute_route three times against three distinct recipient delegate fingerprints; each MUST return an `ok` envelope; `delegate_share_counters[r-share-cap].shared_with_count` MUST track 1 → 2 → 3. Day 5 the rig invokes engine_redistribute_route a fourth time; the envelope MUST be `{\"error\":\"cap_exhausted\"}`; `last_delegate_share_outcome` MUST be `cap_exhausted`; `shared_with_count` MUST remain 3 (NOT 4). Day 10 the rig re-imports a publisher bundle that updates the route's cap to 25 (simulated via re-seeding); the counter MUST survive the re-seed (3D/3E-style non-clobber discipline preserved); a fifth re-share invocation MUST now succeed. Day 14 final ledger: 4 successful re-shares + 1 refused. The legacy subscription-url block layers so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    { "day": 1, "name": "soak_seed_delegate_route",
+      "args": { "route_id": "r-share-cap", "policy": "delegated_n", "cap": 3 } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-cap", "recipient_fp_hex": "alice-fp" } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-cap", "recipient_fp_hex": "bob-fp" } },
+    { "day": 3, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-cap", "recipient_fp_hex": "carol-fp" } },
+    { "day": 5, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-cap", "recipient_fp_hex": "dan-fp" } },
+    { "day": 10, "name": "soak_seed_delegate_route",
+      "args": { "route_id": "r-share-cap", "policy": "delegated_n", "cap": 25 } },
+    { "day": 10, "name": "soak_redistribute_route",
+      "args": { "route_id": "r-share-cap", "recipient_fp_hex": "erin-fp" } }
+  ]
+}

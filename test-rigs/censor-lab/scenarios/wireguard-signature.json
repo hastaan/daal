@@ -1,0 +1,15 @@
+{
+  "id": "wireguard-signature",
+  "v0_failure_categories": ["udp_unavailable"],
+  "description": "Drop UDP datagrams matching WireGuard initiation: type 0x01000000, length 148.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {
+    "udp_signature_drop": [
+      { "name": "wireguard_init", "first_bytes_hex": "01000000", "length": 148 }
+    ]
+  },
+  "expectations": [
+    { "flow": "wireguard_init", "outcome": "blocked" },
+    { "flow": "udp_echo_other", "outcome": "ok" }
+  ]
+}

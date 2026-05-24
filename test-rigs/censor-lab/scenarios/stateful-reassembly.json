@@ -1,0 +1,11 @@
+{
+  "id": "stateful-reassembly",
+  "v0_failure_categories": ["tls_sni_or_cert_block_suspected"],
+  "description": "Stateful middlebox tracks seq windows; FakeSNI-style pre-ISN injection no longer poisons SNI extraction.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": { "tls_sni_rst": { "block_list": ["blocked.example"], "stateful_reassembly": true } },
+  "expectations": [
+    { "flow": "fakesni_pre_isn_injection", "outcome": "tcp_reset" },
+    { "flow": "plain_tls_to_allowed", "outcome": "ok" }
+  ]
+}

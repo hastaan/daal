@@ -1,0 +1,21 @@
+{
+  "vector": "cdn-fronted-no-origin-tag-rejected",
+  "purpose": "cdn_fronted candidate missing origin_* tag. V1.5 rejects RP004; V1.6 rejects RP006.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP004"
+    },
+    {
+      "phase": "V1.6",
+      "pass": false,
+      "error_code": "RP006"
+    },
+    {
+      "phase": "PostV2",
+      "pass": false,
+      "error_code": "RP006"
+    }
+  ]
+}

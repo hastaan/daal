@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "kind": "root_rotation",
+  "old_root_fingerprint_hex": "baf7fd3808058a8575c46473a0ef60dd38639bda92caf42550a4449995c001c9",
+  "new_root_pub_hex": "fcba2121d28a58ec3bb59474b1fde4b751985208c1e39e37889ecac0d7c8cb6c",
+  "transition_starts_at": "2026-05-22T17:29:42Z",
+  "transition_ends_at": "2026-06-05T17:29:42Z",
+  "signature_hex": "f17b38678f3a90b674c5c313b448520ca7aae8bae202de3b696736a00b30e94b4dac5f065985ae7d7fc5f18a7639d3c8d5df7826e189e4347d831cf604406709"
+}

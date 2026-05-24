@@ -1,0 +1,28 @@
+{
+  "id": "posture-recovery-cycle",
+  "channel": "subscription-url",
+  "description": "Phase 2B (rig-folded into 2C): channel block + mode toggle to lifeline forces ImportedActive → Lifeline; mode return to normal forces Lifeline → ImportedActive. Asserts the V2.3 posture axis is observable via ExportDiagnostics and stays orthogonal to the legacy `state` field. Channel-blocking is identical to subscription-url-unreachable.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 3,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 5,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 7,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    }
+  ]
+}

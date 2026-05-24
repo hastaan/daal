@@ -1,0 +1,6 @@
+{
+  "id": "publisher-revocation-url-unreachable",
+  "channel": "publisher-revocation",
+  "description": "Per-publisher revocation_url unreachable; existing routes must continue to work; last_revocation_check ages but no false-positive revoke.",
+  "blocks": ["publisher-revocation"]
+}

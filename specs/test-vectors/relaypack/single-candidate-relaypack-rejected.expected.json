@@ -1,0 +1,21 @@
+{
+  "vector": "single-candidate-relaypack-rejected",
+  "purpose": "One vps-native candidate. RP014 at all phases (\u003e=2 required).",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP014"
+    },
+    {
+      "phase": "V1.6",
+      "pass": false,
+      "error_code": "RP014"
+    },
+    {
+      "phase": "PostV2",
+      "pass": false,
+      "error_code": "RP014"
+    }
+  ]
+}

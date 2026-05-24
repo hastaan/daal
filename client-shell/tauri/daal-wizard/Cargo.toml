@@ -1,0 +1,55 @@
+[package]
+name = "daal-wizard"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "FRP-5 desktop wizard backend: OperatorRecord persistence, two-layer key custody, daal-deploy CLI bridge."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+# Two-layer key custody.
+keyring = "3.6"
+argon2 = "0.5"
+aes-gcm = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.8"
+
+# Persistence + filesystem layout.
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs-next = "2.0"
+tempfile = "3.10"
+
+# FRP-14: branded `daal1...` recipient-address codec.
+daal-recipient-addr = { path = "../daal-recipient-addr" }
+
+# FRP-14 Layer 3c: recipient-side X25519 identity (keygen +
+# pub-derivation). v2 is the latest API; we lock it because age
+# v1 (used in the .sbpx envelope) interoperates only with v2.
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "getrandom"] }
+
+[dev-dependencies]
+
+[features]
+default = []
+# `dev-no-keystore` bypasses the OS-keystore outer layer for local
+# development. PIN-derived AES-GCM still runs. RELEASE BUILDS REJECT
+# THIS FEATURE: a compile-time guard fires if it is enabled in a
+# non-debug build (see src/keystore.rs).
+dev-no-keystore = []
+
+[lints.rust]
+unsafe_code = "forbid"

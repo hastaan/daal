@@ -1,0 +1,492 @@
+#!/usr/bin/env bash
+# /home/daal/daal — root build script for the Daal anti-censorship project.
+#
+# Subcommands:
+#   doctor         — verify host has Go, Rust, Node, npm.
+#   test           — run all Go test suites + Rust bundle parity tests.
+#   build          — build engine .so/.dll, Tauri desktop, publisher CLI,
+#                    gate-eval CLI. Output under build/.
+#   package        — copy final artifacts into build/release/ + write
+#                    build/release/manifest.json.
+#   release-check  — verify ABI=52, engine version unchanged, spec_version=4,
+#                    no forbidden imports, working tree clean.
+#   manifest       — print the manifest JSON to stdout (no build).
+#   help           — print this list.
+#
+# Both local developers and CI MUST call this script. CI does not duplicate
+# build logic; it runs the same subcommands. This is the contract that
+# prevents local/CI drift.
+#
+# Usage:
+#   ./daal doctor
+#   ./daal test
+#   ./daal build
+#   ./daal package
+#   ./daal release-check
+#
+# Exit codes:
+#   0   success
+#   1   subcommand failed
+#   2   doctor / release-check found a problem
+#   64  bad subcommand
+#
+# Developer escape hatches:
+#   DAAL_ALLOW_BUNDLE_RS_WARN=1    demote bundle-rs test failures to warnings.
+#   DAAL_ALLOW_PARTIAL_BUILD=1     demote Tauri build failures or missing
+#                                  optional build toolchains to warnings.
+#   DAAL_RELEASE_STRICT=1          make release-check fail on dirty tree or
+#                                  missing ABI binary.
+#   DAAL_TAURI_BUNDLES=<list>      override desktop bundle target(s). Defaults
+#                                  to "deb" on Linux because AppImage needs a
+#                                  less restricted host filesystem.
+#
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+# --- Engine line constants. These MUST match the source of truth.
+EXPECTED_ENGINE_VERSION="daal-core 0.9.0+v3-share"
+EXPECTED_ABI=52
+EXPECTED_SPEC_VERSION=4
+
+# --- Tools. Override with env vars if your install paths differ.
+GO_BIN="${GO_BIN:-/usr/local/go/bin/go}"
+CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
+NODE_BIN="${NODE_BIN:-node}"
+NPM_BIN="${NPM_BIN:-npm}"
+TAURI_BUNDLES="${DAAL_TAURI_BUNDLES:-deb}"
+ALLOW_BUNDLE_RS_WARN="${DAAL_ALLOW_BUNDLE_RS_WARN:-0}"
+ALLOW_PARTIAL_BUILD="${DAAL_ALLOW_PARTIAL_BUILD:-0}"
+RELEASE_STRICT="${DAAL_RELEASE_STRICT:-0}"
+TEST_SOAK="${DAAL_TEST_SOAK:-0}"
+export GOCACHE="${GOCACHE:-/tmp/daal-go-build}"
+mkdir -p "$GOCACHE"
+if [[ -x "$CARGO_BIN" ]]; then
+  export PATH="$(dirname "$CARGO_BIN"):$PATH"
+fi
+
+# --- Output dirs.
+BUILD_DIR="$REPO_ROOT/build"
+RELEASE_DIR="$BUILD_DIR/release"
+
+# --- Colours (skip if not a tty).
+if [[ -t 1 ]]; then
+  C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'
+  C_BLUE='\033[34m'; C_DIM='\033[2m'; C_RESET='\033[0m'
+else
+  C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_DIM=''; C_RESET=''
+fi
+
+log()  { printf "${C_BLUE}[daal]${C_RESET} %s\n" "$*"; }
+ok()   { printf "${C_GREEN}[ ok  ]${C_RESET} %s\n" "$*"; }
+warn() { printf "${C_YELLOW}[warn ]${C_RESET} %s\n" "$*"; }
+err()  { printf "${C_RED}[FAIL ]${C_RESET} %s\n" "$*" >&2; }
+hr()   { printf "%s\n" "${C_DIM}--------------------------------------------------------------${C_RESET}"; }
+
+read_version() {
+  if [[ ! -f "$REPO_ROOT/VERSION" ]]; then
+    echo "0.0.0-unknown"
+    return
+  fi
+  tr -d ' \n\r\t' < "$REPO_ROOT/VERSION"
+}
+
+git_sha() {
+  if git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null; then
+    return 0
+  fi
+  echo "unknown"
+}
+
+git_dirty() {
+  if [[ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then
+    echo "false"
+  else
+    echo "true"
+  fi
+}
+
+# --- Subcommand: doctor.
+cmd_doctor() {
+  log "Daal doctor"
+  hr
+  local fail=0
+
+  if "$GO_BIN" version >/dev/null 2>&1; then
+    ok  "Go      $($GO_BIN version | awk '{print $3, $4}')"
+  else
+    err "Go      MISSING (set GO_BIN; expected $GO_BIN)"
+    fail=1
+  fi
+
+  if "$CARGO_BIN" --version >/dev/null 2>&1; then
+    ok  "Cargo   $($CARGO_BIN --version)"
+  else
+    err "Cargo   MISSING (set CARGO_BIN; expected $CARGO_BIN)"
+    fail=1
+  fi
+
+  if command -v "$NODE_BIN" >/dev/null 2>&1; then
+    ok  "Node    $($NODE_BIN --version)"
+  else
+    warn "Node    MISSING (Tauri build will be skipped)"
+  fi
+
+  if command -v "$NPM_BIN" >/dev/null 2>&1; then
+    ok  "npm     $($NPM_BIN --version)"
+  else
+    warn "npm     MISSING (Tauri build will be skipped)"
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    ok  "git     $(git --version | awk '{print $3}')"
+  else
+    err "git     MISSING"
+    fail=1
+  fi
+
+  hr
+  if [[ "$fail" -ne 0 ]]; then
+    err "doctor: required tools missing"
+    return 2
+  fi
+  ok "doctor: ready"
+  return 0
+}
+
+# --- Subcommand: test.
+# Goes module-by-module so a single failure doesn't mask the rest.
+cmd_test() {
+  log "Daal test (Go modules + Rust bundle parity)"
+  hr
+  local fail=0
+
+  # Core engineering modules. Soak rigs (cmd/daal-soak-engine*)
+  # are excluded by default — they're test-only harnesses that
+  # depend on engine internals not exported through the release
+  # ABI. Run them explicitly with DAAL_TEST_SOAK=1 if needed.
+  local go_modules=(
+    "bundle/go"
+    "core"
+    "publisher"
+    "cmd/daal-deploy"
+    "cmd/daal-gate-eval"
+    "cmd/daal-relay-health"
+    "cmd/daal-relay-mgmt"
+  )
+  if [[ "$TEST_SOAK" == "1" ]]; then
+    go_modules+=(
+      "cmd/daal-soak-engine"
+    )
+  fi
+  for m in "${go_modules[@]}"; do
+    if [[ ! -f "$REPO_ROOT/$m/go.mod" ]]; then
+      warn "skip $m (no go.mod)"
+      continue
+    fi
+    local go_test_args=("test")
+    if [[ "$m" == cmd/daal-soak-engine* ]]; then
+      go_test_args+=("-tags" "soak")
+    fi
+    go_test_args+=("./...")
+    log "go ${go_test_args[*]} ($m)"
+    if ( cd "$REPO_ROOT/$m" && "$GO_BIN" "${go_test_args[@]}" ); then
+      ok "$m"
+    else
+      err "$m: tests failed"
+      fail=1
+    fi
+  done
+
+  if [[ -d "$REPO_ROOT/client-shell/tauri" ]] && command -v "$CARGO_BIN" >/dev/null 2>&1; then
+    # Regenerate deterministic fixtures first so Rust parity always runs
+    # against the current Go fixture generator output.
+    if [[ -f "$REPO_ROOT/bundle/go/cmd/bundle-rs-fixtures/main.go" ]]; then
+      log "regenerating bundle-rs fixtures"
+      ( cd "$REPO_ROOT/bundle/go" \
+        && "$GO_BIN" run ./cmd/bundle-rs-fixtures \
+             -out "$REPO_ROOT/client-shell/tauri/bundle-rs/tests/fixtures" ) \
+        && ok "fixtures regenerated" \
+        || warn "fixture regeneration failed; bundle-rs tests may fail"
+    fi
+    log "cargo test (client-shell/tauri bundle-rs)"
+    if ( cd "$REPO_ROOT/client-shell/tauri" && "$CARGO_BIN" test -p bundle-rs ); then
+      ok "bundle-rs"
+    else
+      if [[ "$ALLOW_BUNDLE_RS_WARN" == "1" ]]; then
+        warn "bundle-rs: tests failed (explicitly allowed by DAAL_ALLOW_BUNDLE_RS_WARN=1)"
+      else
+        err "bundle-rs: tests failed"
+        fail=1
+      fi
+    fi
+  else
+    warn "skip Rust tests (no cargo)"
+  fi
+
+  hr
+  if [[ "$fail" -ne 0 ]]; then
+    err "test: one or more suites failed"
+    return 1
+  fi
+  ok "test: all suites green"
+  return 0
+}
+
+# --- Subcommand: build.
+cmd_build() {
+  log "Daal build"
+  hr
+  mkdir -p "$BUILD_DIR"
+  local fail=0
+
+  # 1. Engine C-shared library.
+  log "building libdaalcore (engine)"
+  local engine_out
+  case "$(uname -s)" in
+    Linux*)   engine_out="$BUILD_DIR/libdaalcore.so" ;;
+    Darwin*)  engine_out="$BUILD_DIR/libdaalcore.dylib" ;;
+    MINGW*|MSYS*|CYGWIN*) engine_out="$BUILD_DIR/libdaalcore.dll" ;;
+    *)        engine_out="$BUILD_DIR/libdaalcore.so" ;;
+  esac
+  ( cd "$REPO_ROOT/core" && CGO_ENABLED=1 "$GO_BIN" build \
+      -buildmode=c-shared -tags cshared \
+      -o "$engine_out" ./cmd/libdaalcore )
+  ok "engine: $engine_out"
+
+  # 2. Publisher CLIs.
+  log "building daal-deploy"
+  ( cd "$REPO_ROOT/cmd/daal-deploy" && "$GO_BIN" build -o "$BUILD_DIR/daal-deploy" . )
+  ok "daal-deploy: $BUILD_DIR/daal-deploy"
+
+  log "building daal-gate-eval"
+  ( cd "$REPO_ROOT/cmd/daal-gate-eval" && "$GO_BIN" build -o "$BUILD_DIR/daal-gate-eval" . )
+  ok "daal-gate-eval: $BUILD_DIR/daal-gate-eval"
+
+  # 3. Tauri desktop app (only if node is present).
+  if command -v "$NPM_BIN" >/dev/null 2>&1 && [[ -d "$REPO_ROOT/client-ui" ]] && [[ -d "$REPO_ROOT/client-shell/tauri/src-tauri" ]]; then
+    log "building Tauri desktop (this is slow; ~minutes)"
+    mkdir -p "$REPO_ROOT/client-shell/tauri/src-tauri/resources"
+    cp "$engine_out" "$REPO_ROOT/client-shell/tauri/src-tauri/resources/" || true
+    ( cd "$REPO_ROOT/client-ui" && "$NPM_BIN" install --no-fund --no-audit )
+    ( cd "$REPO_ROOT/client-ui" && "$NPM_BIN" run build )
+    if ( cd "$REPO_ROOT/client-ui" \
+           && "$NPM_BIN" exec -- tauri build \
+                --config ../client-shell/tauri/src-tauri/tauri.conf.json \
+                --bundles "$TAURI_BUNDLES" ); then
+      ok "Tauri desktop built (artifacts under client-shell/tauri/src-tauri/target/release/bundle/)"
+    else
+      if [[ "$ALLOW_PARTIAL_BUILD" == "1" ]]; then
+        warn "Tauri build failed; continuing because DAAL_ALLOW_PARTIAL_BUILD=1"
+      else
+        err "Tauri build failed"
+        fail=1
+      fi
+    fi
+  else
+    if [[ "$ALLOW_PARTIAL_BUILD" == "1" ]]; then
+      warn "skip Tauri build (npm not present or tauri dir missing; partial build allowed)"
+    else
+      err "cannot build Tauri desktop (npm not present or tauri dir missing)"
+      fail=1
+    fi
+  fi
+
+  # The legacy Android Compose build target was removed in v0.2.
+  # A future Tauri Mobile binary will replace it.
+
+  hr
+  if [[ "$fail" -ne 0 ]]; then
+    err "build: one or more app build targets failed"
+    return 1
+  fi
+  ok "build: complete (binaries under $BUILD_DIR)"
+}
+
+# --- Subcommand: package.
+cmd_package() {
+  log "Daal package (collect into $RELEASE_DIR)"
+  hr
+  rm -rf "$RELEASE_DIR"
+  mkdir -p "$RELEASE_DIR"
+
+  # Engine + CLIs.
+  for f in libdaalcore.so libdaalcore.dylib libdaalcore.dll \
+           daal-deploy daal-gate-eval daal-deploy.exe daal-gate-eval.exe; do
+    if [[ -f "$BUILD_DIR/$f" ]]; then
+      cp "$BUILD_DIR/$f" "$RELEASE_DIR/"
+      ok "include $f"
+    fi
+  done
+
+  # Tauri desktop.
+  local tauri_bundle="$REPO_ROOT/client-shell/tauri/src-tauri/target/release/bundle"
+  if [[ -d "$tauri_bundle" ]]; then
+    mkdir -p "$RELEASE_DIR/desktop"
+    find "$tauri_bundle" \
+      \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.app.tar.gz' \) \
+      -exec cp {} "$RELEASE_DIR/desktop/" \; 2>/dev/null || true
+    if compgen -G "$RELEASE_DIR/desktop/*" >/dev/null; then
+      ok "include desktop bundles"
+    else
+      warn "no desktop bundles found in $tauri_bundle"
+    fi
+  fi
+
+  # Manifest.
+  cmd_manifest > "$RELEASE_DIR/manifest.json"
+  ok "manifest: $RELEASE_DIR/manifest.json"
+
+  hr
+  ok "package: $RELEASE_DIR/"
+  ls -la "$RELEASE_DIR/" 2>/dev/null || true
+}
+
+# --- Subcommand: manifest.
+cmd_manifest() {
+  local version sha dirty
+  version="$(read_version)"
+  sha="$(git_sha)"
+  dirty="$(git_dirty)"
+  cat <<EOF
+{
+  "version": "$version",
+  "git_sha": "$sha",
+  "git_dirty": $dirty,
+  "engine_version": "$EXPECTED_ENGINE_VERSION",
+  "abi_symbols": $EXPECTED_ABI,
+  "sbp_spec_version": $EXPECTED_SPEC_VERSION,
+  "built_at_unix": $(date -u +%s)
+}
+EOF
+}
+
+# --- Subcommand: release-check.
+# Static invariant verification. Runs offline. Exit 2 on any failure.
+cmd_release_check() {
+  log "Daal release-check (static invariants)"
+  hr
+  local fail=0
+
+  # 1. Engine version string in source.
+  log "engine version string"
+  if grep -RIn --include='*.go' "daal-core 0\.9\.0+v3-share" "$REPO_ROOT/core" >/dev/null 2>&1 \
+     || grep -RIn --include='*.md' "daal-core 0\.9\.0+v3-share" "$REPO_ROOT/specs" >/dev/null 2>&1; then
+    ok "engine_version pinned: $EXPECTED_ENGINE_VERSION"
+  else
+    err "engine_version not found in core/ or specs/"
+    fail=1
+  fi
+
+  # 2. Asymmetric module guard: core MUST NOT import publisher; bundle MUST NOT import publisher.
+  log "asymmetric module guard (core,bundle -> NOT publisher)"
+  if grep -RIn --include='*.go' '"daal/publisher' "$REPO_ROOT/core" "$REPO_ROOT/bundle" >/dev/null 2>&1; then
+    err "core/ or bundle/ imports daal/publisher (asymmetric guard violation)"
+    grep -RIn --include='*.go' '"daal/publisher' "$REPO_ROOT/core" "$REPO_ROOT/bundle" || true
+    fail=1
+  else
+    ok "asymmetric guard clean"
+  fi
+
+  # 3. Locked invariant 52: no publisher/directory/ Go source.
+  log "locked invariant 52: no publisher/directory/"
+  if grep -RIn --include='*.go' '"daal/publisher/directory' "$REPO_ROOT" >/dev/null 2>&1; then
+    err "found daal/publisher/directory references (locked invariant 52)"
+    fail=1
+  else
+    ok "no publisher/directory references"
+  fi
+
+  # 4. Locked invariant 47: no admin/cell-admin/modifier-admin surfaces
+  # anywhere in the codebase (was Android-specific; now scans every
+  # source file because the Compose tree is gone).
+  log "locked invariant 47: admin-screen source-grep guard"
+  if grep -RInE --include='*.kt' --include='*.java' --include='*.tsx' --include='*.ts' --include='*.rs' \
+       'CellAdminScreen|ModifierAdminScreen|publisherAdmin' \
+       "$REPO_ROOT" >/dev/null 2>&1; then
+    err "admin surface present (locked invariant 47)"
+    fail=1
+  else
+    ok "admin surfaces absent"
+  fi
+
+  # 5. spec_version pin.
+  log "spec_version pin"
+  if grep -RIn '"spec_version"\s*:\s*4' "$REPO_ROOT/specs" "$REPO_ROOT/bundle" >/dev/null 2>&1 \
+     || grep -RIn 'spec_version.*=.*4' "$REPO_ROOT/bundle" >/dev/null 2>&1; then
+    ok "spec_version=$EXPECTED_SPEC_VERSION pinned"
+  else
+    warn "could not auto-confirm spec_version=$EXPECTED_SPEC_VERSION (manual review recommended)"
+  fi
+
+  # 6. ABI sanity (count engine_* exported C symbols if engine binary present).
+  log "ABI symbol count"
+  local engine_so="$BUILD_DIR/libdaalcore.so"
+  if [[ -f "$engine_so" ]] && command -v nm >/dev/null 2>&1; then
+    local n
+    n="$(nm -D --defined-only "$engine_so" 2>/dev/null | grep -c ' T engine_' || true)"
+    if [[ "$n" -eq "$EXPECTED_ABI" ]]; then
+      ok "ABI engine_* symbol count: $n (matches $EXPECTED_ABI)"
+    elif [[ "$n" -gt 0 ]]; then
+      warn "ABI engine_* symbol count: $n (expected $EXPECTED_ABI; documented value)"
+    else
+      warn "ABI symbol count: 0 (binary may not export engine_* in this build mode)"
+    fi
+  else
+    if [[ "$RELEASE_STRICT" == "1" ]]; then
+      err "engine binary not built; cannot verify ABI symbol count in strict mode"
+      fail=1
+    else
+      warn "engine binary not built; skipping ABI symbol count (run ./daal build first)"
+    fi
+  fi
+
+  # 7. Working tree dirtiness.
+  log "git status"
+  if [[ "$(git_dirty)" == "false" ]]; then
+    ok "working tree clean"
+  else
+    if [[ "$RELEASE_STRICT" == "1" ]]; then
+      err "working tree dirty"
+      fail=1
+    else
+      warn "working tree dirty (unstaged or uncommitted changes)"
+    fi
+    git -C "$REPO_ROOT" status --porcelain | head -20 || true
+  fi
+
+  hr
+  if [[ "$fail" -ne 0 ]]; then
+    err "release-check: invariant violation(s)"
+    return 2
+  fi
+  ok "release-check: invariants intact"
+  log "version=$(read_version) sha=$(git_sha) engine=$EXPECTED_ENGINE_VERSION abi=$EXPECTED_ABI spec_version=$EXPECTED_SPEC_VERSION"
+  return 0
+}
+
+cmd_help() {
+  sed -n '2,30p' "$0"
+}
+
+main() {
+  local sub="${1:-help}"
+  shift || true
+  case "$sub" in
+    doctor)        cmd_doctor "$@" ;;
+    test)          cmd_test "$@" ;;
+    build)         cmd_build "$@" ;;
+    package)       cmd_package "$@" ;;
+    manifest)      cmd_manifest "$@" ;;
+    release-check) cmd_release_check "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+      err "unknown subcommand: $sub"
+      cmd_help
+      exit 64
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,23 @@
+{
+  "id": "v1-5-7-day-stay-online",
+  "channel": "subscription-url",
+  "description": "Phase FRP-7 V1.5 supplement §22.1 stay-online metric. Family-side anonymized session uptime \u2265 99% over 7 simulated days under the rig's accelerated clock (one tick == one wall-clock minute). Drives the FRP-3 selector pipeline through a synthetic 7-day TIC trace; asserts no single outage window exceeds the supplement §22.1 budget (rotation must heal inside 60 s on every observed dip). Day-7 final assertion: cumulative_downtime_minutes / total_minutes \u2264 0.01.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_v1_5_uptime_window",
+      "args": { "operator_id": "v1-5-op-1", "uptime_target_pct": 99 }
+    },
+    {
+      "day": 4,
+      "name": "soak_inject_partial_outage",
+      "args": { "duration_seconds": 30 }
+    },
+    {
+      "day": 7,
+      "name": "soak_assert_uptime_pct",
+      "args": { "min_pct": 99 }
+    }
+  ]
+}

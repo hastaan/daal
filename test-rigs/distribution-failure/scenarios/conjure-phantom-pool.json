@@ -1,0 +1,33 @@
+{
+  "id": "conjure-phantom-pool",
+  "channel": "subscription-url",
+  "description": "Phase 3D. Exercises the conjure-family phantom-pool activation lifecycle and the no-IP-leak privacy invariant. Day 1 enables the experimental-families gate so conjure routes are selectable. Day 3 drives a soak-only conjure activation against a known phantom IP; diagnostics MUST surface `conjure_active_route` matching the route AND `conjure_phantom_in_use` MUST be a 16-hex-char hash (8-byte SHA-256 truncation) — the raw IP MUST NOT appear anywhere in diagnostics. Day 7 the rig drives a second activation against a different phantom IP; the hash MUST differ from day 3's. Day 14 clears the conjure activation; diagnostics MUST clear `conjure_active_route` AND `conjure_phantom_in_use` to empty strings. Day 20 exercises the locked invariant: conjure IS opportunistic — auto-promotion MAY promote a network whose only family is conjure (this is the dual of psiphon-blob-rotation's day 14). The legacy subscription-url block layers so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 3,
+      "name": "soak_record_conjure_activation",
+      "args": { "route_id": "soak-conjure-1", "raw_phantom_ip": "192.122.190.42" }
+    },
+    {
+      "day": 7,
+      "name": "soak_record_conjure_activation",
+      "args": { "route_id": "soak-conjure-1", "raw_phantom_ip": "192.122.190.99" }
+    },
+    {
+      "day": 14,
+      "name": "soak_record_conjure_activation",
+      "args": { "route_id": "", "raw_phantom_ip": "" }
+    },
+    {
+      "day": 20,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "ConjureOnlyNet" }
+    }
+  ]
+}

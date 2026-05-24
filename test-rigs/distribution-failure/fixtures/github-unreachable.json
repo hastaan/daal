@@ -1,0 +1,16 @@
+{
+  "scenario_id": "github-unreachable",
+  "channel": "github",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "github-raw",
+    "github-releases",
+    "github-api"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}

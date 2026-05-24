@@ -1,0 +1,384 @@
+{
+  "scenario": "subscription-url-unreachable",
+  "days": [
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "linux-cli-A": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ],
+      "linux-cli-B": [
+        {
+          "rule": "engine_responsive",
+          "pass": true
+        },
+        {
+          "rule": "no_auth_failed_from_blackout",
+          "pass": true
+        },
+        {
+          "rule": "refresh_outcome_mapped",
+          "pass": true
+        },
+        {
+          "rule": "pointer_status_shape",
+          "pass": true
+        },
+        {
+          "rule": "no_false_positive_revocation",
+          "pass": true
+        },
+        {
+          "rule": "diag_explain_non_empty",
+          "pass": true
+        }
+      ]
+    }
+  ],
+  "failed": false
+}

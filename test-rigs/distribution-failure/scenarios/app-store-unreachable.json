@@ -1,0 +1,6 @@
+{
+  "id": "app-store-unreachable",
+  "channel": "app-store",
+  "description": "Play Store / App Store / F-Droid each unreachable in turn; sideload paths must remain.",
+  "blocks": ["play-store", "app-store", "fdroid"]
+}

@@ -1,0 +1,23 @@
+{
+  "id": "v3-experimental-gate-cross-product",
+  "channel": "subscription-url",
+  "description": "Phase 3-Soak secondary 1. Drives the experimental-gate cross-product across the 1k-client × 30-day soak: 50% of clients have engine_set_experimental_families_enabled(0), 50% have (1). The verifier walks per-client activation ledgers and asserts: (a) every gate-OFF client's ledger contains zero activations of an Experimental family (`webtunnel`, `snowflake`, `masque`, `psiphon`, `conjure`, `transport_module`); (b) every gate-ON client has at least one Experimental activation by simulated end of soak. Day 1 every client starts with the gate set per its assigned half. Day 7 every gate-ON client must have activated at least one Experimental family. Day 14 final ledger: experimental_gate_cross_product_pass = true. Locked at 3-Soak per `phases of development/27-phase-3-soak-success-metric.md` §6 secondary 1.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": false }
+    },
+    {
+      "day": 7,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 14,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": false }
+    }
+  ]
+}

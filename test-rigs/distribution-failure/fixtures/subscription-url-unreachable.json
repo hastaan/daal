@@ -1,0 +1,14 @@
+{
+  "scenario_id": "subscription-url-unreachable",
+  "channel": "subscription-url",
+  "outcome": "subscription_unreachable",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "subscription-url"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}

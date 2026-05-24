@@ -1,0 +1,14 @@
+{
+  "scenario_id": "bootstrap-directory-mirror-unreachable",
+  "channel": "bootstrap-directory",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "directory-primary"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}

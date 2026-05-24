@@ -1,0 +1,29 @@
+{
+  "pick": {
+    "route_id": "rA",
+    "family": "vless-reality",
+    "exposure_mode": "direct_vps",
+    "family_class": "vps-native",
+    "probing_risk_class": "low"
+  },
+  "shortlist": [
+    {
+      "route_id": "rA",
+      "position": 0,
+      "started_at_ms": 0,
+      "outcome": "success"
+    },
+    {
+      "route_id": "rB",
+      "position": 1,
+      "started_at_ms": 400,
+      "outcome": "not_started"
+    }
+  ],
+  "failures": [],
+  "active_cooldowns": [],
+  "network_signals": [],
+  "reason": "Used vless-reality on the leader direct_vps; secondary candidates staggered.",
+  "decision_id": "frp3-fixture-mixed-mode-v16-001",
+  "phase": "V1.6"
+}

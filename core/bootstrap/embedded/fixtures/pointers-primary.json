@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "kind": "bootstrap_pointers",
+  "set": "primary",
+  "issued_at": "2026-05-07T08:45:45Z",
+  "valid_until": "2027-05-07T08:45:45Z",
+  "pointers": [
+    {
+      "url": "https://bootstrap-primary.daal.example/dir.sbp",
+      "expected_publisher_fingerprint_hex": "488c160475debbfa08ef2f0adff05376ffdf57238a88d2629a2a990afeed60d7"
+    }
+  ],
+  "signature_hex": "5bd906441f04649217e6a7dd9bc6e75671f9c186db96e2ab09eff0e3291b39ab2ddb830030d7651793ea60835b39e62953b6f2b71bb2f44026be86df9496890f"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "amneziawg-signature",
+  "v0_failure_categories": ["udp_unavailable"],
+  "description": "Placeholder: drop default WireGuard fingerprint; allow when junk packets / S1/S2 / H1-H4 obfuscation is configured.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {
+    "udp_signature_drop": [
+      { "name": "wireguard_init", "first_bytes_hex": "01000000", "length": 148 }
+    ]
+  },
+  "expectations": [
+    { "flow": "vanilla_wg", "outcome": "blocked" },
+    { "flow": "amneziawg_obfuscated", "outcome": "ok" }
+  ]
+}

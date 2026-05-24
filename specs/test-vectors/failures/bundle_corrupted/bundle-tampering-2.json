@@ -1,0 +1,7 @@
+{
+  "scenario_id": "bundle-tampering",
+  "category": "bundle_corrupted",
+  "outcome": "bundle_signature_invalid",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "import_bad_signature"
+}
