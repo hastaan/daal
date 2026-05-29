@@ -1,0 +1,30 @@
+{
+  "vector": "idempotent-reimport",
+  "purpose": "Direct-vps minimal twin. Importer-side proves re-import yields equal rows.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "V1.6",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    }
+  ]
+}

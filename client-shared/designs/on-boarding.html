@@ -1,0 +1,2019 @@
+<!doctype html>
+<html lang="en">
+<head><script data-od-sandbox-shim>(function(){
+  function makeStore(){
+    var data = {};
+    var api = {
+      getItem: function(k){ return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function(k, v){ data[k] = String(v); },
+      removeItem: function(k){ delete data[k]; },
+      clear: function(){ data = {}; },
+      key: function(i){ return Object.keys(data)[i] || null; }
+    };
+    Object.defineProperty(api, 'length', { get: function(){ return Object.keys(data).length; } });
+    return api;
+  }
+  function tryShim(name){
+    var works = false;
+    try { works = !!window[name] && typeof window[name].getItem === 'function'; void window[name].length; }
+    catch (_) { works = false; }
+    if (works) return;
+    try { Object.defineProperty(window, name, { configurable: true, value: makeStore() }); }
+    catch (_) { try { window[name] = makeStore(); } catch (__) {} }
+  }
+  tryShim('localStorage');
+  tryShim('sessionStorage');
+})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Daal — Two-path onboarding · mobile</title>
+<style>
+  :root {
+    --bg:        oklch(28% 0.04 215);   /* deep teal */
+    --bg-deep:   oklch(22% 0.045 215);  /* page bg, slightly darker */
+    --surface:   oklch(33% 0.04 215);   /* phone bg / cards */
+    --surface-2: oklch(38% 0.04 215);   /* tile inside surface */
+    --line:      oklch(45% 0.025 215);  /* hairlines on dark */
+    --line-soft: oklch(40% 0.03 215);
+    --fg:        oklch(96% 0.012 80);   /* off-white paper */
+    --muted:     oklch(72% 0.012 215);
+    --dim:       oklch(58% 0.015 215);
+    --gold:      #C9A23A;               /* brand */
+    --gold-warm: oklch(78% 0.12 80);    /* readable on dark teal */
+    --gold-deep: oklch(60% 0.12 75);
+    --green:     oklch(72% 0.14 150);
+    --red:       oklch(64% 0.18 25);
+
+    --font-display: 'Iowan Old Style', 'Charter', 'Newsreader', 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
+    --font-body:    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-mono:    ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    --font-fa:      'Vazirmatn', 'IRANSans', 'Geeza Pro', 'SF Arabic', Tahoma, sans-serif;
+
+    --r-phone: 44px;
+    --r-card:  16px;
+    --r-tile:  12px;
+    --r-pill:  999px;
+
+    --phone-w: 280px;
+    --phone-h: 606px; /* 280 * (844/390) ≈ 606 */
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg-deep);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image:
+      radial-gradient(1100px 600px at 12% -10%, oklch(35% 0.05 215) 0%, transparent 60%),
+      radial-gradient(900px 500px at 92% 8%, oklch(34% 0.05 195) 0%, transparent 60%);
+  }
+
+  /* ────────────────── header ────────────────── */
+  header.top {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    background: color-mix(in oklab, var(--bg-deep) 78%, transparent);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .top-inner {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 14px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    font-family: var(--font-display);
+  }
+  .brand .daal-fa {
+    font-size: 30px;
+    font-weight: 600;
+    color: var(--gold-warm);
+    letter-spacing: 0;
+    line-height: 1;
+  }
+  .brand .daal-en {
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--fg);
+    letter-spacing: 0.04em;
+  }
+  .brand .sep {
+    color: var(--dim);
+    font-size: 14px;
+  }
+  .brand .doc-tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .lang-toggle {
+    display: inline-flex;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-pill);
+    padding: 3px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+  }
+  .lang-toggle button {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    padding: 6px 14px;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    font: inherit;
+    text-transform: uppercase;
+    transition: color 120ms ease, background 180ms ease;
+  }
+  .lang-toggle button:hover { color: var(--fg); }
+  .lang-toggle button[aria-pressed="true"] {
+    background: var(--gold-warm);
+    color: oklch(20% 0.04 80);
+  }
+
+  /* ────────────────── hero ────────────────── */
+  .hero {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 80px 32px 44px;
+  }
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-warm);
+    margin-bottom: 18px;
+  }
+  h1.headline {
+    font-family: var(--font-display);
+    font-size: clamp(40px, 5.4vw, 76px);
+    font-weight: 500;
+    line-height: 1.02;
+    letter-spacing: -0.018em;
+    margin: 0 0 22px;
+    text-wrap: balance;
+    max-width: 18ch;
+  }
+  h1.headline em {
+    font-style: italic;
+    color: var(--gold-warm);
+    font-weight: 400;
+  }
+  .lede {
+    font-size: 18px;
+    line-height: 1.55;
+    color: var(--muted);
+    max-width: 64ch;
+    text-wrap: pretty;
+    margin: 0;
+  }
+  .legend {
+    display: flex;
+    gap: 22px;
+    flex-wrap: wrap;
+    margin-top: 28px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot.shared    { background: var(--fg); }
+  .dot.recipient { background: var(--gold-warm); }
+  .dot.publisher { background: oklch(70% 0.10 195); }
+
+  /* ────────────────── lane ────────────────── */
+  .lane {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 28px 32px 48px;
+  }
+  .lane-head {
+    display: flex;
+    align-items: baseline;
+    gap: 24px;
+    margin-bottom: 26px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .lane-num {
+    font-family: var(--font-display);
+    font-size: 44px;
+    font-weight: 400;
+    line-height: 1;
+    color: var(--dim);
+    letter-spacing: -0.02em;
+  }
+  .lane-title {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 500;
+    margin: 0;
+    line-height: 1.2;
+  }
+  .lane-sub {
+    font-size: 14px;
+    color: var(--muted);
+    margin-left: auto;
+    max-width: 42ch;
+    text-wrap: pretty;
+    line-height: 1.45;
+  }
+  .lane-recipient .lane-num { color: var(--gold-warm); }
+  .lane-publisher .lane-num { color: oklch(70% 0.10 195); }
+
+  .phones {
+    display: flex;
+    gap: 28px;
+    align-items: flex-start;
+    overflow-x: auto;
+    padding-bottom: 18px;
+    scroll-snap-type: x mandatory;
+  }
+  .phones::-webkit-scrollbar { height: 8px; }
+  .phones::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+
+  /* ────────────────── phone frame ────────────────── */
+  .phone {
+    flex: 0 0 var(--phone-w);
+    scroll-snap-align: start;
+  }
+  .phone-caption {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .phone-step {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .phone-name {
+    font-family: var(--font-display);
+    font-size: 16px;
+    color: var(--fg);
+    letter-spacing: -0.005em;
+  }
+  .phone-note {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.45;
+    margin-top: 2px;
+    text-wrap: pretty;
+  }
+
+  .device {
+    width: var(--phone-w);
+    height: var(--phone-h);
+    border-radius: var(--r-phone);
+    background: oklch(8% 0.01 215);
+    padding: 9px;
+    box-shadow:
+      0 1px 0 0 oklch(46% 0.02 215) inset,
+      0 0 0 1.5px oklch(38% 0.02 215),
+      0 30px 60px -28px oklch(8% 0.05 215),
+      0 14px 30px -14px oklch(6% 0.04 215);
+    position: relative;
+  }
+  .device .screen {
+    width: 100%;
+    height: 100%;
+    border-radius: calc(var(--r-phone) - 8px);
+    background: var(--bg);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  /* dynamic island */
+  .device .island {
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 88px;
+    height: 26px;
+    background: oklch(6% 0 0);
+    border-radius: 14px;
+    z-index: 10;
+  }
+
+  /* status bar */
+  .statusbar {
+    height: 44px;
+    padding: 0 22px 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+    flex-shrink: 0;
+    letter-spacing: -0.01em;
+  }
+  .statusbar .icons {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+  }
+  .statusbar svg { display: block; }
+
+  /* home indicator */
+  .home-indicator {
+    height: 5px;
+    width: 96px;
+    background: var(--fg);
+    border-radius: 3px;
+    margin: 0 auto 7px;
+    flex-shrink: 0;
+    opacity: 0.8;
+  }
+
+  /* generic screen content */
+  .screen-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 18px 22px 6px;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .screen-body[dir="rtl"] {
+    font-family: var(--font-fa);
+  }
+
+  /* ────────────────── reusable bits ────────────────── */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold-warm);
+  }
+  h2.title {
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 500;
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin: 8px 0 8px;
+    color: var(--fg);
+    text-wrap: balance;
+  }
+  .sub {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: 0;
+    text-wrap: pretty;
+  }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 14px 16px;
+    border-radius: 14px;
+    border: 0;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    letter-spacing: -0.005em;
+  }
+  .btn-primary {
+    background: var(--gold-warm);
+    color: oklch(20% 0.04 80);
+  }
+  .btn-secondary {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--line);
+  }
+  .btn-link {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    width: 100%;
+    padding: 8px;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--line);
+    text-underline-offset: 4px;
+  }
+
+  .stack { display: flex; flex-direction: column; gap: 8px; margin-top: auto; }
+
+  /* ────────────────── screen 1: welcome ────────────────── */
+  .welcome-art {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    padding: 0 0 12px;
+  }
+  .phoenix-mark {
+    width: 200px;
+    height: 200px;
+    object-fit: contain;
+    display: block;
+  }
+  .welcome-tagline {
+    font-family: var(--font-display);
+    font-size: 19px;
+    line-height: 1.3;
+    color: var(--fg);
+    text-align: center;
+    max-width: 22ch;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  /* ────────────────── screen 2: who are you ────────────────── */
+  .who-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 18px;
+  }
+  .who-card {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-card);
+    padding: 16px 14px;
+    display: flex;
+    gap: 13px;
+    align-items: flex-start;
+    cursor: pointer;
+    transition: border-color 160ms ease, background 160ms ease;
+  }
+  .who-card:hover {
+    border-color: var(--gold-warm);
+    background: var(--surface-2);
+  }
+  .who-card .who-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: oklch(40% 0.05 215);
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    color: var(--gold-warm);
+  }
+  .who-card .who-text { flex: 1; min-width: 0; }
+  .who-card .who-h {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--fg);
+    margin: 0 0 4px;
+  }
+  .who-card .who-p {
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--muted);
+    margin: 0;
+  }
+  .who-card .who-arrow { color: var(--dim); flex-shrink: 0; align-self: center; }
+  [dir="rtl"] .who-card .who-arrow { transform: scaleX(-1); }
+
+  /* ────────────────── screen 3a: what is daal (cards) ────────────────── */
+  .info-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .info-card {
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-card);
+    padding: 14px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .info-card .info-num {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 400;
+    font-style: italic;
+    color: var(--gold-warm);
+    line-height: 1;
+    width: 22px;
+    flex-shrink: 0;
+  }
+  .info-card .info-h {
+    font-family: var(--font-display);
+    font-size: 14px;
+    color: var(--fg);
+    margin: 0 0 3px;
+    font-weight: 500;
+  }
+  .info-card .info-p {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .pager-dots {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    margin: 16px 0 6px;
+  }
+  .pager-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--line);
+  }
+  .pager-dots span.on { background: var(--gold-warm); width: 16px; border-radius: 3px; }
+
+  /* ────────────────── screen 4a: PIN ────────────────── */
+  .pin-shield {
+    display: flex;
+    justify-content: center;
+    margin: 12px 0 18px;
+    color: var(--gold-warm);
+  }
+  .pin-dots {
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    margin: 12px 0 16px;
+  }
+  .pin-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1.5px solid var(--line);
+    background: transparent;
+  }
+  .pin-dot.filled {
+    background: var(--gold-warm);
+    border-color: var(--gold-warm);
+  }
+  .keypad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .key {
+    height: 48px;
+    border-radius: 14px;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    display: grid;
+    place-items: center;
+    font-family: var(--font-display);
+    font-size: 22px;
+    color: var(--fg);
+    letter-spacing: -0.01em;
+  }
+  .key.spacer { background: transparent; border: 0; }
+
+  /* ────────────────── screen 5a: add a route ────────────────── */
+  .route-tiles {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 9px;
+    margin-top: 16px;
+  }
+  .route-tile {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-tile);
+    padding: 14px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    aspect-ratio: 1 / 1;
+    position: relative;
+    cursor: pointer;
+  }
+  .route-tile.recommended {
+    border-color: var(--gold-warm);
+    background: color-mix(in oklab, var(--surface) 86%, var(--gold-warm) 14%);
+  }
+  .route-tile .rt-icon {
+    width: 26px;
+    height: 26px;
+    color: var(--muted);
+  }
+  .route-tile.recommended .rt-icon {
+    color: var(--gold-warm);
+  }
+  .route-tile .rt-h {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg);
+    margin: 0;
+    line-height: 1.15;
+    text-wrap: balance;
+  }
+  .route-tile .rt-p {
+    font-size: 10.5px;
+    color: var(--muted);
+    line-height: 1.35;
+    margin: 0;
+  }
+  .route-tile .rt-flag {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--gold-warm);
+    text-transform: uppercase;
+  }
+  [dir="rtl"] .route-tile .rt-flag { right: auto; left: 9px; }
+
+  /* ────────────────── screen 6a: ready / phoenix glow ────────────────── */
+  .ready-stage {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    padding-bottom: 8px;
+    position: relative;
+  }
+  .phoenix-button {
+    position: relative;
+    width: 196px;
+    height: 196px;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 50% 50%,
+      oklch(36% 0.04 215) 0%,
+      oklch(30% 0.04 215) 60%,
+      oklch(26% 0.04 215) 100%
+    );
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    isolation: isolate;
+  }
+  .phoenix-button::before {
+    content: '';
+    position: absolute;
+    inset: -22px;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle,
+      color-mix(in oklab, var(--gold-warm) 38%, transparent) 0%,
+      transparent 65%
+    );
+    z-index: -1;
+    animation: glow 2.6s ease-in-out infinite;
+  }
+  .phoenix-button::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid color-mix(in oklab, var(--gold-warm) 60%, transparent);
+    box-shadow: 0 0 0 1px oklch(38% 0.05 215) inset;
+  }
+  .phoenix-button .phoenix-mark {
+    width: 132px;
+    height: 132px;
+    object-fit: contain;
+    filter: drop-shadow(0 0 18px color-mix(in oklab, var(--gold-warm) 55%, transparent));
+  }
+  @keyframes glow {
+    0%, 100% { opacity: 0.55; transform: scale(1); }
+    50%      { opacity: 1;    transform: scale(1.07); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .phoenix-button::before { animation: none; opacity: 0.7; }
+  }
+
+  .ready-text {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ready-text .h {
+    font-family: var(--font-display);
+    font-size: 22px;
+    color: var(--fg);
+    font-weight: 500;
+    line-height: 1.2;
+  }
+  .ready-text .p {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .route-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-pill);
+    padding: 7px 14px 7px 10px;
+    font-size: 11px;
+    color: var(--fg);
+  }
+  .route-chip .badge {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--gold-warm);
+    background: color-mix(in oklab, var(--gold-warm) 14%, transparent);
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+
+  /* ────────────────── publisher path bits ────────────────── */
+  .pub-tag {
+    align-self: flex-start;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: oklch(80% 0.08 195);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border: 1px solid color-mix(in oklab, oklch(70% 0.10 195) 30%, transparent);
+    background: color-mix(in oklab, oklch(70% 0.10 195) 8%, transparent);
+    padding: 4px 9px;
+    border-radius: 4px;
+    margin-bottom: 10px;
+  }
+  .pub-art {
+    margin: 14px auto 18px;
+    width: 96px;
+    height: 96px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%,
+      color-mix(in oklab, oklch(70% 0.10 195) 28%, transparent) 0%,
+      transparent 70%);
+    display: grid;
+    place-items: center;
+    color: oklch(80% 0.08 195);
+  }
+
+  .input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 18px;
+  }
+  .input-label {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .input {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    color: var(--fg);
+    font-size: 14px;
+    font-family: var(--font-body);
+  }
+  [dir="rtl"] .input { font-family: var(--font-fa); }
+  .input.with-cursor {
+    border-color: var(--gold-warm);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--gold-warm) 18%, transparent);
+  }
+  .input .cursor {
+    display: inline-block;
+    width: 1.5px;
+    background: var(--gold-warm);
+    height: 1em;
+    vertical-align: -2px;
+    margin-left: 1px;
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .input-hint {
+    font-size: 11.5px;
+    color: var(--dim);
+    line-height: 1.4;
+    margin: 4px 0 0;
+  }
+
+  .examples {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .examples button {
+    background: transparent;
+    border: 1px solid var(--line-soft);
+    color: var(--muted);
+    border-radius: var(--r-pill);
+    padding: 5px 11px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  [dir="rtl"] .examples button { font-family: var(--font-fa); }
+
+  /* server endpoint screen */
+  .server-list {
+    margin-top: 14px;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-card);
+    overflow: hidden;
+  }
+  .server-row {
+    display: flex;
+    gap: 12px;
+    padding: 12px 14px;
+    align-items: center;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .server-row:last-child { border-bottom: 0; }
+  .server-row .sr-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    flex-shrink: 0;
+  }
+  .server-row .sr-name {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--fg);
+  }
+  .server-row .sr-loc {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .server-row .sr-tag {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: oklch(80% 0.08 195);
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+  [dir="rtl"] .server-row .sr-tag { margin-left: 0; margin-right: auto; }
+
+  /* share screen */
+  .qr-frame {
+    background: oklch(95% 0.012 80);
+    border-radius: 14px;
+    padding: 12px;
+    margin: 14px auto 14px;
+    width: fit-content;
+  }
+  .qr {
+    display: block;
+    width: 148px;
+    height: 148px;
+  }
+  .share-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--fg);
+    letter-spacing: 0.16em;
+  }
+  .share-meta .meta-label {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .fingerprint {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px dashed var(--line);
+    border-radius: 12px;
+  }
+  .fp-title {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .fp-words {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px 12px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--fg);
+  }
+  .fp-words .w {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .fp-words .w .n { color: var(--dim); font-size: 9.5px; }
+  [dir="rtl"] .fp-words { font-family: var(--font-fa); font-size: 12.5px; }
+  [dir="rtl"] .fp-words .n { font-family: var(--font-mono); }
+
+  /* ────────────────── footer ────────────────── */
+  footer.foot {
+    max-width: 1320px;
+    margin: 40px auto 0;
+    padding: 40px 32px 80px;
+    border-top: 1px solid var(--line-soft);
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 64px;
+  }
+  footer.foot h3 {
+    font-family: var(--font-display);
+    font-size: 24px;
+    font-weight: 500;
+    margin: 0 0 12px;
+    line-height: 1.2;
+  }
+  footer.foot p {
+    color: var(--muted);
+    line-height: 1.6;
+    margin: 0 0 14px;
+    max-width: 60ch;
+    text-wrap: pretty;
+  }
+  footer.foot .meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+  }
+  footer.foot .meta b {
+    color: var(--fg);
+    font-weight: 500;
+  }
+
+  /* small responsive */
+  @media (max-width: 760px) {
+    footer.foot { grid-template-columns: 1fr; gap: 24px; }
+    .lane-head { flex-wrap: wrap; }
+    .lane-sub { margin-left: 0; }
+  }
+
+</style>
+</head>
+<body class="lang-en">
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">
+      <span class="daal-fa">دال</span>
+      <span class="daal-en">DAAL</span>
+      <span class="sep">·</span>
+      <span class="doc-tag">Onboarding · Mobile · v0.1</span>
+    </div>
+    <div class="lang-toggle" role="group" aria-label="Language">
+      <button data-lang="en" aria-pressed="true">EN</button>
+      <button data-lang="fa" aria-pressed="false" lang="fa" style="font-family: var(--font-fa);">فا</button>
+    </div>
+  </div>
+</header>
+
+<section class="hero" data-od-id="hero">
+  <div class="kicker" data-i18n="hero.kicker">A two-path onboarding</div>
+  <h1 class="headline">
+    <span data-i18n="hero.h1.a">The first ninety seconds, </span><em data-i18n="hero.h1.b">two ways.</em>
+  </h1>
+  <p class="lede" data-i18n="hero.lede">People inside Iran land on the recipient flow — get a route, press connect. Diaspora who want to help family land on the publisher flow — set up a server, share a subscription with the people they love. Both paths leave first-launch ready.</p>
+  <div class="legend">
+    <span><i class="dot shared"></i><span data-i18n="legend.shared">Shared start</span></span>
+    <span><i class="dot recipient"></i><span data-i18n="legend.recipient">Recipient · inside</span></span>
+    <span><i class="dot publisher"></i><span data-i18n="legend.publisher">Publisher · diaspora</span></span>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- LANE 1 — SHARED START                             -->
+<!-- ════════════════════════════════════════════════ -->
+<section class="lane lane-shared">
+  <div class="lane-head">
+    <div class="lane-num">01</div>
+    <h2 class="lane-title" data-i18n="lane.shared.title">Shared start</h2>
+    <p class="lane-sub" data-i18n="lane.shared.sub">Everyone sees these two screens. The branching choice on screen two decides which path the rest of onboarding takes.</p>
+  </div>
+
+  <div class="phones">
+
+    <!-- ── Phone 1.1 — Welcome ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <!-- signal -->
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <!-- wifi -->
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <!-- battery -->
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="welcome">
+            <div class="welcome-art">
+              <img class="phoenix-mark" src="mouenlj9-daal-flat-no-bg.svg" alt="Daal" />
+              <p class="welcome-tagline" data-i18n="welcome.tagline">Reach the open internet. Together.</p>
+            </div>
+            <div class="stack">
+              <button class="btn btn-primary" data-i18n="welcome.cta">Get started</button>
+              <button class="btn-link" data-i18n="welcome.lang">Language: English · فارسی</button>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.welcome.step">Shared · Step 1 of 2</span>
+        <span class="phone-name" data-i18n="cap.welcome.name">Welcome</span>
+        <span class="phone-note" data-i18n="cap.welcome.note">Logo, tagline, language toggle. The only screen with the wordmark at full scale.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 1.2 — Who are you? ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="who">
+            <div class="eyebrow" data-i18n="who.eyebrow">Step 2 of 2</div>
+            <h2 class="title" data-i18n="who.title">Who are you?</h2>
+            <p class="sub" data-i18n="who.sub">Daal works two ways. Pick the one that sounds like you — you can change it later.</p>
+
+            <div class="who-cards">
+              <div class="who-card" data-od-id="who.recipient">
+                <span class="who-icon">
+                  <svg width="18" height="20" viewBox="0 0 18 20" fill="none"><path d="M9 1L17 4V10C17 14 13.5 17.5 9 19C4.5 17.5 1 14 1 10V4L9 1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+                </span>
+                <div class="who-text">
+                  <h3 class="who-h" data-i18n="who.recipient.h">I want to connect</h3>
+                  <p class="who-p" data-i18n="who.recipient.p">I'm looking for a way to reach the open internet. I have a route from a friend or publisher — or I'm looking for one.</p>
+                </div>
+                <span class="who-arrow"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 3l5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+              </div>
+
+              <div class="who-card" data-od-id="who.publisher">
+                <span class="who-icon">
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2" fill="currentColor"/><path d="M5.6 5.6a6 6 0 0 0 0 8.8M14.4 5.6a6 6 0 0 1 0 8.8M2.8 2.8a10 10 0 0 0 0 14.4M17.2 2.8a10 10 0 0 1 0 14.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                </span>
+                <div class="who-text">
+                  <h3 class="who-h" data-i18n="who.publisher.h">I want to help others</h3>
+                  <p class="who-p" data-i18n="who.publisher.p">I run a server abroad. I want to make routes for my family and friends back home.</p>
+                </div>
+                <span class="who-arrow"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 3l5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+              </div>
+            </div>
+
+            <button class="btn-link" style="margin-top: 18px;" data-i18n="who.unsure">I'm not sure yet</button>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.who.step">Shared · Step 2 of 2</span>
+        <span class="phone-name" data-i18n="cap.who.name">Who are you?</span>
+        <span class="phone-note" data-i18n="cap.who.note">The branch. Recipient and publisher are equally weighted — neither is "the default." "Not sure yet" routes to recipient with a banner that lets the user switch.</span>
+      </div>
+    </article>
+
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- LANE 2 — RECIPIENT PATH                           -->
+<!-- ════════════════════════════════════════════════ -->
+<section class="lane lane-recipient">
+  <div class="lane-head">
+    <div class="lane-num">02</div>
+    <h2 class="lane-title" data-i18n="lane.recipient.title">Recipient · "I want to connect"</h2>
+    <p class="lane-sub" data-i18n="lane.recipient.sub">For people inside Iran on shaky networks. The path optimises for one outcome: at the end, the phoenix is glowing and the user is one tap away from a working connection.</p>
+  </div>
+
+  <div class="phones">
+
+    <!-- ── Phone 2.1 — What is Daal ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="r.what">
+            <div class="eyebrow" data-i18n="r.what.eyebrow">Recipient · 1 of 4</div>
+            <h2 class="title" data-i18n="r.what.title">What is Daal?</h2>
+
+            <div class="info-cards">
+              <div class="info-card">
+                <span class="info-num">i.</span>
+                <div>
+                  <h3 class="info-h" data-i18n="r.what.c1.h">A way to reach.</h3>
+                  <p class="info-p" data-i18n="r.what.c1.p">Daal helps you reach the open internet when your country blocks it.</p>
+                </div>
+              </div>
+              <div class="info-card">
+                <span class="info-num">ii.</span>
+                <div>
+                  <h3 class="info-h" data-i18n="r.what.c2.h">Routes are how it connects.</h3>
+                  <p class="info-p" data-i18n="r.what.c2.p">A route is the path your traffic takes. You can get them from a publisher, a friend, or a file.</p>
+                </div>
+              </div>
+              <div class="info-card">
+                <span class="info-num">iii.</span>
+                <div>
+                  <h3 class="info-h" data-i18n="r.what.c3.h">Your routes stay yours.</h3>
+                  <p class="info-p" data-i18n="r.what.c3.p">They live on this device. Daal does not see your traffic, and we do not run a server.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="pager-dots"><span class="on"></span><span></span><span></span></div>
+
+            <div class="stack">
+              <button class="btn btn-primary" data-i18n="r.what.cta">Continue</button>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.r.what.step">Recipient · Step 1 of 4</span>
+        <span class="phone-name" data-i18n="cap.r.what.name">What is Daal?</span>
+        <span class="phone-note" data-i18n="cap.r.what.note">Three claims, no jargon. The italic Roman numerals are a quiet editorial cue, not a feature list.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 2.2 — Set a PIN ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="r.pin">
+            <div class="eyebrow" data-i18n="r.pin.eyebrow">Recipient · 2 of 4 · Optional</div>
+            <h2 class="title" data-i18n="r.pin.title">Protect your routes.</h2>
+            <p class="sub" data-i18n="r.pin.sub">A PIN protects your routes if someone takes your phone. You'll enter it each time you open Daal.</p>
+
+            <div class="pin-shield">
+              <svg width="40" height="48" viewBox="0 0 40 48" fill="none"><path d="M20 2L37 8V22C37 33 30 41 20 45C10 41 3 33 3 22V8L20 2Z" stroke="currentColor" stroke-width="1.6"/><rect x="13" y="20" width="14" height="12" rx="1.5" stroke="currentColor" stroke-width="1.6"/><path d="M16 20V16C16 13.8 17.8 12 20 12C22.2 12 24 13.8 24 16V20" stroke="currentColor" stroke-width="1.6"/></svg>
+            </div>
+
+            <div class="pin-dots">
+              <span class="pin-dot filled"></span>
+              <span class="pin-dot filled"></span>
+              <span class="pin-dot filled"></span>
+              <span class="pin-dot filled"></span>
+              <span class="pin-dot"></span>
+              <span class="pin-dot"></span>
+            </div>
+
+            <div class="keypad">
+              <div class="key" data-num="1">1</div>
+              <div class="key" data-num="2">2</div>
+              <div class="key" data-num="3">3</div>
+              <div class="key" data-num="4">4</div>
+              <div class="key" data-num="5">5</div>
+              <div class="key" data-num="6">6</div>
+              <div class="key" data-num="7">7</div>
+              <div class="key" data-num="8">8</div>
+              <div class="key" data-num="9">9</div>
+              <div class="key spacer"></div>
+              <div class="key" data-num="0">0</div>
+              <div class="key" data-num="x"><svg width="22" height="14" viewBox="0 0 22 14" fill="none"><path d="M7 1H20C20.5 1 21 1.5 21 2V12C21 12.5 20.5 13 20 13H7L1 7L7 1Z" stroke="currentColor" stroke-width="1.4"/><path d="M11 5L16 9M16 5L11 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></div>
+            </div>
+
+            <button class="btn-link" style="margin-top: 8px;" data-i18n="r.pin.skip">Skip — use device keystore instead</button>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.r.pin.step">Recipient · Step 2 of 4</span>
+        <span class="phone-name" data-i18n="cap.r.pin.name">Set a PIN</span>
+        <span class="phone-note" data-i18n="cap.r.pin.note">Honest copy on the trade-off. "Skip" is not buried — many users on shared phones won't want a PIN.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 2.3 — Add a route ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="r.route">
+            <div class="eyebrow" data-i18n="r.route.eyebrow">Recipient · 3 of 4</div>
+            <h2 class="title" data-i18n="r.route.title">Add your first route.</h2>
+            <p class="sub" data-i18n="r.route.sub">Pick whichever you have. You can add more later.</p>
+
+            <div class="route-tiles">
+              <div class="route-tile recommended">
+                <span class="rt-flag" data-i18n="r.route.t1.flag">Recommended</span>
+                <svg class="rt-icon" viewBox="0 0 24 24" fill="none"><path d="M3 8h18M3 12h18M3 16h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="19" cy="16" r="3" stroke="currentColor" stroke-width="1.6"/></svg>
+                <h3 class="rt-h" data-i18n="r.route.t1.h">Subscribe to a publisher</h3>
+                <p class="rt-p" data-i18n="r.route.t1.p">Paste a daal:// link or scan a QR.</p>
+              </div>
+              <div class="route-tile">
+                <svg class="rt-icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="3.5" stroke="currentColor" stroke-width="1.6"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <h3 class="rt-h" data-i18n="r.route.t2.h">Receive from a friend</h3>
+                <p class="rt-p" data-i18n="r.route.t2.p">LAN handoff or 6-digit PIN.</p>
+              </div>
+              <div class="route-tile">
+                <svg class="rt-icon" viewBox="0 0 24 24" fill="none"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3v6h6" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+                <h3 class="rt-h" data-i18n="r.route.t3.h">Import a file</h3>
+                <p class="rt-p" data-i18n="r.route.t3.p">Open a .sbp from your device.</p>
+              </div>
+              <div class="route-tile">
+                <svg class="rt-icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M9 9l6 6M15 9l-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <h3 class="rt-h" data-i18n="r.route.t4.h">Skip for now</h3>
+                <p class="rt-p" data-i18n="r.route.t4.p">Decide later — empty home.</p>
+              </div>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.r.route.step">Recipient · Step 3 of 4</span>
+        <span class="phone-name" data-i18n="cap.r.route.name">Add a route</span>
+        <span class="phone-note" data-i18n="cap.r.route.note">Four equal tiles. The "Recommended" flag on subscribe is the only nudge — every option is real and reachable.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 2.4 — Ready (phoenix glow) ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="r.ready">
+            <div class="eyebrow" data-i18n="r.ready.eyebrow">Recipient · 4 of 4</div>
+            <h2 class="title" data-i18n="r.ready.title">Ready when you are.</h2>
+
+            <div class="ready-stage">
+              <div class="phoenix-button" role="button" aria-label="Connect">
+                <img class="phoenix-mark" src="mouenlnv-daal-3d-no-bg.png" alt="" aria-hidden="true" />
+              </div>
+              <div class="ready-text">
+                <div class="h" data-i18n="r.ready.h">Tap the shield to connect.</div>
+                <div class="p" data-i18n="r.ready.p">First connect asks for VPN permission once.</div>
+              </div>
+              <div class="route-chip">
+                <span class="badge" data-i18n="r.ready.badge">Route</span>
+                <span data-i18n="r.ready.route">Pars Relays · Rescue 03</span>
+              </div>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.r.ready.step">Recipient · Step 4 of 4</span>
+        <span class="phone-name" data-i18n="cap.r.ready.name">Ready to connect</span>
+        <span class="phone-note" data-i18n="cap.r.ready.note">The flourish: the shield button breathes a soft gold halo. The selected route is shown as a chip — never the raw ID.</span>
+      </div>
+    </article>
+
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- LANE 3 — PUBLISHER PATH                           -->
+<!-- ════════════════════════════════════════════════ -->
+<section class="lane lane-publisher">
+  <div class="lane-head">
+    <div class="lane-num">03</div>
+    <h2 class="lane-title" data-i18n="lane.publisher.title">Publisher · "I want to help others"</h2>
+    <p class="lane-sub" data-i18n="lane.publisher.sub">For diaspora setting up a VPS to make routes for family back home. Same warmth, slightly more capable surface — marked with a quiet teal-cyan accent so power users know they're in publisher mode.</p>
+  </div>
+
+  <div class="phones">
+
+    <!-- ── Phone 3.1 — What is publisher ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="p.welcome">
+            <span class="pub-tag" data-i18n="p.tag">Publisher mode</span>
+            <h2 class="title" data-i18n="p.welcome.title">Welcome, publisher.</h2>
+            <p class="sub" data-i18n="p.welcome.sub">You'll create routes that family and friends can subscribe to. Your server, your keys, your trusted circle — Daal does not see any of it.</p>
+
+            <div class="pub-art">
+              <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+                <circle cx="28" cy="28" r="6" fill="currentColor"/>
+                <circle cx="28" cy="28" r="14" stroke="currentColor" stroke-width="1.6" opacity="0.7"/>
+                <circle cx="28" cy="28" r="22" stroke="currentColor" stroke-width="1.4" opacity="0.45"/>
+                <circle cx="6" cy="28" r="3" fill="currentColor"/>
+                <circle cx="50" cy="28" r="3" fill="currentColor"/>
+                <circle cx="28" cy="6" r="3" fill="currentColor"/>
+                <circle cx="14" cy="46" r="3" fill="currentColor"/>
+                <circle cx="42" cy="46" r="3" fill="currentColor"/>
+              </svg>
+            </div>
+
+            <div class="info-cards">
+              <div class="info-card">
+                <span class="info-num" style="color: oklch(80% 0.08 195);">i.</span>
+                <div>
+                  <h3 class="info-h" data-i18n="p.welcome.c1.h">You sign each route.</h3>
+                  <p class="info-p" data-i18n="p.welcome.c1.p">Subscribers verify your fingerprint once. They trust the publisher, not the network.</p>
+                </div>
+              </div>
+              <div class="info-card">
+                <span class="info-num" style="color: oklch(80% 0.08 195);">ii.</span>
+                <div>
+                  <h3 class="info-h" data-i18n="p.welcome.c2.h">You stay anonymous to Daal.</h3>
+                  <p class="info-p" data-i18n="p.welcome.c2.p">There is no Daal server. Your subscription URL goes peer-to-peer, or through whatever channel you choose.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack">
+              <button class="btn btn-primary" data-i18n="p.welcome.cta">Continue</button>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.p.welcome.step">Publisher · Step 1 of 4</span>
+        <span class="phone-name" data-i18n="cap.p.welcome.name">What is publishing?</span>
+        <span class="phone-note" data-i18n="cap.p.welcome.note">Same three-card pattern as recipient, but the accent shifts from gold to a muted cyan so power-users know where they are.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 3.2 — Name your publisher ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="p.name">
+            <span class="pub-tag" data-i18n="p.tag">Publisher mode</span>
+            <h2 class="title" data-i18n="p.name.title">Name your publisher.</h2>
+            <p class="sub" data-i18n="p.name.sub">This is what your family will see when they subscribe — not a URL, just a friendly name.</p>
+
+            <div class="input-group">
+              <span class="input-label" data-i18n="p.name.label">Display name</span>
+              <div class="input with-cursor"><span data-i18n="p.name.value">Maman &amp; Baba</span><span class="cursor"></span></div>
+              <p class="input-hint" data-i18n="p.name.hint">You can change this later. Keep it personal — your people will recognise it.</p>
+            </div>
+
+            <div class="examples">
+              <button data-i18n="p.name.ex1">Family</button>
+              <button data-i18n="p.name.ex2">Maman &amp; Baba</button>
+              <button data-i18n="p.name.ex3">Tehran group</button>
+              <button data-i18n="p.name.ex4">Class of 2018</button>
+            </div>
+
+            <div class="stack">
+              <button class="btn btn-primary" data-i18n="p.name.cta">Continue</button>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.p.name.step">Publisher · Step 2 of 4</span>
+        <span class="phone-name" data-i18n="cap.p.name.name">Name your publisher</span>
+        <span class="phone-note" data-i18n="cap.p.name.note">Not "publisher_id" or "domain." A real human name the recipient will recognise on the trust prompt later.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 3.3 — Add server ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="p.server">
+            <span class="pub-tag" data-i18n="p.tag">Publisher mode</span>
+            <h2 class="title" data-i18n="p.server.title">Where will routes run from?</h2>
+            <p class="sub" data-i18n="p.server.sub">Add the VPS or server you've already set up. Daal generates signed routes from it — your provider never knows about Daal.</p>
+
+            <div class="input-group">
+              <span class="input-label" data-i18n="p.server.label">Server endpoint</span>
+              <div class="input"><span class="input-placeholder" style="color: var(--dim); font-family: var(--font-mono); font-size: 13px;" data-i18n="p.server.placeholder">vps-fra.example.net : 443</span></div>
+            </div>
+
+            <div class="server-list">
+              <div class="server-row">
+                <span class="sr-dot"></span>
+                <div>
+                  <div class="sr-name">vps-fra.maman-baba.net</div>
+                  <div class="sr-loc" data-i18n="p.server.loc1">Frankfurt · Hetzner · seen 2 min ago</div>
+                </div>
+                <span class="sr-tag" data-i18n="p.server.tag">Detected</span>
+              </div>
+              <div class="server-row">
+                <span class="sr-dot" style="background: var(--dim);"></span>
+                <div>
+                  <div class="sr-name">vps-ams.maman-baba.net</div>
+                  <div class="sr-loc" data-i18n="p.server.loc2">Amsterdam · Vultr · idle</div>
+                </div>
+                <span class="sr-tag" style="color: var(--dim);" data-i18n="p.server.tag2">Add</span>
+              </div>
+            </div>
+
+            <button class="btn-link" style="margin-top: 12px;" data-i18n="p.server.later">I'll set up later — show me the dashboard</button>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.p.server.step">Publisher · Step 3 of 4</span>
+        <span class="phone-name" data-i18n="cap.p.server.name">Add a server</span>
+        <span class="phone-note" data-i18n="cap.p.server.note">Auto-detect when the user has the Daal CLI running on the VPS. Otherwise, paste an endpoint or postpone — never block onboarding.</span>
+      </div>
+    </article>
+
+    <!-- ── Phone 3.4 — Share with family ── -->
+    <article class="phone">
+      <div class="device">
+        <div class="screen">
+          <div class="island"></div>
+          <div class="statusbar">
+            <span class="time">9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="0.5"/><rect x="4" y="5" width="3" height="6" rx="0.5"/><rect x="8" y="3" width="3" height="8" rx="0.5"/><rect x="12" y="0" width="3" height="11" rx="0.5"/></svg>
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M8 11l1.4-1.6a2 2 0 0 0-2.8 0L8 11zm-3.5-4a5 5 0 0 1 7 0l1.4-1.4a7 7 0 0 0-9.8 0L4.5 7zM8 0a11 11 0 0 0-7.8 3.2l1.4 1.4A9 9 0 0 1 8 2a9 9 0 0 1 6.4 2.6l1.4-1.4A11 11 0 0 0 8 0z"/></svg>
+              <svg width="26" height="12" viewBox="0 0 26 12" fill="none"><rect x="0.5" y="0.5" width="22" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/><rect x="2" y="2" width="19" height="8" rx="1.5" fill="currentColor"/><rect x="23.5" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/></svg>
+            </span>
+          </div>
+          <div class="screen-body" data-od-id="p.share">
+            <span class="pub-tag" data-i18n="p.tag">Publisher mode</span>
+            <h2 class="title" data-i18n="p.share.title">Share with your people.</h2>
+
+            <div class="qr-frame">
+              <svg class="qr" viewBox="0 0 21 21" id="pub-qr" aria-hidden="true"></svg>
+            </div>
+
+            <div class="share-meta">
+              <span class="meta-label" data-i18n="p.share.pin">PIN</span>
+              <span>4 8 2&nbsp;&nbsp;3 9 1</span>
+            </div>
+
+            <div class="fingerprint">
+              <div class="fp-title" data-i18n="p.share.fp">Your fingerprint — read these aloud to verify</div>
+              <div class="fp-words" data-words="en">
+                <span class="w"><span class="n">1</span>anchor</span>
+                <span class="w"><span class="n">2</span>harvest</span>
+                <span class="w"><span class="n">3</span>summer</span>
+                <span class="w"><span class="n">4</span>lantern</span>
+                <span class="w"><span class="n">5</span>chapel</span>
+                <span class="w"><span class="n">6</span>ribbon</span>
+              </div>
+              <div class="fp-words" data-words="fa" style="display: none;">
+                <span class="w"><span class="n">۱</span>لنگر</span>
+                <span class="w"><span class="n">۲</span>خرمن</span>
+                <span class="w"><span class="n">۳</span>تابستان</span>
+                <span class="w"><span class="n">۴</span>فانوس</span>
+                <span class="w"><span class="n">۵</span>نمازخانه</span>
+                <span class="w"><span class="n">۶</span>نوار</span>
+              </div>
+            </div>
+
+            <div class="stack">
+              <button class="btn btn-primary" data-i18n="p.share.cta">Send subscription link</button>
+            </div>
+          </div>
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <span class="phone-step" data-i18n="cap.p.share.step">Publisher · Step 4 of 4</span>
+        <span class="phone-name" data-i18n="cap.p.share.name">Share with family</span>
+        <span class="phone-note" data-i18n="cap.p.share.note">QR + PIN + 6-word fingerprint, all visible at once. The publisher reads the words on a phone call so the recipient can verify the trust prompt — the same six words appear on their device.</span>
+      </div>
+    </article>
+
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════ -->
+<!-- FOOTER                                            -->
+<!-- ════════════════════════════════════════════════ -->
+<footer class="foot" data-od-id="footer">
+  <div>
+    <h3 data-i18n="foot.h">Both paths converge.</h3>
+    <p data-i18n="foot.p">From here, both users land on the main app's Connection screen. The recipient sees the phoenix glowing, one tap from connected. The publisher sees a small "publisher dashboard" entry alongside, where they can manage subscribers, rotate keys, and watch route health.</p>
+    <p data-i18n="foot.p2">The branching choice is reversible: Settings → Advanced → "I am a publisher" toggles the publisher surface on for any user who started as a recipient.</p>
+  </div>
+  <div>
+    <div class="meta">
+      <div><b>Form factor</b> · iPhone, 390 × 844 (Android parity uses Material 3 idioms)</div>
+      <div><b>Theme</b> · Dark · deep teal #033E51, gold #C9A23A, accent restraint enforced</div>
+      <div><b>Type</b> · Iowan Old Style display · system humanist body · system mono</div>
+      <div><b>Languages</b> · English (LTR) · Persian (RTL, live flip via header toggle)</div>
+      <div><b>Brand rules honoured</b> · no raw IDs · routes have human names · BIP-39 fingerprint visible</div>
+      <div><b>Out of scope here</b> · trust prompt modal · status / settings · panic wipe · desktop variants</div>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // ────────────── i18n ──────────────
+  const STRINGS = {
+    en: {
+      "hero.kicker": "A two-path onboarding",
+      "hero.h1.a": "The first ninety seconds, ",
+      "hero.h1.b": "two ways.",
+      "hero.lede": "People inside Iran land on the recipient flow — get a route, press connect. Diaspora who want to help family land on the publisher flow — set up a server, share a subscription with the people they love. Both paths leave first-launch ready.",
+      "legend.shared": "Shared start",
+      "legend.recipient": "Recipient · inside",
+      "legend.publisher": "Publisher · diaspora",
+
+      "lane.shared.title": "Shared start",
+      "lane.shared.sub": "Everyone sees these two screens. The branching choice on screen two decides which path the rest of onboarding takes.",
+      "lane.recipient.title": "Recipient · \"I want to connect\"",
+      "lane.recipient.sub": "For people inside Iran on shaky networks. The path optimises for one outcome: at the end, the phoenix is glowing and the user is one tap away from a working connection.",
+      "lane.publisher.title": "Publisher · \"I want to help others\"",
+      "lane.publisher.sub": "For diaspora setting up a VPS to make routes for family back home. Same warmth, slightly more capable surface — marked with a quiet teal-cyan accent so power users know they're in publisher mode.",
+
+      "welcome.wordmark": "DAAL",
+      "welcome.tagline": "Reach the open internet. Together.",
+      "welcome.cta": "Get started",
+      "welcome.lang": "Language: English · فارسی",
+
+      "who.eyebrow": "Step 2 of 2",
+      "who.title": "Who are you?",
+      "who.sub": "Daal works two ways. Pick the one that sounds like you — you can change it later.",
+      "who.recipient.h": "I want to connect",
+      "who.recipient.p": "I'm looking for a way to reach the open internet. I have a route from a friend or publisher — or I'm looking for one.",
+      "who.publisher.h": "I want to help others",
+      "who.publisher.p": "I run a server abroad. I want to make routes for my family and friends back home.",
+      "who.unsure": "I'm not sure yet",
+
+      "r.what.eyebrow": "Recipient · 1 of 4",
+      "r.what.title": "What is Daal?",
+      "r.what.c1.h": "A way to reach.",
+      "r.what.c1.p": "Daal helps you reach the open internet when your country blocks it.",
+      "r.what.c2.h": "Routes are how it connects.",
+      "r.what.c2.p": "A route is the path your traffic takes. You can get them from a publisher, a friend, or a file.",
+      "r.what.c3.h": "Your routes stay yours.",
+      "r.what.c3.p": "They live on this device. Daal does not see your traffic, and we do not run a server.",
+      "r.what.cta": "Continue",
+
+      "r.pin.eyebrow": "Recipient · 2 of 4 · Optional",
+      "r.pin.title": "Protect your routes.",
+      "r.pin.sub": "A PIN protects your routes if someone takes your phone. You'll enter it each time you open Daal.",
+      "r.pin.skip": "Skip — use device keystore instead",
+
+      "r.route.eyebrow": "Recipient · 3 of 4",
+      "r.route.title": "Add your first route.",
+      "r.route.sub": "Pick whichever you have. You can add more later.",
+      "r.route.t1.flag": "Recommended",
+      "r.route.t1.h": "Subscribe to a publisher",
+      "r.route.t1.p": "Paste a daal:// link or scan a QR.",
+      "r.route.t2.h": "Receive from a friend",
+      "r.route.t2.p": "LAN handoff or 6-digit PIN.",
+      "r.route.t3.h": "Import a file",
+      "r.route.t3.p": "Open a .sbp from your device.",
+      "r.route.t4.h": "Skip for now",
+      "r.route.t4.p": "Decide later — empty home.",
+
+      "r.ready.eyebrow": "Recipient · 4 of 4",
+      "r.ready.title": "Ready when you are.",
+      "r.ready.h": "Tap the shield to connect.",
+      "r.ready.p": "First connect asks for VPN permission once.",
+      "r.ready.badge": "Route",
+      "r.ready.route": "Pars Relays · Rescue 03",
+
+      "p.tag": "Publisher mode",
+      "p.welcome.title": "Welcome, publisher.",
+      "p.welcome.sub": "You'll create routes that family and friends can subscribe to. Your server, your keys, your trusted circle — Daal does not see any of it.",
+      "p.welcome.c1.h": "You sign each route.",
+      "p.welcome.c1.p": "Subscribers verify your fingerprint once. They trust the publisher, not the network.",
+      "p.welcome.c2.h": "You stay anonymous to Daal.",
+      "p.welcome.c2.p": "There is no Daal server. Your subscription URL goes peer-to-peer, or through whatever channel you choose.",
+      "p.welcome.cta": "Continue",
+
+      "p.name.title": "Name your publisher.",
+      "p.name.sub": "This is what your family will see when they subscribe — not a URL, just a friendly name.",
+      "p.name.label": "Display name",
+      "p.name.value": "Maman & Baba",
+      "p.name.hint": "You can change this later. Keep it personal — your people will recognise it.",
+      "p.name.ex1": "Family",
+      "p.name.ex2": "Maman & Baba",
+      "p.name.ex3": "Tehran group",
+      "p.name.ex4": "Class of 2018",
+      "p.name.cta": "Continue",
+
+      "p.server.title": "Where will routes run from?",
+      "p.server.sub": "Add the VPS or server you've already set up. Daal generates signed routes from it — your provider never knows about Daal.",
+      "p.server.label": "Server endpoint",
+      "p.server.placeholder": "vps-fra.example.net : 443",
+      "p.server.loc1": "Frankfurt · Hetzner · seen 2 min ago",
+      "p.server.loc2": "Amsterdam · Vultr · idle",
+      "p.server.tag": "Detected",
+      "p.server.tag2": "Add",
+      "p.server.later": "I'll set up later — show me the dashboard",
+
+      "p.share.title": "Share with your people.",
+      "p.share.pin": "PIN",
+      "p.share.fp": "Your fingerprint — read these aloud to verify",
+      "p.share.cta": "Send subscription link",
+
+      "cap.welcome.step": "Shared · Step 1 of 2",
+      "cap.welcome.name": "Welcome",
+      "cap.welcome.note": "Logo, tagline, language toggle. The only screen with the wordmark at full scale.",
+      "cap.who.step": "Shared · Step 2 of 2",
+      "cap.who.name": "Who are you?",
+      "cap.who.note": "The branch. Recipient and publisher are equally weighted — neither is \"the default.\" \"Not sure yet\" routes to recipient with a banner that lets the user switch.",
+      "cap.r.what.step": "Recipient · Step 1 of 4",
+      "cap.r.what.name": "What is Daal?",
+      "cap.r.what.note": "Three claims, no jargon. The italic Roman numerals are a quiet editorial cue, not a feature list.",
+      "cap.r.pin.step": "Recipient · Step 2 of 4",
+      "cap.r.pin.name": "Set a PIN",
+      "cap.r.pin.note": "Honest copy on the trade-off. \"Skip\" is not buried — many users on shared phones won't want a PIN.",
+      "cap.r.route.step": "Recipient · Step 3 of 4",
+      "cap.r.route.name": "Add a route",
+      "cap.r.route.note": "Four equal tiles. The \"Recommended\" flag on subscribe is the only nudge — every option is real and reachable.",
+      "cap.r.ready.step": "Recipient · Step 4 of 4",
+      "cap.r.ready.name": "Ready to connect",
+      "cap.r.ready.note": "The flourish: the shield button breathes a soft gold halo. The selected route is shown as a chip — never the raw ID.",
+      "cap.p.welcome.step": "Publisher · Step 1 of 4",
+      "cap.p.welcome.name": "What is publishing?",
+      "cap.p.welcome.note": "Same three-card pattern as recipient, but the accent shifts from gold to a muted cyan so power-users know where they are.",
+      "cap.p.name.step": "Publisher · Step 2 of 4",
+      "cap.p.name.name": "Name your publisher",
+      "cap.p.name.note": "Not \"publisher_id\" or \"domain.\" A real human name the recipient will recognise on the trust prompt later.",
+      "cap.p.server.step": "Publisher · Step 3 of 4",
+      "cap.p.server.name": "Add a server",
+      "cap.p.server.note": "Auto-detect when the user has the Daal CLI running on the VPS. Otherwise, paste an endpoint or postpone — never block onboarding.",
+      "cap.p.share.step": "Publisher · Step 4 of 4",
+      "cap.p.share.name": "Share with family",
+      "cap.p.share.note": "QR + PIN + 6-word fingerprint, all visible at once. The publisher reads the words on a phone call so the recipient can verify the trust prompt — the same six words appear on their device.",
+
+      "foot.h": "Both paths converge.",
+      "foot.p": "From here, both users land on the main app's Connection screen. The recipient sees the phoenix glowing, one tap from connected. The publisher sees a small \"publisher dashboard\" entry alongside, where they can manage subscribers, rotate keys, and watch route health.",
+      "foot.p2": "The branching choice is reversible: Settings → Advanced → \"I am a publisher\" toggles the publisher surface on for any user who started as a recipient."
+    },
+    fa: {
+      "hero.kicker": "ورود دو مسیره",
+      "hero.h1.a": "نود ثانیهٔ نخست، ",
+      "hero.h1.b": "دو راه.",
+      "hero.lede": "کسانی که داخل ایران هستند به مسیر «گیرنده» می‌روند — راهی می‌گیرند، دکمه را می‌فشارند. خارج‌نشینانی که می‌خواهند به خانواده کمک کنند به مسیر «ناشر» می‌روند — سرور خود را راه می‌اندازند، اشتراکی با عزیزانشان به اشتراک می‌گذارند. هر دو مسیر در پایان، آماده‌اند.",
+      "legend.shared": "آغاز مشترک",
+      "legend.recipient": "گیرنده · داخل",
+      "legend.publisher": "ناشر · خارج‌نشین",
+
+      "lane.shared.title": "آغاز مشترک",
+      "lane.shared.sub": "همه این دو صفحه را می‌بینند. انتخاب در صفحهٔ دوم تعیین می‌کند بقیهٔ ورود از کدام مسیر می‌گذرد.",
+      "lane.recipient.title": "گیرنده · «می‌خواهم متصل شوم»",
+      "lane.recipient.sub": "برای کسانی که داخل ایران، روی شبکه‌های ناپایدار هستند. این مسیر برای یک هدف بهینه شده است: در پایان، ققنوس می‌درخشد و کاربر تنها یک فشار با اتصال فاصله دارد.",
+      "lane.publisher.title": "ناشر · «می‌خواهم به دیگران کمک کنم»",
+      "lane.publisher.sub": "برای خارج‌نشینانی که سرور می‌سازند تا برای خانواده در وطن راه بسازند. همان گرما، با کمی عمق بیشتر — با یک رنگ آبی-فیروزه‌ای آرام مشخص شده تا کاربر بداند در حالت ناشر است.",
+
+      "welcome.wordmark": "DAAL",
+      "welcome.tagline": "به اینترنت آزاد برسید. در کنار هم.",
+      "welcome.cta": "شروع کنیم",
+      "welcome.lang": "زبان: فارسی · English",
+
+      "who.eyebrow": "مرحلهٔ ۲ از ۲",
+      "who.title": "شما کی هستید؟",
+      "who.sub": "دال دو حالت دارد. آن را که شبیه شماست انتخاب کنید — بعداً قابل تغییر است.",
+      "who.recipient.h": "می‌خواهم متصل شوم",
+      "who.recipient.p": "به دنبال راهی هستم تا به اینترنت آزاد برسم. راهی از یک دوست یا ناشر دارم — یا در پی آنم.",
+      "who.publisher.h": "می‌خواهم به دیگران کمک کنم",
+      "who.publisher.p": "خارج از کشور سروری دارم. می‌خواهم برای خانواده و دوستانم در وطن راه بسازم.",
+      "who.unsure": "هنوز مطمئن نیستم",
+
+      "r.what.eyebrow": "گیرنده · ۱ از ۴",
+      "r.what.title": "دال چیست؟",
+      "r.what.c1.h": "راهی برای رسیدن.",
+      "r.what.c1.p": "دال کمک می‌کند وقتی کشورتان دسترسی را می‌بندد، به اینترنت آزاد برسید.",
+      "r.what.c2.h": "مسیر، اساس اتصال است.",
+      "r.what.c2.p": "مسیر یعنی راهی که داده‌های شما طی می‌کند. آن را از یک ناشر، یک دوست، یا یک فایل می‌گیرید.",
+      "r.what.c3.h": "مسیرهای شما، مالِ شما.",
+      "r.what.c3.p": "روی همین دستگاه می‌مانند. دال داده‌های شما را نمی‌بیند و سروری ندارد.",
+      "r.what.cta": "ادامه",
+
+      "r.pin.eyebrow": "گیرنده · ۲ از ۴ · اختیاری",
+      "r.pin.title": "از مسیرهای خود محافظت کنید.",
+      "r.pin.sub": "اگر کسی گوشی‌تان را برداشت، رمز از مسیرهایتان محافظت می‌کند. هر بار که دال را باز می‌کنید، آن را وارد خواهید کرد.",
+      "r.pin.skip": "رد کن — به جای آن از کلیدِ دستگاه استفاده کن",
+
+      "r.route.eyebrow": "گیرنده · ۳ از ۴",
+      "r.route.title": "اولین مسیر خود را اضافه کنید.",
+      "r.route.sub": "هر کدام را که دارید انتخاب کنید. بعداً می‌توانید بیشتر اضافه کنید.",
+      "r.route.t1.flag": "پیشنهاد",
+      "r.route.t1.h": "اشتراک با یک ناشر",
+      "r.route.t1.p": "یک پیوند daal:// را بچسبانید یا QR را اسکن کنید.",
+      "r.route.t2.h": "از یک دوست دریافت کنید",
+      "r.route.t2.p": "تحویل در شبکهٔ محلی یا رمز ۶ رقمی.",
+      "r.route.t3.h": "وارد کردن از فایل",
+      "r.route.t3.p": "یک .sbp از روی دستگاه باز کنید.",
+      "r.route.t4.h": "فعلاً رد کن",
+      "r.route.t4.p": "بعداً تصمیم بگیرید — صفحهٔ خانه خالی.",
+
+      "r.ready.eyebrow": "گیرنده · ۴ از ۴",
+      "r.ready.title": "هر وقت آماده بودی.",
+      "r.ready.h": "برای اتصال روی سپر بزنید.",
+      "r.ready.p": "اولین اتصال یک‌بار اجازهٔ VPN را می‌خواهد.",
+      "r.ready.badge": "مسیر",
+      "r.ready.route": "پارس‌ ریلیز · رستگار ۰۳",
+
+      "p.tag": "حالت ناشر",
+      "p.welcome.title": "خوش آمدید، ناشر.",
+      "p.welcome.sub": "شما مسیرهایی می‌سازید که خانواده و دوستانتان می‌توانند به آن مشترک شوند. سرور شما، کلیدهای شما، حلقهٔ امن شما — دال هیچ‌کدام را نمی‌بیند.",
+      "p.welcome.c1.h": "هر مسیر را خودتان امضا می‌کنید.",
+      "p.welcome.c1.p": "مشترکین یک‌بار اثرانگشت شما را تأیید می‌کنند. آن‌ها به ناشر اعتماد می‌کنند، نه به شبکه.",
+      "p.welcome.c2.h": "برای دال، شما ناشناس می‌مانید.",
+      "p.welcome.c2.p": "هیچ سرور دالی وجود ندارد. آدرس اشتراک شما یا نظیر-به-نظیر می‌رسد، یا از هر کانالی که خودتان انتخاب کنید.",
+      "p.welcome.cta": "ادامه",
+
+      "p.name.title": "نام ناشر را انتخاب کنید.",
+      "p.name.sub": "این چیزی است که خانواده‌تان وقت اشتراک می‌بیند — نه یک آدرس، فقط یک نام آشنا.",
+      "p.name.label": "نام نمایشی",
+      "p.name.value": "مامان و بابا",
+      "p.name.hint": "بعداً قابل تغییر است. آن را شخصی نگه دارید — عزیزانتان آن را خواهند شناخت.",
+      "p.name.ex1": "خانواده",
+      "p.name.ex2": "مامان و بابا",
+      "p.name.ex3": "گروه تهران",
+      "p.name.ex4": "ورودی ۹۷",
+      "p.name.cta": "ادامه",
+
+      "p.server.title": "مسیرها از کجا اجرا می‌شوند؟",
+      "p.server.sub": "سرور یا VPS که از قبل راه‌اندازی کرده‌اید را اضافه کنید. دال از روی آن مسیرهای امضاشده می‌سازد — ارائه‌دهندهٔ شما هرگز از دال خبر ندارد.",
+      "p.server.label": "آدرس سرور",
+      "p.server.placeholder": "vps-fra.example.net : 443",
+      "p.server.loc1": "فرانکفورت · هتزنر · ۲ دقیقه پیش",
+      "p.server.loc2": "آمستردام · ولتر · بی‌فعالیت",
+      "p.server.tag": "شناسایی شد",
+      "p.server.tag2": "افزودن",
+      "p.server.later": "بعداً تنظیم می‌کنم — مرا به داشبورد ببر",
+
+      "p.share.title": "با عزیزانتان به اشتراک بگذارید.",
+      "p.share.pin": "رمز",
+      "p.share.fp": "اثرانگشت شما — این کلمات را برای تأیید بخوانید",
+      "p.share.cta": "ارسال پیوند اشتراک",
+
+      "cap.welcome.step": "مشترک · مرحلهٔ ۱ از ۲",
+      "cap.welcome.name": "خوش‌آمدگویی",
+      "cap.welcome.note": "نشان، شعار، انتخاب زبان. تنها صفحه‌ای که نشانه با اندازهٔ کامل ظاهر می‌شود.",
+      "cap.who.step": "مشترک · مرحلهٔ ۲ از ۲",
+      "cap.who.name": "شما کی هستید؟",
+      "cap.who.note": "نقطهٔ انشعاب. گیرنده و ناشر هم‌وزن‌اند — هیچ‌کدام «پیش‌فرض» نیست. «هنوز مطمئن نیستم» به مسیر گیرنده می‌رود با باندری که اجازهٔ تغییر می‌دهد.",
+      "cap.r.what.step": "گیرنده · مرحلهٔ ۱ از ۴",
+      "cap.r.what.name": "دال چیست؟",
+      "cap.r.what.note": "سه ادعا، بدون اصطلاح فنی. اعداد رومی ایتالیک یک نشانهٔ ادبی آرام‌اند، نه فهرست ویژگی.",
+      "cap.r.pin.step": "گیرنده · مرحلهٔ ۲ از ۴",
+      "cap.r.pin.name": "ساختن رمز",
+      "cap.r.pin.note": "نوشتار صادقانه دربارهٔ مزایا و معایب. «رد کن» پنهان نیست — بسیاری از کاربران روی گوشی مشترک رمز نمی‌خواهند.",
+      "cap.r.route.step": "گیرنده · مرحلهٔ ۳ از ۴",
+      "cap.r.route.name": "افزودن مسیر",
+      "cap.r.route.note": "چهار کاشی هم‌وزن. تنها نشانهٔ پیشنهاد روی «اشتراک» است — هر گزینه واقعی و در دسترس است.",
+      "cap.r.ready.step": "گیرنده · مرحلهٔ ۴ از ۴",
+      "cap.r.ready.name": "آمادهٔ اتصال",
+      "cap.r.ready.note": "نقطهٔ ادبیِ طرح: دکمهٔ سپر یک هالهٔ طلایی نرم می‌کشد. مسیر انتخاب‌شده به‌عنوان چیپ نشان داده می‌شود — هرگز شناسهٔ خام.",
+      "cap.p.welcome.step": "ناشر · مرحلهٔ ۱ از ۴",
+      "cap.p.welcome.name": "نشر چیست؟",
+      "cap.p.welcome.note": "همان الگوی سه‌کارته‌ای گیرنده، اما رنگ تأکید از طلایی به فیروزه‌ای آرام تغییر می‌کند تا کاربر بداند کجاست.",
+      "cap.p.name.step": "ناشر · مرحلهٔ ۲ از ۴",
+      "cap.p.name.name": "نام‌گذاری ناشر",
+      "cap.p.name.note": "نه «publisher_id» و نه «دامنه». یک نام انسانی واقعی که گیرنده روی صفحهٔ تأیید می‌بیند.",
+      "cap.p.server.step": "ناشر · مرحلهٔ ۳ از ۴",
+      "cap.p.server.name": "افزودن سرور",
+      "cap.p.server.note": "اگر CLI دال روی VPS در حال اجرا باشد، خودکار شناسایی می‌شود. در غیر این صورت آدرس بچسبانید یا بعداً انجام دهید — هرگز ورود را مسدود نمی‌کند.",
+      "cap.p.share.step": "ناشر · مرحلهٔ ۴ از ۴",
+      "cap.p.share.name": "اشتراک با خانواده",
+      "cap.p.share.note": "QR + رمز + اثرانگشت ۶ کلمه‌ای، همه با هم پیداست. ناشر کلمات را در تماس می‌خواند تا گیرنده روی صفحهٔ تأیید همان شش کلمه را ببیند.",
+
+      "foot.h": "هر دو مسیر هم‌گرا می‌شوند.",
+      "foot.p": "از اینجا، هر دو کاربر به صفحهٔ «اتصال» در برنامهٔ اصلی می‌رسند. گیرنده ققنوسِ درخشان را می‌بیند، یک لمس تا اتصال. ناشر کنار آن یک ورودی کوچک «داشبورد ناشر» می‌بیند که در آن مشترکین را مدیریت می‌کند، کلیدها را می‌چرخاند و سلامت مسیرها را زیر نظر دارد.",
+      "foot.p2": "این انشعاب برگشت‌پذیر است: تنظیمات → پیشرفته → «من ناشر هستم» می‌تواند سطح ناشر را برای هر کاربری که از مسیر گیرنده شروع کرده فعال کند."
+    }
+  };
+
+  function setLang(lang) {
+    document.body.classList.toggle('lang-en', lang === 'en');
+    document.body.classList.toggle('lang-fa', lang === 'fa');
+
+    // toggle button state
+    document.querySelectorAll('.lang-toggle button').forEach(b => {
+      b.setAttribute('aria-pressed', b.dataset.lang === lang ? 'true' : 'false');
+    });
+
+    // swap text content
+    const dict = STRINGS[lang];
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const key = el.dataset.i18n;
+      if (dict[key] !== undefined) el.textContent = dict[key];
+    });
+
+    // flip dir on each phone screen body (but NOT the editorial chrome)
+    document.querySelectorAll('.screen-body').forEach(b => {
+      b.setAttribute('dir', lang === 'fa' ? 'rtl' : 'ltr');
+    });
+    // captions stay LTR (designer annotations)
+
+    // swap fingerprint word grid
+    document.querySelectorAll('.fp-words').forEach(g => {
+      g.style.display = (g.dataset.words === lang) ? '' : 'none';
+    });
+
+    // swap PIN keypad numerals (Western ↔ Persian-Indic)
+    const persianNumerals = ['۰','۱','۲','۳','۴','۵','۶','۷','۸','۹'];
+    document.querySelectorAll('.key[data-num]').forEach(k => {
+      const n = k.dataset.num;
+      if (n === 'x') return;
+      k.textContent = lang === 'fa' ? persianNumerals[parseInt(n, 10)] : n;
+    });
+
+    // share PIN numerals
+    const shareMeta = document.querySelector('.share-meta span:nth-child(2)');
+    if (shareMeta) {
+      shareMeta.textContent = lang === 'fa'
+        ? '۴ ۸ ۲  ۳ ۹ ۱'
+        : '4 8 2   3 9 1';
+    }
+  }
+
+  document.querySelectorAll('.lang-toggle button').forEach(b => {
+    b.addEventListener('click', () => setLang(b.dataset.lang));
+  });
+
+  // ────────────── deterministic QR-style pattern ──────────────
+  (function buildQR(){
+    const svg = document.getElementById('pub-qr');
+    if (!svg) return;
+    const N = 21;
+    // simple LCG seeded by a fixed string
+    let h = 1234567;
+    const seed = 'daal-pub-fingerprint-anchor-harvest-summer';
+    for (const c of seed) h = ((h * 31) + c.charCodeAt(0)) | 0;
+    const grid = [];
+    for (let y = 0; y < N; y++) {
+      const row = [];
+      for (let x = 0; x < N; x++) {
+        h = (h * 1103515245 + 12345) & 0x7fffffff;
+        row.push(((h >> 16) & 1) === 1 ? 1 : 0);
+      }
+      grid.push(row);
+    }
+    // finder pattern at (0,0), (0,14), (14,0)
+    const setFinder = (ox, oy) => {
+      for (let y = 0; y < 7; y++) for (let x = 0; x < 7; x++) {
+        const onRing = (y === 0 || y === 6 || x === 0 || x === 6);
+        const onCore = (y >= 2 && y <= 4 && x >= 2 && x <= 4);
+        grid[oy + y][ox + x] = (onRing || onCore) ? 1 : 0;
+      }
+    };
+    setFinder(0, 0);
+    setFinder(14, 0);
+    setFinder(0, 14);
+    // separators (white border around finders)
+    for (let i = 0; i < 8; i++) {
+      if (grid[7] && grid[7][i] !== undefined) grid[7][i] = 0;
+      if (grid[i] && grid[i][7] !== undefined) grid[i][7] = 0;
+      if (grid[7] && grid[7][13 + i - 6] !== undefined) grid[7][13 + i] = 0;
+      if (grid[i] && grid[i][13] !== undefined) grid[i][13] = 0;
+      if (grid[13] && grid[13][i] !== undefined) grid[13][i] = 0;
+      if (grid[14 + i - 6]) {} // no-op
+    }
+    // alignment block at center
+    for (let y = 8; y <= 12; y++) for (let x = 8; x <= 12; x++) {
+      const onRing = (y === 8 || y === 12 || x === 8 || x === 12);
+      const onCore = (y === 10 && x === 10);
+      grid[y][x] = (onRing || onCore) ? 1 : 0;
+    }
+
+    // emit rects
+    const ns = 'http://www.w3.org/2000/svg';
+    const frag = document.createDocumentFragment();
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      if (grid[y][x] === 1) {
+        const r = document.createElementNS(ns, 'rect');
+        r.setAttribute('x', x);
+        r.setAttribute('y', y);
+        r.setAttribute('width', 1);
+        r.setAttribute('height', 1);
+        r.setAttribute('fill', '#0E2C39');
+        frag.appendChild(r);
+      }
+    }
+    svg.appendChild(frag);
+  })();
+
+  // initial state
+  setLang('en');
+</script>
+
+</body>
+</html>

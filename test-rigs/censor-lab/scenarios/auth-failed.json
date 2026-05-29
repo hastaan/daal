@@ -1,0 +1,13 @@
+{
+  "id": "auth-failed",
+  "v0_failure_categories": ["auth_failed"],
+  "description": "Server reachable; credentials rejected. Path manager must NOT cool down on this.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": {},
+  "expectations": [
+    { "flow": "auth_attempt_bad_creds", "outcome": "auth_failed" }
+  ],
+  "asserts": [
+    { "rule": "no_cooldown_on", "category": "auth_failed" }
+  ]
+}

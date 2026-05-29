@@ -1,0 +1,7 @@
+{
+  "scenario_id": "route-expired",
+  "category": "route_expired",
+  "outcome": "route_expired",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "use_expired_route"
+}

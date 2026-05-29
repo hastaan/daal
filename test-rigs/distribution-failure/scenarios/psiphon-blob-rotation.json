@@ -1,0 +1,28 @@
+{
+  "id": "psiphon-blob-rotation",
+  "channel": "subscription-url",
+  "description": "Phase 3D. Exercises the psiphon-family activation lifecycle. Day 1 enables the experimental-families gate so psiphon routes are selectable. Day 3 drives a soak-only psiphon route activation; the rig asserts diagnostics carry `psiphon_active_route` matching the route and `psiphon_compiled_in` is true (release builds without the GPLv3 isolation tag MUST report compiled-in). Day 7 simulates a publisher-bundle rotation by clearing the active psiphon route; diagnostics MUST clear `psiphon_active_route` to empty within the same day. Day 14 exercises the locked invariant: psiphon is NOT opportunistic — auto-promotion MUST NOT promote a network whose only family is psiphon. The legacy subscription-url block layers so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 3,
+      "name": "soak_record_psiphon_active_route",
+      "args": { "route_id": "soak-psiphon-1" }
+    },
+    {
+      "day": 7,
+      "name": "soak_record_psiphon_active_route",
+      "args": { "route_id": "" }
+    },
+    {
+      "day": 14,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "PsiphonOnlyNet" }
+    }
+  ]
+}

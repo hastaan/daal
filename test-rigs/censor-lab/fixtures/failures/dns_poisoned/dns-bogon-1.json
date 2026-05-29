@@ -1,0 +1,7 @@
+{
+  "scenario_id": "dns-bogon",
+  "category": "dns_poisoned",
+  "outcome": "bogon",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "dns_blocked"
+}

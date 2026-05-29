@@ -1,0 +1,10 @@
+{
+  "id": "tls-in-tls-burst",
+  "v0_failure_categories": ["tls_sni_or_cert_block_suspected"],
+  "description": "Placeholder classifier flags the canonical TLS-in-TLS burst-pattern window. Not a real ML model.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": { "tls_in_tls_burst": { "enabled": true, "window_packets": 10 } },
+  "expectations": [
+    { "flow": "nested_tls_handshake", "outcome": "tcp_reset" }
+  ]
+}

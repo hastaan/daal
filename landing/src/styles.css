@@ -1,0 +1,274 @@
+/* landing/src/styles.css — landing page styling.
+ *
+ * Pulls the same design DNA as client-ui (see client-ui/src/design/tokens.css).
+ * Tokens are copied (not symlinked) so the landing site can deploy
+ * independently of the in-app build. Keep in sync when client-ui
+ * updates its palette.
+ */
+
+:root {
+  /* palette (oklch teal + warm gold accent) — matches client-ui tokens.css */
+  --bg:         oklch(28% 0.04 215);
+  --bg-deep:    oklch(22% 0.045 215);
+  --surface:    oklch(33% 0.04 215);
+  --surface-2:  oklch(38% 0.04 215);
+  --surface-3:  oklch(43% 0.035 215);
+  --line:       oklch(45% 0.025 215);
+  --line-soft:  oklch(40% 0.03 215);
+  --fg:         oklch(96% 0.012 80);
+  --muted:      oklch(72% 0.012 215);
+  --dim:        oklch(58% 0.015 215);
+  --gold:       #C9A23A;
+  --gold-warm:  oklch(78% 0.12 80);
+  --gold-deep:  oklch(60% 0.12 75);
+  --green:      oklch(72% 0.14 150);
+  --amber:      oklch(76% 0.14 80);
+  --red:        oklch(64% 0.18 25);
+
+  --font-display: 'Iowan Old Style', 'Charter', 'Newsreader',
+                  'Palatino Linotype', Palatino, Georgia, serif;
+  --font-body:    -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                  system-ui, sans-serif;
+  --font-mono:    ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+  --r-card: 16px;
+  --r-tile: 12px;
+  --r-pill: 999px;
+
+  --gutter: 24px;
+  --max-content-width: 1080px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; min-height: 100%; }
+body {
+  background: var(--bg-deep);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background-image:
+    radial-gradient(1100px 600px at 12% -10%, oklch(35% 0.05 215) 0%, transparent 60%),
+    radial-gradient(900px 500px at 92% 8%, oklch(34% 0.05 195) 0%, transparent 60%);
+  background-attachment: fixed;
+}
+
+a { color: var(--gold-warm); text-decoration: none; }
+a:hover { color: var(--gold); }
+
+/* layout */
+.shell {
+  max-width: var(--max-content-width);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+/* top nav */
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.5px;
+}
+.nav-brand img { width: 32px; height: 32px; }
+.nav-links {
+  display: flex;
+  gap: 24px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.nav-links a { color: var(--muted); }
+.nav-links a:hover { color: var(--fg); }
+
+/* hero */
+.hero {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 48px;
+  align-items: center;
+  padding: 72px 0 48px;
+}
+@media (max-width: 720px) {
+  .hero { grid-template-columns: 1fr; padding: 48px 0 32px; }
+  .hero-art { order: -1; justify-self: center; }
+}
+.hero h1 {
+  margin: 0 0 16px;
+  font-family: var(--font-display);
+  font-size: clamp(36px, 6vw, 56px);
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  line-height: 1.05;
+}
+.hero h1 .accent { color: var(--gold); }
+.hero p.tag {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 18px;
+}
+.hero p.lede {
+  margin: 0;
+  font-size: 16px;
+  color: var(--dim);
+  max-width: 52ch;
+}
+.hero-art img {
+  width: 320px;
+  height: auto;
+  display: block;
+}
+
+/* download grid */
+.downloads-section { padding: 32px 0 64px; }
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.section-head h2 {
+  font-family: var(--font-display);
+  font-size: 28px;
+  margin: 0;
+  letter-spacing: -0.3px;
+}
+.section-head .version {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--dim);
+}
+.section-head .version strong { color: var(--gold); }
+
+.platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+  margin-top: 24px;
+}
+
+.platform-card {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-card);
+  padding: 24px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.platform-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.platform-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  color: var(--gold);
+}
+.platform-name {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+}
+.platform-meta {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.download-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.download-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-tile);
+  color: var(--fg);
+  font-size: 14px;
+  transition: border-color 120ms, background 120ms;
+}
+.download-item:hover {
+  border-color: var(--gold-deep);
+  background: var(--surface-3);
+}
+.download-item .name { font-family: var(--font-mono); font-size: 12.5px; color: var(--fg); }
+.download-item .meta { color: var(--muted); font-size: 12px; }
+.download-item.unavailable {
+  opacity: 0.55;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+.download-item.unavailable .meta { color: var(--amber); }
+
+.notes {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 10px;
+  line-height: 1.5;
+}
+.notes code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg);
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--gold-warm);
+}
+
+/* footer */
+.foot {
+  border-top: 1px solid var(--line-soft);
+  padding: 32px 0 48px;
+  margin-top: 64px;
+  font-size: 13px;
+  color: var(--dim);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.foot a { color: var(--muted); }
+.foot a:hover { color: var(--gold-warm); }
+
+/* small "verify checksums" callout */
+.verify-callout {
+  margin-top: 24px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--gold);
+  border-radius: var(--r-tile);
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.verify-callout strong { color: var(--fg); }
+.verify-callout pre {
+  margin: 8px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--gold-warm);
+  background: var(--bg);
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}

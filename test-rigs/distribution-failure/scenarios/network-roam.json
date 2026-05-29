@@ -1,0 +1,33 @@
+{
+  "id": "network-roam",
+  "channel": "subscription-url",
+  "description": "Phase 2C: user roams between two Wi-Fi networks during the soak. The engine MUST hash the SSID before persisting, swap per-network state on each roam, and never leak the raw SSID into diagnostics. Channel-blocking is identical to subscription-url-unreachable so the legacy invariants still fire on the relevant days.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "normal" }
+    },
+    {
+      "day": 1,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "Home" }
+    },
+    {
+      "day": 2,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "Cafe" }
+    },
+    {
+      "day": 3,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "Home" }
+    },
+    {
+      "day": 5,
+      "name": "network_changed",
+      "args": { "kind": "cell", "carrier": "MCI", "ssid": "" }
+    }
+  ]
+}

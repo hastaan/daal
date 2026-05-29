@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daal.invalid/schema/probe-report-v1.json",
+  "title": "Daal Field Probe Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_id",
+    "generated_hour_bucket",
+    "platform",
+    "country_hint",
+    "carrier_class",
+    "probes",
+    "failures"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "report_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID-like, generated fresh per report; not reusable across runs"
+    },
+    "generated_hour_bucket": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:00Z$"
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["linux", "windows", "android", "macos", "ios", "unknown"]
+    },
+    "country_hint": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}$|^unknown$"
+    },
+    "carrier_class": {
+      "type": "string",
+      "enum": ["mobile", "fixed", "wifi", "unknown"]
+    },
+    "probes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "result"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "dns_resolves_default",
+              "tcp_443_to_canary",
+              "udp_echo",
+              "subscription_url_reachable",
+              "bootstrap_directory_reachable"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "enum": ["ok", "fail", "timeout", "bogon", "reset", "loss", "blocked", "other"]
+          }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "count_bucket"],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "dns_poisoned",
+              "dns_timeout",
+              "tcp_connect_timeout",
+              "tcp_reset",
+              "tls_handshake_failed",
+              "tls_sni_or_cert_block_suspected",
+              "udp_unavailable",
+              "quic_unavailable",
+              "auth_failed",
+              "route_expired",
+              "publisher_revoked",
+              "publisher_key_changed",
+              "subscription_unreachable",
+              "engine_crash",
+              "bundle_signature_invalid",
+              "bundle_corrupted",
+              "network_offline",
+              "unknown"
+            ]
+          },
+          "count_bucket": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 500
+    }
+  }
+}

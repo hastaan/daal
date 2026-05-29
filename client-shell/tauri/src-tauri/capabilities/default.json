@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "Default capability set for the Daal desktop+mobile shell. Grants the dialog plugin (file picker / save) on every window+webview; all other Tauri APIs remain locked.",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
+}

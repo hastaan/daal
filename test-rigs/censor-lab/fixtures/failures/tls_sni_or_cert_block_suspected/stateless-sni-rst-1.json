@@ -1,0 +1,7 @@
+{
+  "scenario_id": "stateless-sni-rst",
+  "category": "tls_sni_or_cert_block_suspected",
+  "outcome": "tcp_reset",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "tls_to_blocked"
+}

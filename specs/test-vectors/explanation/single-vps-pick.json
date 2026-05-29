@@ -1,0 +1,40 @@
+{
+  "pick": {
+    "route_id": "r1",
+    "family": "vless-reality",
+    "exposure_mode": "direct_vps",
+    "family_class": "vps-native",
+    "probing_risk_class": "low"
+  },
+  "shortlist": [
+    {
+      "route_id": "r1",
+      "position": 0,
+      "started_at_ms": 0,
+      "outcome": "success"
+    },
+    {
+      "route_id": "r2",
+      "position": 1,
+      "started_at_ms": 400,
+      "outcome": "not_started"
+    },
+    {
+      "route_id": "r3",
+      "position": 2,
+      "started_at_ms": 800,
+      "outcome": "not_started"
+    }
+  ],
+  "failures": [],
+  "active_cooldowns": [],
+  "network_signals": [],
+  "memory_hint": {
+    "signature": "public_ip:5.75.0.1,public_port:tcp443",
+    "last_outcome": "success",
+    "last_seen_unix": 1777809600
+  },
+  "reason": "Used vless-reality on the leader direct_vps; secondary candidates staggered.",
+  "decision_id": "frp3-fixture-single-vps-001",
+  "phase": "V1.5"
+}

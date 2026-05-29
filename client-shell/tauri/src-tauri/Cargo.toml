@@ -1,0 +1,70 @@
+[package]
+name = "daal-desktop-tauri"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+description = "Tauri 2 GUI shell for Daal desktop. Wraps daal-desktop-core with #[tauri::command] handlers."
+
+[lib]
+name = "daal_desktop_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "daal-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2.0"
+tauri-plugin-opener = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs-next = "2.0"
+daal-desktop-core = { path = "../daal-desktop-core" }
+daal-wizard = { path = "../daal-wizard" }
+# Custody v1: device-wrap-key handling needs explicit zero-on-drop
+# semantics whether we're on desktop (keyring) or Android (JNI).
+zeroize = "1.8"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Desktop custody provider stores a 32-byte Device Wrap Key in the
+# OS keychain (macOS Keychain, Windows Credential Manager/DPAPI,
+# Linux libsecret). base64 lets us round-trip it as a string.
+keyring = "2"
+base64 = "0.22"
+rand = "0.8"
+
+[target.'cfg(target_os = "android")'.dependencies]
+log = "0.4"
+android_logger = "0.13"
+# share_file Tauri command calls MainActivity.shareFile via JNI;
+# custody provider also uses JNI to talk to DaalKeystore.kt.
+jni = "0.21"
+ndk-context = "0.1"
+hex = "0.4"
+rand = "0.8"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+oslog = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+# `dev-no-keystore` bypasses the OS-keystore outer layer for local
+# development. PIN-derived AES-GCM still runs. PRODUCTION RELEASE
+# BUILDS REJECT THIS FEATURE: a compile-time guard fires if it is
+# enabled in a non-debug build (see daal-wizard/src/keystore.rs).
+dev-no-keystore = ["daal-wizard/dev-no-keystore"]
+
+# This crate is intentionally NOT in the workspace; building it pulls
+# in tauri-build / Vite / Node deps, which slow `cargo test -p bundle-rs`
+# significantly. Build it on its own with `cargo build --manifest-path
+# tauri/src-tauri/Cargo.toml`.
+[workspace]

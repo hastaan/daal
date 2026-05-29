@@ -1,0 +1,1108 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head><script data-od-sandbox-shim>(function(){
+  function makeStore(){
+    var data = {};
+    var api = {
+      getItem: function(k){ return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function(k, v){ data[k] = String(v); },
+      removeItem: function(k){ delete data[k]; },
+      clear: function(){ data = {}; },
+      key: function(i){ return Object.keys(data)[i] || null; }
+    };
+    Object.defineProperty(api, 'length', { get: function(){ return Object.keys(data).length; } });
+    return api;
+  }
+  function tryShim(name){
+    var works = false;
+    try { works = !!window[name] && typeof window[name].getItem === 'function'; void window[name].length; }
+    catch (_) { works = false; }
+    if (works) return;
+    try { Object.defineProperty(window, name, { configurable: true, value: makeStore() }); }
+    catch (_) { try { window[name] = makeStore(); } catch (__) {} }
+  }
+  tryShim('localStorage');
+  tryShim('sessionStorage');
+})();</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1320, initial-scale=1">
+<title>Daal — Desktop</title>
+<style>
+  :root {
+    --teal-deep: #033E51;
+    --teal-surface: #0A4A5E;
+    --teal-raised: #0F576C;
+    --teal-border: #1A6478;
+    --teal-hairline: #134E5F;
+    --gold: #C9A23A;
+    --gold-soft: #D9B86E;
+    --paper: #F2EBD9;
+    --paper-dim: #C9C0AB;
+    --ink-soft: #8FA8B0;
+    --ink-mute: #5C7A84;
+    --danger: #C8553D;
+    --success: #5FA85A;
+    --warn: #E0A93B;
+
+    --font-display: 'Iowan Old Style', 'Charter', 'Hoefler Text', Georgia, serif;
+    --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-mono: ui-monospace, 'JetBrains Mono', 'IBM Plex Mono', Menlo, monospace;
+
+    --radius: 8px;
+    --radius-lg: 14px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #07212B;
+    color: var(--paper);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    min-height: 100vh;
+    padding: 48px 32px 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 64px;
+  }
+
+  .canvas-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-mute);
+    margin-bottom: 18px;
+    text-align: center;
+  }
+  .canvas-label strong { color: var(--paper-dim); font-weight: 500; }
+
+  /* ============ DESKTOP WINDOW ============ */
+  .window {
+    width: 1280px;
+    height: 820px;
+    background: var(--teal-deep);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.04) inset,
+      0 60px 120px rgba(0,0,0,0.55),
+      0 24px 48px rgba(0,0,0,0.35);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+
+  /* Custom title bar (Windows / Linux convention; brief says "pick one and apply consistently") */
+  .titlebar {
+    height: 36px;
+    flex: 0 0 36px;
+    background: linear-gradient(180deg, #052E3E, #032834);
+    border-bottom: 1px solid var(--teal-hairline);
+    display: flex;
+    align-items: center;
+    padding-inline: 14px;
+    gap: 14px;
+    -webkit-app-region: drag;
+  }
+  .traffic { display: flex; gap: 8px; }
+  .traffic span {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--teal-border);
+    display: block;
+  }
+  .traffic span:nth-child(1) { background: #E06A5C; }
+  .traffic span:nth-child(2) { background: #D9B86E; }
+  .traffic span:nth-child(3) { background: #5FA85A; }
+  .titlebar-title {
+    font-family: var(--font-display);
+    font-size: 13px;
+    color: var(--paper-dim);
+    letter-spacing: 0.02em;
+  }
+  .titlebar-spacer { flex: 1; }
+  .titlebar-conn {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--success);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .titlebar-conn::before {
+    content: '';
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+  }
+
+  /* App body: sidebar + main */
+  .app-body {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    min-height: 0;
+  }
+  [dir="rtl"] .app-body { grid-template-columns: 1fr 240px; }
+
+  /* ============ SIDEBAR ============ */
+  .sidebar {
+    background: linear-gradient(180deg, #042F3F 0%, #032834 100%);
+    border-inline-end: 1px solid var(--teal-hairline);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 0;
+    grid-column: 1;
+  }
+  [dir="rtl"] .sidebar { grid-column: 2; }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 20px 22px;
+    border-block-end: 1px solid var(--teal-hairline);
+    margin-block-end: 16px;
+  }
+  .brand img {
+    width: 36px; height: 36px;
+    object-fit: contain;
+  }
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+  }
+  .brand-name {
+    font-family: var(--font-display);
+    font-size: 17px;
+    color: var(--paper);
+    letter-spacing: 0.01em;
+  }
+  .brand-sub {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-mute);
+  }
+
+  .nav-section-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-mute);
+    padding: 14px 20px 8px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    color: var(--paper-dim);
+    font-size: 14px;
+    cursor: pointer;
+    border-inline-start: 2px solid transparent;
+    transition: background 120ms, color 120ms;
+  }
+  .nav-item:hover { background: rgba(255,255,255,0.03); color: var(--paper); }
+  .nav-item.active {
+    background: rgba(201,162,58,0.08);
+    color: var(--paper);
+    border-inline-start-color: var(--gold);
+  }
+  .nav-item.dim { color: var(--ink-mute); }
+  .nav-item .icon {
+    width: 18px; height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: currentColor;
+  }
+  .nav-item .icon svg { width: 100%; height: 100%; }
+  .nav-shortcut {
+    margin-inline-start: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-mute);
+    letter-spacing: 0.06em;
+  }
+  .nav-badge {
+    margin-inline-start: auto;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    background: var(--teal-border);
+    color: var(--paper-dim);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 16px 20px;
+    border-block-start: 1px solid var(--teal-hairline);
+  }
+  .panic {
+    width: 100%;
+    background: transparent;
+    border: 1px solid rgba(200,85,61,0.4);
+    color: #E07A66;
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-family: var(--font-body);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    letter-spacing: 0.02em;
+    transition: background 120ms;
+  }
+  .panic:hover { background: rgba(200,85,61,0.08); }
+
+  /* ============ MAIN ============ */
+  .main {
+    grid-column: 2;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  [dir="rtl"] .main { grid-column: 1; }
+
+  .topbar {
+    height: 56px;
+    flex: 0 0 56px;
+    border-block-end: 1px solid var(--teal-hairline);
+    padding: 0 28px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .breadcrumb {
+    font-family: var(--font-display);
+    font-size: 18px;
+    color: var(--paper);
+    letter-spacing: 0.005em;
+  }
+  .breadcrumb-sep {
+    color: var(--ink-mute);
+    margin-inline: 8px;
+    font-size: 14px;
+  }
+  .breadcrumb-current {
+    font-family: var(--font-body);
+    color: var(--paper-dim);
+    font-size: 14px;
+  }
+  .topbar-spacer { flex: 1; }
+
+  .search-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--teal-hairline);
+    border-radius: var(--radius);
+    padding: 6px 12px;
+    color: var(--ink-soft);
+    font-size: 12px;
+    width: 220px;
+    cursor: pointer;
+  }
+  .search-hint kbd {
+    margin-inline-start: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    background: rgba(255,255,255,0.06);
+    color: var(--paper-dim);
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--teal-hairline);
+  }
+
+  .lang-toggle {
+    display: flex;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--teal-hairline);
+    border-radius: var(--radius);
+    padding: 2px;
+    gap: 0;
+  }
+  .lang-toggle button {
+    background: transparent;
+    border: 0;
+    color: var(--ink-soft);
+    font-family: var(--font-body);
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    letter-spacing: 0.02em;
+  }
+  .lang-toggle button.on {
+    background: var(--gold);
+    color: #1A1208;
+    font-weight: 600;
+  }
+
+  /* Connection workspace */
+  .work {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .work-main {
+    padding: 36px 48px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: auto;
+    border-inline-end: 1px solid var(--teal-hairline);
+  }
+
+  .conn-state-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--success);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-block-end: 18px;
+  }
+  .conn-state-label::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+  }
+
+  /* Phoenix button — the decisive flourish */
+  .phoenix-wrap {
+    width: 280px; height: 280px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-block-end: 28px;
+  }
+  .phoenix-halo {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(201,162,58,0.45) 0%, rgba(201,162,58,0.12) 45%, transparent 70%);
+    animation: breathe 3.4s ease-in-out infinite;
+    filter: blur(2px);
+  }
+  .phoenix-halo.outer {
+    inset: -28px;
+    background: radial-gradient(circle, rgba(201,162,58,0.18) 0%, transparent 60%);
+    animation-delay: -1.7s;
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: 0.55; transform: scale(0.97); }
+    50%      { opacity: 1;    transform: scale(1.03); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .phoenix-halo { animation: none; opacity: 0.7; transform: none; }
+  }
+  .phoenix-img {
+    position: relative;
+    width: 220px; height: 220px;
+    object-fit: contain;
+    z-index: 1;
+    cursor: pointer;
+    transition: transform 200ms ease;
+  }
+  .phoenix-img:hover { transform: scale(1.02); }
+
+  .conn-headline {
+    font-family: var(--font-display);
+    font-size: 38px;
+    color: var(--paper);
+    letter-spacing: -0.01em;
+    margin: 0 0 10px;
+    text-align: center;
+  }
+  .conn-route-chip {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--teal-hairline);
+    border-radius: 100px;
+    padding: 8px 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--paper-dim);
+    font-size: 13px;
+    cursor: pointer;
+    margin-block-end: 16px;
+  }
+  .trust-badge {
+    background: rgba(95,168,90,0.15);
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .conn-route-chip svg {
+    width: 12px; height: 12px;
+    color: var(--ink-mute);
+  }
+  .conn-status-line {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-align: center;
+    margin-block-end: 18px;
+  }
+  .conn-status-line .num { font-variant-numeric: tabular-nums; }
+
+  .mode-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(201,162,58,0.10);
+    border: 1px solid rgba(201,162,58,0.35);
+    color: var(--gold-soft);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    padding: 5px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  /* Right rail */
+  .rail {
+    background: rgba(255,255,255,0.015);
+    padding: 24px 24px 16px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .rail-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-mute);
+    margin-block-end: 10px;
+  }
+  .rail-section h3 {
+    font-family: var(--font-display);
+    font-size: 14px;
+    color: var(--paper);
+    margin: 0 0 10px;
+    font-weight: 600;
+  }
+  .why-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 0;
+    border-block-end: 1px solid var(--teal-hairline);
+  }
+  .why-row:last-child { border-block-end: 0; }
+  .why-row .k {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-mute);
+  }
+  .why-row .v {
+    color: var(--paper-dim);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .why-row .v.mono {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .skip-list {
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .skip-list li {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    display: flex;
+    gap: 8px;
+  }
+  .skip-list .reason { color: var(--ink-mute); }
+
+  .health-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 12px;
+  }
+  .health-row .name { color: var(--paper-dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .health-row .pct { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--paper-dim); }
+  .health-bar {
+    width: 64px; height: 4px;
+    background: var(--teal-hairline);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .health-bar > span {
+    display: block; height: 100%;
+    background: var(--success);
+  }
+  .health-bar.warn > span { background: var(--warn); }
+  .health-bar.bad > span { background: var(--danger); }
+
+  .pointer-banner {
+    background: rgba(224,169,59,0.08);
+    border: 1px solid rgba(224,169,59,0.3);
+    border-radius: var(--radius);
+    padding: 12px;
+    font-size: 12px;
+    color: var(--paper-dim);
+    line-height: 1.5;
+  }
+  .pointer-banner strong { color: var(--warn); display: block; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; margin-block-end: 4px; }
+
+  .export-btn {
+    margin-top: auto;
+    background: transparent;
+    border: 1px solid var(--teal-border);
+    color: var(--paper-dim);
+    padding: 10px;
+    border-radius: var(--radius);
+    font-family: var(--font-body);
+    font-size: 12px;
+    cursor: pointer;
+    width: 100%;
+  }
+
+  /* ============ TRAY POPOVER ============ */
+  .tray-wrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .tray-strip {
+    width: 1280px;
+    height: 38px;
+    background: rgba(15,30,40,0.9);
+    border: 1px solid #1a2a32;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-inline-end: 14px;
+    gap: 14px;
+    color: var(--ink-soft);
+    font-size: 11px;
+    font-family: var(--font-body);
+  }
+  .tray-strip .icons { display: flex; gap: 12px; align-items: center; color: var(--paper-dim); }
+  .tray-strip .icons span { font-family: var(--font-mono); font-size: 11px; }
+  .tray-icon {
+    width: 18px; height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--gold);
+    position: relative;
+  }
+  .tray-icon img { width: 16px; height: 16px; object-fit: contain; }
+  .tray-icon::after {
+    content: '';
+    position: absolute;
+    inset-block-end: -2px;
+    inset-inline-end: -2px;
+    width: 8px; height: 8px;
+    background: var(--success);
+    border: 1.5px solid #0a1820;
+    border-radius: 50%;
+  }
+  .tray-clock { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--paper-dim); }
+
+  .tray-pop {
+    position: relative;
+    width: 320px;
+    background: #073241;
+    border: 1px solid var(--teal-border);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 24px 48px rgba(0,0,0,0.5);
+  }
+  .tray-pop::before {
+    content: '';
+    position: absolute;
+    inset-block-start: -6px;
+    inset-inline-end: 60px;
+    width: 12px; height: 12px;
+    background: #073241;
+    border-block-start: 1px solid var(--teal-border);
+    border-inline-start: 1px solid var(--teal-border);
+    transform: rotate(45deg);
+  }
+  .tray-head {
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-block-end: 1px solid var(--teal-hairline);
+  }
+  .tray-head img { width: 28px; height: 28px; object-fit: contain; }
+  .tray-head .l { flex: 1; }
+  .tray-head .l .t { font-family: var(--font-display); font-size: 14px; color: var(--paper); }
+  .tray-head .l .s { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--success); }
+  .tray-route {
+    padding: 12px 16px;
+    border-block-end: 1px solid var(--teal-hairline);
+  }
+  .tray-route .lbl {
+    font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--ink-mute);
+    margin-block-end: 4px;
+  }
+  .tray-route .name { color: var(--paper); font-size: 13px; }
+  .tray-route .meta { color: var(--ink-soft); font-family: var(--font-mono); font-size: 11px; margin-block-start: 4px; }
+
+  .tray-row {
+    padding: 9px 16px;
+    color: var(--paper-dim);
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tray-row:hover { background: rgba(255,255,255,0.04); color: var(--paper); }
+  .tray-row .icon { width: 14px; height: 14px; color: var(--ink-soft); }
+  .tray-row .icon svg { width: 100%; height: 100%; }
+  .tray-row .shortcut { margin-inline-start: auto; font-family: var(--font-mono); font-size: 10px; color: var(--ink-mute); }
+  .tray-row.danger { color: #E07A66; }
+  .tray-divider { height: 1px; background: var(--teal-hairline); margin: 4px 0; }
+
+  /* RTL: flip the tray arrow position */
+  [dir="rtl"] .tray-pop::before { inset-inline-end: auto; inset-inline-start: 60px; }
+
+  /* Numerals get switched per-language via JS */
+  [data-fa-num] { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<div class="canvas-label"><strong>Daal — Desktop · Connection</strong> · 1280 × 820 · deep teal canvas, gold phoenix, EN ↔ فا live mirror</div>
+
+<div class="window">
+  <!-- Title bar -->
+  <div class="titlebar">
+    <div class="traffic"><span></span><span></span><span></span></div>
+    <div class="titlebar-title" data-i18n="appname">Daal</div>
+    <div class="titlebar-spacer"></div>
+    <div class="titlebar-conn" data-i18n="connected_for"><span data-i18n="connected_label">Connected</span> · 02:14:38</div>
+  </div>
+
+  <div class="app-body">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="daal-flat-no-bg.svg" alt="Daal">
+        <div class="brand-text">
+          <div class="brand-name" data-i18n="appname">Daal</div>
+          <div class="brand-sub" data-i18n="brand_sub">v0.4.2</div>
+        </div>
+      </div>
+
+      <div class="nav-section-label" data-i18n="nav_main">Main</div>
+
+      <div class="nav-item active">
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M8.5 16a6 6 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 20 0"/><circle cx="12" cy="20" r=".5" fill="currentColor"/></svg></span>
+        <span data-i18n="nav_connection">Connection</span>
+        <span class="nav-shortcut">⌘1</span>
+      </div>
+
+      <div class="nav-item">
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M8 6h8M7 8l4 8M17 8l-4 8"/></svg></span>
+        <span data-i18n="nav_routes">Routes</span>
+        <span class="nav-shortcut">⌘2</span>
+      </div>
+
+      <div class="nav-item">
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h12a4 4 0 0 1 0 8H8a4 4 0 0 0 0 8h12"/></svg></span>
+        <span data-i18n="nav_subscriptions">Subscriptions</span>
+        <span class="nav-shortcut">⌘3</span>
+      </div>
+
+      <div class="nav-item">
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>
+        <span data-i18n="nav_status">Status</span>
+        <span class="nav-shortcut">⌘4</span>
+      </div>
+
+      <div class="nav-item">
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4.9a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.5a7 7 0 0 0-2 1.2L5.1 5.8l-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-.9a7 7 0 0 0 2 1.2L10 21h4l.5-2.5a7 7 0 0 0 2-1.2l2.4.9 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg></span>
+        <span data-i18n="nav_settings">Settings</span>
+        <span class="nav-shortcut">⌘5</span>
+      </div>
+
+      <div class="nav-section-label" data-i18n="nav_advanced">Advanced</div>
+
+      <div class="nav-item dim">
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z"/><path d="M9 12l2 2 4-4"/></svg></span>
+        <span data-i18n="nav_publisher">Publisher</span>
+        <span class="nav-badge" data-i18n="badge_off">Off</span>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="panic">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z"/><path d="M12 8v5"/><circle cx="12" cy="16" r=".6" fill="currentColor"/></svg>
+          <span data-i18n="panic">Panic wipe</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="topbar">
+        <div class="breadcrumb">
+          <span data-i18n="appname">Daal</span>
+          <span class="breadcrumb-sep">/</span>
+          <span class="breadcrumb-current" data-i18n="nav_connection">Connection</span>
+        </div>
+        <div class="topbar-spacer"></div>
+        <div class="search-hint">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <span data-i18n="search_placeholder">Search routes, settings…</span>
+          <kbd>⌘K</kbd>
+        </div>
+        <div class="lang-toggle" id="langToggle">
+          <button class="on" data-lang="en">EN</button>
+          <button data-lang="fa">فا</button>
+        </div>
+      </div>
+
+      <div class="work">
+        <div class="work-main">
+          <div class="conn-state-label" data-i18n="state_connected">Connected · Routing</div>
+          <div class="phoenix-wrap">
+            <div class="phoenix-halo outer"></div>
+            <div class="phoenix-halo"></div>
+            <img class="phoenix-img" src="daal-3d-no-bg.png" alt="Daal phoenix shield">
+          </div>
+          <h1 class="conn-headline" data-i18n="conn_headline">You're connected.</h1>
+          <div class="conn-route-chip">
+            <span data-i18n="route_label_full">Pars Relays · Rescue 03</span>
+            <span class="trust-badge" data-i18n="trust_trusted">Trusted</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+          <div class="conn-status-line" data-i18n="status_line">On Wi-Fi · using rotated pointers · valid <span class="num" data-fa-num>14</span> days</div>
+          <div class="mode-chip" data-i18n="mode_normal">● Normal mode</div>
+        </div>
+
+        <aside class="rail">
+          <div class="rail-section">
+            <div class="rail-title" data-i18n="rail_diagnostic">Diagnostic</div>
+            <h3 data-i18n="why_this_route">Why this route?</h3>
+            <div class="why-row">
+              <span class="k" data-i18n="active">Active</span>
+              <span class="v" data-i18n="route_label_full">Pars Relays · Rescue 03</span>
+            </div>
+            <div class="why-row">
+              <span class="k" data-i18n="reason">Reason</span>
+              <span class="v" data-i18n="reason_text">Lowest latency among trusted routes; matches the current network's history.</span>
+            </div>
+            <div class="why-row">
+              <span class="k" data-i18n="skipped">Skipped</span>
+              <span class="v">
+                <ul class="skip-list">
+                  <li><span data-i18n="skip_a">Pars · Rescue 01</span><span class="reason" data-i18n="skip_a_r">— rate-limited</span></li>
+                  <li><span data-i18n="skip_b">Friend · May 6</span><span class="reason" data-i18n="skip_b_r">— recent failure</span></li>
+                  <li><span data-i18n="skip_c">Emergency · K3F</span><span class="reason" data-i18n="skip_c_r">— last-resort tier</span></li>
+                </ul>
+              </span>
+            </div>
+          </div>
+
+          <div class="rail-section">
+            <h3 data-i18n="route_health">Route health · last hour</h3>
+            <div class="health-row">
+              <span class="name" data-i18n="rh_a">Pars · Rescue 03</span>
+              <span class="health-bar"><span style="width: 96%"></span></span>
+              <span class="pct" data-fa-num>96%</span>
+            </div>
+            <div class="health-row">
+              <span class="name" data-i18n="rh_b">Pars · Rescue 01</span>
+              <span class="health-bar warn"><span style="width: 64%"></span></span>
+              <span class="pct" data-fa-num>64%</span>
+            </div>
+            <div class="health-row">
+              <span class="name" data-i18n="rh_c">Friend · May 6</span>
+              <span class="health-bar bad"><span style="width: 28%"></span></span>
+              <span class="pct" data-fa-num>28%</span>
+            </div>
+          </div>
+
+          <div class="pointer-banner">
+            <strong data-i18n="banner_label">Pointer rotation</strong>
+            <span data-i18n="banner_text">Pointers rotated successfully. Valid for <span data-fa-num>14</span> more days.</span>
+          </div>
+
+          <button class="export-btn" data-i18n="export_diag">Export diagnostics</button>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ============ SYSTEM TRAY ============ -->
+<div class="canvas-label" style="margin-top: 16px;"><strong data-i18n="tray_label">System tray flyout</strong> · click the phoenix in the menu bar</div>
+
+<div class="tray-wrap">
+  <div class="tray-strip">
+    <div class="icons">
+      <span data-i18n="tray_strip_other">⌃</span>
+      <span data-fa-num>↑ 12 KB/s</span>
+      <span data-fa-num>↓ 318 KB/s</span>
+      <span class="tray-icon"><img src="daal-flat-no-bg.svg" alt=""></span>
+      <span class="tray-clock" data-fa-num>22:48</span>
+    </div>
+  </div>
+
+  <div class="tray-pop">
+    <div class="tray-head">
+      <img src="daal-flat-no-bg.svg" alt="Daal">
+      <div class="l">
+        <div class="t" data-i18n="appname">Daal</div>
+        <div class="s" data-i18n="state_connected_short">● Connected · 02:14</div>
+      </div>
+    </div>
+
+    <div class="tray-route">
+      <div class="lbl" data-i18n="current_route">Current route</div>
+      <div class="name" data-i18n="route_label_full">Pars Relays · Rescue 03</div>
+      <div class="meta" data-i18n="tray_meta">↑ <span data-fa-num>12</span> KB/s · ↓ <span data-fa-num>318</span> KB/s</div>
+    </div>
+
+    <div class="tray-row">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6 18 18M18 6 6 18"/></svg></span>
+      <span data-i18n="tray_disconnect">Disconnect</span>
+      <span class="shortcut">⌘D</span>
+    </div>
+
+    <div class="tray-row">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M8 6h8M7 8l4 8M17 8l-4 8"/></svg></span>
+      <span data-i18n="tray_change_route">Change route…</span>
+    </div>
+
+    <div class="tray-row">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+      <span data-i18n="tray_mode">Mode: Normal</span>
+    </div>
+
+    <div class="tray-divider"></div>
+
+    <div class="tray-row">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 10v4M12 8v8M15 11v3"/></svg></span>
+      <span data-i18n="tray_open">Open Daal</span>
+      <span class="shortcut">⌘O</span>
+    </div>
+
+    <div class="tray-divider"></div>
+
+    <div class="tray-row danger">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z"/><path d="M12 8v5"/><circle cx="12" cy="16" r=".6" fill="currentColor"/></svg></span>
+      <span data-i18n="panic">Panic wipe</span>
+    </div>
+
+    <div class="tray-row">
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></svg></span>
+      <span data-i18n="tray_quit">Quit Daal</span>
+      <span class="shortcut">⌘Q</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ============ Translations ============
+  const i18n = {
+    en: {
+      appname: 'Daal',
+      brand_sub: 'v0.4.2',
+      connected_label: 'Connected',
+      connected_for: 'Connected · 02:14:38',
+      nav_main: 'Main',
+      nav_connection: 'Connection',
+      nav_routes: 'Routes',
+      nav_subscriptions: 'Subscriptions',
+      nav_status: 'Status',
+      nav_settings: 'Settings',
+      nav_advanced: 'Advanced',
+      nav_publisher: 'Publisher',
+      badge_off: 'Off',
+      panic: 'Panic wipe',
+      search_placeholder: 'Search routes, settings…',
+      state_connected: 'Connected · Routing',
+      state_connected_short: '● Connected · 02:14',
+      conn_headline: "You're connected.",
+      route_label_full: 'Pars Relays · Rescue 03',
+      trust_trusted: 'Trusted',
+      status_line: 'On Wi-Fi · using rotated pointers · valid 14 days',
+      mode_normal: '● Normal mode',
+      rail_diagnostic: 'Diagnostic',
+      why_this_route: 'Why this route?',
+      active: 'Active',
+      reason: 'Reason',
+      reason_text: "Lowest latency among trusted routes; matches the current network's history.",
+      skipped: 'Skipped',
+      skip_a: 'Pars · Rescue 01',
+      skip_a_r: ' — rate-limited',
+      skip_b: 'Friend · May 6',
+      skip_b_r: ' — recent failure',
+      skip_c: 'Emergency · K3F',
+      skip_c_r: ' — last-resort tier',
+      route_health: 'Route health · last hour',
+      rh_a: 'Pars · Rescue 03',
+      rh_b: 'Pars · Rescue 01',
+      rh_c: 'Friend · May 6',
+      banner_label: 'Pointer rotation',
+      banner_text: 'Pointers rotated successfully. Valid for 14 more days.',
+      export_diag: 'Export diagnostics',
+      tray_label: 'System tray flyout',
+      tray_strip_other: '⌃',
+      current_route: 'Current route',
+      tray_meta: '↑ 12 KB/s · ↓ 318 KB/s',
+      tray_disconnect: 'Disconnect',
+      tray_change_route: 'Change route…',
+      tray_mode: 'Mode: Normal',
+      tray_open: 'Open Daal',
+      tray_quit: 'Quit Daal',
+    },
+    fa: {
+      appname: 'دال',
+      brand_sub: 'v0.4.2',
+      connected_label: 'متصل',
+      connected_for: 'متصل · ۰۲:۱۴:۳۸',
+      nav_main: 'اصلی',
+      nav_connection: 'اتصال',
+      nav_routes: 'مسیرها',
+      nav_subscriptions: 'اشتراک‌ها',
+      nav_status: 'وضعیت',
+      nav_settings: 'تنظیمات',
+      nav_advanced: 'پیشرفته',
+      nav_publisher: 'ناشر',
+      badge_off: 'خاموش',
+      panic: 'پاک‌سازی اضطراری',
+      search_placeholder: 'جست‌وجوی مسیرها، تنظیمات…',
+      state_connected: 'متصل · در حال مسیریابی',
+      state_connected_short: '● متصل · ۰۲:۱۴',
+      conn_headline: 'اتصال برقرار است.',
+      route_label_full: 'پارس ریلیز · نجات ۰۳',
+      trust_trusted: 'مورد اعتماد',
+      status_line: 'روی وای‌فای · با نشانگرهای چرخشی · معتبر تا ۱۴ روز',
+      mode_normal: '● حالت عادی',
+      rail_diagnostic: 'تشخیصی',
+      why_this_route: 'چرا این مسیر؟',
+      active: 'فعال',
+      reason: 'دلیل',
+      reason_text: 'کم‌ترین تأخیر میان مسیرهای مورد اعتماد؛ با سابقهٔ شبکهٔ فعلی هم‌خوان است.',
+      skipped: 'رد شد',
+      skip_a: 'پارس · نجات ۰۱',
+      skip_a_r: ' — محدودیت نرخ',
+      skip_b: 'دوست · ۱۶ اردیبهشت',
+      skip_b_r: ' — شکست اخیر',
+      skip_c: 'اضطراری · K3F',
+      skip_c_r: ' — لایهٔ نهایی',
+      route_health: 'سلامت مسیر · ساعت گذشته',
+      rh_a: 'پارس · نجات ۰۳',
+      rh_b: 'پارس · نجات ۰۱',
+      rh_c: 'دوست · ۱۶ اردیبهشت',
+      banner_label: 'چرخش نشانگر',
+      banner_text: 'نشانگرها با موفقیت چرخش یافتند. ۱۴ روز دیگر معتبر است.',
+      export_diag: 'برون‌بری تشخیصی',
+      tray_label: 'پنجرهٔ نوار وضعیت',
+      tray_strip_other: '⌃',
+      current_route: 'مسیر فعلی',
+      tray_meta: '↑ ۱۲ کیلوبایت/ث · ↓ ۳۱۸ کیلوبایت/ث',
+      tray_disconnect: 'قطع اتصال',
+      tray_change_route: 'تغییر مسیر…',
+      tray_mode: 'حالت: عادی',
+      tray_open: 'باز کردن دال',
+      tray_quit: 'خروج از دال',
+    }
+  };
+
+  const FA_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
+  function toFaDigits(s) { return String(s).replace(/[0-9]/g, d => FA_DIGITS[+d]); }
+  function toEnDigits(s) { return String(s).replace(/[۰-۹]/g, d => '0123456789'[FA_DIGITS.indexOf(d)]); }
+
+  function applyLang(lang) {
+    const html = document.documentElement;
+    html.setAttribute('lang', lang === 'fa' ? 'fa' : 'en');
+    html.setAttribute('dir', lang === 'fa' ? 'rtl' : 'ltr');
+
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const key = el.getAttribute('data-i18n');
+      const val = i18n[lang][key];
+      if (val == null) return;
+      // Preserve nested num spans by injecting raw text only in leaf cases.
+      const hasNumChild = el.querySelector('[data-fa-num]');
+      if (!hasNumChild) {
+        el.textContent = val;
+      } else {
+        // For elements that contain interpolated number spans, we re-render
+        // the whole subtree from a template stored in the i18n value.
+        el.innerHTML = val.replace(/(\d+)/g, (m) => `<span data-fa-num>${m}</span>`);
+      }
+    });
+
+    // Numerals
+    document.querySelectorAll('[data-fa-num]').forEach(el => {
+      const original = el.getAttribute('data-original') || el.textContent;
+      el.setAttribute('data-original', original);
+      el.textContent = lang === 'fa' ? toFaDigits(original) : original;
+    });
+
+    // Toggle button state
+    document.querySelectorAll('#langToggle button').forEach(b => {
+      b.classList.toggle('on', b.dataset.lang === lang);
+    });
+  }
+
+  document.querySelectorAll('#langToggle button').forEach(b => {
+    b.addEventListener('click', () => applyLang(b.dataset.lang));
+  });
+
+  // Initial pass — capture original numerals first
+  document.querySelectorAll('[data-fa-num]').forEach(el => {
+    el.setAttribute('data-original', el.textContent);
+  });
+  applyLang('en');
+</script>
+
+</body>
+</html>

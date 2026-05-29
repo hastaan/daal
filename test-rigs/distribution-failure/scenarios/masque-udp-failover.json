@@ -1,0 +1,38 @@
+{
+  "id": "masque-udp-failover",
+  "channel": "subscription-url",
+  "description": "Phase 3C. Exercises the MASQUE sub-mode chooser cascade end-to-end. Day 1 enables the experimental-families gate so masque routes are selectable. Day 3 forces a fresh UDP probe outcome of OK on the active network (which biases chooseSubmode to masque_h3_quic). Day 7 simulates a network roam to a network where UDP is suppressed; the next session MUST pick masque_h2_connect at start because the per-network UDPProbeOK is false on the new network. Day 14 returns to the original network; the engine MUST resume masque_h3_quic per the persisted netmem hint. The legacy subscription-url block is layered so the distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_experimental_families_enabled",
+      "args": { "enabled": true }
+    },
+    {
+      "day": 3,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-mq-1", "budget_tag": "experimental" }
+    },
+    {
+      "day": 7,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "UdpBlockedNet" }
+    },
+    {
+      "day": 14,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "UdpOpenNet" }
+    },
+    {
+      "day": 20,
+      "name": "set_masque_submode_override",
+      "args": { "submode": "masque_h2_connect" }
+    },
+    {
+      "day": 23,
+      "name": "set_masque_submode_override",
+      "args": { "submode": "" }
+    }
+  ]
+}

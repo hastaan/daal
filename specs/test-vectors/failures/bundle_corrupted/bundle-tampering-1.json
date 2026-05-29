@@ -1,0 +1,7 @@
+{
+  "scenario_id": "bundle-tampering",
+  "category": "bundle_corrupted",
+  "outcome": "bundle_corrupted",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "import_corrupt_zip"
+}

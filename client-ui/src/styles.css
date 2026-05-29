@@ -1,0 +1,49 @@
+/* CSS imports must come BEFORE other rules (CSSOM rule). */
+/* Brand tokens (generated from client-shared/tokens/colors.json by
+ * tools/gen-tokens.mjs — see styles.tokens.css). */
+@import './styles.tokens.css';
+/* D-2 component classes for the desktop shell. */
+@import './styles.d2.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--paper);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+
+/* Persian RTL applies via dir="rtl" on <html>; Tauri sets it from
+ * navigator.language at startup if user picked fa, and the Settings
+ * → Language switch can flip it live. */
+:root[dir="rtl"] {
+    font-family: var(--font-fa);
+}
+
+/* Phoenix-button breathing halos (D-2 §5C). The 3-D phoenix asset
+ * appears only when state == Connected. */
+@keyframes daal-breathe {
+    0%, 100% { opacity: 0.55; transform: scale(0.97); }
+    50%      { opacity: 1.0;  transform: scale(1.03); }
+}
+
+/* DaalButton.tsx — the "connecting" state pulses the greyscale eagle
+ * subtly so the user sees activity without flicker. Kept slow + low
+ * amplitude so it reads as "warming up", not "loading spinner". */
+@keyframes daal-pulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 0.85; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .daal-breathe-halo { animation: none !important; opacity: 0.7; transform: none; }
+    /* Also halt the connecting-pulse — keep the eagle dim but static. */
+    img[style*="daal-pulse"] { animation: none !important; opacity: 0.55 !important; }
+}

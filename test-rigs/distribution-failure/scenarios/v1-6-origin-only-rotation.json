@@ -1,0 +1,18 @@
+{
+  "id": "v1-6-origin-only-rotation",
+  "channel": "subscription-url",
+  "description": "Phase FRP-9 V1.6 origin-only rotation scenario. The origin IP changes behind an unchanged Cloudflare hostname and public path. The expected result is no public_risk_tag change, no RelayPack re-sign, no freshness republish, and zero family-visible event.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_rotate_origin_only",
+      "args": {
+        "rotation_kind": "cdn_origin",
+        "relaypack_republished": false,
+        "freshness_republished": false,
+        "family_visible_event": false
+      }
+    }
+  ]
+}

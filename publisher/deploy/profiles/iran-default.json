@@ -1,0 +1,14 @@
+{
+  "name": "iran-default",
+  "description": "Default candidate mix for Iranian network conditions, V1.5 direct-VPS only.",
+  "spec_version": 1,
+  "candidates": [
+    {"family": "vless-reality", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
+    {"family": "websocket-tls", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
+    {"family": "naive",         "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
+    {"family": "hysteria2",     "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": true},
+    {"family": "tuic",          "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true},
+    {"family": "wireguard",     "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true},
+    {"family": "amnezia-wg",    "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true}
+  ]
+}

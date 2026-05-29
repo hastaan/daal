@@ -1,0 +1,17 @@
+#!/bin/sh
+# Daal .deb postinst — sets the setuid bit on the privileged TUN
+# helper so the unprivileged GUI can request a TUN fd via SCM_RIGHTS.
+#
+# We deliberately do NOT install a systemd unit for the helper; it is
+# a one-shot binary, invoked on demand by the GUI.
+
+set -e
+
+HELPER=/usr/libexec/daal/daal-tun-helper
+
+if [ -e "$HELPER" ]; then
+    chown root:root "$HELPER"
+    chmod 4755 "$HELPER"
+fi
+
+exit 0

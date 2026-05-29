@@ -1,0 +1,30 @@
+{
+  "vector": "direct-vps-minimal",
+  "purpose": "Two direct_vps vps-native candidates with no public-surface diversity.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "V1.6",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    }
+  ]
+}

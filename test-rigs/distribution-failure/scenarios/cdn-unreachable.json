@@ -1,0 +1,6 @@
+{
+  "id": "cdn-unreachable",
+  "channel": "cdn",
+  "description": "Major CDNs serving the project become unreachable simultaneously.",
+  "blocks": ["cdn-a", "cdn-b", "cdn-c"]
+}

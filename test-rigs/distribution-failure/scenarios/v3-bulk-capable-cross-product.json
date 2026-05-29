@@ -1,0 +1,23 @@
+{
+  "id": "v3-bulk-capable-cross-product",
+  "channel": "subscription-url",
+  "description": "Phase 3-Soak secondary metric. Drives the bulk-capable opt-in cross-product: 25% of clients have engine_set_allow_bulk_capable(1), 75% have (0). The verifier asserts no V1/V2 regression on either subset; the v2-superset's mode-budgets-v1 invariants must remain green across both halves. Mirrors the 2G locked default (OFF for the load tier) but exercises the cross-product. Day 1 every bulk-opt-in client flips the flag ON via engine_set_allow_bulk_capable. Day 7 the rig drives a bulk-mode session for the opt-in subset. Day 14 final ledger: bulk-capable subset has bulk-mode session in their ledger; non-opt-in subset never enters bulk mode. The v2-superset distribution-failure invariants continue to assert.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 7,
+      "name": "set_mode",
+      "args": { "mode": "bulk" }
+    },
+    {
+      "day": 14,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    }
+  ]
+}

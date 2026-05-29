@@ -1,0 +1,18 @@
+{
+  "id": "v1-6-freshness-atomic-swap",
+  "channel": "subscription-url",
+  "description": "Phase FRP-9 V1.6 freshness atomic-swap scenario. The rig presents a same-publisher updated RelayPack via the FRP-controlled freshness document and asserts recovery within the 5 min budget, with no QR re-scan and no re-TOFU prompt.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_freshness_atomic_swap",
+      "args": {
+        "recovery_seconds": 96,
+        "qr_rescan": false,
+        "re_tofu": false,
+        "same_publisher": true
+      }
+    }
+  ]
+}

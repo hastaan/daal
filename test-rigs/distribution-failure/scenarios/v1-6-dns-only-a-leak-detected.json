@@ -1,0 +1,17 @@
+{
+  "id": "v1-6-dns-only-a-leak-detected",
+  "channel": "subscription-url",
+  "description": "Phase FRP-9 V1.6 §11.7 hardening scenario. The rig injects a DNS-only A-record leak after deployment and asserts the V1.6 posture path / validator contract detects it as RP023 while the recipient remains unaffected. This is synthetic-only evidence for V1.6-S2.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_simulate_dns_only_leak",
+      "args": {
+        "hostname": "front-alpha.example.com",
+        "expected_code": "RP023",
+        "recipient_affected": false
+      }
+    }
+  ]
+}

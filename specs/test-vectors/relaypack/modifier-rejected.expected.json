@@ -1,0 +1,24 @@
+{
+  "vector": "modifier-rejected",
+  "purpose": "Candidate with non-empty modifiers[client_desync]. Rejected at V15/V16 (RP013); accepted at PostV2 only when client_desync is in AllowedModifierKinds.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP013"
+    },
+    {
+      "phase": "V1.6",
+      "pass": false,
+      "error_code": "RP013"
+    },
+    {
+      "phase": "PostV2",
+      "pass": true,
+      "warnings": [
+        "RP019",
+        "RP020"
+      ]
+    }
+  ]
+}

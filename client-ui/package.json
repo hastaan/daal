@@ -1,0 +1,33 @@
+{
+  "name": "daal-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Daal — single GUI for desktop + Android + iOS. React/TS/Vite app. Tauri shell loads dist/. Browser-preview via ?harness=<scenario>.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:browser": "vite --host 0.0.0.0",
+    "build": "node ../tools/sync-i18n.mjs && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "screenshots": "node ../tools/screenshot-harness.mjs",
+    "screenshots:fast": "node ../tools/screenshot-harness.mjs --skip-build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/plugin-dialog": "2.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.1",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.0",
+    "vite": "^6.4.2"
+  }
+}

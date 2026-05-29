@@ -1,0 +1,40 @@
+{
+  "pick": {
+    "route_id": "r2",
+    "family": "naive",
+    "exposure_mode": "direct_vps",
+    "family_class": "vps-native",
+    "probing_risk_class": "low"
+  },
+  "shortlist": [
+    {
+      "route_id": "r2",
+      "position": 0,
+      "started_at_ms": 0,
+      "outcome": "success"
+    }
+  ],
+  "failures": [
+    {
+      "route_id": "r1",
+      "classification": "tcp_reset",
+      "tag": "public_ip:5.75.0.1"
+    }
+  ],
+  "active_cooldowns": [
+    {
+      "tag": "public_asn:24940",
+      "expires_at_unix": 1777811400,
+      "reason": "tcp_rst"
+    },
+    {
+      "tag": "public_ip:5.75.0.1",
+      "expires_at_unix": 1777809900,
+      "reason": "tcp_rst"
+    }
+  ],
+  "network_signals": [],
+  "reason": "Only one eligible candidate at V1.5; running naive on direct_vps.",
+  "decision_id": "frp3-fixture-cooldown-propagation-001",
+  "phase": "V1.5"
+}

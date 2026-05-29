@@ -1,0 +1,33 @@
+{
+  "id": "mode-bulk-unlock",
+  "channel": "subscription-url",
+  "description": "Phase 2B (rig-folded into 2C): user toggles through the V2.2 modes (lifeline → normal → bulk → normal). Channel-blocking is identical to subscription-url-unreachable. Asserts that engine_set_mode round-trips through ExportDiagnostics and never bumps the budget session epoch.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "normal" }
+    },
+    {
+      "day": 2,
+      "name": "set_mode",
+      "args": { "mode": "lifeline" }
+    },
+    {
+      "day": 4,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 5,
+      "name": "set_mode",
+      "args": { "mode": "bulk" }
+    },
+    {
+      "day": 6,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    }
+  ]
+}

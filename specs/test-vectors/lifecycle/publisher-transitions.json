@@ -1,0 +1,40 @@
+{
+  "scenarios": [
+    {
+      "name": "first_seen_publisher",
+      "from": "unknown",
+      "event": "valid_signed_bundle_imported",
+      "to": "tofu"
+    },
+    {
+      "name": "user_trusts_publisher",
+      "from": "tofu",
+      "event": "user_confirms_publisher",
+      "to": "trusted"
+    },
+    {
+      "name": "one_bundle_only",
+      "from": "tofu",
+      "event": "user_accepts_single_bundle",
+      "to": "unknown"
+    },
+    {
+      "name": "unexpected_key_change",
+      "from": "trusted",
+      "event": "new_key_without_rotation_chain",
+      "to": "changed_key"
+    },
+    {
+      "name": "publisher_revoked",
+      "from": "trusted",
+      "event": "valid_revocation",
+      "to": "revoked"
+    },
+    {
+      "name": "route_expired",
+      "from": "trusted",
+      "event": "route_valid_until_passed",
+      "to": "expired"
+    }
+  ]
+}

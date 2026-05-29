@@ -1,0 +1,8 @@
+#!/bin/sh
+# Daal .deb prerm — runs before the package is removed.
+# We have no daemons or systemd units to stop. Best-effort: kill any
+# running sing-box owned by daal users, but only if the user opted
+# in by passing `--purge`.
+
+set -e
+exit 0

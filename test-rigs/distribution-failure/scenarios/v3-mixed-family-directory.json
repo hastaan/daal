@@ -1,0 +1,33 @@
+{
+  "id": "v3-mixed-family-directory",
+  "channel": "subscription-url",
+  "description": "Phase 3-Soak secondary 4. Drives the V3 family-mix in the route directory (per `phases of development/27-phase-3-soak-success-metric.md` §8): 30% TCP-443/VLESS-Reality, 15% Hysteria2, 10% WireGuard, 10% WebTunnel (3A), 10% Snowflake (3B), 10% MASQUE (3C), 5% Psiphon (3D), 5% Conjure (3D), 5% transport_module (3E). The verifier asserts the path manager respects per-family budgets, scarcity classes, and trust ladder under load; per-family burn rates are aggregated and compared against the directory rotation cadence (default 48h). Day 1 the directory is seeded with the V3 family mix. Day 7 the rig synthesises a partial burn of WebTunnel + MASQUE + Snowflake to exercise the per-family burn-rate metric. Day 14 final ledger: per_family_burn_rate_pass = true on every family whose burn interval ≥ directory cadence. Locked at 3-Soak per spec §6 secondary 4 / §8.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "soak_seed_delegate_route",
+      "args": { "route_id": "v3-mix-vless", "policy": "none", "cap": 0 }
+    },
+    {
+      "day": 1,
+      "name": "soak_seed_delegate_route",
+      "args": { "route_id": "v3-mix-webtunnel", "policy": "none", "cap": 0 }
+    },
+    {
+      "day": 1,
+      "name": "soak_seed_delegate_route",
+      "args": { "route_id": "v3-mix-snowflake", "policy": "none", "cap": 0 }
+    },
+    {
+      "day": 1,
+      "name": "soak_seed_delegate_route",
+      "args": { "route_id": "v3-mix-masque", "policy": "none", "cap": 0 }
+    },
+    {
+      "day": 1,
+      "name": "soak_seed_delegate_route",
+      "args": { "route_id": "v3-mix-transport-module", "policy": "none", "cap": 0 }
+    }
+  ]
+}

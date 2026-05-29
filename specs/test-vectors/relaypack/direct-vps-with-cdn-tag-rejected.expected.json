@@ -1,0 +1,21 @@
+{
+  "vector": "direct-vps-with-cdn-tag-rejected",
+  "purpose": "direct_vps candidate carrying cdn:* tag (mode mismatch). RP009 at all phases.",
+  "outcomes": [
+    {
+      "phase": "V1.5",
+      "pass": false,
+      "error_code": "RP009"
+    },
+    {
+      "phase": "V1.6",
+      "pass": false,
+      "error_code": "RP009"
+    },
+    {
+      "phase": "PostV2",
+      "pass": false,
+      "error_code": "RP009"
+    }
+  ]
+}

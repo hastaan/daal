@@ -1,0 +1,209 @@
+{
+  "$schema": "./colors.schema.json",
+  "_comment": "Single source of truth for Daal brand color tokens. Per design brief v2 §10.1 every token has an OKLCH primary + sRGB fallback, and light + dark variants. Platform token files (Tauri CSS, Android colors*.xml, iOS Colors.xcassets) are GENERATED from this file; do not edit them by hand. CI fails the build if generated outputs drift from this source.",
+  "version": "1.0.0",
+  "themes": {
+    "dark": {
+      "_comment": "Default theme on first launch (matches reference HTMLs and target audience usage context).",
+      "tokens": {
+        "bg": {
+          "oklch": "oklch(22% 0.045 215)",
+          "srgb": "#07212B",
+          "use": "App-window backdrop (one notch deeper than the canvas card)."
+        },
+        "teal-deep": {
+          "oklch": "oklch(28% 0.04 215)",
+          "srgb": "#033E51",
+          "use": "Canonical canvas / window background. Matches the on-brand logo background."
+        },
+        "teal-surface": {
+          "oklch": "oklch(33% 0.04 215)",
+          "srgb": "#0A4A5E",
+          "use": "Card / sheet surface."
+        },
+        "teal-raised": {
+          "oklch": "oklch(38% 0.04 215)",
+          "srgb": "#0F576C",
+          "use": "Raised tile / picker / popover."
+        },
+        "teal-border": {
+          "oklch": "oklch(43% 0.035 215)",
+          "srgb": "#1A6478",
+          "use": "Decorative border on raised surfaces."
+        },
+        "teal-hairline": {
+          "oklch": "oklch(40% 0.03 215)",
+          "srgb": "#134E5F",
+          "use": "Hairline divider between rows / sections."
+        },
+        "gold": {
+          "oklch": "oklch(72% 0.10 80)",
+          "srgb": "#C9A23A",
+          "use": "Brand primary — buttons, active nav, emphasis."
+        },
+        "gold-soft": {
+          "oklch": "oklch(78% 0.12 80)",
+          "srgb": "#D9B86E",
+          "use": "Brand accent — kicker text, hover."
+        },
+        "gold-deep": {
+          "oklch": "oklch(60% 0.12 75)",
+          "srgb": "#A9852A",
+          "use": "Pressed / active gold."
+        },
+        "paper": {
+          "oklch": "oklch(96% 0.012 80)",
+          "srgb": "#F2EBD9",
+          "use": "Foreground text on dark surfaces."
+        },
+        "paper-dim": {
+          "oklch": "oklch(82% 0.018 80)",
+          "srgb": "#C9C0AB",
+          "use": "Secondary text."
+        },
+        "ink-soft": {
+          "oklch": "oklch(72% 0.012 215)",
+          "srgb": "#8FA8B0",
+          "use": "Tertiary text / placeholder."
+        },
+        "ink-mute": {
+          "oklch": "oklch(58% 0.015 215)",
+          "srgb": "#5C7A84",
+          "use": "Quaternary text / metadata."
+        },
+        "danger": {
+          "oklch": "oklch(64% 0.18 25)",
+          "srgb": "#C8553D",
+          "use": "Error / panic / destructive."
+        },
+        "success": {
+          "oklch": "oklch(72% 0.14 150)",
+          "srgb": "#5FA85A",
+          "use": "Connected / OK / healthy."
+        },
+        "warn": {
+          "oklch": "oklch(76% 0.14 80)",
+          "srgb": "#E0A93B",
+          "use": "Pointer / soft warning / pending."
+        },
+        "cyan": {
+          "oklch": "oklch(75% 0.10 200)",
+          "srgb": "#5FB8C8",
+          "use": "Publisher (advanced) accent surface treatment."
+        }
+      }
+    },
+    "light": {
+      "_comment": "Light theme for users on light-mode OS or who switch in Settings. Same token names; flipped bg / fg.",
+      "tokens": {
+        "bg": {
+          "oklch": "oklch(98% 0.005 80)",
+          "srgb": "#FAF8F2",
+          "use": "App-window backdrop."
+        },
+        "teal-deep": {
+          "oklch": "oklch(96% 0.012 80)",
+          "srgb": "#F2EBD9",
+          "use": "Canvas card. In light theme this is paper, not teal — the brand teal becomes accent only."
+        },
+        "teal-surface": {
+          "oklch": "oklch(94% 0.012 80)",
+          "srgb": "#EDE6D2",
+          "use": "Card / sheet surface."
+        },
+        "teal-raised": {
+          "oklch": "oklch(91% 0.012 80)",
+          "srgb": "#E5DDC4",
+          "use": "Raised tile / picker / popover."
+        },
+        "teal-border": {
+          "oklch": "oklch(80% 0.018 80)",
+          "srgb": "#C9C0AB",
+          "use": "Decorative border."
+        },
+        "teal-hairline": {
+          "oklch": "oklch(86% 0.014 80)",
+          "srgb": "#D8D0B7",
+          "use": "Hairline divider."
+        },
+        "gold": {
+          "oklch": "oklch(60% 0.12 75)",
+          "srgb": "#A9852A",
+          "use": "Brand primary on light."
+        },
+        "gold-soft": {
+          "oklch": "oklch(70% 0.12 80)",
+          "srgb": "#C29A45",
+          "use": "Brand accent."
+        },
+        "gold-deep": {
+          "oklch": "oklch(50% 0.12 75)",
+          "srgb": "#8B6A1F",
+          "use": "Pressed gold."
+        },
+        "paper": {
+          "oklch": "oklch(20% 0.025 215)",
+          "srgb": "#0A2530",
+          "use": "Foreground text on light surfaces (deep teal)."
+        },
+        "paper-dim": {
+          "oklch": "oklch(35% 0.025 215)",
+          "srgb": "#2D4D5A",
+          "use": "Secondary text."
+        },
+        "ink-soft": {
+          "oklch": "oklch(50% 0.018 215)",
+          "srgb": "#5C7A84",
+          "use": "Tertiary text / placeholder."
+        },
+        "ink-mute": {
+          "oklch": "oklch(62% 0.014 215)",
+          "srgb": "#7E96A0",
+          "use": "Quaternary text / metadata."
+        },
+        "danger": {
+          "oklch": "oklch(54% 0.18 25)",
+          "srgb": "#A53E2C",
+          "use": "Error / panic / destructive."
+        },
+        "success": {
+          "oklch": "oklch(56% 0.14 150)",
+          "srgb": "#3F7E3D",
+          "use": "Connected / OK / healthy."
+        },
+        "warn": {
+          "oklch": "oklch(64% 0.14 80)",
+          "srgb": "#A8842D",
+          "use": "Pointer / soft warning."
+        },
+        "cyan": {
+          "oklch": "oklch(60% 0.10 200)",
+          "srgb": "#3D8A99",
+          "use": "Publisher accent."
+        }
+      }
+    }
+  },
+  "typography": {
+    "font_display": "Iowan Old Style, Charter, Newsreader, Palatino Linotype, Book Antiqua, Palatino, Georgia, serif",
+    "font_body": "-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif",
+    "font_mono": "ui-monospace, SF Mono, JetBrains Mono, IBM Plex Mono, Menlo, monospace",
+    "font_fa": "Vazirmatn, IRANSans, Geeza Pro, SF Arabic, Tahoma, sans-serif"
+  },
+  "shape": {
+    "radius_sm": 6,
+    "radius_md": 8,
+    "radius_lg": 14,
+    "radius_card": 16,
+    "radius_tile": 12,
+    "radius_pill": 999
+  },
+  "motion": {
+    "phoenix_breathe_seconds": 3.4,
+    "phoenix_breathe_delay_outer_seconds": -1.7,
+    "transition_fast_ms": 120,
+    "transition_default_ms": 180,
+    "transition_slow_ms": 240,
+    "_comment": "All motion respects prefers-reduced-motion / OS reduced-motion."
+  }
+}

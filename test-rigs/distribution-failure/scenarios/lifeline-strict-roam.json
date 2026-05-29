@@ -1,0 +1,38 @@
+{
+  "id": "lifeline-strict-roam",
+  "channel": "subscription-url",
+  "description": "Phase 2D + 2C interaction: combines a network roam (cafe-wifi → home-wifi → cafe-wifi) with lifeline-strict toggling. Asserts V2.4 per-network memory correctly remembers lifeline-strict on cafe-wifi and auto-restores it when the user roams back. Channel-blocking is identical to subscription-url-unreachable.",
+  "blocks": ["subscription-url"],
+  "engine_actions": [
+    {
+      "day": 1,
+      "name": "set_route_budget",
+      "args": { "route_id": "soak-r1", "budget_tag": "normal" }
+    },
+    {
+      "day": 1,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "Cafe" }
+    },
+    {
+      "day": 1,
+      "name": "set_mode",
+      "args": { "mode": "lifeline-strict" }
+    },
+    {
+      "day": 3,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "Home" }
+    },
+    {
+      "day": 3,
+      "name": "set_mode",
+      "args": { "mode": "normal" }
+    },
+    {
+      "day": 5,
+      "name": "network_changed",
+      "args": { "kind": "wifi", "carrier": "", "ssid": "Cafe" }
+    }
+  ]
+}

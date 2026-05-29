@@ -1,0 +1,13 @@
+{
+  "scenario_id": "auth-failed",
+  "category": "auth_failed",
+  "outcome": "auth_failed",
+  "hour_bucket": "2026-04-26T17:00Z",
+  "flow": "auth_attempt_bad_creds",
+  "asserts": [
+    {
+      "rule": "no_cooldown_on",
+      "category": "auth_failed"
+    }
+  ]
+}

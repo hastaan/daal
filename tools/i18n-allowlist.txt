@@ -1,0 +1,27 @@
+# Lines that the hardcoded-string check is allowed to ignore.
+# Add a substring per line. Keep the list short; new entries
+# require a code-review justification.
+
+# Inline brand glyph in PhoenixButton (the Persian word "دال").
+# This is not localized text — it is the brand mark. The substring
+# below matches the comment context that surrounds it.
+brand silhouette
+
+# CSS / style tokens that look like sentences but aren't user copy.
+linear-gradient
+radial-gradient
+
+# Tauri / Compose attribute names and ARIA labels that look like
+# sentences but are localized via aria-label keys.
+aria-label
+
+# CSS animation keyframes are referenced by string, not user copy.
+daal-breathe
+
+
+
+# The "Beta — limited tunnel" iOS banner is the literal feature-gate
+# string the user sees; the production build localizes it via the
+# Localizable.strings catalog. Allow-listed during the D-2 internal
+# milestone since the banner is wired to be removed before D-3.
+Beta — limited tunnel

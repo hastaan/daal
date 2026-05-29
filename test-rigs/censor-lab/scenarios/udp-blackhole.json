@@ -1,0 +1,12 @@
+{
+  "id": "udp-blackhole",
+  "v0_failure_categories": ["udp_unavailable", "quic_unavailable"],
+  "description": "All UDP dropped except UDP/53 DNS.",
+  "network": { "client": "10.0.0.2/24", "origin": "10.0.0.3/24" },
+  "censor": { "udp_blackhole": { "except_ports": [53] } },
+  "expectations": [
+    { "flow": "udp_echo", "outcome": "blocked" },
+    { "flow": "quic_handshake", "outcome": "blocked" },
+    { "flow": "dns_udp", "outcome": "ok" }
+  ]
+}

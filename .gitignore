@@ -1,0 +1,85 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+.claude/
+.codex/
+.agents/
+
+# Build outputs
+dist/
+build/
+out/
+target/
+bin/
+obj/
+# Local-only release staging — binaries are attached to GitHub Releases,
+# not committed.
+dist-release/
+# Tauri Mobile scaffolds gen/android and gen/apple on first
+# `tauri android init` / `tauri ios init`. We re-generate per build,
+# so don't commit them.
+client-shell/tauri/src-tauri/gen/android/
+client-shell/tauri/src-tauri/gen/apple/
+
+# Logs/temp
+*.log
+tmp/
+temp/
+
+# Secrets/keys
+release-keys/
+*.key
+*.priv
+*.pem
+*.p12
+*.mobileprovision
+*.keystore
+*.jks
+.env
+.env.*
+.signing/
+
+# Platform dependencies
+node_modules/
+# Lab driver build artifact
+test-rigs/censor-lab/lab-driver/lab-driver
+
+# FRP-1 fixture generator build artifact
+publisher/relaypack-fixtures
+
+# FRP-3 explanation-fixtures generator build artifact
+core/explanation-fixtures
+
+# FRP-1 RelayPack test-vector review-only companions
+# (regenerable via `cd publisher && go run ./cmd/relaypack-fixtures
+# -emit-manifest-json`; not part of the spec contract)
+specs/test-vectors/relaypack/*.manifest.json
+
+# FRP-4a daal-relay-health binary build artifact
+cmd/daal-relay-health/daal-relay-health
+
+# FRP-4a daal-deploy binary build artifact
+cmd/daal-deploy/daal-deploy
+# FRP-14 cross-built libdaal_deploy.so (per-platform Go c-archive
+# artefact; only used as a build input for the Tauri android build).
+cmd/daal-deploy/libdaal_deploy.so
+publisher/deploy/libdaal_deploy.so
+
+# FRP-14 release tooling: pre-downloaded sing-box tarballs lived under
+# tools/vendor/ during local relay-vN.M.0.sh runs. Large + reproducible
+# by re-running the release script, so kept out of git.
+tools/vendor/
+
+# Desktop package staging: copied in by ./daal build before Tauri build.
+client-desktop/tauri/src-tauri/resources/libdaalcore.*
+
+# FRP-7 pilot artefacts: filled evidence templates, signed consent
+# forms, and any private aggregate roll-ups. Templates committed;
+# completed forms private (operator records, not project records).
+docs/pilot/private/
+docs/pilot/signed/
+docs/pilot/*.filled.md

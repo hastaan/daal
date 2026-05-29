@@ -1,0 +1,12 @@
+#!/bin/sh
+# Daal AppImage launcher — sets DAAL_ENGINE_LIB to the bundled
+# libdaalcore.so before exec-ing the GUI. AppImages cannot install
+# setuid helpers, so on AppImage we fall back to invoking
+# daal-tun-helper through pkexec (PolicyKit). The helper accepts the
+# pkexec invocation iff its policy file is installed.
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+export DAAL_ENGINE_LIB="${HERE}/usr/lib/daal/libdaalcore.so"
+export DAAL_TUN_HELPER="${HERE}/usr/libexec/daal/daal-tun-helper"
+export DAAL_TUN_HELPER_INVOKE="pkexec"
+exec "${HERE}/usr/bin/daal-desktop" "$@"

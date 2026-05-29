@@ -1,0 +1,1356 @@
+
+<!doctype html>
+<html lang="en">
+<head><script data-od-sandbox-shim>(function(){
+  function makeStore(){
+    var data = {};
+    var api = {
+      getItem: function(k){ return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function(k, v){ data[k] = String(v); },
+      removeItem: function(k){ delete data[k]; },
+      clear: function(){ data = {}; },
+      key: function(i){ return Object.keys(data)[i] || null; }
+    };
+    Object.defineProperty(api, 'length', { get: function(){ return Object.keys(data).length; } });
+    return api;
+  }
+  function tryShim(name){
+    var works = false;
+    try { works = !!window[name] && typeof window[name].getItem === 'function'; void window[name].length; }
+    catch (_) { works = false; }
+    if (works) return;
+    try { Object.defineProperty(window, name, { configurable: true, value: makeStore() }); }
+    catch (_) { try { window[name] = makeStore(); } catch (__) {} }
+  }
+  tryShim('localStorage');
+  tryShim('sessionStorage');
+})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Daal — Mobile main app · 5 sections</title>
+<style>
+  :root {
+    --bg:        oklch(28% 0.04 215);
+    --bg-deep:   oklch(22% 0.045 215);
+    --surface:   oklch(33% 0.04 215);
+    --surface-2: oklch(38% 0.04 215);
+    --surface-3: oklch(43% 0.035 215);
+    --line:      oklch(45% 0.025 215);
+    --line-soft: oklch(40% 0.03 215);
+    --fg:        oklch(96% 0.012 80);
+    --muted:     oklch(72% 0.012 215);
+    --dim:       oklch(58% 0.015 215);
+    --gold:      #C9A23A;
+    --gold-warm: oklch(78% 0.12 80);
+    --gold-deep: oklch(60% 0.12 75);
+    --green:     oklch(72% 0.14 150);
+    --green-dim: oklch(52% 0.10 150);
+    --amber:     oklch(76% 0.14 80);
+    --red:       oklch(64% 0.18 25);
+
+    --font-display: 'Iowan Old Style', 'Charter', 'Newsreader', 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
+    --font-body:    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-mono:    ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    --font-fa:      'Vazirmatn', 'IRANSans', 'Geeza Pro', 'SF Arabic', Tahoma, sans-serif;
+
+    --r-phone: 44px;
+    --r-card:  16px;
+    --r-tile:  12px;
+    --r-pill:  999px;
+
+    --phone-w: 290px;
+    --phone-h: 627px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg-deep);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image:
+      radial-gradient(1100px 600px at 12% -10%, oklch(35% 0.05 215) 0%, transparent 60%),
+      radial-gradient(900px 500px at 92% 8%, oklch(34% 0.05 195) 0%, transparent 60%);
+  }
+
+  header.top {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    background: color-mix(in oklab, var(--bg-deep) 78%, transparent);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .top-inner {
+    max-width: 1640px; margin: 0 auto;
+    padding: 14px 32px;
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  }
+  .brand { display: flex; align-items: baseline; gap: 12px; font-family: var(--font-display); }
+  .brand .daal-fa { font-size: 30px; font-weight: 600; color: var(--gold-warm); line-height: 1; }
+  .brand .daal-en { font-size: 18px; font-weight: 500; color: var(--fg); letter-spacing: 0.04em; }
+  .brand .sep { color: var(--dim); font-size: 14px; }
+  .brand .doc-tag {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .lang-toggle {
+    display: inline-flex; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--r-pill);
+    padding: 3px; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em;
+  }
+  .lang-toggle button {
+    appearance: none; background: transparent; border: 0; color: var(--muted);
+    padding: 6px 14px; border-radius: var(--r-pill); cursor: pointer; font: inherit;
+    text-transform: uppercase; transition: color 120ms ease, background 180ms ease;
+  }
+  .lang-toggle button:hover { color: var(--fg); }
+  .lang-toggle button[aria-pressed="true"] { background: var(--gold-warm); color: oklch(20% 0.04 80); }
+
+  .hero { max-width: 1640px; margin: 0 auto; padding: 64px 32px 36px; }
+  .kicker {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--gold-warm); margin-bottom: 18px;
+  }
+  h1.headline {
+    font-family: var(--font-display);
+    font-size: clamp(36px, 4.6vw, 64px);
+    font-weight: 500; line-height: 1.04; letter-spacing: -0.018em;
+    margin: 0 0 18px; text-wrap: balance; max-width: 22ch;
+  }
+  h1.headline em { font-style: italic; color: var(--gold-warm); font-weight: 400; }
+  .lede {
+    font-size: 17px; line-height: 1.55; color: var(--muted);
+    max-width: 64ch; text-wrap: pretty; margin: 0;
+  }
+
+  .lane { max-width: 1640px; margin: 0 auto; padding: 16px 32px 64px; }
+  .phones {
+    display: flex; gap: 26px; align-items: flex-start;
+    overflow-x: auto; padding: 18px 0 22px;
+  }
+  .phones::-webkit-scrollbar { height: 8px; }
+  .phones::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+
+  .phone { flex: 0 0 var(--phone-w); }
+  .phone-caption { margin-top: 14px; display: flex; flex-direction: column; gap: 4px; }
+  .phone-step {
+    font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim);
+  }
+  .phone-name { font-family: var(--font-display); font-size: 16px; color: var(--fg); letter-spacing: -0.005em; }
+  .phone-note { font-size: 12px; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+
+  .device {
+    width: var(--phone-w); height: var(--phone-h);
+    border-radius: var(--r-phone);
+    background: oklch(8% 0.01 215); padding: 9px;
+    box-shadow:
+      0 1px 0 0 oklch(46% 0.02 215) inset,
+      0 0 0 1.5px oklch(38% 0.02 215),
+      0 30px 60px -28px oklch(8% 0.05 215),
+      0 14px 30px -14px oklch(6% 0.04 215);
+    position: relative;
+  }
+  .device .screen {
+    width: 100%; height: 100%;
+    border-radius: calc(var(--r-phone) - 8px);
+    background: var(--bg); overflow: hidden;
+    position: relative; display: flex; flex-direction: column;
+  }
+  .device .island {
+    position: absolute; top: 18px; left: 50%;
+    transform: translateX(-50%);
+    width: 88px; height: 26px;
+    background: oklch(6% 0 0); border-radius: 14px; z-index: 10;
+  }
+
+  .statusbar {
+    height: 44px; padding: 0 22px 0 24px;
+    display: flex; align-items: center; justify-content: space-between;
+    font-family: var(--font-body); font-size: 13px; font-weight: 600;
+    color: var(--fg); flex-shrink: 0; letter-spacing: -0.01em;
+  }
+  .statusbar .icons { display: flex; gap: 5px; align-items: center; }
+  .statusbar svg { display: block; }
+
+  .home-indicator {
+    height: 5px; width: 96px; background: var(--fg);
+    border-radius: 3px; margin: 0 auto 7px; flex-shrink: 0; opacity: 0.8;
+  }
+
+  .screen-body {
+    flex: 1; display: flex; flex-direction: column;
+    padding: 14px 18px 6px;
+    overflow: hidden; min-height: 0;
+  }
+  .screen-body[dir="rtl"] { font-family: var(--font-fa); }
+
+  /* ── reusable ── */
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--gold-warm);
+  }
+  h2.title {
+    font-family: var(--font-display); font-size: 22px; font-weight: 500;
+    line-height: 1.15; letter-spacing: -0.01em; margin: 4px 0 4px; color: var(--fg);
+  }
+  h3.subtitle {
+    font-family: var(--font-display); font-size: 16px; font-weight: 600;
+    margin: 0; color: var(--fg);
+  }
+  .sub { font-size: 12.5px; line-height: 1.5; color: var(--muted); margin: 0; }
+
+  .row { display: flex; align-items: center; gap: 10px; }
+  .col { display: flex; flex-direction: column; }
+
+  /* page header inside phone */
+  .page-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .page-head h2 { margin: 0; }
+  .head-action {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--gold-warm); letter-spacing: 0.04em;
+    background: transparent; border: 0; cursor: pointer; padding: 0;
+  }
+
+  /* group label */
+  .group-label {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--dim);
+    margin: 14px 0 8px;
+  }
+  .group-label:first-child { margin-top: 0; }
+
+  /* card */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-card);
+    padding: 12px 14px;
+  }
+
+  /* list-row */
+  .list-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .list-row:last-child { border-bottom: 0; }
+  .list-row .body { flex: 1; min-width: 0; }
+  .list-row .pub { font-weight: 600; font-size: 13px; color: var(--fg); }
+  .list-row .nick {
+    font-size: 12px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .list-row .meta {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--dim); letter-spacing: 0.04em;
+  }
+  .chev {
+    width: 14px; height: 14px; flex-shrink: 0; color: var(--dim);
+  }
+  [dir="rtl"] .chev { transform: scaleX(-1); }
+
+  /* trust badge */
+  .badge {
+    font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: 4px;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .badge.trusted { background: color-mix(in oklab, var(--green) 20%, transparent); color: var(--green); }
+  .badge.prompted { background: color-mix(in oklab, var(--amber) 20%, transparent); color: var(--amber); }
+  .badge.new { background: var(--surface-2); color: var(--muted); }
+  .badge.emergency { background: color-mix(in oklab, var(--red) 18%, transparent); color: var(--red); }
+  .badge.once { background: color-mix(in oklab, var(--amber) 16%, transparent); color: var(--amber); }
+
+  /* fingerprint thumb */
+  .fp {
+    width: 36px; height: 36px; border-radius: 9px;
+    background: var(--surface-2); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .fp svg { width: 100%; height: 100%; display: block; }
+
+  /* bottom nav */
+  .bottom-nav {
+    flex-shrink: 0;
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    background: color-mix(in oklab, var(--bg) 90%, transparent);
+    border-top: 1px solid var(--line-soft);
+    padding: 8px 6px 0;
+  }
+  .nav-item {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 4px; padding: 6px 4px 8px;
+    color: var(--dim); font-size: 9.5px;
+    font-family: var(--font-mono); letter-spacing: 0.06em;
+    text-transform: uppercase; position: relative;
+  }
+  .nav-item svg { width: 22px; height: 22px; display: block; }
+  .nav-item.active { color: var(--gold-warm); }
+  .nav-item.active::before {
+    content: ''; position: absolute; top: 0; left: 50%;
+    transform: translateX(-50%);
+    width: 22px; height: 2px;
+    background: var(--gold-warm); border-radius: 2px;
+  }
+
+  /* ── connection screen ── */
+  .conn-screen { align-items: center; justify-content: space-between; padding-top: 24px; }
+  .conn-state {
+    font-family: var(--font-mono); font-size: 9.5px;
+    letter-spacing: 0.22em; text-transform: uppercase; color: var(--green);
+    display: flex; align-items: center; gap: 7px;
+    margin-top: 6px;
+  }
+  .conn-state::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+  }
+  .phoenix-wrap {
+    width: 200px; height: 200px; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    margin: 14px 0 8px;
+  }
+  .halo {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: radial-gradient(circle, rgba(217,184,110,0.42) 0%, rgba(201,162,58,0.10) 45%, transparent 70%);
+    animation: breathe 3.4s ease-in-out infinite;
+    filter: blur(1px);
+  }
+  .halo.outer {
+    inset: -22px;
+    background: radial-gradient(circle, rgba(217,184,110,0.16) 0%, transparent 60%);
+    animation-delay: -1.7s;
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: 0.55; transform: scale(0.97); }
+    50%      { opacity: 1;    transform: scale(1.04); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .halo { animation: none; opacity: 0.7; transform: none; }
+  }
+  .phoenix-img { position: relative; width: 168px; height: 168px; object-fit: contain; z-index: 1; }
+  .conn-headline {
+    font-family: var(--font-display);
+    font-size: 28px; font-weight: 500;
+    letter-spacing: -0.01em; color: var(--fg);
+    margin: 0 0 10px; text-align: center;
+  }
+  .route-chip {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-pill);
+    padding: 7px 14px;
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--fg);
+  }
+  .route-chip .pub { font-weight: 600; }
+  .route-chip .sep { color: var(--dim); }
+  .route-chip .nick { color: var(--muted); }
+  .conn-status-line {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--dim); text-align: center; margin: 12px 0 10px;
+    line-height: 1.5;
+  }
+  .conn-status-line .num { font-variant-numeric: tabular-nums; }
+  .mode-chip {
+    background: color-mix(in oklab, var(--gold-warm) 14%, transparent);
+    border: 1px solid color-mix(in oklab, var(--gold-warm) 35%, transparent);
+    color: var(--gold-warm);
+    font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 4px 11px; border-radius: var(--r-pill);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+
+  /* ── routes screen ── */
+  .scroll-area {
+    flex: 1; overflow-y: auto; min-height: 0;
+    margin: 0 -18px; padding: 0 18px;
+  }
+  .scroll-area::-webkit-scrollbar { width: 0; }
+  .search-pill {
+    background: var(--surface); border: 1px solid var(--line-soft);
+    border-radius: var(--r-pill);
+    padding: 7px 12px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--dim);
+    margin-bottom: 12px;
+  }
+  .search-pill svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+  /* ── subscription cards ── */
+  .sub-row {
+    display: flex; gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line-soft);
+    align-items: flex-start;
+  }
+  .sub-row:last-child { border-bottom: 0; }
+  .sub-row .fp { width: 40px; height: 40px; }
+  .sub-row .body { flex: 1; min-width: 0; }
+  .sub-row .pub { font-weight: 600; font-size: 13px; color: var(--fg); margin-bottom: 2px; }
+  .sub-row .meta {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--muted); letter-spacing: 0.02em;
+    line-height: 1.5;
+  }
+  .refresh-dots { display: flex; gap: 3px; margin-top: 6px; }
+  .refresh-dots span {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green-dim);
+  }
+  .refresh-dots span.warn { background: var(--amber); }
+  .refresh-dots span.err { background: var(--red); }
+
+  /* ── status screen ── */
+  .health-card {
+    background: color-mix(in oklab, var(--green) 14%, var(--surface));
+    border: 1px solid color-mix(in oklab, var(--green) 35%, var(--line-soft));
+    border-radius: var(--r-card);
+    padding: 14px;
+    display: flex; gap: 12px; align-items: flex-start;
+    margin-bottom: 14px;
+  }
+  .health-card .pulse {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 16px color-mix(in oklab, var(--green) 70%, transparent);
+    flex-shrink: 0;
+    position: relative; margin-top: 1px;
+  }
+  .health-card .pulse::after {
+    content: ''; position: absolute; inset: 0;
+    border-radius: 50%; border: 1.5px solid var(--green);
+    animation: ping 2.4s ease-out infinite;
+  }
+  @keyframes ping {
+    0% { transform: scale(1); opacity: 0.7; }
+    100% { transform: scale(2.2); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .health-card .pulse::after { animation: none; opacity: 0; }
+  }
+  .health-card h3 { margin: 0 0 4px; font-family: var(--font-display); font-size: 16px; }
+  .health-card p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+
+  .accordion {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-card);
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .accordion .hdr {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 0;
+  }
+  .accordion.open .hdr { margin-bottom: 10px; }
+  .accordion .hdr h4 {
+    margin: 0; font-family: var(--font-display);
+    font-size: 14px; font-weight: 600; color: var(--fg);
+  }
+  .accordion .caret {
+    width: 12px; height: 12px; color: var(--muted);
+    transition: transform 200ms;
+  }
+  .accordion.open .caret { transform: rotate(180deg); }
+  .why-line {
+    font-size: 12px; color: var(--muted); line-height: 1.5;
+    margin: 0 0 10px;
+  }
+  .why-line strong { color: var(--fg); font-weight: 600; }
+  .skip-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .skip-list li {
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--dim); display: flex; gap: 8px;
+    line-height: 1.4;
+  }
+  .skip-list .name { color: var(--muted); }
+
+  .export-btn {
+    margin-top: auto;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--fg);
+    padding: 11px;
+    border-radius: var(--r-card);
+    font: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer; width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .export-btn svg { width: 14px; height: 14px; }
+
+  /* ── settings screen ── */
+  .setting-group {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-card);
+    margin-bottom: 14px;
+    overflow: hidden;
+  }
+  .setting-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .setting-row:last-child { border-bottom: 0; }
+  .setting-row .body { flex: 1; min-width: 0; }
+  .setting-row .lbl { font-size: 13px; color: var(--fg); font-weight: 500; }
+  .setting-row .desc { font-size: 11px; color: var(--muted); margin-top: 1px; line-height: 1.4; }
+  .setting-row .val {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--gold-warm); letter-spacing: 0.04em;
+  }
+  .toggle {
+    width: 32px; height: 19px; border-radius: 10px;
+    background: var(--surface-3); position: relative;
+    flex-shrink: 0;
+    transition: background 200ms;
+  }
+  .toggle::after {
+    content: ''; position: absolute;
+    top: 2px; left: 2px; width: 15px; height: 15px;
+    border-radius: 50%; background: var(--fg);
+    transition: transform 200ms;
+  }
+  .toggle.on { background: var(--green-dim); }
+  .toggle.on::after { transform: translateX(13px); }
+  [dir="rtl"] .toggle.on::after { transform: translateX(-13px); }
+
+  .emergency-group {
+    background: color-mix(in oklab, var(--red) 12%, var(--surface));
+    border: 1px solid color-mix(in oklab, var(--red) 36%, var(--line-soft));
+  }
+  .emergency-group .setting-row .lbl { color: var(--red); }
+  .emergency-group .setting-row .desc { color: color-mix(in oklab, var(--red) 50%, var(--muted)); }
+
+  /* footer credits */
+  footer.credits {
+    max-width: 1640px; margin: 0 auto;
+    padding: 28px 32px 56px; color: var(--dim);
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.06em;
+    display: flex; gap: 24px; flex-wrap: wrap;
+  }
+
+  /* RTL specific tweaks */
+  [dir="rtl"] .head-action,
+  [dir="rtl"] .group-label,
+  [dir="rtl"] .conn-state,
+  [dir="rtl"] .conn-status-line,
+  [dir="rtl"] .nav-item,
+  [dir="rtl"] .badge,
+  [dir="rtl"] .meta,
+  [dir="rtl"] .setting-row .val,
+  [dir="rtl"] .skip-list li {
+    font-family: var(--font-fa);
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">
+      <span class="daal-fa">دال</span>
+      <span class="sep">·</span>
+      <span class="daal-en">DAAL</span>
+      <span class="sep">·</span>
+      <span class="doc-tag">Mobile · main app</span>
+    </div>
+    <div class="lang-toggle" role="tablist" aria-label="Language">
+      <button data-lang="en" aria-pressed="true">EN</button>
+      <button data-lang="fa" aria-pressed="false">فا</button>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="kicker" data-i18n="kicker">After onboarding · the daily app</div>
+  <h1 class="headline" data-i18n="hero-h">
+    Five sections. <em data-i18n="hero-em">One quiet button.</em>
+  </h1>
+  <p class="lede" data-i18n="hero-lede">
+    The user has finished onboarding and added at least one route. Everything they will use day-to-day lives in
+    these five screens — Connection, Routes, Subscriptions, Status, Settings. The phoenix is the only thing
+    glowing on purpose.
+  </p>
+</section>
+
+<section class="lane">
+  <div class="phones" id="phones">
+    <!-- ───── 1. CONNECTION ───── -->
+    <div class="phone">
+      <div class="device">
+        <div class="island"></div>
+        <div class="screen">
+
+          <!-- status bar -->
+          <div class="statusbar">
+            <span class="time" data-clock>9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="none">
+                <rect x="0.5" y="6.5" width="3" height="4" rx="0.5" fill="currentColor"/>
+                <rect x="4.5" y="4.5" width="3" height="6" rx="0.5" fill="currentColor"/>
+                <rect x="8.5" y="2.5" width="3" height="8" rx="0.5" fill="currentColor"/>
+                <rect x="12.5" y="0.5" width="3" height="10" rx="0.5" fill="currentColor"/>
+              </svg>
+              <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                <path d="M8 3.5C5.5 3.5 3.3 4.4 1.6 5.9L0 4.3C2.2 2.3 5 1 8 1s5.8 1.3 8 3.3L14.4 5.9C12.7 4.4 10.5 3.5 8 3.5z" fill="currentColor" opacity="0.4"/>
+                <path d="M8 7C6.5 7 5.1 7.5 4.1 8.4L2.5 6.8C4 5.4 5.9 4.5 8 4.5s4 .9 5.5 2.3L11.9 8.4C10.9 7.5 9.5 7 8 7z" fill="currentColor" opacity="0.7"/>
+                <circle cx="8" cy="10" r="1.5" fill="currentColor"/>
+              </svg>
+              <svg width="25" height="12" viewBox="0 0 25 12" fill="none">
+                <rect x="0.5" y="0.5" width="21" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/>
+                <rect x="2" y="2" width="18" height="8" rx="1.5" fill="currentColor"/>
+                <rect x="22" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+              </svg>
+            </span>
+          </div>
+
+          <!-- body -->
+          <div class="screen-body conn-screen" data-screen="conn">
+            <div class="conn-state" data-i18n="conn-state">CONNECTED</div>
+
+            <div class="phoenix-wrap">
+              <div class="halo outer"></div>
+              <div class="halo"></div>
+              <img class="phoenix-img" src="mouenlnv-daal-3d-no-bg.png" alt="Phoenix shield" />
+            </div>
+
+            <h1 class="conn-headline" data-i18n="conn-h">You're protected</h1>
+
+            <div class="route-chip" data-i18n="conn-route">
+              <span class="pub" data-i18n="conn-pub">Pars Relays</span>
+              <span class="sep">·</span>
+              <span class="nick" data-i18n="conn-nick">Rescue 03</span>
+              <span class="badge trusted" data-i18n="badge-trusted">Trusted</span>
+            </div>
+
+            <div class="conn-status-line">
+              <span data-i18n="conn-status1">On Wi-Fi · network seen before</span><br/>
+              <span data-i18n="conn-status2">Pointers rotated · valid <span class="num" data-num="14">14</span> days</span>
+            </div>
+
+            <div class="mode-chip" data-i18n="mode-normal">
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M6 1v4M6 7v4M1 6h4M7 6h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              <span data-i18n="mode-label">Normal mode</span>
+            </div>
+          </div>
+
+          <!-- nav -->
+          <div class="bottom-nav">
+            <div class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.4" opacity="0.5"/></svg>
+              <span data-i18n="nav-conn">Connect</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h16M4 12h16M4 16h10" stroke-linecap="round"/><circle cx="18" cy="16" r="2"/></svg>
+              <span data-i18n="nav-routes">Routes</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7l8 5 8-5M4 7v10l8 5 8-5V7M4 7l8-4 8 4" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-subs">Sources</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-status">Status</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19 5l-2 2M7 17l-2 2M19 19l-2-2M7 7L5 5"/></svg>
+              <span data-i18n="nav-settings">Settings</span>
+            </div>
+          </div>
+
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <div class="phone-step" data-i18n="step-1">SECTION 01</div>
+        <div class="phone-name" data-i18n="phone-conn">Connection</div>
+        <div class="phone-note" data-i18n="phone-conn-note">The daily-driver. One button, one chip, one line of redacted status.</div>
+      </div>
+    </div>
+
+    <!-- ───── 2. ROUTES ───── -->
+    <div class="phone">
+      <div class="device">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="statusbar">
+            <span class="time" data-clock>9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="none">
+                <rect x="0.5" y="6.5" width="3" height="4" rx="0.5" fill="currentColor"/>
+                <rect x="4.5" y="4.5" width="3" height="6" rx="0.5" fill="currentColor"/>
+                <rect x="8.5" y="2.5" width="3" height="8" rx="0.5" fill="currentColor"/>
+                <rect x="12.5" y="0.5" width="3" height="10" rx="0.5" fill="currentColor"/>
+              </svg>
+              <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                <path d="M8 3.5C5.5 3.5 3.3 4.4 1.6 5.9L0 4.3C2.2 2.3 5 1 8 1s5.8 1.3 8 3.3L14.4 5.9C12.7 4.4 10.5 3.5 8 3.5z" fill="currentColor" opacity="0.4"/>
+                <path d="M8 7C6.5 7 5.1 7.5 4.1 8.4L2.5 6.8C4 5.4 5.9 4.5 8 4.5s4 .9 5.5 2.3L11.9 8.4C10.9 7.5 9.5 7 8 7z" fill="currentColor" opacity="0.7"/>
+                <circle cx="8" cy="10" r="1.5" fill="currentColor"/>
+              </svg>
+              <svg width="25" height="12" viewBox="0 0 25 12" fill="none">
+                <rect x="0.5" y="0.5" width="21" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/>
+                <rect x="2" y="2" width="18" height="8" rx="1.5" fill="currentColor"/>
+                <rect x="22" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+              </svg>
+            </span>
+          </div>
+
+          <div class="screen-body" data-screen="routes">
+            <div class="page-head">
+              <h2 class="title" data-i18n="routes-h">Routes</h2>
+              <button class="head-action" data-i18n="add">+ Add route</button>
+            </div>
+            <div class="search-pill">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3" stroke-linecap="round"/></svg>
+              <span data-i18n="search-routes">Search routes</span>
+            </div>
+
+            <div class="scroll-area">
+              <div class="group-label" data-i18n="group-trusted">TRUSTED</div>
+              <div class="card" style="padding:0 14px">
+                <div class="list-row">
+                  <div class="body">
+                    <div class="pub" data-i18n="r1-pub">Pars Relays</div>
+                    <div class="nick" data-i18n="r1-nick">Rescue 03 · 2 days ago</div>
+                  </div>
+                  <span class="badge trusted" data-i18n="badge-trusted">Trusted</span>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+                <div class="list-row">
+                  <div class="body">
+                    <div class="pub" data-i18n="r2-pub">Pars Relays</div>
+                    <div class="nick" data-i18n="r2-nick">Daylight 12 · 5 hr ago</div>
+                  </div>
+                  <span class="badge trusted" data-i18n="badge-trusted">Trusted</span>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+                <div class="list-row">
+                  <div class="body">
+                    <div class="pub" data-i18n="r3-pub">Saghez Mesh</div>
+                    <div class="nick" data-i18n="r3-nick">Quiet door · 1 wk ago</div>
+                  </div>
+                  <span class="badge trusted" data-i18n="badge-trusted">Trusted</span>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div class="group-label" data-i18n="group-prompted">PROMPTED · VERIFY ONCE</div>
+              <div class="card" style="padding:0 14px">
+                <div class="list-row">
+                  <div class="body">
+                    <div class="pub" data-i18n="r4-pub">Friend route</div>
+                    <div class="nick" data-i18n="r4-nick">Mon May 6 · from Reza</div>
+                  </div>
+                  <span class="badge once" data-i18n="badge-once">Once</span>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div class="group-label" data-i18n="group-emergency">EMERGENCY POOL</div>
+              <div class="card" style="padding:0 14px">
+                <div class="list-row">
+                  <div class="body">
+                    <div class="pub" data-i18n="r5-pub">Emergency · A7K3</div>
+                    <div class="nick" data-i18n="r5-nick">Bootstrap fallback · never used</div>
+                  </div>
+                  <span class="badge emergency" data-i18n="badge-emergency">SOS</span>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div style="height:14px"></div>
+            </div>
+          </div>
+
+          <div class="bottom-nav">
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.4" opacity="0.5"/></svg>
+              <span data-i18n="nav-conn">Connect</span>
+            </div>
+            <div class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h16M4 12h16M4 16h10" stroke-linecap="round"/><circle cx="18" cy="16" r="2"/></svg>
+              <span data-i18n="nav-routes">Routes</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7l8 5 8-5M4 7v10l8 5 8-5V7M4 7l8-4 8 4" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-subs">Sources</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-status">Status</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19 5l-2 2M7 17l-2 2M19 19l-2-2M7 7L5 5"/></svg>
+              <span data-i18n="nav-settings">Settings</span>
+            </div>
+          </div>
+
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <div class="phone-step" data-i18n="step-2">SECTION 02</div>
+        <div class="phone-name" data-i18n="phone-routes">Routes</div>
+        <div class="phone-note" data-i18n="phone-routes-note">Grouped by trust class. Human names only — never raw IDs.</div>
+      </div>
+    </div>
+
+    <!-- ───── 3. SUBSCRIPTIONS ───── -->
+    <div class="phone">
+      <div class="device">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="statusbar">
+            <span class="time" data-clock>9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="none">
+                <rect x="0.5" y="6.5" width="3" height="4" rx="0.5" fill="currentColor"/>
+                <rect x="4.5" y="4.5" width="3" height="6" rx="0.5" fill="currentColor"/>
+                <rect x="8.5" y="2.5" width="3" height="8" rx="0.5" fill="currentColor"/>
+                <rect x="12.5" y="0.5" width="3" height="10" rx="0.5" fill="currentColor"/>
+              </svg>
+              <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                <path d="M8 3.5C5.5 3.5 3.3 4.4 1.6 5.9L0 4.3C2.2 2.3 5 1 8 1s5.8 1.3 8 3.3L14.4 5.9C12.7 4.4 10.5 3.5 8 3.5z" fill="currentColor" opacity="0.4"/>
+                <path d="M8 7C6.5 7 5.1 7.5 4.1 8.4L2.5 6.8C4 5.4 5.9 4.5 8 4.5s4 .9 5.5 2.3L11.9 8.4C10.9 7.5 9.5 7 8 7z" fill="currentColor" opacity="0.7"/>
+                <circle cx="8" cy="10" r="1.5" fill="currentColor"/>
+              </svg>
+              <svg width="25" height="12" viewBox="0 0 25 12" fill="none">
+                <rect x="0.5" y="0.5" width="21" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/>
+                <rect x="2" y="2" width="18" height="8" rx="1.5" fill="currentColor"/>
+                <rect x="22" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+              </svg>
+            </span>
+          </div>
+
+          <div class="screen-body" data-screen="subs">
+            <div class="page-head">
+              <h2 class="title" data-i18n="subs-h">Sources</h2>
+              <button class="head-action" data-i18n="add-sub">+ Subscribe</button>
+            </div>
+            <p class="sub" style="margin-bottom: 14px;" data-i18n="subs-sub">Publishers you follow. URLs are never shown — manage by name and history.</p>
+
+            <div class="scroll-area">
+              <div class="card" style="padding:0 14px">
+                <div class="sub-row">
+                  <div class="fp">
+                    <svg viewBox="0 0 40 40">
+                      <rect width="40" height="40" fill="#1a4858"/>
+                      <circle cx="14" cy="14" r="6" fill="#C9A23A" opacity="0.7"/>
+                      <rect x="22" y="8" width="12" height="12" fill="#5FA85A" opacity="0.6"/>
+                      <path d="M8 28 L20 20 L32 32 Z" fill="#D9B86E" opacity="0.5"/>
+                      <circle cx="30" cy="26" r="4" fill="#033E51" stroke="#C9A23A" stroke-width="0.6"/>
+                    </svg>
+                  </div>
+                  <div class="body">
+                    <div class="pub" data-i18n="s1-pub">Pars Relays</div>
+                    <div class="meta" data-i18n="s1-meta">2 hr ago · 47 routes</div>
+                    <div class="refresh-dots"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+                  </div>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+
+                <div class="sub-row">
+                  <div class="fp">
+                    <svg viewBox="0 0 40 40">
+                      <rect width="40" height="40" fill="#143040"/>
+                      <path d="M0 20 L20 0 L40 20 L20 40 Z" fill="#5FA85A" opacity="0.4"/>
+                      <circle cx="20" cy="20" r="8" fill="#C9A23A"/>
+                      <circle cx="20" cy="20" r="3" fill="#033E51"/>
+                      <rect x="2" y="2" width="6" height="6" fill="#D9B86E" opacity="0.7"/>
+                    </svg>
+                  </div>
+                  <div class="body">
+                    <div class="pub" data-i18n="s2-pub">Saghez Mesh</div>
+                    <div class="meta" data-i18n="s2-meta">14 hr ago · 23 routes</div>
+                    <div class="refresh-dots"><span></span><span></span><span class="warn"></span><span></span><span></span><span></span><span></span></div>
+                  </div>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+
+                <div class="sub-row">
+                  <div class="fp">
+                    <svg viewBox="0 0 40 40">
+                      <rect width="40" height="40" fill="#0d3848"/>
+                      <rect x="6" y="6" width="14" height="14" fill="#C9A23A" opacity="0.8"/>
+                      <rect x="20" y="20" width="14" height="14" fill="#5FA85A" opacity="0.6"/>
+                      <circle cx="6" cy="34" r="5" fill="#D9B86E"/>
+                      <path d="M28 6 L34 12 L28 12 Z" fill="#5FA85A"/>
+                    </svg>
+                  </div>
+                  <div class="body">
+                    <div class="pub" data-i18n="s3-pub">Tabriz Anchors</div>
+                    <div class="meta" data-i18n="s3-meta">3 days ago · 9 routes</div>
+                    <div class="refresh-dots"><span class="err"></span><span class="warn"></span><span></span><span></span><span></span><span></span><span></span></div>
+                  </div>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+
+                <div class="sub-row">
+                  <div class="fp">
+                    <svg viewBox="0 0 40 40">
+                      <rect width="40" height="40" fill="#0a3242"/>
+                      <circle cx="20" cy="14" r="9" fill="#C9A23A" opacity="0.7"/>
+                      <circle cx="14" cy="28" r="6" fill="#5FA85A" opacity="0.7"/>
+                      <circle cx="28" cy="28" r="6" fill="#D9B86E"/>
+                    </svg>
+                  </div>
+                  <div class="body">
+                    <div class="pub" data-i18n="s4-pub">Diaspora Hub</div>
+                    <div class="meta" data-i18n="s4-meta">8 hr ago · 16 routes</div>
+                    <div class="refresh-dots"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+                  </div>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div style="height:14px"></div>
+            </div>
+          </div>
+
+          <div class="bottom-nav">
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.4" opacity="0.5"/></svg>
+              <span data-i18n="nav-conn">Connect</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h16M4 12h16M4 16h10" stroke-linecap="round"/><circle cx="18" cy="16" r="2"/></svg>
+              <span data-i18n="nav-routes">Routes</span>
+            </div>
+            <div class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7l8 5 8-5M4 7v10l8 5 8-5V7M4 7l8-4 8 4" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-subs">Sources</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-status">Status</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19 5l-2 2M7 17l-2 2M19 19l-2-2M7 7L5 5"/></svg>
+              <span data-i18n="nav-settings">Settings</span>
+            </div>
+          </div>
+
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <div class="phone-step" data-i18n="step-3">SECTION 03</div>
+        <div class="phone-name" data-i18n="phone-subs">Subscriptions</div>
+        <div class="phone-note" data-i18n="phone-subs-note">Publishers as fingerprints + history. The URL is never displayed.</div>
+      </div>
+    </div>
+
+    <!-- ───── 4. STATUS ───── -->
+    <div class="phone">
+      <div class="device">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="statusbar">
+            <span class="time" data-clock>9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="none">
+                <rect x="0.5" y="6.5" width="3" height="4" rx="0.5" fill="currentColor"/>
+                <rect x="4.5" y="4.5" width="3" height="6" rx="0.5" fill="currentColor"/>
+                <rect x="8.5" y="2.5" width="3" height="8" rx="0.5" fill="currentColor"/>
+                <rect x="12.5" y="0.5" width="3" height="10" rx="0.5" fill="currentColor"/>
+              </svg>
+              <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                <path d="M8 3.5C5.5 3.5 3.3 4.4 1.6 5.9L0 4.3C2.2 2.3 5 1 8 1s5.8 1.3 8 3.3L14.4 5.9C12.7 4.4 10.5 3.5 8 3.5z" fill="currentColor" opacity="0.4"/>
+                <path d="M8 7C6.5 7 5.1 7.5 4.1 8.4L2.5 6.8C4 5.4 5.9 4.5 8 4.5s4 .9 5.5 2.3L11.9 8.4C10.9 7.5 9.5 7 8 7z" fill="currentColor" opacity="0.7"/>
+                <circle cx="8" cy="10" r="1.5" fill="currentColor"/>
+              </svg>
+              <svg width="25" height="12" viewBox="0 0 25 12" fill="none">
+                <rect x="0.5" y="0.5" width="21" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/>
+                <rect x="2" y="2" width="18" height="8" rx="1.5" fill="currentColor"/>
+                <rect x="22" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+              </svg>
+            </span>
+          </div>
+
+          <div class="screen-body" data-screen="status">
+            <div class="page-head"><h2 class="title" data-i18n="status-h">Status</h2></div>
+
+            <div class="scroll-area">
+              <div class="health-card">
+                <div class="pulse"></div>
+                <div>
+                  <h3 data-i18n="health-h">All systems normal</h3>
+                  <p data-i18n="health-p">Daal is reaching the open internet through your route. No throttling detected in the last hour.</p>
+                </div>
+              </div>
+
+              <div class="accordion open">
+                <div class="hdr">
+                  <h4 data-i18n="why-h">Why this route?</h4>
+                  <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" stroke-linecap="round"/></svg>
+                </div>
+                <p class="why-line">
+                  <span data-i18n="why-l1">Active:</span> <strong data-i18n="why-active">Pars Relays · Rescue 03</strong><br/>
+                  <span data-i18n="why-l2">Chosen because pointers are fresh and the cellular network you are on has used this route successfully twice before.</span>
+                </p>
+                <div class="group-label" style="margin:0 0 6px" data-i18n="why-skipped">SKIPPED</div>
+                <ul class="skip-list">
+                  <li><span class="name" data-i18n="skip1-name">Saghez Mesh ·</span><span data-i18n="skip1-r">cooldown · 4 min left</span></li>
+                  <li><span class="name" data-i18n="skip2-name">Tabriz Anchors ·</span><span data-i18n="skip2-r">last attempt failed</span></li>
+                  <li><span class="name" data-i18n="skip3-name">Friend route ·</span><span data-i18n="skip3-r">trust = once · already used</span></li>
+                </ul>
+              </div>
+
+              <div class="accordion">
+                <div class="hdr">
+                  <h4 data-i18n="net-h">Network</h4>
+                  <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div class="accordion">
+                <div class="hdr">
+                  <h4 data-i18n="rb-h">Routes &amp; budgets</h4>
+                  <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <button class="export-btn" style="margin-top:12px">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span data-i18n="export">Export diagnostics</span>
+              </button>
+              <div style="height:10px"></div>
+            </div>
+          </div>
+
+          <div class="bottom-nav">
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.4" opacity="0.5"/></svg>
+              <span data-i18n="nav-conn">Connect</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h16M4 12h16M4 16h10" stroke-linecap="round"/><circle cx="18" cy="16" r="2"/></svg>
+              <span data-i18n="nav-routes">Routes</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7l8 5 8-5M4 7v10l8 5 8-5V7M4 7l8-4 8 4" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-subs">Sources</span>
+            </div>
+            <div class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-status">Status</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19 5l-2 2M7 17l-2 2M19 19l-2-2M7 7L5 5"/></svg>
+              <span data-i18n="nav-settings">Settings</span>
+            </div>
+          </div>
+
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <div class="phone-step" data-i18n="step-4">SECTION 04</div>
+        <div class="phone-name" data-i18n="phone-status">Status</div>
+        <div class="phone-note" data-i18n="phone-status-note">Health · Why this route · skipped routes · redacted diagnostics export.</div>
+      </div>
+    </div>
+
+    <!-- ───── 5. SETTINGS ───── -->
+    <div class="phone">
+      <div class="device">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="statusbar">
+            <span class="time" data-clock>9:41</span>
+            <span class="icons">
+              <svg width="17" height="11" viewBox="0 0 17 11" fill="none">
+                <rect x="0.5" y="6.5" width="3" height="4" rx="0.5" fill="currentColor"/>
+                <rect x="4.5" y="4.5" width="3" height="6" rx="0.5" fill="currentColor"/>
+                <rect x="8.5" y="2.5" width="3" height="8" rx="0.5" fill="currentColor"/>
+                <rect x="12.5" y="0.5" width="3" height="10" rx="0.5" fill="currentColor"/>
+              </svg>
+              <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                <path d="M8 3.5C5.5 3.5 3.3 4.4 1.6 5.9L0 4.3C2.2 2.3 5 1 8 1s5.8 1.3 8 3.3L14.4 5.9C12.7 4.4 10.5 3.5 8 3.5z" fill="currentColor" opacity="0.4"/>
+                <path d="M8 7C6.5 7 5.1 7.5 4.1 8.4L2.5 6.8C4 5.4 5.9 4.5 8 4.5s4 .9 5.5 2.3L11.9 8.4C10.9 7.5 9.5 7 8 7z" fill="currentColor" opacity="0.7"/>
+                <circle cx="8" cy="10" r="1.5" fill="currentColor"/>
+              </svg>
+              <svg width="25" height="12" viewBox="0 0 25 12" fill="none">
+                <rect x="0.5" y="0.5" width="21" height="11" rx="2.5" stroke="currentColor" opacity="0.4"/>
+                <rect x="2" y="2" width="18" height="8" rx="1.5" fill="currentColor"/>
+                <rect x="22" y="4" width="2" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+              </svg>
+            </span>
+          </div>
+
+          <div class="screen-body" data-screen="settings">
+            <div class="page-head"><h2 class="title" data-i18n="set-h">Settings</h2></div>
+
+            <div class="scroll-area">
+              <div class="group-label" data-i18n="set-g1">CONNECTION MODE</div>
+              <div class="setting-group">
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-mode">Mode</div>
+                    <div class="desc" data-i18n="set-mode-d">Lower visibility, lower bandwidth, higher reach.</div>
+                  </div>
+                  <div class="val" data-i18n="set-mode-v">Normal</div>
+                </div>
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-auto">Auto-promote to Lifeline</div>
+                    <div class="desc" data-i18n="set-auto-d">Switches automatically under traffic pressure.</div>
+                  </div>
+                  <div class="toggle on"></div>
+                </div>
+              </div>
+
+              <div class="group-label" data-i18n="set-g2">SECURITY</div>
+              <div class="setting-group">
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-pin">PIN</div>
+                    <div class="desc" data-i18n="set-pin-d">Argon2id · vault profile</div>
+                  </div>
+                  <div class="val" data-i18n="set-pin-v">Set</div>
+                </div>
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-lock">Lock now</div>
+                  </div>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div class="group-label" data-i18n="set-g3">LANGUAGE</div>
+              <div class="setting-group">
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-lang">Language</div>
+                    <div class="desc" data-i18n="set-lang-d">Persian (FA) flips layout to RTL.</div>
+                  </div>
+                  <div class="val" data-i18n="set-lang-v">English</div>
+                </div>
+              </div>
+
+              <div class="group-label" data-i18n="set-g4">NOTIFICATIONS</div>
+              <div class="setting-group">
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-notif">Detailed notifications</div>
+                    <div class="desc" data-i18n="set-notif-d">Names appear after unlock only.</div>
+                  </div>
+                  <div class="toggle"></div>
+                </div>
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-quiet">Quiet mode</div>
+                  </div>
+                  <div class="toggle"></div>
+                </div>
+              </div>
+
+              <div class="group-label" data-i18n="set-g5">EMERGENCY</div>
+              <div class="setting-group emergency-group">
+                <div class="setting-row">
+                  <div class="body">
+                    <div class="lbl" data-i18n="set-panic">Panic wipe</div>
+                    <div class="desc" data-i18n="set-panic-d">Removes all routes, secrets, logs. Three-step confirm.</div>
+                  </div>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--red)"><path d="M9 6l6 6-6 6" stroke-linecap="round"/></svg>
+                </div>
+              </div>
+
+              <div style="height:14px"></div>
+            </div>
+          </div>
+
+          <div class="bottom-nav">
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.4" opacity="0.5"/></svg>
+              <span data-i18n="nav-conn">Connect</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h16M4 12h16M4 16h10" stroke-linecap="round"/><circle cx="18" cy="16" r="2"/></svg>
+              <span data-i18n="nav-routes">Routes</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7l8 5 8-5M4 7v10l8 5 8-5V7M4 7l8-4 8 4" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-subs">Sources</span>
+            </div>
+            <div class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-7 4 14 3-7h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span data-i18n="nav-status">Status</span>
+            </div>
+            <div class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19 5l-2 2M7 17l-2 2M19 19l-2-2M7 7L5 5"/></svg>
+              <span data-i18n="nav-settings">Settings</span>
+            </div>
+          </div>
+
+          <div class="home-indicator"></div>
+        </div>
+      </div>
+      <div class="phone-caption">
+        <div class="phone-step" data-i18n="step-5">SECTION 05</div>
+        <div class="phone-name" data-i18n="phone-settings">Settings</div>
+        <div class="phone-note" data-i18n="phone-settings-note">Mode · PIN · Language · Notifications · Emergency. Panic wipe always last, always red.</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<footer class="credits">
+  <span data-i18n="cr1">Daal · Mobile main app</span>
+  <span data-i18n="cr2">5 sections · 1 toggle</span>
+  <span data-i18n="cr3">No remote fonts · No CDN · Offline-first</span>
+</footer>
+
+<script>
+  // ── strings ──
+  const FA = {
+    'kicker': 'پس از خوش‌آمد · برنامهٔ روزمره',
+    'hero-h': 'پنج بخش.',
+    'hero-em': 'یک دکمهٔ آرام.',
+    'hero-lede': 'کاربر خوش‌آمدگویی را تمام کرده و دست‌کم یک مسیر اضافه کرده است. هر چیزی که هرروز استفاده می‌شود در همین پنج صفحه است: اتصال، مسیرها، منابع، وضعیت، تنظیمات. تنها چیزی که عمدی می‌درخشد، ققنوس است.',
+
+    'conn-state': 'وصل',
+    'conn-h': 'محافظت شده‌اید',
+    'conn-pub': 'پارس‌رِلِی',
+    'conn-nick': 'نجات ۰۳',
+    'conn-status1': 'روی وای‌فای · شبکه قبلاً دیده شده',
+    'conn-status2': 'اشاره‌گرها چرخیدند · معتبر تا ۱۴ روز',
+    'mode-label': 'حالت عادی',
+
+    'badge-trusted': 'معتمد',
+    'badge-once': 'یک‌بار',
+    'badge-emergency': 'اضطرار',
+
+    'routes-h': 'مسیرها',
+    'add': '+ افزودن مسیر',
+    'search-routes': 'جستجوی مسیرها',
+    'group-trusted': 'معتمد',
+    'group-prompted': 'تأیید یک‌بار',
+    'group-emergency': 'مخزن اضطراری',
+    'r1-pub': 'پارس‌رِلِی', 'r1-nick': 'نجات ۰۳ · ۲ روز پیش',
+    'r2-pub': 'پارس‌رِلِی', 'r2-nick': 'روشنا ۱۲ · ۵ ساعت پیش',
+    'r3-pub': 'مش سقز', 'r3-nick': 'درِ آرام · ۱ هفته پیش',
+    'r4-pub': 'مسیرِ دوست', 'r4-nick': 'دوشنبه ۱۶ اردیبهشت · از رضا',
+    'r5-pub': 'اضطرار · A7K3', 'r5-nick': 'پشتیبان راه‌اندازی · هرگز استفاده نشده',
+
+    'subs-h': 'منابع',
+    'add-sub': '+ مشترک شدن',
+    'subs-sub': 'ناشرانی که دنبال می‌کنید. آدرس‌ها هرگز نمایش داده نمی‌شوند — مدیریت بر اساس نام و سابقه است.',
+    's1-pub': 'پارس‌رِلِی', 's1-meta': '۲ ساعت پیش · ۴۷ مسیر',
+    's2-pub': 'مش سقز', 's2-meta': '۱۴ ساعت پیش · ۲۳ مسیر',
+    's3-pub': 'لنگرگاه‌های تبریز', 's3-meta': '۳ روز پیش · ۹ مسیر',
+    's4-pub': 'پایگاه دیاسپورا', 's4-meta': '۸ ساعت پیش · ۱۶ مسیر',
+
+    'status-h': 'وضعیت',
+    'health-h': 'همه‌چیز عادی است',
+    'health-p': 'دال از طریق مسیر شما به اینترنت آزاد می‌رسد. در ساعت گذشته فشاری مشاهده نشد.',
+    'why-h': 'چرا این مسیر؟',
+    'why-l1': 'فعال:',
+    'why-active': 'پارس‌رِلِی · نجات ۰۳',
+    'why-l2': 'انتخاب شد چون اشاره‌گرها تازه‌اند و این شبکه تلفنی پیش‌تر دو بار از این مسیر موفق بوده است.',
+    'why-skipped': 'صرف‌نظر شده',
+    'skip1-name': 'مش سقز ·', 'skip1-r': 'استراحت · ۴ دقیقه مانده',
+    'skip2-name': 'لنگرگاه‌های تبریز ·', 'skip2-r': 'تلاش پیشین ناموفق',
+    'skip3-name': 'مسیرِ دوست ·', 'skip3-r': 'اعتماد یک‌بار · مصرف شد',
+    'net-h': 'شبکه',
+    'rb-h': 'مسیرها و سهمیه‌ها',
+    'export': 'برون‌سپاری تشخیص',
+
+    'set-h': 'تنظیمات',
+    'set-g1': 'حالت اتصال',
+    'set-mode': 'حالت', 'set-mode-d': 'دیده‌شدنِ کمتر، پهنای باندِ کمتر، دسترسیِ بیشتر.', 'set-mode-v': 'عادی',
+    'set-auto': 'ارتقای خودکار به لایف‌لاین', 'set-auto-d': 'هنگام فشار ترافیک خودکار جابجا می‌شود.',
+    'set-g2': 'امنیت',
+    'set-pin': 'پین', 'set-pin-d': 'Argon2id · نمایهٔ گاوصندوق', 'set-pin-v': 'تنظیم‌شده',
+    'set-lock': 'هم‌اکنون قفل کن',
+    'set-g3': 'زبان',
+    'set-lang': 'زبان', 'set-lang-d': 'فارسی چینش را به راست‌چین تغییر می‌دهد.', 'set-lang-v': 'فارسی',
+    'set-g4': 'اعلان‌ها',
+    'set-notif': 'اعلان‌های جزئی', 'set-notif-d': 'نام‌ها فقط پس از باز شدن قفل ظاهر می‌شوند.',
+    'set-quiet': 'حالت بی‌صدا',
+    'set-g5': 'اضطراری',
+    'set-panic': 'پاک‌سازی اضطراری', 'set-panic-d': 'حذف همهٔ مسیرها، رازها، گزارش‌ها. تأیید سه‌مرحله‌ای.',
+
+    'nav-conn': 'اتصال', 'nav-routes': 'مسیرها', 'nav-subs': 'منابع', 'nav-status': 'وضعیت', 'nav-settings': 'تنظیمات',
+
+    'step-1': 'بخش ۰۱', 'step-2': 'بخش ۰۲', 'step-3': 'بخش ۰۳', 'step-4': 'بخش ۰۴', 'step-5': 'بخش ۰۵',
+    'phone-conn': 'اتصال',
+    'phone-conn-note': 'صفحهٔ روزمره. یک دکمه، یک تراشه، یک خطِ وضعیتِ سانسورشده.',
+    'phone-routes': 'مسیرها',
+    'phone-routes-note': 'گروه‌بندی بر پایهٔ کلاس اعتماد. فقط نامِ انسانی — هرگز شناسهٔ خام.',
+    'phone-subs': 'اشتراک‌ها',
+    'phone-subs-note': 'ناشران به‌صورت اثر‌انگشت + سابقه. آدرس هرگز نمایش داده نمی‌شود.',
+    'phone-status': 'وضعیت',
+    'phone-status-note': 'سلامت · چرا این مسیر · مسیرهای رد‌شده · برون‌سپاری سانسورشده.',
+    'phone-settings': 'تنظیمات',
+    'phone-settings-note': 'حالت · پین · زبان · اعلان · اضطرار. پاک‌سازی اضطراری همیشه آخر، همیشه قرمز.',
+
+    'cr1': 'دال · برنامهٔ موبایل', 'cr2': '۵ بخش · ۱ کلید', 'cr3': 'بدون فونت از راه دور · بدون CDN · ابتدا آفلاین',
+  };
+
+  // English snapshot of all translatable text (so EN toggle restores cleanly)
+  const EN = {};
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    EN[el.dataset.i18n] = el.textContent;
+  });
+
+  function applyLang(lang) {
+    const isFa = lang === 'fa';
+    const dict = isFa ? FA : EN;
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const k = el.dataset.i18n;
+      if (dict[k] !== undefined) el.textContent = dict[k];
+    });
+    // dir on screen-body and on rtl-aware bits
+    document.querySelectorAll('[data-screen]').forEach(el => {
+      el.setAttribute('dir', isFa ? 'rtl' : 'ltr');
+    });
+    document.querySelectorAll('.bottom-nav').forEach(el => {
+      el.setAttribute('dir', isFa ? 'rtl' : 'ltr');
+    });
+    // numerals: 14 days
+    document.querySelectorAll('[data-num]').forEach(el => {
+      const n = el.dataset.num;
+      el.textContent = isFa ? toFa(n) : n;
+    });
+    // status-bar clock
+    document.querySelectorAll('[data-clock]').forEach(el => {
+      el.textContent = isFa ? '۹:۴۱' : '9:41';
+    });
+    // toggle pressed state
+    document.querySelectorAll('.lang-toggle button').forEach(b => {
+      b.setAttribute('aria-pressed', b.dataset.lang === lang ? 'true' : 'false');
+    });
+    document.documentElement.lang = isFa ? 'fa' : 'en';
+  }
+
+  function toFa(s) {
+    const map = {'0':'۰','1':'۱','2':'۲','3':'۳','4':'۴','5':'۵','6':'۶','7':'۷','8':'۸','9':'۹'};
+    return String(s).replace(/[0-9]/g, d => map[d]);
+  }
+
+  document.querySelectorAll('.lang-toggle button').forEach(b => {
+    b.addEventListener('click', () => applyLang(b.dataset.lang));
+  });
+</script>
+
+</body>
+</html>

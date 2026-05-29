@@ -1,0 +1,15 @@
+{
+  "scenario_id": "telegram-unreachable",
+  "channel": "telegram",
+  "outcome": "blocked",
+  "hour_bucket": "2026-04-26T19:00Z",
+  "blocks": [
+    "telegram-cdn",
+    "telegram-api"
+  ],
+  "asserts": [
+    {
+      "rule": "no_single_channel_required"
+    }
+  ]
+}
