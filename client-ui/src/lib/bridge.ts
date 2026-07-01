@@ -39,11 +39,40 @@ export async function resolveTrustPrompt(
     return invoke<string>('resolve_trust_prompt', { fingerprint, decision });
 }
 
+// Phase 45 — On Android, Connect goes through the daal-platform plugin
+// so the VpnService consent dialog can fire and the in-process engine
+// receives the TUN fd before set_route is called. The plugin's
+// vpn_start command runs VpnService.prepare(), starts DaalVpnService,
+// which calls engine_set_tun_fd(fd) and then engine_set_route(routeId)
+// in the right order. Desktop falls through to the existing connect
+// command, which calls engine_set_route directly because the
+// daal-tun-helper has already delivered the fd at GUI startup.
+function isAndroid(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    // Tauri's Android WebView reports "Android" in the UA string; the
+    // desktop wry shells (GTK / WebView2 / WKWebView) do not. This is
+    // cheap and synchronous, which lets connect() stay a thin shim.
+    return /Android/i.test(navigator.userAgent);
+}
+
 export async function connect(routeId: string): Promise<void> {
+    if (isAndroid()) {
+        await invoke<unknown>('plugin:daal-platform|vpn_start', {
+            request: { routeId },
+        });
+        return;
+    }
     return invoke<void>('connect', { routeId });
 }
 
 export async function disconnect(): Promise<void> {
+    if (isAndroid()) {
+        try {
+            await invoke<unknown>('plugin:daal-platform|vpn_stop');
+        } catch (_) {
+            /* best-effort; fall through to engine_clear_route */
+        }
+    }
     return invoke<void>('disconnect');
 }
 

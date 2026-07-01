@@ -5,6 +5,7 @@
   "windows": ["*"],
   "permissions": [
     "core:default",
-    "dialog:default"
+    "dialog:default",
+    "daal-platform:default"
   ]
 }

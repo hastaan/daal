@@ -211,7 +211,7 @@ func Init(stateDir, logLevel string) error {
 		autoPromotionEnabled: true,
 		store:                s,
 		adapter:              &trust.StoreAdapter{S: s},
-		driver:               engine.NewStub(),
+		driver:               engine.NewDefaultDriver(),
 		pm:                   pathmanager.New(),
 		subs:                 make(chan engine.Event, 32),
 	}
@@ -286,6 +286,7 @@ func Shutdown() error {
 	resetBootstrapForShutdown()
 	resetShareForShutdown()
 	resetTunnelForShutdown()
+	resetTunFDForShutdown()
 	resetClockForShutdown()
 	resetNetmemForShutdown()
 	resetPushQueueForShutdown()

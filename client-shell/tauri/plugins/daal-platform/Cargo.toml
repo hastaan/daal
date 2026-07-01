@@ -1,0 +1,32 @@
+[package]
+name = "tauri-plugin-daal-platform"
+version = "0.1.0"
+edition = "2021"
+description = "Daal's mobile-only platform glue: Android VpnService lifecycle + TUN-fd handoff into the in-process engine. Desktop branch is a no-op (data plane runs in-process directly)."
+license = "GPL-3.0-or-later"
+links = "tauri-plugin-daal-platform"
+
+[lib]
+name = "tauri_plugin_daal_platform"
+crate-type = ["rlib"]
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-plugin = { version = "2.5", features = ["build"] }
+
+[dependencies]
+tauri = { version = "2.0", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1"
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+android_logger = "0.13"
+
+# Not part of the desktop Cargo workspace — the plugin is compiled as
+# a path-dep from src-tauri/. The standalone [workspace] marker keeps
+# `cargo check` here from pulling the rest of the desktop crates.
+[workspace]

@@ -1,108 +1,310 @@
-# Phase 45 — Data-plane & delivery: design spec for Gaps 2, 3, 4-publisher
+# Phase 45 — Data plane: in-process sing-box + Android VpnService
 
-**Status:** design spec; implementation deferred to a dedicated session whose **exit gate is real tunneled traffic on Android and desktop Linux**.
-**Branch (when implementation begins):** `gap-dataplane-and-delivery`.
-**Position:** slots after Phase FRP-14 (`44-phase-frp-14-pack-to-person.md`).
+**Status:** ACTIVE build spec.
+**Branch:** `gap-dataplane-and-delivery` (orphan / force-push pattern continues; tag bump at the end).
+**Position:** slots after Phase FRP-14 (`44-phase-frp-14-pack-to-person.md`) and the v0.1.0 tractable-gap follow-up.
+**Exit gate (single, non-negotiable):** **real tunneled traffic on the Android device**. A `curl` issued from the device through the VPN tunnel returns the relay's egress IP. Disconnect tears everything down cleanly.
 
-## Why this is a separate phase
+## Why this phase exists
 
-The "tractable" gaps (5, 1, 4-recipient) were implemented in the v0.1.0 follow-up to FRP-14 and are validated by webview flow checks on device. They produce no tunneled traffic by nature.
+The v0.1.0 "tractable" gaps (5 — posture FSM tightening; 1 — publisher recipient dashboard; 4-recipient — subscription panel + scheduler tick) were implemented in the FRP-14 follow-up session and validated by webview flow checks on the Samsung One UI 16 device (192.168.0.172:43951). Those gaps produce no tunneled traffic by nature.
 
-Real tunneled traffic requires three large, interdependent pieces:
+Real tunneled traffic requires two large, interdependent pieces:
 
-1. **Gap 2** — A real in-process sing-box `engine.Driver` behind `//go:build singbox`.
-2. **Gap 3** — Android `VpnService` + a new `engine_set_tun_fd(int)` ABI so the Go engine receives the TUN fd from Kotlin.
-3. **Gap 4-publisher** — A canonical Daal subscription hosting path (live `Put` on R2 / GH-Pages, a `publish-subscription` CLI subcommand, and a wizard step that emits the recipient-pasteable URL).
+1. **Gap 2** — a real in-process sing-box `engine.Driver` selected by `//go:build singbox`. The stub currently linked into the release `.so` (`core/abi/abi.go:213` → `engine.NewStub()`) silently swallows `Start/Stop/Stats/Subscribe` calls; until that is replaced, `engine_set_route` configures a route table that no one reads.
+2. **Gap 3** — Android `VpnService` lifecycle + a new `engine_set_tun_fd(int)` ABI so the Kotlin service can hand the TUN file descriptor straight to the in-process driver, and a `protect()` callback ABI so the driver's own upstream sockets are excluded from the TUN (no loopback).
 
-Each is small in isolation but their dependency graph is real: Gap 3 cannot tunnel without Gap 2's real driver consuming the fd; Gap 4-publisher cannot be validated against a live recipient until Gap 2 is feeding routes through a tunnel. Doing them as one phase with a single "traffic actually flows" exit gate is the cheapest way to ship them correctly.
+Gap 3 cannot tunnel without Gap 2's real driver consuming the fd, and Gap 2 cannot be validated end-to-end without Gap 3's VpnService delivering one. Doing them as one phase with **one** exit gate (real traffic) is the cheapest way to ship them correctly.
 
-## Invariants locked at the end of this phase
+Per the locked decisions from the v0.1.0 retro:
 
-1. **`engine.NewDefaultDriver()` is the only constructor call site in `core/abi/abi.go`.** Build tag `singbox` selects the real driver; absent tag keeps the stub for unit tests + ABI-stability soak. Pinned by `TestDriverSelectionByBuildTag` (Go test guarded by `//go:build singbox` and its inverse twin).
-2. **Append-only ABI growth.** The cshared release surface grows by exactly two symbols: `engine_set_tun_fd(int) → int` and `engine_clear_tun_fd() → int`. Total release ABI count moves from 33 → 35 (or whatever the locked baseline is at the time). Pinned by the `nm libdaalcore.so | grep -c '^[0-9a-f]\+ T engine_'` CI gate.
-3. **`engine_set_tun_fd` takes ownership of the fd.** After a successful call the caller MUST NOT `close(fd)`. The engine closes it on `engine_clear_tun_fd` or `engine_shutdown`. Pinned by `TestSetTunFdOwnershipSemantics` (mock Driver + sentinel close).
-4. **Android `VpnService.protect()` is reachable from Go.** A C callback registered via a new `engine_register_protect_callback(extern "C" fn(int)→int)` (one additional symbol if needed; otherwise routed through the existing JNI bridge) excludes the engine's own upstream sockets from the TUN. Pinned by integration test (Android instrumented).
-5. **`libsing_box.so` is removed.** The 58 MB dead artifact at `client-shell/tauri/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libsing_box.so` is deleted; only `libdaalcore.so` + `libdaal_desktop_tauri_lib.so` ship in jniLibs after this phase. Pinned by APK-bom assertion in CI (or a `find ... | grep -v allowlist` shell guard).
-6. **Desktop traffic actually flows through sing-box.** The route → outbound translation in `daal-desktop-core/src/commands.rs::connect` (the TODO at the existing line ~94) is finished: on `connect(route_id)`, the GUI does `Engine::set_route(route_id)` AND PUTs the resolved outbound block to the sidecar via Clash REST. Pinned by `TestDesktopConnectTunnelsThroughSingbox` (real outbound, real TCP probe).
-7. **Per-recipient subscription hosting is live.** `daal-deploy publish-subscription` performs an actual R2 / GH-Pages PUT, returns a recipient-pasteable URL, and the recipient app's paste flow refreshes against that URL on its scheduler tick. Pinned by `mission/gap-dataplane-publish-subscription.sh`.
+- **Gap 2 = in-process Go library behind `//go:build singbox`** (NOT bundled sidecar). Desktop and Android converge on a single mechanism.
+- **Milestone order = both in parallel** (desktop tunnel + Android stack proven together).
+- **Protect loop = JNI `protect()` callback** via a new `engine_register_protect_callback` ABI. NOT `addDisallowedApplication(self)` — the engine's own subscription / revocation refresh traffic must traverse the tunnel exactly like any other app's traffic.
+- **Gap 4-publisher (canonical hosting) and Gap 4 transport rotation hosting** are explicitly out of scope here; they belong in a follow-on phase whose exit gate is "publisher publishes → recipient pastes URL → routes refresh on tick against live origin". The plumbing for that (live `Put` on R2 / GH-Pages, `publish-subscription` CLI subcommand, wizard UX) is independent of the data plane.
+
+## Verified starting point (re-confirmed at the top of this session)
+
+| Fact | Source |
+|---|---|
+| `engine.Driver` constructor in `abi.go` is `engine.NewStub()` | `core/abi/abi.go:213` |
+| `engine.Driver` interface is `Start/Stop/Stats/Subscribe` | `core/engine/engine.go` |
+| `BuildSingBoxConfig` already produces valid sing-box outbound JSON (+`udp_gated`) | `core/engine/config.go` |
+| No `//go:build singbox` files exist anywhere in the tree | `grep //go:build singbox core/...` |
+| Release cshared ABI = **53** symbols pre-Phase-45 (cshared without `soak`; the 3 soak-tagged exports — `engine_set_now_unix`, `engine_soak_force_wg_handoff`, `engine_soak_set_wg_memory_kib` — only link in soak builds) | `nm libdaalcore.so \| grep -c ' T engine_'` against the v0.1.0 build |
+| ABI growth pattern = triplet (`X.go` logic / `X_export.go` cshared / `X_gomobile.go` parity) | `core/abi/tunnel{,_export,_gomobile}.go` |
+| `plugins/daal-platform/` contains only `README.md`, `android/DaalVpnService.kt` (legacy stub, package `ai.daal.app`, missing `DaalCoreBridge`, closes fd after `establish`), `ios/PacketTunnelProvider.swift`. NO `Cargo.toml`, NO `src/`, NO `android/build.gradle.kts`, NO `android/src/main/AndroidManifest.xml`. Not a Cargo workspace member. | `find plugins/daal-platform` |
+| `gen/android/...` is gitignored and regenerated (`.gitignore:25:client-shell/tauri/src-tauri/gen/android/`) | `git check-ignore -v` |
+| ⇒ Service registration + permissions MUST arrive via the plugin's Android manifest, merged by Gradle at build time. | (consequence) |
+| `libsing_box.so` (58 MB, arm64-v8a only) is referenced **nowhere** in Rust source | `grep -rn libsing_box client-shell/tauri/src-tauri/src daal-desktop-core/src` |
+| sing-box not yet vendored | `grep -c sagernet core/go.sum` = `0` |
+| Tauri plugins currently registered: `tauri-plugin-dialog`, `tauri-plugin-opener` | `src-tauri/Cargo.toml` + `src-tauri/src/lib.rs:1926-1927` |
+| App package: `org.daal.desktop`; MainActivity at `gen/android/app/src/main/java/org/daal/desktop/MainActivity.kt` exposes `instance` for JNI lookup | `MainActivity.kt:21-25` |
+| `client-shell/tauri/daal-desktop-core/src/tun_helper.rs` reads JSON response only — **no `recvmsg` for SCM_RIGHTS fd** (desktop sidecar fd handoff is incomplete) | source-read |
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-  UI[client-ui React<br/>paste URL / connect] --> Bridge[Tauri Rust shell]
-  Bridge -->|dlopen| Core[libdaalcore.so]
-  Core --> Sel{NewDefaultDriver<br/>build tag?}
-  Sel -- "stub<br/>(unit tests)" --> Stub[engine.Stub]
-  Sel -- "singbox<br/>(release)" --> SBLib[engine.SingBox<br/>libbox in-proc]
-  SBLib -.TUN fd.-> AVPN[Android VpnService<br/>Builder.establish→fd<br/>engine_set_tun_fd]
-  SBLib -.Linux tun-helper.-> LXTUN[/dev/net/tun via SCM_RIGHTS<br/>daal-tun-helper]
-  SBLib --> Net((Internet))
-
-  Pub[Publisher Wizard] --> CLI[daal-deploy<br/>publish-subscription]
-  CLI -->|R2 / GH-Pages PUT| Host[(hosted subscription body<br/>URI-list / SIP008 / Clash)]
-  Recipient[Recipient AddSheet] --> Engine2[engine_subscription_add]
-  Engine2 -.scheduler tick.-> Host
+  UI[client-ui React<br/>Connection page Connect] -->|invoke vpn_start| Plug[daal-platform plugin<br/>Tauri Rust]
+  Plug -->|VpnService.prepare<br/>+ startForegroundService| VPN[DaalVpnService.kt<br/>org.daal.desktop.vpn]
+  VPN -->|Builder.establish<br/>pfd.detachFd| Plug
+  Plug -->|engine_set_tun_fd fd| Core[libdaalcore singbox]
+  Plug -->|engine_register_protect_callback| Core
+  Core --> Drv[engine.SingBox driver<br/>libbox in-process]
+  Drv -. protect cb .-> VPN
+  Drv -->|outbound dial| Net((Internet))
+  VPN -. TUN fd .-> Drv
 ```
 
-## Deliverables
+Single mechanism on both Android and Linux desktop:
 
-### Spec docs (this file is one of them)
+- Android: the VpnService gives us the fd; the in-process driver runs the TUN inbound + outbound graph.
+- Linux desktop: the privileged `daal-tun-helper` opens `/dev/net/tun`, sends the fd over `SCM_RIGHTS`; the in-process driver consumes the same fd via the same `engine_set_tun_fd` ABI. The Phase 1.5B external sing-box sidecar (`Singbox::spawn`) and the Clash REST control path are **retired** as a follow-up within this phase once the Android exit gate is green; the desktop convergence is tracked as Part 4 below.
 
-- THIS doc — `development-phases/45-gap-dataplane-and-delivery.md`.
-- NEW `specs/engine-driver-v1.md` — locks the `engine.Driver` interface contract for real-driver implementers (Events, hour-buckets, UDP gating, Stats redaction).
-- NEW `specs/tun-fd-handoff-v1.md` — locks `engine_set_tun_fd` semantics + ownership + `protect()` callback.
-- UPDATE `specs/android-client-v1.md` — replaces the gomobile-AAR section with the in-process `libdaalcore.so` + VpnService + Tauri mobile plugin model.
-- UPDATE `specs/tunnel-dialer-v1.md` — close out the §"Future work (1.5C)" item: Android now uses the engine driver directly, not a SOCKS5 inlet.
-- NEW `specs/subscription-host-v1.md` — canonical wire format Daal hosts (URI-list); rotation rules; signing requirement (TBD).
+## Invariants locked at the end of this phase
 
-### Code packages
+1. **`engine.NewDefaultDriver()` is the single constructor call site** in `core/abi/abi.go`. Build tag `singbox` selects the real driver; absent tag keeps the stub for unit tests + ABI-stability soak. Pinned by `TestDriverSelectionByBuildTag` (twin test files per build tag).
+2. **Append-only ABI growth: 53 → 56 in release builds (cshared without `soak`).** Three new symbols: `engine_set_tun_fd(int) → int`, `engine_clear_tun_fd() → int`, `engine_register_protect_callback(uintptr) → int`. No existing symbol is renamed, deleted, or has its signature changed. Pinned by `nm libdaalcore.so | grep -c ' T engine_'` CI gate = 56 (release) / 59 (cshared+soak).
+3. **`engine_set_tun_fd` takes ownership of the fd.** After a successful call the caller MUST NOT `close(fd)`. The engine closes it on `engine_clear_tun_fd` or `engine_shutdown`. Pinned by `TestSetTunFdOwnershipSemantics` (mock Driver + sentinel close).
+4. **`VpnService.protect()` is reachable from Go via the registered callback.** Each upstream socket the in-process driver opens is offered to the callback before its first connect / sendto; the Kotlin side calls `this.protect(fd)`. Pinned by `TestProtectCallbackInvoked` (in-tree mock) + the device exit gate (real traffic actually reaches a remote IP, which is only possible if protect was called).
+5. **`libsing_box.so` is gone.** All ABI copies under `gen/android/app/src/main/jniLibs/*/libsing_box.so` are deleted; only `libdaalcore.so` + `libdaal_desktop_tauri_lib.so` ship in jniLibs after this phase. (The 58 MB file is referenced nowhere in source.)
+6. **Plugin's `<service>` + VPN permissions land in the merged manifest at every build.** Even though `gen/android/.../AndroidManifest.xml` is gitignored and regenerated, the Tauri plugin's `android/src/main/AndroidManifest.xml` is part of the source tree and merges into the app manifest via Gradle. Pinned by inspecting `app/build/intermediates/merged_manifest/.../AndroidManifest.xml` after a clean build.
+7. **Real traffic exit gate.** On a fresh install, accepting the VPN consent dialog and connecting to a relay route causes a `curl https://ip.example/` issued from the device to return the relay's egress IP (not the device's WAN IP).
 
-- NEW `core/engine/engine_default.go` (`//go:build !singbox`) and `core/engine/engine_singbox.go` (`//go:build singbox`). Each defines `NewDefaultDriver()`; the singbox file additionally defines the real `SingBox` struct implementing `engine.Driver`.
-- UPDATE `core/abi/abi.go:214` — one-line change: `engine.NewStub()` → `engine.NewDefaultDriver()`.
-- NEW `core/abi/tun_fd.go` + `core/abi/tun_fd_export.go` (cshared) + `core/abi/tun_fd_gomobile.go` (parity) — `SetTunFD(int) error`, `ClearTunFD() error`.
-- UPDATE `core/go.mod` — add `github.com/sagernet/sing-box` (trimmed via per-family tags); `core/go.sum` regenerated.
-- UPDATE `tools/build-engine-android.sh` — append `,singbox` to `-tags`; the unit-test build script stays at `cshared` only.
-- UPDATE `tools/build-engine-ios.sh` — same `-tags cshared,singbox`.
-- NEW `tools/build-aar.sh` — `gomobile bind -target=android -tags gomobile,singbox ./abi` (optional; only if a non-Tauri Android host is ever needed).
-- NEW Tauri mobile plugin `client-shell/tauri/plugins/daal-platform/`:
-  - `Cargo.toml` (depends on `tauri`, mobile features).
-  - `src/lib.rs` — plugin init + `#[tauri::command] connect_vpn(route_id)` and `disconnect_vpn()` (Android branch starts/stops `DaalVpnService`; desktop branch is a no-op since data plane is already in-process).
-  - `android/build.gradle.kts`.
-  - `android/src/main/AndroidManifest.xml` — `BIND_VPN_SERVICE`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` (SDK 34+), `POST_NOTIFICATIONS` (SDK 33+ runtime); `<service android:name="org.daal.desktop.vpn.DaalVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="specialUse" android:exported="false"><property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="vpn"/><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>`.
-  - `android/src/main/kotlin/org/daal/desktop/vpn/DaalVpnService.kt` — rewritten from the legacy stub. `connect(routeId)`: `Builder.establish()` → `pfd.detachFd()` → JNI into the Tauri plugin Rust → `engine_set_tun_fd(fd)` → `engine_set_route(routeId)`.
-- UPDATE `client-shell/tauri/src-tauri/src/lib.rs` — register the plugin; route the Tauri `connect` command's Android branch through `connect_vpn`.
-- UPDATE `client-shell/tauri/daal-desktop-core/src/commands.rs::connect` — finish the route→outbound translation: read the route's outbound profile (already in `core/abi`), PUT it to sing-box via Clash REST API.
-- DELETE `client-shell/tauri/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libsing_box.so` (and its build/intermediates copies). It is a dead 58 MB artifact (only `main.main`, zero references).
-- UPDATE `client-shell/tauri/plugins/daal-platform/README.md` — flip "Source preservation only" to "Active plugin".
-- NEW publisher subcommand `cmd/daal-deploy publish-subscription` — wraps the FRP-14 per-recipient creds into a URI-list body and PUTs to R2 / GH-Pages via the existing `publisher/deploy/freshness/backends/{r2,ghpages}/` clients (currently stubbed for freshness; the implementations are real, only the freshness CLI's wiring is missing).
-- UPDATE `publisher/deploy/cli/cli.go` — close out the `freshness.ErrBackendNotImplemented` stubs at lines ~1015-1019 and ~1119-1124 so `publish-freshness` and `publish-subscription` both PUT live.
-- UPDATE `client-shell/tauri/daal-wizard/src/cli_bridge.rs` — add `run_publish_subscription(args)`; the wizard's Step 7 (or the new Recipients page) gets a "Publish to URL" button per recipient.
+## Build spec
 
-### CI gates
+### Part 1 — Gap 2: in-process sing-box driver behind `//go:build singbox`
 
-- `mission/gap-dataplane-driver-selection.sh` — builds with and without `-tags singbox`, verifies the right driver was linked (sentinel symbol + smoke run).
-- `mission/gap-dataplane-android-tunnel.sh` — Android instrumented test: install APK, accept VpnService prompt, import a real `.sbpx` for a sandbox relay, connect, curl `https://api.daal.test/echo` through the tunnel, assert the response carries the relay's egress IP.
-- `mission/gap-dataplane-desktop-tunnel.sh` — Linux desktop equivalent: launch GUI headless, connect, probe egress.
-- `mission/gap-dataplane-publish-subscription.sh` — publisher publishes a subscription URL via R2, recipient pastes it, scheduler tick imports routes, end-to-end works.
+Files:
 
-## Carry-overs / risks
+- `core/go.mod` / `core/go.sum`: add `github.com/sagernet/sing-box` and the necessary supporting modules. sing-box is gated by its per-feature tags; we adopt only what the engine needs:
+  - `with_gvisor` — required by `sing-tun` for the userspace netstack
+  - `with_quic` — QUIC outbounds (Hysteria, Tuic, MASQUE family)
+  - `with_wireguard` — WG outbounds
+  - `with_utls` — uTLS fingerprinting for VLESS / Trojan / VMess
+  - `with_clash_api` — runtime stats (the Clash REST endpoint stays bound to loopback inside the engine; the desktop sidecar / external clash-api is retired)
+- `core/engine/engine_default.go` (NEW, `//go:build !singbox`):
+  ```go
+  package engine
+  func NewDefaultDriver() Driver { return NewStub() }
+  ```
+- `core/engine/engine_singbox.go` (NEW, `//go:build singbox`):
+  ```go
+  package engine
+  func NewDefaultDriver() Driver { return newSingBox() }
+  // type singBox struct { ... } implementing Driver:
+  //   Start(cfg) -> parse cfg via BuildSingBoxConfig contract,
+  //                inject TUN inbound from registered fd (set via Driver-level
+  //                method called by tun_fd.go), honor route.udp_gated by
+  //                blocking the udp outbound when set, libbox.NewInstance,
+  //                instance.Start.
+  //   Stop()    -> instance.Close.
+  //   Stats()   -> hour-bucketed bytes-in/out from clash stats hook.
+  //   Subscribe -> emits engine.Event (Connected / Disconnected / SocketProtected).
+  ```
+- `core/abi/abi.go:213` (UPDATE, one-line): `engine.NewStub()` → `engine.NewDefaultDriver()`.
+- `tools/build-engine-android.sh` (UPDATE): `-tags cshared` → `-tags cshared,singbox`.
+- `tools/build-engine-ios.sh` (UPDATE): same.
+- Unit test build flow (`go test ./core/...`) intentionally stays **without** the `singbox` tag so the stub remains the test target — the real driver is exercised only on-device.
 
-- **APK size.** sing-box's transitive graph (sing-quic, sing-mux, sing-shadowtls, sing-tun, quic-go, gvisor, cloudflare/circl) can easily push libdaalcore.so past 50 MB per ABI. Mitigation: trim sing-box itself with its per-family tags (`with_wireguard`, `with_quic`, `with_acme`, etc.); strip release `.so`s; gzip the `.aab` upload. APK size budget: ≤ 60 MB per-ABI; ≤ 200 MB universal.
-- **CGO cross-compile.** sing-box's TUN code (sing-tun) uses gvisor for userspace netstack and needs cgo for several transports. Already on cgo on Android; budget +30s build time per ABI.
-- **`protect()` semantics.** If sing-box opens upstream sockets in-engine, Android needs each socket excluded from the TUN. The cleanest path is a registered JNI callback (`engine_register_protect_callback`); the alternative is the engine refuses to open sockets and demands the host pre-create them, which is the Tailscale approach and harder to retrofit.
-- **In-process vs sidecar on Android.** This phase commits to **in-process** (Gap 2 chosen "In-process Go library behind `//go:build singbox`"). Sidecar option (mirror desktop) explicitly rejected to avoid the extra IPC layer on mobile.
-- **Subscription signing.** Open question for `specs/subscription-host-v1.md`: should the hosted body be signed by the publisher root key (so the recipient verifies before importing) or stay unsigned (current engine wraps with a local synthetic .sbp signed by the device delegate key). Decision deferred to the spec doc; the engine-side wrap path works either way.
+Tests:
+
+- `core/engine/driver_selection_singbox_test.go` (`//go:build singbox`) — asserts `NewDefaultDriver()` returns something whose `Start` actually configures libbox.
+- `core/engine/driver_selection_stub_test.go` (`//go:build !singbox`) — asserts `NewDefaultDriver()` returns a `*Stub`.
+
+### Part 2 — Gap 3a: TUN-fd + protect ABI (append-only, 56 → 59)
+
+Triplet, mirroring `tunnel{,_export,_gomobile}.go`:
+
+- `core/abi/tun_fd.go` (NEW, no build tag) — logic. Exposes:
+  - `SetTunFD(fd int) (string, error)` — stores fd in package-level guarded slot, calls a Driver-level `OnTunFD(fd)` hook (added to `engine.Driver`, default impl `error("unsupported")` in `Stub`, real impl in `singBox`). Returns the same JSON shape as other set_* calls (`{"ok":true}` on success).
+  - `ClearTunFD() (string, error)` — symmetric.
+  - `RegisterProtectCallback(cb unsafe.Pointer) (string, error)` — stores the C function pointer; `singBox` reads it at upstream-socket-open time.
+- `core/abi/tun_fd_export.go` (NEW, `//go:build cshared`):
+  ```go
+  //export engine_set_tun_fd
+  func engine_set_tun_fd(fd C.int, out unsafe.Pointer, outLen C.int) C.int { ... }
+  //export engine_clear_tun_fd
+  func engine_clear_tun_fd(out unsafe.Pointer, outLen C.int) C.int { ... }
+  //export engine_register_protect_callback
+  func engine_register_protect_callback(cb C.uintptr_t, out unsafe.Pointer, outLen C.int) C.int { ... }
+  ```
+- `core/abi/tun_fd_gomobile.go` (NEW, `//go:build gomobile`) — `(h *DaalCore) SetTunFD / ClearTunFD / RegisterProtectCallback` method parity.
+
+Tests:
+
+- `core/abi/tun_fd_test.go`:
+  - `TestSetTunFdOwnershipSemantics` — installs a mock Driver whose `OnTunFD` records the fd; opens a temp `os.Pipe()` to get a real fd; calls `SetTunFD(fd)`; asserts ownership flag set; calls `ClearTunFD()`; asserts the fd was closed exactly once (using a sentinel `close()` wrapper).
+  - `TestProtectCallbackInvoked` — installs a mock Driver that calls back into the registered C function pointer with a sentinel fd; the test registers a Go-backed `cgo.NewHandle`-style callback that records invocations; asserts the sentinel fd was offered.
+
+### Part 3 — Gap 3b: Tauri mobile plugin + Android VpnService (real)
+
+**Rust plugin: `client-shell/tauri/plugins/daal-platform/`**
+
+- `Cargo.toml` (NEW) — package `tauri-plugin-daal-platform`, edition 2021, depends on `tauri`, `serde`, `serde_json`, `thiserror`. Android target deps: `jni`, `ndk-context`, `log`, `android_logger`.
+- `build.rs` (NEW) — `tauri_plugin::Builder::new(COMMANDS).android_path("android").build();`
+- `src/lib.rs` (NEW) — plugin init + the `connect / disconnect / status` commands (Android branch invokes JNI into `DaalVpnService`; desktop branch is a no-op).
+- `src/commands.rs` (NEW) — `#[tauri::command] async fn vpn_start(route_id: String) / vpn_stop() / vpn_status()`.
+- `src/models.rs` (NEW) — request/response shapes.
+- `permissions/default.toml` (NEW) — Tauri capability allowing the three commands.
+- `android/build.gradle.kts` (NEW) — minimal Android library module pulling Tauri's mobile plugin gradle pieces.
+- `android/src/main/AndroidManifest.xml` (NEW) — see below.
+- `android/src/main/java/org/daal/desktop/vpn/DaalVpnService.kt` (NEW, replacing the legacy stub).
+
+**Service rewrite (the most important file):**
+
+```kotlin
+// android/src/main/java/org/daal/desktop/vpn/DaalVpnService.kt
+package org.daal.desktop.vpn
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Intent
+import android.net.VpnService
+import android.os.ParcelFileDescriptor
+
+class DaalVpnService : VpnService() {
+
+  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    startForeground(NOTIFICATION_ID, buildNotification())
+
+    val routeId = intent?.getStringExtra(EXTRA_ROUTE_ID) ?: return START_NOT_STICKY
+    val builder = Builder()
+      .setSession("Daal")
+      .addAddress("10.20.30.40", 30)
+      .addRoute("0.0.0.0", 0)
+      .addRoute("::", 0)
+      .addDnsServer("1.1.1.1")
+      .setMtu(1500)
+    val pfd: ParcelFileDescriptor = builder.establish()
+      ?: return START_NOT_STICKY
+    val fd = pfd.detachFd()       // engine takes ownership; we do NOT close(pfd)
+
+    // 1. Wire protect() so the engine's upstream sockets escape the TUN.
+    DaalCoreBridge.registerProtectCallback { socketFd -> protect(socketFd) }
+    // 2. Hand the fd to the engine.
+    DaalCoreBridge.setTunFd(fd)
+    // 3. Activate the route (this triggers Start on the singBox driver).
+    DaalCoreBridge.setRoute(routeId)
+    return START_STICKY
+  }
+
+  override fun onRevoke() { teardown() }
+  override fun onDestroy() { teardown(); super.onDestroy() }
+
+  private fun teardown() {
+    DaalCoreBridge.clearRoute()
+    DaalCoreBridge.clearTunFd()
+    stopForeground(STOP_FOREGROUND_REMOVE)
+    stopSelf()
+  }
+
+  private fun buildNotification(): Notification = /* ... */
+
+  companion object {
+    const val ACTION_START = "org.daal.desktop.vpn.START"
+    const val EXTRA_ROUTE_ID = "route_id"
+    const val NOTIFICATION_ID = 0xDAA1
+    const val CHANNEL_ID = "daal.vpn"
+  }
+}
+```
+
+`DaalCoreBridge` is a Kotlin singleton that uses JNI to reach the Tauri plugin's Rust code (which in turn calls the `engine_*` ABI symbols in `libdaalcore.so`). It is declared inside the plugin and exposes:
+
+```kotlin
+object DaalCoreBridge {
+  external fun setTunFd(fd: Int): Int
+  external fun clearTunFd(): Int
+  external fun setRoute(routeId: String): Int
+  external fun clearRoute(): Int
+  external fun registerProtectCallback(cb: (Int) -> Boolean): Int
+  init { System.loadLibrary("daal_desktop_tauri_lib") }
+}
+```
+
+**Plugin AndroidManifest:**
+
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="org.daal.desktop">
+
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+  <application>
+    <service
+        android:name="org.daal.desktop.vpn.DaalVpnService"
+        android:permission="android.permission.BIND_VPN_SERVICE"
+        android:foregroundServiceType="specialUse"
+        android:exported="false">
+      <property
+          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+          android:value="vpn"/>
+      <intent-filter>
+        <action android:name="android.net.VpnService"/>
+      </intent-filter>
+    </service>
+  </application>
+</manifest>
+```
+
+These permissions / `<service>` declarations merge into the app's regenerated `gen/android/.../AndroidManifest.xml` at Gradle build time. This is the only durable place to put them.
+
+**Wire into the shell:**
+
+- `client-shell/tauri/src-tauri/Cargo.toml`: add `tauri-plugin-daal-platform = { path = "../plugins/daal-platform" }`.
+- `client-shell/tauri/src-tauri/src/lib.rs:1926-1927`: chain `.plugin(tauri_plugin_daal_platform::init())` after the existing two plugins.
+- `client-ui/src/lib/connection.ts` (or wherever the Connect button lands): on Android, `invoke('plugin:daal-platform|vpn_start', { routeId })` instead of `invoke('set_route', { routeId })`. The first invocation surfaces the system VPN consent prompt; the plugin's `vpn_start` handles `VpnService.prepare()` and re-invokes after the consent Activity returns OK.
+
+### Part 4 — Cleanup + desktop convergence
+
+1. **Delete** `client-shell/tauri/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libsing_box.so` and any sibling per-ABI copies. The file is gitignored anyway (part of `gen/`) but the regeneration path (a stale `tauri android init` artifact) is plugged here: we do not stage it back.
+2. **Flip** `plugins/daal-platform/README.md` from "Source preservation only" to "Active plugin" with the new file layout.
+3. **Desktop convergence (deferred within this phase, after Android exit gate is green):**
+   - Switch `daal-desktop-core/src/state.rs` to drive the in-process `singBox` driver directly (no `Singbox::spawn`, no Clash REST control path, no SOCKS5 inlet on loopback).
+   - `daal-tun-helper` continues to open `/dev/net/tun` and `SCM_RIGHTS`-send the fd; the Rust client (`tun_helper.rs`) gains a `recvmsg` path (currently missing — only the JSON response is read) and forwards the received fd to `engine_set_tun_fd`.
+   - `daal-desktop-core/src/singbox.rs` (the sidecar wrapper) and the Clash REST client become dead code → delete.
+   - Desktop `vpn_start(route_id)` is a thin wrapper that delegates to the same `engine_set_route` path, since the helper has already delivered the fd at GUI startup.
+
+## Build / test / validate
+
+1. `go test ./core/...` (default, no `singbox` tag) stays green, including the two new invariant tests.
+2. `PATH=/usr/local/go125/bin:$PATH ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.0.12077973 bash /home/daal/tools/build-engine-android.sh` builds `libdaalcore.so` with `-tags cshared,singbox` for arm64-v8a, armeabi-v7a, x86_64 (the iOS arm64 build uses `build-engine-ios.sh` with the same tag set).
+3. `nm gen/android/app/src/main/jniLibs/arm64-v8a/libdaalcore.so | grep -c ' T engine_'` == **56** (release cshared without `soak`). Per-ABI `.so` size budget ≤ 60 MB.
+4. `cd /home/daal/client-ui && npm run build` (auto-syncs i18n).
+5. `cd /home/daal/client-shell/tauri && PATH=/root/.cargo/bin:$PATH ANDROID_HOME=/opt/android-sdk ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.0.12077973 npx tauri android build --apk`.
+6. Inspect `app/build/intermediates/merged_manifest/universalRelease/.../AndroidManifest.xml` — confirm `<service ... DaalVpnService>` + `BIND_VPN_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE` are present.
+7. Install on the device (192.168.0.172:43951 — port subject to change between sessions; verify with `adb devices`): `adb install -r gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
+8. **Device exit gate:**
+   - Launch the app: `adb shell monkey -p org.daal.desktop -c android.intent.category.LAUNCHER 1`.
+   - Import a real relay `.sbpx` (subscription pasted via the FRP-14 paste flow or a test bundle dropped to `/sdcard/Download/`).
+   - Tap Connect → system VPN consent dialog appears → accept.
+   - Foreground notification appears: "Daal — Tunnel active".
+   - In-app probe (or `adb shell curl https://api.ipify.org`) returns the relay's egress IP (NOT the device WAN IP).
+   - Tap Disconnect → notification clears → `adb shell dumpsys connectivity` shows no active VPN network.
+
+## Risks / mitigations
+
+- **CGO cross-compile of the sing-box graph** (gvisor, quic-go) for 4 Android ABIs is the most likely failure point. Mitigation: build arm64 first as the device-validation target; only after arm64 is green proceed to armeabi-v7a + x86_64. Trim further sing-box feature tags if a transitive cgo build blows up.
+- **APK size.** sing-box's transitive deps can push `libdaalcore.so` per ABI well past current ~15 MB. Budget ≤ 60 MB per-ABI; ≤ 250 MB universal APK; strip `-s -w` in release build via `-ldflags`. Deleting `libsing_box.so` reclaims 58 MB at the same time.
+- **`protect()` ordering.** The callback MUST be registered BEFORE the first outbound dial inside libbox. Order in `DaalVpnService.onStartCommand`: register protect, set TUN fd, set route. Pinned by a (failing-fast) integration check in `DaalCoreBridge` that no upstream socket is opened before the callback is non-null.
+- **Manifest merge.** First clean build verifies merged manifest at `app/build/intermediates/merged_manifest/universalRelease/.../AndroidManifest.xml`. If the plugin manifest is not picked up, the Tauri plugin gradle wiring needs `tauri android init` re-run.
+- **Desktop sidecar retirement** strictly follows the Android exit gate; if Android is green but desktop convergence stalls, Phase 45 ships with Android tunnel only and desktop convergence becomes Phase 45.1.
 
 ## Phase exit checklist
 
-- [ ] All spec docs landed and locked.
-- [ ] `libdaalcore.so` built with `-tags singbox` for all 4 Android ABIs + desktop targets.
-- [ ] `nm libdaalcore.so | grep ' T engine_' | wc -l` = 35 (or the new baseline).
-- [ ] APK installs cleanly on the test device (192.168.0.172:46529 or successor).
-- [ ] VpnService prompt appears on first connect; user accepts; the persistent foreground notification renders.
-- [ ] `curl --interface tun0 https://api.daal.test/echo` returns the relay's egress IP (Android instrumented test).
-- [ ] Linux desktop equivalent passes.
-- [ ] Publisher publishes a subscription URL via R2; recipient pastes it; routes appear in the routestore; scheduler tick rotates the body 24 h later (or whatever `profile_update_min` is set to).
-- [ ] `libsing_box.so` deleted; APK shrinks by ~58 MB.
-- [ ] Handover doc written.
+- [ ] `go test ./core/...` (no tag) green incl. `TestDriverSelectionByBuildTag` (`!singbox`).
+- [ ] `go test -tags singbox ./core/...` green incl. `TestDriverSelectionByBuildTag` (`singbox`) + `TestSetTunFdOwnershipSemantics` + `TestProtectCallbackInvoked`.
+- [ ] `libdaalcore.so` built with `-tags cshared,singbox` for all 4 Android ABIs.
+- [ ] `nm libdaalcore.so | grep -c ' T engine_'` = **56** on every ABI (release cshared without `soak`).
+- [ ] APK builds and installs cleanly on the device.
+- [ ] Merged manifest contains the `<service>` + VPN permissions.
+- [ ] On first Connect, the system VPN consent dialog appears; on accept, the foreground notification renders.
+- [ ] In-tunnel probe returns the relay's egress IP.
+- [ ] Disconnect clears the VPN network and the notification.
+- [ ] `libsing_box.so` removed; APK shrinks by ~58 MB (offset by sing-box link-in into `libdaalcore.so`).
+- [ ] Handover doc written; v0.2.0-dev tag bumped or the tractable v0.1.0 tag moved per the orphan-branch pattern.

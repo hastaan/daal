@@ -133,6 +133,13 @@ pub struct Engine {
     uri_import: extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int,
     wasm_kill_switch_pubkey: extern "C" fn(*mut c_void, c_int) -> c_int,
     loaded_wasm_modules: extern "C" fn(*mut c_void, c_int) -> c_int,
+
+    // Phase 45 — TUN-fd handoff + protect() callback (release surface
+    // 53 → 56). Takes ownership of fd on success; the caller must
+    // NOT close(fd) after a successful set call.
+    set_tun_fd: extern "C" fn(c_int, *mut c_void, c_int) -> c_int,
+    clear_tun_fd: extern "C" fn(*mut c_void, c_int) -> c_int,
+    register_protect_callback: extern "C" fn(usize, *mut c_void, c_int) -> c_int,
 }
 
 impl Engine {
@@ -344,6 +351,23 @@ impl Engine {
                     b"engine_loaded_wasm_modules",
                 )?;
 
+            // Phase 45 — TUN-fd + protect callback.
+            let set_tun_fd =
+                *lookup::<unsafe extern "C" fn(c_int, *mut c_void, c_int) -> c_int>(
+                    &lib,
+                    b"engine_set_tun_fd",
+                )?;
+            let clear_tun_fd =
+                *lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(
+                    &lib,
+                    b"engine_clear_tun_fd",
+                )?;
+            let register_protect_callback =
+                *lookup::<unsafe extern "C" fn(usize, *mut c_void, c_int) -> c_int>(
+                    &lib,
+                    b"engine_register_protect_callback",
+                )?;
+
             // Reinterpret each unsafe-extern as the safe-extern variant
             // we store in the struct. The wrapper methods enforce all
             // borrow / lifetime invariants before crossing the FFI.
@@ -398,6 +422,9 @@ impl Engine {
                 uri_import: std::mem::transmute(uri_import),
                 wasm_kill_switch_pubkey: std::mem::transmute(wasm_kill_switch_pubkey),
                 loaded_wasm_modules: std::mem::transmute(loaded_wasm_modules),
+                set_tun_fd: std::mem::transmute(set_tun_fd),
+                clear_tun_fd: std::mem::transmute(clear_tun_fd),
+                register_protect_callback: std::mem::transmute(register_protect_callback),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -810,6 +837,33 @@ impl Engine {
 
     pub fn loaded_wasm_modules(&self) -> Result<String> {
         call_buf(|buf, len| (self.loaded_wasm_modules)(buf, len))
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 45 — TUN-fd handoff + protect callback.
+    //
+    // `set_tun_fd` takes ownership of the fd. After a successful return
+    // the host MUST NOT close it; the engine closes it on
+    // `clear_tun_fd` or `Shutdown`. Negative fds are rejected by the
+    // engine.
+
+    pub fn set_tun_fd(&self, fd: c_int) -> Result<String> {
+        call_buf(|buf, len| (self.set_tun_fd)(fd, buf, len))
+    }
+
+    pub fn clear_tun_fd(&self) -> Result<String> {
+        call_buf(|buf, len| (self.clear_tun_fd)(buf, len))
+    }
+
+    /// `register_protect_callback` installs a C function pointer of
+    /// type `int (*)(int fd)` that the in-process driver invokes for
+    /// every upstream socket it opens. Pass 0 to clear.
+    ///
+    /// On Android the pointer is a host-side trampoline that turns
+    /// around and calls `DaalCoreBridge.invokeProtect(fd)` via JNI;
+    /// on desktop the call site is currently a no-op.
+    pub fn register_protect_callback(&self, fn_ptr: usize) -> Result<String> {
+        call_buf(|buf, len| (self.register_protect_callback)(fn_ptr, buf, len))
     }
 }
 

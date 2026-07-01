@@ -1,0 +1,10 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+Default permission set for the daal-platform plugin. Grants the three
+commands the Daal frontend needs to drive the Android VpnService and
+TUN-fd handoff. Desktop hosts get the same surface as no-op handlers
+so the same frontend bindings work everywhere.
+"""
+permissions = ["allow-vpn-start", "allow-vpn-stop", "allow-vpn-status"]

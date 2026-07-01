@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-vpn-stop"
+description = "Enables the vpn_stop command without any pre-configured scope."
+commands.allow = ["vpn_stop"]
+
+[[permission]]
+identifier = "deny-vpn-stop"
+description = "Denies the vpn_stop command without any pre-configured scope."
+commands.deny = ["vpn_stop"]

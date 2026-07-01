@@ -1918,6 +1918,15 @@ pub fn run() {
     let engine = Engine::load(&lib_path).expect("engine load");
     engine.init(&state_dir, "warn").expect("engine init");
 
+    // Phase 45 — publish a global Arc<Engine> so the Android JNI bridge
+    // (Java_org_daal_desktop_platform_DaalCoreBridge_*) can reach the
+    // engine symbols without piping through AppState (no AppHandle in a
+    // JNI extern "system" function).
+    #[cfg(target_os = "android")]
+    {
+        let _ = ENGINE_FOR_JNI.set(engine.clone());
+    }
+
     let app_state = AppState::new(engine, state_dir.clone());
     let wizard_ctx = build_wizard_ctx(&state_dir).expect("wizard context init (DB + keystore)");
     let recipient_registry = recipient::SessionRegistry::default();
@@ -1925,6 +1934,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_daal_platform::init())
         .manage(app_state)
         .manage(WizardStateMgr(wizard_ctx))
         .manage(RecipientStateMgr(recipient_registry))
@@ -2148,4 +2158,150 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ----------------------------------------------------------------------
+// Phase 45 — Android JNI bridge.
+//
+// The Kotlin object `org.daal.desktop.platform.DaalCoreBridge` declares
+// five `external` methods that the in-process engine ABI surfaces
+// through libdaalcore.so:
+//
+//   setTunFd(fd: Int): Int
+//   clearTunFd(): Int
+//   registerProtectCallback(): Int
+//   setRoute(routeId: String): Int
+//   clearRoute(): Int
+//
+// We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
+// (Kotlin's class-mangling rule for object companions), reach the
+// engine through ENGINE_FOR_JNI (a OnceLock populated during Tauri
+// app startup), and translate the result into a JNI-friendly jint.
+//
+// The protect callback installs a C trampoline that, when called by
+// the engine driver, takes the fd, locates the active JavaVM via
+// ndk_context, and calls `DaalCoreBridge.invokeProtect(fd: Int): Boolean`
+// — which routes to `VpnService.protect()` because DaalVpnService set
+// `DaalCoreBridge.protectImpl = { fd -> protect(fd) }` before any
+// upstream socket existed.
+
+#[cfg(target_os = "android")]
+static ENGINE_FOR_JNI: std::sync::OnceLock<Arc<Engine>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+mod jni_bridge {
+    use std::ffi::c_int;
+    use std::sync::Arc;
+
+    use jni::objects::{JClass, JString};
+    use jni::sys::jint;
+    use jni::JNIEnv;
+
+    use daal_desktop_core::engine::Engine;
+
+    fn engine() -> Option<Arc<Engine>> {
+        super::ENGINE_FOR_JNI.get().cloned()
+    }
+
+    /// Engine driver's protect trampoline. The signature matches the
+    /// `int (*)(int fd)` contract documented on
+    /// engine_register_protect_callback: returns non-zero on success,
+    /// zero on failure.
+    extern "C" fn protect_trampoline(fd: c_int) -> c_int {
+        use jni::objects::JValue;
+        let raw_vm = ndk_context::android_context().vm();
+        if raw_vm.is_null() {
+            return 0;
+        }
+        let vm = match unsafe { jni::JavaVM::from_raw(raw_vm.cast()) } {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+        let result = (|| -> Result<bool, jni::errors::Error> {
+            let mut env = vm.attach_current_thread()?;
+            let class = env.find_class("org/daal/desktop/platform/DaalCoreBridge")?;
+            let v = env.call_static_method(
+                &class,
+                "invokeProtect",
+                "(I)Z",
+                &[JValue::Int(fd)],
+            )?;
+            v.z()
+        })();
+        // The JavaVM came from a raw pointer we do not own (ndk_context
+        // holds the lifetime); avoid running the destructor.
+        std::mem::forget(vm);
+        if result.unwrap_or(false) {
+            1
+        } else {
+            0
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_setTunFd<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        fd: jint,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        match eng.set_tun_fd(fd as c_int) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_clearTunFd<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        match eng.clear_tun_fd() {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_registerProtectCallback<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        let ptr = protect_trampoline as *const () as usize;
+        match eng.register_protect_callback(ptr) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_setRoute<'local>(
+        mut env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        route_id: JString<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        let s: String = match env.get_string(&route_id) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+        match eng.set_route(&s) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_clearRoute<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        match eng.clear_route() {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    }
 }
