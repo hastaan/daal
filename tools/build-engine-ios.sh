@@ -71,7 +71,7 @@ echo "==> $SDK / GOARCH=$GOARCH -> c-archive"
   GOARCH="$GOARCH" \
   CGO_CFLAGS="-isysroot $sysroot -arch $GOARCH $MIN_FLAG -fembed-bitcode" \
   CGO_LDFLAGS="-isysroot $sysroot -arch $GOARCH $MIN_FLAG" \
-  go build -buildmode=c-archive -tags cshared \
+  go build -buildmode=c-archive -tags cshared,singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api \
     -o "$archive" \
     ./cmd/libdaalcore
 )

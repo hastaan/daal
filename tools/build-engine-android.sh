@@ -45,7 +45,8 @@ build_abi() {
     CGO_ENABLED=1 \
     GOOS=android \
     GOARCH="$goarch" \
-    go build -buildmode=c-shared -tags cshared \
+    go build -buildmode=c-shared -tags cshared,singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api \
+      -ldflags "-s -w" \
       -o "$out" \
       ./cmd/libdaalcore
   )
