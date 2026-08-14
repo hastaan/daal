@@ -90,7 +90,10 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	//     every connection ("Connection refused" from the tun address).
 	//   - address MUST match what the VpnService established
 	//     (10.20.30.40/30, see DaalVpnService.onStartCommand).
-	//   - sniff lets the router see the destination for DNS/routing.
+	// NB: no `sniff` — it is a legacy inbound field removed in sing-box
+	// 1.13 (box.New rejects it: "legacy inbound fields … removed").
+	// route.final sends all traffic to the single outbound, so
+	// destination sniffing is unnecessary.
 	tun := map[string]any{
 		"tag":            "tun-in",
 		"type":           "tun",
@@ -100,7 +103,6 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		"auto_route":     true,
 		"strict_route":   false,
 		"stack":          "gvisor",
-		"sniff":          true,
 	}
 	raw["inbounds"] = append([]any{tun}, inbounds...)
 
