@@ -272,6 +272,36 @@ pub fn stop_sidecar(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Phase 45 Part 4 (desktop convergence): ask the privileged
+/// `daal-tun-helper` for a TUN fd over SCM_RIGHTS and hand it to the
+/// in-process engine via `engine_set_tun_fd` — the desktop twin of
+/// DaalVpnService's `setTunFd`. On success the engine owns the fd
+/// (Phase 45 invariant 3) and a subsequent `set_route` starts the
+/// singbox driver against it. This replaces the sidecar SOCKS
+/// topology once desktop engine builds carry `-tags singbox`; until
+/// then callers treat failure as non-fatal (the helper may not even
+/// be installed).
+#[cfg(target_os = "linux")]
+pub fn deliver_tun_fd(state: &AppState, iface_name: &str) -> Result<String> {
+    let (fd, _detail) =
+        crate::tun_helper::unix::open_fd(iface_name, Duration::from_secs(5))?;
+    match state.engine.set_tun_fd(fd) {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            // Handoff failed — ownership never transferred; close our copy.
+            let _ = nix::unistd::close(fd);
+            Err(e)
+        }
+    }
+}
+
+/// Symmetric teardown: detach the engine from the TUN fd (the engine
+/// closes its copy).
+#[cfg(target_os = "linux")]
+pub fn clear_tun_fd(state: &AppState) -> Result<String> {
+    state.engine.clear_tun_fd()
+}
+
 /// 2-second-tick heartbeat the GUI calls from a background timer.
 /// Returns the current healthy flag.
 pub fn heartbeat_tick(state: &AppState) -> bool {
