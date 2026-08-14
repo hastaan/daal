@@ -9,14 +9,23 @@
   Per Phase 45 invariant 6, this file is the source of truth for the
   VPN-related Android surface. The merged result must appear in
   app/build/intermediates/merged_manifest/.../AndroidManifest.xml.
+
+  extractNativeLibs="true" is required (FRP-4a): the daal-deploy CLI
+  ships as libdaal_deploy.so in jniLibs and must be extracted to a
+  real on-disk file so the wizard can exec it as a subprocess. AGP
+  defaults this to false (libs loaded compressed from the APK, no file
+  on disk); tools:replace forces our value through the merge.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <application>
+    <application
+        android:extractNativeLibs="true"
+        tools:replace="android:extractNativeLibs">
         <service
             android:name="org.daal.desktop.vpn.DaalVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
