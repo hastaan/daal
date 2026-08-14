@@ -249,6 +249,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "libloading",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",
