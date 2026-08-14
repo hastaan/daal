@@ -74,12 +74,28 @@ previously dead-ended. Still needs a Hetzner token (entered on-device)
 to exercise the pricing/provision steps.
 
 **Canonical Android build sequence** (the manual `tauri android init`
-this session skipped the patch step): `tauri android init` →
+this session skipped the patch steps): `tauri android init` →
 `tools/build-engine-android.sh` → `tools/build-deploy-android.sh` →
 `tools/patch-android-signing.sh` (signing + useLegacyPackaging + strips
-the dead `assets/resources/libdaalcore.so`) → `tauri android build`.
-`build-deploy-android.sh` is NOT yet wired into any committed CI android
-workflow — wire it in beside `build-engine-android.sh`.
+the dead `assets/resources/libdaalcore.so`) →
+`tools/patch-android-mainactivity.sh` → `tauri android build`. Neither
+`build-deploy-android.sh` nor `patch-android-mainactivity.sh` is wired
+into a committed CI android workflow yet — wire both in beside
+`build-engine-android.sh`.
+
+## 3c. MainActivity.shareFile was missing from version control
+
+Surfaced when the "Send relay pack" button threw `NoSuchMethodError:
+MainActivity.shareFile`. The Rust shell JNI-calls a static
+`MainActivity.shareFile(String,String,String)` (lib.rs ~1744/1830), but
+`tauri android init` regenerates a vanilla MainActivity.kt and the
+custom method existed only in a past session's gitignored `gen/` tree —
+it was never committed. Restored durably as
+`tools/patch-android-mainactivity.sh` (`instance` holder + `shareFile`
+using the existing `org.daal.desktop.fileprovider`, whose
+`cache-path "."` already covers the staging dir). This is a general
+lesson: anything hand-added to `gen/android` is lost on re-init unless
+captured in a committed patch script.
 
 ## 4. Toolchain notes (this machine)
 
