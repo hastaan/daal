@@ -47,6 +47,40 @@ The Phase 45 code had been committed in `73f6c21` ("daal-platform plugin") but *
 5. Disconnect → `adb … shell dumpsys connectivity | grep -i vpn` shows no active VPN network.
 6. Then: delete stale `libsing_box.so` if present, tick the last checklist boxes, do the Part 4 desktop convergence, and bump the tag per the orphan-branch pattern.
 
+## 3b. FRP-4a packaging fix (daal-deploy bundled for the on-device wizard)
+
+Surfaced mid-session: the on-device Family Relay Publisher wizard errored
+`pricing: daal-deploy not on PATH; install FRP-4a binary` at Step 3. The
+wizard shells out to `daal-deploy` (Rust `resolve_deploy_binary()` expects
+`libdaal_deploy.so` in the native-lib dir), but the binary was never
+cross-compiled or packaged — the FRP-4a packaging the Phase 45 spec left
+out of scope. Fixed (`63b9a70`):
+
+- `tools/build-deploy-android.sh` (NEW) cross-compiles `cmd/daal-deploy`
+  as a PIE executable named `libdaal_deploy.so` (the only place modern
+  Android permits exec) into jniLibs per ABI.
+- Plugin manifest forces `android:extractNativeLibs=true` (tools:replace).
+  NOTE: AGP 8 ignores that manifest attribute and honours the gradle
+  `packaging { jniLibs { useLegacyPackaging = true } }` DSL instead —
+  which is what actually flips the merged manifest to `extractNativeLibs
+  ="true"`. That DSL already lives in `tools/patch-android-signing.sh`
+  (line ~121); the manifest attribute is belt-and-suspenders.
+
+Verified on device: `libdaal_deploy.so` extracted to
+`…/lib/arm64/libdaal_deploy.so` (mode `-r-xr-xr-x`), runs directly
+(`adb shell <path> --help` prints the daal-deploy usage), and the wizard
+now advances past Step 1 → Step 2 (Cloud account / token entry) where it
+previously dead-ended. Still needs a Hetzner token (entered on-device)
+to exercise the pricing/provision steps.
+
+**Canonical Android build sequence** (the manual `tauri android init`
+this session skipped the patch step): `tauri android init` →
+`tools/build-engine-android.sh` → `tools/build-deploy-android.sh` →
+`tools/patch-android-signing.sh` (signing + useLegacyPackaging + strips
+the dead `assets/resources/libdaalcore.so`) → `tauri android build`.
+`build-deploy-android.sh` is NOT yet wired into any committed CI android
+workflow — wire it in beside `build-engine-android.sh`.
+
 ## 4. Toolchain notes (this machine)
 
 - Android SDK at `~/Android/sdk` (cmdline-tools symlinked so tauri's env check passes: `cmdline-tools/bin -> latest/bin`), NDK **r27 / 27.0.12077973** at `~/Android/android-ndk-r27`, symlinked into `~/Android/sdk/ndk/27.0.12077973`.
