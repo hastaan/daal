@@ -2289,7 +2289,12 @@ mod jni_bridge {
         };
         match eng.set_route(&s) {
             Ok(_) => 0,
-            Err(_) => -1,
+            Err(e) => {
+                // Surface the engine's reason — DaalVpnService otherwise
+                // only sees the -1 and logs a bare "tearing down".
+                log::error!("DaalCoreBridge.setRoute({s}) failed: {e}");
+                -1
+            }
         }
     }
 
