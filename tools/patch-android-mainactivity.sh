@@ -16,12 +16,14 @@
 # this script is the durable source of truth — run it after
 # `tauri android init`, before `tauri android build`.
 #
-# Idempotent: rewrites the file to the canonical content every run.
+# Idempotent: rewrites the files to the canonical content every run.
 
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-MAIN_ACTIVITY="${MAIN_ACTIVITY:-$ROOT/client-shell/tauri/src-tauri/gen/android/app/src/main/java/org/daal/desktop/MainActivity.kt}"
+APP_DIR="${APP_DIR:-$ROOT/client-shell/tauri/src-tauri/gen/android/app}"
+MAIN_ACTIVITY="${MAIN_ACTIVITY:-$APP_DIR/src/main/java/org/daal/desktop/MainActivity.kt}"
+PROGUARD_KEEP="${PROGUARD_KEEP:-$APP_DIR/proguard-daal.pro}"
 
 if [ ! -d "$(dirname "$MAIN_ACTIVITY")" ]; then
   echo "FATAL: $(dirname "$MAIN_ACTIVITY") not found (run \`tauri android init\` first)" >&2
@@ -34,6 +36,7 @@ package org.daal.desktop
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.Keep
 import androidx.core.content.FileProvider
 import java.io.File
 
@@ -54,6 +57,11 @@ class MainActivity : TauriActivity() {
     // reach a live Context to start the share chooser from. The Rust
     // side (client-shell/tauri/src-tauri/src/lib.rs) calls this static
     // method to export the relay pack .sbp via the system share sheet.
+    //
+    // @Keep + the proguard-daal.pro rule this script also writes are
+    // BOTH required: the release build minifies (R8), and shareFile is
+    // reached only by JNI reflection, so without an explicit keep R8
+    // strips/renames it and the Rust call throws NoSuchMethodError.
     @JvmStatic
     var instance: MainActivity? = null
 
@@ -62,6 +70,7 @@ class MainActivity : TauriActivity() {
     // Rust via JNI (signature (String,String,String)V). Throws (as a
     // Java exception surfaced to the Rust caller) if no Activity is
     // live or the file cannot be shared.
+    @Keep
     @JvmStatic
     fun shareFile(path: String, mime: String, title: String) {
       val activity = instance
@@ -86,4 +95,21 @@ class MainActivity : TauriActivity() {
 }
 KOTLIN
 
+# R8 keep rule — the app build.gradle.kts pulls in every **/*.pro under
+# app/ via fileTree("."), so this file is picked up automatically. Keeps
+# the JNI-reached members of MainActivity (shareFile + instance).
+cat > "$PROGUARD_KEEP" <<'PROGUARD'
+# Daal: keep JNI-invoked members of MainActivity (shareFile, instance).
+# Written by tools/patch-android-mainactivity.sh. Without this the
+# release R8 pass strips the reflection-only shareFile and the Rust
+# shell throws NoSuchMethodError when exporting a relay pack.
+-keep class org.daal.desktop.MainActivity {
+    public static void shareFile(java.lang.String, java.lang.String, java.lang.String);
+    public static *** instance;
+    public static *** getInstance();
+    public static void setInstance(***);
+}
+PROGUARD
+
 echo "==> patched $MAIN_ACTIVITY"
+echo "==> wrote $PROGUARD_KEEP"
