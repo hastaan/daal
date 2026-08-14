@@ -1,6 +1,6 @@
 # Phase FRP-14 — Pack-to-Person: per-recipient credentials + encrypted relay packs
 
-**Status:** active. Slots after FRP-10 (`40-phase-frp-10-v2-multi-provider.md`) and before FRP-11 (`41-phase-frp-11-trusted-cells.md`). **Branch:** `frp-14-pack-to-person`. **Codename:** `pack-to-person`.
+**Status:** SHIPPED (code in the v0.1.0 line; retroactive handover `docs/handovers/frp-14-handover.md`, written 2026-08-14, records the deviations from this plan). Slots after FRP-10 (`40-phase-frp-10-v2-multi-provider.md`) and before FRP-11 (`41-phase-frp-11-trusted-cells.md`). **Branch:** `frp-14-pack-to-person`. **Codename:** `pack-to-person`.
 
 ## Premise
 
@@ -109,4 +109,4 @@ Exit criteria: all `mission/frp-14-*.sh` scripts pass on real hardware; one full
 - [ ] One Android E2E run shows: provision → add 2 recipients → both connect → revoke 1 → revoked disconnects in ≤ 10 s → other unaffected.
 - [ ] One Linux E2E run with the same script.
 - [ ] `specs/v2-closure-v1.md` updated (V2-blocker or V2.1 deferral decision recorded).
-- [ ] Handover doc written: `44-phase-frp-14-pack-to-person.handover.md`.
+- [x] Handover doc written: `docs/handovers/frp-14-handover.md` (post-FRP-3 handovers live in `docs/handovers/`, not as `.handover.md` siblings; written retroactively 2026-08-14 — unticked items above are inventoried there as deviations/follow-ups).
