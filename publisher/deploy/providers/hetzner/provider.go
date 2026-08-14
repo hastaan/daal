@@ -383,11 +383,25 @@ func generateHealthToken() (string, error) {
 // recordFromServer builds an OperatorRecord from the cloud-side
 // ServerInfo + the caller's ProvisionOpts.
 func (p *Provider) recordFromServer(s *ServerInfo, opts provider.ProvisionOpts) *provider.OperatorRecord {
+	// Hetzner's ServerCreate response does not always populate the
+	// server_type / datacenter names, which would leave the persisted
+	// OperatorRecord with empty ServerType/Region — and the wizard's
+	// derive_wizard_step then regresses a fully-provisioned operator
+	// back to the PIN-gated "pricing" step. Fall back to the values we
+	// asked for; they are authoritative for a create.
+	serverType := s.ServerType
+	if serverType == "" {
+		serverType = opts.ServerType
+	}
+	region := s.Region
+	if region == "" {
+		region = opts.Region
+	}
 	return &provider.OperatorRecord{
 		Provider:        "hetzner",
 		ServerID:        s.ID,
-		ServerType:      s.ServerType,
-		Region:          s.Region,
+		ServerType:      serverType,
+		Region:          region,
 		PublicIP:        s.PublicIP,
 		PublicIPv6:      s.PublicIPv6,
 		ToolboxProfile:  opts.ToolboxProfile,

@@ -146,6 +146,18 @@ fn derive_wizard_step(row: &crate::operator_db::OperatorRow) -> &'static str {
     if row.cloud_token_keystore_alias.is_empty() {
         return "provider";
     }
+    // A provisioned operator resumes at the share/distribute step — where
+    // re-sending the pack needs only the PIN, never the earlier PIN-gated
+    // pricing step. Check this BEFORE the region/server_type probe below:
+    // Hetzner's create response can omit those fields, and without this
+    // shortcut a fully-provisioned server would regress to "pricing" (a
+    // dead end, since the PIN is only collected on the provider step).
+    if row.status == "provisioned" {
+        if row.signed_sbp_sha256.is_some() {
+            return "distribute";
+        }
+        return "sign";
+    }
     // Parse the record to check for region/server_type
     if let Ok(rec) = serde_json::from_str::<serde_json::Value>(&row.operator_record_json) {
         let region = rec
@@ -2090,6 +2102,60 @@ mod tests {
     fn wizard_ctx_is_send_sync_for_tauri_state() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WizardCtx>();
+    }
+
+    fn wizard_step_row(
+        status: &str,
+        token_alias: &str,
+        record_json: &str,
+        pub_hex: &str,
+        signed: Option<&str>,
+    ) -> crate::operator_db::OperatorRow {
+        crate::operator_db::OperatorRow {
+            id: 1,
+            status: status.into(),
+            operator_record_json: record_json.into(),
+            publisher_pub_hex: pub_hex.into(),
+            publisher_priv_keystore_alias: String::new(),
+            cloud_provider: "hetzner".into(),
+            cloud_token_keystore_alias: token_alias.into(),
+            created_at_unix: 0,
+            last_provisioned_at_unix: None,
+            decommissioned_at_unix: None,
+            signed_sbp_sha256: signed.map(|s| s.to_string()),
+            signed_sbp_relay_pack_id: None,
+            signed_sbp_at_unix: None,
+            mgmt_port: 0,
+            mgmt_tls_fingerprint: String::new(),
+        }
+    }
+
+    #[test]
+    fn derive_wizard_step_resumes_provisioned_operator_at_distribute() {
+        // Regression: a fully-provisioned operator whose record lost its
+        // region/server_type (Hetzner create response can omit them) must
+        // resume at the PIN-free "distribute" step, NOT regress to the
+        // PIN-gated "pricing" step which is a dead end on resume.
+        let row = wizard_step_row(
+            "provisioned",
+            "alias",
+            r#"{"region":"","server_type":""}"#,
+            "abcd",
+            Some("deadbeef"),
+        );
+        assert_eq!(derive_wizard_step(&row), "distribute");
+
+        // Provisioned but not yet signed → the sign step (also PIN-free).
+        let row = wizard_step_row("provisioned", "alias", r#"{"region":"","server_type":""}"#, "abcd", None);
+        assert_eq!(derive_wizard_step(&row), "sign");
+
+        // Pre-provision with empty profile still routes to pricing.
+        let row = wizard_step_row("pre-provision", "alias", r#"{"region":"","server_type":""}"#, "", None);
+        assert_eq!(derive_wizard_step(&row), "pricing");
+
+        // No token at all → provider step.
+        let row = wizard_step_row("draft", "", "{}", "", None);
+        assert_eq!(derive_wizard_step(&row), "provider");
     }
 
     #[test]
