@@ -72,14 +72,29 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		return errors.New("engine: TUN fd not set; VpnService must call engine_set_tun_fd before engine_set_route")
 	}
 	inbounds, _ := raw["inbounds"].([]any)
+	// TUN inbound over the fd the host (Android VpnService / desktop
+	// tun-helper) already established. Critical constraints for that
+	// topology:
+	//   - stack MUST be "gvisor": the userspace netstack reads/writes
+	//     packets on the fd and never binds a host socket. The default
+	//     "system"/"mixed" stack tries to `listen` on the tun address,
+	//     which fails on Android ("bind: cannot assign requested
+	//     address") because the OS owns the interface.
+	//   - auto_route MUST be false: the VpnService Builder already
+	//     installed 0.0.0.0/0 + ::/0 into the fd; sing-box cannot (and
+	//     must not) touch system routing on an unrooted device.
+	//   - address MUST match what the VpnService established
+	//     (10.20.30.40/30, see DaalVpnService.onStartCommand) so the
+	//     netstack gateway aligns with the OS interface.
 	tun := map[string]any{
 		"tag":            "tun-in",
 		"type":           "tun",
 		"interface_name": "daal-tun",
-		"address":        []any{"172.19.0.1/30"},
+		"address":        []any{"10.20.30.40/30"},
 		"mtu":            1500,
-		"auto_route":     true,
+		"auto_route":     false,
 		"strict_route":   false,
+		"stack":          "gvisor",
 	}
 	raw["inbounds"] = append([]any{tun}, inbounds...)
 
