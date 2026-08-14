@@ -143,6 +143,63 @@ affordance still needs building. Also minor: the wizard's `error`
 state persists across step changes (stale "invalid PIN" shows on
 unrelated steps).
 
+## 3e. THE REMAINING BLOCKER: routes carry no client sing-box config
+
+After every plumbing fix above, the on-device flow reaches the real
+exit gate and stops there: `engine_set_route("r1")` returns **-1**,
+`DaalVpnService` logs "tearing down", the VPN network never comes up,
+and the in-tunnel curl still returns the device WAN IP. The consent
+dialog, TUN fd handoff, protect callback, and VpnService lifecycle all
+work — the failure is one layer deeper, in the *content* of the route.
+
+**Root cause (traced end to end, not a Phase 45 regression):** the
+`.sbp`/`.sbpx` route profiles contain only RelayPack *metadata*, never
+a client sing-box outbound. Chain of evidence:
+
+- `publisher/deploy/relaypack/candidate_render.go:60-107` writes each
+  `profiles/<id>.json` as `{ ...Params, "port": <n>, "_relaypack": {…} }`.
+- `publisher/deploy/providers/hetzner/profile_render.go:44` builds the
+  `CandidateMeta` with only Family/ExposureMode/Port/risk-tags and
+  **no `Params`** — so the profile has no `type`, `server`, `uuid`, or
+  reality keys. (I verified the exported `My_Family_Relay.sbp`: every
+  profile is literally `{"_relaypack":{…},"port":443}`.)
+- `core/engine/config.go` `BuildSingBoxConfig` wraps that stub as the
+  `active` outbound (adds only `tag`), producing an outbound with **no
+  `type`** → sing-box `box.New`/`instance.Start` rejects it →
+  `core/abi/abi.go` `SetRoute` returns the error → ABI returns -1.
+- The per-recipient credentials that *would* populate an outbound
+  (`vless_uuid`, `reality_short_id`, `ws_path`, …) are minted by
+  `/users/provision` and stored in the wizard DB, but the `.sbpx`
+  wraps the credential-less operator-level `{operator_id}.sbp` —
+  `client-shell/tauri/daal-wizard/src/recipient_book.rs:180-185`
+  says so verbatim: *"The inner `.sbp` is the operator-level Step-6
+  output (shared creds for now; per-recipient inbound rewriting lands
+  in Tier-2)."*
+- Worse, even the minted creds are insufficient: `UserCreds`
+  (`publisher/deploy/mgmt/users.go:20`, `cmd/daal-relay-mgmt/users.go:41`)
+  has **no `reality_public_key`**, which a vless-reality client
+  requires. It is never derived from the box's reality private key or
+  shipped to the recipient.
+- Also note the relay only ships the `vless-in` (443) inbound plus a
+  per-recipient `ws-r<id>` inbound; hysteria2 and naive inbounds are
+  deliberately NOT on the box
+  (`hetzner/profile_render.go:63-70`), so of the four routes only r1
+  (vless-reality) and r2 (websocket-tls) could ever connect even once
+  the config is assembled.
+
+**What it takes to close the gate (a follow-on phase, "FRP-14 Tier-2"):**
+1. Capture the box's REALITY public key at provision (derive from the
+   cloud-init private key) and add it to `UserCreds` + the wizard DB.
+2. Assemble a real client sing-box outbound per family from
+   IP (in `_relaypack` public_risk_tags) + port + per-recipient creds
+   + reality pubkey, and write it into the per-recipient `.sbp`
+   `profiles/<id>.json` before `users-pack-sbpx` wraps it.
+3. Scope to the transports the box actually serves (vless-reality,
+   websocket-tls) until the hy2/naive inbounds ship.
+
+Until that exists, no imported pack can produce a working tunnel — the
+data plane is proven right up to the sing-box config handoff.
+
 ## 4. Toolchain notes (this machine)
 
 - Android SDK at `~/Android/sdk` (cmdline-tools symlinked so tauri's env check passes: `cmdline-tools/bin -> latest/bin`), NDK **r27 / 27.0.12077973** at `~/Android/android-ndk-r27`, symlinked into `~/Android/sdk/ndk/27.0.12077973`.
