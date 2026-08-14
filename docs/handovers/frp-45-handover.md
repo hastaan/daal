@@ -97,6 +97,37 @@ using the existing `org.daal.desktop.fileprovider`, whose
 lesson: anything hand-added to `gen/android` is lost on re-init unless
 captured in a committed patch script.
 
+## 3d. Publisher wizard bugs found driving a real Hetzner deploy
+
+Driving the on-device Family Relay Publisher against a live Hetzner
+token surfaced a chain of real bugs, each fixed:
+
+- **`fix(hetzner)` `dd6d24c`** — `ListServerTypes` offered retired
+  server types (cx11) that still carry a pricing entry for the region;
+  the wizard auto-picks the cheapest, so provision failed with
+  "unsupported location for server type". Now filters on the
+  per-location `Available` flag.
+- **`fix(publisher)` `ab772a4`** — two linked bugs left a
+  successfully-provisioned operator un-resumable: (a) hetzner
+  `recordFromServer` read ServerType/Region from the ServerCreate
+  response, which Hetzner can return empty, overwriting the good
+  pre-provision profile → fall back to the requested opts; (b)
+  `derive_wizard_step` then regressed the provisioned operator to the
+  `pricing` step, but the PIN is only collected on the `provider` step,
+  so resume landed on a PIN-gated dead end ("invalid PIN", no field to
+  fix it). Now a provisioned operator resumes at the PIN-free
+  `distribute`/`sign` step.
+
+**Known follow-up (not yet fixed):** operators still mid-setup
+(pricing/keys/provision) that need the PIN on resume have no inline
+PIN-unlock — the user must step back to the provider step, where the
+token field is empty on resume (re-pasting the token defeats the
+encrypted-token design). The intended UX is "click existing server →
+enter PIN → continue" without re-entering the token; that unlock
+affordance still needs building. Also minor: the wizard's `error`
+state persists across step changes (stale "invalid PIN" shows on
+unrelated steps).
+
 ## 4. Toolchain notes (this machine)
 
 - Android SDK at `~/Android/sdk` (cmdline-tools symlinked so tauri's env check passes: `cmdline-tools/bin -> latest/bin`), NDK **r27 / 27.0.12077973** at `~/Android/android-ndk-r27`, symlinked into `~/Android/sdk/ndk/27.0.12077973`.
