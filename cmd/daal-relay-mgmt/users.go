@@ -15,12 +15,17 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
+	"strings"
 )
 
 // MaxRecipientsPerServer is the hard cap from FRP-14 invariant 7.
@@ -46,6 +51,22 @@ type userCreds struct {
 	NaivePassword     string `json:"naive_password"`   // 22 b64-url chars
 	WSPath            string `json:"ws_path"`          // /r<id>/<8 hex>
 	ProvisionedAtUnix int64  `json:"provisioned_at_unix"`
+
+	// FRP-14 Tier-2: box-wide (not per-user) connection material the
+	// publisher needs to assemble a working client sing-box outbound.
+	// Same value for every recipient on this box; echoed in each
+	// provision response so the publisher never has to SSH the box.
+	//   RealityPublicKey — base64 x25519 pubkey of the vless-in
+	//     REALITY keypair (from /etc/daal/reality.pub, written at
+	//     cloud-init first boot). Empty if the file is absent (e.g.
+	//     a pre-Tier-2 box) — the publisher then can't build a
+	//     vless-reality outbound and must surface that.
+	//   TLSCertSHA256 — hex SHA-256 of the DER of the box's
+	//     self-signed leaf cert used by the ws/hy2/naive inbounds,
+	//     for client-side certificate pinning on a bare-IP VPS with
+	//     no CA-issued cert. Empty when those transports aren't shipped.
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	TLSCertSHA256    string `json:"tls_cert_sha256,omitempty"`
 }
 
 type userMeta struct {
@@ -113,8 +134,53 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Attach the box-wide connection material so the publisher can
+	// assemble a working client outbound without SSHing the box.
+	// Best-effort: a pre-Tier-2 box has no reality.pub/tls-cert.pem and
+	// the publisher surfaces the resulting empty fields.
+	creds.RealityPublicKey = s.readRealityPub()
+	creds.TLSCertSHA256 = s.readTLSCertSHA256()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(creds)
+}
+
+// readRealityPub returns the base64 x25519 REALITY public key written
+// to realityPubPath at cloud-init first boot, or "" if unreadable.
+func (s *server) readRealityPub() string {
+	if s.realityPubPath == "" {
+		return ""
+	}
+	b, err := os.ReadFile(s.realityPubPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// readTLSCertSHA256 returns the base64 SHA-256 of the box's self-signed
+// leaf cert's SubjectPublicKeyInfo (SPKI), or "" if unreadable/malformed.
+// This is exactly what sing-box's client TLS `certificate_public_key_
+// sha256` pin compares against, so the publisher can drop it into the
+// client outbound verbatim. Pinning the public key (not the whole cert)
+// lets the box rotate the cert with the same key without re-issuing packs.
+func (s *server) readTLSCertSHA256() string {
+	if s.tlsCertPath == "" {
+		return ""
+	}
+	pemBytes, err := os.ReadFile(s.tlsCertPath)
+	if err != nil {
+		return ""
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return ""
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 func (s *server) handleUsersRevoke(w http.ResponseWriter, r *http.Request) {

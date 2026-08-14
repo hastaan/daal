@@ -127,6 +127,8 @@ func run(paths configPaths) error {
 type server struct {
 	pubkey         ed25519.PublicKey
 	singboxConfig  string
+	realityPubPath string // /etc/daal/reality.pub (FRP-14 Tier-2)
+	tlsCertPath    string // /etc/daal/tls-cert.pem (self-signed leaf, ws/hy2/naive)
 	rotateCredCnt  atomic.Int64
 	rotateTLSCnt   atomic.Int64
 	healthCnt      atomic.Int64
@@ -142,6 +144,8 @@ func newServer(pubkey ed25519.PublicKey, singboxConfig string) *server {
 	return &server{
 		pubkey:         pubkey,
 		singboxConfig:  singboxConfig,
+		realityPubPath: "/etc/daal/reality.pub",
+		tlsCertPath:    "/etc/daal/tls-cert.pem",
 		now:            time.Now,
 		singboxControl: defaultSingboxControl,
 		singboxKick:    defaultSingboxKick,

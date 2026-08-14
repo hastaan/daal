@@ -25,6 +25,14 @@ type UserCreds struct {
 	NaivePassword     string `json:"naive_password"`
 	WSPath            string `json:"ws_path"`
 	ProvisionedAtUnix int64  `json:"provisioned_at_unix"`
+
+	// FRP-14 Tier-2 box-wide connection material (see the mgmt
+	// server's userCreds). RealityPublicKey is the base64 x25519
+	// pubkey for the vless-reality client outbound; TLSCertSHA256 is
+	// the hex pin for the ws/hy2/naive self-signed TLS. Both empty
+	// on a pre-Tier-2 box.
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	TLSCertSHA256    string `json:"tls_cert_sha256,omitempty"`
 }
 
 // UserMeta is the lightweight per-user descriptor returned by
