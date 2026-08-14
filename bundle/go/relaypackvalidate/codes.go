@@ -131,6 +131,12 @@ const (
 	// is still importable.
 	CodeRP024 Code = "RP024"
 
+	// RP025 is RESERVED for the FRP-14 recipient-binding
+	// mismatch (bundle.ErrRecipientMismatch, raised by
+	// bundle-go's VerifyBundleFor, not by this validator).
+	// specs/relaypack-v1.md briefly double-assigned RP024 to
+	// that error; renumbered 2026-08-14. Do not reuse RP025.
+
 	// Warnings (surfaced in LintReport; never block import).
 
 	// CodeRP019: all candidates share every public_risk_tag

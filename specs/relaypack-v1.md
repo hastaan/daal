@@ -356,8 +356,12 @@ Rules:
   fingerprint at sign time, before age-encryption wraps the bundle.
 * **Recipient app `VerifyBundle`:** after age-decryption, recomputes
   `sha256(localIdentity.X25519Pub)` and compares hex-lowercase. A
-  mismatch returns `ErrRecipientMismatch` (RP024); a missing field
+  mismatch returns `ErrRecipientMismatch` (RP025); a missing field
   on a V1.5 import is permitted for backwards compat with old packs.
+  (History: FRP-14 originally wrote RP024 here, colliding with the
+  FRP-8 cdn-without-direct-sibling lint warning that already owned
+  the number in `relaypackvalidate/codes.go`; renumbered to RP025 on
+  2026-08-14 — see `docs/handovers/frp-14-handover.md` §2.5.)
 * The field lives in the signed manifest payload, so a publisher
   cannot forge it without the publisher private key. Together with
   the age envelope (`specs/sbpx-envelope-v1.md` §4), this prevents a

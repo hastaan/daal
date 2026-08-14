@@ -27,7 +27,7 @@ Everything below is verified against the tree at commit `54abbf4`; deviations fr
 2. **Command names.** Shipped Tauri commands are `wizard_recipient_provision` / `wizard_recipient_revoke` / `wizard_recipient_list` / `wizard_recipient_list_remote` (see `client-ui/src/publisher/wizardCommands.ts:367-395`), not the planned `recipient_add`/`recipient_revoke`/`recipient_resend`/`recipient_list`. There is **no** `address_book_list`; resend is `Wizard.shareInviteSbpx` (wizardCommands.ts:169).
 3. **No `mission/` CI rigs.** None of `mission/frp-14-{address-cross-impl,revoke-soak,e2e-android,e2e-linux}.sh` exist. The E2E claims rest on the manual device session recorded in Phase 45's preamble (Samsung One UI 16, webview flow checks), not on repeatable scripts. This is the biggest gap between plan and tree.
 4. **`specs/v2-closure-v1.md` was never updated** — the V2-blocker vs V2.1-deferral decision (phase doc exit item) is unrecorded.
-5. **RP024 is double-assigned** in `specs/relaypack-v1.md`: recipient mismatch (lines 359/369) and a CDN-front warning (lines 404/416) share the code. Needs a renumber on the next spec touch.
+5. **RP024 was double-assigned** in `specs/relaypack-v1.md`: recipient mismatch and the FRP-8 CDN-front warning (which owns the number in `relaypackvalidate/codes.go`) shared the code. Resolved 2026-08-14: recipient mismatch renumbered to RP025, reserved in the codebook.
 6. **Farsi i18n incomplete.** `client-ui/src/i18n/en.json` and `client-shared/i18n/d2-extra.{en,fa}.json` carry the recipient strings, but `desktop.*`/`mobile.*` have none and `onboarding.fa.json` recipient values are empty — consistent with the D-2 "FA is DRAFT / release veto" caveat.
 
 ## 3. Known-red at handover time
@@ -45,6 +45,6 @@ Everything below is verified against the tree at commit `54abbf4`; deviations fr
 
 1. Regenerate or time-anchor the expired `bundle/go` sample fixtures (red suite).
 2. Record the FRP-14 decision in `specs/v2-closure-v1.md` (V2 blocker vs V2.1 deferral).
-3. Renumber the duplicated RP024 in `specs/relaypack-v1.md`.
+3. ~~Renumber the duplicated RP024~~ — done 2026-08-14 (RP025).
 4. Script the E2E flows the plan promised (`mission/frp-14-*.sh`) or explicitly waive them in the phase doc.
 5. Complete the FA recipient strings before any release that unveils the recipient UI (D-2 release veto applies).
