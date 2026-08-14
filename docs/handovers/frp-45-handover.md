@@ -118,6 +118,21 @@ token surfaced a chain of real bugs, each fixed:
   fix it). Now a provisioned operator resumes at the PIN-free
   `distribute`/`sign` step.
 
+- **`fix(publisher)` `e9ba2de`** — the Step 7 "Add recipient" inline PIN
+  field was `{!pin && <Input value={pin} onChange={setPin}/>}`, so it
+  unmounted on the first keystroke (pin non-empty → `!pin` false) and
+  the PIN could never be entered — every Add recipient failed "invalid
+  PIN". The helper-IP input had the same defect. Now gated on a
+  snapshot taken when Step 7 opens (`recipientPinFieldOpen` /
+  `recipientHelperIpFieldOpen`).
+- **Systemic: the custom Android Kotlin layer was never committed.**
+  `MainActivity.shareFile` and `DaalKeystore` both lived only in a past
+  session's gitignored `gen/android` and were lost on a clean
+  `tauri android init` — a clean build was missing them. Restored via
+  `tools/patch-android-mainactivity.sh` (now the source of truth for
+  that layer, with R8 keep rules). More classes may still be missing
+  further down the recipient-import/connect flow.
+
 **Known follow-up (not yet fixed):** operators still mid-setup
 (pricing/keys/provision) that need the PIN on resume have no inline
 PIN-unlock — the user must step back to the provider step, where the
