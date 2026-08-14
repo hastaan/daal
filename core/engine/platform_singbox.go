@@ -72,9 +72,21 @@ func (p *androidPlatform) CreateDefaultInterfaceMonitor(_ logger.Logger) tun.Def
 	return &staticInterfaceMonitor{}
 }
 
+// UsePlatformNetworkInterfaces reports false: we cannot enumerate
+// interfaces at all in the Android app sandbox (netlink RTM_GETLINK,
+// /proc/net/*, and /sys/class/net are every one SELinux-denied), and we
+// do not need to. auto_detect_interface is left off (see Start), so the
+// dialer never binds outbound sockets to an interface; the VpnService
+// excludes our own package instead, so upstream sockets bypass the TUN
+// at the routing layer. With this false, sing-box never asks us for the
+// list.
 func (p *androidPlatform) UsePlatformNetworkInterfaces() bool { return false }
 
-func (p *androidPlatform) NetworkInterfaces() ([]adapter.NetworkInterface, error) { return nil, nil }
+// NetworkInterfaces is never called (UsePlatformNetworkInterfaces is
+// false) but must exist to satisfy adapter.PlatformInterface.
+func (p *androidPlatform) NetworkInterfaces() ([]adapter.NetworkInterface, error) {
+	return nil, nil
+}
 
 func (p *androidPlatform) UnderNetworkExtension() bool { return false }
 
@@ -119,7 +131,13 @@ func (m *staticInterfaceMonitor) Start() error { return nil }
 
 func (m *staticInterfaceMonitor) Close() error { return nil }
 
-func (m *staticInterfaceMonitor) DefaultInterface() *control.Interface { return nil }
+// DefaultInterface returns nil ("unknown"). We can't enumerate interfaces
+// in the app sandbox and don't need to: auto_detect_interface is off, so
+// the dialer never consults this to bind a socket. sing-box's
+// NetworkManager handles a nil default interface.
+func (m *staticInterfaceMonitor) DefaultInterface() *control.Interface {
+	return nil
+}
 
 func (m *staticInterfaceMonitor) OverrideAndroidVPN() bool { return false }
 

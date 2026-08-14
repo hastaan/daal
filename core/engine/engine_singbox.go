@@ -71,6 +71,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		androidLog("TUN fd not set before set_route")
 		return errors.New("engine: TUN fd not set; VpnService must call engine_set_tun_fd before engine_set_route")
 	}
+
 	inbounds, _ := raw["inbounds"].([]any)
 	// TUN inbound over the fd the host (Android VpnService / desktop
 	// tun-helper) already established. Critical constraints for that
@@ -108,18 +109,22 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	// route.udp_gated is daal's marker (BuildSingBoxConfig), not
 	// sing-box schema — the path manager already enforced the gate
-	// before this route reached Start, so strip it. And when the host
-	// registered a protect callback, upstream sockets must be routed
-	// through the platform control (VpnService.protect) or they loop
-	// straight back into the TUN and wedge the VPN.
+	// before this route reached Start, so strip it.
+	//
+	// We deliberately do NOT set auto_detect_interface. On Android that
+	// flag makes the dialer bind every upstream socket to an auto-
+	// detected underlying interface, which requires enumerating
+	// interfaces — impossible in the app sandbox (netlink RTM_GETLINK,
+	// /proc/net/*, and /sys/class/net are all SELinux-denied), so it
+	// fails every dial with "no available network interface". Instead
+	// the VpnService excludes our own package (addDisallowedApplication),
+	// so the engine's upstream sockets bypass the TUN at the routing
+	// layer and can dial normally without binding to an interface.
 	route, _ := raw["route"].(map[string]any)
 	if route == nil {
 		route = map[string]any{}
 	}
 	delete(route, "udp_gated")
-	if CurrentProtectCallback() != 0 {
-		route["auto_detect_interface"] = true
-	}
 	raw["route"] = route
 
 	// DNS must resolve THROUGH the tunnel (detour=active) or the whole
@@ -174,6 +179,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		s.Stub.mu.Unlock()
 		return err
 	}
+
 	s.instance = inst
 
 	s.Stub.mu.Lock()

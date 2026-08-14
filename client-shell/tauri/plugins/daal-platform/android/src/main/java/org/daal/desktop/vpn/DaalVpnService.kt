@@ -94,7 +94,20 @@ class DaalVpnService : VpnService() {
     // 2. Establish the TUN inbound. We hold the ParcelFileDescriptor
     //    until the engine has accepted ownership so that on rejection
     //    we can close it cleanly (avoids a fd leak).
-    val pfd: ParcelFileDescriptor = Builder()
+    //
+    //    addDisallowedApplication(self) is what keeps the engine's own
+    //    upstream sockets (sing-box outbounds to the relay) OUT of the
+    //    TUN. On Android the VPN captures every app's traffic INCLUDING
+    //    the VPN app's, so without this exclusion the engine's dial to
+    //    the relay loops back into the TUN. The pure-Go alternatives —
+    //    per-socket protect() bound to an auto-detected interface, or
+    //    net.Interfaces()/sysfs enumeration — are unusable here: the
+    //    untrusted-app SELinux domain denies netlink RTM_GETLINK,
+    //    /proc/net/*, and /sys/class/net alike, so the engine can never
+    //    learn an interface to bind to. Excluding our own package makes
+    //    the exclusion at the routing layer, needs no interface list,
+    //    and lets the engine dial normally (auto_detect_interface off).
+    val builder = Builder()
       .setSession("Daal")
       .setMtu(1500)
       .addAddress("10.20.30.40", 32)
@@ -102,7 +115,17 @@ class DaalVpnService : VpnService() {
       .addRoute("::", 0)
       .addDnsServer("1.1.1.1")
       .addDnsServer("9.9.9.9")
-      .establish()
+    try {
+      builder.addDisallowedApplication(packageName)
+    } catch (e: Throwable) {
+      // NameNotFoundException is impossible for our own package, but a
+      // failure here would silently loop traffic — fail the connect
+      // loudly instead.
+      Log.e(TAG, "addDisallowedApplication(self) failed: ${e.message}")
+      DaalCoreBridge.protectImpl = null
+      return false
+    }
+    val pfd: ParcelFileDescriptor = builder.establish()
       ?: run {
         Log.w(TAG, "VpnService.Builder.establish() returned null")
         DaalCoreBridge.protectImpl = null
