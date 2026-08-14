@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Request payload for the `plugin:daal-platform|vpn_start` invoke.
+///
+/// `rename_all = "camelCase"` is required: the JS side invokes with
+/// `{ request: { routeId } }` (the Tauri convention), so without the
+/// rename this struct rejects the payload with "missing field
+/// `route_id`" and the Connect button fails.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VpnStartRequest {
     /// Route id chosen via `engine_set_route` semantics. The plugin
     /// forwards this string verbatim through to the Kotlin
