@@ -68,6 +68,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	// PlatformInterface is present in the box context. We only refuse
 	// early here so the error names the actual contract violation.
 	if CurrentTunFD() < 0 {
+		androidLog("TUN fd not set before set_route")
 		return errors.New("engine: TUN fd not set; VpnService must call engine_set_tun_fd before engine_set_route")
 	}
 	inbounds, _ := raw["inbounds"].([]any)
@@ -114,14 +115,17 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	options, err := singjson.UnmarshalExtendedContext[boxoption.Options](bctx, merged)
 	if err != nil {
+		androidLog("option parse: " + err.Error() + " | config=" + string(merged))
 		return fmt.Errorf("engine: option parse: %w", err)
 	}
 
 	inst, err := box.New(box.Options{Context: bctx, Options: options})
 	if err != nil {
+		androidLog("box.New: " + err.Error())
 		return fmt.Errorf("engine: box.New: %w", err)
 	}
 	if err := inst.Start(); err != nil {
+		androidLog("instance.Start: " + err.Error())
 		_ = inst.Close()
 		s.Stub.mu.Lock()
 		s.Stub.publishLocked(Event{
