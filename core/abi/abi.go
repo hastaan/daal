@@ -211,7 +211,7 @@ func Init(stateDir, logLevel string) error {
 		autoPromotionEnabled: true,
 		store:                s,
 		adapter:              &trust.StoreAdapter{S: s},
-		driver:               engine.NewDefaultDriver(),
+		driver:               newEngineDriver(),
 		pm:                   pathmanager.New(),
 		subs:                 make(chan engine.Event, 32),
 	}

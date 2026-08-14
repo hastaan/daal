@@ -15,11 +15,10 @@ import (
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/include"
 	boxoption "github.com/sagernet/sing-box/option"
-
-	// Feature registrations. Without these blank imports the box.New
-	// registry-resolution panics with "unknown inbound/outbound type".
-	_ "github.com/sagernet/sing-box/include"
+	singjson "github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/service"
 )
 
 // NewDefaultDriver returns the real in-process sing-box driver. The ABI
@@ -63,44 +62,60 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		return fmt.Errorf("engine: parse config: %w", err)
 	}
 
-	// Inject the TUN inbound iff we have a fd. The Android service
-	// owns the fd's lifetime; sing-box dups it internally so detach
-	// on the Java side is safe after Start returns.
-	tunFD := CurrentTunFD()
-	if tunFD < 0 {
-		return errors.New("engine: TUN fd not set; VpnService must call engine_set_tun_fd before engine_start")
+	// The fd itself is NOT written into the config — sing-box v1.13's
+	// TUN options have no file_descriptor field. It travels through
+	// androidPlatform.OpenInterface, which sing-tun consults because a
+	// PlatformInterface is present in the box context. We only refuse
+	// early here so the error names the actual contract violation.
+	if CurrentTunFD() < 0 {
+		return errors.New("engine: TUN fd not set; VpnService must call engine_set_tun_fd before engine_set_route")
 	}
 	inbounds, _ := raw["inbounds"].([]any)
 	tun := map[string]any{
-		"tag":         "tun-in",
-		"type":        "tun",
+		"tag":            "tun-in",
+		"type":           "tun",
 		"interface_name": "daal-tun",
-		"inet4_address":  "172.19.0.1/30",
+		"address":        []any{"172.19.0.1/30"},
 		"mtu":            1500,
 		"auto_route":     true,
 		"strict_route":   false,
-		"endpoint_independent_nat": true,
-		"sniff":         true,
-		"file_descriptor": tunFD,
 	}
 	raw["inbounds"] = append([]any{tun}, inbounds...)
+
+	// route.udp_gated is daal's marker (BuildSingBoxConfig), not
+	// sing-box schema — the path manager already enforced the gate
+	// before this route reached Start, so strip it. And when the host
+	// registered a protect callback, upstream sockets must be routed
+	// through the platform control (VpnService.protect) or they loop
+	// straight back into the TUN and wedge the VPN.
+	route, _ := raw["route"].(map[string]any)
+	if route == nil {
+		route = map[string]any{}
+	}
+	delete(route, "udp_gated")
+	if CurrentProtectCallback() != 0 {
+		route["auto_detect_interface"] = true
+	}
+	raw["route"] = route
 
 	merged, err := json.Marshal(raw)
 	if err != nil {
 		return fmt.Errorf("engine: re-marshal: %w", err)
 	}
 
-	var options boxoption.Options
-	if err := options.UnmarshalJSON(merged); err != nil {
-		return fmt.Errorf("engine: option parse: %w", err)
-	}
-
 	// PlatformInterface lets sing-box ask us for socket-protection
 	// each time it opens an upstream socket (essential — without it
 	// outbound packets are routed *back* through the TUN, causing a
-	// loop that wedges the VPN).
+	// loop that wedges the VPN) and for the TUN device built from the
+	// host-supplied fd.
 	s.platform = newAndroidPlatform()
-	bctx := context.WithValue(ctx, adapter.PlatformInterfaceKey{}, s.platform)
+	bctx := include.Context(ctx)
+	bctx = service.ContextWith[adapter.PlatformInterface](bctx, s.platform)
+
+	options, err := singjson.UnmarshalExtendedContext[boxoption.Options](bctx, merged)
+	if err != nil {
+		return fmt.Errorf("engine: option parse: %w", err)
+	}
 
 	inst, err := box.New(box.Options{Context: bctx, Options: options})
 	if err != nil {
