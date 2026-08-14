@@ -61,6 +61,18 @@ type OperatorRecord struct {
 	// for every subsequent L1/L2 mgmt call (FRP-10 invariant 26).
 	// Empty on V1.5 records.
 	MgmtTLSFingerprint string `json:"mgmt_tls_fingerprint,omitempty"`
+
+	// FRP-14 Tier-2 client-connection material, read off the box over
+	// SSH at provision time (the box writes reality.pub at cloud-init,
+	// independent of the released daal-relay-mgmt binary). The
+	// publisher uses these to assemble a working client outbound.
+	//   RealityPublicKey — base64 x25519 pubkey of vless-in's REALITY
+	//     keypair (/etc/daal/reality.pub).
+	//   TLSCertSHA256 — base64 SHA-256 of the self-signed leaf SPKI for
+	//     the ws/hy2/naive inbounds (/etc/daal/tls-cert.pem); empty
+	//     until the box ships those TLS inbounds.
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	TLSCertSHA256    string `json:"tls_cert_sha256,omitempty"`
 }
 
 // CandidateMeta is one candidate entry on an OperatorRecord. It is

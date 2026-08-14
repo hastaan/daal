@@ -147,16 +147,34 @@ pub fn recipient_provision(
         .map_err(map_bridge_err)?;
     let _ = std::fs::remove_file(&record_path);
 
-    // FRP-14 Tier-2: capture the creds JSON (incl. reality_public_key /
-    // tls_cert_sha256) BEFORE insert_recipient moves the cred fields, and
-    // resolve the relay's public IP from the operator record — that is
-    // the `server` the client outbound dials (NOT helper_ip, which is the
-    // publisher's own WAN used only for provisioning-time allowlisting).
-    let creds_json = serde_json::to_string(&creds).unwrap_or_default();
-    let relay_server_ip = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
-        .ok()
-        .and_then(|v| v.get("public_ip").and_then(|s| s.as_str()).map(String::from))
-        .unwrap_or_default();
+    // FRP-14 Tier-2: build the creds JSON the pack step reads. Capture
+    // BEFORE insert_recipient moves the cred fields. The relay's public
+    // IP, reality pubkey, and tls pin come from the OperatorRecord
+    // (read off the box over SSH at provision time) — the mgmt-response
+    // creds carry empty box material on a box running a pre-Tier-2
+    // released daal-relay-mgmt, so the record is the authoritative
+    // source. `helper_ip` is the publisher's own WAN and is NOT the
+    // server the client dials.
+    let rec_val = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
+        .unwrap_or(serde_json::Value::Null);
+    let field = |k: &str| -> String {
+        rec_val.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
+    };
+    let relay_server_ip = field("public_ip");
+    let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = creds_val.as_object_mut() {
+        // Prefer the record's box material; fall back to whatever the
+        // mgmt response provided (non-empty once a Tier-2 release ships).
+        let reality_pub = field("reality_public_key");
+        let tls_pin = field("tls_cert_sha256");
+        if !reality_pub.is_empty() {
+            obj.insert("reality_public_key".into(), reality_pub.into());
+        }
+        if !tls_pin.is_empty() {
+            obj.insert("tls_cert_sha256".into(), tls_pin.into());
+        }
+    }
+    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
 
     let inserted = ctx
         .db

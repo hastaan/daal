@@ -258,6 +258,21 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 			return nil, healthErr
 		}
 		rec.MgmtTLSFingerprint = fp
+
+		// FRP-14 Tier-2: read the box's client-connection material over
+		// the same ephemeral SSH session while it is still open. The box
+		// writes reality.pub at cloud-init (independent of the released
+		// daal-relay-mgmt binary), so this works without a new release.
+		// Best-effort: a pre-Tier-2 box simply leaves the fields empty.
+		if sshSigner != nil || srv.RootPassword != "" {
+			if pub, err := sshReadFile(rec.PublicIP.String(), sshSigner, srv.RootPassword, "/etc/daal/reality.pub"); err == nil {
+				rec.RealityPublicKey = strings.TrimSpace(pub)
+			}
+			if pin, err := sshReadFile(rec.PublicIP.String(), sshSigner, srv.RootPassword,
+				"/etc/daal/tls-spki-sha256.b64"); err == nil {
+				rec.TLSCertSHA256 = strings.TrimSpace(pin)
+			}
+		}
 	}
 	progress("provision_healthy", "Server is up and healthy")
 	return rec, nil
@@ -477,6 +492,49 @@ func (e *provisionFatalError) Summary() string {
 		return s[:500]
 	}
 	return s
+}
+
+// sshReadFile cats a small file on the box over SSH using the same
+// ephemeral auth as sshCloudInitTail. Used to read box-written
+// connection material (reality.pub, tls SPKI pin) at provision time.
+func sshReadFile(host string, signer ssh.Signer, password, path string) (string, error) {
+	var auth []ssh.AuthMethod
+	if signer != nil {
+		auth = append(auth, ssh.PublicKeys(signer))
+	}
+	if password != "" {
+		auth = append(auth, ssh.Password(password))
+	}
+	if len(auth) == 0 {
+		return "", errors.New("no SSH auth method available")
+	}
+	cfg := &ssh.ClientConfig{
+		User:            "root",
+		Auth:            auth,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         3 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", net.JoinHostPort(host, "22"), cfg)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+	// `cat` a path we control; reject anything unexpectedly large.
+	out, err := sess.Output("head -c 4096 " + shellQuote(path))
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// shellQuote single-quotes a path for safe use in a remote command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func sshCloudInitTail(host string, signer ssh.Signer, password string) (string, error) {
