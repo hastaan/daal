@@ -42,7 +42,14 @@ impl<R: Runtime> Clone for Platform<R> {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartArgs<'a> {
+    // Serialized as `routeId` to match the Kotlin plugin's
+    // `@InvokeArg VpnStartArgs.routeId` (Tauri Mobile parses args as
+    // camelCase). Without the rename the forwarded field is `route_id`
+    // and the Kotlin lateinit `routeId` is never set, failing the
+    // post-consent start with "lateinit property routeId has not been
+    // initialized".
     route_id: &'a str,
 }
 
