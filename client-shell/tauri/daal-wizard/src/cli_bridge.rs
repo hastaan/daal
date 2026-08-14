@@ -356,6 +356,12 @@ pub struct UserCredsResult {
     pub naive_password: String,
     pub ws_path: String,
     pub provisioned_at_unix: i64,
+    // FRP-14 Tier-2 box-wide connection material (empty on a pre-Tier-2
+    // box). Needed to assemble the client outbound in the pack step.
+    #[serde(default)]
+    pub reality_public_key: String,
+    #[serde(default)]
+    pub tls_cert_sha256: String,
 }
 
 /// FRP-14: JSON returned by `daal-deploy users-revoke`.
@@ -376,6 +382,12 @@ pub struct UsersPackSbpxArgs<'a> {
     pub in_sbp_path: &'a Path,
     pub recipient_pub_hex: &'a str,
     pub out_sbpx_path: &'a Path,
+    /// FRP-14 Tier-2: per-recipient creds JSON path (mgmt provision
+    /// shape) + box server IP. When both are set, the pack step
+    /// rewrites the inner .sbp's profiles with real client outbounds.
+    /// Both None preserves the Tier-1 envelope-unchanged behaviour.
+    pub creds_file_path: Option<&'a Path>,
+    pub server: Option<&'a str>,
 }
 
 /// FRP-14 Layer 3b.5: JSON returned by `daal-deploy users-pack-sbpx`.
@@ -1399,6 +1411,9 @@ impl CliRunner for SubprocessRunner {
             .arg(args.recipient_pub_hex)
             .arg("--out")
             .arg(args.out_sbpx_path);
+        if let (Some(creds), Some(server)) = (args.creds_file_path, args.server) {
+            cmd.arg("--creds-file").arg(creds).arg("--server").arg(server);
+        }
         let mut child = cmd
             .apply_env()
             .stdin(Stdio::null())
@@ -2001,6 +2016,8 @@ impl CliRunner for MockRunner {
             naive_password: "mocknaivepassword00000".into(),
             ws_path: format!("/{}/cafebabe", args.name),
             provisioned_at_unix: 1_700_000_000,
+            reality_public_key: "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into(),
+            tls_cert_sha256: "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into(),
         })
     }
 

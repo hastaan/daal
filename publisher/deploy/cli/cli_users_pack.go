@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"daal/bundle-go/envelope"
+	"daal/publisher/deploy/relaypack"
 )
 
 // runUsersUnpackSbpx (Layer 3d) decrypts a `.sbpx` envelope on
@@ -122,12 +123,51 @@ func trimAscii(s string) string {
 	return s
 }
 
+// clientParamsFromCredsFile reads a per-recipient creds JSON (the mgmt
+// /users/provision response shape) and maps it to the fields the client
+// outbound assembler needs, with `server` supplied separately (the box
+// public IP is not part of the creds payload).
+func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return relaypack.ClientConnParams{}, err
+	}
+	var c struct {
+		VLESSUUID        string `json:"vless_uuid"`
+		RealityShortID   string `json:"reality_short_id"`
+		RealityPublicKey string `json:"reality_public_key"`
+		Hy2Password      string `json:"hy2_password"`
+		NaivePassword    string `json:"naive_password"`
+		WSPath           string `json:"ws_path"`
+		TLSCertSHA256    string `json:"tls_cert_sha256"`
+	}
+	if err := json.Unmarshal(body, &c); err != nil {
+		return relaypack.ClientConnParams{}, fmt.Errorf("parse: %w", err)
+	}
+	return relaypack.ClientConnParams{
+		Server:           server,
+		VLESSUUID:        c.VLESSUUID,
+		RealityShortID:   c.RealityShortID,
+		RealityPublicKey: c.RealityPublicKey,
+		Hy2Password:      c.Hy2Password,
+		NaivePassword:    c.NaivePassword,
+		WSPath:           c.WSPath,
+		TLSCertSHA256:    c.TLSCertSHA256,
+	}, nil
+}
+
 func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("users-pack-sbpx", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	inPath := fs.String("in", "", "input .sbp path (Step 6 output)")
 	pubHex := fs.String("recipient-pub-hex", "", "recipient X25519 pubkey (64 lowercase hex chars)")
 	outPath := fs.String("out", "", "output .sbpx path")
+	// FRP-14 Tier-2: when both --creds-file and --server are given, the
+	// inner .sbp's per-route profiles are rewritten with real client
+	// sing-box outbounds for THIS recipient before enveloping. Omitting
+	// them preserves the Tier-1 behaviour (envelope the .sbp unchanged).
+	credsFile := fs.String("creds-file", "", "per-recipient creds JSON (mgmt /users/provision shape); enables Tier-2 profile rewrite")
+	server := fs.String("server", "", "box public IP/host for the client outbound (required with --creds-file)")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -159,6 +199,27 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 		fmt.Fprintf(stderr, "read input: %v\n", err)
 		return 1
 	}
+
+	// FRP-14 Tier-2: rewrite the inner .sbp's profiles with real client
+	// outbounds for this recipient before enveloping. Fails closed if a
+	// route can't be made connectable — a pack must not ship a dead route.
+	if *credsFile != "" {
+		if *server == "" {
+			fmt.Fprintln(stderr, "--server is required with --creds-file")
+			return 2
+		}
+		params, err := clientParamsFromCredsFile(*credsFile, *server)
+		if err != nil {
+			fmt.Fprintf(stderr, "creds-file: %v\n", err)
+			return 2
+		}
+		plaintext, err = relaypack.RewriteProfilesForRecipient(plaintext, params)
+		if err != nil {
+			fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
+			return 1
+		}
+	}
+
 	if len(plaintext) > envelope.MaxCiphertextBytes {
 		fmt.Fprintf(stderr, "input .sbp is %d bytes; max %d\n",
 			len(plaintext), envelope.MaxCiphertextBytes)

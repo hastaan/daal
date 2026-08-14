@@ -147,6 +147,17 @@ pub fn recipient_provision(
         .map_err(map_bridge_err)?;
     let _ = std::fs::remove_file(&record_path);
 
+    // FRP-14 Tier-2: capture the creds JSON (incl. reality_public_key /
+    // tls_cert_sha256) BEFORE insert_recipient moves the cred fields, and
+    // resolve the relay's public IP from the operator record — that is
+    // the `server` the client outbound dials (NOT helper_ip, which is the
+    // publisher's own WAN used only for provisioning-time allowlisting).
+    let creds_json = serde_json::to_string(&creds).unwrap_or_default();
+    let relay_server_ip = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
+        .ok()
+        .and_then(|v| v.get("public_ip").and_then(|s| s.as_str()).map(String::from))
+        .unwrap_or_default();
+
     let inserted = ctx
         .db
         .insert_recipient(NewRecipientRow {
@@ -170,17 +181,13 @@ pub fn recipient_provision(
         .map_err(WizardError::Db)?
         .ok_or_else(|| WizardError::Pricing("recipient row vanished after insert".into()))?;
 
-    // FRP-14 Layer 3b.5: produce the per-recipient `.sbpx`
-    // envelope alongside the row. The inner `.sbp` is the
-    // operator-level Step-6 output (shared creds for now;
-    // per-recipient inbound rewriting lands in Tier-2). The
-    // envelope adds in-transit confidentiality and binds the
-    // file to one recipient pubkey.
-    //
-    // We don't fail the whole provision if envelope wrap fails —
-    // the box-side credentials are already live and the user can
-    // still share the legacy `.sbp`. We just leave `sbpx_path`
-    // empty and the UI surfaces that.
+    // FRP-14 Tier-2: produce the per-recipient `.sbpx` envelope. The
+    // inner `.sbp`'s profiles are rewritten with real client outbounds
+    // for THIS recipient (creds_file + server), then age-wrapped and
+    // bound to the recipient pubkey. Without the box connection material
+    // (pre-Tier-2 box → empty reality_public_key) the rewrite fails
+    // closed and we leave sbpx_path empty; the box-side creds are still
+    // live, so the operator can retry after the box is updated.
     let mut summary: RecipientSummary = row.into();
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
     if in_sbp_path.exists() {
@@ -188,15 +195,27 @@ pub fn recipient_provision(
             .staging_dir
             .join(format!("{operator_id}.{}.sbpx", summary.name));
         let recipient_pub_hex = hex::encode(pub_key);
+        // Stage the creds JSON for the subprocess; 0600, removed after.
+        let creds_path = ctx.staging_dir.join(format!("{operator_id}.{}.creds.json", summary.name));
+        let wrote_creds = std::fs::write(&creds_path, creds_json.as_bytes()).is_ok();
+        let (creds_arg, server_arg): (Option<&std::path::Path>, Option<&str>) =
+            if wrote_creds && !relay_server_ip.is_empty() {
+                (Some(creds_path.as_path()), Some(relay_server_ip.as_str()))
+            } else {
+                (None, None)
+            };
         if let Ok(_res) = ctx.cli.run_users_pack_sbpx(
             crate::cli_bridge::UsersPackSbpxArgs {
                 in_sbp_path: &in_sbp_path,
                 recipient_pub_hex: &recipient_pub_hex,
                 out_sbpx_path: &out_path,
+                creds_file_path: creds_arg,
+                server: server_arg,
             },
         ) {
             summary.sbpx_path = out_path.to_string_lossy().to_string();
         }
+        let _ = std::fs::remove_file(&creds_path);
     }
     Ok(summary)
 }
