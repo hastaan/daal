@@ -200,6 +200,60 @@ a client sing-box outbound. Chain of evidence:
 Until that exists, no imported pack can produce a working tunnel — the
 data plane is proven right up to the sing-box config handoff.
 
+## 3f. FRP-14 Tier-2: the client-config assembly — BUILT (2026-08-14)
+
+The gap in §3e is now closed in code (commits `f26ec3b`, `183ed76`,
+`eb4f6d6` + mgmt/publisher changes), all unit-tested locally:
+
+- **mgmt plane** (`cmd/daal-relay-mgmt`): `/users/provision` now echoes
+  the box-wide `reality_public_key` (from `/etc/daal/reality.pub`,
+  already written at cloud-init) and `tls_cert_sha256` (base64 SPKI pin
+  of the self-signed leaf), so the publisher never SSHes the box.
+- **assembler** (`publisher/deploy/relaypack/client_outbound.go`):
+  `ClientOutboundForFamily` renders a concrete client outbound per
+  family — vless-reality (REALITY, bare-IP-friendly, no cert),
+  websocket-tls / hysteria2 / naive (TLS pinned via
+  `certificate_public_key_sha256`, never `insecure`).
+- **rewrite** (`relaypack/client_pack.go`):
+  `RewriteProfilesForRecipient` swaps each `profiles/<id>.json` in the
+  signed operator `.sbp` with the assembled outbound and re-emits
+  WITHOUT re-signing — profiles aren't covered by the manifest
+  signature; the `.sbpx` age envelope carries per-recipient integrity.
+  Fails closed on any unserviceable route.
+- **pipeline**: `daal-deploy users-pack-sbpx` gained `--creds-file` +
+  `--server`; the wizard's `recipient_provision` captures the creds
+  JSON (incl. reality pubkey/tls pin) and the relay IP from the
+  operator record and passes them through.
+- **validated locally** (`core/engine/client_outbound_singbox_test.go`,
+  `-tags singbox`): the assembled vless-reality, websocket-tls, and
+  hysteria2 outbounds all parse cleanly through sing-box's own option
+  decoder after `BuildSingBoxConfig` — so the recipient engine accepts
+  them. No device needed to catch config-field bugs.
+
+**What still blocks a green on-device tunnel:**
+1. The running relay box has the OLD `daal-relay-mgmt` (no reality-pub
+   echo), so a **fresh provision is mandatory** to pick up the new
+   binary — cost + the operator's Hetzner token. The APK's bundled
+   `libdaal_deploy.so` also needs rebuilding from the new code.
+2. **Box-side TLS for ws/hy2/naive (§3g / task 13, NOT done):** the box
+   ships only `vless-in` (REALITY, no cert); `appendHy2User`/
+   `appendNaiveUser` no-op when their inbounds are absent, and the ws
+   inbound sets `tls.enabled` with no certificate. Making those three
+   serviceable on a bare IP needs a self-signed cert
+   (`/etc/daal/tls-cert.pem`) generated at cloud-init, hy2-in/naive-in
+   inbounds added to the default config, and the ws inbound given the
+   cert — then the client pins it via the `tls_cert_sha256` the mgmt
+   plane already returns. Until then, **only vless-reality is
+   serviceable**, and the default profile still advertises all four —
+   so recipients get two dead routes (hy2/naive) + one unverified
+   (ws). Robustness fix: either finish the box TLS story or gate the
+   advertised set to what the box serves.
+
+**Bottom line:** vless-reality is code-complete, sing-box-validated, and
+ready to prove on-device the moment a box is re-provisioned with the new
+mgmt binary. The other three transports are client-complete but need the
+box-side self-signed-TLS build.
+
 ## 4. Toolchain notes (this machine)
 
 - Android SDK at `~/Android/sdk` (cmdline-tools symlinked so tauri's env check passes: `cmdline-tools/bin -> latest/bin`), NDK **r27 / 27.0.12077973** at `~/Android/android-ndk-r27`, symlinked into `~/Android/sdk/ndk/27.0.12077973`.
