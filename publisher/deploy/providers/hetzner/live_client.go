@@ -536,8 +536,17 @@ type ServerTypeEntry struct {
 	Arch        string  `json:"arch"`
 }
 
-// ListServerTypes returns all shared-CPU server types with pricing
-// for the given region. Filters out dedicated and special types.
+// ListServerTypes returns all shared-CPU server types that are
+// available for new-server creation in the given region, with pricing.
+// Filters out dedicated/special types AND — critically — retired types.
+//
+// Hetzner keeps a pricing entry for a location long after a server type
+// is retired there (e.g. the old cx11/cx21 Intel line), so filtering on
+// pricing alone surfaces types that then fail `create server` with
+// "unsupported location for server type (invalid_input)". The
+// authoritative signal is the per-location Available flag on
+// ServerType.Locations; honour it so the wizard only ever auto-selects
+// a type it can actually provision.
 func (l *ListingClient) ListServerTypes(ctx context.Context, region string) ([]ServerTypeEntry, error) {
 	types, err := l.c.ServerType.All(ctx)
 	if err != nil {
@@ -549,6 +558,9 @@ func (l *ListingClient) ListServerTypes(ctx context.Context, region string) ([]S
 		name := st.Name
 		isShared := len(name) >= 2 && (name[:2] == "cx" || name[:3] == "cax" || name[:3] == "cpx" || name[:3] == "ccx")
 		if !isShared {
+			continue
+		}
+		if !serverTypeAvailableInLocation(st, region) {
 			continue
 		}
 		for _, p := range st.Pricings {
@@ -575,6 +587,23 @@ func (l *ListingClient) ListServerTypes(ctx context.Context, region string) ([]S
 		}
 	}
 	return result, nil
+}
+
+// serverTypeAvailableInLocation reports whether st can be used to create
+// a new server in region. It trusts the per-location Available flag (and
+// skips locations flagged deprecated). When the API returns no per-
+// location list (older responses), it falls back to the type-level
+// deprecation flag so a missing Locations slice never hides every type.
+func serverTypeAvailableInLocation(st *hcloud.ServerType, region string) bool {
+	if len(st.Locations) == 0 {
+		return !st.IsDeprecated()
+	}
+	for _, loc := range st.Locations {
+		if loc.Location != nil && loc.Location.Name == region {
+			return loc.Available && !loc.IsDeprecated()
+		}
+	}
+	return false
 }
 
 // ExistingServerEntry is a single existing server on the account.
