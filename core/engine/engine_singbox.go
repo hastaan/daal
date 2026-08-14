@@ -80,21 +80,27 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	//     "system"/"mixed" stack tries to `listen` on the tun address,
 	//     which fails on Android ("bind: cannot assign requested
 	//     address") because the OS owns the interface.
-	//   - auto_route MUST be false: the VpnService Builder already
-	//     installed 0.0.0.0/0 + ::/0 into the fd; sing-box cannot (and
-	//     must not) touch system routing on an unrooted device.
+	//   - auto_route stays true so sing-box wires the netstack's packet
+	//     forwarding to the router. It does NOT manipulate system
+	//     routing here: with a PlatformInterface present
+	//     (androidPlatform.UsePlatformInterface()==true) sing-box skips
+	//     the ip-rule/iptables work — the VpnService Builder already
+	//     installed 0.0.0.0/0 + ::/0 into the fd. Setting it false
+	//     leaves the gvisor TCP forwarder unwired, so the netstack RSTs
+	//     every connection ("Connection refused" from the tun address).
 	//   - address MUST match what the VpnService established
-	//     (10.20.30.40/30, see DaalVpnService.onStartCommand) so the
-	//     netstack gateway aligns with the OS interface.
+	//     (10.20.30.40/30, see DaalVpnService.onStartCommand).
+	//   - sniff lets the router see the destination for DNS/routing.
 	tun := map[string]any{
 		"tag":            "tun-in",
 		"type":           "tun",
 		"interface_name": "daal-tun",
 		"address":        []any{"10.20.30.40/30"},
 		"mtu":            1500,
-		"auto_route":     false,
+		"auto_route":     true,
 		"strict_route":   false,
 		"stack":          "gvisor",
+		"sniff":          true,
 	}
 	raw["inbounds"] = append([]any{tun}, inbounds...)
 
@@ -113,6 +119,20 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		route["auto_detect_interface"] = true
 	}
 	raw["route"] = route
+
+	// DNS must resolve THROUGH the tunnel (detour=active) or the whole
+	// point is defeated (and, more immediately, name lookups fail so no
+	// connection starts). Only add a default if the profile didn't bring
+	// its own dns block. Legacy server shape — still accepted in v1.13.
+	if _, ok := raw["dns"]; !ok {
+		raw["dns"] = map[string]any{
+			"servers": []any{
+				map[string]any{"tag": "remote", "address": "1.1.1.1", "detour": "active"},
+			},
+			"final":    "remote",
+			"strategy": "prefer_ipv4",
+		}
+	}
 
 	merged, err := json.Marshal(raw)
 	if err != nil {
