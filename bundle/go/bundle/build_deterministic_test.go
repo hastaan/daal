@@ -13,19 +13,26 @@ func TestDeterministicBuildIsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// VerifyBundle checks expiry against the wall clock, so the
+	// window is derived from now — hardcoded dates turn this test
+	// into a time bomb (it went red 2026-05-25). Determinism is
+	// asserted by building twice from the SAME manifest, so dynamic
+	// timestamps cost nothing.
+	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	expires := time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
 	manifest := Manifest{
 		SpecVersion: 1,
 		Publisher: PublisherInfo{
 			Name:              "Det Publisher",
 			KeyFingerprintHex: PublisherFingerprint(pub).Hex,
-			KeyCreatedAt:      "2026-04-25T12:00:00Z",
+			KeyCreatedAt:      created,
 			TrustClass:        "community",
 		},
 		Bundle: BundleInfo{
 			ID:             "bundle-det",
 			Type:           "provider",
-			CreatedAt:      "2026-04-25T12:00:00Z",
-			ExpiresAt:      "2026-05-25T12:00:00Z",
+			CreatedAt:      created,
+			ExpiresAt:      expires,
 			SupersedesKeys: []string{},
 		},
 		Routes: []RouteManifestEntry{{
@@ -33,8 +40,8 @@ func TestDeterministicBuildIsByteIdentical(t *testing.T) {
 			ScarcityClass:   "normal",
 			TransportFamily: "vless-reality",
 			ConfigPath:      "profiles/route-det.json",
-			ValidFrom:       "2026-04-25T12:00:00Z",
-			ValidUntil:      "2026-05-25T12:00:00Z",
+			ValidFrom:       created,
+			ValidUntil:      expires,
 		}},
 	}
 	profiles := map[string][]byte{"profiles/route-det.json": []byte(`{"type":"direct"}`)}
