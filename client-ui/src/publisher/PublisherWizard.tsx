@@ -328,6 +328,15 @@ export default function PublisherWizard({ t }: Props) {
     const [recipientDisplayName, setRecipientDisplayName] = useState('');
     const [recipientBusy, setRecipientBusy] = useState(false);
     const [recipientError, setRecipientError] = useState<string | null>(null);
+    // Whether to show the inline PIN / helper-IP inputs in the Step 7
+    // recipient form. Snapshotted once on step entry (see the
+    // distribute effect below) — NOT gated on the live `pin`/`helperIp`
+    // values, or the field would unmount the instant the first
+    // character is typed (making the PIN un-enterable and every
+    // "Add recipient" fail with "invalid PIN").
+    const [recipientPinFieldOpen, setRecipientPinFieldOpen] = useState(false);
+    const [recipientHelperIpFieldOpen, setRecipientHelperIpFieldOpen] =
+        useState(false);
     // FRP-14 UX: live elapsed-seconds counter while "Add recipient"
     // is in flight, so the operator sees that something IS happening
     // during the ~30s mgmt round-trip rather than thinking the app
@@ -374,11 +383,16 @@ export default function PublisherWizard({ t }: Props) {
         }
         const id = STEPS[stepIdx]?.id;
         if (id !== 'distribute') return;
+        // Snapshot whether the inline PIN / helper-IP fields are needed,
+        // ONCE on entry. Gating the inputs on the live values instead
+        // would unmount them on the first keystroke.
+        setRecipientPinFieldOpen(!pin);
+        setRecipientHelperIpFieldOpen(!helperIp);
         if (!live) return;
         Wizard.recipientList(operatorId)
             .then((rs) => setRecipients(rs))
             .catch(() => setRecipients([]));
-    }, [stepIdx, operatorId, live]);
+    }, [stepIdx, operatorId, live]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
@@ -1762,7 +1776,7 @@ export default function PublisherWizard({ t }: Props) {
                                             operator can unlock the per-recipient
                                             provision call from Step 7 without
                                             walking the whole wizard again. */}
-                                        {!pin && (
+                                        {recipientPinFieldOpen && (
                                             <Input
                                                 type="password"
                                                 placeholder={t(
@@ -1778,7 +1792,7 @@ export default function PublisherWizard({ t }: Props) {
                                             on step entry, but if detection failed
                                             (no internet / blocked) the operator
                                             needs a way in. */}
-                                        {!helperIp && (
+                                        {recipientHelperIpFieldOpen && (
                                             <Input
                                                 placeholder={t(
                                                     'wiz.recipients.helper_ip_placeholder',
