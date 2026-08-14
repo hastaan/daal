@@ -36,11 +36,11 @@ func resetSchedulerForShutdown() {
 // ensureScheduler returns a Scheduler bound to the current core's
 // store + Refresher. Idempotent.
 func ensureScheduler() (*scheduler.Scheduler, error) {
-	// Snapshot globalCore once. A concurrent Shutdown can null it out
+	// Snapshot loadedCore() once. A concurrent Shutdown can null it out
 	// between the entry-point's check and our access, so re-checking
 	// here keeps the gomobile contract ("never panic; always return
 	// a clean error if not ready") regardless of timing.
-	c := globalCore
+	c := loadedCore()
 	if c == nil {
 		return nil, errors.New("abi: not initialized")
 	}
@@ -74,7 +74,7 @@ func ensureScheduler() (*scheduler.Scheduler, error) {
 
 // SchedulerStatus is engine_scheduler_status.
 func SchedulerStatus() (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
 	s, err := ensureScheduler()

@@ -47,7 +47,7 @@ const (
 //	-1 engine not initialised
 //	-3 priority list contains an unknown channel ID
 func SetRendezvousPriority(priority []string) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	for _, ch := range priority {
@@ -55,7 +55,7 @@ func SetRendezvousPriority(priority []string) int {
 			return -3
 		}
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	c.rendezvousPriorityOverride = append([]string(nil), priority...)
 	c.mu.Unlock()
@@ -69,10 +69,10 @@ func SetRendezvousPriority(priority []string) int {
 // RendezvousPriority returns the current per-engine override
 // (nil if not set). Pure read.
 func RendezvousPriority() []string {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return nil
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.rendezvousPriorityOverride == nil {
@@ -88,10 +88,10 @@ func RendezvousPriority() []string {
 //	-1 engine not initialised
 //	-2 storage profile is "vault" — push is forbidden
 func SetPushRendezvousEnabled(enabled bool) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	if c.storageProfile == "vault" {
 		c.mu.Unlock()
@@ -111,10 +111,10 @@ func SetPushRendezvousEnabled(enabled bool) int {
 
 // PushRendezvousEnabled reports the current opt-in value.
 func PushRendezvousEnabled() bool {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return false
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.pushRendezvousEnabled
@@ -126,10 +126,10 @@ func PushRendezvousEnabled() bool {
 // FCM/APNS tokens. Returns -1 if the engine is not initialised
 // or -2 if the storage profile is "vault".
 func SetPushDeviceToken(platform, token string) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	if c.storageProfile == "vault" {
 		c.mu.Unlock()
@@ -156,10 +156,10 @@ type PushDevice struct {
 // PushDeviceToken returns the stored push device token + its
 // platform. Both fields are empty if no token is set.
 func PushDeviceToken() PushDevice {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return PushDevice{}
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return PushDevice{Platform: c.pushDeviceTokenPlatform, Token: c.pushDeviceToken}
@@ -174,13 +174,13 @@ func PushDeviceToken() PushDevice {
 // rejected with an error (defence-in-depth — the Selector also
 // returns only known channels).
 func RecordRendezvousWinner(routeID, channelID, networkID string) error {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return errors.New("abi: not initialised")
 	}
 	if !rendezvous.IsKnownChannel(channelID) {
 		return errors.New("abi: unknown rendezvous channel " + channelID)
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	c.lastWinningRendezvousChannel = channelID
 	c.mu.Unlock()

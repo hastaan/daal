@@ -38,14 +38,14 @@ var globalNetmem = &netmemSingleton{activeNetwork: netmem.SentinelUnset}
 
 // netmemStore returns the netmem.Store, lazy-creating it on first
 // use bound to the global core's routestore. Returns nil if
-// globalCore is not initialised yet.
+// the Core is not initialised yet.
 func netmemStore() *netmem.Store {
 	globalNetmem.mu.Lock()
 	defer globalNetmem.mu.Unlock()
 	if globalNetmem.store != nil {
 		return globalNetmem.store
 	}
-	c := globalCore
+	c := loadedCore()
 	if c == nil || c.store == nil {
 		return nil
 	}
@@ -74,7 +74,7 @@ func resetNetmemForShutdown() {
 // the sentinel network ID so all 2C-aware code paths agree on the
 // "no real network yet" identity until the first NetworkChanged.
 func seedNetmemForInit() {
-	c := globalCore
+	c := loadedCore()
 	if c == nil {
 		return
 	}

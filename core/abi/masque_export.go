@@ -25,7 +25,7 @@ import "C"
 
 //export engine_set_masque_submode_override
 func engine_set_masque_submode_override(submode *C.char) C.int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	val := ""

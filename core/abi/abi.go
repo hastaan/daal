@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"daal/bundle-go/importer"
@@ -177,7 +178,15 @@ type Core struct {
 	lastConjurePhantomHashHex string
 }
 
-var globalCore *Core
+// globalCorePtr holds the process-wide Core. Init fully constructs the
+// Core, then publishes it with one atomic store; readers go through
+// loadedCore() and observe either nil (clean "not initialized" error)
+// or a fully initialised Core — never a partially built one. A plain
+// pointer variable here is a data race against the concurrent ABI
+// pollers (TestInit_NoNilDerefFromConcurrentReaders).
+var globalCorePtr atomic.Pointer[Core]
+
+func loadedCore() *Core { return globalCorePtr.Load() }
 
 // soakDiagHook is registered ONLY by `-tags soak` builds (see
 // ios_handoff_diag.go). Release builds leave it nil and the
@@ -186,8 +195,8 @@ var soakDiagHook func(map[string]any)
 
 // Init is engine_init.
 //
-// Concurrency contract: globalCore is published in a single
-// assignment at the end of this function, after every sub-field is
+// Concurrency contract: the Core is published in a single atomic
+// store at the end of this function, after every sub-field is
 // populated. Readers therefore observe either `nil` (engine not
 // ready — mustCore() panics, gomobile turns that into a Java
 // Exception) or a fully initialised Core. The Phase-1B Android crash
@@ -237,10 +246,10 @@ func Init(stateDir, logLevel string) error {
 		core.secretsUnlocked = true
 	}
 
-	// Atomic publish. Every other engine function reads globalCore;
+	// Atomic publish. Every other engine function reads loadedCore();
 	// before this point they observe nil (clean Java Exception via
 	// mustCore), after this point they see a fully populated Core.
-	globalCore = core
+	globalCorePtr.Store(core)
 
 	// Phase 2A-Polish: bump the budget engine's session epoch. This
 	// is the canonical session boundary — every successful Init
@@ -257,26 +266,27 @@ func Init(stateDir, logLevel string) error {
 	// secrets KV. Default-OFF; missing key → off. The flag
 	// survives session epochs by virtue of being persisted here
 	// rather than reset on every Init.
-	loadExperimentalFamiliesEnabled(globalCore)
+	loadExperimentalFamiliesEnabled(loadedCore())
 	// Phase 3B: daalte the rendezvous priority override + push
 	// opt-in + push device token from the secrets KV. The vault
 	// profile rejects push-related fields at daalte time even
 	// if a corrupt persisted state attempts to enable them.
-	loadRendezvousState(globalCore)
+	loadRendezvousState(loadedCore())
 	// Phase 3C: daalte the MASQUE sub-mode override from the
 	// secrets KV. Missing / out-of-list values default to "no
 	// override" (auto cascade).
-	loadMasqueState(globalCore)
+	loadMasqueState(loadedCore())
 	return nil
 }
 
 // Shutdown is engine_shutdown.
 func Shutdown() error {
-	if globalCore == nil {
+	// Swap so concurrent Shutdown calls cannot double-Stop the same
+	// Core: exactly one caller wins the pointer.
+	c := globalCorePtr.Swap(nil)
+	if c == nil {
 		return nil
 	}
-	c := globalCore
-	globalCore = nil
 	if c.driver != nil {
 		_ = c.driver.Stop()
 	}
@@ -737,8 +747,9 @@ func Subscribe() <-chan engine.Event {
 }
 
 func mustCore() *Core {
-	if globalCore == nil {
+	c := loadedCore()
+	if c == nil {
 		panic(errors.New("abi: not initialized — call Init first"))
 	}
-	return globalCore
+	return c
 }

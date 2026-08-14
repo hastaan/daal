@@ -40,13 +40,13 @@ const masqueSubmodeOverrideKey = "masque_submode_override"
 //	-1 engine not initialised
 //	-3 sub-mode is not in the v1 closed list
 func SetMasqueSubmodeOverride(submode string) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	if submode != "" && !masque.IsKnownSubmode(submode) {
 		return -3
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	c.masqueSubmodeOverride = submode
 	c.mu.Unlock()
@@ -60,10 +60,10 @@ func SetMasqueSubmodeOverride(submode string) int {
 // override. Empty string means "no override — use the auto
 // cascade." Pure read.
 func MasqueSubmodeOverride() string {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return ""
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.masqueSubmodeOverride
@@ -75,10 +75,10 @@ func MasqueSubmodeOverride() string {
 // masque route activated yet this session." Pure read;
 // snapshot, not cumulative.
 func LastChosenMasqueSubmode() string {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return ""
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastChosenMasqueSubmode
@@ -94,13 +94,13 @@ func LastChosenMasqueSubmode() string {
 // rejected with an error (defence-in-depth — chooseSubmode
 // also returns only known sub-modes).
 func RecordChosenMasqueSubmode(routeID, submode, networkID string) error {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return errors.New("abi: not initialised")
 	}
 	if !masque.IsKnownSubmode(submode) {
 		return errors.New("abi: unknown masque sub-mode " + submode)
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	c.lastChosenMasqueSubmode = submode
 	c.mu.Unlock()

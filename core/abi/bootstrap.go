@@ -40,11 +40,11 @@ func SetBootstrapManifestForTest(m *bootstrap.Manifest) {
 }
 
 func ensureBootstrap() (*bootstrap.Provider, error) {
-	// Snapshot globalCore once so a concurrent Shutdown can't null it
+	// Snapshot loadedCore() once so a concurrent Shutdown can't null it
 	// out between the check and the use. ensureBootstrap is reachable
 	// from gomobile-bound entry points the Android UI polls during
 	// the Init/Shutdown window.
-	c := globalCore
+	c := loadedCore()
 	if c == nil {
 		return nil, errors.New("abi: not initialized")
 	}
@@ -86,7 +86,7 @@ func BootstrapInstallSeeds() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if c := globalCore; c != nil && c.pm != nil {
+	if c := loadedCore(); c != nil && c.pm != nil {
 		_ = c.pm.SetPosture(pathmanager.EventBootstrapStart, pathmanager.PostureBootstrapDiscovery)
 	}
 	out, _ := json.Marshal(res)
@@ -113,7 +113,7 @@ func BootstrapRefresh(timeoutMs int) (string, error) {
 	// don't want to clobber e.g. ExperimentalActive or Lifeline just
 	// because a background refresh succeeded.
 	if err == nil && res.DirectoryFetched {
-		if c := globalCore; c != nil && c.pm != nil {
+		if c := loadedCore(); c != nil && c.pm != nil {
 			_ = c.pm.SetPosture(pathmanager.EventDirectoryFetched, pathmanager.PostureImportedActive)
 		}
 	}
@@ -130,7 +130,7 @@ func BootstrapRefresh(timeoutMs int) (string, error) {
 
 // BootstrapStatus is engine_bootstrap_status.
 func BootstrapStatus() (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
 	p, err := ensureBootstrap()

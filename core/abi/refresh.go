@@ -38,7 +38,7 @@ func resetRefreshForShutdown() {
 func ensureRefresh() (*refresh.Refresher, *refresh.RevocationRefresher, error) {
 	// Snapshot for the same reason ensureBootstrap and ensureScheduler
 	// do — gomobile entry points the UI polls reach this code path.
-	c := globalCore
+	c := loadedCore()
 	if c == nil {
 		return nil, nil, errors.New("abi: not initialized")
 	}
@@ -132,10 +132,10 @@ func SubscriptionRemove(subscriptionID string) error {
 // SubscriptionList is a helper used by the CLI; not part of the C ABI but
 // exposed via gomobile.
 func SubscriptionList() (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
-	c := globalCore
+	c := loadedCore()
 	rows, err := c.store.ListSubscriptions()
 	if err != nil {
 		return "", err
@@ -190,10 +190,10 @@ func RevocationRefreshAll(timeoutMs int) (string, error) {
 
 // PointerRotationStatus is engine_pointer_rotation_status.
 func PointerRotationStatus() (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
-	c := globalCore
+	c := loadedCore()
 	p, err := ensureBootstrap()
 	if err != nil {
 		return "", err
@@ -214,10 +214,10 @@ func PointerRotationStatus() (string, error) {
 // worker), so entry points that callers may legitimately invoke
 // during the init window MUST return an error instead.
 func DiagnosticsExplain() (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
-	c := globalCore
+	c := loadedCore()
 	w := c.pm.Explain()
 	// Persist to diagnostics_explain so the CLI / next-launch UI can
 	// surface it without needing the Manager to still be in memory.

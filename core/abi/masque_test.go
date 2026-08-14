@@ -156,7 +156,7 @@ func TestRecordChosenMasqueSubmode_PersistsThroughLayers(t *testing.T) {
 		t.Errorf("LastChosenMasqueSubmode: got %q", got)
 	}
 	// (b) routestore (per-route).
-	body, err := globalCore.store.GetSecret("masque_submode:r-mq-1")
+	body, err := loadedCore().store.GetSecret("masque_submode:r-mq-1")
 	if err != nil {
 		t.Fatalf("routestore lookup: %v", err)
 	}

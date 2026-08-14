@@ -7,7 +7,7 @@ package abi
 // so the iOS / Android bridges can call it through the standard
 // gomobile binding surface.
 func EngineSetExperimentalFamiliesEnabled(enabled int) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	SetExperimentalFamiliesEnabled(enabled != 0)

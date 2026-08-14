@@ -24,7 +24,7 @@ import (
 
 //export engine_set_rendezvous_priority
 func engine_set_rendezvous_priority(priorityJSON *C.char) C.int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	if priorityJSON == nil {
@@ -53,7 +53,7 @@ func engine_set_rendezvous_priority(priorityJSON *C.char) C.int {
 
 //export engine_set_push_rendezvous_enabled
 func engine_set_push_rendezvous_enabled(enabled C.int) C.int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	return C.int(SetPushRendezvousEnabled(enabled != 0))

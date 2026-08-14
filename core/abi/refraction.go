@@ -42,13 +42,13 @@ import (
 // `routeID` is the route the psiphon handler activated; pass
 // empty string to clear (e.g., on engine_clear_route).
 func RecordPsiphonActiveRoute(routeID string) error {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return errors.New("abi: not initialised")
 	}
 	if !psiphonCompiledIn && routeID != "" {
 		return errors.New("abi: psiphon vendor tree excluded; cannot record active route")
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	c.lastActivePsiphonRouteID = routeID
 	c.mu.Unlock()
@@ -59,10 +59,10 @@ func RecordPsiphonActiveRoute(routeID string) error {
 // activated psiphon route ID this session. Empty string ⇒ no
 // activation this session.
 func PsiphonActiveRoute() string {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return ""
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastActivePsiphonRouteID
@@ -79,10 +79,10 @@ func PsiphonActiveRoute() string {
 // boundary (8-byte SHA-256 truncation, hex-encoded) and stores
 // only the hash. Empty `rawPhantomIP` clears the hash.
 func RecordConjureActivation(routeID, rawPhantomIP string) error {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return errors.New("abi: not initialised")
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	c.lastActiveConjureRouteID = routeID
 	if rawPhantomIP == "" {
@@ -97,10 +97,10 @@ func RecordConjureActivation(routeID, rawPhantomIP string) error {
 // ConjureActiveRoute is a pure read of the most recently
 // activated conjure route ID this session.
 func ConjureActiveRoute() string {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return ""
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastActiveConjureRouteID
@@ -111,10 +111,10 @@ func ConjureActiveRoute() string {
 // 8-byte SHA-256 truncation, hex-encoded; the raw IP NEVER
 // leaves the conjure transport package.
 func ConjurePhantomInUseHash() string {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return ""
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastConjurePhantomHashHex

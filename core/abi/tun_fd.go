@@ -185,5 +185,3 @@ func resetTunFDForShutdown() {
 	engine.SetCurrentTunFD(-1)
 	engine.SetCurrentProtectCallback(0)
 }
-
-

@@ -21,7 +21,7 @@ import (
 //	-3 priority list contains an unknown channel ID
 //	-4 priorityJSON is malformed
 func EngineSetRendezvousPriority(priorityJSON string) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	var list []string
@@ -38,7 +38,7 @@ func EngineSetRendezvousPriority(priorityJSON string) int {
 //	-1 engine not initialised
 //	-2 storage profile is "vault" — push is rejected
 func EngineSetPushRendezvousEnabled(enabled int) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	return SetPushRendezvousEnabled(enabled != 0)
@@ -80,10 +80,10 @@ func EngineSetPushDeviceToken(platform, token string) int {
 //	-5 signature verification failed
 //	-6 payload malformed or stale (timestamp drift > 5 min)
 func EngineDeliverPushPayload(payload []byte) int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
-	c := globalCore
+	c := loadedCore()
 	c.mu.Lock()
 	if c.storageProfile == "vault" {
 		c.mu.Unlock()

@@ -142,10 +142,10 @@ func computeHealthPctLastHour(r routestore.RouteRow) float64 {
 
 // RouteSummary returns the display shape for a single route_id.
 func RouteSummary(routeID string) (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
-	c := globalCore
+	c := loadedCore()
 	row, err := c.store.GetRoute(routeID)
 	if err != nil {
 		return "", err
@@ -158,10 +158,10 @@ func RouteSummary(routeID string) (string, error) {
 // AvailableRoutes returns all routes the user could connect to,
 // ordered by health_pct descending. Revoked routes are excluded.
 func AvailableRoutes() (string, error) {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
-	c := globalCore
+	c := loadedCore()
 	rows, err := c.store.ListRoutes()
 	if err != nil {
 		return "", err
@@ -251,12 +251,13 @@ func ThroughputSnapshot() (string, error) {
 //
 // Wipe scope:
 //   - state_dir directory tree (sqlite db, secrets vault, prefs, logs)
+//
 // Wipe NEVER touches:
 //   - the user's home directory generally
 //   - OS keystore entries (those are platform-specific; clients
 //     should call platform-specific keystore-wipe before invoking this)
 func PanicWipe() error {
-	c := globalCore
+	c := loadedCore()
 	stateDir := ""
 	if c != nil {
 		stateDir = c.stateDir

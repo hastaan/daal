@@ -16,7 +16,7 @@ import "C"
 
 //export engine_set_experimental_families_enabled
 func engine_set_experimental_families_enabled(enabled C.int) C.int {
-	if globalCore == nil {
+	if loadedCore() == nil {
 		return -1
 	}
 	SetExperimentalFamiliesEnabled(enabled != 0)

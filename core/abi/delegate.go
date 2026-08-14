@@ -283,7 +283,7 @@ func resetDelegateStateForShutdown() {
 // tryGetCore returns the global Core if Init has been called,
 // or nil otherwise. Mirrors mustCore but does not panic — the
 // diagnostics path MUST tolerate Init not having been called.
-func tryGetCore() *Core { return globalCore }
+func tryGetCore() *Core { return loadedCore() }
 
 // errEngineUninitialised is exported for tests that need to
 // distinguish "engine not initialised" from other failures.
