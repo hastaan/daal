@@ -93,6 +93,28 @@ class MainActivity : TauriActivity() {
       }
       activity.startActivity(chooser)
     }
+
+    // copyContentUriToFile(uri, destPath): stream the content:// URI
+    // the system file picker returned into a local file the Rust side
+    // can read (src-tauri/src/lib.rs, .sbp/.sbpx import). Returns true
+    // on success. Called from Rust via JNI (signature
+    // (String,String)Z).
+    @Keep
+    @JvmStatic
+    fun copyContentUriToFile(uriString: String, destPath: String): Boolean {
+      val activity = instance ?: return false
+      return try {
+        val uri = android.net.Uri.parse(uriString)
+        val input = activity.contentResolver.openInputStream(uri)
+          ?: return false
+        input.use { source ->
+          File(destPath).outputStream().use { sink -> source.copyTo(sink) }
+        }
+        true
+      } catch (_: Throwable) {
+        false
+      }
+    }
   }
 }
 KOTLIN
@@ -219,6 +241,7 @@ cat > "$PROGUARD_KEEP" <<'PROGUARD'
 # with NoSuchMethodError / ClassNotFoundException.
 -keep class org.daal.desktop.MainActivity {
     public static void shareFile(java.lang.String, java.lang.String, java.lang.String);
+    public static boolean copyContentUriToFile(java.lang.String, java.lang.String);
     public static *** instance;
     public static *** getInstance();
     public static void setInstance(***);
