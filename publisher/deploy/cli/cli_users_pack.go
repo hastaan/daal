@@ -160,6 +160,65 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 	}, nil
 }
 
+// runUsersPackSbp (shared-.sbp path) rewrites a signed .sbp's per-route
+// profiles with real, connectable client outbounds for ONE shared box
+// user (e.g. the "r0" identity), producing a plaintext shared .sbp that
+// ANY phone can import and connect — no per-recipient envelope, no
+// recipient pubkey. This is the default "share with the whole family"
+// artifact; users-pack-sbpx is the per-recipient (individually revocable)
+// variant. Both drive the same relaypack.RewriteProfilesForRecipient; the
+// only difference is this one skips the age envelope.
+func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("users-pack-sbp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	inPath := fs.String("in", "", "input .sbp path (Step 6 / bind-and-sign output)")
+	outPath := fs.String("out", "", "output shared .sbp path")
+	credsFile := fs.String("creds-file", "", "shared creds JSON (mgmt /users/provision shape for the shared user)")
+	server := fs.String("server", "", "box public IP/host for the client outbound")
+	if rc := parseFlags(fs, args); rc >= 0 {
+		return rc
+	}
+	if err := requireAll(stderr, map[string]string{
+		"--in":         *inPath,
+		"--out":        *outPath,
+		"--creds-file": *credsFile,
+		"--server":     *server,
+	}); err != nil {
+		return 2
+	}
+
+	plaintext, err := os.ReadFile(*inPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "read input: %v\n", err)
+		return 1
+	}
+	params, err := clientParamsFromCredsFile(*credsFile, *server)
+	if err != nil {
+		fmt.Fprintf(stderr, "creds-file: %v\n", err)
+		return 2
+	}
+	// Fails closed if any route can't be made connectable — a shared pack
+	// must not ship a dead route.
+	rewritten, err := relaypack.RewriteProfilesForRecipient(plaintext, params)
+	if err != nil {
+		fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(*outPath, rewritten, 0o644); err != nil {
+		fmt.Fprintf(stderr, "write output: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(stdout).Encode(map[string]any{
+		"sbp_path": *outPath,
+		"sbp_size": len(rewritten),
+		"shared":   true,
+	}); err != nil {
+		fmt.Fprintf(stderr, "encode: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("users-pack-sbpx", flag.ContinueOnError)
 	fs.SetOutput(stderr)

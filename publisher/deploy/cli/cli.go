@@ -114,6 +114,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runUsersRevoke(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-list":
 		return runUsersList(ctx, rest, os.Stdin, stdout, stderr)
+	case "users-pack-sbp":
+		return runUsersPackSbp(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-pack-sbpx":
 		return runUsersPackSbpx(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-unpack-sbpx":
