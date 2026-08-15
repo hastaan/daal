@@ -187,6 +187,18 @@ export const Wizard = {
             sbpxPath: sbpx_path,
             friendlyName: friendly_name,
         }),
+    /** Save the operator's shared `.sbp` into the phone's Downloads. */
+    saveSharedSbpToDownloads: (operator_id: number, file_name: string) =>
+        invoke<void>('save_shared_sbp_to_downloads', {
+            operatorId: operator_id,
+            fileName: file_name,
+        }),
+    /** Save a per-recipient `.sbpx` into the phone's Downloads. */
+    saveSbpxToDownloads: (sbpx_path: string, file_name: string) =>
+        invoke<void>('save_sbpx_to_downloads', {
+            sbpxPath: sbpx_path,
+            fileName: file_name,
+        }),
     getOperatorState: (operator_id: number) =>
         invoke<OperatorState>('wizard_get_operator_state', { operatorId: operator_id }),
     cancelAndCleanup: (operator_id: number) =>

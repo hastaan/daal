@@ -109,27 +109,42 @@ export default function PublisherRecipientsPage({ t }: Props) {
     const [shareBusy, setShareBusy] = useState(false);
     const [shareError, setShareError] = useState<string | null>(null);
 
-    const onShareConnectionFile = useCallback(async () => {
-        if (operatorId === null) return;
-        if (!sharePin) {
-            setShareError(t('pub.recipients.add.missing_pin'));
-            return;
-        }
-        setShareBusy(true);
-        setShareError(null);
-        try {
-            // Mint the shared user + rewrite the .sbp with its working creds,
-            // then open the OS share sheet on the result.
-            await Wizard.produceSharedSbp(operatorId, sharePin, shareHelperIp);
-            await Wizard.shareInvite(operatorId, 'daal-connection');
-            setShareOpen(false);
-            setSharePin('');
-        } catch (e) {
-            setShareError(String(e));
-        } finally {
-            setShareBusy(false);
-        }
-    }, [operatorId, sharePin, shareHelperIp, t]);
+    // Produce the shared .sbp (mint r0 + rewrite), then either open the OS
+    // share sheet or save a local copy to Downloads.
+    const runShared = useCallback(
+        async (mode: 'share' | 'save') => {
+            if (operatorId === null) return;
+            if (!sharePin) {
+                setShareError(t('pub.recipients.add.missing_pin'));
+                return;
+            }
+            setShareBusy(true);
+            setShareError(null);
+            try {
+                await Wizard.produceSharedSbp(operatorId, sharePin, shareHelperIp);
+                if (mode === 'save') {
+                    await Wizard.saveSharedSbpToDownloads(
+                        operatorId,
+                        'daal-connection.sbp',
+                    );
+                    setShareError(t('pub.share.saved'));
+                } else {
+                    await Wizard.shareInvite(operatorId, 'daal-connection');
+                    setShareOpen(false);
+                }
+                setSharePin('');
+            } catch (e) {
+                setShareError(String(e));
+            } finally {
+                setShareBusy(false);
+            }
+        },
+        [operatorId, sharePin, shareHelperIp, t],
+    );
+    const onShareConnectionFile = useCallback(
+        () => runShared('share'),
+        [runShared],
+    );
 
     const reloadOperators = useCallback(async () => {
         try {
@@ -250,6 +265,19 @@ export default function PublisherRecipientsPage({ t }: Props) {
         if (!r.sbpx_path) return;
         try {
             await Wizard.shareInviteSbpx(r.sbpx_path, r.display_name || r.name);
+        } catch (e) {
+            setError(String(e));
+        }
+    };
+
+    const onSaveSbpx = async (r: RecipientSummary) => {
+        if (!r.sbpx_path) return;
+        try {
+            await Wizard.saveSbpxToDownloads(
+                r.sbpx_path,
+                `${r.display_name || r.name}.sbpx`,
+            );
+            setSyncResult(t('pub.share.saved'));
         } catch (e) {
             setError(String(e));
         }
@@ -398,7 +426,7 @@ export default function PublisherRecipientsPage({ t }: Props) {
                                             {shareError}
                                         </div>
                                     )}
-                                    <div style={{ display: 'flex', gap: 8 }}>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                                         <Button
                                             onClick={onShareConnectionFile}
                                             disabled={shareBusy}
@@ -406,6 +434,13 @@ export default function PublisherRecipientsPage({ t }: Props) {
                                             {shareBusy
                                                 ? t('pub.share.working')
                                                 : t('pub.share.confirm')}
+                                        </Button>
+                                        <Button
+                                            variant="secondary"
+                                            onClick={() => void runShared('save')}
+                                            disabled={shareBusy}
+                                        >
+                                            {t('pub.share.save')}
                                         </Button>
                                         <Button
                                             onClick={() => {
@@ -498,6 +533,14 @@ export default function PublisherRecipientsPage({ t }: Props) {
                                             {!revoked && r.sbpx_path && (
                                                 <Button onClick={() => onResend(r)}>
                                                     {t('pub.recipients.resend')}
+                                                </Button>
+                                            )}
+                                            {!revoked && r.sbpx_path && (
+                                                <Button
+                                                    variant="secondary"
+                                                    onClick={() => onSaveSbpx(r)}
+                                                >
+                                                    {t('pub.share.save')}
                                                 </Button>
                                             )}
                                             {!revoked && (

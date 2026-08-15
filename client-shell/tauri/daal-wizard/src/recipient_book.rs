@@ -292,10 +292,21 @@ pub fn produce_shared_sbp(
         String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
     );
 
-    // Mint the shared user on the box. Provisioning the same name twice
-    // simply re-mints its creds (the box keeps one user row per name), so
-    // this is safe to call again to refresh the shared .sbp.
+    // Mint the shared user on the box. /users/provision 409s if the name
+    // already exists, so make the flow idempotent: best-effort revoke the
+    // previous r0 first (ignore "not found"), then provision fresh. A
+    // re-share therefore re-keys the shared user — older shared .sbp files
+    // stop working, which is the correct behaviour for "rotate my relay".
     let record_path = write_record_staging(ctx, operator_id, &row.operator_record_json)?;
+    let _ = ctx.cli.run_users_revoke(
+        UsersRevokeArgs {
+            record_path: &record_path,
+            helper_ip,
+            token: token.as_str(),
+            name: SHARED_USER_NAME,
+        },
+        priv_buf.as_slice(),
+    );
     let creds = ctx
         .cli
         .run_users_provision(

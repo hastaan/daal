@@ -261,6 +261,8 @@
   "pub.share.helper_ip_placeholder": "This phone's public IP (for the relay firewall)",
   "pub.share.working": "Preparing…",
   "pub.share.confirm": "Create & share",
+  "pub.share.save": "Save to phone",
+  "pub.share.saved": "Saved to Downloads.",
   "pub.recipients.operator": "Operator",
   "pub.recipients.add": "Add",
   "pub.recipients.sync": "Sync",

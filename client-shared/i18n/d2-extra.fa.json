@@ -261,6 +261,8 @@
   "pub.share.helper_ip_placeholder": "IP عمومی این گوشی (برای فایروال رله)",
   "pub.share.working": "در حال آماده‌سازی…",
   "pub.share.confirm": "ساخت و اشتراک",
+  "pub.share.save": "ذخیره در گوشی",
+  "pub.share.saved": "در پوشهٔ دانلود ذخیره شد.",
   "pub.recipients.operator": "اپراتور",
   "pub.recipients.add": "افزودن",
   "pub.recipients.sync": "هم‌گام‌سازی",

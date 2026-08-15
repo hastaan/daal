@@ -115,6 +115,39 @@ class MainActivity : TauriActivity() {
         false
       }
     }
+
+    // saveToDownloads(path, displayName): copy a staged file into the
+    // public Downloads collection via MediaStore so the user can keep,
+    // manage, or re-import it. Scoped-storage compliant on API 29+.
+    // Called from Rust via JNI (signature (String,String)Z).
+    @Keep
+    @JvmStatic
+    fun saveToDownloads(path: String, displayName: String): Boolean {
+      val activity = instance ?: return false
+      if (android.os.Build.VERSION.SDK_INT < 29) return false
+      return try {
+        val resolver = activity.contentResolver
+        val values = android.content.ContentValues().apply {
+          put(android.provider.MediaStore.Downloads.DISPLAY_NAME, displayName)
+          put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+          put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val collection = android.provider.MediaStore.Downloads.getContentUri(
+          android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY,
+        )
+        val uri = resolver.insert(collection, values) ?: return false
+        resolver.openOutputStream(uri).use { out ->
+          if (out == null) return false
+          File(path).inputStream().use { it.copyTo(out) }
+        }
+        values.clear()
+        values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+        true
+      } catch (_: Throwable) {
+        false
+      }
+    }
   }
 }
 KOTLIN
@@ -242,6 +275,7 @@ cat > "$PROGUARD_KEEP" <<'PROGUARD'
 -keep class org.daal.desktop.MainActivity {
     public static void shareFile(java.lang.String, java.lang.String, java.lang.String);
     public static boolean copyContentUriToFile(java.lang.String, java.lang.String);
+    public static boolean saveToDownloads(java.lang.String, java.lang.String);
     public static *** instance;
     public static *** getInstance();
     public static void setInstance(***);

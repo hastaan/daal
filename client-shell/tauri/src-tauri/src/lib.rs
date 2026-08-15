@@ -1836,6 +1836,101 @@ fn share_invite(
     }
 }
 
+/// Copy a staged file into the phone's public Downloads via the Kotlin
+/// MainActivity.saveToDownloads (MediaStore). Lets the user keep/manage
+/// the connection file and re-import it later. Desktop: copies next to the
+/// user's home Downloads dir.
+fn save_path_to_downloads(src: &str, display_name: &str) -> Result<(), String> {
+    if !std::path::Path::new(src).exists() {
+        return Err(format!("file not found: {src}"));
+    }
+    #[cfg(target_os = "android")]
+    {
+        use jni::objects::JValue;
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
+            .map_err(|e| format!("attach JavaVM: {e}"))?;
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| format!("attach thread: {e}"))?;
+        let class = env
+            .find_class("org/daal/desktop/MainActivity")
+            .map_err(|e| format!("find_class: {e}"))?;
+        let j_src = env.new_string(src).map_err(|e| format!("j_src: {e}"))?;
+        let j_name = env
+            .new_string(display_name)
+            .map_err(|e| format!("j_name: {e}"))?;
+        let ok: bool = env
+            .call_static_method(
+                &class,
+                "saveToDownloads",
+                "(Ljava/lang/String;Ljava/lang/String;)Z",
+                &[JValue::Object(&j_src), JValue::Object(&j_name)],
+            )
+            .and_then(|v| v.z())
+            .map_err(|e| format!("call saveToDownloads: {e}"))?;
+        drop(env);
+        std::mem::forget(vm);
+        if !ok {
+            return Err("could not write to Downloads".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let dl = dirs_downloads();
+        std::fs::create_dir_all(&dl).map_err(|e| format!("mkdir downloads: {e}"))?;
+        std::fs::copy(src, dl.join(display_name)).map_err(|e| format!("copy: {e}"))?;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn dirs_downloads() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("Downloads"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Save the operator's shared `.sbp` (produced by wizard_produce_shared_sbp)
+/// into the phone's Downloads folder under a friendly name.
+#[tauri::command]
+fn save_shared_sbp_to_downloads(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    file_name: String,
+) -> Result<(), String> {
+    let shared = wstate
+        .0
+        .staging_dir
+        .join(format!("{operator_id}.shared.sbp"));
+    let name = sanitize_filename(&file_name);
+    let name = if name.is_empty() {
+        format!("daal-connection-{operator_id}.sbp")
+    } else if name.ends_with(".sbp") {
+        name
+    } else {
+        format!("{name}.sbp")
+    };
+    save_path_to_downloads(&shared.to_string_lossy(), &name)
+}
+
+/// Save a per-recipient `.sbpx` (from a recipient row's sbpx_path) into the
+/// phone's Downloads folder.
+#[tauri::command]
+fn save_sbpx_to_downloads(sbpx_path: String, file_name: String) -> Result<(), String> {
+    let name = sanitize_filename(&file_name);
+    let name = if name.is_empty() {
+        "daal-connection.sbpx".to_string()
+    } else if name.ends_with(".sbpx") {
+        name
+    } else {
+        format!("{name}.sbpx")
+    };
+    save_path_to_downloads(&sbpx_path, &name)
+}
+
 /// FRP-14 Layer 3b.5: `share_invite_sbpx` — same shape as
 /// `share_invite` but for the per-recipient `.sbpx` envelope.
 /// Path is supplied directly from the recipient row's `sbpx_path`
@@ -2109,6 +2204,8 @@ pub fn run() {
             open_external_url,
             share_invite,
             share_invite_sbpx,
+            save_shared_sbp_to_downloads,
+            save_sbpx_to_downloads,
             wizard_get_sbp_path,
         ])
         .setup(|app| {
