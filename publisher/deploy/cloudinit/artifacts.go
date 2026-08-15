@@ -40,8 +40,8 @@ var V15Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "b7169ac97b20cbddf255d2f0ddfab5a5e7c57be9f003a505934969f7ab3be8fc",
-			SigHex:    "eedaa2b38084589f5132f3ac217fa2b186655dca3c0352e7525c2b4a84b180d83aed5f9c04b57978b7c5639654ee61ea9ef714d7b8d22694eda7d2d60f29d60b",
+			Sha256:    "4d17143b721273ae3e220f8f720b34ce3f5fc1235a12763930a616ae0dce68e1",
+			SigHex:    "fb50f8f22364f9772a5201a6e2f5e03999ae489894e7a43c103a78f67c9c2c8ab748e5e2f31cd697cf453af6763256987425834e09428ad7ec78b768e9608d0e",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
@@ -66,8 +66,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "b7169ac97b20cbddf255d2f0ddfab5a5e7c57be9f003a505934969f7ab3be8fc",
-			SigHex:    "eedaa2b38084589f5132f3ac217fa2b186655dca3c0352e7525c2b4a84b180d83aed5f9c04b57978b7c5639654ee61ea9ef714d7b8d22694eda7d2d60f29d60b",
+			Sha256:    "4d17143b721273ae3e220f8f720b34ce3f5fc1235a12763930a616ae0dce68e1",
+			SigHex:    "fb50f8f22364f9772a5201a6e2f5e03999ae489894e7a43c103a78f67c9c2c8ab748e5e2f31cd697cf453af6763256987425834e09428ad7ec78b768e9608d0e",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
@@ -76,8 +76,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "419fbddd6b234dad536f19599b3d09e2f701428fd08ca8e0947097264ab6dcac",
-			SigHex:    "9a1e50af379956021d6f563e560d63916a49a06c9736fe3cb4fb44e32f6cdf7e0c27ac825a6a056d4e320a6454cf458b615473c8c51195077d10908670d1d804",
+			Sha256:    "adab6e93d7fdec93ffc90953a2b40f5858638b133880f6108ac9d04366d315fd",
+			SigHex:    "40648f9956ac5acdd0b16091973b166711e2ad8681f6ba6ed2a36ab2b9375614ff663fcac54fa835545964a2831cf8df2e1357b4a6d3fd609f78b8d6c99f2d0f",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-mgmt-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",

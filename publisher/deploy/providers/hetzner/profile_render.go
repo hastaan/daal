@@ -63,15 +63,19 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 // the on-box mgmt service appends per-recipient user rows via
 // /users/provision and a fresh ws-r<id> inbound per recipient.
 //
-// The hy2-in and naive-in inbounds ship alongside it so the box
-// serves the full 4-tier transport set. Unlike REALITY, these TLS
-// families need a real certificate: cloud-init generates a self-
-// signed data-plane leaf at /etc/daal/tls-cert.pem (+ key) before
-// sing-box first starts, and the client pins it by SPKI SHA-256
+// The hy2-in inbound ships alongside it (hysteria2 starts fine with an
+// empty users[]). Unlike REALITY, it needs a real certificate: cloud-init
+// generates a self-signed data-plane leaf at /etc/daal/tls-cert.pem (+ key)
+// before sing-box first starts, and the client pins it by SPKI SHA-256
 // rather than name-validating it (see relaypack/client_outbound.go
-// pinnedTLS). Ports come from relayports (the canonical map): vless
-// and hy2 share 443 on different L4 sockets (tcp vs udp), naive gets
-// 8444/tcp, and the per-recipient ws-r<id> inbounds get 8445/tcp.
+// pinnedTLS). vless and hy2 share 443 on different L4 sockets (tcp vs udp).
+//
+// naive-in is NOT shipped here: sing-box's naive inbound FATALs with
+// "missing users" if users[] is empty (protocol/naive/inbound.go), so it
+// can't exist until it has a user. The mgmt service creates it — with its
+// first recipient — in appendNaiveUser (8444/tcp), the same way it creates
+// the per-recipient ws-r<id> inbounds (8445/tcp). Ports come from
+// relayports (the canonical map).
 func defaultSingBoxConfig(profileName string) string {
 	return `{
   "log": {"level": "info"},
@@ -82,10 +86,6 @@ func defaultSingBoxConfig(profileName string) string {
              "reality": {"enabled": true, "private_key": "", "short_id": [],
                          "handshake": {"server": "www.cloudflare.com", "server_port": 443}}}},
     {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 443,
-     "users": [],
-     "tls": {"enabled": true,
-             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}},
-    {"type": "naive", "tag": "naive-in", "listen": "0.0.0.0", "listen_port": 8444,
      "users": [],
      "tls": {"enabled": true,
              "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}

@@ -39,12 +39,14 @@ const (
 	tlsCertPath = "/etc/daal/tls-cert.pem"
 	tlsKeyPath  = "/etc/daal/tls-key.pem"
 
-	// wsListenPort is the per-recipient WS-TLS inbound port. This is a
-	// local copy of publisher/deploy/relayports.For("websocket-tls").Port
-	// (8445): relay-mgmt is a separate module and importing the publisher
-	// package here would pull the whole publisher dependency tree into
-	// the on-box binary, so we mirror the single value with this pointer.
-	wsListenPort = 8445
+	// wsListenPort / naiveListenPort are the WS-TLS and Naive inbound
+	// ports. Local copies of publisher/deploy/relayports.For(...).Port
+	// ("websocket-tls"=8445, "naive"=8444): relay-mgmt is a separate
+	// module and importing the publisher package here would pull the
+	// whole publisher dependency tree into the on-box binary, so we
+	// mirror the single values with these pointers.
+	wsListenPort    = 8445
+	naiveListenPort = 8444
 )
 
 // addUserToSingbox loads /etc/sing-box/config.json, appends the
@@ -253,7 +255,25 @@ func removeHy2User(doc map[string]any, name string) bool {
 func appendNaiveUser(doc map[string]any, c userCreds) error {
 	in := findInboundByTag(doc, tagNaive)
 	if in == nil {
-		return nil
+		// Create the naive inbound on first use. Unlike vless/hy2 it
+		// cannot ship empty: sing-box FATALs "missing users" when a
+		// naive inbound has no users (protocol/naive/inbound.go), so it
+		// only exists once it has one. The cert is the box's shared
+		// data-plane leaf; the client pins it by SPKI SHA-256.
+		in = map[string]any{
+			"type":        "naive",
+			"tag":         tagNaive,
+			"listen":      "0.0.0.0",
+			"listen_port": naiveListenPort,
+			"users":       []any{},
+			"tls": map[string]any{
+				"enabled":          true,
+				"certificate_path": tlsCertPath,
+				"key_path":         tlsKeyPath,
+			},
+		}
+		inbounds, _ := doc["inbounds"].([]any)
+		doc["inbounds"] = append(inbounds, in)
 	}
 	users, _ := in["users"].([]any)
 	users = append(users, map[string]any{
@@ -280,6 +300,22 @@ func removeNaiveUser(doc map[string]any, name string) bool {
 	}
 	if len(out) == len(users) {
 		return false
+	}
+	if len(out) == 0 {
+		// A naive inbound with an empty users[] FATALs on the next
+		// sing-box start, so drop the whole inbound when its last user
+		// leaves; appendNaiveUser re-creates it on the next add.
+		inbounds, _ := doc["inbounds"].([]any)
+		kept := make([]any, 0, len(inbounds))
+		for _, raw := range inbounds {
+			ib, _ := raw.(map[string]any)
+			if t, _ := ib["tag"].(string); t == tagNaive {
+				continue
+			}
+			kept = append(kept, raw)
+		}
+		doc["inbounds"] = kept
+		return true
 	}
 	in["users"] = out
 	return true
@@ -375,8 +411,6 @@ func loadSingboxDoc(path string) (map[string]any, error) {
      "users":[],
      "tls":{"enabled":true,"server_name":"","reality":{"enabled":true,"private_key":"","short_id":[]}}},
     {"type":"hysteria2","tag":"` + tagHy2 + `","listen":"0.0.0.0","listen_port":443,"users":[],
-     "tls":{"enabled":true,"certificate_path":"` + tlsCertPath + `","key_path":"` + tlsKeyPath + `"}},
-    {"type":"naive","tag":"` + tagNaive + `","listen":"0.0.0.0","listen_port":8444,"users":[],
      "tls":{"enabled":true,"certificate_path":"` + tlsCertPath + `","key_path":"` + tlsKeyPath + `"}}
   ],
   "outbounds":[{"type":"direct"}]

@@ -8,10 +8,12 @@ import (
 )
 
 // TestDefaultSingBoxConfigStructure proves the shipped box config is
-// valid JSON and carries the full 4-tier inbound set with ports and
-// cert paths that agree with the canonical relayports map. The data-
-// plane TLS families (hy2, naive) must carry a certificate_path; vless
-// (REALITY) must not.
+// valid JSON and carries the inbounds that can start with an empty
+// users[] — vless-in (REALITY) and hy2-in — with ports and cert paths
+// that agree with the canonical relayports map. hy2-in must carry a
+// certificate_path; vless (REALITY) must not. naive-in is deliberately
+// NOT shipped (sing-box FATALs "missing users" on an empty naive
+// inbound); the mgmt service creates it with its first recipient.
 func TestDefaultSingBoxConfigStructure(t *testing.T) {
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(defaultSingBoxConfig("iran-default")), &doc); err != nil {
@@ -19,8 +21,8 @@ func TestDefaultSingBoxConfigStructure(t *testing.T) {
 	}
 
 	inbounds, _ := doc["inbounds"].([]any)
-	if len(inbounds) != 3 {
-		t.Fatalf("want 3 inbounds, got %d", len(inbounds))
+	if len(inbounds) != 2 {
+		t.Fatalf("want 2 inbounds, got %d", len(inbounds))
 	}
 
 	byTag := map[string]map[string]any{}
@@ -28,6 +30,11 @@ func TestDefaultSingBoxConfigStructure(t *testing.T) {
 		in, _ := raw.(map[string]any)
 		tag, _ := in["tag"].(string)
 		byTag[tag] = in
+	}
+
+	// naive-in must not ship empty — it can't start without users.
+	if _, ok := byTag["naive-in"]; ok {
+		t.Errorf("naive-in must not be shipped (created on first recipient)")
 	}
 
 	type want struct {
@@ -38,7 +45,6 @@ func TestDefaultSingBoxConfigStructure(t *testing.T) {
 	cases := map[string]want{
 		"vless-in": {typ: "vless", port: relayports.For("vless-reality").Port, wantTLS: false},
 		"hy2-in":   {typ: "hysteria2", port: relayports.For("hysteria2").Port, wantTLS: true},
-		"naive-in": {typ: "naive", port: relayports.For("naive").Port, wantTLS: true},
 	}
 	for tag, w := range cases {
 		in, ok := byTag[tag]

@@ -50,8 +50,8 @@ func TestAppendWSInboundTLS(t *testing.T) {
 
 // TestBootstrapFallbackTLS proves the loadSingboxDoc first-boot
 // scaffold (fires only when config.json is absent) does not drift from
-// the shipped config: hy2-in on 443 + naive-in on 8444, both with the
-// data-plane cert paths.
+// the shipped config: hy2-in on 443 with the data-plane cert paths, and
+// NO naive-in (naive can't start empty; it is created on first user).
 func TestBootstrapFallbackTLS(t *testing.T) {
 	// A path that does not exist forces the bootstrap branch.
 	doc, err := loadSingboxDoc(filepath.Join(t.TempDir(), "does-not-exist.json"))
@@ -63,32 +63,63 @@ func TestBootstrapFallbackTLS(t *testing.T) {
 		t.Fatalf("bootstrap doc not marshalable: %v", err)
 	}
 
-	cases := []struct {
-		tag  string
-		port float64
-	}{
-		{tagHy2, 443},
-		{tagNaive, 8444},
+	if findInboundByTag(doc, tagNaive) != nil {
+		t.Errorf("bootstrap must not ship naive-in (created on first user)")
 	}
-	for _, tc := range cases {
-		in := findInboundByTag(doc, tc.tag)
-		if in == nil {
-			t.Errorf("bootstrap missing inbound %q", tc.tag)
-			continue
-		}
-		if p, _ := in["listen_port"].(float64); p != tc.port {
-			t.Errorf("%s: listen_port = %v, want %v", tc.tag, p, tc.port)
-		}
-		tls, _ := in["tls"].(map[string]any)
-		if tls == nil {
-			t.Errorf("%s: missing tls block in bootstrap", tc.tag)
-			continue
-		}
-		if cp, _ := tls["certificate_path"].(string); cp != tlsCertPath {
-			t.Errorf("%s: certificate_path = %q, want %q", tc.tag, cp, tlsCertPath)
-		}
-		if kp, _ := tls["key_path"].(string); kp != tlsKeyPath {
-			t.Errorf("%s: key_path = %q, want %q", tc.tag, kp, tlsKeyPath)
-		}
+	in := findInboundByTag(doc, tagHy2)
+	if in == nil {
+		t.Fatalf("bootstrap missing inbound %q", tagHy2)
+	}
+	if p, _ := in["listen_port"].(float64); p != 443 {
+		t.Errorf("%s: listen_port = %v, want 443", tagHy2, p)
+	}
+	tls, _ := in["tls"].(map[string]any)
+	if tls == nil {
+		t.Fatalf("%s: missing tls block in bootstrap", tagHy2)
+	}
+	if cp, _ := tls["certificate_path"].(string); cp != tlsCertPath {
+		t.Errorf("%s: certificate_path = %q, want %q", tagHy2, cp, tlsCertPath)
+	}
+	if kp, _ := tls["key_path"].(string); kp != tlsKeyPath {
+		t.Errorf("%s: key_path = %q, want %q", tagHy2, kp, tlsKeyPath)
+	}
+}
+
+// TestAppendNaiveUserCreatesInbound proves the naive inbound is created
+// on first use (with cert + port 8444) and dropped when its last user
+// leaves — never left with an empty users[], which sing-box rejects.
+func TestAppendNaiveUserCreatesInbound(t *testing.T) {
+	doc, err := loadSingboxDoc(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if findInboundByTag(doc, tagNaive) != nil {
+		t.Fatalf("naive-in unexpectedly present before any user")
+	}
+	if err := appendNaiveUser(doc, userCreds{Name: "r1", NaivePassword: "pw"}); err != nil {
+		t.Fatalf("appendNaiveUser: %v", err)
+	}
+	in := findInboundByTag(doc, tagNaive)
+	if in == nil {
+		t.Fatalf("naive-in not created on first user")
+	}
+	// appendNaiveUser builds a Go map, so listen_port is an int here
+	// (it becomes float64 only after a JSON write/reload round-trip).
+	if p, _ := in["listen_port"].(int); p != naiveListenPort {
+		t.Errorf("naive-in port = %v, want %d", in["listen_port"], naiveListenPort)
+	}
+	tls, _ := in["tls"].(map[string]any)
+	if cp, _ := tls["certificate_path"].(string); cp != tlsCertPath {
+		t.Errorf("naive-in certificate_path = %q, want %q", cp, tlsCertPath)
+	}
+	if users, _ := in["users"].([]any); len(users) != 1 {
+		t.Errorf("naive-in users = %d, want 1", len(users))
+	}
+	// Removing the only user must drop the whole inbound.
+	if !removeNaiveUser(doc, "r1") {
+		t.Fatalf("removeNaiveUser returned false")
+	}
+	if findInboundByTag(doc, tagNaive) != nil {
+		t.Errorf("naive-in must be removed when its last user leaves")
 	}
 }
