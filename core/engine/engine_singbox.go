@@ -54,7 +54,16 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.instance != nil {
-		return errors.New("engine: already started")
+		// Route switch: the host establishes a fresh TUN and calls
+		// set_route for the new route, which can race ahead of the old
+		// VpnService's onRevoke teardown — so the previous instance is
+		// still live here. Tear it down and start the new one rather
+		// than failing "already started" (which left the switch dead).
+		_ = s.instance.Close()
+		s.instance = nil
+		s.Stub.mu.Lock()
+		s.Stub.connected = false
+		s.Stub.mu.Unlock()
 	}
 
 	var raw map[string]any
