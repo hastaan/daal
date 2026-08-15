@@ -141,6 +141,7 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 		NaivePassword    string `json:"naive_password"`
 		WSPath           string `json:"ws_path"`
 		TLSCertSHA256    string `json:"tls_cert_sha256"`
+		TLSCertPEM       string `json:"tls_cert_pem"`
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
 		return relaypack.ClientConnParams{}, fmt.Errorf("parse: %w", err)
@@ -155,6 +156,7 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 		NaivePassword:    c.NaivePassword,
 		WSPath:           c.WSPath,
 		TLSCertSHA256:    c.TLSCertSHA256,
+		TLSCertPEM:       c.TLSCertPEM,
 	}, nil
 }
 

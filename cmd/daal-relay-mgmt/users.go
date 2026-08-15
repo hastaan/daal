@@ -67,6 +67,11 @@ type userCreds struct {
 	//     no CA-issued cert. Empty when those transports aren't shipped.
 	RealityPublicKey string `json:"reality_public_key,omitempty"`
 	TLSCertSHA256    string `json:"tls_cert_sha256,omitempty"`
+	//   TLSCertPEM — the full data-plane leaf cert (PEM). naive/Cronet
+	//     verifies against a trusted-root set rather than an SPKI pin, so
+	//     the publisher installs this as the recipient's naive trusted
+	//     root. Empty when the data-plane cert is absent.
+	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
 }
 
 type userMeta struct {
@@ -140,6 +145,7 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 	// the publisher surfaces the resulting empty fields.
 	creds.RealityPublicKey = s.readRealityPub()
 	creds.TLSCertSHA256 = s.readTLSCertSHA256()
+	creds.TLSCertPEM = s.readTLSCertPEM()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(creds)
 }
@@ -181,6 +187,25 @@ func (s *server) readTLSCertSHA256() string {
 	}
 	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
 	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// readTLSCertPEM returns the box's self-signed data-plane leaf cert as
+// PEM, or "" if unreadable. The naive client outbound needs the full
+// cert (not just the SPKI pin): naive rides Cronet, which verifies via a
+// trusted-root set (there is no CA), so the publisher installs this PEM
+// as the recipient's trusted root. ws/hy2 pin by SPKI and don't need it.
+func (s *server) readTLSCertPEM() string {
+	if s.tlsCertPath == "" {
+		return ""
+	}
+	pemBytes, err := os.ReadFile(s.tlsCertPath)
+	if err != nil {
+		return ""
+	}
+	if block, _ := pem.Decode(pemBytes); block == nil || block.Type != "CERTIFICATE" {
+		return ""
+	}
+	return string(pemBytes)
 }
 
 func (s *server) handleUsersRevoke(w http.ResponseWriter, r *http.Request) {

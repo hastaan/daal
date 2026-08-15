@@ -42,7 +42,8 @@ type ClientConnParams struct {
 	Hy2Password      string
 	NaivePassword    string
 	WSPath           string // "/r<id>/<hex>"
-	TLSCertSHA256    string // base64 SHA-256 of the leaf SPKI, for ws/hy2/naive pinning
+	TLSCertSHA256    string // base64 SHA-256 of the leaf SPKI, for ws/hy2 pinning
+	TLSCertPEM       string // full leaf cert PEM, naive's trusted root (Cronet)
 }
 
 // ClientOutboundForFamily returns the sing-box outbound JSON bytes for
@@ -108,14 +109,13 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			"tls": pinnedTLSNoUTLS(p.Server, p.TLSCertSHA256),
 		}
 	case "naive":
-		if p.NaivePassword == "" || p.Name == "" {
-			return nil, fmt.Errorf("naive needs naive_password and name")
+		if p.NaivePassword == "" || p.Name == "" || p.TLSCertPEM == "" {
+			return nil, fmt.Errorf("naive needs naive_password, name and tls_cert_pem")
 		}
 		ob = map[string]any{
 			// The real naive protocol (HTTP/2 CONNECT) — a plain "http"
 			// outbound cannot speak it. Requires the engine to be built
-			// with the with_naive_outbound tag. Like hysteria2 it rejects
-			// a uTLS block, so pin without it.
+			// with the with_naive_outbound tag.
 			"type":        "naive",
 			"tag":         "active",
 			"server":      p.Server,
@@ -124,7 +124,14 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			// sets it to the recipient name), or auth fails.
 			"username": p.Name,
 			"password": p.NaivePassword,
-			"tls":      pinnedTLSNoUTLS(p.Server, p.TLSCertSHA256),
+			// naive rides Cronet, which verifies against a trusted-root
+			// set (no CA, no uTLS, no SPKI pin): install the box's leaf as
+			// the trusted root. server_name must match its iPAddress SAN.
+			"tls": map[string]any{
+				"enabled":     true,
+				"server_name": p.Server,
+				"certificate": []any{p.TLSCertPEM},
+			},
 		}
 	default:
 		return nil, fmt.Errorf("no client outbound renderer for family %q", family)
