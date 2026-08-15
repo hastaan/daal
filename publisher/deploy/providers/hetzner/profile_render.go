@@ -6,6 +6,7 @@ import (
 
 	"daal/publisher/deploy/profiles"
 	"daal/publisher/deploy/provider"
+	"daal/publisher/deploy/relayports"
 )
 
 // candidatesForProfile produces the unsigned []CandidateMeta the
@@ -62,12 +63,15 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 // the on-box mgmt service appends per-recipient user rows via
 // /users/provision and a fresh ws-r<id> inbound per recipient.
 //
-// Hysteria2 and Naive inbounds are intentionally NOT shipped in
-// the default config: sing-box refuses to start either without a
-// TLS block, and the per-user appenders in singbox_users.go are
-// no-ops when those inbounds aren't present. They'll be added
-// later when we ship the toolbox-profile-driven UDP/TCP-multi-
-// transport story. See specs/per-recipient-credentials-v1.md.
+// The hy2-in and naive-in inbounds ship alongside it so the box
+// serves the full 4-tier transport set. Unlike REALITY, these TLS
+// families need a real certificate: cloud-init generates a self-
+// signed data-plane leaf at /etc/daal/tls-cert.pem (+ key) before
+// sing-box first starts, and the client pins it by SPKI SHA-256
+// rather than name-validating it (see relaypack/client_outbound.go
+// pinnedTLS). Ports come from relayports (the canonical map): vless
+// and hy2 share 443 on different L4 sockets (tcp vs udp), naive gets
+// 8444/tcp, and the per-recipient ws-r<id> inbounds get 8445/tcp.
 func defaultSingBoxConfig(profileName string) string {
 	return `{
   "log": {"level": "info"},
@@ -76,7 +80,15 @@ func defaultSingBoxConfig(profileName string) string {
      "users": [],
      "tls": {"enabled": true, "server_name": "www.cloudflare.com",
              "reality": {"enabled": true, "private_key": "", "short_id": [],
-                         "handshake": {"server": "www.cloudflare.com", "server_port": 443}}}}
+                         "handshake": {"server": "www.cloudflare.com", "server_port": 443}}}},
+    {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 443,
+     "users": [],
+     "tls": {"enabled": true,
+             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}},
+    {"type": "naive", "tag": "naive-in", "listen": "0.0.0.0", "listen_port": 8444,
+     "users": [],
+     "tls": {"enabled": true,
+             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}
   ],
   "outbounds": [{"type": "direct"}]
 }`
@@ -92,21 +104,12 @@ func loadProfile(name string) (*profiles.Profile, error) {
 }
 
 func defaultPortForFamily(family string) int {
-	switch family {
-	case "hysteria2", "tuic":
-		return 443 // UDP
-	case "wireguard", "amnezia-wg":
-		return 51820
-	default:
-		return 443 // TCP
-	}
+	return relayports.For(family).Port
 }
 
 func portProto(family string) string {
-	switch family {
-	case "hysteria2", "tuic", "wireguard", "amnezia-wg":
+	if relayports.For(family).UDP {
 		return "udp"
-	default:
-		return "tcp"
 	}
+	return "tcp"
 }

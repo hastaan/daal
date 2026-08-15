@@ -191,6 +191,11 @@ runcmd:
     run ufw default allow outgoing
     run ufw allow 443/tcp
     run ufw allow 443/udp
+    # FRP-14: data-plane ports for the TLS families that can't share
+    # 443/tcp with REALITY (naive=8444, websocket-tls=8445). Keep in
+    # sync with relayports.ExtraFirewallPorts().
+    run ufw allow 8444/tcp
+    run ufw allow 8445/tcp
     run ufw allow from {{ .ProvisioningClientIP }} to any port 22 proto tcp
     run ufw allow from {{ .ProvisioningClientIP }} to any port 9876 proto tcp
     # FRP-14 fix: open the V2 mgmt port at the box-side firewall too.
@@ -240,6 +245,16 @@ runcmd:
       'if not patched:' \
       '    sys.exit("no reality inbound found in sing-box config")' \
       'json.dump(cfg, open(path, "w"))')" || fail "inject reality priv failed"
+    # FRP-14: data-plane self-signed TLS cert for the hy2/naive/ws
+    # inbounds (TLS families that, unlike REALITY, need a cert). The
+    # client pins it by SPKI SHA-256 and never name-validates, so any
+    # subject works and it persists for the box's life. Generated here
+    # so it exists before sing-box first starts.
+    run openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+      -keyout /etc/daal/tls-key.pem -out /etc/daal/tls-cert.pem \
+      -days 3650 -nodes -subj /CN=daal-relay
+    run chmod 0600 /etc/daal/tls-key.pem
+    run chmod 0644 /etc/daal/tls-cert.pem
     run systemctl daemon-reload
     run systemctl enable --now sing-box
     run systemctl enable --now daal-health

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"daal/publisher/deploy/relayports"
+
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
@@ -366,8 +368,11 @@ func stringPtr(s string) *string { return &s }
 //
 // Baseline rules (inbound):
 //   - 443/tcp from 0.0.0.0/0 + ::/0 (VLESS / HTTPS)
-//   - 443/udp from 0.0.0.0/0 + ::/0 (Hysteria2 / QUIC, future)
+//   - 443/udp from 0.0.0.0/0 + ::/0 (Hysteria2 / QUIC)
 //   - 80/tcp  from 0.0.0.0/0 + ::/0 (ACME http-01 future-proofing)
+//   - plus relayports.ExtraFirewallPorts() (naive=8444/tcp,
+//     websocket-tls=8445/tcp) — the TLS families that can't share
+//     443/tcp with REALITY.
 //
 // Hetzner closes everything else when any inbound rule is present,
 // so the random V2 mgmt port stays sealed until the wizard's
@@ -399,6 +404,20 @@ func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID strin
 		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP, Port: &port443, SourceIPs: srcAny},
 		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolUDP, Port: &port443, SourceIPs: srcAny},
 		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP, Port: &port80, SourceIPs: srcAny},
+	}
+	// Data-plane ports for the TLS families that can't share 443/tcp
+	// with REALITY (naive=8444/tcp, websocket-tls=8445/tcp). Derived
+	// from relayports so the firewall never drifts from the sing-box
+	// inbound generator.
+	for _, ep := range relayports.ExtraFirewallPorts() {
+		portStr := strconv.Itoa(ep.Port)
+		proto := hcloud.FirewallRuleProtocolTCP
+		if ep.UDP {
+			proto = hcloud.FirewallRuleProtocolUDP
+		}
+		baseRules = append(baseRules, hcloud.FirewallRule{
+			Direction: hcloud.FirewallRuleDirectionIn, Protocol: proto, Port: &portStr, SourceIPs: srcAny,
+		})
 	}
 
 	// Reuse an existing firewall with the same name if present
