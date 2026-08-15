@@ -299,6 +299,52 @@ pub fn recipient_revoke(
     Ok(updated.into())
 }
 
+/// `recipient_delete` hard-removes a recipient from the local
+/// roster. Where [`recipient_revoke`] tears down the on-box state
+/// and stamps `revoked_at_unix` so the UI greys the row out, this is
+/// the follow-up "remove from list" affordance that purges the
+/// greyed-out row (and its leftover `.sbpx` envelope) for good. No
+/// box round-trip: deletion is a local roster edit only.
+///
+/// Guarded: a still-live recipient (never revoked) must be revoked
+/// FIRST. Deleting a live row here would silently orphan working
+/// credentials on the box — the recipient could keep connecting and
+/// the slot would stay burned — so we refuse with a validation error
+/// the React layer turns into a "revoke before removing" prompt.
+/// This mirrors the connection-safety rule elsewhere in the app:
+/// tear down the active/live path before dropping its record.
+pub fn recipient_delete(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    recipient_id: i64,
+) -> Result<(), WizardError> {
+    let r = ctx
+        .db
+        .get_recipient(operator_id, recipient_id)
+        .map_err(WizardError::Db)?
+        .ok_or_else(|| WizardError::Db(DbError::NotFound(recipient_id)))?;
+    if r.revoked_at_unix == 0 {
+        return Err(WizardError::Validation(
+            "revoke this recipient before removing it from the roster".into(),
+        ));
+    }
+
+    ctx.db
+        .delete_recipient(operator_id, recipient_id)
+        .map_err(WizardError::Db)?;
+
+    // Best-effort unlink of the per-recipient `.sbpx` envelope left
+    // in the staging dir (Layer 3b.5). Failure to remove is
+    // non-fatal: the roster row is already gone, and the launch-time
+    // sweep reaps orphaned staging files anyway.
+    let sbpx = ctx
+        .staging_dir
+        .join(format!("{operator_id}.{}.sbpx", r.name));
+    let _ = std::fs::remove_file(&sbpx);
+
+    Ok(())
+}
+
 /// `recipient_list` returns the local roster (live + revoked).
 pub fn recipient_list(
     ctx: &WizardCtx,
@@ -534,6 +580,30 @@ mod tests {
         // short-circuits the second call).
         let calls = mock.users_revoke_calls.lock().unwrap().clone();
         assert_eq!(calls, vec!["r1".to_string()]);
+    }
+
+    #[test]
+    fn delete_requires_revoke_first_then_purges_row() {
+        let (ctx, _mock, op_id) = mk_ctx();
+        let s = recipient_provision(&ctx, op_id, "123456", "1.2.3.4", &sample_address(), "Alice")
+            .unwrap();
+
+        // A live (never-revoked) recipient cannot be removed.
+        let err = recipient_delete(&ctx, op_id, s.id).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("revoke this recipient before removing"),
+            "got: {err:?}"
+        );
+        assert_eq!(recipient_list(&ctx, op_id).unwrap().len(), 1);
+
+        // After revoke, the greyed-out row can be purged for good.
+        recipient_revoke(&ctx, op_id, "123456", "1.2.3.4", s.id).unwrap();
+        recipient_delete(&ctx, op_id, s.id).unwrap();
+        assert!(recipient_list(&ctx, op_id).unwrap().is_empty());
+
+        // A second delete on the vanished row surfaces as NotFound.
+        let err = recipient_delete(&ctx, op_id, s.id).unwrap_err();
+        assert!(matches!(err, WizardError::Db(DbError::NotFound(id)) if id == s.id));
     }
 
     // The 128-recipient cap test runs argon2 once per insert through

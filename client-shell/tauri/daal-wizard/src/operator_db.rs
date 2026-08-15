@@ -1155,6 +1155,28 @@ impl OperatorDb {
         Ok(())
     }
 
+    /// Hard-deletes a recipient row from the local roster. Unlike
+    /// [`mark_recipient_revoked`] (which keeps the row for audit and
+    /// greys it out in the UI), this removes the row entirely — used
+    /// by the "remove from list" affordance once the recipient has
+    /// already been revoked on the box. Scoped by `operator_id` so a
+    /// stale id from another operator can never delete the wrong row.
+    /// The per-operator name counter is deliberately NOT rewound: a
+    /// burned `r<n>` index is never reissued (see V009's
+    /// `recipient_name_counters` note). Returns
+    /// [`DbError::NotFound`] when no matching row exists.
+    pub fn delete_recipient(&self, operator_id: i64, recipient_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM recipients WHERE id = ?1 AND operator_id = ?2",
+            params![recipient_id, operator_id],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(recipient_id));
+        }
+        Ok(())
+    }
+
     /// Lists all (live + revoked) recipients for an operator,
     /// most-recently-provisioned first.
     pub fn list_recipients(&self, operator_id: i64) -> Result<Vec<RecipientRow>> {
@@ -2461,6 +2483,27 @@ mod tests {
         db.mark_recipient_revoked(r_id, 1_700_999_999).unwrap();
         let row = db.get_recipient(op_id, r_id).unwrap().unwrap();
         assert_eq!(row.revoked_at_unix, 1_700_999_999);
+    }
+
+    #[test]
+    fn delete_recipient_removes_row_and_is_operator_scoped() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op_id = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        let r1 = db.insert_recipient(sample_recipient(op_id, 1)).unwrap();
+        db.insert_recipient(sample_recipient(op_id, 2)).unwrap();
+
+        db.delete_recipient(op_id, r1).unwrap();
+        assert!(db.get_recipient(op_id, r1).unwrap().is_none());
+        // The sibling row survives.
+        assert_eq!(db.list_recipients(op_id).unwrap().len(), 1);
+
+        // A wrong operator id (or an already-deleted id) is NotFound.
+        match db.delete_recipient(op_id, r1).unwrap_err() {
+            DbError::NotFound(id) if id == r1 => (),
+            e => panic!("expected NotFound({r1}), got {e:?}"),
+        }
     }
 
     #[test]

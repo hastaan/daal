@@ -1268,6 +1268,19 @@ fn wizard_recipient_list_remote(
         .map_err(|e| e.to_string())
 }
 
+/// Hard-removes an already-revoked recipient from the local roster.
+/// No box round-trip: [`wizard_recipient_revoke`] does the on-box
+/// teardown; this just purges the greyed-out row + its `.sbpx`.
+#[tauri::command]
+fn wizard_recipient_delete(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    recipient_id: i64,
+) -> Result<(), String> {
+    daal_wizard::recipient_book::recipient_delete(&wstate.0, operator_id, recipient_id)
+        .map_err(|e| e.to_string())
+}
+
 // ---- FRP-14 Layer 3c: recipient-side identity ----------------------
 
 /// First call: generate keypair + seal priv + persist row.
@@ -1993,6 +2006,7 @@ pub fn run() {
             wizard_recipient_revoke,
             wizard_recipient_list,
             wizard_recipient_list_remote,
+            wizard_recipient_delete,
             // FRP-14 Layer 3c: recipient-side identity
             recipient_identity_get_or_create,
             recipient_identity_get,

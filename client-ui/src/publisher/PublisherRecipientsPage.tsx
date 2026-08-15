@@ -52,6 +52,10 @@ interface ConfirmRevoke {
     recipient: RecipientSummary;
 }
 
+interface ConfirmRemove {
+    recipient: RecipientSummary;
+}
+
 export default function PublisherRecipientsPage({ t }: Props) {
     const [operators, setOperators] = useState<OperatorSummary[]>([]);
     const [operatorId, setOperatorId] = useState<number | null>(null);
@@ -87,6 +91,12 @@ export default function PublisherRecipientsPage({ t }: Props) {
     const [revokeHelperIp, setRevokeHelperIp] = useState('');
     const [revokeBusy, setRevokeBusy] = useState(false);
     const [revokeError, setRevokeError] = useState<string | null>(null);
+
+    // Remove confirm — hard-deletes an already-revoked row from the
+    // local roster. Local-only (no PIN / no box round-trip).
+    const [confirmRemove, setConfirmRemove] = useState<ConfirmRemove | null>(null);
+    const [removeBusy, setRemoveBusy] = useState(false);
+    const [removeError, setRemoveError] = useState<string | null>(null);
 
     // Sync
     const [syncing, setSyncing] = useState(false);
@@ -187,6 +197,23 @@ export default function PublisherRecipientsPage({ t }: Props) {
             setRevokeError(String(e));
         } finally {
             setRevokeBusy(false);
+        }
+    };
+
+    const onRemoveConfirm = async () => {
+        if (operatorId === null || !confirmRemove) return;
+        setRemoveBusy(true);
+        setRemoveError(null);
+        try {
+            await Wizard.recipientDelete(operatorId, confirmRemove.recipient.id);
+            setRecipients((prev) =>
+                prev.filter((r) => r.id !== confirmRemove.recipient.id),
+            );
+            setConfirmRemove(null);
+        } catch (e) {
+            setRemoveError(String(e));
+        } finally {
+            setRemoveBusy(false);
         }
     };
 
@@ -379,6 +406,19 @@ export default function PublisherRecipientsPage({ t }: Props) {
                                                     }}
                                                 >
                                                     {t('pub.recipients.revoke')}
+                                                </Button>
+                                            )}
+                                            {/* Once revoked (on-box teardown done)
+                                                the greyed-out row can be purged from
+                                                the local roster for good. */}
+                                            {revoked && (
+                                                <Button
+                                                    onClick={() => {
+                                                        setConfirmRemove({ recipient: r });
+                                                        setRemoveError(null);
+                                                    }}
+                                                >
+                                                    {t('pub.recipients.remove')}
                                                 </Button>
                                             )}
                                         </span>
@@ -584,6 +624,50 @@ export default function PublisherRecipientsPage({ t }: Props) {
                         {revokeError && (
                             <div style={{ color: 'var(--red)', fontSize: 12 }}>
                                 {revokeError}
+                            </div>
+                        )}
+                    </div>
+                </Sheet>
+            )}
+
+            {confirmRemove && (
+                <Sheet
+                    title={t('pub.recipients.remove.title')}
+                    onClose={() => {
+                        if (!removeBusy) setConfirmRemove(null);
+                    }}
+                    width={520}
+                    footer={
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                            <Button
+                                onClick={() => setConfirmRemove(null)}
+                                disabled={removeBusy}
+                            >
+                                {t('common.cancel')}
+                            </Button>
+                            <Button onClick={onRemoveConfirm} disabled={removeBusy}>
+                                {removeBusy
+                                    ? t('pub.recipients.removing')
+                                    : t('pub.recipients.remove')}
+                            </Button>
+                        </span>
+                    }
+                >
+                    <div style={{ display: 'grid', gap: 10 }}>
+                        <div style={{ fontSize: 13, color: 'var(--fg)' }}>
+                            {t('pub.recipients.remove.body').replace(
+                                '{name}',
+                                confirmRemove.recipient.display_name ||
+                                    confirmRemove.recipient.name ||
+                                    `#${confirmRemove.recipient.id}`,
+                            )}
+                        </div>
+                        <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>
+                            {confirmRemove.recipient.address_str}
+                        </div>
+                        {removeError && (
+                            <div style={{ color: 'var(--red)', fontSize: 12 }}>
+                                {removeError}
                             </div>
                         )}
                     </div>

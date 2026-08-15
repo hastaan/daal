@@ -397,6 +397,14 @@ export const Wizard = {
             pin,
             helperIp: helper_ip,
         }),
+    // Hard-remove an already-revoked recipient from the local roster.
+    // No box round-trip; the row must be revoked first (the Rust side
+    // guards live rows). Purges the greyed-out row + its .sbpx.
+    recipientDelete: (operator_id: number, recipient_id: number) =>
+        invoke<void>('wizard_recipient_delete', {
+            operatorId: operator_id,
+            recipientId: recipient_id,
+        }),
 };
 
 // ---- Streaming events ----
