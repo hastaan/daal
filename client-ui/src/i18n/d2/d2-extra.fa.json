@@ -90,6 +90,7 @@
   "network.route_count_one": "۱ مسیر",
   "network.route_count_other": "{n} مسیر",
   "network.cooled": "خنک‌شده",
+  "network.untested": "هنوز آزمایش نشده",
   "network.budget_full": "بودجه پر",
   "network.cool_15m": "خنک‌سازی ۱۵ دقیقه",
   "network.cap": "تعیین سقف داده",

@@ -90,6 +90,7 @@
   "network.route_count_one": "1 route",
   "network.route_count_other": "{n} routes",
   "network.cooled": "cooled",
+  "network.untested": "not tested yet",
   "network.budget_full": "budget full",
   "network.cool_15m": "Cool 15 min",
   "network.cap": "Set data cap",

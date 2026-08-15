@@ -22,8 +22,14 @@ export interface RouteDisplayRow {
   inCooldown: boolean;
   cooldownUntilUnixMs?: number;
   budgetExhausted: boolean;
-  /** 0..100, computed from engine route_health over the last hour. */
+  /** 0..100, computed from engine route_health over the last hour.
+   *  Only meaningful when `proven` is true; otherwise it is a placeholder
+   *  (the engine caps unproven routes at 50) and the UI must show
+   *  "not tested yet" rather than the number. */
   healthPct?: number;
+  /** True once the route has recorded at least one success. Until then
+   *  `healthPct` is a placeholder — render an untested state, not a score. */
+  proven?: boolean;
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
   sourceName?: string;
@@ -71,6 +77,9 @@ export interface RouteHealthDisplayRow {
   label: string;
   pct: number;
   severity: Severity;
+  /** True once the route has recorded a success. When false, `pct` is a
+   *  placeholder and the UI should show "not tested yet". */
+  proven?: boolean;
 }
 
 export interface PublisherHandoffSummary {
@@ -148,7 +157,9 @@ export type SourceKind = 'sbpx' | 'sbp' | 'subscription' | 'pasted' | 'mixed';
 export interface FamilyChip {
   family: string;            // engine family token, e.g. "vless-reality"
   count: number;
-  healthPct: number;         // averaged across family routes (0..100)
+  healthPct: number;         // averaged across PROVEN family routes (0..100)
+  proven: boolean;           // at least one route in the family has succeeded;
+                             // when false, healthPct is a placeholder (render untested)
   cooledCount: number;       // how many of `count` are currently cooled
   experimental: boolean;     // from routestore.FamilyMaturity
   lastErrorTag?: string;     // engine token for "why cooled" (when cooled>0)

@@ -535,8 +535,9 @@ function CellRowView({
                                 }}
                             >
                                 {r.family}
-                                {typeof r.healthPct === 'number' &&
-                                    ` · ${r.healthPct}%`}
+                                {r.proven && typeof r.healthPct === 'number'
+                                    ? ` · ${r.healthPct}%`
+                                    : ` · ${t('network.untested')}`}
                                 {r.inCooldown && ` · ${t('network.cooled')}`}
                                 {r.budgetExhausted && ` · ${t('network.budget_full')}`}
                             </div>
@@ -620,8 +621,9 @@ function FamilyChipView({
             {cooled && '🚨 '}
             {exp && !cooled && '⚡ '}
             {chip.family} · {chip.count}
-            {typeof chip.healthPct === 'number' &&
-                ` · ${chip.healthPct}%`}
+            {chip.proven && typeof chip.healthPct === 'number'
+                ? ` · ${chip.healthPct}%`
+                : ` · ${t('network.untested')}`}
         </span>
     );
 }

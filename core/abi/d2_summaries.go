@@ -38,6 +38,12 @@ type RouteSummaryDisplay struct {
 	CooldownUntilUnixMs int64   `json:"cooldown_until_unix_ms,omitempty"`
 	BudgetExhausted     bool    `json:"budget_exhausted"`
 	HealthPct           float64 `json:"health_pct,omitempty"`
+	// Proven is true once the route has recorded at least one success
+	// (LastSuccessBucket set). Until then HealthPct is a placeholder
+	// (computeHealthPctLastHour caps unproven routes at 50), so the UI
+	// MUST render "not tested yet" rather than the number — otherwise it
+	// presents an untested route as a measured 50% health.
+	Proven bool `json:"proven"`
 }
 
 // rowToDisplay maps a routestore.RouteRow to the wire shape.
@@ -90,6 +96,7 @@ func rowToDisplay(r routestore.RouteRow, healthPct float64) RouteSummaryDisplay 
 		CooldownUntilUnixMs: cooldownUntilMs,
 		BudgetExhausted:     budgetExhausted,
 		HealthPct:           healthPct,
+		Proven:              strings.TrimSpace(r.LastSuccessBucket) != "",
 	}
 }
 
@@ -131,7 +138,7 @@ func computeHealthPctLastHour(r routestore.RouteRow) float64 {
 			pct -= 30.0
 		}
 	}
-	if r.LastSuccessBucket == "" && pct > 50 {
+	if strings.TrimSpace(r.LastSuccessBucket) == "" && pct > 50 {
 		pct = 50
 	}
 	if pct < 0 {

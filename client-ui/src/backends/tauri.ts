@@ -77,6 +77,7 @@ interface RawRouteSummary {
     cooldown_until_unix_ms?: number;
     budget_exhausted: boolean;
     health_pct?: number;
+    proven?: boolean;
 }
 
 // ---- derivations
@@ -144,6 +145,7 @@ function rawToRow(r: RawRouteSummary): RouteDisplayRow {
         cooldownUntilUnixMs: r.cooldown_until_unix_ms,
         budgetExhausted: !!r.budget_exhausted,
         healthPct: typeof r.health_pct === 'number' ? r.health_pct : undefined,
+        proven: !!r.proven,
     };
 }
 
@@ -275,12 +277,16 @@ export class TauriContract implements D2Contract {
             const label = summary
                 ? `${summary.publisher_name} · ${summary.route_nickname}`
                 : r.route_id;
-            const pct = summary?.health_pct ?? (r.in_cooldown ? 30 : 90);
+            // Honest value only — never fabricate a number the engine
+            // didn't produce. When health is absent, fall back to 0 and
+            // let `proven=false` drive a "not tested yet" render.
+            const pct = typeof summary?.health_pct === 'number' ? summary.health_pct : 0;
             out.push({
                 routeId: r.route_id,
                 label,
                 pct,
                 severity: deriveSeverity(pct),
+                proven: !!summary?.proven,
             });
         }
         return out;

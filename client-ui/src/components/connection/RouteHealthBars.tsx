@@ -18,15 +18,33 @@ export default function RouteHealthBars({ rows, locale, t }: Props) {
                     {t('health.no_data')}
                 </div>
             )}
-            {rows.map((r) => (
-                <div className="d2-health-row" key={r.routeId}>
-                    <span className="name">{r.label}</span>
-                    <HealthBar pct={r.pct} severity={r.severity} />
-                    <span className="pct">
-                        <NumeralSpan locale={locale}>{Math.round(r.pct)}</NumeralSpan>%
-                    </span>
-                </div>
-            ))}
+            {rows.map((r) =>
+                // Honest render: a route that has never succeeded has only a
+                // placeholder health number, so show "not tested yet" rather
+                // than a bar + % that looks measured.
+                r.proven === false ? (
+                    <div className="d2-health-row" key={r.routeId}>
+                        <span className="name">{r.label}</span>
+                        <span
+                            className="pct"
+                            style={{ color: 'var(--ink-soft)', fontSize: 12 }}
+                        >
+                            {t('network.untested')}
+                        </span>
+                    </div>
+                ) : (
+                    <div className="d2-health-row" key={r.routeId}>
+                        <span className="name">{r.label}</span>
+                        <HealthBar pct={r.pct} severity={r.severity} />
+                        <span className="pct">
+                            <NumeralSpan locale={locale}>
+                                {Math.round(r.pct)}
+                            </NumeralSpan>
+                            %
+                        </span>
+                    </div>
+                ),
+            )}
         </div>
     );
 }

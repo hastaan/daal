@@ -63,16 +63,22 @@ function chipFor(
     routes: RouteDisplayRow[],
     skipped: Map<string, SkippedFamilyRow>,
 ): FamilyChip {
-    const totalPct = routes.reduce(
-        (acc, r) => acc + (typeof r.healthPct === 'number' ? r.healthPct : 0),
-        0,
+    // Only proven routes contribute a meaningful health number; averaging
+    // in the placeholder 50 of untested routes would fabricate a score.
+    const provenRoutes = routes.filter(
+        (r) => r.proven && typeof r.healthPct === 'number',
     );
+    const totalPct = provenRoutes.reduce((acc, r) => acc + (r.healthPct ?? 0), 0);
     const cooledCount = routes.filter((r) => r.inCooldown).length;
     const skip = skipped.get(family);
     return {
         family,
         count: routes.length,
-        healthPct: routes.length === 0 ? 0 : Math.round(totalPct / routes.length),
+        healthPct:
+            provenRoutes.length === 0
+                ? 0
+                : Math.round(totalPct / provenRoutes.length),
+        proven: provenRoutes.length > 0,
         cooledCount: skip ? Math.max(cooledCount, 1) : cooledCount,
         experimental: isExperimental(family),
         lastErrorTag: skip?.reasonTag,
