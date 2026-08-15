@@ -19,7 +19,35 @@ most user-visible.
 
 ---
 
-## Workstream A — UI honesty & connect UX  ← ACTIVE
+## Workstream E — sharing model & publisher (user-reported 2026-08-15)  ← ACTIVE
+Four problems the user hit on-device:
+
+- [~] **E1. Plain `.sbp` didn't connect.** Root cause: `.sbp` shipped metadata-only
+  profiles; connectable outbounds were injected only in the per-recipient
+  `.sbpx` path. FIXED at the pipeline (commit eb42f28, `users-pack-sbp`): a
+  plain `.sbp` is now rewritten with ONE shared box user's creds (`r0`) so ANY
+  phone imports + connects it, no PIN. **Validated on-device: all 4 tiers egress
+  the relay from a shared `.sbp`.** REMAINING: wire it into the phone publisher
+  wizard so provisioning auto-produces the shared `.sbp` (needs Rust +
+  libdaal_deploy.so rebuild).
+- [ ] **E2. Publisher can't share/revoke/create `.sbpx` after PIN; too complex.**
+  Root causes (see below): two disconnected PIN systems (custody-unlock vs
+  per-call keystore PIN), provision/revoke need a *live* box + correct
+  `helper_ip` + valid token, silent fail-closed leaves an empty `sbpx_path` so
+  Share is disabled. SIMPLIFY: with E1's shared `.sbp` as the default, the
+  per-recipient box round-trip / PIN / helper-IP dance becomes optional. Also:
+  unify the two PINs; auto-detect helper_ip; surface fail-closed; de-duplicate
+  the roster UI (wizard `distribute` step vs PublisherRecipientsPage).
+- [x] **E3. App icon was the stock two-circle placeholder.** FIXED (commit
+  5a8b063): real daal eagle on dark teal + adaptive icon; `make-android-icon-
+  source.py` + `patch-android-icons.sh` for reproducibility. Ships next build.
+- [ ] **E4. No way to delete an imported route/publisher.** Only URL
+  *subscriptions* can be removed (`subscriptionRemove`); there is no
+  route/publisher delete in the contract, Rust, or `core/routestore` (no
+  `DeleteRoute`). Build across layers: routestore delete → engine ABI →
+  `wizard_*` command → UI affordance on the route row + publisher card.
+
+## Workstream A — UI honesty & connect UX  (A1-A4 done; see commits)
 The app currently shows fabricated/meaningless data and has a confusing
 connect model. Goal: never show a number we didn't measure; make connect /
 disconnect obvious.
