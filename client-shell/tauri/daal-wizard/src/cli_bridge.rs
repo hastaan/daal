@@ -312,6 +312,9 @@ pub trait CliRunner: Send + Sync {
     /// addressed to one recipient. No box round-trip, no priv-key.
     fn run_users_pack_sbpx(&self, args: UsersPackSbpxArgs<'_>) -> Result<UsersPackSbpxResult>;
 
+    /// Shared-.sbp path: invoke `daal-deploy users-pack-sbp`.
+    fn run_users_pack_sbp(&self, args: UsersPackSbpArgs<'_>) -> Result<UsersPackSbpResult>;
+
     /// FRP-14 Layer 3d: invoke `daal-deploy users-unpack-sbpx`.
     /// Decrypts a `.sbpx` envelope using the recipient's X25519
     /// private key (piped through stdin as 64 hex chars). Writes
@@ -362,6 +365,10 @@ pub struct UserCredsResult {
     pub reality_public_key: String,
     #[serde(default)]
     pub tls_cert_sha256: String,
+    /// The box's data-plane leaf cert (PEM) — naive's trusted root
+    /// (Cronet). Without it the naive outbound can't be assembled.
+    #[serde(default)]
+    pub tls_cert_pem: String,
 }
 
 /// FRP-14: JSON returned by `daal-deploy users-revoke`.
@@ -396,6 +403,24 @@ pub struct UsersPackSbpxResult {
     pub sbpx_path: String,
     pub plaintext_size: i64,
     pub sbpx_size: i64,
+}
+
+/// Shared-.sbp path: args for `daal-deploy users-pack-sbp`. Rewrites a
+/// signed .sbp's profiles with ONE shared box user's creds (no envelope,
+/// no recipient pubkey) so any phone can import + connect it.
+pub struct UsersPackSbpArgs<'a> {
+    pub in_sbp_path: &'a Path,
+    pub creds_file_path: &'a Path,
+    pub server: &'a str,
+    pub out_sbp_path: &'a Path,
+}
+
+/// JSON returned by `daal-deploy users-pack-sbp`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct UsersPackSbpResult {
+    pub sbp_path: String,
+    pub sbp_size: i64,
+    pub shared: bool,
 }
 
 /// FRP-14 Layer 3d: args for `daal-deploy users-unpack-sbpx`.
@@ -1442,6 +1467,45 @@ impl CliRunner for SubprocessRunner {
         Ok(serde_json::from_str(&stdout_text)?)
     }
 
+    fn run_users_pack_sbp(&self, args: UsersPackSbpArgs<'_>) -> Result<UsersPackSbpResult> {
+        // Local file I/O only — no priv-key, no token, no record.
+        let mut child = Command::new(&self.binary)
+            .arg("users-pack-sbp")
+            .arg("--in")
+            .arg(args.in_sbp_path)
+            .arg("--creds-file")
+            .arg(args.creds_file_path)
+            .arg("--server")
+            .arg(args.server)
+            .arg("--out")
+            .arg(args.out_sbp_path)
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        let mut stdout_text = String::new();
+        let mut stderr_text = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut stdout_text);
+        }
+        if let Some(mut s) = child.stderr.take() {
+            let _ = s.read_to_string(&mut stderr_text);
+        }
+        let status = child.wait().map_err(BridgeError::Io)?;
+        if !status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: status.code().unwrap_or(-1),
+                stderr: stderr_text,
+            });
+        }
+        Ok(serde_json::from_str(&stdout_text)?)
+    }
+
     fn run_users_unpack_sbpx(
         &self,
         args: UsersUnpackSbpxArgs<'_>,
@@ -2018,6 +2082,7 @@ impl CliRunner for MockRunner {
             provisioned_at_unix: 1_700_000_000,
             reality_public_key: "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into(),
             tls_cert_sha256: "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into(),
+            tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
         })
     }
 
@@ -2068,6 +2133,17 @@ impl CliRunner for MockRunner {
             sbpx_path: args.out_sbpx_path.to_string_lossy().to_string(),
             plaintext_size: in_bytes.len() as i64,
             sbpx_size: out.len() as i64,
+        })
+    }
+    fn run_users_pack_sbp(&self, args: UsersPackSbpArgs<'_>) -> Result<UsersPackSbpResult> {
+        // Mock: copy input to output (the real rewrite is exercised by the
+        // Go CLI tests), and report a believable result.
+        let in_bytes = std::fs::read(args.in_sbp_path).unwrap_or_default();
+        std::fs::write(args.out_sbp_path, &in_bytes).ok();
+        Ok(UsersPackSbpResult {
+            sbp_path: args.out_sbp_path.to_string_lossy().to_string(),
+            sbp_size: in_bytes.len() as i64,
+            shared: true,
         })
     }
 

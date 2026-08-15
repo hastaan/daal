@@ -1231,6 +1231,33 @@ fn wizard_recipient_provision(
     r.map_err(|e| e.to_string())
 }
 
+/// Produce the shareable shared `.sbp` (default distribution artifact):
+/// mints the shared `r0` box user and rewrites the signed `.sbp` with its
+/// creds so any phone can import + connect it — no per-recipient sealing.
+#[tauri::command]
+fn wizard_produce_shared_sbp(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    pin: String,
+    helper_ip: String,
+) -> Result<daal_wizard::recipient_book::SharedSbpSummary, String> {
+    eprintln!(
+        "[produce_shared_sbp] op={} helper_ip={}",
+        operator_id, helper_ip
+    );
+    let r = daal_wizard::recipient_book::produce_shared_sbp(
+        &wstate.0,
+        operator_id,
+        &pin,
+        &helper_ip,
+    );
+    match &r {
+        Ok(s) => eprintln!("[produce_shared_sbp] ok -> {}", s.sbp_path),
+        Err(e) => eprintln!("[produce_shared_sbp] err: {}", e),
+    }
+    r.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn wizard_recipient_revoke(
     wstate: State<'_, WizardStateMgr>,
@@ -1709,10 +1736,19 @@ fn share_invite(
     operator_id: i64,
     friendly_name: String,
 ) -> Result<String, String> {
-    let canonical = wstate
+    // Prefer the shared .sbp (rewritten with the r0 shared user's working
+    // outbounds by wizard_produce_shared_sbp) — that's the one any phone
+    // can actually connect. Fall back to the raw Step-6 .sbp only if the
+    // shared one hasn't been produced yet.
+    let shared = wstate
+        .0
+        .staging_dir
+        .join(format!("{operator_id}.shared.sbp"));
+    let raw = wstate
         .0
         .staging_dir
         .join(format!("{operator_id}.sbp"));
+    let canonical = if shared.exists() { shared } else { raw };
     if !canonical.exists() {
         return Err(format!(
             "no relay pack on this device for server #{operator_id}"
@@ -2007,6 +2043,7 @@ pub fn run() {
             wizard_recipient_list,
             wizard_recipient_list_remote,
             wizard_recipient_delete,
+            wizard_produce_shared_sbp,
             // FRP-14 Layer 3c: recipient-side identity
             recipient_identity_get_or_create,
             recipient_identity_get,

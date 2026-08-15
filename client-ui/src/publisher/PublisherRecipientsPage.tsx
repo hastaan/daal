@@ -102,6 +102,35 @@ export default function PublisherRecipientsPage({ t }: Props) {
     const [syncing, setSyncing] = useState(false);
     const [syncResult, setSyncResult] = useState<string | null>(null);
 
+    // Shared .sbp — the default "one file, any phone" distribution.
+    const [shareOpen, setShareOpen] = useState(false);
+    const [sharePin, setSharePin] = useState('');
+    const [shareHelperIp, setShareHelperIp] = useState('');
+    const [shareBusy, setShareBusy] = useState(false);
+    const [shareError, setShareError] = useState<string | null>(null);
+
+    const onShareConnectionFile = useCallback(async () => {
+        if (operatorId === null) return;
+        if (!sharePin) {
+            setShareError(t('pub.recipients.add.missing_pin'));
+            return;
+        }
+        setShareBusy(true);
+        setShareError(null);
+        try {
+            // Mint the shared user + rewrite the .sbp with its working creds,
+            // then open the OS share sheet on the result.
+            await Wizard.produceSharedSbp(operatorId, sharePin, shareHelperIp);
+            await Wizard.shareInvite(operatorId, 'daal-connection');
+            setShareOpen(false);
+            setSharePin('');
+        } catch (e) {
+            setShareError(String(e));
+        } finally {
+            setShareBusy(false);
+        }
+    }, [operatorId, sharePin, shareHelperIp, t]);
+
     const reloadOperators = useCallback(async () => {
         try {
             const ops = await Wizard.listOperators();
@@ -319,6 +348,79 @@ export default function PublisherRecipientsPage({ t }: Props) {
                             ))}
                         </select>
                     </div>
+                )}
+                {operatorId !== null && (
+                    <Card>
+                        <div style={{ padding: '12px 14px', display: 'grid', gap: 10 }}>
+                            <div style={{ fontSize: 15, fontWeight: 600 }}>
+                                {t('pub.share.title')}
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                {t('pub.share.help')}
+                            </div>
+                            {!shareOpen ? (
+                                <Button onClick={() => setShareOpen(true)}>
+                                    {t('pub.share.cta')}
+                                </Button>
+                            ) : (
+                                <div style={{ display: 'grid', gap: 8 }}>
+                                    <input
+                                        type="password"
+                                        inputMode="numeric"
+                                        placeholder={t('pub.share.pin_placeholder')}
+                                        value={sharePin}
+                                        onChange={(e) => setSharePin(e.target.value)}
+                                        style={{
+                                            padding: '8px 10px',
+                                            background: 'var(--surface)',
+                                            color: 'var(--fg)',
+                                            border: '1px solid var(--line-soft)',
+                                            borderRadius: 'var(--r-control)',
+                                        }}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder={t('pub.share.helper_ip_placeholder')}
+                                        value={shareHelperIp}
+                                        onChange={(e) => setShareHelperIp(e.target.value)}
+                                        style={{
+                                            padding: '8px 10px',
+                                            background: 'var(--surface)',
+                                            color: 'var(--fg)',
+                                            border: '1px solid var(--line-soft)',
+                                            borderRadius: 'var(--r-control)',
+                                            fontFamily: 'var(--font-mono)',
+                                            fontSize: 12,
+                                        }}
+                                    />
+                                    {shareError && (
+                                        <div style={{ color: 'var(--red)', fontSize: 12 }}>
+                                            {shareError}
+                                        </div>
+                                    )}
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                        <Button
+                                            onClick={onShareConnectionFile}
+                                            disabled={shareBusy}
+                                        >
+                                            {shareBusy
+                                                ? t('pub.share.working')
+                                                : t('pub.share.confirm')}
+                                        </Button>
+                                        <Button
+                                            onClick={() => {
+                                                setShareOpen(false);
+                                                setShareError(null);
+                                            }}
+                                            disabled={shareBusy}
+                                        >
+                                            {t('common.cancel')}
+                                        </Button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </Card>
                 )}
                 {operatorId === null && (
                     <Card>

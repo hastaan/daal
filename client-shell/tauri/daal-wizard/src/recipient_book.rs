@@ -238,6 +238,126 @@ pub fn recipient_provision(
     Ok(summary)
 }
 
+/// The fixed shared-user identity on the box. A plain shared `.sbp` bakes
+/// this one credential set in, so ANY phone that imports the file can
+/// connect — no per-recipient sealing. `r0` matches the box nameRegex.
+pub const SHARED_USER_NAME: &str = "r0";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedSbpSummary {
+    /// Filesystem path to the shareable shared `.sbp`.
+    pub sbp_path: String,
+    /// The relay public IP the routes dial (for display).
+    pub server: String,
+}
+
+/// `produce_shared_sbp` mints (or re-mints) the shared `r0` user on the
+/// box and rewrites the operator's signed `.sbp` (Step-6 output) with that
+/// one credential set, producing a plaintext shared `.sbp` any phone can
+/// import and connect. This is the default "share with the whole family"
+/// artifact; the per-recipient `.sbpx` path (recipient_provision) stays as
+/// the individually-revocable option.
+pub fn produce_shared_sbp(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    pin: &str,
+    helper_ip: &str,
+) -> Result<SharedSbpSummary, WizardError> {
+    crate::commands::validate_pin(pin)?;
+
+    let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
+
+    // The signed .sbp from Step 6 must exist before we can rewrite it.
+    let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
+    if !in_sbp_path.exists() {
+        return Err(WizardError::Pricing(
+            "no signed bundle yet — finish the Sign step first".into(),
+        ));
+    }
+
+    // Open keystore once for publisher privkey + cloud token.
+    let priv_bytes = match ctx.keystore.open(&row.publisher_priv_keystore_alias, pin) {
+        Ok(b) => b,
+        Err(KeystoreError::WrongPin) => {
+            return Err(WizardError::Keystore(KeystoreError::WrongPin));
+        }
+        Err(e) => return Err(WizardError::Keystore(e)),
+    };
+    let priv_buf = Zeroizing::new(priv_bytes);
+    let token_bytes = ctx
+        .keystore
+        .open(&row.cloud_token_keystore_alias, pin)
+        .map_err(WizardError::Keystore)?;
+    let token = Zeroizing::new(
+        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
+    );
+
+    // Mint the shared user on the box. Provisioning the same name twice
+    // simply re-mints its creds (the box keeps one user row per name), so
+    // this is safe to call again to refresh the shared .sbp.
+    let record_path = write_record_staging(ctx, operator_id, &row.operator_record_json)?;
+    let creds = ctx
+        .cli
+        .run_users_provision(
+            UsersProvisionArgs {
+                record_path: &record_path,
+                helper_ip,
+                token: token.as_str(),
+                name: SHARED_USER_NAME,
+            },
+            priv_buf.as_slice(),
+        )
+        .map_err(map_bridge_err)?;
+    let _ = std::fs::remove_file(&record_path);
+
+    // Build the creds JSON the rewrite reads. Box-wide material
+    // (reality pubkey, tls pin) falls back to the OperatorRecord when the
+    // mgmt response omits it (pre-Tier-2 box); tls_cert_pem comes straight
+    // from the mgmt response (needed for naive).
+    let rec_val = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
+        .unwrap_or(serde_json::Value::Null);
+    let field = |k: &str| -> String {
+        rec_val.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
+    };
+    let relay_server_ip = field("public_ip");
+    if relay_server_ip.is_empty() {
+        return Err(WizardError::Pricing(
+            "operator record has no public_ip — reprovision the box".into(),
+        ));
+    }
+    let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = creds_val.as_object_mut() {
+        let reality_pub = field("reality_public_key");
+        let tls_pin = field("tls_cert_sha256");
+        if !reality_pub.is_empty() {
+            obj.insert("reality_public_key".into(), reality_pub.into());
+        }
+        if !tls_pin.is_empty() {
+            obj.insert("tls_cert_sha256".into(), tls_pin.into());
+        }
+    }
+    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+
+    // Rewrite the .sbp's profiles with the shared creds → shared .sbp.
+    let out_path = ctx.staging_dir.join(format!("{operator_id}.shared.sbp"));
+    let creds_path = ctx.staging_dir.join(format!("{operator_id}.shared.creds.json"));
+    std::fs::write(&creds_path, creds_json.as_bytes())
+        .map_err(|e| WizardError::Pricing(format!("stage creds: {e}")))?;
+    let res = ctx.cli.run_users_pack_sbp(crate::cli_bridge::UsersPackSbpArgs {
+        in_sbp_path: &in_sbp_path,
+        creds_file_path: &creds_path,
+        server: &relay_server_ip,
+        out_sbp_path: &out_path,
+    });
+    let _ = std::fs::remove_file(&creds_path);
+    res.map_err(map_bridge_err)?;
+
+    Ok(SharedSbpSummary {
+        sbp_path: out_path.to_string_lossy().to_string(),
+        server: relay_server_ip,
+    })
+}
+
 /// `recipient_revoke` revokes the recipient on the box (sing-box
 /// rewrite + SIGUSR2 kick) and stamps `revoked_at_unix` on the
 /// local row. Idempotent: revoking an already-revoked recipient

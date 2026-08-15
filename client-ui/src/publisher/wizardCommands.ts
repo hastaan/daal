@@ -164,6 +164,22 @@ export const Wizard = {
             operatorId: operator_id,
             friendlyName: friendly_name,
         }),
+    /** Produce the shareable shared `.sbp` (mints the shared r0 user +
+     *  rewrites the signed .sbp with its working creds). Any phone can
+     *  import + connect the result — no PIN, no per-recipient sealing. */
+    produceSharedSbp: (
+        operator_id: number,
+        pin: string,
+        helper_ip: string,
+    ) =>
+        invoke<{ sbp_path: string; server: string }>(
+            'wizard_produce_shared_sbp',
+            {
+                operatorId: operator_id,
+                pin,
+                helperIp: helper_ip,
+            },
+        ),
     /** FRP-14 Layer 3b.5: open the share-sheet for a specific
      *  per-recipient `.sbpx` file produced by Add-recipient. */
     shareInviteSbpx: (sbpx_path: string, friendly_name: string) =>
