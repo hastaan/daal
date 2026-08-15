@@ -31,7 +31,7 @@ var V15Artifacts = ArtifactManifest{
 			Name:      "sing-box-1.13.12-linux-amd64",
 			InstallAs: "sing-box",
 			Sha256:    "989e848637725005fdac7f1d3fa3d6eeb16992c5e0a68789da96b6b3fde06ea2",
-			SigHex:    "f928976c7b89f8d23e8d8df6f7fe629f34d9844d38ce7fef02632bbacad05e4b7b591e90507262316aae9da90b252b0dcd4408c2ef4a0f679671ab4966b77a0c",
+			SigHex:    "ff5ba04d6dddee1bd3350cccb828f366efc6f95d5b73ea98f49679001a45be543810fbfeb3c9d0737b12e0dd3fb050c48b7d629278d74bd0f9e4a4a1630eb10a",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/sing-box-1.13.12-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/sing-box-1.13.12-linux-amd64",
@@ -40,8 +40,8 @@ var V15Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "35a16b5259d2d3b49fe2f3193cf18744b4010dce4fb1f5f9fe6f776ea3f8753c",
-			SigHex:    "c9dc758c102e76cd18d148756968dcb166b74482cb442b10b30c3da0b4d53a9314da6c000a9808deaf3f1b5e573a9505feffa1906f77d4238f74b286a639e40c",
+			Sha256:    "b7169ac97b20cbddf255d2f0ddfab5a5e7c57be9f003a505934969f7ab3be8fc",
+			SigHex:    "eedaa2b38084589f5132f3ac217fa2b186655dca3c0352e7525c2b4a84b180d83aed5f9c04b57978b7c5639654ee61ea9ef714d7b8d22694eda7d2d60f29d60b",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
@@ -57,7 +57,7 @@ var V2Artifacts = ArtifactManifest{
 			Name:      "sing-box-1.13.12-linux-amd64",
 			InstallAs: "sing-box",
 			Sha256:    "989e848637725005fdac7f1d3fa3d6eeb16992c5e0a68789da96b6b3fde06ea2",
-			SigHex:    "f928976c7b89f8d23e8d8df6f7fe629f34d9844d38ce7fef02632bbacad05e4b7b591e90507262316aae9da90b252b0dcd4408c2ef4a0f679671ab4966b77a0c",
+			SigHex:    "ff5ba04d6dddee1bd3350cccb828f366efc6f95d5b73ea98f49679001a45be543810fbfeb3c9d0737b12e0dd3fb050c48b7d629278d74bd0f9e4a4a1630eb10a",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/sing-box-1.13.12-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/sing-box-1.13.12-linux-amd64",
@@ -66,8 +66,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "35a16b5259d2d3b49fe2f3193cf18744b4010dce4fb1f5f9fe6f776ea3f8753c",
-			SigHex:    "c9dc758c102e76cd18d148756968dcb166b74482cb442b10b30c3da0b4d53a9314da6c000a9808deaf3f1b5e573a9505feffa1906f77d4238f74b286a639e40c",
+			Sha256:    "b7169ac97b20cbddf255d2f0ddfab5a5e7c57be9f003a505934969f7ab3be8fc",
+			SigHex:    "eedaa2b38084589f5132f3ac217fa2b186655dca3c0352e7525c2b4a84b180d83aed5f9c04b57978b7c5639654ee61ea9ef714d7b8d22694eda7d2d60f29d60b",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
@@ -76,8 +76,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "251becedc38de9662ace5663fbaddbbe6a46ae9095876967ec4edf053d276368",
-			SigHex:    "7d1bfb9823f42d4f01f1833ca37fd192b93195f328e610fea2be7ade06c04fb65288a05cb75a741d80093c5b7c7a236afd137c66f16b30a0e0010bb70575f905",
+			Sha256:    "419fbddd6b234dad536f19599b3d09e2f701428fd08ca8e0947097264ab6dcac",
+			SigHex:    "9a1e50af379956021d6f563e560d63916a49a06c9736fe3cb4fb44e32f6cdf7e0c27ac825a6a056d4e320a6454cf458b615473c8c51195077d10908670d1d804",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-mgmt-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
@@ -89,5 +89,5 @@ var V2Artifacts = ArtifactManifest{
 // DaalReleasePubKeyPEM is the Ed25519 public key the verifier shim
 // uses to validate artefact signatures.
 const DaalReleasePubKeyPEM = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEANau6FcQzm1wh/0i3hKHEqm6zqlwgtReD6c9beVqEJJs=
+MCowBQYDK2VwAyEATGVDyH8Gzd+qu2HYpmw/nfwgKNxXm27DEpaQZDAz2W8=
 -----END PUBLIC KEY-----`
