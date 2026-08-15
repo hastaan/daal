@@ -86,6 +86,8 @@
   "network.connecting": "Connecting…",
   "network.refresh": "Refresh",
   "network.remove": "Remove",
+  "network.remove_publisher": "Remove this connection",
+  "network.remove_publisher_confirm": "Remove this publisher and all its routes from this phone? You can re-import the file later.",
   "network.last_refresh": "Last refresh",
   "network.route_count_one": "1 route",
   "network.route_count_other": "{n} routes",

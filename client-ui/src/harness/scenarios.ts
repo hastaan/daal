@@ -24,6 +24,7 @@ import type {
 
 const ROUTE_PARS_RESCUE_03: RouteDisplayRow = {
     routeId: 'pars-rescue-03',
+    publisherId: 'pars-relays',
     publisherName: 'Pars Relays',
     routeNickname: 'Rescue 03',
     trustClass: 'trusted',
@@ -36,6 +37,7 @@ const ROUTE_PARS_RESCUE_03: RouteDisplayRow = {
 
 const ROUTE_PARS_RESCUE_01: RouteDisplayRow = {
     routeId: 'pars-rescue-01',
+    publisherId: 'pars-relays',
     publisherName: 'Pars',
     routeNickname: 'Rescue 01',
     trustClass: 'trusted',
@@ -48,6 +50,7 @@ const ROUTE_PARS_RESCUE_01: RouteDisplayRow = {
 
 const ROUTE_FRIEND_MAY6: RouteDisplayRow = {
     routeId: 'friend-may-6',
+    publisherId: 'friend',
     publisherName: 'Friend',
     routeNickname: 'May 6',
     trustClass: 'pinned',
@@ -60,6 +63,7 @@ const ROUTE_FRIEND_MAY6: RouteDisplayRow = {
 
 const ROUTE_EMERGENCY_K3F: RouteDisplayRow = {
     routeId: 'emergency-k3f',
+    publisherId: 'emergency',
     publisherName: 'Emergency',
     routeNickname: 'K3F',
     trustClass: 'unknown',

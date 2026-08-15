@@ -252,6 +252,23 @@ export default function NetworkPage({ t }: Props) {
                                     /* ignore */
                                 }
                             }}
+                            onRemovePublisher={async () => {
+                                if (
+                                    !window.confirm(
+                                        t('network.remove_publisher_confirm'),
+                                    )
+                                )
+                                    return;
+                                try {
+                                    // Drop the tunnel if it's this publisher's
+                                    // route, then hard-delete publisher + routes.
+                                    await contract.disconnect().catch(() => {});
+                                    await contract.publisherDelete(p.publisherId);
+                                    await load();
+                                } catch (e) {
+                                    setError(String(e));
+                                }
+                            }}
                         />
                     ))}
                 </ul>
@@ -295,6 +312,7 @@ interface PublisherRowProps {
     onBudget: (r: RouteDisplayRow) => void;
     onRefresh: () => void | Promise<void>;
     onRemoveSub: () => void | Promise<void>;
+    onRemovePublisher: () => void | Promise<void>;
     /** Route id whose Connect button is currently in flight, or null. */
     connectingId: string | null;
 }
@@ -309,6 +327,7 @@ function PublisherRowView({
     onBudget,
     onRefresh,
     onRemoveSub,
+    onRemovePublisher,
     connectingId,
 }: PublisherRowProps) {
     // The "trivial" case: one publisher with one cell and one route.
@@ -452,6 +471,22 @@ function PublisherRowView({
                                 </Button>
                             </div>
                         )}
+                        <div
+                            style={{
+                                display: 'flex',
+                                justifyContent: 'flex-end',
+                                paddingTop: 6,
+                                borderTop: '1px dashed var(--line-soft)',
+                            }}
+                        >
+                            <Button
+                                variant="danger"
+                                size="sm"
+                                onClick={() => void onRemovePublisher()}
+                            >
+                                {t('network.remove_publisher')}
+                            </Button>
+                        </div>
                     </div>
                 )}
             </Card>

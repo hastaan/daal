@@ -160,6 +160,8 @@ export class HarnessContract implements D2Contract {
     }
 
     async subscriptionRemove(_subscriptionId: string): Promise<void> { /* no-op */ }
+    async routeDelete(_routeId: string): Promise<void> { /* no-op */ }
+    async publisherDelete(_publisherId: string): Promise<number> { return 0; }
 
     async subscriptionRefresh(_subscriptionId: string, _timeoutMs: number): Promise<string> {
         return 'harness-refreshed';

@@ -525,6 +525,16 @@ fn subscription_refresh(
 }
 
 #[tauri::command]
+fn route_delete(state: State<'_, AppState>, route_id: String) -> Result<(), String> {
+    cmd::route_delete(&state, &route_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn publisher_delete(state: State<'_, AppState>, publisher_id: String) -> Result<i32, String> {
+    cmd::publisher_delete(&state, &publisher_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn subscription_remove(state: State<'_, AppState>, subscription_id: String) -> Result<(), String> {
     cmd::subscription_remove(&state, &subscription_id).map_err(|e| e.to_string())
 }
@@ -2004,6 +2014,8 @@ pub fn run() {
             subscription_add,
             subscription_refresh,
             subscription_remove,
+            route_delete,
+            publisher_delete,
             subscription_list,
             revocation_refresh_all,
             start_sidecar,

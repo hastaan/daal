@@ -12,6 +12,8 @@ export type Severity   = 'ok' | 'warn' | 'bad';
 export interface RouteDisplayRow {
   /** Engine route_id (opaque). */
   routeId: string;
+  /** Engine publisher_id (fingerprint hex) — the id delete/forget use. */
+  publisherId: string;
   /** Localizable: "Pars Relays". */
   publisherName: string;
   /** Localizable: "Rescue 03". */
@@ -352,6 +354,10 @@ export interface D2Contract {
   subscriptionList(): Promise<SubscriptionRow[]>;
   subscriptionAdd(req: AddSubscriptionRequest): Promise<string>;
   subscriptionRemove(subscriptionId: string): Promise<void>;
+  /** Hard-delete one imported route from the device store. */
+  routeDelete(routeId: string): Promise<void>;
+  /** Hard-delete a publisher and all its routes; resolves to the count removed. */
+  publisherDelete(publisherId: string): Promise<number>;
   subscriptionRefresh(subscriptionId: string, timeoutMs: number): Promise<string>;
   revocationRefreshAll(timeoutMs: number): Promise<string>;
 

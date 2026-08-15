@@ -204,6 +204,16 @@ export async function subscriptionRefresh(
     return invoke<string>('subscription_refresh', { subscriptionId, timeoutMs });
 }
 
+/** Hard-delete one imported route from the device store. */
+export async function routeDelete(routeId: string): Promise<void> {
+    return invoke<void>('route_delete', { routeId });
+}
+
+/** Hard-delete a publisher and all its routes; resolves to the count removed. */
+export async function publisherDelete(publisherId: string): Promise<number> {
+    return invoke<number>('publisher_delete', { publisherId });
+}
+
 export async function subscriptionRemove(subscriptionId: string): Promise<void> {
     return invoke<void>('subscription_remove', { subscriptionId });
 }

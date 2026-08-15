@@ -219,6 +219,17 @@ pub fn subscription_remove(state: &AppState, subscription_id: &str) -> Result<()
     state.engine.subscription_remove(subscription_id)
 }
 
+/// Hard-delete one imported route from the device store.
+pub fn route_delete(state: &AppState, route_id: &str) -> Result<()> {
+    state.engine.route_delete(route_id)
+}
+
+/// Hard-delete a publisher and all of its imported routes. Returns the
+/// number of routes removed.
+pub fn publisher_delete(state: &AppState, publisher_id: &str) -> Result<i32> {
+    state.engine.publisher_delete(publisher_id)
+}
+
 /// Snapshot of every subscription known to the engine. Used by the
 /// desktop Subscriptions screen on mount; without this the screen only
 /// renders rows the user added this session, which the 1.5B handover

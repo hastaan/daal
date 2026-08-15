@@ -86,6 +86,8 @@
   "network.connecting": "در حال اتصال…",
   "network.refresh": "به‌روزرسانی",
   "network.remove": "حذف",
+  "network.remove_publisher": "حذف این اتصال",
+  "network.remove_publisher_confirm": "این ناشر و همهٔ مسیرهایش از این گوشی حذف شود؟ می‌توانید بعداً فایل را دوباره وارد کنید.",
   "network.last_refresh": "آخرین به‌روزرسانی",
   "network.route_count_one": "۱ مسیر",
   "network.route_count_other": "{n} مسیر",

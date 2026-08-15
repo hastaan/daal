@@ -30,6 +30,7 @@ import (
 // RouteSummaryDisplay is the wire shape (D2FunctionalContract).
 type RouteSummaryDisplay struct {
 	RouteID             string  `json:"route_id"`
+	PublisherID         string  `json:"publisher_id"`
 	PublisherName       string  `json:"publisher_name"`
 	RouteNickname       string  `json:"route_nickname"`
 	TrustClass          string  `json:"trust_class"`
@@ -88,6 +89,7 @@ func rowToDisplay(r routestore.RouteRow, healthPct float64) RouteSummaryDisplay 
 
 	return RouteSummaryDisplay{
 		RouteID:             r.RouteID,
+		PublisherID:         r.PublisherID,
 		PublisherName:       publisherName,
 		RouteNickname:       nickname,
 		TrustClass:          trustClass,

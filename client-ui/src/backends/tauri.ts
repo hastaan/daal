@@ -59,6 +59,8 @@ import {
     subscriptionList as bridgeSubList,
     subscriptionAdd as bridgeSubAdd,
     subscriptionRemove as bridgeSubRemove,
+    routeDelete as bridgeRouteDelete,
+    publisherDelete as bridgePublisherDelete,
     subscriptionRefresh as bridgeSubRefresh,
     previewBundle as bridgePreviewBundle,
     importSbp as bridgeImportSbp,
@@ -69,6 +71,7 @@ import {
 
 interface RawRouteSummary {
     route_id: string;
+    publisher_id: string;
     publisher_name: string;
     route_nickname: string;
     trust_class: string;
@@ -147,6 +150,7 @@ function toProbeResult(raw: number): ProbeResult {
 function rawToRow(r: RawRouteSummary): RouteDisplayRow {
     return {
         routeId: r.route_id,
+        publisherId: r.publisher_id,
         publisherName: r.publisher_name,
         routeNickname: r.route_nickname,
         trustClass: deriveTrustClass(r.trust_class),
@@ -402,6 +406,14 @@ export class TauriContract implements D2Contract {
 
     async subscriptionRemove(subscriptionId: string): Promise<void> {
         return bridgeSubRemove(subscriptionId);
+    }
+
+    async routeDelete(routeId: string): Promise<void> {
+        return bridgeRouteDelete(routeId);
+    }
+
+    async publisherDelete(publisherId: string): Promise<number> {
+        return bridgePublisherDelete(publisherId);
     }
 
     async subscriptionRefresh(subscriptionId: string, timeoutMs: number): Promise<string> {

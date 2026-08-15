@@ -67,6 +67,8 @@ pub struct Engine {
         extern "C" fn(*const c_char, *const c_char, *const c_char, *mut c_void, c_int) -> c_int,
     subscription_refresh: extern "C" fn(*const c_char, c_int, *mut c_void, c_int) -> c_int,
     subscription_remove: extern "C" fn(*const c_char) -> c_int,
+    route_delete: extern "C" fn(*const c_char) -> c_int,
+    publisher_delete: extern "C" fn(*const c_char) -> c_int,
     subscription_list: extern "C" fn(*mut c_void, c_int) -> c_int,
     revocation_refresh_all: extern "C" fn(c_int, *mut c_void, c_int) -> c_int,
     pointer_rotation_status: extern "C" fn(*mut c_void, c_int) -> c_int,
@@ -213,6 +215,14 @@ impl Engine {
             let subscription_remove = *lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(
                 &lib,
                 b"engine_subscription_remove",
+            )?;
+            let route_delete = *lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(
+                &lib,
+                b"engine_route_delete",
+            )?;
+            let publisher_delete = *lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(
+                &lib,
+                b"engine_publisher_delete",
             )?;
             let subscription_list = *lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(
                 &lib,
@@ -391,6 +401,8 @@ impl Engine {
                 subscription_add: std::mem::transmute(subscription_add),
                 subscription_refresh: std::mem::transmute(subscription_refresh),
                 subscription_remove: std::mem::transmute(subscription_remove),
+                route_delete: std::mem::transmute(route_delete),
+                publisher_delete: std::mem::transmute(publisher_delete),
                 subscription_list: std::mem::transmute(subscription_list),
                 revocation_refresh_all: std::mem::transmute(revocation_refresh_all),
                 pointer_rotation_status: std::mem::transmute(pointer_rotation_status),
@@ -580,6 +592,29 @@ impl Engine {
         let s = CString::new(subscription_id)
             .map_err(|_| DesktopError::EngineSymbol("subscription_id NUL".into()))?;
         call_buf(|buf, len| (self.subscription_refresh)(s.as_ptr(), timeout_ms as c_int, buf, len))
+    }
+
+    /// Hard-delete one imported route (engine_route_delete).
+    pub fn route_delete(&self, route_id: &str) -> Result<()> {
+        let r = CString::new(route_id)
+            .map_err(|_| DesktopError::EngineSymbol("route_id NUL".into()))?;
+        let rc = (self.route_delete)(r.as_ptr());
+        if rc != 0 {
+            return Err(DesktopError::EngineReturn(rc as i32));
+        }
+        Ok(())
+    }
+
+    /// Hard-delete a publisher and all its routes (engine_publisher_delete).
+    /// Returns the number of routes removed.
+    pub fn publisher_delete(&self, publisher_id: &str) -> Result<i32> {
+        let p = CString::new(publisher_id)
+            .map_err(|_| DesktopError::EngineSymbol("publisher_id NUL".into()))?;
+        let rc = (self.publisher_delete)(p.as_ptr());
+        if rc < 0 {
+            return Err(DesktopError::EngineReturn(rc as i32));
+        }
+        Ok(rc as i32)
     }
 
     pub fn subscription_remove(&self, subscription_id: &str) -> Result<()> {

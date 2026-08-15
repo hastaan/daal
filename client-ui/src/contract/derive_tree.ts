@@ -173,7 +173,10 @@ export function buildPublisherTree(
             trustLevel = 'pinned';
         }
         out.push({
-            publisherId: name, // M1: name doubles as id; M5 swaps in fp
+            // Real engine publisher_id (fingerprint) from the routes, so
+            // delete/forget target the right publisher; fall back to the
+            // display name for subscription-only groups with no routes yet.
+            publisherId: list[0]?.publisherId ?? name,
             displayName: name,
             trustLevel,
             sourceKind: sub ? 'subscription' : inferSourceKind(list),
