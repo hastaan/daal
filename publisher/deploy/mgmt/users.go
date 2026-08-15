@@ -33,6 +33,10 @@ type UserCreds struct {
 	// on a pre-Tier-2 box.
 	RealityPublicKey string `json:"reality_public_key,omitempty"`
 	TLSCertSHA256    string `json:"tls_cert_sha256,omitempty"`
+	// TLSCertPEM is the box's data-plane leaf cert (PEM), the naive
+	// client's trusted root (Cronet verifies against a root set, not an
+	// SPKI pin). Empty when the data-plane cert is absent.
+	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
 }
 
 // UserMeta is the lightweight per-user descriptor returned by

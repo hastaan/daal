@@ -211,7 +211,10 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	gotHex := hex.EncodeToString(got[:])
 	// FRP-8: the conditional `{{ if .CDNEnabled }}` block introduces
 	// a tiny whitespace pad even when disabled. Re-pinned post FRP-8.
-	const want = "cbbe21217c0049ca70bc0537d019086438617dce617000b8997a5d913c4f91f8"
+	// FRP-14: re-pinned after shortening the data-plane cert validity
+	// to 90 days (Cronet/naive rejects longer certs, ERR_CERT_VALIDITY_
+	// TOO_LONG; see v2.yaml.tmpl).
+	const want = "a8f760c6c6e8e243ff335f0806c85e9bbee5d5071b6acb31399b98b7361c1035"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}

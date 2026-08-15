@@ -252,13 +252,27 @@ runcmd:
     # iPAddress SAN for the box's own public IP(s); the naive client sets
     # server_name to that IP. Generated here so it exists before sing-box
     # first starts, and persists for the box's life.
+    #
+    # Validity MUST stay short: the naive client rides Cronet (Chromium's
+    # net stack), which installs this leaf as a trusted ROOT and therefore
+    # runs the CA/Browser-Forum max-validity check on it. Chromium
+    # (cert_verify_proc.cc HasTooLongValidity, CABF BR 2.1.7) caps validity
+    # by the cert's issue date and rejects anything longer with
+    # ERR_CERT_VALIDITY_TOO_LONG (net_error -213):
+    #   issued >= 2026-03-15: 200 days
+    #   issued >= 2027-03-15: 100 days
+    #   issued >= 2029-03-15:  47 days
+    # ws/hy2 pin by SPKI and ignore validity, so a too-long cert breaks
+    # ONLY naive — silently. 90 days sits under the 100-day bracket too,
+    # so a box provisioned any time before 2029-03-15 is safe; relays
+    # rotate well within 90 days. Shorten to <=47 before 2029-03-15.
     DAAL_IP4="$(ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1 | head -1)"
     DAAL_IP6="$(ip -6 -o addr show eth0 scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
     DAAL_SAN="IP:${DAAL_IP4}"
     [ -n "$DAAL_IP6" ] && DAAL_SAN="${DAAL_SAN},IP:${DAAL_IP6}"
     run openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
       -keyout /etc/daal/tls-key.pem -out /etc/daal/tls-cert.pem \
-      -days 3650 -nodes -subj /CN=daal-relay \
+      -days 90 -nodes -subj /CN=daal-relay \
       -addext "subjectAltName=${DAAL_SAN}"
     run chmod 0600 /etc/daal/tls-key.pem
     run chmod 0644 /etc/daal/tls-cert.pem
