@@ -30,22 +30,23 @@ Four problems the user hit on-device:
   the relay from a shared `.sbp`.** REMAINING: wire it into the phone publisher
   wizard so provisioning auto-produces the shared `.sbp` (needs Rust +
   libdaal_deploy.so rebuild).
-- [ ] **E2. Publisher can't share/revoke/create `.sbpx` after PIN; too complex.**
-  Root causes (see below): two disconnected PIN systems (custody-unlock vs
-  per-call keystore PIN), provision/revoke need a *live* box + correct
-  `helper_ip` + valid token, silent fail-closed leaves an empty `sbpx_path` so
-  Share is disabled. SIMPLIFY: with E1's shared `.sbp` as the default, the
-  per-recipient box round-trip / PIN / helper-IP dance becomes optional. Also:
-  unify the two PINs; auto-detect helper_ip; surface fail-closed; de-duplicate
-  the roster UI (wizard `distribute` step vs PublisherRecipientsPage).
+- [~] **E2. Publisher simplification.** DONE (core, commit 0c1b437): a "Share
+  your relay" card produces one shared `.sbp` (mints `r0`, rewrites profiles)
+  and opens the share sheet — the common case no longer needs per-recipient
+  provisioning. Also fixed `tls_cert_pem` being dropped on deserialize (naive
+  couldn't assemble from the wizard). REMAINING (follow-ups, not blocking):
+  unify the two PIN systems (custody-unlock vs per-call keystore PIN);
+  auto-detect helper_ip instead of a free-text field; surface the silent
+  fail-closed; de-duplicate the roster UI.
 - [x] **E3. App icon was the stock two-circle placeholder.** FIXED (commit
   5a8b063): real daal eagle on dark teal + adaptive icon; `make-android-icon-
   source.py` + `patch-android-icons.sh` for reproducibility. Ships next build.
-- [ ] **E4. No way to delete an imported route/publisher.** Only URL
-  *subscriptions* can be removed (`subscriptionRemove`); there is no
-  route/publisher delete in the contract, Rust, or `core/routestore` (no
-  `DeleteRoute`). Build across layers: routestore delete → engine ABI →
-  `wizard_*` command → UI affordance on the route row + publisher card.
+- [x] **E4. Delete imported routes/publishers.** DONE (commit 05d0e30):
+  routestore DeleteRoute/DeletePublisher (+tests) → engine_route_delete /
+  engine_publisher_delete ABI → desktop-core FFI + Tauri commands → a
+  "Remove this connection" action on the publisher card (confirm + disconnect
+  first). Route summary now carries publisher_id so the UI targets the real
+  fingerprint.
 
 ## Workstream A — UI honesty & connect UX  (A1-A4 done; see commits)
 The app currently shows fabricated/meaningless data and has a confusing
