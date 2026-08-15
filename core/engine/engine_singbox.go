@@ -168,6 +168,11 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	bctx := include.Context(ctx)
 	bctx = service.ContextWith[adapter.PlatformInterface](bctx, s.platform)
 
+	// Load libcronet.so before box.New builds any naive outbound (no-op
+	// unless the engine was built with the naive/Cronet tags). See
+	// cronet_loader_naive.go.
+	loadCronet()
+
 	options, err := singjson.UnmarshalExtendedContext[boxoption.Options](bctx, merged)
 	if err != nil {
 		androidLog("option parse: " + err.Error() + " | config=" + string(merged))
