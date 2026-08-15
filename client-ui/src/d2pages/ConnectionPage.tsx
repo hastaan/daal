@@ -13,7 +13,6 @@
 // center hero + right rail and dispatches actions.
 
 import { useEffect, useState } from 'react';
-import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { useContract } from '../contract/ContractProvider';
 import type {
     ConnectionSummary,
@@ -94,6 +93,13 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // state matches the optimistic target, OR after a 6 s safety
     // timeout so a stuck backend can never freeze the UI.
     const [optimistic, setOptimistic] = useState<ConnState | null>(null);
+    // Transient user-facing notice (export result, failed mode change, …).
+    const [notice, setNotice] = useState<string | null>(null);
+    useEffect(() => {
+        if (!notice) return;
+        const id = setTimeout(() => setNotice(null), 4000);
+        return () => clearTimeout(id);
+    }, [notice]);
     const locale = effectiveLocale();
 
     useEffect(() => {
@@ -211,29 +217,28 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     };
 
     const onPickMode = async (m: ConnMode) => {
-        try { await contract.setMode(m); }
-        catch { /* ignore — next poll will reflect engine state */ }
+        try {
+            await contract.setMode(m);
+        } catch {
+            // Don't fail silently — tell the user the change didn't take.
+            setNotice(t('conn.mode_failed'));
+        }
     };
 
+    // Diagnostics export: the Tauri fs plugin isn't wired, so we can't
+    // write a file. Rather than show a save dialog that silently does
+    // nothing, copy the JSON to the clipboard and say so plainly.
     const onExport = async () => {
         try {
             const json = await contract.exportDiagnostics();
-            const path = await saveDialog({
-                defaultPath: 'daal-diagnostics.json',
-                filters: [{ name: 'JSON', extensions: ['json'] }],
-            });
-            if (!path) return;
-            // Tauri 2 fs plugin not configured; use the dialog return
-            // as a hint and write via the existing diagnostics path.
-            // For now, copy to clipboard as a graceful fallback so
-            // users still get the data.
             try {
                 await navigator.clipboard.writeText(json);
+                setNotice(t('conn.export_copied'));
             } catch {
-                /* ignore */
+                setNotice(t('conn.export_failed'));
             }
         } catch {
-            /* ignore */
+            setNotice(t('conn.export_failed'));
         }
     };
 
@@ -260,6 +265,35 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 overflow: 'auto',
             }}
         >
+            {/* Transient status line (export result, failed mode change). */}
+            <div
+                aria-live="polite"
+                style={{
+                    position: 'absolute',
+                    insetInlineStart: 0,
+                    insetInlineEnd: 0,
+                    top: 8,
+                    textAlign: 'center',
+                    pointerEvents: 'none',
+                    zIndex: 10,
+                }}
+            >
+                {notice && (
+                    <span
+                        style={{
+                            display: 'inline-block',
+                            padding: '6px 14px',
+                            borderRadius: 999,
+                            background: 'var(--teal-hairline)',
+                            color: 'var(--fg)',
+                            fontSize: 13,
+                        }}
+                    >
+                        {notice}
+                    </span>
+                )}
+            </div>
+
             {/* CENTER: hero */}
             <section
                 style={{
