@@ -35,6 +35,7 @@ const RealityServerName = "www.cloudflare.com"
 // the per-recipient creds minted by /users/provision.
 type ClientConnParams struct {
 	Server           string // box public IP or hostname
+	Name             string // recipient name (r<id>); the naive proxy username
 	VLESSUUID        string
 	RealityShortID   string
 	RealityPublicKey string // base64 x25519; required for vless-reality
@@ -102,20 +103,28 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			"server":      p.Server,
 			"server_port": port,
 			"password":    p.Hy2Password,
-			"tls":         pinnedTLS(p.Server, p.TLSCertSHA256),
+			// hysteria2 is QUIC: it uses its own TLS stack and rejects a
+			// uTLS block ("unsupported usage for uTLS"), so pin without it.
+			"tls": pinnedTLSNoUTLS(p.Server, p.TLSCertSHA256),
 		}
 	case "naive":
-		if p.NaivePassword == "" {
-			return nil, fmt.Errorf("naive needs naive_password")
+		if p.NaivePassword == "" || p.Name == "" {
+			return nil, fmt.Errorf("naive needs naive_password and name")
 		}
 		ob = map[string]any{
-			"type":        "http", // sing-box speaks naive as an http proxy with TLS
+			// The real naive protocol (HTTP/2 CONNECT) — a plain "http"
+			// outbound cannot speak it. Requires the engine to be built
+			// with the with_naive_outbound tag. Like hysteria2 it rejects
+			// a uTLS block, so pin without it.
+			"type":        "naive",
 			"tag":         "active",
 			"server":      p.Server,
 			"server_port": port,
-			"username":    "daal",
-			"password":    p.NaivePassword,
-			"tls":         pinnedTLS(p.Server, p.TLSCertSHA256),
+			// username MUST match the box's naive-in user (appendNaiveUser
+			// sets it to the recipient name), or auth fails.
+			"username": p.Name,
+			"password": p.NaivePassword,
+			"tls":      pinnedTLSNoUTLS(p.Server, p.TLSCertSHA256),
 		}
 	default:
 		return nil, fmt.Errorf("no client outbound renderer for family %q", family)
@@ -130,10 +139,22 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 // still fail closed at connect, surfacing the missing pin) — we never
 // emit `insecure: true`.
 func pinnedTLS(server, certSHA256 string) map[string]any {
+	return pinnedTLSOpts(server, certSHA256, true)
+}
+
+// pinnedTLSNoUTLS is pinnedTLS without the uTLS ClientHello mimicry, for
+// transports whose TLS stack rejects it (hysteria2/QUIC).
+func pinnedTLSNoUTLS(server, certSHA256 string) map[string]any {
+	return pinnedTLSOpts(server, certSHA256, false)
+}
+
+func pinnedTLSOpts(server, certSHA256 string, withUTLS bool) map[string]any {
 	tls := map[string]any{
 		"enabled":     true,
 		"server_name": server,
-		"utls":        map[string]any{"enabled": true, "fingerprint": "chrome"},
+	}
+	if withUTLS {
+		tls["utls"] = map[string]any{"enabled": true, "fingerprint": "chrome"}
 	}
 	if certSHA256 != "" {
 		// sing-box pins via base64 SHA-256 of the leaf SPKI. The

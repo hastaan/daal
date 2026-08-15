@@ -129,12 +129,16 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	// DNS must resolve THROUGH the tunnel (detour=active) or the whole
 	// point is defeated (and, more immediately, name lookups fail so no
-	// connection starts). Only add a default if the profile didn't bring
-	// its own dns block. Legacy server shape — still accepted in v1.13.
+	// connection starts). Use DNS-over-TCP (tcp://): the active outbound
+	// may be a TCP-only transport (naive is an HTTP proxy) that cannot
+	// carry UDP, so plain UDP DNS fails "UDP is not supported by
+	// outbound". TCP DNS works over every transport. Only add a default
+	// if the profile didn't bring its own dns block. Legacy server shape —
+	// still accepted in v1.13.
 	if _, ok := raw["dns"]; !ok {
 		raw["dns"] = map[string]any{
 			"servers": []any{
-				map[string]any{"tag": "remote", "address": "1.1.1.1", "detour": "active"},
+				map[string]any{"tag": "remote", "address": "tcp://1.1.1.1", "detour": "active"},
 			},
 			"final":    "remote",
 			"strategy": "prefer_ipv4",

@@ -133,6 +133,7 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 		return relaypack.ClientConnParams{}, err
 	}
 	var c struct {
+		Name             string `json:"name"`
 		VLESSUUID        string `json:"vless_uuid"`
 		RealityShortID   string `json:"reality_short_id"`
 		RealityPublicKey string `json:"reality_public_key"`
@@ -146,6 +147,7 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 	}
 	return relaypack.ClientConnParams{
 		Server:           server,
+		Name:             c.Name,
 		VLESSUUID:        c.VLESSUUID,
 		RealityShortID:   c.RealityShortID,
 		RealityPublicKey: c.RealityPublicKey,
