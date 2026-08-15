@@ -248,6 +248,9 @@ export interface ProbeResult {
   ok: boolean;
   /** Engine return value (positive = latency ms, 0 = ok, negative = error code). */
   raw: number;
+  /** True when the engine reported the probe isn't implemented yet
+   *  (raw === -1000). The UI shows "unavailable" rather than a fake result. */
+  unavailable?: boolean;
 }
 
 export interface SchedulerStatus {

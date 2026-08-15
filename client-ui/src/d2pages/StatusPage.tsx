@@ -484,9 +484,9 @@ export default function StatusPage({ t }: Props) {
                         marginTop: 10,
                     }}
                 >
-                    <ProbeTile label={t('status.probes.udp')} probe={probes.udp} />
-                    <ProbeTile label={t('status.probes.dns')} probe={probes.dns} />
-                    <ProbeTile label={t('status.probes.tcp443')} probe={probes.tcp} />
+                    <ProbeTile label={t('status.probes.udp')} probe={probes.udp} t={t} />
+                    <ProbeTile label={t('status.probes.dns')} probe={probes.dns} t={t} />
+                    <ProbeTile label={t('status.probes.tcp443')} probe={probes.tcp} t={t} />
                 </div>
             </Accordion>
 
@@ -645,15 +645,14 @@ function fmtBps(bps: number): string {
 function ProbeTile({
     label,
     probe,
+    t,
 }: {
     label: string;
     probe: import('../contract/D2Contract').ProbeResult | undefined;
+    t: (k: string) => string;
 }) {
-    const tone: 'good' | 'bad' | 'neutral' = !probe
-        ? 'neutral'
-        : probe.ok
-            ? 'good'
-            : 'bad';
+    const tone: 'good' | 'bad' | 'neutral' =
+        !probe || probe.unavailable ? 'neutral' : probe.ok ? 'good' : 'bad';
     return (
         <div
             style={{
@@ -690,9 +689,15 @@ function ProbeTile({
                     whiteSpace: 'nowrap',
                 }}
             >
-                {probe ? (probe.ok ? 'ok' : 'fail') : '—'}
+                {!probe
+                    ? '—'
+                    : probe.unavailable
+                        ? t('status.probes.unavailable')
+                        : probe.ok
+                            ? 'ok'
+                            : 'fail'}
             </div>
-            {probe?.raw && (
+            {!probe?.unavailable && probe?.raw ? (
                 <div
                     style={{
                         fontFamily: 'var(--font-mono)',
@@ -702,7 +707,7 @@ function ProbeTile({
                 >
                     {probe.raw}
                 </div>
-            )}
+            ) : null}
         </div>
     );
 }

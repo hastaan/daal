@@ -134,6 +134,16 @@ function deriveNetworkLabel(networkIdHash?: string): string | undefined {
     return 'Network';
 }
 
+// Engine sentinel (core/abi.ProbeUnimplemented): the probe ABI isn't wired
+// yet. Map it to `unavailable` so the UI shows "unavailable" not fake success.
+const PROBE_UNIMPLEMENTED = -1000;
+function toProbeResult(raw: number): ProbeResult {
+    if (raw === PROBE_UNIMPLEMENTED) {
+        return { ok: false, raw, unavailable: true };
+    }
+    return { ok: raw >= 0, raw };
+}
+
 function rawToRow(r: RawRouteSummary): RouteDisplayRow {
     return {
         routeId: r.route_id,
@@ -483,16 +493,13 @@ export class TauriContract implements D2Contract {
     }
 
     async probeUdp(timeoutMs: number): Promise<ProbeResult> {
-        const raw = await invoke<number>('probe_udp', { timeoutMs });
-        return { ok: raw >= 0, raw };
+        return toProbeResult(await invoke<number>('probe_udp', { timeoutMs }));
     }
     async probeDns(timeoutMs: number): Promise<ProbeResult> {
-        const raw = await invoke<number>('probe_dns', { timeoutMs });
-        return { ok: raw >= 0, raw };
+        return toProbeResult(await invoke<number>('probe_dns', { timeoutMs }));
     }
     async probeTcp443(timeoutMs: number): Promise<ProbeResult> {
-        const raw = await invoke<number>('probe_tcp443', { timeoutMs });
-        return { ok: raw >= 0, raw };
+        return toProbeResult(await invoke<number>('probe_tcp443', { timeoutMs }));
     }
 
     async networkChanged(kind: string, carrier: string, ssid: string): Promise<string> {

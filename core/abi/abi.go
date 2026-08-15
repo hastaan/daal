@@ -544,13 +544,16 @@ func ProbeDNS(timeoutMs int) int { return probeStub(timeoutMs) }
 // ProbeTCP443 is engine_probe_tcp443.
 func ProbeTCP443(timeoutMs int) int { return probeStub(timeoutMs) }
 
-// probeStub is the Phase 1B probe placeholder; the real probes live in
-// engine/probe.go and are wired here in Phase 1C.
-func probeStub(timeoutMs int) int {
-	if timeoutMs <= 0 {
-		return 1
-	}
-	return 0
+// ProbeUnimplemented is the sentinel the probe ABI returns while the
+// real probes (engine/probe.go, wired in Phase 1C) don't exist yet. The
+// UI maps it to an "unavailable" tile instead of a fake success — a stub
+// that returned 0 (ok) made the Status page claim every probe passed.
+const ProbeUnimplemented = -1000
+
+// probeStub is the Phase 1B probe placeholder. Until real probes land it
+// reports "unimplemented" rather than a fabricated ok/latency.
+func probeStub(_ int) int {
+	return ProbeUnimplemented
 }
 
 // StatsRedacted is engine_stats_redacted.

@@ -124,6 +124,7 @@
     "status.probes.udp": "UDP",
     "status.probes.dns": "DNS",
     "status.probes.tcp443": "TCP 443",
+    "status.probes.unavailable": "unavailable",
     "status.bootstrap.install": "Install seeds",
     "status.bootstrap.refresh": "Refresh",
     "sources.refresh.tip": "Refresh revocations across all subscriptions",
