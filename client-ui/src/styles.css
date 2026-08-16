@@ -47,3 +47,25 @@ html, body, #root {
     /* Also halt the connecting-pulse — keep the eagle dim but static. */
     img[style*="daal-pulse"] { animation: none !important; opacity: 0.55 !important; }
 }
+
+/* Publisher surface — keep cards and buttons inside the viewport.
+ *
+ * The relay screens print several long, atomic strings: `.sbp` file names,
+ * `daal1…` recipient addresses and 64-char publisher fingerprints. A flex or
+ * grid item defaults to `min-width: auto`, so its track grows to fit the
+ * longest unbreakable string instead of wrapping it — which pushed the whole
+ * page wider than the screen and clipped the right-hand buttons ("Add",
+ * "…cannot be copied off this device"). Letting descendants shrink and giving
+ * long tokens somewhere to break fixes it once for the surface rather than
+ * per-container, and survives new cards being added later. */
+.daal-publisher,
+.daal-publisher * {
+    min-width: 0;
+}
+.daal-publisher {
+    overflow-wrap: anywhere;
+}
+/* Action rows must reflow rather than run off the edge. */
+.daal-publisher [data-actions] {
+    flex-wrap: wrap;
+}

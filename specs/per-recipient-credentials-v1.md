@@ -108,7 +108,9 @@ inbound or outbound is touched.
 ## 3. On-box surface — additions to `daal-relay-mgmt`
 
 Per FRP-14 the "exactly three routes" invariant lifts to **exactly six
-routes**.
+routes**. The publisher redesign lifts it once more, to **exactly seven**:
+`/whoami` is specified in `specs/daal-relay-mgmt-v1.md` §4.7 and is not
+part of the per-recipient surface.
 
 ### 3.1. `POST /users/provision`
 
@@ -353,8 +355,10 @@ UI then calls the platform share dispatcher.
 
 ## 8. Invariants
 
-1. **Exactly six routes** in `daal-relay-mgmt` at FRP-14.
-   Pinned by `TestExactlyNRoutes` (n=6).
+1. **Exactly seven routes** in `daal-relay-mgmt`: the FRP-10 three, the
+   FRP-14 per-recipient trio, and `/whoami` (added by the publisher
+   redesign; see `specs/daal-relay-mgmt-v1.md` §4.7).
+   Pinned by `TestExactlyNRoutes` (n=7).
 2. **Per-recipient credentials are independent.** Adding or revoking
    recipient X never modifies the on-box credentials of recipient Y.
    Pinned by `TestUsersProvisionIsolated` and `TestUsersRevokeIsolated`.

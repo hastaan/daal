@@ -1,4 +1,30 @@
-//! Two-layer key custody for the FRP-5 wizard.
+//! LEGACY two-layer key custody. **Read-only except `forget()`.**
+//!
+//! This module was the FRP-5 publisher custody: every publisher
+//! secret (Ed25519 signing key, cloud-provider token, Cloudflare
+//! token) was sealed under a user-typed PIN. That is over. Publisher
+//! secrets now live under [`crate::device_custody`] — hardware-backed
+//! on Android via the AndroidKeyStore DWK, OS keyring on desktop,
+//! session passphrase only where neither exists — and **no command
+//! takes a PIN any more**.
+//!
+//! The module is deliberately kept, not deleted, for exactly three
+//! live jobs:
+//!
+//!   1. [`Keystore::open`] is the *reader* for the one-time
+//!      PIN→custody migration (`commands::migrate_from_pin`). Until a
+//!      given install has run that migration, this is the only thing
+//!      that can decrypt its publisher signing key. Deleting it would
+//!      orphan every relay provisioned before the migration landed.
+//!   2. [`Keystore::has`] answers "is there still a legacy blob?"
+//!      without a PIN, so the UI can decide whether to prompt at all.
+//!   3. [`Keystore::forget`] is live in `cancel_and_cleanup` and
+//!      `panic_wipe`, which must erase legacy blobs whether or not
+//!      the migration ever ran.
+//!
+//! [`Keystore::seal`] survives only because `open`'s round-trip tests
+//! need it. **Do not add new callers of `seal`.** New secrets go
+//! through `DeviceCustody::put`.
 //!
 //! Outer layer: OS-keystore (`keyring` crate v3 — macOS Keychain,
 //! Windows Credential Manager via DPAPI, Linux libsecret).
@@ -13,6 +39,12 @@
 //! ```text
 //!   nonce[12] || ciphertext || tag[16]   (AES-256-GCM)
 //! ```
+//!
+//! Note the Android caveat this design carried and `device_custody`
+//! removes: on Android the `keyring` crate has no backend, so the
+//! outer layer degraded to plain app-private files and the *only*
+//! protection was the PIN-derived inner layer. The AndroidKeyStore
+//! DWK the publisher path now uses is strictly stronger.
 //!
 //! The Argon2id salt is read from `~/.config/daal/keystore_salt`
 //! (16 random bytes, generated on first call). Its parameters are
@@ -75,6 +107,14 @@ pub type Result<T> = std::result::Result<T, KeystoreError>;
 pub struct Keystore {
     salt_path: PathBuf,
     backend: Backend,
+    /// Process-lifetime memo for [`Keystore::has`]. See that method:
+    /// on the OS-keyring backend the only existence check the crate
+    /// offers is a real credential read, which can raise a platform
+    /// unlock dialog. `custody_status` walks every alias on each mount
+    /// of the publisher surface, so without this memo a user with a
+    /// locked login keyring would get one dialog per pending alias,
+    /// every time they open the page.
+    has_memo: std::sync::Mutex<std::collections::HashMap<String, bool>>,
 }
 
 /// `Backend` selects the outer storage layer. The OS-keystore path
@@ -91,10 +131,12 @@ pub enum Backend {
     /// contains base64 of `nonce || ct || tag` — same wire format
     /// as the OS-keystore path.
     ///
-    /// Used on Android where the `keyring` crate has no backend.
-    /// Security: the real protection is the inner AES-GCM layer
-    /// keyed by PIN+Argon2id. The OS-keystore outer layer is
-    /// defense-in-depth that Android simply doesn't provide.
+    /// Used on Android, where the `keyring` crate has no backend.
+    /// This is precisely why the PIN had to go: with no OS-keystore
+    /// outer layer, an Android install's entire protection was
+    /// Argon2id over a short PIN, guarding a file that any process
+    /// with the app's uid could read. `device_custody` replaces it
+    /// with a non-exportable AndroidKeyStore key.
     File(PathBuf),
 }
 
@@ -110,6 +152,7 @@ impl Keystore {
         Self {
             salt_path: config.join(SALT_FILENAME),
             backend,
+            has_memo: Default::default(),
         }
     }
 
@@ -119,6 +162,7 @@ impl Keystore {
         Self {
             salt_path: config_dir.as_ref().join(SALT_FILENAME),
             backend: Backend::File(config_dir.as_ref().join("keyblobs")),
+            has_memo: Default::default(),
         }
     }
 
@@ -127,6 +171,7 @@ impl Keystore {
         Self {
             salt_path: config_dir.as_ref().join(SALT_FILENAME),
             backend: Backend::Memory(std::sync::Mutex::new(Default::default())),
+            has_memo: Default::default(),
         }
     }
 
@@ -152,7 +197,9 @@ impl Keystore {
         let encoded = B64.encode(&blob);
 
         key_bytes.zeroize();
-        self.put_blob(alias, &encoded)
+        let r = self.put_blob(alias, &encoded);
+        self.invalidate_has(alias);
+        r
     }
 
     /// Decrypt the ciphertext at `alias` under the PIN. Returns
@@ -177,9 +224,57 @@ impl Keystore {
         Ok(pt)
     }
 
+    /// Legacy probe: does a PIN-sealed blob still exist for this
+    /// alias? PIN-free on purpose — the migration gate must be able
+    /// to decide whether to prompt at all *without* first asking for
+    /// a PIN, and a fresh install must reach "nothing to migrate"
+    /// silently.
+    ///
+    /// It does **not** decrypt the secret — the PIN never enters this
+    /// path, so the AES-GCM layer is never opened. It is not a free
+    /// stat either, and it is worth being precise about that: on the
+    /// File backend this reads the opaque base64 blob off disk, and on
+    /// the OS-keyring backend it *retrieves the credential*
+    /// (`Entry::get_password`), because `keyring` v3 exposes no
+    /// existence check that stops short of a read. On a platform where
+    /// the item carries an ACL — a locked gnome-keyring, a macOS
+    /// Keychain per-item prompt — that retrieval can raise a system
+    /// dialog.
+    ///
+    /// Hence the process-lifetime memo. `custody_status` walks every
+    /// alias on each mount of the publisher surface, so an uncached
+    /// probe would mean one dialog per pending alias, every visit.
+    /// The memo is invalidated by the two methods that can change the
+    /// answer (`seal`, `forget`), and nothing outside this process
+    /// writes the legacy store any more.
+    ///
+    /// Any error (no entry, keyring locked, backend missing) reads as
+    /// `false`. That is the safe direction: a false negative merely
+    /// means the migration skips an alias and the legacy blob stays
+    /// on disk, which loses nothing. A false *positive* would make
+    /// the UI demand a PIN for a secret that isn't there.
+    pub fn has(&self, alias: &str) -> bool {
+        if let Some(v) = self.has_memo.lock().unwrap().get(alias) {
+            return *v;
+        }
+        let present = self.get_blob(alias).is_ok();
+        self.has_memo
+            .lock()
+            .unwrap()
+            .insert(alias.to_string(), present);
+        present
+    }
+
+    /// Drop the [`Keystore::has`] memo for one alias. Called by every
+    /// method that can change whether a blob exists.
+    fn invalidate_has(&self, alias: &str) {
+        self.has_memo.lock().unwrap().remove(alias);
+    }
+
     /// Erase any stored value at `alias`. Returns Ok even if the
     /// alias was never set (idempotent).
     pub fn forget(&self, alias: &str) -> Result<()> {
+        self.invalidate_has(alias);
         match &self.backend {
             Backend::Os => {
                 let entry = keyring::Entry::new(SERVICE, alias)

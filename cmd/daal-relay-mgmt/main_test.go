@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -50,9 +51,9 @@ func mintToken(priv ed25519.PrivateKey, op string, ts int64) string {
 // --- tests ---
 
 // TestExactlyNRoutes enforces FRP-14 invariant 1: the mgmt API
-// surface is exactly six routes — the original three plus the
-// per-recipient trio. Adding a seventh requires a supplement
-// amendment.
+// surface is exactly seven routes — the original three, the
+// per-recipient trio, and /whoami. Adding an eighth requires a
+// supplement amendment.
 func TestExactlyNRoutes(t *testing.T) {
 	srv, _, _, _ := newTestServer(t)
 	got := append([]string{}, srv.routeNames()...)
@@ -64,6 +65,7 @@ func TestExactlyNRoutes(t *testing.T) {
 		"/users/list",
 		"/users/provision",
 		"/users/revoke",
+		"/whoami",
 	}
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
@@ -310,5 +312,239 @@ func TestVerifyToken_OpMustMatchEndpoint(t *testing.T) {
 	tok := mintToken(priv, "rotate-credentials", srv.now().Unix())
 	if err := srv.verifyToken(tok, "rotate-tls"); err == nil {
 		t.Errorf("expected mismatch error; op-bound token must not work cross-endpoint")
+	}
+}
+
+// --- /whoami ---
+
+// whoamiGet issues a signed GET against /whoami with the op string
+// the endpoint expects.
+func whoamiGet(t *testing.T, url string, priv ed25519.PrivateKey, ts int64) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url+"/whoami", nil)
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "whoami", ts))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// TestObservedSourceIP covers the address-extraction rule directly:
+// the peer address is reported as observed and never invented. The
+// malformed/absent rows matter because that value is what gets written
+// into a firewall allowlist — a fabricated one would be worse than an
+// empty one.
+func TestObservedSourceIP(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{"ipv4 host:port", "203.0.113.7:44444", "203.0.113.7"},
+		{"ipv4 empty port", "203.0.113.7:", "203.0.113.7"},
+		{"ipv4 bare literal", "203.0.113.7", "203.0.113.7"},
+		{"ipv6 bracketed host:port", "[2001:db8::1]:44444", "2001:db8::1"},
+		{"ipv6 loopback host:port", "[::1]:44444", "::1"},
+		{"ipv6 zone preserved", "[fe80::1%eth0]:44444", "fe80::1%eth0"},
+		{"ipv6 bare bracketed", "[2001:db8::1]", "2001:db8::1"},
+		{"ipv6 bare unbracketed", "2001:db8::1", "2001:db8::1"},
+		{"absent", "", ""},
+		{"whitespace only", "   ", ""},
+		{"surrounding whitespace", " 203.0.113.7:44444 ", "203.0.113.7"},
+		{"malformed returned verbatim", "not-an-address", "not-an-address"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := observedSourceIP(tc.remoteAddr); got != tc.want {
+				t.Errorf("observedSourceIP(%q) = %q, want %q", tc.remoteAddr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWhoAmI_RejectsUnsignedRequest(t *testing.T) {
+	srv, _, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/whoami")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("expected 401 for missing auth; got %d", resp.StatusCode)
+	}
+	if srv.whoamiCnt.Load() != 0 {
+		t.Errorf("whoamiCnt = %d want 0 (handler must not run unauthenticated)", srv.whoamiCnt.Load())
+	}
+}
+
+// TestWhoAmI_RejectsCrossOpToken pins that /whoami has its own op
+// string, so a token minted for another endpoint cannot be replayed
+// onto it.
+func TestWhoAmI_RejectsCrossOpToken(t *testing.T) {
+	srv, _, priv, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/whoami", nil)
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "users-list", srv.now().Unix()))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("cross-op token on /whoami: got %d want 401", resp.StatusCode)
+	}
+}
+
+func TestWhoAmI_ReturnsObservedSourceIP(t *testing.T) {
+	srv, _, priv, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	resp := whoamiGet(t, ts.URL, priv, srv.now().Unix())
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200; got %d", resp.StatusCode)
+	}
+	var got whoAmIResp
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	ip := net.ParseIP(got.SourceIP)
+	if ip == nil || !ip.IsLoopback() {
+		t.Errorf("source_ip = %q, want the harness's loopback peer address", got.SourceIP)
+	}
+	if got.ServerTimeUnix != srv.now().Unix() {
+		t.Errorf("server_time_unix = %d want %d", got.ServerTimeUnix, srv.now().Unix())
+	}
+	if got.APIVersion != whoAmIAPIVersion {
+		t.Errorf("api_version = %d want %d", got.APIVersion, whoAmIAPIVersion)
+	}
+	if srv.whoamiCnt.Load() != 1 {
+		t.Errorf("whoamiCnt = %d want 1", srv.whoamiCnt.Load())
+	}
+}
+
+// TestWhoAmI_IgnoresForwardedHeaders is the security property: the
+// answer comes from the TCP peer, never from a client-supplied header.
+// Nothing in this deployment puts a trusted proxy in front of the mgmt
+// plane (systemd runs the binary with its own TLS listener), so
+// honouring these headers would let a caller dictate the very value
+// the endpoint exists to verify — and that value lands in a
+// cloud-firewall allowlist.
+func TestWhoAmI_IgnoresForwardedHeaders(t *testing.T) {
+	srv, _, priv, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	spoofed := []struct{ header, value string }{
+		{"X-Forwarded-For", "203.0.113.7"},
+		{"X-Real-IP", "198.51.100.9"},
+		{"Forwarded", "for=192.0.2.60;proto=https"},
+		{"X-Client-IP", "2001:db8::dead"},
+	}
+	req, _ := http.NewRequest("GET", ts.URL+"/whoami", nil)
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "whoami", srv.now().Unix()))
+	for _, h := range spoofed {
+		req.Header.Set(h.header, h.value)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200; got %d", resp.StatusCode)
+	}
+	var got whoAmIResp
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range spoofed {
+		if strings.Contains(got.SourceIP, strings.SplitN(h.value, ";", 2)[0]) {
+			t.Errorf("source_ip %q echoed spoofable header %s: %q", got.SourceIP, h.header, h.value)
+		}
+	}
+	if ip := net.ParseIP(got.SourceIP); ip == nil || !ip.IsLoopback() {
+		t.Errorf("source_ip = %q, want the harness's loopback peer address", got.SourceIP)
+	}
+}
+
+// TestWhoAmI_MethodGate: GET is the natural verb, POST is accepted so
+// the Helper's POST-shaped signed-request path needs no special case,
+// everything else is 405.
+func TestWhoAmI_MethodGate(t *testing.T) {
+	cases := []struct {
+		method string
+		want   int
+	}{
+		{"GET", 200},
+		{"POST", 200},
+		{"PUT", 405},
+		{"DELETE", 405},
+		{"PATCH", 405},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			srv, _, priv, _ := newTestServer(t)
+			ts := httptest.NewServer(srv.routes())
+			defer ts.Close()
+
+			req, _ := http.NewRequest(tc.method, ts.URL+"/whoami", nil)
+			req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "whoami", srv.now().Unix()))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("%s /whoami: got %d want %d", tc.method, resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+// TestWhoAmI_MalformedOrAbsentRemoteAddr drives the handler directly,
+// because a real listener always supplies a well-formed RemoteAddr.
+// The endpoint must still answer 200 with an honestly-empty (or
+// verbatim) source_ip rather than guessing — the client treats an
+// unparseable answer as "no answer" and keeps its stored value.
+func TestWhoAmI_MalformedOrAbsentRemoteAddr(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{"absent", "", ""},
+		{"malformed", "not-an-address", "not-an-address"},
+		{"ipv6 no port", "2001:db8::1", "2001:db8::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _, _ := newTestServer(t)
+			req := httptest.NewRequest("GET", "/whoami", nil)
+			req.RemoteAddr = tc.remoteAddr
+			rec := httptest.NewRecorder()
+			srv.handleWhoAmI(rec, req)
+
+			if rec.Code != 200 {
+				t.Fatalf("status = %d want 200", rec.Code)
+			}
+			var got whoAmIResp
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.SourceIP != tc.want {
+				t.Errorf("source_ip = %q want %q", got.SourceIP, tc.want)
+			}
+			if got.APIVersion != whoAmIAPIVersion {
+				t.Errorf("api_version = %d want %d", got.APIVersion, whoAmIAPIVersion)
+			}
+		})
 	}
 }

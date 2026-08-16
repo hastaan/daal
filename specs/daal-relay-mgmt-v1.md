@@ -1,8 +1,8 @@
 # `daal-relay-mgmt` — V2 in-box management plane (v1)
 
-**Status:** locked at FRP-10 (May 2026); **extended at FRP-14** (lifts the 3-route invariant to 6 routes; see `specs/per-recipient-credentials-v1.md`). · **Supplement reference:** §9.5.2, §9.5.5. · **Engine line:** `daal-core 0.9.0+v3-share` (no engine ABI surface — this is an in-box userspace daemon).
+**Status:** locked at FRP-10 (May 2026); **extended at FRP-14** (lifts the 3-route invariant to 6 routes; see `specs/per-recipient-credentials-v1.md`); **extended again at the publisher redesign** (7th route `/whoami`, §4.7). · **Supplement reference:** §9.5.2, §9.5.5. · **Engine line:** `daal-core 0.9.0+v3-share` (no engine ABI surface — this is an in-box userspace daemon).
 
-This spec defines the contract between the FRP Helper and the persistent in-box `daal-relay-mgmt` service that ships with FRP-10's V2 deploys. It locks the wire format, the auth scheme, the TLS posture, the port discipline, and (at FRP-14) the six-route API surface. The Helper-side mirror (`publisher/deploy/mgmt/`) and the box-side service (`cmd/daal-relay-mgmt/`) are both pinned by tests against this contract.
+This spec defines the contract between the FRP Helper and the persistent in-box `daal-relay-mgmt` service that ships with FRP-10's V2 deploys. It locks the wire format, the auth scheme, the TLS posture, the port discipline, and the seven-route API surface (six at FRP-14, plus `/whoami`). The Helper-side mirror (`publisher/deploy/mgmt/`) and the box-side service (`cmd/daal-relay-mgmt/`) are both pinned by tests against this contract.
 
 ---
 
@@ -42,9 +42,9 @@ The `privKey` is the Helper's per-deploy publisher Ed25519 private key. Its publ
 
 **Op-binding:** the on-box service refuses to accept a token signed for `rotate-credentials` against `/rotate-tls` and vice versa. This pins token-flow integrity even if the URL path is otherwise unprotected.
 
-## 4. API surface — exactly six routes (FRP-14)
+## 4. API surface — exactly seven routes
 
-The FRP-10 baseline locked three routes (`/rotate-credentials`, `/rotate-tls`, `/health`). FRP-14 adds three per-recipient routes (`/users/provision`, `/users/revoke`, `/users/list`), specified in `specs/per-recipient-credentials-v1.md`. Adding a seventh route requires a supplement amendment. The implementation-level invariant is pinned by `TestExactlyNRoutes` (n=6) in `cmd/daal-relay-mgmt/main_test.go`.
+The FRP-10 baseline locked three routes (`/rotate-credentials`, `/rotate-tls`, `/health`). FRP-14 adds three per-recipient routes (`/users/provision`, `/users/revoke`, `/users/list`), specified in `specs/per-recipient-credentials-v1.md`. The publisher redesign adds a seventh, `/whoami` (§4.7). Adding an **eighth** route requires a supplement amendment. The implementation-level invariant is pinned by `TestExactlyNRoutes` (n=7) in `cmd/daal-relay-mgmt/main_test.go`.
 
 ### 4.1. `POST /rotate-credentials` — L1, ~5 s
 
@@ -101,6 +101,17 @@ Auth required. The wire format, sing-box rewriter, and force-kick mechanism for 
 
 Both state-changing routes require op-bound tokens (`users-provision`, `users-revoke`); the read route requires `users-list`.
 
+### 4.7. `GET|POST /whoami` — L0, instant
+
+Echoes the source IP the box actually observes for the connection.
+
+* **Auth:** the standard `requireAuth` wrapper; op-bound as `whoami` in `opFromPath`.
+* **Methods:** `GET` and `POST`; anything else → `405`.
+* **Response:** `200 application/json` — `{"source_ip":"<ip>","server_time_unix":<int64>,"api_version":1}`.
+* **Derivation:** `net.SplitHostPort(r.RemoteAddr)`; if the split fails, the raw `RemoteAddr`. `X-Forwarded-For` / `X-Real-IP` are **deliberately ignored** — the mgmt plane is dialled directly, and honouring a client header would let a caller spoof the very value it is asking the box to verify.
+* **Why it exists:** the publisher's helper IP comes from third-party echo services and can be wrong behind CGNAT, split-horizon NAT or a captive proxy. This is the only authoritative answer. It cannot *bootstrap* the allowlist — it is itself behind the firewall — so it only confirms an IP that already works, letting the client stop re-detecting and store a verified value.
+* **Feature detection is mandatory on the client.** Boxes deployed before this route exists answer `404`. A `404`, `405`, connection error or malformed body must be treated as "older box" and must never fail, block or degrade any publisher action; the stored `helper_ip` stays authoritative.
+
 ## 5. Cloud-firewall as gate
 
 The Helper opens a 300-second `(callerIP, mgmtPort)` allowlist via `Provider.SetEphemeralFirewallRule(serverID, callerIP, port, 300)` immediately before each L1/L2 call, then drives the call, then removes the rule via `RemoveEphemeralFirewallRule(rule)` in a `defer` so cleanup runs even on error. The provider auto-expires the rule at 300 s as belt-and-braces.
@@ -130,7 +141,7 @@ Box-side `ufw` does **not** open the mgmt port. FRP-10 invariant 18 is structura
 
 | File | Purpose |
 |---|---|
-| `cmd/daal-relay-mgmt/main_test.go` | 11 baseline + ~10 FRP-14 tests pinning the wire format, the six-route invariant, the Ed25519 token shape (op-binding for all 5 ops + timestamp window), the self-signed cert fingerprint stability across restarts, the surgical sing-box JSON rewriters (rotate + per-user paths), and the per-recipient isolation invariants |
+| `cmd/daal-relay-mgmt/main_test.go` | 11 baseline + ~10 FRP-14 tests + the `/whoami` set, pinning the wire format, the seven-route invariant, the Ed25519 token shape (op-binding for all 5 ops + timestamp window), the self-signed cert fingerprint stability across restarts, the surgical sing-box JSON rewriters (rotate + per-user paths), and the per-recipient isolation invariants |
 | `publisher/deploy/mgmt/client_test.go` | 12 tests pinning the Helper-side TLS-pin (wrong fingerprint = error), the token mint/parse round-trip, the ephemeral firewall open/close ordering, and the V1.5-fallback-on-zero-port path |
 | `publisher/deploy/cloudinit/template_test.go` | 6 tests pinning the V2 cloud-init template's mgmt-unit installation, port-input determinism, and the no-cloud-provider-token-in-template invariant |
 

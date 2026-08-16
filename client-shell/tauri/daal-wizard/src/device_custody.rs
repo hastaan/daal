@@ -306,7 +306,23 @@ pub struct FileCustody {
     /// `<config_dir>/custody/`
     base_dir: PathBuf,
     binding_salt: [u8; BINDING_SALT_LEN],
+    /// When `unlock(Some(passphrase))` last succeeded, used solely to
+    /// disambiguate AEAD failures. An AEAD tag mismatch is
+    /// indistinguishable at the crypto layer between "you typed the
+    /// wrong passphrase", "the DWK rotated", and "this blob came off
+    /// another device" — the ciphertext just doesn't open. But a
+    /// failure moments after the user typed a passphrase is
+    /// overwhelmingly the first case, and telling them "wrong
+    /// passphrase" instead of "machine binding mismatch" is the
+    /// difference between a retry and a support ticket. Outside the
+    /// window we do not guess: it stays [`CustodyError::BindingMismatch`].
+    last_passphrase_unlock: Mutex<Option<std::time::Instant>>,
 }
+
+/// How long after a passphrase unlock an AEAD failure is attributed
+/// to that passphrase rather than to a binding mismatch.
+const WRONG_PASSPHRASE_ATTRIBUTION_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
 impl FileCustody {
     /// Construct with an explicit provider. The shell uses this to
@@ -323,6 +339,7 @@ impl FileCustody {
             provider,
             base_dir: base,
             binding_salt,
+            last_passphrase_unlock: Mutex::new(None),
         })
     }
 
@@ -344,6 +361,29 @@ impl FileCustody {
             .join("aliases")
             .join(format!("{}.blob", sanitize(alias)))
     }
+
+    /// Re-label a [`CustodyError::BindingMismatch`] as
+    /// [`CustodyError::WrongPassphrase`] when it lands inside the
+    /// attribution window opened by `unlock(Some(_))`. Every other
+    /// error passes through untouched — this never invents a cause,
+    /// it only picks the likelier of two indistinguishable ones when
+    /// the user has just told us which to expect.
+    fn attribute_aead_failure(&self, e: CustodyError) -> CustodyError {
+        if !matches!(e, CustodyError::BindingMismatch) {
+            return e;
+        }
+        let recent = self
+            .last_passphrase_unlock
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed() < WRONG_PASSPHRASE_ATTRIBUTION_WINDOW)
+            .unwrap_or(false);
+        if recent {
+            CustodyError::WrongPassphrase
+        } else {
+            e
+        }
+    }
 }
 
 impl DeviceCustody for FileCustody {
@@ -357,7 +397,20 @@ impl DeviceCustody for FileCustody {
 
     fn unlock(&self, passphrase: Option<&str>) -> Result<()> {
         match passphrase {
-            Some(p) => self.provider.set_passphrase(p),
+            Some(p) => {
+                self.provider.set_passphrase(p)?;
+                // Open the attribution window (see the field doc) —
+                // but ONLY where a passphrase is actually the wrap
+                // key. Hardware and OS-keystore providers ignore the
+                // passphrase entirely, so blaming one for a later AEAD
+                // failure would send a user hunting for a typo on a
+                // device that never asked them for a passphrase.
+                if self.provider.level() == CustodyLevel::SessionPassphrase {
+                    *self.last_passphrase_unlock.lock().unwrap() =
+                        Some(std::time::Instant::now());
+                }
+                Ok(())
+            }
             None => {
                 // Force the DWK to materialise so keystore errors
                 // surface here rather than on first put/get.
@@ -370,6 +423,8 @@ impl DeviceCustody for FileCustody {
 
     fn lock(&self) {
         self.provider.clear();
+        // A locked custody has no "just-typed passphrase" to blame.
+        *self.last_passphrase_unlock.lock().unwrap() = None;
     }
 
     fn put(&self, alias: &str, secret: &[u8]) -> Result<()> {
@@ -381,12 +436,7 @@ impl DeviceCustody for FileCustody {
         let blob = sealed?;
         let encoded = B64.encode(&blob);
         let path = self.alias_path(alias);
-        std::fs::write(&path, encoded.as_bytes())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
+        write_blob_durably(&path, encoded.as_bytes())?;
         Ok(())
     }
 
@@ -405,7 +455,7 @@ impl DeviceCustody for FileCustody {
         dwk.zeroize();
         let plain = aes_gcm_open(&wrap_key, &blob);
         wrap_key.zeroize();
-        plain
+        plain.map_err(|e| self.attribute_aead_failure(e))
     }
 
     fn forget(&self, alias: &str) -> Result<()> {
@@ -435,6 +485,59 @@ impl DeviceCustody for FileCustody {
         }
         Ok(n)
     }
+}
+
+/// Write a wrapped blob so that a `put` which has returned `Ok` has
+/// really reached stable storage.
+///
+/// This is load-bearing for exactly one caller: the one-time PIN→
+/// custody migration. Its whole safety property is "the legacy blob is
+/// deleted only after the same plaintext has been written under custody
+/// and read back byte-identical" — but a plain `fs::write` followed by
+/// a read is satisfied entirely from the page cache. If the device lost
+/// power between the legacy `unlink` being journalled and these data
+/// blocks being flushed, the install would come back with **neither**
+/// copy of the relay's Ed25519 signing key, and there is no escrow
+/// anywhere in the system.
+///
+/// Temp file → `sync_all` → atomic rename → fsync the directory, so
+/// either the old blob or the complete new one survives a crash, never
+/// a truncated file and never nothing.
+fn write_blob_durably(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = path.with_extension("tmp");
+
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+
+    std::fs::rename(&tmp, path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        // Persist the rename itself. Without this the directory entry
+        // can still be lost even though the file's contents are safe.
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -478,9 +581,13 @@ fn mix_binding(dwk: &[u8; KEY_LEN], binding: &[u8; BINDING_SALT_LEN]) -> [u8; KE
 }
 
 /// Argon2id over the passphrase, salted by the per-install binding.
-/// Parameters mirror `keystore.rs` so users carrying both auth
-/// surfaces (publisher PIN, recipient passphrase) see consistent
-/// unlock latency.
+/// Parameters match the legacy `keystore.rs` PIN derivation, which
+/// matters for one reason only: an install that still holds
+/// unmigrated PIN-sealed blobs runs both derivations during the
+/// one-time migration, and a mismatch would make one of the two feel
+/// inexplicably slower. (The publisher PIN itself is gone — this is
+/// now the *only* passphrase surface, and only on devices with no
+/// hardware or OS keystore at all.)
 fn derive_passphrase_key(
     passphrase: &[u8],
     binding: &[u8; BINDING_SALT_LEN],
@@ -581,16 +688,40 @@ mod tests {
     }
 
     #[test]
-    fn session_passphrase_wrong_passphrase_fails_decrypt() {
+    fn session_passphrase_wrong_passphrase_reports_wrong_passphrase() {
         let dir = tempdir().unwrap();
         let c = FileCustody::session_passphrase(dir.path()).unwrap();
         c.unlock(Some("correct horse battery staple")).unwrap();
         c.put("a", b"super-secret").unwrap();
         c.lock();
         c.unlock(Some("not the same passphrase")).unwrap();
-        // Now is_unlocked is true (we have *a* key in memory) but
-        // the key doesn't decrypt prior ciphertext → BindingMismatch
-        // from the AEAD tag failure.
+        // is_unlocked is true (we have *a* key in memory) but the key
+        // doesn't decrypt prior ciphertext. The AEAD tag failure alone
+        // cannot tell "wrong passphrase" from "wrong device"; because
+        // the user typed a passphrase moments ago, we attribute it to
+        // the passphrase. Reporting "machine binding mismatch" here
+        // sent people looking for a lost device instead of retyping.
+        let err = c.get("a").unwrap_err();
+        assert!(matches!(err, CustodyError::WrongPassphrase), "got: {err:?}");
+    }
+
+    #[test]
+    fn aead_failure_outside_unlock_window_stays_binding_mismatch() {
+        // Same AEAD failure, but with no passphrase unlock to blame:
+        // a static-DWK custody handed a blob it cannot open must not
+        // claim "wrong passphrase" — there is no passphrase.
+        let dir = tempdir().unwrap();
+        let c = FileCustody::static_test(dir.path()).unwrap();
+        c.put("a", b"x").unwrap();
+        // Corrupt the ciphertext body, leaving a decodable base64
+        // blob of adequate length so we reach the AEAD open.
+        let path = c.alias_path("a");
+        let blob = B64.decode(std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut tampered = blob.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        std::fs::write(&path, B64.encode(&tampered)).unwrap();
+
         let err = c.get("a").unwrap_err();
         assert!(matches!(err, CustodyError::BindingMismatch), "got: {err:?}");
     }

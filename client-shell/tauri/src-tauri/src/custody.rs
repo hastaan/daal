@@ -82,10 +82,68 @@ pub fn build_device_custody(state_dir: &Path) -> Arc<dyn DeviceCustody> {
             }
         }
     }
-    Arc::new(
-        FileCustody::session_passphrase(state_dir)
-            .expect("session-passphrase custody must initialise"),
-    )
+    match FileCustody::session_passphrase(state_dir) {
+        Ok(fc) => Arc::new(fc),
+        Err(e) => {
+            // The last fallback failed too — `state_dir` is
+            // unwritable. This used to be an `expect()`, which killed
+            // the whole app at startup: a read-only or full data
+            // partition took the engine, the connect path and every
+            // route with it, none of which need custody at all.
+            //
+            // Return a custody that answers honestly instead. Every
+            // operation fails with the underlying reason, which
+            // `publisher_custody_status` surfaces as ok=false plus the
+            // text, so the publisher surface is disabled with an
+            // explanation while the rest of the app keeps running.
+            eprintln!("[custody] no custody backend could initialise: {e}");
+            Arc::new(UnavailableCustody {
+                reason: e.to_string(),
+            })
+        }
+    }
+}
+
+/// A custody that stores nothing and says so. Used only when even the
+/// session-passphrase fallback cannot initialise (unwritable state
+/// dir). It reports `SessionPassphrase` because that is the weakest
+/// level — we never let a broken backend claim hardware backing.
+struct UnavailableCustody {
+    reason: String,
+}
+
+impl UnavailableCustody {
+    fn err(&self) -> CustodyError {
+        CustodyError::Backend(format!("custody unavailable: {}", self.reason))
+    }
+}
+
+impl DeviceCustody for UnavailableCustody {
+    fn level(&self) -> CustodyLevel {
+        CustodyLevel::SessionPassphrase
+    }
+    fn is_unlocked(&self) -> bool {
+        false
+    }
+    fn unlock(&self, _passphrase: Option<&str>) -> Result<(), CustodyError> {
+        Err(self.err())
+    }
+    fn lock(&self) {}
+    fn put(&self, _alias: &str, _secret: &[u8]) -> Result<(), CustodyError> {
+        Err(self.err())
+    }
+    fn get(&self, _alias: &str) -> Result<Vec<u8>, CustodyError> {
+        Err(self.err())
+    }
+    fn forget(&self, _alias: &str) -> Result<(), CustodyError> {
+        // Erasure of something that was never stored is vacuously
+        // done; failing here would make panic_wipe report an error
+        // for a store that holds nothing.
+        Ok(())
+    }
+    fn forget_prefix(&self, _prefix: &str) -> Result<usize, CustodyError> {
+        Ok(0)
+    }
 }
 
 #[cfg(not(target_os = "android"))]

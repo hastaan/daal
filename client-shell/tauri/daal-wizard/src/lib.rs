@@ -2,13 +2,16 @@
 //!
 //! The wizard walks a Diaspora Helper through:
 //!
-//!   0. Welcome.
-//!   1. Cloud-provider token paste + PIN set + live pricing lookup.
-//!   2. Region / server-type / toolbox-profile choice.
-//!   3. Publisher key creation (or import) + fingerprint reveal.
-//!   4. Provisioning shell      — DISABLED at FRP-5; wired live at FRP-4b.
-//!   5. RelayPack signing shell — DISABLED at FRP-5; wired live at FRP-4b.
-//!   6. RelayPack handoff shell — DISABLED at FRP-5; wired live at FRP-4b.
+//!   1. Cloud-provider token paste + live pricing lookup.
+//!   2. Region / server-type / toolbox-profile choice + relay name.
+//!   3. Build: publisher keygen, provision, sign, produce the
+//!      shareable pack. Then hand off to the relay-detail screen,
+//!      which is the permanent home for sharing and recipients.
+//!
+//! There is no PIN anywhere in that flow. Publisher secrets live
+//! under `device_custody` (hardware-backed where the platform has a
+//! keystore); `keystore` survives only as the legacy reader for the
+//! one-time migration. See the headers of both modules.
 //!
 //! This crate is workspace-resident so it can be unit-tested
 //! without the GTK/webkit toolchain pulled in by Tauri 2. The
@@ -26,7 +29,6 @@ pub mod device_custody;
 pub mod keystore;
 pub mod modifiers_i18n;
 pub mod operator_db;
-pub mod pin_lockout;
 pub mod publisher_key;
 pub mod recipient_book;
 pub mod recipient_identity;

@@ -5,9 +5,17 @@
 //! function takes a [`WizardCtx`] holding the dependencies — DB,
 //! keystore, CLI runner — so unit tests can substitute mocks.
 //!
+//! ## Custody
+//!
+//! Publisher secrets — the Ed25519 signing key, the cloud-provider
+//! token, the Cloudflare token — live under [`DeviceCustody`]. **No
+//! function in this module takes a PIN.** `ctx.keystore` survives
+//! only as the reader for the one-time PIN→custody migration
+//! ([`migrate_from_pin`]) and for `forget()` on teardown; see the
+//! header of `keystore.rs`.
+//!
 //! At FRP-5 ship the LIVE operations are:
 //!
-//!   - `set_pin` / `unlock_pin`
 //!   - `store_cloud_token`
 //!   - `pricing_lookup`
 //!   - `select_profile`
@@ -40,10 +48,9 @@ use crate::cli_bridge::{
     CdnRotateOriginArgs, CdnRotatePathArgs, CdnRotateResult, CliRunner, FountainFrame, Pricing,
     ProgressEvent, ProvisionArgs, PublishFreshnessArgs, ReprovisionArgs,
 };
-use crate::device_custody::DeviceCustody;
+use crate::device_custody::{CustodyError, DeviceCustody};
 use crate::keystore::{Keystore, KeystoreError};
 use crate::operator_db::{CdnFrontRow, DbError, OperatorDb, SubkeyRow};
-use crate::pin_lockout::{self, LockoutStatus};
 use crate::publisher_key::{self, Fingerprint, KeyError};
 use crate::staging::{self, PreProvisionRecord, StagingError};
 
@@ -57,10 +64,6 @@ pub enum WizardError {
     Key(#[from] KeyError),
     #[error(transparent)]
     Staging(#[from] StagingError),
-    #[error("PIN lockout active until unix={0}")]
-    Locked(i64),
-    #[error("invalid PIN: must be at least 6 characters")]
-    InvalidPin,
     #[error("cloud token must not be empty")]
     EmptyToken,
     #[error("pricing: {0}")]
@@ -78,14 +81,105 @@ pub enum WizardError {
     Subprocess(String),
     /// Generic precondition / validation failure surfaced to the
     /// React layer (e.g. "recipient identity not yet created").
-    /// Distinct from `InvalidPin` and `EmptyToken` which carry
-    /// dedicated copy for those specific user-facing prompts.
+    /// Distinct from `EmptyToken`, which carries dedicated copy for
+    /// that specific user-facing prompt.
     #[error("{0}")]
     Validation(String),
     /// Device Custody v1 is locked — UI should prompt for session
     /// passphrase (or trigger an OS-keystore unlock) before retry.
     #[error("custody locked: {0}")]
     CustodyLocked(String),
+    /// A publisher-custody or helper-IP failure whose message is a
+    /// **stable machine-readable code** followed by `": "` and human
+    /// text — one of `E_CUSTODY_LOCKED`, `E_CUSTODY_WRONG_PASS`,
+    /// `E_CUSTODY_BACKEND`, `E_LEGACY_PIN_REQUIRED`,
+    /// `E_SECRET_MISSING`, `E_HELPER_IP_MISSING`, `E_HELPER_IP_STALE`.
+    ///
+    /// The React layer branches on that prefix
+    /// (`classifyPublisherError` in `wizardCommands.ts`) to choose
+    /// between "unlock", "run the migration", "re-detect your IP" and
+    /// "this is broken, here's why". Display is `{0}` **verbatim**:
+    /// prefixing anything — even "wizard: " — silently breaks every
+    /// consumer, because Tauri hands the React side `e.to_string()`.
+    #[error("{0}")]
+    Coded(String),
+}
+
+// ---- Stable error codes (contract with the React layer) ----------
+//
+// These tokens are load-bearing UI state, not log text. Changing one
+// changes which recovery affordance the user is offered.
+
+/// Session-passphrase custody exists but has not been unlocked.
+pub const E_CUSTODY_LOCKED: &str = "E_CUSTODY_LOCKED";
+/// An AEAD failure attributable to a just-typed session passphrase.
+pub const E_CUSTODY_WRONG_PASS: &str = "E_CUSTODY_WRONG_PASS";
+/// The OS/Android keystore itself is unreachable or broken.
+pub const E_CUSTODY_BACKEND: &str = "E_CUSTODY_BACKEND";
+/// The secret exists only as a legacy PIN-sealed blob — run the
+/// one-time migration.
+pub const E_LEGACY_PIN_REQUIRED: &str = "E_LEGACY_PIN_REQUIRED";
+/// Neither a custody blob nor a legacy blob: the key is gone.
+pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
+/// `operators.helper_ip` is empty; the UI must detect + set, then retry.
+pub const E_HELPER_IP_MISSING: &str = "E_HELPER_IP_MISSING";
+/// The box was unreachable in a way consistent with a stale
+/// firewall allowlist entry for the publisher's IP.
+pub const E_HELPER_IP_STALE: &str = "E_HELPER_IP_STALE";
+
+/// Build a [`WizardError::Coded`] from a code constant and a tail.
+fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
+    WizardError::Coded(format!("{code}: {tail}"))
+}
+
+/// Does this `daal-deploy` stderr look like the box refusing us at
+/// the network layer?
+///
+/// The publisher's IP is allowlisted on the cloud firewall for the
+/// duration of one call. When the publisher moves between Wi-Fi and
+/// cellular, or a CGNAT re-NATs them, the stored IP no longer matches
+/// and the box becomes unreachable — not "down", *unreachable from
+/// here*. The two look identical from a subprocess exit code, and the
+/// difference decides whether the UI says "your relay is broken" or
+/// "your network address changed, updating it" and silently retries.
+///
+/// We only claim staleness on transport-shaped failures. An
+/// application-level error from a box we clearly reached (a 4xx from
+/// the mgmt API itself, a JSON parse failure) is not an allowlist
+/// problem and must not be papered over with a retry.
+pub(crate) fn looks_like_stale_allowlist(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    const TRANSPORT_MARKERS: &[&str] = &[
+        "connection refused",
+        "connection reset",
+        "no route to host",
+        "network is unreachable",
+        "host is unreachable",
+        "i/o timeout",
+        "timeout awaiting",
+        "deadline exceeded",
+        "dial tcp",
+        "tls handshake",
+        "handshake failure",
+        "eof",
+        "403 forbidden",
+        "status 403",
+        "401 unauthorized",
+        "status 401",
+    ];
+    TRANSPORT_MARKERS.iter().any(|m| s.contains(m))
+}
+
+/// Map a `daal-deploy` subprocess failure onto the error contract,
+/// promoting transport-shaped failures to `E_HELPER_IP_STALE` so the
+/// UI can re-detect the publisher's IP and retry once instead of
+/// showing a dead end.
+pub(crate) fn map_deploy_err(e: crate::cli_bridge::BridgeError) -> WizardError {
+    let text = e.to_string();
+    if looks_like_stale_allowlist(&text) {
+        return coded(E_HELPER_IP_STALE, text);
+    }
+    WizardError::Subprocess(text)
 }
 
 pub type Result<T> = std::result::Result<T, WizardError>;
@@ -95,19 +189,141 @@ pub type Result<T> = std::result::Result<T, WizardError>;
 /// it into each `#[tauri::command]` shim via Tauri's State<>.
 pub struct WizardCtx {
     pub db: Arc<OperatorDb>,
+    /// **Legacy.** The PIN-sealed store. Read only by the one-time
+    /// migration ([`migrate_from_pin`]) and probed by
+    /// [`Keystore::has`]; erased by `cancel_and_cleanup` /
+    /// `panic_wipe`. No live operation opens a secret from here.
     pub keystore: Arc<Keystore>,
     pub staging_dir: PathBuf,
     pub cli: Arc<dyn CliRunner>,
     pub clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-    /// Device Custody v1: wraps the recipient X25519 priv without a
-    /// per-operation PIN. Publisher keys + cloud tokens stay on the
-    /// PIN-gated `keystore` field above (deliberate friction); only
-    /// the recipient identity uses custody.
+    /// Device Custody v1 — the custody surface for **every** secret
+    /// this app holds: the recipient X25519 priv, the publisher
+    /// Ed25519 signing key, and the cloud/Cloudflare API tokens.
+    ///
+    /// This reverses the FRP-5 design, which kept publisher secrets
+    /// behind a typed PIN and called that friction deliberate. It
+    /// wasn't buying what it claimed. On Android the `keyring` crate
+    /// has no backend, so the PIN path degraded to app-private files
+    /// whose only protection was Argon2id over a 6-digit secret,
+    /// while the DWK reached through `DaalKeystore.kt` is a
+    /// non-exportable AndroidKeyStore key that never leaves the TEE.
+    /// Dropping the PIN on Android is a security *upgrade*, and on
+    /// desktop the OS keyring is at least as strong as the PIN was.
+    /// What the PIN did buy was a wizard the user could not resume:
+    /// it was collected on one step, never persisted, and every
+    /// later step's button was disabled for invisible reasons after
+    /// a relaunch.
     pub custody: Arc<dyn DeviceCustody>,
 }
 
-/// `OperatorSummary` is the lightweight shape returned by
-/// `list_operators` — enough to render a "your relays" list.
+/// Read a publisher secret out of custody, translating custody
+/// failures into the stable `E_*` codes the UI branches on.
+///
+/// The `NotFound` case is the interesting one: it means either "this
+/// install has not run the PIN→custody migration yet" (recoverable —
+/// prompt for the old PIN once) or "the key is genuinely gone"
+/// (unrecoverable). `Keystore::has` is what separates them, and
+/// getting that distinction wrong would either hide a recoverable
+/// state behind a dead end or demand a PIN that no longer exists.
+pub(crate) fn custody_get(ctx: &WizardCtx, alias: &str) -> Result<Zeroizing<Vec<u8>>> {
+    match ctx.custody.get(alias) {
+        Ok(b) => Ok(Zeroizing::new(b)),
+        Err(e) => Err(map_custody_err(ctx, alias, e)),
+    }
+}
+
+/// Presence probe: is `alias` readable from custody right now?
+///
+/// The plaintext is dropped through `Zeroizing` rather than as a bare
+/// `Vec<u8>`. This matters more than it looks: the migration gate and
+/// the relay-detail header both call `custody_status`, which walks
+/// every alias — so a naive `custody.get(a).is_ok()` would copy every
+/// relay's Ed25519 signing key into freed heap on each mount of the
+/// publisher surface, in a crate that otherwise zeroizes carefully.
+fn custody_has(ctx: &WizardCtx, alias: &str) -> bool {
+    ctx.custody.get(alias).map(Zeroizing::new).is_ok()
+}
+
+/// Same, decoding the secret as UTF-8 (cloud + Cloudflare tokens).
+pub(crate) fn custody_get_string(ctx: &WizardCtx, alias: &str) -> Result<Zeroizing<String>> {
+    let bytes = custody_get(ctx, alias)?;
+    let s = String::from_utf8(bytes.to_vec())
+        .map_err(|e| coded(E_CUSTODY_BACKEND, format!("token is not UTF-8: {e}")))?;
+    Ok(Zeroizing::new(s))
+}
+
+fn map_custody_err(ctx: &WizardCtx, alias: &str, e: CustodyError) -> WizardError {
+    match e {
+        CustodyError::Locked => coded(
+            E_CUSTODY_LOCKED,
+            "unlock this device's key store to continue",
+        ),
+        CustodyError::WrongPassphrase => {
+            coded(E_CUSTODY_WRONG_PASS, "that passphrase does not match")
+        }
+        CustodyError::NotFound(_) => {
+            if ctx.keystore.has(alias) {
+                coded(
+                    E_LEGACY_PIN_REQUIRED,
+                    format!("{alias} is still sealed under your old PIN"),
+                )
+            } else {
+                coded(E_SECRET_MISSING, format!("no key stored for {alias}"))
+            }
+        }
+        // BindingMismatch outside the passphrase-attribution window,
+        // Backend (Android JNI / keyring), and every crypto-layer
+        // failure are all "the key store is not answering correctly".
+        // There is nothing the user can type to fix any of them.
+        other => coded(E_CUSTODY_BACKEND, other),
+    }
+}
+
+/// Write a publisher secret into custody under the same code mapping.
+fn custody_put(ctx: &WizardCtx, alias: &str, secret: &[u8]) -> Result<()> {
+    ctx.custody
+        .put(alias, secret)
+        .map_err(|e| map_custody_err(ctx, alias, e))
+}
+
+/// Read the persisted helper IP for an operator, or fail with
+/// `E_HELPER_IP_MISSING` **before** spawning any subprocess.
+///
+/// Every mgmt-plane call needs this: `daal-deploy` punches an
+/// ephemeral cloud-firewall rule for the publisher's own public IP
+/// immediately before talking to the box. Failing here — cheaply,
+/// with a code the UI can act on — beats a 30-second subprocess
+/// timeout that surfaces as "connection refused".
+pub(crate) fn require_helper_ip(ctx: &WizardCtx, operator_id: i64) -> Result<String> {
+    let row = ctx.db.get(operator_id)?;
+    if row.helper_ip.trim().is_empty() {
+        return Err(coded(
+            E_HELPER_IP_MISSING,
+            "this device's public IP is not known yet",
+        ));
+    }
+    Ok(row.helper_ip)
+}
+
+/// Accept an IPv4 dotted-quad or an IPv6 textual address. Rejecting
+/// anything else is what stops a captive-portal HTML page from being
+/// stored as a helper IP by the auto-detect path.
+pub fn is_valid_ip(s: &str) -> bool {
+    s.trim().parse::<std::net::IpAddr>().is_ok()
+}
+
+/// `OperatorSummary` is the shape returned by `list_operators` —
+/// everything the relay list needs to render one card, in one call.
+///
+/// It is deliberately fat. The previous shape carried id / status /
+/// provider / region / server_type only, so two relays on the same
+/// provider and region were literally indistinguishable in the
+/// picker, and the recipient counts had to come from an N+1 of
+/// `recipient_list(id)` per row. Every field below is already in
+/// hand when we walk the rows; returning them costs one extra
+/// COUNT per operator and removes a whole class of "which one is
+/// this?" from the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorSummary {
     pub id: i64,
@@ -117,6 +333,21 @@ pub struct OperatorSummary {
     pub server_type: String,
     pub publisher_pub_hex: String,
     pub created_at_unix: i64,
+    /// V012 nickname; "" when the user never named it.
+    pub nickname: String,
+    /// From the OperatorRecord; "" until provisioned.
+    pub public_ip: String,
+    pub public_ipv6: String,
+    pub server_id: String,
+    /// V012 helper IP; "" when never detected.
+    pub helper_ip: String,
+    pub last_provisioned_at_unix: i64,
+    pub decommissioned_at_unix: i64,
+    /// True once a RelayPack has been bound and signed for this relay.
+    pub has_signed_sbp: bool,
+    pub signed_sbp_at_unix: i64,
+    pub live_recipient_count: i64,
+    pub total_recipient_count: i64,
 }
 
 /// `OperatorState` is the full resumable state returned by
@@ -137,8 +368,20 @@ pub struct OperatorState {
     pub has_signed_sbp: bool,
     /// The wizard step the user should resume from. One of:
     /// "provider", "pricing", "keys", "provision", "sign", "distribute", "done".
+    ///
+    /// These strings are the **stable** resume vocabulary. The React
+    /// wizard collapsed 7 screens into 3 and maps these onto screen
+    /// indices in one place (`stepIdToIdx`); do not rename them here
+    /// to match the new screen names or every resume breaks.
     pub wizard_step: String,
     pub created_at_unix: i64,
+    /// V012 nickname, so a resume can rehydrate the name field
+    /// without a second round-trip.
+    pub nickname: String,
+    /// From the OperatorRecord; "" until provisioned.
+    pub public_ip: String,
+    /// V012 helper IP; "" when never detected.
+    pub helper_ip: String,
 }
 
 /// Derive the wizard step from the operator's DB state.
@@ -146,12 +389,11 @@ fn derive_wizard_step(row: &crate::operator_db::OperatorRow) -> &'static str {
     if row.cloud_token_keystore_alias.is_empty() {
         return "provider";
     }
-    // A provisioned operator resumes at the share/distribute step — where
-    // re-sending the pack needs only the PIN, never the earlier PIN-gated
-    // pricing step. Check this BEFORE the region/server_type probe below:
-    // Hetzner's create response can omit those fields, and without this
-    // shortcut a fully-provisioned server would regress to "pricing" (a
-    // dead end, since the PIN is only collected on the provider step).
+    // A provisioned operator resumes at the share/distribute step.
+    // Check this BEFORE the region/server_type probe below: Hetzner's
+    // create response can omit those fields, and without the shortcut
+    // a fully-provisioned server would regress to "pricing" and
+    // re-run a size choice it can no longer act on.
     if row.status == "provisioned" {
         if row.signed_sbp_sha256.is_some() {
             return "distribute";
@@ -184,22 +426,21 @@ fn derive_wizard_step(row: &crate::operator_db::OperatorRow) -> &'static str {
     "distribute"
 }
 
-/// Return the full resumable state for an operator. Does NOT
-/// require PIN — it reads only non-secret metadata from the DB.
+/// Return the full resumable state for an operator. Reads only
+/// non-secret metadata from the DB — it never touches custody, so it
+/// is always safe to call on mount.
 pub fn get_operator_state(ctx: &WizardCtx, operator_id: i64) -> Result<OperatorState> {
     let row = ctx.db.get(operator_id)?;
     let rec: serde_json::Value =
         serde_json::from_str(&row.operator_record_json).unwrap_or_default();
-    let region = rec
-        .get("region")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let server_type = rec
-        .get("server_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let field = |k: &str| -> String {
+        rec.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let region = field("region");
+    let server_type = field("server_type");
     let step = derive_wizard_step(&row);
     Ok(OperatorState {
         id: row.id,
@@ -214,46 +455,52 @@ pub fn get_operator_state(ctx: &WizardCtx, operator_id: i64) -> Result<OperatorS
         has_signed_sbp: row.signed_sbp_sha256.is_some(),
         wizard_step: step.to_string(),
         created_at_unix: row.created_at_unix,
+        nickname: row.nickname.clone(),
+        public_ip: field("public_ip"),
+        helper_ip: row.helper_ip.clone(),
     })
 }
 
-/// PIN format: at least 6 characters, any printable characters allowed.
-pub(crate) fn validate_pin(pin: &str) -> Result<()> {
-    if pin.len() < 6 {
-        return Err(WizardError::InvalidPin);
-    }
-    Ok(())
-}
-
-/// Validate a PIN before any operation that uses it. Returns
-/// `Locked` if the rate limiter is engaged.
-pub fn check_pin_allowed(ctx: &WizardCtx) -> Result<()> {
-    let now = (ctx.clock)();
-    match pin_lockout::check(&ctx.db, now)? {
-        LockoutStatus::Allowed => Ok(()),
-        LockoutStatus::Locked { unlock_at_unix } => Err(WizardError::Locked(unlock_at_unix)),
-    }
-}
-
-/// Record a PIN attempt outcome. Wizard calls this from any path
-/// that consults the PIN.
-pub fn record_pin_attempt(ctx: &WizardCtx, success: bool) -> Result<()> {
-    let now = (ctx.clock)();
-    ctx.db.record_pin_attempt(now, success)?;
-    Ok(())
-}
-
-/// Step 1a: store the cloud-provider token under the PIN.
-/// Returns the new operator row id (status=pre-provision).
-pub fn store_cloud_token(ctx: &WizardCtx, provider: &str, token: &str, pin: &str) -> Result<i64> {
-    validate_pin(pin)?;
+/// Step 1a: store the cloud-provider token under device custody.
+///
+/// `operator_id` selects between INSERT and UPDATE. Passing `None`
+/// creates a new relay; passing `Some(id)` re-points an existing
+/// pre-provision row at a (possibly new) token. The UPDATE branch is
+/// not a nicety: without it, walking Back then Next on the wizard's
+/// first screen INSERTed a second operator row every time, quietly
+/// littering the relay list with half-built duplicates that each
+/// held their own keystore aliases.
+pub fn store_cloud_token(
+    ctx: &WizardCtx,
+    provider: &str,
+    token: &str,
+    operator_id: Option<i64>,
+) -> Result<i64> {
     if token.trim().is_empty() {
         return Err(WizardError::EmptyToken);
     }
-    check_pin_allowed(ctx)?;
     let now = (ctx.clock)();
 
-    // Insert a placeholder row so we have an id to bind to keystore aliases.
+    if let Some(id) = operator_id {
+        // UPDATE: the row exists; re-seal the token under its
+        // canonical alias and re-point the provider if it changed.
+        let row = ctx.db.get(id)?;
+        let token_alias = cloud_alias(id);
+        custody_put(ctx, &token_alias, token.as_bytes())?;
+        ctx.db.update_token_alias(id, &token_alias)?;
+        if row.cloud_provider != provider {
+            ctx.db.set_cloud_provider(id, provider)?;
+            let mut rec: PreProvisionRecord =
+                serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
+            rec.provider = provider.to_string();
+            let body = serde_json::to_string(&rec).map_err(StagingError::from)?;
+            ctx.db.update_record_json(id, &body)?;
+        }
+        return Ok(id);
+    }
+
+    // INSERT: placeholder row first so we have an id to bind the
+    // custody alias to.
     let initial_record = PreProvisionRecord::new(provider, "", "", "iran-default", vec![], "");
     let initial_json = serde_json::to_string(&initial_record).map_err(StagingError::from)?;
     let id = ctx.db.insert_pre_provision(
@@ -265,38 +512,39 @@ pub fn store_cloud_token(ctx: &WizardCtx, provider: &str, token: &str, pin: &str
         now,
     )?;
     let token_alias = cloud_alias(id);
-    ctx.keystore.seal(&token_alias, pin, token.as_bytes())?;
+    custody_put(ctx, &token_alias, token.as_bytes())?;
     // Update the row with the now-known token alias.
     ctx.db.update_record_json(id, &initial_json)?;
-    let conn = &ctx.db; // borrow for the next call
-    conn.update_token_alias(id, &token_alias)?;
-    record_pin_attempt(ctx, true)?;
+    ctx.db.update_token_alias(id, &token_alias)?;
     Ok(id)
 }
 
+/// Seal the operator's Cloudflare API token under device custody.
+///
+/// This lives here rather than inline in the Tauri shim so it goes
+/// through [`custody_put`] like every other secret-touching command.
+/// Calling `ctx.custody.put` directly loses the stable `E_CUSTODY_*`
+/// prefix, and the React layer branches on that prefix to decide
+/// whether to offer the unlock sheet, the migration sheet, or a plain
+/// retry — a bare "custody is locked; call unlock() with a passphrase
+/// first" string gets none of them.
+pub fn store_cloudflare_token(ctx: &WizardCtx, operator_id: i64, token: &str) -> Result<()> {
+    if token.trim().is_empty() {
+        return Err(WizardError::EmptyToken);
+    }
+    // Confirm the operator exists before minting an alias bound to it.
+    let _ = ctx.db.get(operator_id)?;
+    custody_put(ctx, &cloudflare_alias(operator_id), token.as_bytes())
+}
+
 /// List existing servers on the operator's cloud account.
-/// Decrypts the stored token and calls `daal-deploy list-servers`.
+/// Reads the stored token and calls `daal-deploy list-servers`.
 pub fn list_existing_servers(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
 ) -> Result<Vec<crate::cli_bridge::ExistingServer>> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
     let row = ctx.db.get(operator_id)?;
-    let token_bytes = match ctx.keystore.open(&row.cloud_token_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            record_pin_attempt(ctx, false)?;
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    record_pin_attempt(ctx, true)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes)
-            .map_err(|e| WizardError::Pricing(format!("token utf8: {e}")))?,
-    );
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let servers = ctx
         .cli
         .run_list_servers(&row.cloud_provider, token.as_str())
@@ -304,31 +552,15 @@ pub fn list_existing_servers(
     Ok(servers)
 }
 
-/// Step 1b: live read-only pricing lookup. Decrypts the cloud
 /// List available server types for the operator's cloud provider.
-/// Decrypts the stored token and calls `daal-deploy list-server-types`.
+/// Reads the stored token and calls `daal-deploy list-server-types`.
 pub fn list_server_types(
     ctx: &WizardCtx,
     operator_id: i64,
     region: &str,
-    pin: &str,
 ) -> Result<Vec<crate::cli_bridge::ServerTypeOption>> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
     let row = ctx.db.get(operator_id)?;
-    let token_bytes = match ctx.keystore.open(&row.cloud_token_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            record_pin_attempt(ctx, false)?;
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    record_pin_attempt(ctx, true)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes)
-            .map_err(|e| WizardError::Pricing(format!("token utf8: {e}")))?,
-    );
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let types = ctx
         .cli
         .run_list_server_types(&row.cloud_provider, region, token.as_str())
@@ -336,30 +568,16 @@ pub fn list_server_types(
     Ok(types)
 }
 
-/// token, hands it to the FRP-4a CLI, returns the Pricing JSON.
+/// Step 1b: live read-only pricing lookup. Reads the cloud token,
+/// hands it to the FRP-4a CLI, returns the Pricing JSON.
 pub fn pricing_lookup(
     ctx: &WizardCtx,
     operator_id: i64,
     region: &str,
     server_type: &str,
-    pin: &str,
 ) -> Result<Pricing> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
     let row = ctx.db.get(operator_id)?;
-    let token_bytes = match ctx.keystore.open(&row.cloud_token_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            record_pin_attempt(ctx, false)?;
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    record_pin_attempt(ctx, true)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes)
-            .map_err(|e| WizardError::Pricing(format!("token utf8: {e}")))?,
-    );
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let pricing = ctx
         .cli
         .run_pricing(&row.cloud_provider, region, server_type, token.as_str())
@@ -369,6 +587,26 @@ pub fn pricing_lookup(
 
 /// Step 2: persist the user's region/server-type/toolbox-profile +
 /// enabled-families selection into the operator's record JSON.
+///
+/// # Why this patches a `Value` instead of a typed round-trip
+///
+/// Before provisioning, `operator_record_json` holds a
+/// [`PreProvisionRecord`]. **After** provisioning it holds the full
+/// FRP-4b `OperatorRecord` daal-deploy emitted, which carries the
+/// mgmt plane (`mgmt_port`, `mgmt_tls_fingerprint`) and the box's
+/// connection material (`reality_public_key`, `tls_cert_sha256`) —
+/// none of which exist on `PreProvisionRecord`. Deserialising into
+/// that struct and re-serialising therefore *silently deletes* them,
+/// and nothing ever writes them back: `write_record_staging` would
+/// hand daal-deploy a record with no mgmt port and no TLS pin, so
+/// every users-* call would fail for good and every `.sbp`/`.sbpx`
+/// built afterwards would be non-connectable. The relay would be
+/// unmanageable with no way back short of a reprovision.
+///
+/// That is not hypothetical: the build screen re-runs this stage from
+/// the top on every "Try again", including retries after the box is
+/// already up. Patching the parsed JSON in place keeps every key the
+/// struct does not model.
 pub fn select_profile(
     ctx: &WizardCtx,
     operator_id: i64,
@@ -378,57 +616,64 @@ pub fn select_profile(
     enabled_families: Vec<String>,
 ) -> Result<()> {
     let row = ctx.db.get(operator_id)?;
-    let mut rec: PreProvisionRecord =
+    // A provisioned box's region and server type are facts about a
+    // machine that already exists, not a preference the plan screen
+    // still owns. Rewriting them would make the record disagree with
+    // the running server. Idempotent no-op rather than an error so a
+    // retry higher up the chain can never be turned into a failure.
+    if row.status == "provisioned" {
+        return Ok(());
+    }
+    let mut rec: serde_json::Value =
         serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
-    rec.region = region.to_string();
-    rec.server_type = server_type.to_string();
-    rec.toolbox_profile = toolbox_profile.to_string();
-    rec.enabled_families = enabled_families;
+    let obj = rec.as_object_mut().ok_or_else(|| {
+        WizardError::Pricing("operator record JSON is not an object".into())
+    })?;
+    obj.insert("region".into(), region.into());
+    obj.insert("server_type".into(), server_type.into());
+    obj.insert("toolbox_profile".into(), toolbox_profile.into());
+    obj.insert(
+        "enabled_families".into(),
+        serde_json::Value::from(enabled_families),
+    );
     let body = serde_json::to_string(&rec).map_err(StagingError::from)?;
     ctx.db.update_record_json(operator_id, &body)?;
     Ok(())
 }
 
-/// Step 3a: generate a fresh publisher keypair, seal under PIN,
-/// store keystore alias on the operator row, return the
-/// fingerprint to render on screen 3.
-pub fn publisher_keygen(ctx: &WizardCtx, operator_id: i64, pin: &str) -> Result<Fingerprint> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
-    verify_operator_pin(ctx, operator_id, pin)?;
+/// Step 3a: generate a fresh publisher keypair, wrap it under device
+/// custody, store the alias on the operator row, return the
+/// fingerprint to render.
+pub fn publisher_keygen(ctx: &WizardCtx, operator_id: i64) -> Result<Fingerprint> {
     let key = publisher_key::generate();
-    seal_and_store_publisher(ctx, operator_id, pin, &key.priv_bytes, &key.pub_bytes)?;
+    seal_and_store_publisher(ctx, operator_id, &key.priv_bytes, &key.pub_bytes)?;
     Ok(key.fingerprint)
 }
 
 /// Step 3b: import an existing publisher key. `priv_bytes_b64` is
-/// base64 of the 32- or 64-byte raw form.
+/// base64 of the 32- or 64-byte raw form. This is also the restore
+/// path for a recovery blob written by [`export_recovery_key`].
 pub fn publisher_keyimport(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
     priv_bytes_b64: &str,
 ) -> Result<Fingerprint> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
-    verify_operator_pin(ctx, operator_id, pin)?;
     let raw = B64
-        .decode(priv_bytes_b64.as_bytes())
+        .decode(priv_bytes_b64.trim().as_bytes())
         .map_err(|e| WizardError::Pricing(format!("base64: {e}")))?;
     let key = publisher_key::import(&raw)?;
-    seal_and_store_publisher(ctx, operator_id, pin, &key.priv_bytes, &key.pub_bytes)?;
+    seal_and_store_publisher(ctx, operator_id, &key.priv_bytes, &key.pub_bytes)?;
     Ok(key.fingerprint)
 }
 
 fn seal_and_store_publisher(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
     priv_bytes: &[u8],
     pub_bytes: &[u8; 32],
 ) -> Result<()> {
     let alias = pub_alias(operator_id);
-    ctx.keystore.seal(&alias, pin, priv_bytes)?;
+    custody_put(ctx, &alias, priv_bytes)?;
     let pub_hex = hex_of(pub_bytes);
     let pub_b64 = B64.encode(pub_bytes);
     // Update record JSON with the pubkey, and update the row's
@@ -484,9 +729,8 @@ struct CliSubkeyRotateLine {
 
 /// FRP-7.5: rotate the operator's publisher sub-key. Steps:
 ///
-///   1. Validate PIN, verify it against the operator row.
-///   2. Open the root publisher.priv from the keystore (the PIN
-///      gates this; on wrong PIN the lockout counter ticks).
+///   1. Read the root publisher.priv out of device custody.
+///   2. (was: PIN validation — gone with the PIN.)
 ///   3. Write the root priv to a 0o600 tempfile.
 ///   4. Spawn `daal-publish subkey rotate --json`. The subprocess
 ///      mints a fresh sub-key, signs a 90-day cert with the root,
@@ -509,24 +753,16 @@ struct CliSubkeyRotateLine {
 pub fn subkey_rotate(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
     validity: &str,
     label: &str,
 ) -> Result<SubkeyRotateResult> {
     use std::io::Write as _;
     use std::process::Command;
 
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
-    verify_operator_pin(ctx, operator_id, pin)?;
-
-    // Open root priv. The keystore's open() returns Zeroizing<Vec<u8>>
-    // so the bytes are wiped when this scope exits.
+    // Read root priv out of custody. `custody_get` returns
+    // Zeroizing<Vec<u8>> so the bytes are wiped when this scope exits.
     let row = ctx.db.get(operator_id)?;
-    let mut root_priv = ctx
-        .keystore
-        .open(&row.publisher_priv_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
+    let mut root_priv = custody_get(ctx, &row.publisher_priv_keystore_alias)?;
 
     // Write root priv to a 0o600 tempfile.
     let tmp_dir = ctx.staging_dir.join("tmp-subkey-rotate");
@@ -562,6 +798,21 @@ pub fn subkey_rotate(
 
     // Out-dir for the new sub-key — co-located with the wizard's
     // staging area, namespaced by operator id.
+    //
+    // TODO(custody): `daal-publish subkey rotate` writes
+    // subkey.priv here in PLAINTEXT (mode 0o600, but plaintext) and
+    // we persist only its path in the V004 row; `sign_relaypack` and
+    // `publish_freshness_after_rotate` then read it straight off
+    // disk. The PIN never protected this file — it gated the command
+    // that produced it and nothing more — so removing the PIN loses
+    // nothing here, but the gap is real and predates this change: a
+    // rotated operator's active signing key sits unwrapped in the
+    // staging dir. The fix is to wrap the sub-key priv under
+    // `DeviceCustody` (alias `daal.subkey.<operator_id>.priv`) and
+    // materialise a 0o600 tempfile only for the subprocess call, the
+    // same shape `publish_freshness_after_rotate` already uses for
+    // the root key. Out of scope for this phase because it needs a
+    // V013 column swap plus a migration for existing rows.
     let out_dir = ctx
         .staging_dir
         .join("subkeys")
@@ -667,9 +918,9 @@ pub fn list_subkey_history(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<Subk
 /// fields of `publisher/deploy/cloudflare.CloudflareOpts` plus
 /// the operator id the row binds to.
 ///
-/// Position B: the Cloudflare API token comes from the OS
-/// keystore (alias `daal.cloudflare.<operator_id>.token`); it
-/// is NOT in this struct.
+/// Position B: the Cloudflare API token comes from device custody
+/// (alias `daal.cloudflare.<operator_id>.token`); it is NOT in this
+/// struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisionCdnFrontInput {
     pub operator_id: i64,
@@ -685,45 +936,29 @@ pub struct ProvisionCdnFrontInput {
 }
 
 /// `provision_cdn_front` is the wizard CDN screen 2.5 entry
-/// point. It validates the input, decrypts the operator's
-/// Cloudflare token from the keystore, hands everything to the
-/// Go-side `publisher/deploy/cloudflare` provider, and on
-/// success records the resulting front in V005's `cdn_fronts`.
+/// point. It validates the input, reads the operator's Cloudflare
+/// token from device custody, hands everything to the Go-side
+/// `publisher/deploy/cloudflare` provider, and on success records
+/// the resulting front in V005's `cdn_fronts`.
 ///
 /// Returns the freshly-inserted CDN front row id.
-pub fn provision_cdn_front(
-    ctx: &WizardCtx,
-    input: &ProvisionCdnFrontInput,
-    pin: &str,
-) -> Result<i64> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
+pub fn provision_cdn_front(ctx: &WizardCtx, input: &ProvisionCdnFrontInput) -> Result<i64> {
     if input.hostname.is_empty() || input.origin_ip.is_empty() || input.origin_path.is_empty() {
         return Err(WizardError::Cdn(
             "hostname, origin_ip, origin_path required".into(),
         ));
     }
     let op = ctx.db.get(input.operator_id)?;
-    // Decrypt the Cloudflare token (alias =
+    // Read the Cloudflare token (alias =
     // daal.cloudflare.<operator_id>.token) and the cloud-provider
     // token. The Go CLI uses the latter to lock the origin firewall
     // to Cloudflare edge ranges before returning a validator-ready
     // `firewall_id`.
-    let token_alias = format!("daal.cloudflare.{}.token", input.operator_id);
-    let token = ctx
-        .keystore
-        .open(&token_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(token);
-    let token_str = std::str::from_utf8(token.as_slice())
-        .map_err(|_| WizardError::Cdn("Cloudflare token must be UTF-8".into()))?;
-    let cloud_token = ctx
-        .keystore
-        .open(&op.cloud_token_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let cloud_token = Zeroizing::new(cloud_token);
-    let cloud_token_str = std::str::from_utf8(cloud_token.as_slice())
-        .map_err(|_| WizardError::Cdn("Cloud provider token must be UTF-8".into()))?;
+    let token_alias = cloudflare_alias(input.operator_id);
+    let token = custody_get_string(ctx, &token_alias)?;
+    let token_str = token.as_str();
+    let cloud_token = custody_get_string(ctx, &op.cloud_token_keystore_alias)?;
+    let cloud_token_str = cloud_token.as_str();
     let out_dir = ctx
         .staging_dir
         .join("cdn")
@@ -789,9 +1024,10 @@ pub fn list_cdn_fronts(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<CdnFront
 /// button. The FRP-8 CLI bridge owns the live Cloudflare API; at
 /// this layer we record the operator-visible timestamp after the
 /// live check path succeeds.
-pub fn verify_cdn_posture(ctx: &WizardCtx, front_id: i64, pin: &str) -> Result<()> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
+///
+/// It opens no secret and never did — the PIN it used to demand was
+/// pure theatre, validated and then discarded.
+pub fn verify_cdn_posture(ctx: &WizardCtx, front_id: i64) -> Result<()> {
     let now = (ctx.clock)();
     ctx.db.touch_cdn_front_verification(front_id, now, now)?;
     Ok(())
@@ -817,22 +1053,10 @@ pub struct RotateCdnPathInput {
 /// executor (`rotate_execute`'s mode-aware branch lands at FRP-9
 /// commit 4/8). This layer only drives the CDN-side rebind and
 /// updates the V005 row.
-pub fn rotate_cdn_path(
-    ctx: &WizardCtx,
-    input: &RotateCdnPathInput,
-    pin: &str,
-) -> Result<CdnRotateResult> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
+pub fn rotate_cdn_path(ctx: &WizardCtx, input: &RotateCdnPathInput) -> Result<CdnRotateResult> {
     let row = ctx.db.get_cdn_front(input.front_id)?;
-    let token_alias = format!("daal.cloudflare.{}.token", row.operator_id);
-    let token = ctx
-        .keystore
-        .open(&token_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(token);
-    let token_str = std::str::from_utf8(token.as_slice())
-        .map_err(|_| WizardError::Cdn("Cloudflare token must be UTF-8".into()))?;
+    let token = custody_get_string(ctx, &cloudflare_alias(row.operator_id))?;
+    let token_str = token.as_str();
     let res = ctx
         .cli
         .run_cdn_rotate_path(CdnRotatePathArgs {
@@ -877,24 +1101,15 @@ pub struct RotateCdnHostnameInput {
 pub fn rotate_cdn_hostname(
     ctx: &WizardCtx,
     input: &RotateCdnHostnameInput,
-    pin: &str,
 ) -> Result<CdnRotateResult> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
     if input.new_hostname.is_empty() || input.origin_ipv4.is_empty() {
         return Err(WizardError::Cdn(
             "new_hostname and origin_ipv4 required".into(),
         ));
     }
     let row = ctx.db.get_cdn_front(input.front_id)?;
-    let token_alias = format!("daal.cloudflare.{}.token", row.operator_id);
-    let token = ctx
-        .keystore
-        .open(&token_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(token);
-    let token_str = std::str::from_utf8(token.as_slice())
-        .map_err(|_| WizardError::Cdn("Cloudflare token must be UTF-8".into()))?;
+    let token = custody_get_string(ctx, &cloudflare_alias(row.operator_id))?;
+    let token_str = token.as_str();
     let res = ctx
         .cli
         .run_cdn_rotate_hostname(CdnRotateHostnameArgs {
@@ -938,25 +1153,13 @@ pub struct RotateCdnOriginInput {
 /// the new origin IP; hostname, public path, and worker route
 /// binding are unchanged. The wizard MUST NOT re-sign the
 /// RelayPack — the family sees nothing.
-pub fn rotate_cdn_origin(
-    ctx: &WizardCtx,
-    input: &RotateCdnOriginInput,
-    pin: &str,
-) -> Result<CdnRotateResult> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
+pub fn rotate_cdn_origin(ctx: &WizardCtx, input: &RotateCdnOriginInput) -> Result<CdnRotateResult> {
     if input.new_origin_ipv4.is_empty() {
         return Err(WizardError::Cdn("new_origin_ipv4 required".into()));
     }
     let row = ctx.db.get_cdn_front(input.front_id)?;
-    let token_alias = format!("daal.cloudflare.{}.token", row.operator_id);
-    let token = ctx
-        .keystore
-        .open(&token_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(token);
-    let token_str = std::str::from_utf8(token.as_slice())
-        .map_err(|_| WizardError::Cdn("Cloudflare token must be UTF-8".into()))?;
+    let token = custody_get_string(ctx, &cloudflare_alias(row.operator_id))?;
+    let token_str = token.as_str();
     let res = ctx
         .cli
         .run_cdn_rotate_origin(CdnRotateOriginArgs {
@@ -1025,21 +1228,6 @@ fn parse_rfc3339_unix(s: &str) -> std::result::Result<i64, String> {
     Ok(days * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
-fn verify_operator_pin(ctx: &WizardCtx, operator_id: i64, pin: &str) -> Result<()> {
-    let row = ctx.db.get(operator_id)?;
-    let mut token_bytes = match ctx.keystore.open(&row.cloud_token_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            record_pin_attempt(ctx, false)?;
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    token_bytes.zeroize();
-    record_pin_attempt(ctx, true)?;
-    Ok(())
-}
-
 /// Step 3c: write the pre-provision JSON staging file FRP-4b reads.
 /// Returns the file path written.
 pub fn finalize_pre_provision(ctx: &WizardCtx, operator_id: i64) -> Result<PathBuf> {
@@ -1050,11 +1238,15 @@ pub fn finalize_pre_provision(ctx: &WizardCtx, operator_id: i64) -> Result<PathB
     Ok(path)
 }
 
-/// List all operators (any status).
+/// List all operators (any status), fully populated for the relay
+/// list. Touches no secrets, so it is always safe to call on boot.
 pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
     let rows = ctx.db.list()?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
+        // The record JSON is the authority for provisioned facts
+        // (public IP, server id): `daal-deploy provision` writes the
+        // whole OperatorRecord back and we store it verbatim.
         let rec: PreProvisionRecord =
             serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
         out.push(OperatorSummary {
@@ -1065,24 +1257,60 @@ pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
             server_type: rec.server_type,
             publisher_pub_hex: row.publisher_pub_hex,
             created_at_unix: row.created_at_unix,
+            nickname: row.nickname,
+            public_ip: rec.public_ip,
+            public_ipv6: rec.public_ipv6,
+            server_id: rec.server_id,
+            helper_ip: row.helper_ip,
+            last_provisioned_at_unix: row.last_provisioned_at_unix.unwrap_or(0),
+            decommissioned_at_unix: row.decommissioned_at_unix.unwrap_or(0),
+            has_signed_sbp: row.signed_sbp_sha256.is_some(),
+            signed_sbp_at_unix: row.signed_sbp_at_unix.unwrap_or(0),
+            live_recipient_count: ctx.db.count_live_recipients(row.id)?,
+            total_recipient_count: ctx.db.count_total_recipients(row.id)?,
         });
     }
     Ok(out)
 }
 
-/// Cancel-and-cleanup: erase keystore aliases, delete DB row,
-/// remove staging file. Idempotent.
+/// V012: set (or clear, with "") the human nickname for a relay.
+pub fn set_operator_nickname(ctx: &WizardCtx, operator_id: i64, nickname: &str) -> Result<()> {
+    ctx.db.set_nickname(operator_id, nickname.trim())?;
+    Ok(())
+}
+
+/// Cancel-and-cleanup: erase every secret bound to this operator,
+/// delete the DB row, remove the staging file. Idempotent.
+///
+/// Both stores are swept. Custody holds the live secrets; the legacy
+/// keystore may still hold PIN-sealed copies on an install that never
+/// ran the migration, and leaving those behind would keep a signing
+/// key on disk for a relay the user just deleted.
 pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     let row = match ctx.db.get(operator_id) {
         Ok(r) => r,
         Err(DbError::NotFound(_)) => return Ok(()),
         Err(e) => return Err(WizardError::Db(e)),
     };
+    let mut aliases: Vec<String> = Vec::new();
     if !row.publisher_priv_keystore_alias.is_empty() {
-        ctx.keystore.forget(&row.publisher_priv_keystore_alias)?;
+        aliases.push(row.publisher_priv_keystore_alias.clone());
     }
     if !row.cloud_token_keystore_alias.is_empty() {
-        ctx.keystore.forget(&row.cloud_token_keystore_alias)?;
+        aliases.push(row.cloud_token_keystore_alias.clone());
+    }
+    // Conventional aliases with no column of their own.
+    aliases.push(pub_alias(operator_id));
+    aliases.push(cloud_alias(operator_id));
+    aliases.push(cloudflare_alias(operator_id));
+    aliases.sort();
+    aliases.dedup();
+    for alias in &aliases {
+        // Both forget()s are idempotent on a missing alias, and a
+        // failure to erase one store must not stop us erasing the
+        // other — teardown is best-effort by design.
+        let _ = ctx.custody.forget(alias);
+        let _ = ctx.keystore.forget(alias);
     }
     let staging_path = ctx
         .staging_dir
@@ -1105,29 +1333,19 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
 ///
 /// Progress events are forwarded via `on_progress` so the Tauri
 /// shim can emit them to the wizard frontend.
+///
+/// The helper IP is read from `operators.helper_ip` (V012) rather
+/// than passed in: it used to be a parameter with no storage
+/// anywhere, so it evaporated on every relaunch.
 pub fn provision_run(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
-    helper_ip: &str,
     existing_server_id: &str,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<()> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
+    let helper_ip = require_helper_ip(ctx, operator_id)?;
     let row = ctx.db.get(operator_id)?;
-    let token_bytes = match ctx.keystore.open(&row.cloud_token_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            record_pin_attempt(ctx, false)?;
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    record_pin_attempt(ctx, true)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
-    );
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let rec: PreProvisionRecord =
         serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
 
@@ -1151,7 +1369,7 @@ pub fn provision_run(
                 server_type: &rec.server_type,
                 toolbox_profile: &rec.toolbox_profile,
                 families,
-                helper_ip,
+                helper_ip: &helper_ip,
                 pubkey_file: &pubkey_path,
                 token: token.as_str(),
                 dry_run: false,
@@ -1159,7 +1377,7 @@ pub fn provision_run(
             },
             on_progress,
         )
-        .map_err(|e| WizardError::Pricing(e.to_string()))?;
+        .map_err(map_deploy_err)?;
 
     // Wipe pubkey file on disk; the OperatorRecord we get back
     // already carries the pub bytes inside its JSON.
@@ -1201,7 +1419,7 @@ fn persist_mgmt_plane_if_present(
 
 /// `sign_relaypack`: call `daal-deploy bind-and-sign` for an
 /// operator whose status is `provisioned`. By default the root
-/// publisher key is decrypted from the keystore and piped via stdin.
+/// publisher key is read from device custody and piped via stdin.
 /// After FRP-7.5, if the operator has an active sub-key row, the
 /// active sub-key private key is read from its 0o600 artefact path
 /// and paired with its cert path so the emitted bundle is
@@ -1214,14 +1432,11 @@ fn persist_mgmt_plane_if_present(
 pub fn sign_relaypack(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
     phase: &str,
     output_dir: &std::path::Path,
     publisher_name: &str,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<BindResult> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
     let row = ctx.db.get(operator_id)?;
 
     let active_subkey = ctx.db.active_subkey(operator_id)?;
@@ -1230,11 +1445,9 @@ pub fn sign_relaypack(
         .map(|row| PathBuf::from(row.subkey_cert_path.clone()));
 
     let mut priv_buf = if let Some(subkey) = active_subkey {
-        // The sub-key path is still PIN-gated at the wizard command
-        // boundary. We verify the PIN against the operator before
-        // reading the sub-key artefact, then pass the certified
-        // sub-key to daal-deploy.
-        verify_operator_pin(ctx, operator_id, pin)?;
+        // See the TODO(custody) in subkey_rotate: the sub-key priv is
+        // a plaintext 0o600 file whose path we stored. Reading it back
+        // is all the "custody" this branch has.
         let bytes = std::fs::read(&subkey.subkey_priv_path).map_err(|e| {
             WizardError::Pricing(format!(
                 "read active sub-key priv {}: {e}",
@@ -1243,16 +1456,7 @@ pub fn sign_relaypack(
         })?;
         Zeroizing::new(bytes)
     } else {
-        let priv_bytes = match ctx.keystore.open(&row.publisher_priv_keystore_alias, pin) {
-            Ok(b) => b,
-            Err(KeystoreError::WrongPin) => {
-                record_pin_attempt(ctx, false)?;
-                return Err(WizardError::Keystore(KeystoreError::WrongPin));
-            }
-            Err(e) => return Err(WizardError::Keystore(e)),
-        };
-        record_pin_attempt(ctx, true)?;
-        Zeroizing::new(priv_bytes)
+        custody_get(ctx, &row.publisher_priv_keystore_alias)?
     };
 
     // Stage the OperatorRecord JSON for the subprocess.
@@ -1569,25 +1773,11 @@ fn apply_l2_route_param_overrides(
 pub fn rotate_execute(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
     input: RotateExecuteInput,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<RotateExecuteOutput> {
-    validate_pin(pin)?;
-    check_pin_allowed(ctx)?;
     let row = ctx.db.get(operator_id)?;
-    let token_bytes = match ctx.keystore.open(&row.cloud_token_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            record_pin_attempt(ctx, false)?;
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    record_pin_attempt(ctx, true)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
-    );
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
 
     std::fs::create_dir_all(&ctx.staging_dir)
         .map_err(|e| WizardError::Pricing(format!("mkdir staging: {e}")))?;
@@ -1632,7 +1822,15 @@ pub fn rotate_execute(
 
             let rec: RotateRecordForProvision =
                 serde_json::from_str(&updated).map_err(StagingError::from)?;
-            let helper_ip = require_rotate_param(input.helper_ip.as_ref(), "helper IP")?;
+            // An explicit override still wins; otherwise take the
+            // persisted V012 value. Before V012 this was a required
+            // parameter the UI had no way to supply on a resumed
+            // session, so a rotation could fail on "rotation requires
+            // helper IP" with no field on screen to satisfy it.
+            let helper_ip = match trimmed_opt(input.helper_ip.as_ref()) {
+                Some(s) => s.to_string(),
+                None => require_helper_ip(ctx, operator_id)?,
+            };
             let pub_bytes = B64
                 .decode(rec.publisher_pub_key.as_bytes())
                 .map_err(|e| WizardError::Pricing(format!("pubkey base64: {e}")))?;
@@ -1708,7 +1906,6 @@ pub fn rotate_execute(
                     account_id,
                     new_public_path: new_path,
                 },
-                pin,
             )?;
         }
         // FRP-9 L8: cdn_fronted hostname rotation. The hostname
@@ -1731,7 +1928,6 @@ pub fn rotate_execute(
                     origin_ipv4,
                     origin_ipv6,
                 },
-                pin,
             )?;
         }
         // FRP-9 L9: cdn_fronted origin-only rotation. Per
@@ -1754,7 +1950,6 @@ pub fn rotate_execute(
                     new_origin_ipv4: origin_ipv4,
                     new_origin_ipv6: origin_ipv6,
                 },
-                pin,
             )?;
             let _ = std::fs::remove_file(&record_path);
             on_progress(ProgressEvent {
@@ -1809,11 +2004,10 @@ pub fn rotate_execute(
     });
 
     // Re-sign the RelayPack using the same flow as FRP-4b's
-    // sign_relaypack. The PIN unlocks the publisher private key.
+    // sign_relaypack — it reads the publisher key from custody.
     let bind = sign_relaypack(
         ctx,
         operator_id,
-        pin,
         "V1.5",
         &ctx.staging_dir,
         "Family Relay Publisher",
@@ -1835,7 +2029,7 @@ pub fn rotate_execute(
             input.freshness_signed_sbp_url.as_ref(),
             "freshness_signed_sbp_url",
         )?;
-        publish_freshness_after_rotate(ctx, operator_id, pin, &bind, &signed_url, on_progress)?;
+        publish_freshness_after_rotate(ctx, operator_id, &bind, &signed_url, on_progress)?;
     }
 
     let now = (ctx.clock)();
@@ -1881,7 +2075,6 @@ pub fn rotate_execute(
 fn publish_freshness_after_rotate(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
     bind: &BindResult,
     signed_sbp_url: &str,
     on_progress: &mut dyn FnMut(ProgressEvent),
@@ -1903,7 +2096,6 @@ fn publish_freshness_after_rotate(
     let mut subkey_cert_path: Option<PathBuf> = None;
 
     let mut priv_buf = if let Some(subkey) = active_subkey {
-        verify_operator_pin(ctx, operator_id, pin)?;
         subkey_cert_path = Some(PathBuf::from(subkey.subkey_cert_path.clone()));
         let bytes = std::fs::read(&subkey.subkey_priv_path).map_err(|e| {
             WizardError::Pricing(format!(
@@ -1913,16 +2105,7 @@ fn publish_freshness_after_rotate(
         })?;
         Zeroizing::new(bytes)
     } else {
-        let priv_bytes = match ctx.keystore.open(&row.publisher_priv_keystore_alias, pin) {
-            Ok(b) => b,
-            Err(KeystoreError::WrongPin) => {
-                record_pin_attempt(ctx, false)?;
-                return Err(WizardError::Keystore(KeystoreError::WrongPin));
-            }
-            Err(e) => return Err(WizardError::Keystore(e)),
-        };
-        record_pin_attempt(ctx, true)?;
-        Zeroizing::new(priv_bytes)
+        custody_get(ctx, &row.publisher_priv_keystore_alias)?
     };
     std::fs::write(&priv_path, priv_buf.as_slice())
         .map_err(|e| WizardError::Pricing(format!("write priv tempfile: {e}")))?;
@@ -2019,6 +2202,573 @@ fn cloud_alias(id: i64) -> String {
 
 fn pub_alias(id: i64) -> String {
     format!("daal.publisher.{id}.priv")
+}
+
+fn cloudflare_alias(id: i64) -> String {
+    format!("daal.cloudflare.{id}.token")
+}
+
+/// True for aliases holding an irreplaceable Ed25519 signing key.
+/// Everything else this app stores (cloud tokens, Cloudflare tokens)
+/// can be re-pasted from the provider's dashboard; a lost signing key
+/// orphans the relay permanently. The migration orders and reports on
+/// these separately for exactly that reason.
+fn is_signing_key_alias(alias: &str) -> bool {
+    alias.starts_with("daal.publisher.") && alias.ends_with(".priv")
+}
+
+// ---------------------------------------------------------------
+// Device custody: status, one-time PIN migration, recovery export
+// ---------------------------------------------------------------
+
+/// Rate-limit window for the one surviving PIN entry point,
+/// [`migrate_from_pin`]. The migration is a once-per-device event, so
+/// a ceiling costs a legitimate user nothing.
+const PIN_ATTEMPT_WINDOW_SECS: i64 = 15 * 60;
+
+/// Failed PINs tolerated inside `PIN_ATTEMPT_WINDOW_SECS`.
+const MAX_PIN_ATTEMPTS_PER_WINDOW: i64 = 10;
+
+/// Honest custody report for the publisher surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublisherCustodyStatus {
+    /// "hardware" | "os_keystore" | "session_passphrase".
+    pub level: String,
+    /// `DeviceCustody::is_unlocked()`.
+    pub unlocked: bool,
+    /// True only if a live put→get→forget probe succeeded.
+    ///
+    /// Never gate "can I sign?" on `unlocked` alone: both
+    /// `AndroidKeystoreDwk::is_ready()` and `KeyringDwk::is_ready()`
+    /// return `true` unconditionally, so a completely broken keystore
+    /// reports itself as unlocked right up until the first real
+    /// operation fails.
+    pub ok: bool,
+    /// Non-empty when `ok == false`. Carries the same stable
+    /// `E_CUSTODY_*` prefix as a thrown command error, so the UI can
+    /// run it through `classifyPublisherError` and tell "just needs a
+    /// passphrase" apart from "this keystore is broken" — which decide
+    /// between an unlock sheet and a dead-end error card.
+    pub error: String,
+    /// True when at least one legacy PIN-sealed blob still exists and
+    /// its custody counterpart does not.
+    pub legacy_pending: bool,
+    /// The aliases awaiting migration. Empty when `legacy_pending`.
+    pub legacy_aliases: Vec<String>,
+    /// True when at least one custody blob is already on disk — i.e.
+    /// a session passphrase has been chosen on this device before.
+    ///
+    /// The unlock sheet is *both* "create a passphrase" and "enter
+    /// your passphrase", and [`custody_unlock`] deliberately accepts
+    /// anything on a first run (there is no stored blob to be wrong
+    /// about). Without this flag the UI cannot tell the two apart, so
+    /// a brand-new install is asked to "enter" a passphrase that does
+    /// not exist yet — and whatever the user types, including a typo,
+    /// silently becomes the wrap key for a signing key generated
+    /// minutes later. There is no escrow for that mistake.
+    ///
+    /// Detected without decrypting anything: `FileCustody::get` reads
+    /// the blob file *before* it touches the DWK, so a locked custody
+    /// still answers `NotFound` for an absent alias and something else
+    /// for a present one.
+    pub passphrase_set: bool,
+}
+
+/// Outcome of one [`migrate_from_pin`] run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustodyMigrationReport {
+    /// Moved, verified by read-back, legacy blob then forgotten.
+    pub migrated: Vec<String>,
+    /// Already readable from custody; nothing to do.
+    pub skipped: Vec<String>,
+    /// "alias: reason". The legacy blob is left **intact** for these.
+    pub failed: Vec<String>,
+    /// True iff every publisher signing key is now readable from
+    /// custody. The UI may not dismiss the migration gate while this
+    /// is false.
+    pub signing_keys_safe: bool,
+}
+
+/// The alias inventory the custody surface cares about, de-duplicated
+/// and ordered signing-keys-first.
+fn publisher_aliases(ctx: &WizardCtx) -> Result<Vec<String>> {
+    let mut aliases = ctx.db.list_all_keystore_aliases()?;
+    aliases.sort();
+    aliases.dedup();
+    // Signing keys first: if the process dies mid-run, the thing that
+    // got moved is the thing that cannot be replaced.
+    aliases.sort_by_key(|a| !is_signing_key_alias(a));
+    Ok(aliases)
+}
+
+/// Probe custody for real rather than asking it whether it feels ready.
+/// Returns `Ok(())` only if a value round-trips through the backend.
+fn probe_custody(ctx: &WizardCtx) -> std::result::Result<(), CustodyError> {
+    // unlock(None) forces the DWK to materialise, which is what
+    // surfaces an Android JNI / libsecret failure eagerly.
+    ctx.custody.unlock(None)?;
+    const PROBE: &str = "daal.custody.probe";
+    ctx.custody.put(PROBE, b"1")?;
+    let got = ctx.custody.get(PROBE);
+    let _ = ctx.custody.forget(PROBE);
+    let got = got?;
+    if got != b"1" {
+        return Err(CustodyError::Backend(
+            "custody probe returned different bytes than were written".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Unlock session-passphrase custody and verify the passphrase was
+/// actually right.
+///
+/// `unlock` alone cannot tell: it only derives a key from whatever the
+/// user typed and caches it. Neither can the round-trip probe in
+/// [`custody_status`] — it writes and reads with the *same* derived
+/// key, so a wrong passphrase round-trips perfectly. The only real
+/// test is opening a blob that was written under the correct key, so
+/// that is what this does.
+///
+/// If no existing blob is found there is nothing to be wrong about:
+/// this is a first unlock, and the passphrase the user just chose
+/// becomes the passphrase. Reporting "wrong" there would lock a user
+/// out of their own fresh install.
+pub fn custody_unlock(ctx: &WizardCtx, passphrase: &str) -> Result<PublisherCustodyStatus> {
+    ctx.custody
+        .unlock(Some(passphrase))
+        .map_err(|e| coded(E_CUSTODY_BACKEND, e))?;
+
+    // Candidates: every publisher secret, plus the recipient identity
+    // (read-only — we never write it here; it shares the same custody
+    // and is often the only blob present on a recipient-first install).
+    let mut candidates = publisher_aliases(ctx)?;
+    candidates.push("recipient_priv_x25519".to_string());
+
+    for alias in &candidates {
+        // Zeroizing: on the success path this is a decrypted signing
+        // key, and we only wanted to know that it opened.
+        match ctx.custody.get(alias).map(Zeroizing::new) {
+            // Opened a real blob — the passphrase is right.
+            Ok(_) => break,
+            // No blob under this alias: says nothing about the
+            // passphrase, keep looking.
+            Err(CustodyError::NotFound(_)) => continue,
+            // A blob exists and will not open. Within the attribution
+            // window FileCustody has already called this a passphrase
+            // problem; either way the user's answer did not work.
+            Err(CustodyError::WrongPassphrase) | Err(CustodyError::BindingMismatch) => {
+                return Err(coded(
+                    E_CUSTODY_WRONG_PASS,
+                    "that passphrase does not open this device's stored keys",
+                ));
+            }
+            Err(e) => return Err(coded(E_CUSTODY_BACKEND, e)),
+        }
+    }
+
+    let now = (ctx.clock)();
+    let level = ctx.custody.level().as_str().to_string();
+    let _ = ctx.db.insert_custody_event(now, "unlocked", &level, "{}");
+    custody_status(ctx)
+}
+
+/// Report the custody level, whether it actually works, and whether a
+/// one-time PIN migration is still outstanding.
+///
+/// On a device that never ran the PIN build this must be completely
+/// silent: every alias is absent, so `legacy_pending` is false and the
+/// UI shows no banner, no sheet and no prompt. That silence is the
+/// entire point of removing the PIN.
+pub fn custody_status(ctx: &WizardCtx) -> Result<PublisherCustodyStatus> {
+    let (ok, error) = match probe_custody(ctx) {
+        Ok(()) => (true, String::new()),
+        // The probe alias is a scratch value, never a stored secret,
+        // so NotFound here can only mean the backend swallowed the
+        // write — which is a backend fault, not a missing key.
+        Err(CustodyError::Locked) => (
+            false,
+            format!("{E_CUSTODY_LOCKED}: unlock this device's key store to continue"),
+        ),
+        Err(CustodyError::WrongPassphrase) => (
+            false,
+            format!("{E_CUSTODY_WRONG_PASS}: that passphrase does not match"),
+        ),
+        Err(e) => (false, format!("{E_CUSTODY_BACKEND}: {e}")),
+    };
+
+    let mut legacy_aliases = Vec::new();
+    // A blob that is present but unreadable (locked custody, wrong
+    // wrap key) still proves a passphrase was chosen on this device
+    // once. `NotFound` is the only answer that means "nothing stored".
+    // The recipient identity shares the same custody, and on a
+    // recipient-first install it is often the only blob there is.
+    let mut passphrase_set = !matches!(
+        ctx.custody.get(crate::recipient_identity::RECIPIENT_PRIV_ALIAS),
+        Err(CustodyError::NotFound(_))
+    );
+    for alias in publisher_aliases(ctx)? {
+        if !matches!(ctx.custody.get(&alias), Err(CustodyError::NotFound(_))) {
+            passphrase_set = true;
+        }
+        // Already migrated → nothing to do. Note this is a real read:
+        // presence of the blob is not enough, it must open.
+        if custody_has(ctx, &alias) {
+            continue;
+        }
+        // PIN-free probe. Never open the legacy blob to test it — on
+        // desktop that is the OS keyring and a read can raise a
+        // platform unlock prompt the user did not ask for.
+        if ctx.keystore.has(&alias) {
+            legacy_aliases.push(alias);
+        }
+    }
+
+    Ok(PublisherCustodyStatus {
+        level: ctx.custody.level().as_str().to_string(),
+        unlocked: ctx.custody.is_unlocked(),
+        ok,
+        error,
+        legacy_pending: !legacy_aliases.is_empty(),
+        legacy_aliases,
+        passphrase_set,
+    })
+}
+
+/// One-time upgrade: move every legacy PIN-sealed secret into device
+/// custody. Idempotent and resumable.
+///
+/// # The safety property
+///
+/// **A legacy blob is deleted only after the same plaintext has been
+/// written under custody AND read back byte-identical.** Losing
+/// `daal.publisher.<id>.priv` permanently orphans a relay: signing,
+/// adding a recipient, revoking a recipient and rotating all die, and
+/// there is no escrow anywhere. Already-distributed packs keep working
+/// and the box keeps running, so the user does not even find out until
+/// the next time they try to add someone. Every failure path below
+/// therefore leaves the legacy blob exactly where it was.
+///
+/// A crash between the write and the delete leaves both copies, which
+/// the next run classifies as `skipped`. That is the intended failure
+/// mode: duplicated, never absent.
+pub fn migrate_from_pin(ctx: &WizardCtx, pin: &str) -> Result<CustodyMigrationReport> {
+    // A locked session-passphrase custody cannot accept a single
+    // `put`, so every alias would be unsealed with the PIN (briefly
+    // materialising every signing key in memory) only to fail at the
+    // write. Worse, the gate that shows this sheet has no unlock
+    // control on it, so the run could never start succeeding. Refuse
+    // up front with the code that routes the user to the unlock sheet.
+    if !ctx.custody.is_unlocked() {
+        return Err(coded(
+            E_CUSTODY_LOCKED,
+            "unlock this device's key store before upgrading the old PIN store",
+        ));
+    }
+    // The PIN is on its way out, but this is still a 6-digit secret
+    // behind a tap-and-retry loop: without a ceiling, anyone holding
+    // the unlocked device could walk the whole space one guess at a
+    // time. The old build rate-limited exactly this path; the dormant
+    // V001 `pin_attempts` table is reused rather than reintroducing a
+    // module for it.
+    let now = (ctx.clock)();
+    let recent_failures = ctx
+        .db
+        .count_recent_failed_pins(now - PIN_ATTEMPT_WINDOW_SECS)
+        .unwrap_or(0);
+    if recent_failures >= MAX_PIN_ATTEMPTS_PER_WINDOW {
+        return Err(WizardError::Validation(format!(
+            "too many incorrect PINs — wait {} minutes and try again",
+            PIN_ATTEMPT_WINDOW_SECS / 60
+        )));
+    }
+
+    let mut report = CustodyMigrationReport {
+        migrated: Vec::new(),
+        skipped: Vec::new(),
+        failed: Vec::new(),
+        signing_keys_safe: false,
+    };
+    let aliases = publisher_aliases(ctx)?;
+    let level = ctx.custody.level().as_str().to_string();
+    // How many legacy blobs we have actually tried to open. Only the
+    // FIRST one carries information about the PIN itself — see below.
+    let mut opens_attempted = 0usize;
+
+    for alias in &aliases {
+        if custody_has(ctx, alias) {
+            report.skipped.push(alias.clone());
+            continue;
+        }
+        if !ctx.keystore.has(alias) {
+            // Absent from both stores — e.g. a Cloudflare alias for an
+            // operator that never provisioned a CDN front.
+            continue;
+        }
+
+        // 1. Unseal with the legacy PIN. Zeroizing so the plaintext
+        //    does not outlive this iteration.
+        opens_attempted += 1;
+        let plain: Zeroizing<Vec<u8>> = match ctx.keystore.open(alias, pin) {
+            Ok(b) => Zeroizing::new(b),
+            Err(KeystoreError::WrongPin) => {
+                // `Keystore::open` collapses *every* AEAD failure into
+                // WrongPin, so a single truncated blob (the legacy
+                // writer used a non-atomic fs::write) is
+                // indistinguishable from a bad PIN. Aborting the run on
+                // any of them would strand every other relay's
+                // recoverable signing key behind a gate with no exit.
+                //
+                // Only the first blob we try says anything about the
+                // PIN: if that one opens, the PIN is right and a later
+                // failure is that blob's problem, not the user's.
+                if opens_attempted == 1 {
+                    ctx.db.record_pin_attempt(now, false).ok();
+                    return Err(WizardError::Keystore(KeystoreError::WrongPin));
+                }
+                report
+                    .failed
+                    .push(format!("{alias}: will not decrypt (blob damaged?)"));
+                continue;
+            }
+            Err(e) => {
+                report.failed.push(format!("{alias}: {e}"));
+                continue;
+            }
+        };
+
+        // 2. Write under custody.
+        if let Err(e) = ctx.custody.put(alias, &plain) {
+            report.failed.push(format!("{alias}: put: {e}"));
+            continue; // legacy blob INTACT
+        }
+
+        // 3. Verify by read-back. This is the safety property; without
+        //    it, a keystore that silently swallows writes would eat the
+        //    signing key at step 4.
+        match ctx.custody.get(alias).map(Zeroizing::new) {
+            Ok(rb) if rb.as_slice() == plain.as_slice() => {}
+            Ok(_) => {
+                report.failed.push(format!("{alias}: read-back mismatch"));
+                continue; // legacy blob INTACT
+            }
+            Err(e) => {
+                report.failed.push(format!("{alias}: read-back: {e}"));
+                continue; // legacy blob INTACT
+            }
+        }
+
+        // 4. ONLY NOW erase the legacy copy. forget() is idempotent;
+        //    a failure here is non-fatal because both copies exist and
+        //    the next run's step-0 check turns this alias into a skip.
+        //
+        //    `put` above is durable before it returns (FileCustody
+        //    fsyncs the blob and its directory), so this unlink cannot
+        //    outrun the data it is replacing.
+        if let Err(e) = ctx.keystore.forget(alias) {
+            eprintln!("[custody-migrate] forget({alias}) failed: {e}");
+        }
+        report.migrated.push(alias.clone());
+        let _ = ctx.db.insert_custody_event(
+            now,
+            "migrated",
+            &level,
+            &serde_json::json!({ "alias": alias }).to_string(),
+        );
+    }
+
+    if opens_attempted > 0 {
+        ctx.db.record_pin_attempt(now, true).ok();
+    }
+
+    // The verdict the UI gates on: not "did the run finish" but "is
+    // every irreplaceable key readable from its new home".
+    report.signing_keys_safe = aliases
+        .iter()
+        .filter(|a| is_signing_key_alias(a))
+        .all(|a| custody_has(ctx, a));
+    Ok(report)
+}
+
+/// Write a base64 recovery blob of the operator's Ed25519 signing key
+/// to a 0o600 file in the staging dir and return its path.
+///
+/// This exists because device custody has one failure mode the PIN did
+/// not: the Device Wrap Key lives in the AndroidKeyStore / OS keyring
+/// and is **not** exportable, so a factory reset, an OS reinstall, or a
+/// keystore invalidation destroys it — and with it every relay this
+/// device publishes. There is no escrow. A file the user chooses to
+/// keep is the only recovery path, and [`publisher_keyimport`] is the
+/// restore.
+///
+/// The secret never crosses the IPC boundary: the caller (the Tauri
+/// shim) receives a path, copies the file to Downloads, and unlinks
+/// the staged copy.
+pub fn export_recovery_key(ctx: &WizardCtx, operator_id: i64) -> Result<PathBuf> {
+    let row = ctx.db.get(operator_id)?;
+    if row.publisher_priv_keystore_alias.is_empty() {
+        return Err(coded(
+            E_SECRET_MISSING,
+            "this relay has no publisher key yet",
+        ));
+    }
+    let priv_bytes = custody_get(ctx, &row.publisher_priv_keystore_alias)?;
+    let body = Zeroizing::new(B64.encode(priv_bytes.as_slice()));
+
+    std::fs::create_dir_all(&ctx.staging_dir)
+        .map_err(|e| WizardError::Pricing(format!("mkdir staging: {e}")))?;
+    let path = ctx
+        .staging_dir
+        .join(format!("{operator_id}.recovery.daalkey"));
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| WizardError::Pricing(format!("write recovery key: {e}")))?;
+        f.write_all(body.as_bytes())
+            .map_err(|e| WizardError::Pricing(format!("write recovery key: {e}")))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, body.as_bytes())
+            .map_err(|e| WizardError::Pricing(format!("write recovery key: {e}")))?;
+    }
+    let _ = ctx.db.insert_custody_event(
+        (ctx.clock)(),
+        "recovery_exported",
+        ctx.custody.level().as_str(),
+        &serde_json::json!({ "operator_id": operator_id }).to_string(),
+    );
+    Ok(path)
+}
+
+// ---------------------------------------------------------------
+// Artifacts + helper IP
+// ---------------------------------------------------------------
+
+/// One distributable file belonging to a relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactInfo {
+    /// "shared_sbp" | "raw_sbp" | "sbpx".
+    pub kind: String,
+    pub path: String,
+    pub exists: bool,
+    pub size_bytes: u64,
+    pub modified_at_unix: i64,
+    /// Only for `kind == "sbpx"`.
+    pub recipient_id: Option<i64>,
+    /// Display name (falling back to the on-box name); "" otherwise.
+    pub recipient_label: String,
+}
+
+/// Enumerate a relay's artifacts: the shared `.sbp`, the raw signed
+/// `.sbp`, and one `.sbpx` per recipient row.
+///
+/// Pure `std::fs::metadata` over conventional staging names — it
+/// mutates nothing and is safe to call on every render. Missing files
+/// come back with `exists: false` rather than being filtered out, so
+/// the UI can explain the gap ("this recipient's pack failed to
+/// build — rebuild it") instead of silently hiding a row the user is
+/// looking for.
+///
+/// Ordering is a contract: index 0 is always `shared_sbp`, index 1 is
+/// always `raw_sbp`, then `sbpx` entries by ascending recipient id.
+pub fn list_artifacts(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<ArtifactInfo>> {
+    let mut out = Vec::new();
+    let describe = |kind: &str,
+                    path: PathBuf,
+                    recipient_id: Option<i64>,
+                    recipient_label: String|
+     -> ArtifactInfo {
+        let meta = std::fs::metadata(&path).ok();
+        let modified_at_unix = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        ArtifactInfo {
+            kind: kind.to_string(),
+            path: path.to_string_lossy().to_string(),
+            exists: meta.is_some(),
+            size_bytes: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            modified_at_unix,
+            recipient_id,
+            recipient_label,
+        }
+    };
+
+    out.push(describe(
+        "shared_sbp",
+        ctx.staging_dir.join(format!("{operator_id}.shared.sbp")),
+        None,
+        String::new(),
+    ));
+    out.push(describe(
+        "raw_sbp",
+        ctx.staging_dir.join(format!("{operator_id}.sbp")),
+        None,
+        String::new(),
+    ));
+
+    let mut recipients = ctx.db.list_recipients(operator_id)?;
+    recipients.sort_by_key(|r| r.id);
+    for r in recipients {
+        let label = if r.display_name.trim().is_empty() {
+            r.name.clone()
+        } else {
+            r.display_name.clone()
+        };
+        out.push(describe(
+            "sbpx",
+            ctx.staging_dir
+                .join(format!("{operator_id}.{}.sbpx", r.name)),
+            Some(r.id),
+            label,
+        ));
+    }
+    Ok(out)
+}
+
+/// Read the persisted helper IP, or "" when never detected.
+pub fn get_helper_ip(ctx: &WizardCtx, operator_id: i64) -> Result<String> {
+    Ok(ctx.db.get(operator_id)?.helper_ip)
+}
+
+/// Persist the helper IP. Rejects anything that is not a textual IPv4
+/// or IPv6 address — the auto-detect path races third-party echo
+/// services, and a captive portal answering with an HTML login page
+/// must never be stored as an address.
+///
+/// `source` is "auto" | "manual" | "whoami", recorded for diagnosis
+/// only; nothing branches on it.
+pub fn set_helper_ip(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    helper_ip: &str,
+    source: &str,
+) -> Result<()> {
+    let trimmed = helper_ip.trim();
+    if !is_valid_ip(trimmed) {
+        // Deliberately un-prefixed: this is a bad argument from the
+        // caller, not a helper-IP state the UI should try to self-heal.
+        return Err(WizardError::Validation(format!(
+            "not a valid IP address: {trimmed:?}"
+        )));
+    }
+    let source = match source {
+        "auto" | "manual" | "whoami" => source,
+        _ => "auto",
+    };
+    ctx.db
+        .set_helper_ip(operator_id, trimmed, source, (ctx.clock)())?;
+    Ok(())
 }
 
 fn hex_of(bytes: &[u8]) -> String {
@@ -2127,6 +2877,10 @@ mod tests {
             signed_sbp_at_unix: None,
             mgmt_port: 0,
             mgmt_tls_fingerprint: String::new(),
+            nickname: String::new(),
+            helper_ip: String::new(),
+            helper_ip_source: String::new(),
+            helper_ip_at_unix: 0,
         }
     }
 
@@ -2134,8 +2888,8 @@ mod tests {
     fn derive_wizard_step_resumes_provisioned_operator_at_distribute() {
         // Regression: a fully-provisioned operator whose record lost its
         // region/server_type (Hetzner create response can omit them) must
-        // resume at the PIN-free "distribute" step, NOT regress to the
-        // PIN-gated "pricing" step which is a dead end on resume.
+        // resume at "distribute", NOT regress to "pricing" — a dead end
+        // that re-asks a size question the user can no longer act on.
         let row = wizard_step_row(
             "provisioned",
             "alias",
@@ -2161,19 +2915,19 @@ mod tests {
     #[test]
     fn full_happy_path_screens_0_to_finalize() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let id = store_cloud_token(&ctx, "hetzner", "tok-abc", "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok-abc", None).unwrap();
         select_profile(
             &ctx,
             id,
             "fsn1",
-            "cx22",
+            "cpx12",
             "iran-default",
             vec!["vless-reality".into(), "hysteria2".into()],
         )
         .unwrap();
-        let pricing = pricing_lookup(&ctx, id, "fsn1", "cx22", "123456").unwrap();
+        let pricing = pricing_lookup(&ctx, id, "fsn1", "cpx12").unwrap();
         assert_eq!(pricing.hourly_eur, 0.005);
-        let fp = publisher_keygen(&ctx, id, "123456").unwrap();
+        let fp = publisher_keygen(&ctx, id).unwrap();
         assert_eq!(fp.en_words.split(' ').count(), 4);
         let path = finalize_pre_provision(&ctx, id).unwrap();
         assert!(path.exists());
@@ -2202,37 +2956,37 @@ mod tests {
     }
 
     #[test]
-    fn store_token_rejects_short_pin() {
-        let (ctx, _dir) = ctx(1_700_000_000);
-        match store_cloud_token(&ctx, "hetzner", "tok", "12") {
-            Err(WizardError::InvalidPin) => (),
-            other => panic!("wanted InvalidPin, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn store_token_rejects_four_digit_pin() {
-        let (ctx, _dir) = ctx(1_700_000_000);
-        match store_cloud_token(&ctx, "hetzner", "tok", "1234") {
-            Err(WizardError::InvalidPin) => (),
-            other => panic!("wanted InvalidPin, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn store_token_rejects_empty_token() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        match store_cloud_token(&ctx, "hetzner", "   ", "123456") {
+        match store_cloud_token(&ctx, "hetzner", "   ", None) {
             Err(WizardError::EmptyToken) => (),
             other => panic!("wanted EmptyToken, got {other:?}"),
         }
     }
 
     #[test]
+    fn store_token_with_operator_id_updates_instead_of_inserting() {
+        // Regression: Back→Next on the wizard's first screen used to
+        // INSERT a second operator row every time, littering the relay
+        // list with half-built duplicates that each held their own
+        // keystore aliases. Passing the known id must UPDATE.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok-one", None).unwrap();
+        let again = store_cloud_token(&ctx, "hetzner", "tok-two", Some(id)).unwrap();
+        assert_eq!(again, id, "update must reuse the row id");
+        assert_eq!(list_operators(&ctx).unwrap().len(), 1, "no duplicate row");
+
+        // And the row now holds the second token, not the first.
+        let row = ctx.db.get(id).unwrap();
+        let tok = ctx.custody.get(&row.cloud_token_keystore_alias).unwrap();
+        assert_eq!(tok, b"tok-two");
+    }
+
+    #[test]
     fn cancel_and_cleanup_is_idempotent_and_deletes() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        publisher_keygen(&ctx, id, "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
         finalize_pre_provision(&ctx, id).unwrap();
         cancel_and_cleanup(&ctx, id).unwrap();
         // second call -> Ok (idempotent on missing).
@@ -2241,59 +2995,646 @@ mod tests {
     }
 
     #[test]
-    fn wrong_pin_records_failure() {
+    fn cancel_and_cleanup_erases_custody_and_legacy_secrets() {
+        // Deleting a relay must leave nothing behind in EITHER store —
+        // a signing key surviving a deletion is a signing key on disk
+        // for a relay the user believes is gone.
         let (ctx, _dir) = ctx(1_700_000_000);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        let err = pricing_lookup(&ctx, id, "fsn1", "cx22", "999999").unwrap_err();
-        match err {
-            WizardError::Keystore(KeystoreError::WrongPin) => (),
-            e => panic!("wanted WrongPin, got {e:?}"),
-        }
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        // Plant a legacy PIN-sealed blob as if this install predates
+        // the migration and never ran it.
+        ctx.keystore
+            .seal(&pub_alias(id), "123456", b"legacy-priv")
+            .unwrap();
+        assert!(ctx.keystore.has(&pub_alias(id)));
+
+        cancel_and_cleanup(&ctx, id).unwrap();
+
+        assert!(ctx.custody.get(&pub_alias(id)).is_err(), "custody priv");
+        assert!(ctx.custody.get(&cloud_alias(id)).is_err(), "custody token");
+        assert!(!ctx.keystore.has(&pub_alias(id)), "legacy priv");
     }
 
     #[test]
-    fn publisher_keygen_rejects_wrong_operator_pin() {
+    fn publisher_keygen_stores_priv_under_custody_not_keystore() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        let err = publisher_keygen(&ctx, id, "999999").unwrap_err();
-        match err {
-            WizardError::Keystore(KeystoreError::WrongPin) => (),
-            e => panic!("wanted WrongPin, got {e:?}"),
-        }
-        let row = ctx.db.get(id).unwrap();
-        assert_eq!(row.publisher_pub_hex, "");
-        assert_eq!(row.publisher_priv_keystore_alias, "");
-        assert_eq!(ctx.db.count_recent_failed_pins(1_699_999_900).unwrap(), 1);
-    }
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
 
-    #[test]
-    fn publisher_keyimport_rejects_wrong_operator_pin() {
-        let (ctx, _dir) = ctx(1_700_000_000);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        let seed = vec![0u8; 32];
-        let b64 = B64.encode(&seed);
-        let err = publisher_keyimport(&ctx, id, "999999", &b64).unwrap_err();
-        match err {
-            WizardError::Keystore(KeystoreError::WrongPin) => (),
-            e => panic!("wanted WrongPin, got {e:?}"),
-        }
         let row = ctx.db.get(id).unwrap();
-        assert_eq!(row.publisher_pub_hex, "");
-        assert_eq!(row.publisher_priv_keystore_alias, "");
+        assert_eq!(row.publisher_priv_keystore_alias, pub_alias(id));
+        let from_custody = ctx.custody.get(&pub_alias(id)).unwrap();
+        assert!(!from_custody.is_empty());
+        // Nothing was written to the legacy PIN store.
+        assert!(!ctx.keystore.has(&pub_alias(id)));
     }
 
     #[test]
     fn import_publisher_key_round_trip() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         // Seed = 32 zero bytes (allowed by ed25519-dalek)
         let seed = vec![0u8; 32];
         let b64 = B64.encode(&seed);
-        let fp = publisher_keyimport(&ctx, id, "123456", &b64).unwrap();
+        let fp = publisher_keyimport(&ctx, id, &b64).unwrap();
         assert_eq!(fp.en_words.split(' ').count(), 4);
         // Re-import yields identical fingerprint.
-        let fp2 = publisher_keyimport(&ctx, id, "123456", &b64).unwrap();
+        let fp2 = publisher_keyimport(&ctx, id, &b64).unwrap();
         assert_eq!(fp, fp2);
+    }
+
+    #[test]
+    fn recovery_key_export_round_trips_through_keyimport() {
+        // The DWK is not exportable, so a factory reset destroys every
+        // relay this device publishes unless the user kept a recovery
+        // blob. Export → import must reproduce the same key exactly,
+        // or the recovery path is a lie.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        let fp = publisher_keygen(&ctx, id).unwrap();
+
+        let path = export_recovery_key(&ctx, id).unwrap();
+        let blob = std::fs::read_to_string(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "recovery blob must be 0600");
+        }
+
+        // Wipe custody entirely, as a reinstall would.
+        ctx.custody.forget(&pub_alias(id)).unwrap();
+        assert!(ctx.custody.get(&pub_alias(id)).is_err());
+
+        let restored = publisher_keyimport(&ctx, id, &blob).unwrap();
+        assert_eq!(restored, fp, "restored key must have the same fingerprint");
+    }
+
+    // ---- Custody status + the one-time PIN migration ----------------
+
+    #[test]
+    fn fresh_install_reports_no_legacy_migration() {
+        // The whole point of removing the PIN: a device that never ran
+        // the PIN build must see zero prompts. legacy_pending false,
+        // legacy_aliases empty, custody working.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+
+        let st = custody_status(&ctx).unwrap();
+        assert!(st.ok, "probe failed: {}", st.error);
+        assert!(!st.legacy_pending);
+        assert!(st.legacy_aliases.is_empty());
+        assert_eq!(st.error, "");
+    }
+
+    /// Build a context whose secrets are ONLY in the legacy PIN store,
+    /// exactly as an install from before this refactor would look.
+    fn ctx_with_legacy_pin_secrets(pin: &str) -> (WizardCtx, tempfile::TempDir, i64) {
+        let (ctx, dir) = ctx(1_700_000_000);
+        let id = ctx
+            .db
+            .insert_pre_provision(
+                r#"{"provider":"hetzner","region":"fsn1","server_type":"cpx12"}"#,
+                "abcd",
+                &pub_alias(1),
+                "hetzner",
+                &cloud_alias(1),
+                1_700_000_000,
+            )
+            .unwrap();
+        // Aliases are id-derived; the insert above hard-codes 1 because
+        // it is the first row in a fresh in-memory DB.
+        assert_eq!(id, 1);
+        ctx.keystore.seal(&pub_alias(id), pin, b"root-priv-bytes").unwrap();
+        ctx.keystore.seal(&cloud_alias(id), pin, b"cloud-token").unwrap();
+        (ctx, dir, id)
+    }
+
+    #[test]
+    fn custody_status_flags_legacy_blobs_without_asking_for_a_pin() {
+        let (ctx, _dir, id) = ctx_with_legacy_pin_secrets("123456");
+        let st = custody_status(&ctx).unwrap();
+        assert!(st.legacy_pending);
+        assert!(st.legacy_aliases.contains(&pub_alias(id)), "{st:?}");
+        assert!(st.legacy_aliases.contains(&cloud_alias(id)), "{st:?}");
+    }
+
+    #[test]
+    fn migration_moves_secrets_to_custody_and_forgets_legacy() {
+        let (ctx, _dir, id) = ctx_with_legacy_pin_secrets("123456");
+
+        let report = migrate_from_pin(&ctx, "123456").unwrap();
+        assert!(report.signing_keys_safe, "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(report.migrated.contains(&pub_alias(id)), "{report:?}");
+        assert!(report.migrated.contains(&cloud_alias(id)), "{report:?}");
+
+        // Plaintext preserved byte-for-byte, and now readable without
+        // any PIN at all.
+        assert_eq!(ctx.custody.get(&pub_alias(id)).unwrap(), b"root-priv-bytes");
+        assert_eq!(ctx.custody.get(&cloud_alias(id)).unwrap(), b"cloud-token");
+        // Legacy copies erased only after that read-back succeeded.
+        assert!(!ctx.keystore.has(&pub_alias(id)));
+        assert!(!ctx.keystore.has(&cloud_alias(id)));
+
+        // And the gate closes: nothing left to migrate.
+        let st = custody_status(&ctx).unwrap();
+        assert!(!st.legacy_pending, "{st:?}");
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_resumable() {
+        let (ctx, _dir, id) = ctx_with_legacy_pin_secrets("123456");
+        migrate_from_pin(&ctx, "123456").unwrap();
+
+        // Second run: everything already in custody → all skipped,
+        // nothing failed, verdict still safe. This is also the
+        // crash-recovery path (a crash between put and forget leaves
+        // both copies; the rerun classifies them as skipped).
+        let again = migrate_from_pin(&ctx, "123456").unwrap();
+        assert!(again.migrated.is_empty(), "{again:?}");
+        assert!(again.failed.is_empty(), "{again:?}");
+        assert!(again.skipped.contains(&pub_alias(id)), "{again:?}");
+        assert!(again.signing_keys_safe);
+    }
+
+    #[test]
+    fn migration_with_wrong_pin_aborts_and_touches_nothing() {
+        let (ctx, _dir, id) = ctx_with_legacy_pin_secrets("123456");
+
+        let err = migrate_from_pin(&ctx, "999999").unwrap_err();
+        assert!(
+            matches!(err, WizardError::Keystore(KeystoreError::WrongPin)),
+            "got {err:?}"
+        );
+        // NOTHING moved and NOTHING was deleted. A wrong PIN that ate
+        // the signing key would be unrecoverable.
+        assert!(ctx.keystore.has(&pub_alias(id)));
+        assert!(ctx.keystore.has(&cloud_alias(id)));
+        assert!(ctx.custody.get(&pub_alias(id)).is_err());
+    }
+
+    #[test]
+    fn migration_never_deletes_a_legacy_blob_it_could_not_verify() {
+        // THE safety property, exercised against a custody backend
+        // that accepts writes and then returns nothing. Without the
+        // read-back check the legacy blob would be erased here and the
+        // relay would be orphaned with no escrow and no recovery.
+        use crate::device_custody::{CustodyLevel, Result as CResult};
+
+        struct BlackHoleCustody;
+        impl DeviceCustody for BlackHoleCustody {
+            fn level(&self) -> CustodyLevel {
+                CustodyLevel::OsKeystore
+            }
+            fn is_unlocked(&self) -> bool {
+                true
+            }
+            fn unlock(&self, _p: Option<&str>) -> CResult<()> {
+                Ok(())
+            }
+            fn lock(&self) {}
+            /// Reports success and stores nothing — the shape of a
+            /// keystore whose writes silently no-op.
+            fn put(&self, _alias: &str, _secret: &[u8]) -> CResult<()> {
+                Ok(())
+            }
+            fn get(&self, alias: &str) -> CResult<Vec<u8>> {
+                Err(CustodyError::NotFound(alias.to_string()))
+            }
+            fn forget(&self, _alias: &str) -> CResult<()> {
+                Ok(())
+            }
+            fn forget_prefix(&self, _prefix: &str) -> CResult<usize> {
+                Ok(0)
+            }
+        }
+
+        let (mut ctx, _dir, id) = ctx_with_legacy_pin_secrets("123456");
+        ctx.custody = Arc::new(BlackHoleCustody);
+
+        let report = migrate_from_pin(&ctx, "123456").unwrap();
+        assert!(
+            !report.signing_keys_safe,
+            "a custody that stores nothing must not be declared safe: {report:?}"
+        );
+        assert!(report.migrated.is_empty(), "{report:?}");
+        assert!(
+            report.failed.iter().any(|f| f.contains(&pub_alias(id))),
+            "{report:?}"
+        );
+        // The irreplaceable key is still exactly where it was.
+        assert!(
+            ctx.keystore.has(&pub_alias(id)),
+            "legacy signing key MUST survive an unverifiable migration"
+        );
+        assert_eq!(
+            ctx.keystore.open(&pub_alias(id), "123456").unwrap(),
+            b"root-priv-bytes"
+        );
+    }
+
+    #[test]
+    fn migration_survives_one_undecryptable_blob() {
+        // `Keystore::open` collapses every AEAD failure into WrongPin,
+        // so a truncated blob is indistinguishable from a bad PIN.
+        // Aborting the run on it would strand every OTHER relay's
+        // recoverable signing key behind a gate with no exit — the
+        // regression this pins. Signing keys sort first, so relay 1's
+        // damaged blob is attempted before relay 2's good one.
+        let (ctx, _dir, _id1) = ctx_with_legacy_pin_secrets("123456");
+        let id2 = ctx
+            .db
+            .insert_pre_provision(
+                r#"{"provider":"hetzner","region":"fsn1","server_type":"cpx12"}"#,
+                "beef",
+                &pub_alias(2),
+                "hetzner",
+                &cloud_alias(2),
+                1_700_000_000,
+            )
+            .unwrap();
+        assert_eq!(id2, 2);
+        ctx.keystore
+            .seal(&pub_alias(id2), "123456", b"second-relay-priv")
+            .unwrap();
+
+        // Relay 2's blob will not open under this PIN — the exact
+        // signal a truncated/damaged blob produces, since `open` maps
+        // every AEAD failure to WrongPin.
+        ctx.keystore
+            .seal(&pub_alias(id2), "999999", b"second-relay-priv")
+            .unwrap();
+
+        let report = migrate_from_pin(&ctx, "123456").unwrap();
+        assert!(
+            report.migrated.contains(&pub_alias(1)),
+            "relay 1's perfectly good signing key must still migrate: {report:?}"
+        );
+        assert!(
+            custody_has(&ctx, &pub_alias(1)),
+            "relay 1's key must be readable from custody: {report:?}"
+        );
+        assert!(
+            report.failed.iter().any(|f| f.contains(&pub_alias(id2))),
+            "the unopenable blob must be reported, not thrown away: {report:?}"
+        );
+        assert!(
+            !report.signing_keys_safe,
+            "a key that did not move is not safe: {report:?}"
+        );
+        // And the unopenable legacy blob is left exactly where it was.
+        assert!(ctx.keystore.has(&pub_alias(id2)));
+    }
+
+    #[test]
+    fn custody_status_reports_whether_a_passphrase_was_ever_chosen() {
+        // The unlock sheet is BOTH "choose a passphrase" and "enter
+        // yours", and `custody_unlock` accepts anything on a first run
+        // because there is no stored blob to be wrong about. Without
+        // this flag the UI tells a brand-new install to "enter" a
+        // passphrase that does not exist, and a typo there silently
+        // becomes the wrap key for a signing key with no escrow.
+        let dir = tempdir().unwrap();
+        let mk = || -> WizardCtx {
+            let custody = crate::device_custody::FileCustody::session_passphrase(dir.path())
+                .unwrap();
+            WizardCtx {
+                db: Arc::new(OperatorDb::open_in_memory().unwrap()),
+                keystore: Arc::new(Keystore::new_in_memory(dir.path())),
+                staging_dir: dir.path().join("staging"),
+                cli: Arc::new(MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cpx12".into(),
+                    hourly_eur: 0.0,
+                    monthly_eur: 0.0,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })),
+                clock: Arc::new(|| 1_700_000_000),
+                custody: Arc::new(custody),
+            }
+        };
+
+        // Nothing stored yet → this is a first run.
+        let fresh = mk();
+        assert!(!custody_status(&fresh).unwrap().passphrase_set);
+
+        // Store one blob under a passphrase, then start over with a
+        // LOCKED custody over the same directory: the flag must survive,
+        // because "there is a blob here" is exactly what distinguishes
+        // "enter yours" from "choose one".
+        fresh.custody.unlock(Some("correct horse")).unwrap();
+        fresh
+            .custody
+            .put(crate::recipient_identity::RECIPIENT_PRIV_ALIAS, b"secret")
+            .unwrap();
+
+        let relaunched = mk();
+        assert!(!relaunched.custody.is_unlocked());
+        let st = custody_status(&relaunched).unwrap();
+        assert!(st.passphrase_set, "{st:?}");
+        assert_eq!(st.level, "session_passphrase");
+    }
+
+    #[test]
+    fn migration_refuses_to_start_on_locked_custody() {
+        // Regression: on a session-passphrase device the migration card
+        // used to render in front of the unlock sheet. Every alias
+        // would be unsealed with the PIN and then fail at `put`, so
+        // `signing_keys_safe` never flipped and the gate never cleared.
+        // Fail fast with the code that routes to the unlock sheet.
+        let (mut ctx, _dir, _id) = ctx_with_legacy_pin_secrets("123456");
+        let locked = crate::device_custody::FileCustody::session_passphrase(_dir.path()).unwrap();
+        assert!(!locked.is_unlocked());
+        ctx.custody = Arc::new(locked);
+
+        let err = migrate_from_pin(&ctx, "123456").unwrap_err().to_string();
+        assert!(err.starts_with(E_CUSTODY_LOCKED), "{err}");
+        // Nothing was touched.
+        assert!(ctx.keystore.has(&pub_alias(1)));
+    }
+
+    #[test]
+    fn select_profile_preserves_post_provision_record_fields() {
+        // Regression, and a bad one: `select_profile` used to round-trip
+        // `operator_record_json` through `PreProvisionRecord`, which has
+        // no mgmt_port / mgmt_tls_fingerprint / reality_public_key /
+        // tls_cert_sha256. After provisioning, that record IS the full
+        // FRP-4b OperatorRecord, so a single re-run — which the build
+        // screen does on every "Try again" — silently deleted the mgmt
+        // plane and the box's connection material. Nothing writes them
+        // back, so every users-* call and every pack built afterwards
+        // was dead, permanently.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let full = r#"{"provider":"hetzner","region":"fsn1","server_type":"cpx12",
+            "public_ip":"1.2.3.4","mgmt_port":17847,
+            "mgmt_tls_fingerprint":"aabb","reality_public_key":"rk","tls_cert_sha256":"tp",
+            "toolbox_profile":"iran-default","enabled_families":["vless-reality"]}"#;
+        let id = ctx
+            .db
+            .insert_pre_provision(full, "abcd", "", "hetzner", &cloud_alias(1), 1_700_000_000)
+            .unwrap();
+
+        select_profile(&ctx, id, "nbg1", "cpx22", "iran-default", vec!["hysteria2".into()])
+            .unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        assert_eq!(after["region"], "nbg1");
+        assert_eq!(after["server_type"], "cpx22");
+        assert_eq!(after["enabled_families"][0], "hysteria2");
+        for key in [
+            "mgmt_port",
+            "mgmt_tls_fingerprint",
+            "reality_public_key",
+            "tls_cert_sha256",
+            "public_ip",
+        ] {
+            assert!(
+                after.get(key).is_some(),
+                "select_profile dropped {key}: {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_profile_is_a_no_op_once_provisioned() {
+        // A provisioned box's region and size are facts about a machine
+        // that exists. Rewriting them from the plan screen's leftover
+        // React state would make the record disagree with the server.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let full = r#"{"provider":"hetzner","region":"fsn1","server_type":"cpx12","mgmt_port":17847}"#;
+        let id = ctx
+            .db
+            .insert_pre_provision(full, "abcd", "", "hetzner", &cloud_alias(1), 1_700_000_000)
+            .unwrap();
+        ctx.db.mark_provisioned(id, 1_700_000_100).unwrap();
+
+        select_profile(&ctx, id, "nbg1", "cax11", "iran-default", vec![]).unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        assert_eq!(after["region"], "fsn1");
+        assert_eq!(after["server_type"], "cpx12");
+    }
+
+    #[test]
+    fn custody_unlock_rejects_a_passphrase_that_opens_nothing() {
+        // A round-trip probe cannot catch this: it writes and reads
+        // with the same derived key, so a wrong passphrase round-trips
+        // perfectly. The only real test is opening a blob written
+        // under the right key — which is what custody_unlock does, and
+        // why a wrong passphrase surfaces here instead of eight
+        // screens later in the middle of signing.
+        let dir = tempdir().unwrap();
+        let mk = |pass: Option<&str>| -> WizardCtx {
+            let custody = crate::device_custody::FileCustody::session_passphrase(dir.path())
+                .unwrap();
+            if let Some(p) = pass {
+                custody.unlock(Some(p)).unwrap();
+            }
+            WizardCtx {
+                db: Arc::new(OperatorDb::open_in_memory().unwrap()),
+                keystore: Arc::new(Keystore::new_in_memory(dir.path())),
+                staging_dir: dir.path().join("staging"),
+                cli: Arc::new(MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cpx12".into(),
+                    hourly_eur: 0.0,
+                    monthly_eur: 0.0,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })),
+                clock: Arc::new(|| 1_700_000_000),
+                custody: Arc::new(custody),
+            }
+        };
+
+        // Seed a real secret under the correct passphrase.
+        let seeded = mk(Some("correct horse battery staple"));
+        let id = store_cloud_token(&seeded, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&seeded, id).unwrap();
+
+        // A fresh context over the same blob dir. Right passphrase
+        // opens it; the DB is fresh so we probe the alias directly.
+        let good = mk(Some("correct horse battery staple"));
+        assert!(good.custody.get(&pub_alias(id)).is_ok());
+
+        // Wrong passphrase: unlock() itself succeeds (it just derives
+        // *a* key), so the rejection has to come from the read-back.
+        let bad = mk(None);
+        // Give the fresh DB the same alias inventory to probe against.
+        bad.db
+            .insert_pre_provision(
+                r#"{"provider":"hetzner"}"#,
+                "abcd",
+                &pub_alias(id),
+                "hetzner",
+                &cloud_alias(id),
+                1_700_000_000,
+            )
+            .unwrap();
+        let err = custody_unlock(&bad, "not the same passphrase").unwrap_err();
+        assert!(
+            err.to_string().starts_with(E_CUSTODY_WRONG_PASS),
+            "want E_CUSTODY_WRONG_PASS, got: {err}"
+        );
+    }
+
+    #[test]
+    fn custody_unlock_accepts_any_passphrase_on_a_first_run() {
+        // Nothing stored yet means nothing to be wrong about: the
+        // passphrase the user picks IS the passphrase. Rejecting here
+        // would lock someone out of their own empty install.
+        let dir = tempdir().unwrap();
+        let custody =
+            crate::device_custody::FileCustody::session_passphrase(dir.path()).unwrap();
+        let ctx = WizardCtx {
+            db: Arc::new(OperatorDb::open_in_memory().unwrap()),
+            keystore: Arc::new(Keystore::new_in_memory(dir.path())),
+            staging_dir: dir.path().join("staging"),
+            cli: Arc::new(MockRunner::new(Pricing {
+                provider: "hetzner".into(),
+                region: "fsn1".into(),
+                server_type: "cpx12".into(),
+                hourly_eur: 0.0,
+                monthly_eur: 0.0,
+                included_traffic_tb_per_month: None,
+                overage_eur_per_gb: None,
+            })),
+            clock: Arc::new(|| 1_700_000_000),
+            custody: Arc::new(custody),
+        };
+        let st = custody_unlock(&ctx, "brand new passphrase").unwrap();
+        assert!(st.ok, "{st:?}");
+        assert!(st.unlocked);
+        assert_eq!(st.level, "session_passphrase");
+    }
+
+    // ---- Helper IP + artifacts -------------------------------------
+
+    #[test]
+    fn helper_ip_round_trips_and_rejects_non_addresses() {
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        assert_eq!(get_helper_ip(&ctx, id).unwrap(), "");
+
+        set_helper_ip(&ctx, id, " 203.0.113.9 ", "auto").unwrap();
+        assert_eq!(get_helper_ip(&ctx, id).unwrap(), "203.0.113.9");
+
+        // IPv6 must be accepted: the old dotted-quad-only regex
+        // silently failed on IPv6-only mobile networks.
+        set_helper_ip(&ctx, id, "2001:db8::1", "manual").unwrap();
+        assert_eq!(get_helper_ip(&ctx, id).unwrap(), "2001:db8::1");
+
+        // A captive-portal HTML body must never become a helper IP.
+        let err = set_helper_ip(&ctx, id, "<html>Sign in to WiFi", "auto").unwrap_err();
+        assert!(matches!(err, WizardError::Validation(_)), "{err:?}");
+        assert_eq!(get_helper_ip(&ctx, id).unwrap(), "2001:db8::1", "unchanged");
+    }
+
+    #[test]
+    fn mgmt_calls_fail_fast_with_helper_ip_missing_code() {
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+
+        let mut sink = |_ev: ProgressEvent| {};
+        let err = provision_run(&ctx, id, "", &mut sink).unwrap_err();
+        assert!(
+            err.to_string().starts_with(E_HELPER_IP_MISSING),
+            "error must lead with the code the UI branches on, got: {err}"
+        );
+    }
+
+    #[test]
+    fn transport_failures_classify_as_stale_allowlist() {
+        // The publisher moving from Wi-Fi to cellular looks exactly
+        // like the box being down. Only transport-shaped failures may
+        // claim staleness; an application error from a box we clearly
+        // reached must not be papered over with a retry.
+        assert!(looks_like_stale_allowlist(
+            "daal-deploy failed: rc=1 stderr=dial tcp 91.98.92.73:17847: i/o timeout"
+        ));
+        assert!(looks_like_stale_allowlist("connection refused"));
+        assert!(looks_like_stale_allowlist(
+            "remote error: tls handshake failure"
+        ));
+        assert!(looks_like_stale_allowlist("mgmt returned status 403"));
+        assert!(!looks_like_stale_allowlist(
+            "user r7 already exists on this box"
+        ));
+        assert!(!looks_like_stale_allowlist("invalid recipient address"));
+    }
+
+    #[test]
+    fn list_artifacts_orders_shared_then_raw_then_recipients() {
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        std::fs::create_dir_all(&ctx.staging_dir).unwrap();
+        std::fs::write(
+            ctx.staging_dir.join(format!("{id}.shared.sbp")),
+            b"shared-bytes",
+        )
+        .unwrap();
+        // The raw bundle is deliberately absent: a missing artifact
+        // must come back with exists=false so the UI can explain the
+        // gap instead of hiding a row the user is looking for.
+        for (i, (n, display)) in [("r1", "Bahar"), ("r2", "")].into_iter().enumerate() {
+            ctx.db
+                .insert_recipient(crate::operator_db::NewRecipientRow {
+                    operator_id: id,
+                    name: n.into(),
+                    display_name: display.into(),
+                    address_str: format!("daal1{n}"),
+                    // Unique per row: (operator_id, pubkey) is a UNIQUE key.
+                    pubkey_x25519_hex: format!("{:02x}", i).repeat(32),
+                    fingerprint_hex: format!("{:02x}", i + 0x80).repeat(32),
+                    vless_uuid: "u".into(),
+                    reality_short_id: "s".into(),
+                    hy2_password: "h".into(),
+                    naive_password: "n".into(),
+                    ws_path: "/w".into(),
+                    provisioned_at_unix: 1,
+                })
+                .unwrap();
+        }
+
+        let arts = list_artifacts(&ctx, id).unwrap();
+        assert_eq!(arts.len(), 4);
+        assert_eq!(arts[0].kind, "shared_sbp");
+        assert!(arts[0].exists);
+        assert_eq!(arts[0].size_bytes, b"shared-bytes".len() as u64);
+        assert_eq!(arts[1].kind, "raw_sbp");
+        assert!(!arts[1].exists, "missing files are reported, not hidden");
+        assert_eq!(arts[2].kind, "sbpx");
+        assert_eq!(arts[2].recipient_label, "Bahar");
+        // No display name → fall back to the on-box name rather than
+        // rendering a blank row.
+        assert_eq!(arts[3].recipient_label, "r2");
+    }
+
+    #[test]
+    fn list_operators_carries_enough_to_tell_two_relays_apart() {
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let a = store_cloud_token(&ctx, "hetzner", "tok-a", None).unwrap();
+        let b = store_cloud_token(&ctx, "hetzner", "tok-b", None).unwrap();
+        set_operator_nickname(&ctx, a, "  Mum's relay  ").unwrap();
+        set_helper_ip(&ctx, b, "203.0.113.4", "manual").unwrap();
+
+        let ops = list_operators(&ctx).unwrap();
+        let get = |id: i64| ops.iter().find(|o| o.id == id).unwrap();
+        assert_eq!(get(a).nickname, "Mum's relay", "nickname is trimmed");
+        assert_eq!(get(b).nickname, "");
+        assert_eq!(get(b).helper_ip, "203.0.113.4");
+        assert!(!get(a).has_signed_sbp);
+        assert_eq!(get(a).live_recipient_count, 0);
+        assert_eq!(get(a).total_recipient_count, 0);
     }
 
     // ---- FRP-4b commands -------------------------------------------
@@ -2374,7 +3715,7 @@ mod tests {
             shared_risk_edges: 0,
         };
         let (ctx, _dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         select_profile(
             &ctx,
             id,
@@ -2384,11 +3725,12 @@ mod tests {
             vec!["vless-reality".into()],
         )
         .unwrap();
-        publisher_keygen(&ctx, id, "123456").unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
 
         let mut events: Vec<ProgressEvent> = vec![];
         let mut on_prog = |ev: ProgressEvent| events.push(ev);
-        provision_run(&ctx, id, "123456", "1.2.3.4", "", &mut on_prog).unwrap();
+        provision_run(&ctx, id, "", &mut on_prog).unwrap();
         let row = ctx.db.get(id).unwrap();
         assert_eq!(row.status, "provisioned");
         assert_eq!(row.mgmt_port, 42424);
@@ -2402,7 +3744,11 @@ mod tests {
     }
 
     #[test]
-    fn provision_run_rejects_wrong_pin() {
+    fn provision_run_reports_a_missing_publisher_key_as_such() {
+        // Replaces the old `provision_run_rejects_wrong_pin`: there is
+        // no PIN to get wrong any more. What remains worth asserting is
+        // that a genuinely absent secret is named honestly, so the UI
+        // can tell "run the migration" apart from "the key is gone".
         let bind = BindResult {
             sbp_path: String::new(),
             sbp_sha256: "0".repeat(64),
@@ -2414,14 +3760,29 @@ mod tests {
             shared_risk_edges: 0,
         };
         let (ctx, _dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        publisher_keygen(&ctx, id, "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
+        // Lose the cloud token from both stores.
+        ctx.custody.forget(&cloud_alias(id)).unwrap();
+
         let mut on_prog = |_ev: ProgressEvent| {};
-        let err = provision_run(&ctx, id, "999999", "1.2.3.4", "", &mut on_prog).unwrap_err();
-        match err {
-            WizardError::Keystore(KeystoreError::WrongPin) => (),
-            e => panic!("want WrongPin, got {e:?}"),
-        }
+        let err = provision_run(&ctx, id, "", &mut on_prog).unwrap_err();
+        assert!(
+            err.to_string().starts_with(E_SECRET_MISSING),
+            "want E_SECRET_MISSING, got: {err}"
+        );
+
+        // Now plant a legacy PIN-sealed copy: the same absence must be
+        // reported as recoverable instead.
+        ctx.keystore
+            .seal(&cloud_alias(id), "123456", b"tok")
+            .unwrap();
+        let err = provision_run(&ctx, id, "", &mut on_prog).unwrap_err();
+        assert!(
+            err.to_string().starts_with(E_LEGACY_PIN_REQUIRED),
+            "want E_LEGACY_PIN_REQUIRED, got: {err}"
+        );
     }
 
     #[test]
@@ -2437,7 +3798,7 @@ mod tests {
             shared_risk_edges: 1,
         };
         let (ctx, dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind.clone());
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         select_profile(
             &ctx,
             id,
@@ -2447,17 +3808,17 @@ mod tests {
             vec!["vless-reality".into()],
         )
         .unwrap();
-        publisher_keygen(&ctx, id, "123456").unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
 
         let mut on_prog = |_ev: ProgressEvent| {};
-        provision_run(&ctx, id, "123456", "1.2.3.4", "", &mut on_prog).unwrap();
+        provision_run(&ctx, id, "", &mut on_prog).unwrap();
 
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
         let res = sign_relaypack(
             &ctx,
             id,
-            "123456",
             "V1.5",
             &out_dir,
             "Family Relay",
@@ -2520,7 +3881,7 @@ mod tests {
                 crate::device_custody::FileCustody::static_test(dir.path()).unwrap(),
             ),
         };
-        let id = store_cloud_token(&ctx_, "hetzner", "tok", "123456").unwrap();
+        let id = store_cloud_token(&ctx_, "hetzner", "tok", None).unwrap();
         select_profile(
             &ctx_,
             id,
@@ -2530,12 +3891,13 @@ mod tests {
             vec!["vless-reality".into()],
         )
         .unwrap();
-        publisher_keygen(&ctx_, id, "123456").unwrap();
+        publisher_keygen(&ctx_, id).unwrap();
+        set_helper_ip(&ctx_, id, "1.2.3.4", "manual").unwrap();
         let mut on_prog = |_e: ProgressEvent| {};
-        provision_run(&ctx_, id, "123456", "1.2.3.4", "", &mut on_prog).unwrap();
+        provision_run(&ctx_, id, "", &mut on_prog).unwrap();
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let _ = sign_relaypack(&ctx_, id, "123456", "V1.5", &out_dir, "", &mut on_prog).unwrap();
+        let _ = sign_relaypack(&ctx_, id, "V1.5", &out_dir, "", &mut on_prog).unwrap();
 
         let captured = mock_ref.last_priv_key.lock().unwrap().clone();
         assert!(captured.is_some(), "mock did not receive priv-key");
@@ -2573,7 +3935,7 @@ mod tests {
         );
         let mock_ref = mock.clone();
         let (ctx, dir, _) = ctx_with_mock(1_700_000_000, mock);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         select_profile(
             &ctx,
             id,
@@ -2583,9 +3945,10 @@ mod tests {
             vec!["vless-reality".into()],
         )
         .unwrap();
-        publisher_keygen(&ctx, id, "123456").unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
         let mut on_prog = |_e: ProgressEvent| {};
-        provision_run(&ctx, id, "123456", "1.2.3.4", "", &mut on_prog).unwrap();
+        provision_run(&ctx, id, "", &mut on_prog).unwrap();
 
         let sub_dir = dir.path().join("subkey-active");
         std::fs::create_dir_all(&sub_dir).unwrap();
@@ -2613,7 +3976,7 @@ mod tests {
 
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let _ = sign_relaypack(&ctx, id, "123456", "V1.5", &out_dir, "", &mut on_prog).unwrap();
+        let _ = sign_relaypack(&ctx, id, "V1.5", &out_dir, "", &mut on_prog).unwrap();
 
         let captured = mock_ref.last_priv_key.lock().unwrap().clone().unwrap();
         assert_eq!(captured, sub_priv, "active sub-key must be sent to signer");
@@ -2639,7 +4002,7 @@ mod tests {
             shared_risk_edges: 0,
         };
         let (ctx, dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind);
-        let id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         select_profile(
             &ctx,
             id,
@@ -2649,12 +4012,13 @@ mod tests {
             vec!["vless-reality".into()],
         )
         .unwrap();
-        publisher_keygen(&ctx, id, "123456").unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
         let mut on_prog = |_e: ProgressEvent| {};
-        provision_run(&ctx, id, "123456", "1.2.3.4", "", &mut on_prog).unwrap();
+        provision_run(&ctx, id, "", &mut on_prog).unwrap();
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let _ = sign_relaypack(&ctx, id, "123456", "V1.5", &out_dir, "", &mut on_prog).unwrap();
+        let _ = sign_relaypack(&ctx, id, "V1.5", &out_dir, "", &mut on_prog).unwrap();
 
         // qr_render reads from staging_dir/<id>.sbp; create a
         // synthetic file so the existence check passes.
@@ -2673,7 +4037,7 @@ mod tests {
     // ---- FRP-7 rotation surface ----------------------------------
 
     fn make_provisioned_op(ctx: &WizardCtx) -> i64 {
-        let id = store_cloud_token(ctx, "hetzner", "tok-abc", "123456").unwrap();
+        let id = store_cloud_token(ctx, "hetzner", "tok-abc", None).unwrap();
         select_profile(
             ctx,
             id,
@@ -2683,7 +4047,7 @@ mod tests {
             vec!["vless-reality".into()],
         )
         .unwrap();
-        let _ = publisher_keygen(ctx, id, "123456").unwrap();
+        let _ = publisher_keygen(ctx, id).unwrap();
         let _ = finalize_pre_provision(ctx, id).unwrap();
         // Mark provisioned so rotate_execute's sign_relaypack succeeds.
         ctx.db.mark_provisioned(id, 1_700_000_000).unwrap();
@@ -2804,7 +4168,6 @@ mod tests {
         let out = rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L3".into(),
                 reason: "ip burned".into(),
@@ -2864,7 +4227,6 @@ mod tests {
         rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L4".into(),
                 reason: "datacenter prefix burned".into(),
@@ -2920,7 +4282,6 @@ mod tests {
         rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L2".into(),
                 reason: "sni blocked".into(),
@@ -2984,7 +4345,7 @@ mod tests {
     #[test]
     fn record_cdn_front_attestation_and_list() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         let row = cdn_row_fixture(op_id, "front.example.com");
         let id = record_cdn_front_attestation(&ctx, &row).unwrap();
         assert!(id > 0);
@@ -2998,7 +4359,7 @@ mod tests {
     #[test]
     fn record_cdn_front_attestation_upserts_on_conflict() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         let mut row = cdn_row_fixture(op_id, "front.example.com");
         record_cdn_front_attestation(&ctx, &row).unwrap();
         // Re-insert with a different public_path; the unique
@@ -3014,14 +4375,10 @@ mod tests {
     #[test]
     fn provision_cdn_front_inserts_live_front_record() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         // Stash the CF token under the alias the command reads.
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", op_id),
-                "123456",
-                b"cf-token",
-            )
+        ctx.custody
+            .put(&cloudflare_alias(op_id), b"cf-token")
             .unwrap();
         let input = ProvisionCdnFrontInput {
             operator_id: op_id,
@@ -3031,7 +4388,7 @@ mod tests {
             origin_path: "/ws".into(),
             public_path: String::new(),
         };
-        let front_id = provision_cdn_front(&ctx, &input, "123456").unwrap();
+        let front_id = provision_cdn_front(&ctx, &input).unwrap();
         let rows = list_cdn_fronts(&ctx, op_id).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, front_id);
@@ -3043,7 +4400,7 @@ mod tests {
     #[test]
     fn provision_cdn_front_validates_input() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         let input = ProvisionCdnFrontInput {
             operator_id: op_id,
             hostname: String::new(),
@@ -3052,19 +4409,19 @@ mod tests {
             origin_path: "/ws".into(),
             public_path: String::new(),
         };
-        let err = provision_cdn_front(&ctx, &input, "123456").unwrap_err();
+        let err = provision_cdn_front(&ctx, &input).unwrap_err();
         assert!(matches!(err, WizardError::Cdn(_)));
     }
 
     #[test]
     fn verify_cdn_posture_updates_timestamp() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
         let mut row = cdn_row_fixture(op_id, "front.example.com");
         row.edge_ranges_fetched_unix = 1;
         row.last_verified_unix = 1;
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
-        verify_cdn_posture(&ctx, front_id, "123456").unwrap();
+        verify_cdn_posture(&ctx, front_id).unwrap();
         let rows = list_cdn_fronts(&ctx, op_id).unwrap();
         assert!(rows[0].edge_ranges_fetched_unix > 1);
         assert!(rows[0].last_verified_unix > 1);
@@ -3077,13 +4434,9 @@ mod tests {
     #[test]
     fn rotate_cdn_path_mutates_only_public_surface() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", op_id),
-                "123456",
-                b"cf-token",
-            )
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        ctx.custody
+            .put(&cloudflare_alias(op_id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(op_id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3094,7 +4447,6 @@ mod tests {
                 account_id: "account-example.com".into(),
                 new_public_path: "/r/newAB12".into(),
             },
-            "123456",
         )
         .unwrap();
         assert_eq!(res.public_path, "/r/newAB12");
@@ -3114,13 +4466,9 @@ mod tests {
     #[test]
     fn rotate_cdn_hostname_mutates_hostname_and_zone() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", op_id),
-                "123456",
-                b"cf-token",
-            )
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        ctx.custody
+            .put(&cloudflare_alias(op_id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(op_id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3132,7 +4480,6 @@ mod tests {
                 origin_ipv4: "5.75.9.9".into(),
                 origin_ipv6: String::new(),
             },
-            "123456",
         )
         .unwrap();
         assert_eq!(res.hostname, "frontB.newdomain.com");
@@ -3149,13 +4496,9 @@ mod tests {
     #[test]
     fn rotate_cdn_origin_origin_only_invisible() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", op_id),
-                "123456",
-                b"cf-token",
-            )
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        ctx.custody
+            .put(&cloudflare_alias(op_id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(op_id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3166,7 +4509,6 @@ mod tests {
                 new_origin_ipv4: "5.75.99.99".into(),
                 new_origin_ipv6: String::new(),
             },
-            "123456",
         )
         .unwrap();
         let rows = list_cdn_fronts(&ctx, op_id).unwrap();
@@ -3194,13 +4536,9 @@ mod tests {
     #[test]
     fn rotate_cdn_origin_rejects_empty_ipv4() {
         let (ctx, _dir) = ctx(1_700_000_000);
-        let op_id = store_cloud_token(&ctx, "hetzner", "tok", "123456").unwrap();
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", op_id),
-                "123456",
-                b"cf-token",
-            )
+        let op_id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        ctx.custody
+            .put(&cloudflare_alias(op_id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(op_id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3211,7 +4549,6 @@ mod tests {
                 new_origin_ipv4: String::new(),
                 new_origin_ipv6: String::new(),
             },
-            "123456",
         )
         .unwrap_err();
         assert!(matches!(err, WizardError::Cdn(_)));
@@ -3250,12 +4587,8 @@ mod tests {
         let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
         let id = make_provisioned_op(&ctx);
         // Stage CF token + CDN front row.
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", id),
-                "123456",
-                b"cf-token",
-            )
+        ctx.custody
+            .put(&cloudflare_alias(id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3263,7 +4596,6 @@ mod tests {
         let out = rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L7_CDN_PATH".into(),
                 reason: "public path burned".into(),
@@ -3333,12 +4665,8 @@ mod tests {
         );
         let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
         let id = make_provisioned_op(&ctx);
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", id),
-                "123456",
-                b"cf-token",
-            )
+        ctx.custody
+            .put(&cloudflare_alias(id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3346,7 +4674,6 @@ mod tests {
         let out = rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L8_CDN_HOSTNAME".into(),
                 reason: "hostname domain-blocked".into(),
@@ -3392,12 +4719,8 @@ mod tests {
         let mock = Arc::new(MockRunner::new(pricing).with_provision_record(full_record_json()));
         let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
         let id = make_provisioned_op(&ctx);
-        ctx.keystore
-            .seal(
-                &format!("daal.cloudflare.{}.token", id),
-                "123456",
-                b"cf-token",
-            )
+        ctx.custody
+            .put(&cloudflare_alias(id), b"cf-token")
             .unwrap();
         let row = cdn_row_fixture(id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
@@ -3406,7 +4729,6 @@ mod tests {
         let out = rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L9_CDN_ORIGIN".into(),
                 reason: "origin VPS rebuilt".into(),
@@ -3470,7 +4792,6 @@ mod tests {
         let err = rotate_execute(
             &ctx,
             id,
-            "123456",
             RotateExecuteInput {
                 level: "L7_CDN_PATH".into(),
                 reason: "missing-front-id".into(),

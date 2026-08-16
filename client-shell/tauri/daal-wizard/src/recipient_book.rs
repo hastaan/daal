@@ -36,11 +36,9 @@ use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
 use base64::Engine;
 use daal_recipient_addr as recipaddr;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use crate::cli_bridge::{BridgeError, UsersListArgs, UsersProvisionArgs, UsersRevokeArgs};
 use crate::commands::{WizardCtx, WizardError};
-use crate::keystore::KeystoreError;
 use crate::operator_db::{DbError, NewRecipientRow, RecipientRow};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,12 +80,13 @@ impl From<RecipientRow> for RecipientSummary {
 pub fn recipient_provision(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
-    helper_ip: &str,
     address: &str,
     display_name: &str,
 ) -> Result<RecipientSummary, WizardError> {
-    crate::commands::validate_pin(pin)?;
+    // Fail on a missing helper IP before doing any work: without it
+    // the firewall rule can't be punched and the subprocess would
+    // burn 30 s to report "connection refused".
+    let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
 
     let pub_key = decode_recipient_address(address)?;
     let fp_hex = recipaddr::fingerprint(&pub_key);
@@ -107,23 +106,9 @@ pub fn recipient_provision(
 
     let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
 
-    // Open keystore once for both publisher privkey + cloud token.
-    let priv_bytes = match ctx.keystore.open(&row.publisher_priv_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    let priv_buf = Zeroizing::new(priv_bytes);
-
-    let token_bytes = ctx
-        .keystore
-        .open(&row.cloud_token_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
-    );
+    // Both secrets come out of device custody.
+    let priv_buf = crate::commands::custody_get(ctx, &row.publisher_priv_keystore_alias)?;
+    let token = crate::commands::custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
 
     // Reserve next monotonic name (r1, r2, …) and write the
     // staged OperatorRecord JSON the subprocess reads.
@@ -138,7 +123,7 @@ pub fn recipient_provision(
         .run_users_provision(
             UsersProvisionArgs {
                 record_path: &record_path,
-                helper_ip,
+                helper_ip: &helper_ip,
                 token: token.as_str(),
                 name: &name,
             },
@@ -238,6 +223,161 @@ pub fn recipient_provision(
     Ok(summary)
 }
 
+/// `recipient_repack_sbpx` rebuilds the per-recipient `.sbpx` for a
+/// recipient that is already on the roster.
+///
+/// # Why this is not "just call recipient_provision again"
+///
+/// [`recipient_provision`] has no upsert path. Re-running it for an
+/// address already on the roster burns a fresh `r<n>` name, mints a
+/// **new live user on the box**, and only then hits
+/// `UNIQUE (operator_id, pubkey_x25519_hex)` and fails — leaving a
+/// working credential set on the relay that the local roster does not
+/// know about, cannot revoke, and which still counts against the
+/// 128-recipient cap. Every retry adds another. The relay-detail
+/// "Rebuild" affordance exists precisely for the case where
+/// `run_users_pack_sbpx` failed closed (a pre-Tier-2 box with no
+/// `reality_public_key`), so it needs a path that repairs rather than
+/// duplicates.
+///
+/// This re-mints the recipient's **existing** name: best-effort revoke
+/// (the box 409s on a name that already exists — the same idempotency
+/// dance [`produce_shared_sbp`] does for `r0`), then provision under
+/// the same name, then update the stored credentials in place and
+/// repack. The recipient's identity — name, address, pubkey — is
+/// untouched, so no row is duplicated and no name is burned.
+///
+/// The credentials do change, so any `.sbpx` already delivered to this
+/// recipient stops working. That is inherent: the only reason to call
+/// this is that no working `.sbpx` exists.
+pub fn recipient_repack_sbpx(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    recipient_id: i64,
+) -> Result<RecipientSummary, WizardError> {
+    let r = ctx
+        .db
+        .get_recipient(operator_id, recipient_id)
+        .map_err(WizardError::Db)?
+        .ok_or_else(|| WizardError::Db(DbError::NotFound(recipient_id)))?;
+    if r.revoked_at_unix != 0 {
+        // Re-minting a revoked recipient would hand a live credential
+        // back to someone the operator deliberately cut off.
+        return Err(WizardError::Validation(
+            "this recipient is revoked — add them again to give them access".into(),
+        ));
+    }
+
+    let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
+    let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
+
+    // The signed .sbp is the input to the rewrite; without it there is
+    // nothing to repack.
+    let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
+    if !in_sbp_path.exists() {
+        return Err(WizardError::Pricing(
+            "no signed bundle yet — build the relay pack first".into(),
+        ));
+    }
+
+    let priv_buf = crate::commands::custody_get(ctx, &row.publisher_priv_keystore_alias)?;
+    let token = crate::commands::custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
+
+    let record_path = write_record_staging(ctx, operator_id, &row.operator_record_json)?;
+    let _ = ctx.cli.run_users_revoke(
+        UsersRevokeArgs {
+            record_path: &record_path,
+            helper_ip: &helper_ip,
+            token: token.as_str(),
+            name: &r.name,
+        },
+        priv_buf.as_slice(),
+    );
+    let creds = ctx
+        .cli
+        .run_users_provision(
+            UsersProvisionArgs {
+                record_path: &record_path,
+                helper_ip: &helper_ip,
+                token: token.as_str(),
+                name: &r.name,
+            },
+            priv_buf.as_slice(),
+        )
+        .map_err(map_bridge_err)?;
+    let _ = std::fs::remove_file(&record_path);
+
+    ctx.db
+        .update_recipient_creds(
+            operator_id,
+            recipient_id,
+            &creds.vless_uuid,
+            &creds.reality_short_id,
+            &creds.hy2_password,
+            &creds.naive_password,
+            &creds.ws_path,
+            creds.provisioned_at_unix,
+        )
+        .map_err(WizardError::Db)?;
+
+    // Same record-first precedence as recipient_provision: the box
+    // material read over SSH at provision time beats whatever the mgmt
+    // response carried.
+    let rec_val = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
+        .unwrap_or(serde_json::Value::Null);
+    let field = |k: &str| -> String {
+        rec_val.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
+    };
+    let relay_server_ip = field("public_ip");
+    if relay_server_ip.is_empty() {
+        return Err(WizardError::Pricing(
+            "operator record has no public_ip — reprovision the box".into(),
+        ));
+    }
+    let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = creds_val.as_object_mut() {
+        let reality_pub = field("reality_public_key");
+        let tls_pin = field("tls_cert_sha256");
+        if !reality_pub.is_empty() {
+            obj.insert("reality_public_key".into(), reality_pub.into());
+        }
+        if !tls_pin.is_empty() {
+            obj.insert("tls_cert_sha256".into(), tls_pin.into());
+        }
+    }
+    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+
+    let out_path = ctx
+        .staging_dir
+        .join(format!("{operator_id}.{}.sbpx", r.name));
+    let creds_path = ctx
+        .staging_dir
+        .join(format!("{operator_id}.{}.creds.json", r.name));
+    std::fs::write(&creds_path, creds_json.as_bytes())
+        .map_err(|e| WizardError::Pricing(format!("stage creds: {e}")))?;
+    let res = ctx.cli.run_users_pack_sbpx(crate::cli_bridge::UsersPackSbpxArgs {
+        in_sbp_path: &in_sbp_path,
+        recipient_pub_hex: &r.pubkey_x25519_hex,
+        out_sbpx_path: &out_path,
+        creds_file_path: Some(creds_path.as_path()),
+        server: Some(relay_server_ip.as_str()),
+    });
+    let _ = std::fs::remove_file(&creds_path);
+    // Unlike recipient_provision — which swallows this failure because
+    // the recipient row and box user are the durable outcome — the pack
+    // IS the outcome here, so a failure must surface.
+    res.map_err(map_bridge_err)?;
+
+    let updated = ctx
+        .db
+        .get_recipient(operator_id, recipient_id)
+        .map_err(WizardError::Db)?
+        .ok_or_else(|| WizardError::Db(DbError::NotFound(recipient_id)))?;
+    let mut summary: RecipientSummary = updated.into();
+    summary.sbpx_path = out_path.to_string_lossy().to_string();
+    Ok(summary)
+}
+
 /// The fixed shared-user identity on the box. A plain shared `.sbp` bakes
 /// this one credential set in, so ANY phone that imports the file can
 /// connect — no per-recipient sealing. `r0` matches the box nameRegex.
@@ -260,10 +400,8 @@ pub struct SharedSbpSummary {
 pub fn produce_shared_sbp(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
-    helper_ip: &str,
 ) -> Result<SharedSbpSummary, WizardError> {
-    crate::commands::validate_pin(pin)?;
+    let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
 
     let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
 
@@ -275,22 +413,9 @@ pub fn produce_shared_sbp(
         ));
     }
 
-    // Open keystore once for publisher privkey + cloud token.
-    let priv_bytes = match ctx.keystore.open(&row.publisher_priv_keystore_alias, pin) {
-        Ok(b) => b,
-        Err(KeystoreError::WrongPin) => {
-            return Err(WizardError::Keystore(KeystoreError::WrongPin));
-        }
-        Err(e) => return Err(WizardError::Keystore(e)),
-    };
-    let priv_buf = Zeroizing::new(priv_bytes);
-    let token_bytes = ctx
-        .keystore
-        .open(&row.cloud_token_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
-    );
+    // Both secrets come out of device custody.
+    let priv_buf = crate::commands::custody_get(ctx, &row.publisher_priv_keystore_alias)?;
+    let token = crate::commands::custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
 
     // Mint the shared user on the box. /users/provision 409s if the name
     // already exists, so make the flow idempotent: best-effort revoke the
@@ -301,7 +426,7 @@ pub fn produce_shared_sbp(
     let _ = ctx.cli.run_users_revoke(
         UsersRevokeArgs {
             record_path: &record_path,
-            helper_ip,
+            helper_ip: &helper_ip,
             token: token.as_str(),
             name: SHARED_USER_NAME,
         },
@@ -312,7 +437,7 @@ pub fn produce_shared_sbp(
         .run_users_provision(
             UsersProvisionArgs {
                 record_path: &record_path,
-                helper_ip,
+                helper_ip: &helper_ip,
                 token: token.as_str(),
                 name: SHARED_USER_NAME,
             },
@@ -376,33 +501,22 @@ pub fn produce_shared_sbp(
 pub fn recipient_revoke(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
-    helper_ip: &str,
     recipient_id: i64,
 ) -> Result<RecipientSummary, WizardError> {
-    crate::commands::validate_pin(pin)?;
-
     let r = ctx
         .db
         .get_recipient(operator_id, recipient_id)
         .map_err(WizardError::Db)?
         .ok_or_else(|| WizardError::Db(DbError::NotFound(recipient_id)))?;
     if r.revoked_at_unix != 0 {
+        // Idempotent: an already-revoked row needs no box round-trip,
+        // so this path deliberately runs before the helper-IP check.
         return Ok(r.into());
     }
+    let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
     let op_row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
-    let priv_bytes = ctx
-        .keystore
-        .open(&op_row.publisher_priv_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let priv_buf = Zeroizing::new(priv_bytes);
-    let token_bytes = ctx
-        .keystore
-        .open(&op_row.cloud_token_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
-    );
+    let priv_buf = crate::commands::custody_get(ctx, &op_row.publisher_priv_keystore_alias)?;
+    let token = crate::commands::custody_get_string(ctx, &op_row.cloud_token_keystore_alias)?;
 
     let record_path = write_record_staging(ctx, operator_id, &op_row.operator_record_json)?;
     let resp = ctx
@@ -410,7 +524,7 @@ pub fn recipient_revoke(
         .run_users_revoke(
             UsersRevokeArgs {
                 record_path: &record_path,
-                helper_ip,
+                helper_ip: &helper_ip,
                 token: token.as_str(),
                 name: &r.name,
             },
@@ -508,30 +622,18 @@ pub fn recipient_list(
 pub fn recipient_list_remote(
     ctx: &WizardCtx,
     operator_id: i64,
-    pin: &str,
-    helper_ip: &str,
 ) -> Result<Vec<String>, WizardError> {
-    crate::commands::validate_pin(pin)?;
+    let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
     let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
-    let priv_bytes = ctx
-        .keystore
-        .open(&row.publisher_priv_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let priv_buf = Zeroizing::new(priv_bytes);
-    let token_bytes = ctx
-        .keystore
-        .open(&row.cloud_token_keystore_alias, pin)
-        .map_err(WizardError::Keystore)?;
-    let token = Zeroizing::new(
-        String::from_utf8(token_bytes).map_err(|e| WizardError::Pricing(format!("token: {e}")))?,
-    );
+    let priv_buf = crate::commands::custody_get(ctx, &row.publisher_priv_keystore_alias)?;
+    let token = crate::commands::custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let record_path = write_record_staging(ctx, operator_id, &row.operator_record_json)?;
     let users = ctx
         .cli
         .run_users_list(
             UsersListArgs {
                 record_path: &record_path,
-                helper_ip,
+                helper_ip: &helper_ip,
                 token: token.as_str(),
             },
             priv_buf.as_slice(),
@@ -580,7 +682,13 @@ fn map_bridge_err(e: BridgeError) -> WizardError {
     // routing failure to the operator. Until FRP-14 this was
     // collapsed into `WizardError::Pricing` which was misleading —
     // the bridge has nothing to do with cloud-provider pricing.
-    WizardError::Subprocess(e.to_string())
+    //
+    // `map_deploy_err` additionally promotes transport-shaped
+    // failures to E_HELPER_IP_STALE so the UI re-detects the
+    // publisher's public IP and retries once, instead of telling a
+    // user whose phone just moved from Wi-Fi to cellular that their
+    // relay is broken.
+    crate::commands::map_deploy_err(e)
 }
 
 // suppress unused-warning when an external crate (base64/Arc) isn't
@@ -608,16 +716,12 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let keystore = Arc::new(Keystore::new_in_memory(&dir));
-        let pin = "123456";
         // Mint a publisher key pair and pre-provision row.
         let priv_alias = "pub.priv".to_string();
         let token_alias = "cloud.tok".to_string();
-        let priv_bytes = vec![0u8; 64];
-        keystore.seal(&priv_alias, pin, &priv_bytes).unwrap();
-        keystore.seal(&token_alias, pin, b"mock-token").unwrap();
         let op_id = db
             .insert_pre_provision(
-                r#"{"region":"fsn1","server_type":"cx22","public_ip":"1.2.3.4","mgmt_port":42424}"#,
+                r#"{"region":"fsn1","server_type":"cpx12","public_ip":"1.2.3.4","mgmt_port":42424}"#,
                 "ab",
                 &priv_alias,
                 "hetzner",
@@ -625,10 +729,14 @@ mod tests {
                 1_700_000_000,
             )
             .unwrap();
+        // V012: every mgmt-plane call reads the helper IP off the row,
+        // so the fixture has to look like a relay whose IP was detected.
+        db.set_helper_ip(op_id, "1.2.3.4", "manual", 1_700_000_000)
+            .unwrap();
         let mock = Arc::new(MockRunner::new(Pricing {
             provider: "hetzner".into(),
             region: "fsn1".into(),
-            server_type: "cx22".into(),
+            server_type: "cpx12".into(),
             hourly_eur: 0.0,
             monthly_eur: 0.0,
             included_traffic_tb_per_month: None,
@@ -646,6 +754,9 @@ mod tests {
         let custody: Arc<dyn crate::device_custody::DeviceCustody> = Arc::new(
             crate::device_custody::FileCustody::static_test(&dir).unwrap(),
         );
+        // Secrets live in custody now, not the legacy PIN store.
+        custody.put(&priv_alias, &[0u8; 64]).unwrap();
+        custody.put(&token_alias, b"mock-token").unwrap();
         let ctx = WizardCtx {
             db,
             keystore,
@@ -667,7 +778,7 @@ mod tests {
     fn provision_then_list_round_trips() {
         let (ctx, _mock, op_id) = mk_ctx();
         let summary =
-            recipient_provision(&ctx, op_id, "123456", "1.2.3.4", &sample_address(), "Alice")
+            recipient_provision(&ctx, op_id, &sample_address(), "Alice")
                 .unwrap();
         assert_eq!(summary.name, "r1");
         assert_eq!(summary.display_name, "Alice");
@@ -681,7 +792,7 @@ mod tests {
     #[test]
     fn provision_rejects_bad_address() {
         let (ctx, _mock, op_id) = mk_ctx();
-        let err = recipient_provision(&ctx, op_id, "123456", "1.2.3.4", "not-an-address", "Alice")
+        let err = recipient_provision(&ctx, op_id, "not-an-address", "Alice")
             .unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("recipient address"), "got: {msg}");
@@ -691,20 +802,20 @@ mod tests {
     fn provision_uri_form_accepted() {
         let (ctx, _mock, op_id) = mk_ctx();
         let uri = format!("daal://{}", sample_address());
-        let s = recipient_provision(&ctx, op_id, "123456", "1.2.3.4", &uri, "Bahar").unwrap();
+        let s = recipient_provision(&ctx, op_id, &uri, "Bahar").unwrap();
         assert_eq!(s.address_str, sample_address());
     }
 
     #[test]
     fn revoke_flips_local_row_and_calls_box() {
         let (ctx, mock, op_id) = mk_ctx();
-        let s = recipient_provision(&ctx, op_id, "123456", "1.2.3.4", &sample_address(), "Alice")
+        let s = recipient_provision(&ctx, op_id, &sample_address(), "Alice")
             .unwrap();
-        let revoked = recipient_revoke(&ctx, op_id, "123456", "1.2.3.4", s.id).unwrap();
+        let revoked = recipient_revoke(&ctx, op_id, s.id).unwrap();
         assert!(revoked.revoked_at_unix > 0);
 
         // Idempotent.
-        let revoked_again = recipient_revoke(&ctx, op_id, "123456", "1.2.3.4", s.id).unwrap();
+        let revoked_again = recipient_revoke(&ctx, op_id, s.id).unwrap();
         assert_eq!(revoked_again.revoked_at_unix, revoked.revoked_at_unix);
 
         // Mock runner saw the revoke call once (idempotent path
@@ -716,7 +827,7 @@ mod tests {
     #[test]
     fn delete_requires_revoke_first_then_purges_row() {
         let (ctx, _mock, op_id) = mk_ctx();
-        let s = recipient_provision(&ctx, op_id, "123456", "1.2.3.4", &sample_address(), "Alice")
+        let s = recipient_provision(&ctx, op_id, &sample_address(), "Alice")
             .unwrap();
 
         // A live (never-revoked) recipient cannot be removed.
@@ -728,7 +839,7 @@ mod tests {
         assert_eq!(recipient_list(&ctx, op_id).unwrap().len(), 1);
 
         // After revoke, the greyed-out row can be purged for good.
-        recipient_revoke(&ctx, op_id, "123456", "1.2.3.4", s.id).unwrap();
+        recipient_revoke(&ctx, op_id, s.id).unwrap();
         recipient_delete(&ctx, op_id, s.id).unwrap();
         assert!(recipient_list(&ctx, op_id).unwrap().is_empty());
 
@@ -769,7 +880,54 @@ mod tests {
         key[0] = 0xff;
         key[1] = 0xff;
         let extra = recipaddr::encode(&key);
-        let err = recipient_provision(&ctx, op_id, "123456", "1.2.3.4", &extra, "y").unwrap_err();
+        let err = recipient_provision(&ctx, op_id, &extra, "y").unwrap_err();
         assert!(format!("{err:?}").contains("max recipients"));
+    }
+
+    #[test]
+    fn repack_reuses_the_existing_box_user_and_writes_the_sbpx() {
+        // Regression: the relay-detail "Rebuild" affordance used to call
+        // recipient_provision again for an address already on the
+        // roster. That has no upsert path — it burns a fresh r<n>, mints
+        // a SECOND live user on the box, and only then violates
+        // UNIQUE(operator_id, pubkey), leaving an orphan credential the
+        // app can never revoke. Every retry added another.
+        let (ctx, mock, op_id) = mk_ctx();
+        // The signed bundle is the rewrite's input; recipient_provision
+        // silently skips the pack when it is absent, which is exactly
+        // the state that puts a Rebuild button on screen.
+        let r = recipient_provision(&ctx, op_id, &sample_address(), "Alice").unwrap();
+        assert_eq!(r.name, "r1");
+        assert!(r.sbpx_path.is_empty(), "fixture should have no .sbp yet");
+
+        std::fs::write(ctx.staging_dir.join(format!("{op_id}.sbp")), b"signed-bundle").unwrap();
+        let before = mock.users_provision_calls.lock().unwrap().len();
+
+        let repacked = recipient_repack_sbpx(&ctx, op_id, r.id).unwrap();
+
+        assert_eq!(repacked.id, r.id, "must be the same roster row");
+        assert_eq!(repacked.name, "r1", "must reuse the same box user");
+        assert!(!repacked.sbpx_path.is_empty(), "the .sbpx is the outcome");
+        assert!(std::path::Path::new(&repacked.sbpx_path).exists());
+        // Exactly one more box user minted, and under the SAME name —
+        // the revoke-then-provision dance, not a second identity.
+        let calls = mock.users_provision_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), before + 1, "{calls:?}");
+        assert_eq!(calls.last().unwrap(), "r1");
+        assert_eq!(*mock.users_revoke_calls.lock().unwrap(), vec!["r1"]);
+        // And the roster still holds exactly one recipient.
+        assert_eq!(recipient_list(&ctx, op_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repack_refuses_a_revoked_recipient() {
+        // Rebuilding for someone who was deliberately cut off would hand
+        // them a working credential again.
+        let (ctx, _mock, op_id) = mk_ctx();
+        let r = recipient_provision(&ctx, op_id, &sample_address(), "Alice").unwrap();
+        recipient_revoke(&ctx, op_id, r.id).unwrap();
+
+        let err = recipient_repack_sbpx(&ctx, op_id, r.id).unwrap_err();
+        assert!(format!("{err:?}").contains("revoked"), "got: {err:?}");
     }
 }

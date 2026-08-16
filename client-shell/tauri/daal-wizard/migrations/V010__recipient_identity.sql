@@ -2,10 +2,15 @@
 --
 -- One row, ever. The recipient app's local `daal1…` address is
 -- backed by a Curve25519 keypair generated on first entry to the
--- "My Daal address" screen. The private key is sealed under a
--- PIN in the OS keystore (alias `recipient_priv_x25519`); only
--- the public key + derived address + fingerprint are persisted
--- in this DB.
+-- "My Daal address" screen. The private key is wrapped by Device
+-- Custody under the alias `recipient_priv_x25519`; only the public
+-- key + derived address + fingerprint are persisted in this DB.
+--
+-- (The `keystore_alias` column name and this comment originally said
+-- "sealed under a PIN". That was never true of the recipient path —
+-- it shipped on Device Custody — and it is no longer true of the
+-- publisher path either. The column name is kept because renaming it
+-- would need a migration that buys nothing.)
 --
 -- v1 is intentionally non-rotatable: losing the phone means
 -- losing the identity. See `specs/recipient-identity-v1.md`.

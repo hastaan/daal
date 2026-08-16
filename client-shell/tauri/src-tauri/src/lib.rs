@@ -684,23 +684,26 @@ fn wasm_kill_switch_pubkey(state: State<'_, AppState>) -> Result<String, String>
 
 // ---- FRP-5 wizard command shims ------------------------------------
 
+/// `operator_id`: `Some(id)` updates that relay's token in place;
+/// `None` creates a new relay. Passing the known id is what stops
+/// Back→Next on the first wizard screen from minting duplicate
+/// operator rows, each with its own custody aliases.
 #[tauri::command]
 fn wizard_store_cloud_token(
     wstate: State<'_, WizardStateMgr>,
     provider: String,
     token: String,
-    pin: String,
+    operator_id: Option<i64>,
 ) -> Result<i64, String> {
-    wcmd::store_cloud_token(&wstate.0, &provider, &token, &pin).map_err(|e| e.to_string())
+    wcmd::store_cloud_token(&wstate.0, &provider, &token, operator_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn wizard_list_existing_servers(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
 ) -> Result<Vec<daal_wizard::cli_bridge::ExistingServer>, String> {
-    wcmd::list_existing_servers(&wstate.0, operator_id, &pin).map_err(|e| e.to_string())
+    wcmd::list_existing_servers(&wstate.0, operator_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -708,9 +711,8 @@ fn wizard_list_server_types(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
     region: String,
-    pin: String,
 ) -> Result<Vec<daal_wizard::cli_bridge::ServerTypeOption>, String> {
-    wcmd::list_server_types(&wstate.0, operator_id, &region, &pin).map_err(|e| e.to_string())
+    wcmd::list_server_types(&wstate.0, operator_id, &region).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -719,10 +721,8 @@ fn wizard_pricing_lookup(
     operator_id: i64,
     region: String,
     server_type: String,
-    pin: String,
 ) -> Result<daal_wizard::cli_bridge::Pricing, String> {
-    wcmd::pricing_lookup(&wstate.0, operator_id, &region, &server_type, &pin)
-        .map_err(|e| e.to_string())
+    wcmd::pricing_lookup(&wstate.0, operator_id, &region, &server_type).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -749,20 +749,17 @@ fn wizard_select_profile(
 fn wizard_publisher_keygen(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
 ) -> Result<Fingerprint, String> {
-    wcmd::publisher_keygen(&wstate.0, operator_id, &pin).map_err(|e| e.to_string())
+    wcmd::publisher_keygen(&wstate.0, operator_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn wizard_publisher_keyimport(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
     priv_bytes_b64: String,
 ) -> Result<Fingerprint, String> {
-    wcmd::publisher_keyimport(&wstate.0, operator_id, &pin, &priv_bytes_b64)
-        .map_err(|e| e.to_string())
+    wcmd::publisher_keyimport(&wstate.0, operator_id, &priv_bytes_b64).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -808,8 +805,6 @@ async fn wizard_provision_run(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
-    helper_ip: String,
     existing_server_id: Option<String>,
 ) -> Result<(), String> {
     // Extract Arc fields so we can move them into spawn_blocking
@@ -822,10 +817,10 @@ async fn wizard_provision_run(
     let custody = wstate.0.custody.clone();
     let app_clone = app.clone();
     let esid = existing_server_id.unwrap_or_default();
-    eprintln!(
-        "[provision] start op={} esid={:?} helper_ip={}",
-        operator_id, esid, helper_ip
-    );
+    // The helper IP is no longer a parameter — provision_run reads it
+    // from operators.helper_ip and fails fast with E_HELPER_IP_MISSING
+    // if it was never detected.
+    eprintln!("[provision] start op={} esid={:?}", operator_id, esid);
     let result = tauri::async_runtime::spawn_blocking(move || {
         eprintln!("[provision] spawn_blocking entered");
         let ctx = wcmd::WizardCtx { db, keystore, staging_dir, cli, clock, custody };
@@ -859,7 +854,7 @@ async fn wizard_provision_run(
                 }
             }
         };
-        let r = wcmd::provision_run(&ctx, operator_id, &pin, &helper_ip, &esid, &mut on_progress);
+        let r = wcmd::provision_run(&ctx, operator_id, &esid, &mut on_progress);
         eprintln!("[provision] provision_run returned ok={}", r.is_ok());
         r.map_err(|e| {
             let msg = e.to_string();
@@ -881,7 +876,6 @@ async fn wizard_sign_relaypack(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
     phase: String,
     output_dir: String,
     publisher_name: String,
@@ -913,7 +907,6 @@ async fn wizard_sign_relaypack(
         wcmd::sign_relaypack(
             &ctx,
             operator_id,
-            &pin,
             &phase,
             &path,
             &publisher_name,
@@ -983,23 +976,14 @@ fn wizard_store_cloudflare_token(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
     token: String,
-    pin: String,
 ) -> Result<(), String> {
-    if token.trim().is_empty() {
-        return Err("Cloudflare token must not be empty".into());
-    }
-    let op = wstate.0.db.get(operator_id).map_err(|e| e.to_string())?;
-    let _ = wstate
-        .0
-        .keystore
-        .open(&op.cloud_token_keystore_alias, &pin)
-        .map_err(|e| e.to_string())?;
-    let alias = format!("daal.cloudflare.{operator_id}.token");
-    wstate
-        .0
-        .keystore
-        .seal(&alias, &pin, token.as_bytes())
-        .map_err(|e| e.to_string())
+    // Delegated to daal-wizard so the write goes through `custody_put`
+    // and the failure carries the same stable `E_CUSTODY_*` prefix as
+    // every other secret-touching command. (The old code also opened
+    // the cloud token to "verify the PIN"; with no PIN there is nothing
+    // to verify, and reading a secret only to discard it was never a
+    // check of anything.)
+    wcmd::store_cloudflare_token(&wstate.0, operator_id, &token).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1011,7 +995,6 @@ fn wizard_provision_cdn_front(
     origin_ipv6: String,
     origin_path: String,
     public_path: String,
-    pin: String,
 ) -> Result<i64, String> {
     let input = wcmd::ProvisionCdnFrontInput {
         operator_id,
@@ -1021,7 +1004,7 @@ fn wizard_provision_cdn_front(
         origin_path,
         public_path,
     };
-    wcmd::provision_cdn_front(&wstate.0, &input, &pin).map_err(|e| e.to_string())
+    wcmd::provision_cdn_front(&wstate.0, &input).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1036,9 +1019,8 @@ fn wizard_list_cdn_fronts(
 fn wizard_verify_cdn_posture(
     wstate: State<'_, WizardStateMgr>,
     front_id: i64,
-    pin: String,
 ) -> Result<(), String> {
-    wcmd::verify_cdn_posture(&wstate.0, front_id, &pin).map_err(|e| e.to_string())
+    wcmd::verify_cdn_posture(&wstate.0, front_id).map_err(|e| e.to_string())
 }
 
 // ---- FRP-7 rotation command shims ---------------------------------
@@ -1098,7 +1080,6 @@ fn wizard_rotate_execute(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
     level: String,
     reason: String,
     helper_ip: Option<String>,
@@ -1136,7 +1117,7 @@ fn wizard_rotate_execute(
         cdn_new_origin_ipv6,
         freshness_signed_sbp_url,
     };
-    wcmd::rotate_execute(&wstate.0, operator_id, &pin, input, &mut on_progress)
+    wcmd::rotate_execute(&wstate.0, operator_id, input, &mut on_progress)
         .map_err(|e| e.to_string())
 }
 
@@ -1164,20 +1145,25 @@ fn wizard_rotate_history(
 // ---- FRP-7.5 sub-key rotation command shims ------------------------
 
 /// `wizard_subkey_rotate`: mint a fresh sub-key + cert under the
-/// supplied root publisher key (PIN-gated). Returns the keystore
-/// paths and validity window. Runs `daal-publish subkey rotate
-/// --json` under the hood; opens NO sockets.
+/// operator's root publisher key, which is read from device custody.
+/// Returns the artefact paths and validity window. Runs
+/// `daal-publish subkey rotate --json` under the hood; opens NO
+/// sockets.
+///
+/// Note the sub-key priv it produces is written to the staging dir in
+/// plaintext (0o600) and only its path is recorded — see the
+/// `TODO(custody)` in `commands::subkey_rotate`. The PIN never
+/// protected that file either; it gated the command that made it.
 #[tauri::command]
 fn wizard_subkey_rotate(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
     validity: Option<String>,
     label: Option<String>,
 ) -> Result<SubkeyRotateResult, String> {
     let validity = validity.unwrap_or_else(|| "90d".to_string());
     let label = label.unwrap_or_else(|| "rotated-subkey".to_string());
-    wcmd::subkey_rotate(&wstate.0, operator_id, &pin, &validity, &label).map_err(|e| e.to_string())
+    wcmd::subkey_rotate(&wstate.0, operator_id, &validity, &label).map_err(|e| e.to_string())
 }
 
 /// `wizard_subkey_active`: return the currently-active sub-key
@@ -1209,8 +1195,6 @@ fn wizard_subkey_history(
 fn wizard_recipient_provision(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
-    helper_ip: String,
     address: String,
     display_name: String,
 ) -> Result<daal_wizard::recipient_book::RecipientSummary, String> {
@@ -1220,17 +1204,14 @@ fn wizard_recipient_provision(
     // is invaluable when debugging on-box auth/firewall/route
     // mismatches.
     eprintln!(
-        "[recipient_provision] op={} helper_ip={} addr_prefix={} display_name={:?}",
+        "[recipient_provision] op={} addr_prefix={} display_name={:?}",
         operator_id,
-        helper_ip,
         address.chars().take(12).collect::<String>(),
         display_name,
     );
     let r = daal_wizard::recipient_book::recipient_provision(
         &wstate.0,
         operator_id,
-        &pin,
-        &helper_ip,
         &address,
         &display_name,
     );
@@ -1248,22 +1229,35 @@ fn wizard_recipient_provision(
 fn wizard_produce_shared_sbp(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
-    helper_ip: String,
 ) -> Result<daal_wizard::recipient_book::SharedSbpSummary, String> {
-    eprintln!(
-        "[produce_shared_sbp] op={} helper_ip={}",
-        operator_id, helper_ip
-    );
-    let r = daal_wizard::recipient_book::produce_shared_sbp(
-        &wstate.0,
-        operator_id,
-        &pin,
-        &helper_ip,
-    );
+    eprintln!("[produce_shared_sbp] op={}", operator_id);
+    let r = daal_wizard::recipient_book::produce_shared_sbp(&wstate.0, operator_id);
     match &r {
         Ok(s) => eprintln!("[produce_shared_sbp] ok -> {}", s.sbp_path),
         Err(e) => eprintln!("[produce_shared_sbp] err: {}", e),
+    }
+    r.map_err(|e| e.to_string())
+}
+
+/// Rebuild the `.sbpx` for a recipient already on the roster.
+///
+/// The repair for a recipient whose envelope was never written (the
+/// Tier-2 rewrite fails closed on a pre-Tier-2 box). Re-mints that
+/// recipient's existing box user rather than adding a second one —
+/// see `recipient_book::recipient_repack_sbpx` for why calling
+/// `wizard_recipient_provision` again is not an option.
+#[tauri::command]
+fn wizard_recipient_repack_sbpx(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    recipient_id: i64,
+) -> Result<daal_wizard::recipient_book::RecipientSummary, String> {
+    eprintln!("[recipient_repack_sbpx] op={operator_id} rid={recipient_id}");
+    let r =
+        daal_wizard::recipient_book::recipient_repack_sbpx(&wstate.0, operator_id, recipient_id);
+    match &r {
+        Ok(s) => eprintln!("[recipient_repack_sbpx] ok -> {}", s.sbpx_path),
+        Err(e) => eprintln!("[recipient_repack_sbpx] err: {e}"),
     }
     r.map_err(|e| e.to_string())
 }
@@ -1272,18 +1266,10 @@ fn wizard_produce_shared_sbp(
 fn wizard_recipient_revoke(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
-    helper_ip: String,
     recipient_id: i64,
 ) -> Result<daal_wizard::recipient_book::RecipientSummary, String> {
-    daal_wizard::recipient_book::recipient_revoke(
-        &wstate.0,
-        operator_id,
-        &pin,
-        &helper_ip,
-        recipient_id,
-    )
-    .map_err(|e| e.to_string())
+    daal_wizard::recipient_book::recipient_revoke(&wstate.0, operator_id, recipient_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1298,10 +1284,8 @@ fn wizard_recipient_list(
 fn wizard_recipient_list_remote(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
-    pin: String,
-    helper_ip: String,
 ) -> Result<Vec<String>, String> {
-    daal_wizard::recipient_book::recipient_list_remote(&wstate.0, operator_id, &pin, &helper_ip)
+    daal_wizard::recipient_book::recipient_list_remote(&wstate.0, operator_id)
         .map_err(|e| e.to_string())
 }
 
@@ -1316,6 +1300,128 @@ fn wizard_recipient_delete(
 ) -> Result<(), String> {
     daal_wizard::recipient_book::recipient_delete(&wstate.0, operator_id, recipient_id)
         .map_err(|e| e.to_string())
+}
+
+// ---- Publisher custody: status, migration, recovery ----------------
+
+/// Honest custody report for the publisher surface. The UI renders a
+/// passive label from `level` when everything is fine, a blocking
+/// migration card when `legacy_pending`, and a non-dismissable error
+/// card when `ok == false`.
+#[tauri::command]
+fn publisher_custody_status(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<wcmd::PublisherCustodyStatus, String> {
+    wcmd::custody_status(&wstate.0).map_err(|e| e.to_string())
+}
+
+/// One-time upgrade from the PIN-sealed store to device custody.
+///
+/// Safety property: a legacy blob is deleted only after the same
+/// plaintext has been written under custody AND read back
+/// byte-identical. Callers must keep the gate open until the returned
+/// `signing_keys_safe` is true — a publisher signing key that fails to
+/// migrate is unrecoverable, and the relay it signs for can never gain
+/// or drop another recipient.
+#[tauri::command]
+fn publisher_migrate_from_pin(
+    wstate: State<'_, WizardStateMgr>,
+    pin: String,
+) -> Result<wcmd::CustodyMigrationReport, String> {
+    wcmd::migrate_from_pin(&wstate.0, &pin).map_err(|e| e.to_string())
+}
+
+/// Unlock session-passphrase custody.
+///
+/// A publisher-flavoured wrapper over `device_custody_unlock` that
+/// additionally probes with a real round-trip, so a wrong passphrase
+/// is reported *here* as `E_CUSTODY_WRONG_PASS` instead of surfacing
+/// minutes later as an opaque decrypt failure in the middle of signing.
+#[tauri::command]
+fn publisher_custody_unlock(
+    wstate: State<'_, WizardStateMgr>,
+    passphrase: String,
+) -> Result<wcmd::PublisherCustodyStatus, String> {
+    wcmd::custody_unlock(&wstate.0, &passphrase).map_err(|e| e.to_string())
+}
+
+/// Write a recovery copy of a relay's publisher signing key into the
+/// platform Downloads directory. Returns the file name written; the
+/// key bytes never cross the IPC boundary.
+///
+/// This is the only mitigation for the one thing device custody is
+/// worse at than a PIN: the Device Wrap Key lives in the OS/hardware
+/// keystore and cannot be exported, so a factory reset or a keystore
+/// invalidation destroys every relay this device publishes. There is
+/// no escrow. `wizard_publisher_keyimport` is the restore path.
+#[tauri::command]
+fn publisher_save_recovery_key(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    file_name: String,
+) -> Result<String, String> {
+    let staged = wcmd::export_recovery_key(&wstate.0, operator_id).map_err(|e| e.to_string())?;
+    let name = sanitize_filename(&file_name);
+    let name = if name.is_empty() {
+        format!("daal-relay-{operator_id}-recovery.daalkey")
+    } else if name.ends_with(".daalkey") {
+        name
+    } else {
+        format!("{name}.daalkey")
+    };
+    let res = save_path_to_downloads(&staged.to_string_lossy(), &name);
+    // The staged copy is a plaintext signing key; unlink it whether or
+    // not the Downloads write succeeded.
+    let _ = std::fs::remove_file(&staged);
+    res?;
+    Ok(name)
+}
+
+// ---- Relay identity, artifacts, helper IP --------------------------
+
+/// Set (or clear, with "") the human nickname for a relay.
+#[tauri::command]
+fn wizard_set_operator_nickname(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    nickname: String,
+) -> Result<(), String> {
+    wcmd::set_operator_nickname(&wstate.0, operator_id, &nickname).map_err(|e| e.to_string())
+}
+
+/// List a relay's distributable files. Read-only; safe to call on
+/// every render. Index 0 is the shared `.sbp`, index 1 the raw signed
+/// bundle, then one entry per recipient by ascending id. Missing files
+/// come back with `exists: false` rather than being omitted.
+#[tauri::command]
+fn wizard_list_artifacts(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<Vec<wcmd::ArtifactInfo>, String> {
+    wcmd::list_artifacts(&wstate.0, operator_id).map_err(|e| e.to_string())
+}
+
+/// The persisted helper IP for a relay, or "" if never detected.
+#[tauri::command]
+fn wizard_get_helper_ip(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<String, String> {
+    wcmd::get_helper_ip(&wstate.0, operator_id).map_err(|e| e.to_string())
+}
+
+/// Persist the helper IP. `source` is "auto" | "manual" | "whoami"
+/// and is recorded for diagnosis only. Rejects anything that is not a
+/// textual IPv4/IPv6 address, which is what stops a captive-portal
+/// login page from being stored as an address.
+#[tauri::command]
+fn wizard_set_helper_ip(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    helper_ip: String,
+    source: String,
+) -> Result<(), String> {
+    wcmd::set_helper_ip(&wstate.0, operator_id, &helper_ip, &source).map_err(|e| e.to_string())
 }
 
 // ---- FRP-14 Layer 3c: recipient-side identity ----------------------
@@ -2146,11 +2252,22 @@ pub fn run() {
             wizard_subkey_history,
             // FRP-14 per-recipient surface
             wizard_recipient_provision,
+            wizard_recipient_repack_sbpx,
             wizard_recipient_revoke,
             wizard_recipient_list,
             wizard_recipient_list_remote,
             wizard_recipient_delete,
             wizard_produce_shared_sbp,
+            // Publisher custody: status, one-time PIN migration, recovery
+            publisher_custody_status,
+            publisher_migrate_from_pin,
+            publisher_custody_unlock,
+            publisher_save_recovery_key,
+            // Relay identity, artifacts, helper IP
+            wizard_set_operator_nickname,
+            wizard_list_artifacts,
+            wizard_get_helper_ip,
+            wizard_set_helper_ip,
             // FRP-14 Layer 3c: recipient-side identity
             recipient_identity_get_or_create,
             recipient_identity_get,

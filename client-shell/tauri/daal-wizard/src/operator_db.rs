@@ -91,6 +91,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "recipient_identity_history",
         sql: include_str!("../migrations/V011__recipient_identity_history.sql"),
     },
+    Migration {
+        version: 12,
+        name: "operators_nickname_helper_ip",
+        sql: include_str!("../migrations/V012__operators_nickname_helper_ip.sql"),
+    },
 ];
 
 /// `OperatorRow` mirrors a row of the `operators` table.
@@ -122,6 +127,21 @@ pub struct OperatorRow {
     /// Helper-side mgmt-plane client pins against this on every
     /// L1/L2 call (FRP-10 invariant 26).
     pub mgmt_tls_fingerprint: String,
+    /// V012: the user's name for this relay ("Mum's relay"). Empty
+    /// when unset; callers fall back to `#{id} · provider/region`.
+    pub nickname: String,
+    /// V012: the publisher's outbound public IP. `daal-deploy`
+    /// punches an ephemeral cloud-firewall rule for it immediately
+    /// before every mgmt-plane call, so an empty value means no
+    /// mgmt call can succeed. Persisted here (rather than passed as
+    /// a per-call parameter, as it was before V012) so it survives
+    /// a relaunch.
+    pub helper_ip: String,
+    /// V012: where `helper_ip` came from — "auto" | "manual" |
+    /// "whoami". Diagnostic only; nothing branches on it.
+    pub helper_ip_source: String,
+    /// V012: when `helper_ip` was last written. Diagnostic only.
+    pub helper_ip_at_unix: i64,
 }
 
 /// `SignedSbpRow` mirrors a row of the V003 `signed_sbps` history
@@ -338,17 +358,68 @@ impl OperatorDb {
         Ok(())
     }
 
+    /// Update the cloud-provider slug on an operator row. Used by
+    /// the UPDATE branch of `store_cloud_token`, which re-points an
+    /// existing pre-provision row at a different provider instead of
+    /// inserting a duplicate operator (the Back→Next bug).
+    pub fn set_cloud_provider(&self, id: i64, provider: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET cloud_provider = ?1 WHERE id = ?2",
+            params![provider, id],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    /// V012: set the human nickname for a relay. An empty string
+    /// clears it (callers then fall back to `#{id} · provider/region`).
+    pub fn set_nickname(&self, id: i64, nickname: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET nickname = ?1 WHERE id = ?2",
+            params![nickname, id],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    /// V012: persist the publisher's outbound public IP plus its
+    /// provenance. `source` is "auto" | "manual" | "whoami" and is
+    /// diagnostic only. No validation happens here — the command
+    /// layer validates the textual IP form before calling.
+    pub fn set_helper_ip(&self, id: i64, helper_ip: &str, source: &str, at_unix: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators
+                SET helper_ip = ?1, helper_ip_source = ?2, helper_ip_at_unix = ?3
+              WHERE id = ?4",
+            params![helper_ip, source, at_unix, id],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(id));
+        }
+        Ok(())
+    }
+
     /// Read one operator row.
     pub fn get(&self, id: i64) -> Result<OperatorRow> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
+                // V012 columns are appended LAST so the positional
+                // row.get(N) indices in row_to_operator stay stable.
                 "SELECT id, status, operator_record_json, publisher_pub_hex,
                         publisher_priv_keystore_alias, cloud_provider,
                         cloud_token_keystore_alias, created_at_unix,
                         last_provisioned_at_unix, decommissioned_at_unix,
                         signed_sbp_sha256, signed_sbp_relay_pack_id, signed_sbp_at_unix,
-                        mgmt_port, mgmt_tls_fingerprint
+                        mgmt_port, mgmt_tls_fingerprint,
+                        nickname, helper_ip, helper_ip_source, helper_ip_at_unix
                  FROM operators WHERE id = ?1",
                 params![id],
                 row_to_operator,
@@ -366,7 +437,8 @@ impl OperatorDb {
                     cloud_token_keystore_alias, created_at_unix,
                     last_provisioned_at_unix, decommissioned_at_unix,
                     signed_sbp_sha256, signed_sbp_relay_pack_id, signed_sbp_at_unix,
-                    mgmt_port, mgmt_tls_fingerprint
+                    mgmt_port, mgmt_tls_fingerprint,
+                    nickname, helper_ip, helper_ip_source, helper_ip_at_unix
              FROM operators ORDER BY created_at_unix DESC",
         )?;
         let rows: std::result::Result<Vec<_>, _> = stmt.query_map([], row_to_operator)?.collect();
@@ -928,6 +1000,17 @@ impl OperatorDb {
         Ok(())
     }
 
+    // ---- pin_attempts (V001) ----------------------------------------
+    //
+    // The publisher PIN is gone from every live command: secrets now
+    // live under DeviceCustody (hardware-backed on Android, OS keyring
+    // on desktop). Exactly one PIN entry point survives — the one-time
+    // `migrate_from_pin` upgrade — and it is still a 6-digit secret
+    // behind a tap-and-retry loop, so it still needs a ceiling. These
+    // two accessors are what enforce it; the V001 table is reused
+    // rather than reintroducing a rate-limiter module for one caller.
+    // They go dormant for good once no device has a legacy blob left.
+
     /// Append a PIN attempt outcome.
     pub fn record_pin_attempt(&self, attempt_at_unix: i64, success: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -939,6 +1022,7 @@ impl OperatorDb {
     }
 
     /// Count failed PIN attempts strictly newer than `since_unix`.
+    /// See the note above `record_pin_attempt`.
     pub fn count_recent_failed_pins(&self, since_unix: i64) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(
@@ -1145,6 +1229,50 @@ impl OperatorDb {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Replace the box-side credentials on an existing recipient row.
+    ///
+    /// Used by the `.sbpx` rebuild path, which re-mints the SAME box
+    /// user (`r<n>`) rather than minting a new one: `insert_recipient`
+    /// is a plain INSERT and would violate
+    /// `UNIQUE (operator_id, pubkey_x25519_hex)` after having already
+    /// created a live user on the relay — leaving an orphan the local
+    /// roster does not know about and can never revoke. Identity
+    /// columns (`name`, `address_str`, `pubkey_x25519_hex`) are
+    /// deliberately not touched.
+    pub fn update_recipient_creds(
+        &self,
+        operator_id: i64,
+        recipient_id: i64,
+        vless_uuid: &str,
+        reality_short_id: &str,
+        hy2_password: &str,
+        naive_password: &str,
+        ws_path: &str,
+        provisioned_at_unix: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "UPDATE recipients
+                SET vless_uuid = ?3, reality_short_id = ?4, hy2_password = ?5,
+                    naive_password = ?6, ws_path = ?7, provisioned_at_unix = ?8
+              WHERE id = ?1 AND operator_id = ?2",
+            params![
+                recipient_id,
+                operator_id,
+                vless_uuid,
+                reality_short_id,
+                hy2_password,
+                naive_password,
+                ws_path,
+                provisioned_at_unix,
+            ],
+        )?;
+        if affected == 0 {
+            return Err(DbError::NotFound(recipient_id));
+        }
+        Ok(())
+    }
+
     /// Marks a recipient as revoked.
     pub fn mark_recipient_revoked(&self, recipient_id: i64, revoked_at_unix: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -1252,6 +1380,19 @@ impl OperatorDb {
         let conn = self.conn.lock().unwrap();
         let c: i64 = conn.query_row(
             "SELECT COUNT(*) FROM recipients WHERE operator_id = ?1 AND revoked_at_unix = 0",
+            params![operator_id],
+            |r| r.get(0),
+        )?;
+        Ok(c)
+    }
+
+    /// Count every recipient row, revoked included. The relay card
+    /// renders "live / total" so a family that has churned through
+    /// several devices reads as such instead of looking empty.
+    pub fn count_total_recipients(&self, operator_id: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let c: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recipients WHERE operator_id = ?1",
             params![operator_id],
             |r| r.get(0),
         )?;
@@ -1469,16 +1610,28 @@ impl OperatorDb {
         };
         // operators
         let mut stmt = conn.prepare(
-            "SELECT publisher_priv_keystore_alias, cloud_token_keystore_alias
+            "SELECT id, publisher_priv_keystore_alias, cloud_token_keystore_alias
              FROM operators",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?;
         for row in rows {
-            let (a, b) = row?;
+            let (id, a, b) = row?;
             push(a);
             push(b);
+            // The Cloudflare token has no column: it is stored under
+            // the conventional alias `daal.cloudflare.<id>.token`
+            // (commands.rs::provision_cdn_front). Emitting it here is
+            // what makes panic_wipe actually wipe it, and what lets
+            // the PIN→custody migration find it. Both consumers treat
+            // a non-existent alias as a no-op, so emitting it
+            // unconditionally is safe.
+            push(format!("daal.cloudflare.{id}.token"));
         }
         // cells (V008)
         if let Ok(mut stmt) = conn.prepare(
@@ -1702,6 +1855,11 @@ fn row_to_operator(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorRow> {
         signed_sbp_at_unix: row.get(12)?,
         mgmt_port: row.get(13)?,
         mgmt_tls_fingerprint: row.get(14)?,
+        // V012 — appended last in both SELECT lists on purpose.
+        nickname: row.get(15)?,
+        helper_ip: row.get(16)?,
+        helper_ip_source: row.get(17)?,
+        helper_ip_at_unix: row.get(18)?,
     })
 }
 

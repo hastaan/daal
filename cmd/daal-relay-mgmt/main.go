@@ -22,9 +22,15 @@
 //	                             SIGUSR2 + reload kick wrapper,
 //	                             effective for live sessions ≤10 s.
 //	GET  /users/list          — FRP-14; return active user names.
+//	GET|POST /whoami          — echo the source IP the box observes
+//	                             for this connection, so the
+//	                             publisher's ephemeral-firewall
+//	                             allowlist can be verified against
+//	                             ground truth instead of a
+//	                             third-party echo service.
 //
-// Adding a seventh route requires a supplement amendment; the
-// invariant is enforced by TestExactlyNRoutes (n=6) in main_test.go.
+// Adding an eighth route requires a supplement amendment; the
+// invariant is enforced by TestExactlyNRoutes (n=7) in main_test.go.
 //
 // Auth: every state-changing endpoint requires a per-request
 // Ed25519 signature in the Authorization: Daal-Mgmt-Token header,
@@ -135,6 +141,7 @@ type server struct {
 	usersProvCnt   atomic.Int64
 	usersRevokeCnt atomic.Int64
 	usersListCnt   atomic.Int64
+	whoamiCnt      atomic.Int64
 	now            func() time.Time
 	singboxControl func(action string) error // injectable for tests
 	singboxKick    func() error              // injectable for tests
@@ -189,10 +196,10 @@ func defaultSingboxKick() error {
 	return nil
 }
 
-// routes wires the exactly-six endpoint surface (FRP-10 invariant 29
-// lifted at FRP-14 to add three per-recipient user routes; see
-// specs/per-recipient-credentials-v1.md). Adding a seventh route
-// requires a supplement amendment.
+// routes wires the exactly-seven endpoint surface (FRP-10 invariant
+// 29 lifted at FRP-14 to add three per-recipient user routes; see
+// specs/per-recipient-credentials-v1.md; lifted again for /whoami).
+// Adding an eighth route requires a supplement amendment.
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
@@ -201,11 +208,22 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/users/provision", s.requireAuth(s.handleUsersProvision))
 	mux.HandleFunc("/users/revoke", s.requireAuth(s.handleUsersRevoke))
 	mux.HandleFunc("/users/list", s.requireAuth(s.handleUsersList))
+	// /whoami echoes the source IP the box actually sees for this
+	// connection. The publisher's own idea of its public IP comes from
+	// third-party echo services and can be wrong behind CGNAT,
+	// split-horizon NAT or a captive proxy, which silently produces a
+	// firewall allowlist entry for an address the box never sees. This
+	// is the only authoritative answer. It cannot *bootstrap* the
+	// allowlist — the endpoint is itself behind that firewall, so it
+	// can only be reached from an address that already works — it
+	// confirms a working IP so the client can store a verified value
+	// and stop re-detecting.
+	mux.HandleFunc("/whoami", s.requireAuth(s.handleWhoAmI))
 	return mux
 }
 
 // routeNames returns the exact set of HTTP paths registered. Used
-// by main_test.go to enforce TestExactlyNRoutes (n=6).
+// by main_test.go to enforce TestExactlyNRoutes (n=7).
 func (s *server) routeNames() []string {
 	return []string{
 		"/health",
@@ -214,6 +232,7 @@ func (s *server) routeNames() []string {
 		"/users/provision",
 		"/users/revoke",
 		"/users/list",
+		"/whoami",
 	}
 }
 
@@ -248,6 +267,8 @@ func opFromPath(p string) string {
 		return "users-revoke"
 	case "/users/list":
 		return "users-list"
+	case "/whoami":
+		return "whoami"
 	default:
 		return ""
 	}
@@ -387,6 +408,78 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(rotateTLSResp{AppliedAtUnix: s.now().Unix()})
+}
+
+// whoAmIResp is the JSON returned to the Helper. Deliberately tiny:
+// the only load-bearing field is source_ip. api_version exists so a
+// future shape change is detectable by a client that must also keep
+// working against boxes that predate this endpoint entirely (a 404 /
+// 405 / connection error from an older box means "no answer", never
+// "failure" — see specs feature-detection note).
+type whoAmIResp struct {
+	SourceIP       string `json:"source_ip"`
+	ServerTimeUnix int64  `json:"server_time_unix"`
+	APIVersion     int    `json:"api_version"`
+}
+
+// whoAmIAPIVersion is bumped only if the response shape changes.
+const whoAmIAPIVersion = 1
+
+func (s *server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	// GET is the natural verb; POST is accepted too because the Helper's
+	// signed-request path is POST-shaped for every other authenticated
+	// endpoint and piggybacking /whoami on it should not need a special
+	// case. Anything else is a client bug, not an older/newer box.
+	if r.Method != "GET" && r.Method != "POST" {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	s.whoamiCnt.Add(1)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(whoAmIResp{
+		SourceIP:       observedSourceIP(r.RemoteAddr),
+		ServerTimeUnix: s.now().Unix(),
+		APIVersion:     whoAmIAPIVersion,
+	})
+}
+
+// observedSourceIP extracts the peer address of the actual TCP
+// connection.
+//
+// X-Forwarded-For / X-Real-IP / Forwarded are deliberately NOT
+// consulted. Nothing in this deployment establishes a trusted proxy:
+// cloud-init runs this binary as a systemd unit listening directly on
+// the per-deploy mgmt port with its own TLS, there is no nginx/caddy
+// in front of it, and the one other place in the tree that makes a
+// decision from a client address (publisher/deploy/health/handler.go
+// allowedRemoteIP) also reads r.RemoteAddr alone. Honouring a
+// client-supplied header here would let any caller dictate the value
+// this endpoint exists to *verify*, and that value is written straight
+// into a cloud-firewall allowlist — a spoofable source IP would turn a
+// verification source into a remote allowlist-injection primitive. If
+// a reverse proxy is ever introduced, this function must gain an
+// explicit trusted-proxy check, not a bare header read.
+//
+// The value is returned as observed, never invented: a RemoteAddr the
+// stdlib can't split (malformed, or empty as in a synthesised request)
+// yields the raw string — possibly "" — so a client sees what the box
+// saw and can reject it, rather than being handed a plausible-looking
+// wrong answer.
+func observedSourceIP(remoteAddr string) string {
+	addr := strings.TrimSpace(remoteAddr)
+	if addr == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		// SplitHostPort already strips the brackets of an IPv6
+		// "[::1]:443" form; a zone ("fe80::1%eth0") is left intact
+		// because dropping it would fabricate a different address.
+		return strings.TrimSpace(host)
+	}
+	// No port at all is the common non-error case here (some proxying
+	// listeners and test harnesses set a bare literal); accept the
+	// bracketed IPv6 spelling of it too.
+	return strings.TrimSpace(strings.Trim(addr, "[]"))
 }
 
 // --- crypto helpers ---
