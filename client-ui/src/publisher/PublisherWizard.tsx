@@ -321,6 +321,13 @@ export default function PublisherWizard({ t }: Props) {
     // invite" button + Step 1 operator row.
     const [sbpPath, setSbpPath] = useState<string | null>(null);
     const [sharing, setSharing] = useState(false);
+    // Feedback line under the Step-7 "Save to phone" button.
+    const [saveMsg, setSaveMsg] = useState<string | null>(null);
+    // Tracks the operator id for which we've already produced the
+    // CONNECTABLE `.shared.sbp` (in the Step-6 sign handler). Once set,
+    // the sbpPath loader effect below must NOT clobber that live path
+    // with the raw signed (dead) path returned by getSbpPath.
+    const sharedSbpReadyForRef = useRef<number | null>(null);
 
     // FRP-14 recipient book state.
     const [recipients, setRecipients] = useState<RecipientSummary[]>([]);
@@ -361,12 +368,17 @@ export default function PublisherWizard({ t }: Props) {
     useEffect(() => {
         if (!operatorId) {
             setSbpPath(null);
+            sharedSbpReadyForRef.current = null;
             return;
         }
         if (!live) {
             if (bindResult) setSbpPath('Daal app storage');
             return;
         }
+        // The Step-6 sign handler already put the CONNECTABLE
+        // `.shared.sbp` path into sbpPath for this operator — don't
+        // overwrite it with getSbpPath's raw signed (dead) path.
+        if (sharedSbpReadyForRef.current === operatorId) return;
         const id = STEPS[stepIdx]?.id;
         if (id !== 'distribute' && id !== 'operator' && !bindResult) return;
         Wizard.getSbpPath(operatorId)
@@ -1546,7 +1558,7 @@ export default function PublisherWizard({ t }: Props) {
                                     style={{ marginBottom: 12 }}
                                 />
                                 <Button
-                                    disabled={busy || !operatorId || !pin}
+                                    disabled={busy || sharing || !operatorId || !pin}
                                     onClick={async () => {
                                         if (!operatorId) return;
                                         setSignLog([]);
@@ -1560,7 +1572,33 @@ export default function PublisherWizard({ t }: Props) {
                                                     publisherName,
                                                 ),
                                             );
-                                            if (r) setBindResult(r);
+                                            // Sign failed — error already shown;
+                                            // stay on Step 6, don't advance.
+                                            if (!r) return;
+                                            // Immediately produce the CONNECTABLE
+                                            // shared `.sbp` (mints the shared r0
+                                            // user + rewrites profiles, ~10-20s)
+                                            // so Step 7 hands out a real,
+                                            // importable file rather than the
+                                            // dead raw signed bundle.
+                                            setSharing(true);
+                                            const shared = await run(() =>
+                                                Wizard.produceSharedSbp(
+                                                    operatorId,
+                                                    pin,
+                                                    helperIp,
+                                                ),
+                                            );
+                                            setSharing(false);
+                                            // Producing the shared pack failed —
+                                            // keep the user on Step 6 (bindResult
+                                            // stays null → Next disabled) so they
+                                            // never advance with a dead file.
+                                            if (!shared) return;
+                                            sharedSbpReadyForRef.current =
+                                                operatorId;
+                                            setSbpPath(shared.sbp_path);
+                                            setBindResult(r);
                                         } else {
                                             await fakeProgress(
                                                 'sign',
@@ -1581,9 +1619,11 @@ export default function PublisherWizard({ t }: Props) {
                                         mark('sign');
                                     }}
                                 >
-                                    {busy
-                                        ? t('wiz.sign.running')
-                                        : t('wiz.sign.run')}
+                                    {sharing
+                                        ? t('pub.share.working')
+                                        : busy
+                                            ? t('wiz.sign.running')
+                                            : t('wiz.sign.run')}
                                 </Button>
                                 <EventList events={signLog} />
                                 {bindResult && (
@@ -1675,37 +1715,80 @@ export default function PublisherWizard({ t }: Props) {
                                     </Card>
                                 )}
 
-                                <Button
-                                    disabled={busy || sharing || !operatorId || !sbpPath}
-                                    onClick={async () => {
-                                        if (!operatorId || !sbpPath) return;
-                                        setSharing(true);
-                                        try {
-                                            if (live) {
-                                                await run(() =>
-                                                    Wizard.shareInvite(
-                                                        operatorId,
-                                                        publisherName,
-                                                    ),
-                                                );
-                                            } else {
-                                                alert(
-                                                    fmt(
-                                                        t('wiz.distribute.alert.finalized'),
-                                                        { path: sbpPath },
-                                                    ),
-                                                );
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    <Button
+                                        disabled={busy || sharing || !operatorId || !sbpPath}
+                                        onClick={async () => {
+                                            if (!operatorId || !sbpPath) return;
+                                            setSaveMsg(null);
+                                            setSharing(true);
+                                            try {
+                                                if (live) {
+                                                    await run(() =>
+                                                        Wizard.shareInvite(
+                                                            operatorId,
+                                                            publisherName,
+                                                        ),
+                                                    );
+                                                } else {
+                                                    alert(
+                                                        fmt(
+                                                            t('wiz.distribute.alert.finalized'),
+                                                            { path: sbpPath },
+                                                        ),
+                                                    );
+                                                }
+                                                mark('distribute');
+                                            } finally {
+                                                setSharing(false);
                                             }
-                                            mark('distribute');
-                                        } finally {
-                                            setSharing(false);
-                                        }
-                                    }}
-                                >
-                                    {sharing
-                                        ? t('wiz.distribute.sharing')
-                                        : t('wiz.distribute.send')}
-                                </Button>
+                                        }}
+                                    >
+                                        {sharing
+                                            ? t('wiz.distribute.sharing')
+                                            : t('wiz.distribute.send')}
+                                    </Button>
+                                    {/* Save the CONNECTABLE shared `.sbp` straight
+                                        to the phone's Downloads — mirrors the
+                                        recipients page. Uses the same shared file
+                                        the Send button hands out. */}
+                                    <Button
+                                        variant="secondary"
+                                        disabled={busy || sharing || !operatorId || !sbpPath}
+                                        onClick={async () => {
+                                            if (!operatorId || !sbpPath) return;
+                                            setSaveMsg(null);
+                                            if (live) {
+                                                const ok = await run(() =>
+                                                    Wizard.saveSharedSbpToDownloads(
+                                                        operatorId,
+                                                        'daal-connection.sbp',
+                                                    ),
+                                                );
+                                                if (ok !== null) {
+                                                    setSaveMsg(t('pub.share.saved'));
+                                                    mark('distribute');
+                                                }
+                                            } else {
+                                                setSaveMsg(t('pub.share.saved'));
+                                                mark('distribute');
+                                            }
+                                        }}
+                                    >
+                                        {t('pub.share.save')}
+                                    </Button>
+                                </div>
+                                {saveMsg && (
+                                    <div
+                                        style={{
+                                            fontSize: 12,
+                                            color: 'var(--muted)',
+                                            marginTop: 8,
+                                        }}
+                                    >
+                                        {saveMsg}
+                                    </div>
+                                )}
 
                                 {/* QR fountain — placeholder until the
                                     canvas rendering is wired in V1.6. */}

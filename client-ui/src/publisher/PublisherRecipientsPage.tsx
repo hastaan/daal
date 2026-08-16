@@ -102,49 +102,37 @@ export default function PublisherRecipientsPage({ t }: Props) {
     const [syncing, setSyncing] = useState(false);
     const [syncResult, setSyncResult] = useState<string | null>(null);
 
-    // Shared .sbp — the default "one file, any phone" distribution.
-    const [shareOpen, setShareOpen] = useState(false);
-    const [sharePin, setSharePin] = useState('');
-    const [shareHelperIp, setShareHelperIp] = useState('');
-    const [shareBusy, setShareBusy] = useState(false);
-    const [shareError, setShareError] = useState<string | null>(null);
+    // Re-share the family shared pack. The wizard's final step is now
+    // the canonical place to CREATE it; this is a minimal fallback so
+    // the operator can re-hand-out the pack from the dashboard without
+    // walking the wizard. It re-produces a guaranteed-live `.shared.sbp`
+    // (so it never shares the dead raw bundle) and opens the share sheet.
+    const [reshareOpen, setReshareOpen] = useState(false);
+    const [resharePin, setResharePin] = useState('');
+    const [reshareBusy, setReshareBusy] = useState(false);
+    const [reshareError, setReshareError] = useState<string | null>(null);
 
-    // Produce the shared .sbp (mint r0 + rewrite), then either open the OS
-    // share sheet or save a local copy to Downloads.
-    const runShared = useCallback(
-        async (mode: 'share' | 'save') => {
-            if (operatorId === null) return;
-            if (!sharePin) {
-                setShareError(t('pub.recipients.add.missing_pin'));
-                return;
-            }
-            setShareBusy(true);
-            setShareError(null);
-            try {
-                await Wizard.produceSharedSbp(operatorId, sharePin, shareHelperIp);
-                if (mode === 'save') {
-                    await Wizard.saveSharedSbpToDownloads(
-                        operatorId,
-                        'daal-connection.sbp',
-                    );
-                    setShareError(t('pub.share.saved'));
-                } else {
-                    await Wizard.shareInvite(operatorId, 'daal-connection');
-                    setShareOpen(false);
-                }
-                setSharePin('');
-            } catch (e) {
-                setShareError(String(e));
-            } finally {
-                setShareBusy(false);
-            }
-        },
-        [operatorId, sharePin, shareHelperIp, t],
-    );
-    const onShareConnectionFile = useCallback(
-        () => runShared('share'),
-        [runShared],
-    );
+    const onReshare = useCallback(async () => {
+        if (operatorId === null) return;
+        if (!resharePin) {
+            setReshareError(t('pub.recipients.add.missing_pin'));
+            return;
+        }
+        setReshareBusy(true);
+        setReshareError(null);
+        try {
+            // Empty helper IP falls through to the Tauri command's
+            // stored default (same as the recipient-sync call above).
+            await Wizard.produceSharedSbp(operatorId, resharePin, '');
+            await Wizard.shareInvite(operatorId, 'daal-connection');
+            setResharePin('');
+            setReshareOpen(false);
+        } catch (e) {
+            setReshareError(String(e));
+        } finally {
+            setReshareBusy(false);
+        }
+    }, [operatorId, resharePin, t]);
 
     const reloadOperators = useCallback(async () => {
         try {
@@ -380,15 +368,9 @@ export default function PublisherRecipientsPage({ t }: Props) {
                 {operatorId !== null && (
                     <Card>
                         <div style={{ padding: '12px 14px', display: 'grid', gap: 10 }}>
-                            <div style={{ fontSize: 15, fontWeight: 600 }}>
-                                {t('pub.share.title')}
-                            </div>
-                            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                                {t('pub.share.help')}
-                            </div>
-                            {!shareOpen ? (
-                                <Button onClick={() => setShareOpen(true)}>
-                                    {t('pub.share.cta')}
+                            {!reshareOpen ? (
+                                <Button onClick={() => setReshareOpen(true)}>
+                                    {t('pub.reshare.cta')}
                                 </Button>
                             ) : (
                                 <div style={{ display: 'grid', gap: 8 }}>
@@ -396,8 +378,8 @@ export default function PublisherRecipientsPage({ t }: Props) {
                                         type="password"
                                         inputMode="numeric"
                                         placeholder={t('pub.share.pin_placeholder')}
-                                        value={sharePin}
-                                        onChange={(e) => setSharePin(e.target.value)}
+                                        value={resharePin}
+                                        onChange={(e) => setResharePin(e.target.value)}
                                         style={{
                                             padding: '8px 10px',
                                             background: 'var(--surface)',
@@ -406,48 +388,26 @@ export default function PublisherRecipientsPage({ t }: Props) {
                                             borderRadius: 'var(--r-control)',
                                         }}
                                     />
-                                    <input
-                                        type="text"
-                                        placeholder={t('pub.share.helper_ip_placeholder')}
-                                        value={shareHelperIp}
-                                        onChange={(e) => setShareHelperIp(e.target.value)}
-                                        style={{
-                                            padding: '8px 10px',
-                                            background: 'var(--surface)',
-                                            color: 'var(--fg)',
-                                            border: '1px solid var(--line-soft)',
-                                            borderRadius: 'var(--r-control)',
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 12,
-                                        }}
-                                    />
-                                    {shareError && (
+                                    {reshareError && (
                                         <div style={{ color: 'var(--red)', fontSize: 12 }}>
-                                            {shareError}
+                                            {reshareError}
                                         </div>
                                     )}
                                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                                         <Button
-                                            onClick={onShareConnectionFile}
-                                            disabled={shareBusy}
+                                            onClick={onReshare}
+                                            disabled={reshareBusy}
                                         >
-                                            {shareBusy
+                                            {reshareBusy
                                                 ? t('pub.share.working')
                                                 : t('pub.share.confirm')}
                                         </Button>
                                         <Button
-                                            variant="secondary"
-                                            onClick={() => void runShared('save')}
-                                            disabled={shareBusy}
-                                        >
-                                            {t('pub.share.save')}
-                                        </Button>
-                                        <Button
                                             onClick={() => {
-                                                setShareOpen(false);
-                                                setShareError(null);
+                                                setReshareOpen(false);
+                                                setReshareError(null);
                                             }}
-                                            disabled={shareBusy}
+                                            disabled={reshareBusy}
                                         >
                                             {t('common.cancel')}
                                         </Button>

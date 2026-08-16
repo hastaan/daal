@@ -263,6 +263,7 @@
   "pub.share.confirm": "Create & share",
   "pub.share.save": "Save to phone",
   "pub.share.saved": "Saved to Downloads.",
+  "pub.reshare.cta": "Re-share relay",
   "pub.recipients.operator": "Operator",
   "pub.recipients.add": "Add",
   "pub.recipients.sync": "Sync",
