@@ -131,10 +131,15 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mint creds: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := addUserToSingbox(s.singboxConfig, creds); err != nil {
+	effectiveWSPath, err := addUserToSingbox(s.singboxConfig, creds)
+	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The shared ws-in inbound fixes one ws path for all recipients; hand
+	// the client the path it actually has to dial (the first recipient's,
+	// reused thereafter), not the fresh one mintCreds just generated.
+	creds.WSPath = effectiveWSPath
 	if err := s.singboxControl("reload"); err != nil {
 		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
 		return

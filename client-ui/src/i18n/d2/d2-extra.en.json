@@ -84,6 +84,8 @@
   "add.err.envelope_corrupt": "This .sbpx couldn't be opened. It may be sealed for a different address, the PIN may be wrong, or the file may be corrupt.",
   "network.connect": "Connect",
   "network.connecting": "Connecting…",
+  "network.disconnect": "Disconnect",
+  "network.connected": "Connected",
   "network.refresh": "Refresh",
   "network.remove": "Remove",
   "network.remove_publisher": "Remove this connection",

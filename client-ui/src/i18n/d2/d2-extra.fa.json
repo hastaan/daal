@@ -84,6 +84,8 @@
   "add.err.envelope_corrupt": "این .sbpx باز نشد. ممکن است برای آدرس دیگری مهر شده باشد، PIN اشتباه باشد، یا فایل خراب باشد.",
   "network.connect": "اتصال",
   "network.connecting": "در حال اتصال…",
+  "network.disconnect": "قطع اتصال",
+  "network.connected": "متصل",
   "network.refresh": "به‌روزرسانی",
   "network.remove": "حذف",
   "network.remove_publisher": "حذف این اتصال",

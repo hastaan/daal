@@ -60,6 +60,11 @@ export default function NetworkPage({ t }: Props) {
     // label) so a sub-second `contract.connect` resolution doesn't
     // feel like a dead tap.
     const [connectingId, setConnectingId] = useState<string | null>(null);
+    // The route the engine reports as currently connected (from the 2 s
+    // connectionSummary poll), or null. Drives Connect ↔ Disconnect and the
+    // active-route highlight — without this poll the page had no live link
+    // truth, so a connected route still read "Connect / not tested yet".
+    const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
 
     const load = async () => {
         try {
@@ -78,6 +83,46 @@ export default function NetworkPage({ t }: Props) {
         void load();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contract]);
+
+    // Live connection poll (same source of truth as ConnectionPage and the
+    // shell title bar): read connectionSummary every 2 s and remember which
+    // route the engine is actually routing through.
+    useEffect(() => {
+        let alive = true;
+        const tick = async () => {
+            try {
+                const s = await contract.connectionSummary();
+                if (!alive) return;
+                setActiveRouteId(
+                    s.state === 'connected'
+                        ? s.activeRoute?.routeId ?? null
+                        : null,
+                );
+            } catch {
+                /* transient read failure — keep last known state */
+            }
+        };
+        void tick();
+        const id = setInterval(() => void tick(), 2000);
+        return () => {
+            alive = false;
+            clearInterval(id);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [contract]);
+
+    const onDisconnect = async () => {
+        setError(null);
+        // Optimistic: clear the active route immediately so the button flips
+        // to "Connect" without waiting for the next poll; the poll reconciles.
+        setActiveRouteId(null);
+        try {
+            await contract.disconnect();
+            await load();
+        } catch (e) {
+            setError((e as Error).message || String(e) || 'disconnect failed');
+        }
+    };
 
     const toggle = (id: string) => {
         setExpanded((prev) => {
@@ -187,6 +232,8 @@ export default function NetworkPage({ t }: Props) {
                             open={expanded.has(p.publisherId)}
                             onToggle={() => toggle(p.publisherId)}
                             connectingId={connectingId}
+                            activeRouteId={activeRouteId}
+                            onDisconnect={onDisconnect}
                             onConnectRoute={async (routeId) => {
                                 setError(null);
                                 // Optimistic feedback: flag the row so
@@ -197,9 +244,10 @@ export default function NetworkPage({ t }: Props) {
                                 setConnectingId(routeId);
                                 try {
                                     await contract.connect(routeId);
-                                    // Move user to the Connection page so
-                                    // they see the link state transition.
-                                    // (No router; we just refresh state.)
+                                    // Optimistic: mark this route active so
+                                    // the button flips to "Disconnect" at
+                                    // once; the 2 s poll reconciles.
+                                    setActiveRouteId(routeId);
                                     await load();
                                 } catch (e) {
                                     // Engine connect errors are usually
@@ -315,6 +363,10 @@ interface PublisherRowProps {
     onRemovePublisher: () => void | Promise<void>;
     /** Route id whose Connect button is currently in flight, or null. */
     connectingId: string | null;
+    /** Route id the engine is currently connected through, or null. */
+    activeRouteId: string | null;
+    /** Tear down the active tunnel. */
+    onDisconnect: () => void | Promise<void>;
 }
 
 function PublisherRowView({
@@ -329,6 +381,8 @@ function PublisherRowView({
     onRemoveSub,
     onRemovePublisher,
     connectingId,
+    activeRouteId,
+    onDisconnect,
 }: PublisherRowProps) {
     // The "trivial" case: one publisher with one cell and one route.
     // We collapse the entire row to a single Connect button so a
@@ -394,19 +448,24 @@ function PublisherRowView({
                     </div>
                     {trivial && allRoutes[0] && (() => {
                         const r0 = allRoutes[0];
+                        const isActive = activeRouteId === r0.routeId;
                         const isConnecting = connectingId === r0.routeId;
                         const anyInFlight = connectingId !== null;
                         return (
                             <Button
                                 size="sm"
+                                variant={isActive ? 'secondary' : 'primary'}
                                 disabled={anyInFlight}
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    void onConnectRoute(r0.routeId);
+                                    if (isActive) void onDisconnect();
+                                    else void onConnectRoute(r0.routeId);
                                 }}
                             >
                                 {isConnecting
                                     ? t('network.connecting')
+                                    : isActive
+                                    ? t('network.disconnect')
                                     : t('network.connect')}
                             </Button>
                         );
@@ -443,6 +502,8 @@ function PublisherRowView({
                                 onCool={onCool}
                                 onBudget={onBudget}
                                 connectingId={connectingId}
+                                activeRouteId={activeRouteId}
+                                onDisconnect={onDisconnect}
                             />
                         ))}
                         {p.subscription && (
@@ -501,6 +562,8 @@ function CellRowView({
     onCool,
     onBudget,
     connectingId,
+    activeRouteId,
+    onDisconnect,
 }: {
     t: (k: string) => string;
     cell: CellRow;
@@ -508,6 +571,8 @@ function CellRowView({
     onCool: (routeId: string) => void | Promise<void>;
     onBudget: (r: RouteDisplayRow) => void;
     connectingId: string | null;
+    activeRouteId: string | null;
+    onDisconnect: () => void | Promise<void>;
 }) {
     return (
         <div>
@@ -541,15 +606,23 @@ function CellRowView({
                 </div>
             )}
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                {cell.routes.map((r) => (
+                {cell.routes.map((r) => {
+                    const isActive = activeRouteId === r.routeId;
+                    return (
                     <li
                         key={r.routeId}
                         style={{
                             display: 'flex',
                             alignItems: 'center',
                             gap: 8,
-                            padding: '6px 0',
+                            padding: '6px 8px',
                             borderTop: '1px dashed var(--line-soft)',
+                            borderInlineStart: isActive
+                                ? '2px solid var(--green)'
+                                : '2px solid transparent',
+                            background: isActive
+                                ? 'rgba(80,200,120,0.08)'
+                                : 'transparent',
                         }}
                     >
                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -566,10 +639,13 @@ function CellRowView({
                                 style={{
                                     fontFamily: 'var(--font-mono)',
                                     fontSize: 10,
-                                    color: 'var(--dim)',
+                                    color: isActive
+                                        ? 'var(--green)'
+                                        : 'var(--dim)',
                                 }}
                             >
                                 {r.family}
+                                {isActive && ` · ${t('network.connected')}`}
                                 {r.proven && typeof r.healthPct === 'number'
                                     ? ` · ${r.healthPct}%`
                                     : ` · ${t('network.untested')}`}
@@ -579,10 +655,17 @@ function CellRowView({
                         </div>
                         <Button
                             size="sm"
+                            variant={isActive ? 'secondary' : 'primary'}
                             disabled={connectingId !== null}
-                            onClick={() => void onConnectRoute(r.routeId)}
+                            onClick={() =>
+                                isActive
+                                    ? void onDisconnect()
+                                    : void onConnectRoute(r.routeId)
+                            }
                         >
-                            {connectingId === r.routeId
+                            {isActive
+                                ? t('network.disconnect')
+                                : connectingId === r.routeId
                                 ? t('network.connecting')
                                 : t('network.connect')}
                         </Button>
@@ -604,7 +687,8 @@ function CellRowView({
                             ⓘ
                         </Button>
                     </li>
-                ))}
+                    );
+                })}
             </ul>
         </div>
     );

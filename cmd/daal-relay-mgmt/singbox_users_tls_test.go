@@ -6,10 +6,14 @@ import (
 	"testing"
 )
 
-// TestAppendWSInboundTLS asserts the per-recipient WS-TLS inbound
-// lands on the canonical 8445 port and carries the pinned data-plane
-// cert paths, so the client's SPKI pin has something to validate.
-func TestAppendWSInboundTLS(t *testing.T) {
+// TestAppendWSUserSharedInbound asserts every recipient rides ONE shared
+// ws-in inbound on the canonical 8445 port (a second per-user inbound
+// would collide on the port and crash sing-box the moment a relay has two
+// recipients — the shared-.sbp + per-recipient-.sbpx case), that it
+// carries the pinned data-plane cert paths + mirrored SNI, that later
+// recipients reuse the first one's ws path, and that the inbound is
+// dropped only when its last user leaves.
+func TestAppendWSUserSharedInbound(t *testing.T) {
 	doc := map[string]any{
 		"inbounds": []any{
 			map[string]any{
@@ -18,13 +22,13 @@ func TestAppendWSInboundTLS(t *testing.T) {
 			},
 		},
 	}
-	c := userCreds{Name: "r7", VLESSUUID: "uuid-7", WSPath: "/r7/deadbeef"}
-	if err := appendWSInbound(doc, c); err != nil {
-		t.Fatalf("appendWSInbound: %v", err)
+	// First recipient creates the shared inbound and fixes the ws path.
+	if err := appendWSUser(doc, userCreds{Name: "r7", VLESSUUID: "uuid-7", WSPath: "/r7/deadbeef"}); err != nil {
+		t.Fatalf("appendWSUser r7: %v", err)
 	}
-	in := findInboundByTag(doc, "ws-r7")
+	in := findInboundByTag(doc, tagWS)
 	if in == nil {
-		t.Fatal("ws-r7 inbound not created")
+		t.Fatalf("shared %q inbound not created", tagWS)
 	}
 	if wsListenPort != 8445 {
 		t.Fatalf("wsListenPort const = %d, want 8445 (canonical relayports value)", wsListenPort)
@@ -42,9 +46,47 @@ func TestAppendWSInboundTLS(t *testing.T) {
 	if kp, _ := tls["key_path"].(string); kp != tlsKeyPath {
 		t.Errorf("key_path = %q, want %q", kp, tlsKeyPath)
 	}
-	// SNI is mirrored from vless-in.
 	if sni, _ := tls["server_name"].(string); sni != "www.cloudflare.com" {
 		t.Errorf("server_name = %q, want mirrored www.cloudflare.com", sni)
+	}
+	if wsInboundPath(doc) != "/r7/deadbeef" {
+		t.Errorf("shared ws path = %q, want /r7/deadbeef", wsInboundPath(doc))
+	}
+
+	// Second recipient must join the SAME inbound, not create a colliding
+	// one. (Its own WSPath is ignored in favour of the shared path — the
+	// provision handler reuses wsInboundPath() for the returned creds.)
+	if err := appendWSUser(doc, userCreds{Name: "r8", VLESSUUID: "uuid-8", WSPath: "/r8/cafef00d"}); err != nil {
+		t.Fatalf("appendWSUser r8: %v", err)
+	}
+	wsCount := 0
+	for _, raw := range doc["inbounds"].([]any) {
+		if m, _ := raw.(map[string]any); m != nil {
+			if tag, _ := m["tag"].(string); tag == tagWS {
+				wsCount++
+			}
+		}
+	}
+	if wsCount != 1 {
+		t.Fatalf("got %d ws inbounds, want exactly 1 shared inbound (port-collision bug)", wsCount)
+	}
+	if users, _ := in["users"].([]any); len(users) != 2 {
+		t.Errorf("shared ws-in users = %d, want 2", len(users))
+	}
+
+	// Removing one user keeps the inbound (r8 still there); removing the
+	// last drops it (sing-box faults on a user-less inbound).
+	if !removeWSUser(doc, "r7") {
+		t.Fatalf("removeWSUser r7 returned false")
+	}
+	if findInboundByTag(doc, tagWS) == nil {
+		t.Fatal("ws-in dropped while r8 still present")
+	}
+	if !removeWSUser(doc, "r8") {
+		t.Fatalf("removeWSUser r8 returned false")
+	}
+	if findInboundByTag(doc, tagWS) != nil {
+		t.Error("ws-in must be removed when its last user leaves")
 	}
 }
 

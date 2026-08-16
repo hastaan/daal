@@ -125,8 +125,8 @@ func TestUsersProvision_AppendsAcrossInbounds(t *testing.T) {
 	if !bytes.Contains(body, []byte(got.NaivePassword)) {
 		t.Errorf("Naive password not in config")
 	}
-	if !bytes.Contains(body, []byte(`"tag": "ws-r17"`)) {
-		t.Errorf("ws inbound not in config: %s", body)
+	if !bytes.Contains(body, []byte(`"tag": "ws-in"`)) {
+		t.Errorf("shared ws inbound not in config: %s", body)
 	}
 }
 
@@ -176,10 +176,15 @@ func TestUsersProvision_Isolation(t *testing.T) {
 	resp.Body.Close()
 
 	cfg, _ := os.ReadFile(configPath)
-	for _, want := range []string{c1.VLESSUUID, c2.VLESSUUID, c1.Hy2Password, c2.Hy2Password, "ws-r1", "ws-r2"} {
+	// Both recipients ride the single shared ws-in inbound (told apart by
+	// UUID); a per-user ws inbound would collide on the shared port.
+	for _, want := range []string{c1.VLESSUUID, c2.VLESSUUID, c1.Hy2Password, c2.Hy2Password, tagWS} {
 		if !bytes.Contains(cfg, []byte(want)) {
 			t.Errorf("isolation: %q missing from config", want)
 		}
+	}
+	if n := bytes.Count(cfg, []byte(`"ws-in"`)); n != 1 {
+		t.Errorf("got %d ws-in inbounds, want exactly 1 shared inbound", n)
 	}
 }
 
@@ -206,8 +211,10 @@ func TestUsersRevoke_RemovesAndKicks(t *testing.T) {
 	if bytes.Contains(cfg, []byte(c.VLESSUUID)) {
 		t.Errorf("config still references revoked VLESS UUID")
 	}
-	if bytes.Contains(cfg, []byte("ws-r9")) {
-		t.Errorf("revoked ws inbound still present in config")
+	// r9 was the only ws user, so the shared ws-in inbound is dropped
+	// (sing-box faults on a user-less inbound).
+	if bytes.Contains(cfg, []byte(tagWS)) {
+		t.Errorf("empty ws inbound still present in config after last user revoked")
 	}
 }
 
@@ -248,8 +255,12 @@ func TestUsersRevoke_DoesNotTouchOtherUsers(t *testing.T) {
 	if !bytes.Contains(cfg, []byte(c2.VLESSUUID)) {
 		t.Errorf("r2 wrongly removed when r1 was revoked")
 	}
-	if !bytes.Contains(cfg, []byte("ws-r2")) {
-		t.Errorf("r2 ws inbound wrongly removed")
+	// r2 still rides the shared ws-in inbound after r1 is revoked.
+	if !bytes.Contains(cfg, []byte(tagWS)) {
+		t.Errorf("shared ws inbound wrongly removed while r2 remains")
+	}
+	if !bytes.Contains(cfg, []byte(c2.VLESSUUID)) {
+		t.Errorf("r2 ws user wrongly removed")
 	}
 }
 

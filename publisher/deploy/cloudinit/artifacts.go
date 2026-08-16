@@ -76,8 +76,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "ebe34865e3d599a1386af7b10c2daa024817b6b9081f9539b554398673d08c69",
-			SigHex:    "3fe3ad4d7426f29d492def6d8a55b66bd05e48d71f8c5b0ba67e5e455d88e7f5030b8a0bebbdba4a5324696edfe0d9b33c4beaed2079e0dacc3b71119b428e01",
+			Sha256:    "7325b7231778dd2dcd514a784a4e31c31c124280f77af9adbc5d381941a6133a",
+			SigHex:    "8389e27b565bbb49e30ace32de4554dab3d6a18cb77b7f8a336fc24ecfa80db5cbef6c01b21c4f51af382977a959806161a070cb60a1d193b077c87d381b5f07",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-mgmt-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
