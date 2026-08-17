@@ -84,7 +84,7 @@ permanently break refresh.
   spins up a tiny SOCKS5 listener, calls `SetTunnelSocks`, then dials
   through the installed global dialer and confirms the listener
   observed a SOCKS5 handshake (proves traffic does NOT go direct).
-- `client-desktop/daal-desktop-core/tests/engine_load.rs::engine_loads_and_sets_tunnel_socks`
+- `client-shell/tauri/daal-desktop-core/tests/engine_load.rs::engine_loads_and_sets_tunnel_socks`
   — dlopens the actual `libdaalcore.so` from CI and exercises the
   full Rust → C ABI → Go refresh-dialer plumbing.
 

@@ -34,17 +34,42 @@ use std::time::{Duration, Instant};
 const ABSTRACT_NAME: &[u8] = b"daal/tun-helper";
 const IFNAMSIZ: usize = 16;
 const TUNGETIFF: libc::c_ulong = 0x800454d2;
+const TUNSETIFF: libc::c_ulong = 0x400454ca;
+const IFF_TUN: u16 = 0x0001;
+const IFF_NO_PI: u16 = 0x1000;
 
+/// True only if this process can actually *create* a TUN interface.
+///
+/// Opening `/dev/net/tun` is NOT sufficient evidence: the clone device is
+/// mode 0666 on a normal distro, so `open` succeeds for any user. The
+/// privilege check is `TUNSETIFF`, which needs CAP_NET_ADMIN and returns
+/// EPERM without it. Probing with `open` alone made this guard always
+/// return true, so the documented skip never fired and the test hard-failed
+/// on every unprivileged machine — including every CI runner.
+///
+/// The probe interface is created without IFF_PERSIST, so closing the fd
+/// tears it down immediately.
 fn can_open_tun_clone() -> bool {
     let path = CString::new("/dev/net/tun").unwrap();
-    // SAFETY: open(2) with a valid C string and read-only flag.
+    // SAFETY: open(2) with a valid C string and valid flags.
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
         return false;
     }
-    // SAFETY: fresh fd we own.
+
+    // struct ifreq: 16-byte ifr_name, then a union whose first member
+    // (ifr_flags) is a short. Zeroed name => kernel picks "tunN".
+    let mut ifreq = [0u8; 40];
+    let flags = IFF_TUN | IFF_NO_PI;
+    ifreq[IFNAMSIZ..IFNAMSIZ + 2].copy_from_slice(&flags.to_ne_bytes());
+
+    // SAFETY: fd is ours and ifreq is a correctly sized ifreq buffer.
+    let rc = unsafe { libc::ioctl(fd, TUNSETIFF, ifreq.as_mut_ptr()) };
+
+    // SAFETY: fresh fd we own. Dropping it also destroys the probe iface.
     unsafe { libc::close(fd) };
-    true
+
+    rc == 0
 }
 
 /// Locate the freshly-built helper binary. Cargo sets CARGO_BIN_EXE_<name>

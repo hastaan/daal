@@ -85,16 +85,6 @@ func EvaluateAutoPromotion(now time.Time) burnpressure.Verdict {
 	return verdict
 }
 
-// AutoPromotionLastFiredAt is the diagnostic projection of the
-// last hour-bucket at which auto-promotion fired in this engine
-// session. Zero time means "never fired this session".
-func AutoPromotionLastFiredAt() time.Time {
-	c := mustCore()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.autoPromotionLastFiredHour
-}
-
 // pathmanagerSkipped is a tiny adapter to keep the burnpressure
 // package decoupled from `core/pathmanager`. The compile-time
 // reference here forces the `pathmanager` import below to be used

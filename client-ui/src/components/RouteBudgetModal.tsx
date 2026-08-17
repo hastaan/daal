@@ -57,7 +57,7 @@ export default function RouteBudgetModal({ t, route, onClose, onSaved }: Props) 
                 }}
             >
                 <h2 style={{ marginTop: 0, fontFamily: 'var(--font-display)' }}>
-                    {t('routes.budget.title') || 'Data cap'}
+                    {t('routes.budget.title')}
                 </h2>
                 <div style={{ color: 'var(--paper-dim)', fontSize: 13, marginBottom: 14 }}>
                     {route.publisherName} · {route.routeNickname}

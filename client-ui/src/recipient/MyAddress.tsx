@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react';
 import {
     DeviceCustody,
     RecipientIdentity,
+    type CustodyLevel,
     type RecipientIdentitySummary,
 } from './recipientCommands';
 import { Button, Input } from '../design/primitives';
@@ -18,8 +19,6 @@ import { Button, Input } from '../design/primitives';
 interface Props {
     t: (k: string) => string;
 }
-
-type CustodyLevel = 'hardware' | 'os_keystore' | 'session_passphrase';
 
 export default function MyAddress({ t }: Props) {
     const [summary, setSummary] = useState<RecipientIdentitySummary | null | undefined>(

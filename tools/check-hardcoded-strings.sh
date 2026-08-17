@@ -19,6 +19,17 @@ cd "$(dirname "$0")/.."
 
 ALLOWLIST="tools/i18n-allowlist.txt"
 
+# Hard precondition. The scan below ends in `|| true` (a no-match from
+# ripgrep is exit 1 and must not abort the loop), which also swallows
+# exit 127 when ripgrep is absent — making "no hits" and "no ripgrep"
+# indistinguishable. `set -euo pipefail` does not catch it either,
+# because the invocation sits in a process substitution. Without this
+# check the gate silently passes on any machine lacking ripgrep.
+command -v rg >/dev/null 2>&1 || {
+    echo "[check-hardcoded-strings] FAIL: ripgrep (rg) not installed" >&2
+    exit 2
+}
+
 # We only care about new D-2 surfaces; legacy code is allow-listed.
 SCAN_PATHS=(
     "client-ui/src/d2pages"
@@ -28,7 +39,6 @@ SCAN_PATHS=(
     "client-ui/src/components/PanicWipeDialog.tsx"
     "client-ui/src/components/RecoverySheet.tsx"
     "client-ui/src/components/TrustPrompt.tsx"
-    "client-ui/src/components/PhoenixButton.tsx"
 )
 # Pattern: a string literal of >= 12 ASCII letters (with spaces),
 # wrapped in double or single quotes. The search is conservative
@@ -38,7 +48,14 @@ PATTERN='"[A-Z][A-Za-z][A-Za-z ]{10,}"'
 
 found=0
 for p in "${SCAN_PATHS[@]}"; do
-    if [ ! -e "$p" ]; then continue; fi
+    # A missing scan path is a hard failure, not a skip. Silently
+    # skipping means any future file rename shrinks this gate's
+    # coverage with zero signal.
+    if [ ! -e "$p" ]; then
+        echo "[check-hardcoded-strings] FAIL: scan path does not exist: $p" >&2
+        echo "  Update SCAN_PATHS in $0 to match the current tree." >&2
+        exit 2
+    fi
     # Run ripgrep with json output so we can post-filter per-line.
     while IFS= read -r line; do
         # Skip allow-listed lines.

@@ -29,9 +29,11 @@ import (
 )
 
 // MaxRecipientsPerServer is the hard cap from FRP-14 invariant 7.
-// Each recipient adds one row to the VLESS / Hy2 / Naive inbounds
-// and one full WS-TLS inbound block. The cap bounds reload time and
-// config size.
+// Each recipient adds one row to each of the four inbounds — VLESS,
+// Hy2, Naive and the single shared ws-in. This is a cap on RECIPIENTS,
+// not on inbounds: there is exactly one WS inbound and all recipients
+// share its `transport.path` (see singbox_users.go's package comment).
+// The cap bounds reload time and config size.
 const MaxRecipientsPerServer = 128
 
 // nameRegex matches the recipient names the wizard emits:

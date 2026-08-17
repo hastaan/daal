@@ -1,7 +1,6 @@
 package selection
 
 import (
-	"sort"
 	"time"
 
 	"daal/core/netmem"
@@ -210,14 +209,4 @@ func renderReason(phase Phase, leader Candidate, shortlistN int, race RacePlan) 
 	default:
 		return "Used " + leader.TransportFamily + " on the leader " + mode + "; secondary candidates staggered."
 	}
-}
-
-// SortCandidatesByRouteID is a small public helper the corpus tests
-// use to ensure byte-stable comparisons against expected fixtures.
-// Returns a fresh slice; never mutates the input.
-func SortCandidatesByRouteID(in []Candidate) []Candidate {
-	out := make([]Candidate, len(in))
-	copy(out, in)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].RouteID < out[j].RouteID })
-	return out
 }

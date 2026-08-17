@@ -220,19 +220,6 @@ func captureAndPersist(store *netmem.Store, outID string, c *Core, now time.Time
 	_ = store.Put(outID, snap, now)
 }
 
-// ForgetNetwork is engine_forget_network. NOT exported as a release
-// ABI symbol at 2C — exposed via the desktop "Forget this network"
-// affordance through a Tauri command that calls into this Go func
-// over the soak/cshared bridge in 2C-Rig (or via a future ABI add
-// at 2D). For 2C the function is package-internal.
-func ForgetNetwork(networkID string) error {
-	store := netmemStore()
-	if store == nil {
-		return fmt.Errorf("abi: netmem store unavailable")
-	}
-	return store.Forget(networkID)
-}
-
 // allNetworks returns the hashed network IDs the engine has seen.
 // For diagnostics + tests.
 func allNetworks() ([]string, error) {

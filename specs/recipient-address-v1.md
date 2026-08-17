@@ -190,9 +190,13 @@ cross-system addressing convention.
   the channel can substitute the address. Out-of-band verification
   (voice, in-person QR scan, second messenger) is the recommended
   mitigation.
-* The X25519 priv lives in the recipient's OS keystore, sealed under
-  PIN via Argon2id + AES-GCM (the same two-layer custody used for
-  publisher keys; see `specs/key-vault-v1.md`).
+* The X25519 priv lives in the recipient's OS keystore, wrapped by the
+  Device Wrap Key held in that keystore (AES-GCM, machine-id-bound) —
+  the same Device Custody layer used for publisher keys. **Neither half
+  of the previous wording ("sealed under PIN", "via Argon2id") is true
+  any more:** there is no PIN, and Argon2id is used only in the
+  no-keystore session-passphrase fallback. See
+  `client-shell/tauri/daal-wizard/src/device_custody.rs`.
 
 ## 10. Test surface
 

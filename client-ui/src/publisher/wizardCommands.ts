@@ -75,14 +75,6 @@ export function classifyPublisherError(e: unknown): PublisherErrorCode {
     return null;
 }
 
-/** Strip the `CODE: ` prefix so the UI can show just the human tail. */
-export function publisherErrorText(e: unknown): string {
-    const msg =
-        typeof e === 'string' ? e : e instanceof Error ? e.message : String(e ?? '');
-    const code = classifyPublisherError(e);
-    return code ? msg.slice(code.length + 2) : msg;
-}
-
 // ---- Types mirrored from Rust ----
 
 /**
@@ -703,9 +695,3 @@ export const onProvisionEvent = (cb: (ev: ProgressEvent) => void): Promise<Unlis
 
 export const onSignEvent = (cb: (ev: ProgressEvent) => void): Promise<UnlistenFn> =>
     listen<ProgressEvent>('wizard://sign-event', (e) => cb(e.payload));
-
-export const onQrFrame = (cb: (frame: FountainFrame) => void): Promise<UnlistenFn> =>
-    listen<FountainFrame>('wizard://qr-frame', (e) => cb(e.payload));
-
-export const onRotateEvent = (cb: (ev: ProgressEvent) => void): Promise<UnlistenFn> =>
-    listen<ProgressEvent>('wizard://rotate-event', (e) => cb(e.payload));

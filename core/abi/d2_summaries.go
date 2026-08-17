@@ -217,17 +217,6 @@ type throughputCounters struct {
 
 var globalThroughput = &throughputCounters{windowStart: time.Now()}
 
-// RecordThroughput is a hook the tunnel layer can call to feed
-// up/down byte counters. It is safe to call from any goroutine. If the
-// tunnel isn't wired (current state in many builds), the snapshot
-// returns zeros, which is the correct disconnected-state value.
-func RecordThroughput(upDelta, downDelta int64) {
-	globalThroughput.mu.Lock()
-	defer globalThroughput.mu.Unlock()
-	globalThroughput.upBytes += upDelta
-	globalThroughput.downBytes += downDelta
-}
-
 // ThroughputSnapshot returns up_bps, down_bps and window_ms. After
 // reading, the counters are reset so the next call covers a fresh
 // window — caller must poll at the rate it wants.

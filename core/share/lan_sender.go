@@ -1,7 +1,6 @@
 package share
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -284,13 +283,4 @@ func portFromURL(u string) int {
 	}
 	p, _ := strconv.Atoi(u[idx+1 : idx+1+end])
 	return p
-}
-
-// CtxDeadline returns a context with the supplied per-request deadline.
-// Used by the receiver to bound how long a single GET may take.
-func CtxDeadline(parent context.Context, ms int) (context.Context, context.CancelFunc) {
-	if ms <= 0 {
-		ms = 15000
-	}
-	return context.WithTimeout(parent, time.Duration(ms)*time.Millisecond)
 }

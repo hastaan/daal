@@ -8,7 +8,6 @@ import (
 	"crypto/ed25519"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"daal/core/routestore"
@@ -70,42 +69,6 @@ func FirstSeen(s *routestore.Store, pub ed25519.PublicKey, displayName string,
 	return s.AppendTrustAudit(id, string(from), string(to), "first-seen accepted", now)
 }
 
-// AcceptRotation records a successfully verified rotation chain. The new
-// publisher is pinned with the same trust level as the old publisher; the
-// old publisher's row is updated to key_status=rotated.
-func AcceptRotation(s *routestore.Store, oldPub, newPub ed25519.PublicKey,
-	displayName string, now time.Time) error {
-	oldID := fingerprintHex(oldPub)
-	newID := fingerprintHex(newPub)
-	if oldID == newID {
-		return errors.New("trust: rotation chain has identical keys")
-	}
-	old, err := s.GetPublisher(oldID)
-	if err != nil {
-		return fmt.Errorf("trust: old publisher unknown: %w", err)
-	}
-	old.KeyStatus = "rotated"
-	if err := s.UpsertPublisher(old); err != nil {
-		return err
-	}
-	bucket := routestore.HourBucket(now)
-	rotation := append([]string{oldID}, old.RotationChain...)
-	if err := s.UpsertPublisher(routestore.PublisherRow{
-		PublisherID:       newID,
-		DisplayName:       displayName,
-		TrustLevel:        old.TrustLevel,
-		FirstSeen:         bucket,
-		LastSeenBundle:    bucket,
-		KeyStatus:         "active",
-		RotationChain:     rotation,
-		RevocationSources: []string{},
-	}); err != nil {
-		return err
-	}
-	return s.AppendTrustAudit(newID, string(StateUnknown), State(old.TrustLevel).String(),
-		"rotation accepted from "+oldID, now)
-}
-
 // MarkRevoked marks a publisher as revoked and revokes all of its routes.
 func MarkRevoked(s *routestore.Store, fingerprint, reason, source string, now time.Time) error {
 	row, err := s.GetPublisher(fingerprint)
@@ -133,15 +96,6 @@ func MarkRevoked(s *routestore.Store, fingerprint, reason, source string, now ti
 		return err
 	}
 	return s.MarkPublisherRoutesRevoked(fingerprint)
-}
-
-// IsRevoked is a fast-path predicate.
-func IsRevoked(s *routestore.Store, fingerprint string) bool {
-	p, err := LookupPin(s, fingerprint)
-	if err != nil {
-		return false
-	}
-	return p.State == StateRevoked
 }
 
 func (s State) String() string { return string(s) }

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Phase 1.5B.** Implemented in `client-desktop/bundle-rs/`. Pure Rust,
+**Phase 1.5B.** Implemented in `client-shell/tauri/bundle-rs/`. Pure Rust,
 verify-only. Forbids `unsafe_code`. No file I/O, no network, no
 logging.
 
@@ -83,7 +83,7 @@ matches the Go-supplied oracle for every fixture. Fixtures cover:
 - tampered signed revocation
 
 CI runs both the Go test suite and the Rust parity suite. A new
-fixture lands in `client-desktop/bundle-rs/tests/fixtures/` (and the
+fixture lands in `client-shell/tauri/bundle-rs/tests/fixtures/` (and the
 generator that produces it lives at
 `bundle/go/cmd/bundle-rs-fixtures`) when either side discovers an
 edge case.

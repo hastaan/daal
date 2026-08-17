@@ -43,6 +43,12 @@ type Scheduler struct {
 	stopped bool
 	cancel  context.CancelFunc
 
+	// wg tracks the goroutine spawned by Start so that Stop can join
+	// it. Joining is what gives callers a happens-before edge over
+	// everything the background Tick wrote; without it, reading any
+	// state the executor touched after Stop() returns is a data race.
+	wg sync.WaitGroup
+
 	// observability
 	lastTick   time.Time
 	tickCount  int64
@@ -96,7 +102,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 	every := s.tickEvery
 	s.mu.Unlock()
 
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
@@ -110,15 +118,22 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}()
 }
 
-// Stop cancels the background goroutine if Start was called. Idempotent.
+// Stop cancels the background goroutine if Start was called, then waits
+// for it to exit. Idempotent. On return, everything the background Tick
+// observed or wrote is safely visible to the caller.
+//
+// The mutex must be released before the join: Tick takes s.mu, so
+// waiting under the lock would deadlock against an in-flight tick.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
 	}
 	s.stopped = true
+	s.mu.Unlock()
+
+	s.wg.Wait()
 }
 
 // Tick computes the due list at `now` and executes each action through
@@ -210,14 +225,4 @@ func (s *Scheduler) StatusJSON() ([]byte, error) {
 		})
 	}
 	return json.Marshal(out)
-}
-
-// LastDue returns the most recent due-list, for tests that want to
-// inspect what Tick(now) saw.
-func (s *Scheduler) LastDue() []Action {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Action, len(s.dueLastRun))
-	copy(out, s.dueLastRun)
-	return out
 }

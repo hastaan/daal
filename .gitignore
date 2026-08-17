@@ -75,7 +75,10 @@ publisher/deploy/libdaal_deploy.so
 tools/vendor/
 
 # Desktop package staging: copied in by ./daal build before Tauri build.
-client-desktop/tauri/src-tauri/resources/libdaalcore.*
+# NOTE: this rule read `client-desktop/` until 2026-08-17. That tree has
+# never existed in this repo (`git log --all -- client-desktop` is empty),
+# so the rule matched nothing and the 16 MB engine ended up tracked.
+client-shell/tauri/src-tauri/resources/libdaalcore.*
 
 # FRP-7 pilot artefacts: filled evidence templates, signed consent
 # forms, and any private aggregate roll-ups. Templates committed;
@@ -99,3 +102,28 @@ client-shell/tauri/src-tauri/icons/Square*.png
 client-shell/tauri/src-tauri/icons/StoreLogo.png
 client-shell/tauri/src-tauri/icons/64x64.png
 client-shell/tauri/src-tauri/icons/ios/
+
+# Go build outputs. `go build ./<single-main-pkg>` drops a binary into the
+# module root (or CWD). Nothing consumes these — ./daal and appveyor.yml
+# both compile from source into build/. Four were committed by accident;
+# two of those are pre-rename `hydra` fossils that no longer correspond to
+# any module path in this repo.
+bundle/go/bundle-rs-fixtures
+bundle/go/bundle-subkey-sample
+bundle/go/daal-publish
+bundle/go/verifysbp
+core/genembedded
+core/explanation-fixtures
+publisher/genregistry
+publisher/relaypack-fixtures
+cmd/daal-core/daal-core
+cmd/daal-gate-eval/daal-gate-eval
+cmd/daal-ios-smoke/daal-ios-smoke
+cmd/daal-soak-engine/daal-soak-engine
+cmd/daal-soak-engine-android/daal-soak-engine-android
+cmd/daal-soak-engine-ios/daal-soak-engine-ios
+test-rigs/distribution-failure/soak-driver/soak-driver
+
+# AppVeyor after_build stages the renamed installers here
+# (appveyor.yml:282-296, :354).
+release-assets/

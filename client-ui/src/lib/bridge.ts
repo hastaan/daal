@@ -321,38 +321,6 @@ export interface RecipientSessionStatus {
     verdict?: unknown;
 }
 
-export async function recipientQrSessionNew(): Promise<string> {
-    return invoke<string>('recipient_qr_session_new');
-}
-
-export async function recipientQrFeedFrame(
-    sessionId: string,
-    index: number,
-    totalFrames: number,
-    dataB64: string,
-): Promise<RecipientSessionStatus> {
-    return invoke<RecipientSessionStatus>('recipient_qr_feed_frame', {
-        sessionId,
-        index,
-        totalFrames,
-        dataB64,
-    });
-}
-
-export async function recipientQrStatus(sessionId: string): Promise<RecipientSessionStatus> {
-    return invoke<RecipientSessionStatus>('recipient_qr_status', { sessionId });
-}
-
-export async function recipientQrCancel(sessionId: string): Promise<void> {
-    return invoke<void>('recipient_qr_cancel', { sessionId });
-}
-
-/** Finalize the session and return the importer verdict produced by
- *  the core fountain decoder. */
-export async function recipientQrFinalize(sessionId: string): Promise<string> {
-    return invoke<string>('recipient_qr_finalize', { sessionId });
-}
-
 // ---------------------------------------------------------------------
 // D-2.1 — display-summary surface
 // ---------------------------------------------------------------------

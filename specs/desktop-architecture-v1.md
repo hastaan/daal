@@ -2,7 +2,7 @@
 
 ## Status
 
-**Phase 1.5B.** Implemented in `client-desktop/`. Linux + Windows are
+**Phase 1.5B.** Implemented in `client-shell/tauri/`. Linux + Windows are
 shipping targets; macOS is a CI-matrix entry only.
 
 ## Process model
@@ -81,7 +81,7 @@ restart Daal."* and disables Connect.
 
 - The GUI emits no analytics. The frontend imports zero third-party
   SDKs that could phone home. CI tests this by name-grep against
-  `client-desktop/` (see `core/opsec_test.go::TestNoTelemetryInDesktop`).
+  `client-shell/tauri/` (see `core/opsec_test.go::TestNoTelemetryInDesktop`).
 - The Rust supervisor logs panics to a local file the user can review;
   it does not upload anything.
 - sing-box stderr goes to `/dev/null`; if the user wants engine logs

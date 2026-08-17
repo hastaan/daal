@@ -234,6 +234,8 @@
   "settings.custody.event.locked": "Custody locked",
   "settings.custody.event.unlocked": "Custody unlocked",
   "settings.custody.event.panic_wipe": "Panic wipe",
+  "settings.custody.event.migrated": "Keys migrated",
+  "settings.custody.event.recovery_exported": "Recovery key exported",
   "subs.section_title": "Subscriptions",
   "subs.empty.title": "No subscriptions yet",
   "subs.empty.help": "Paste a subscription URL on the Network page to add one. They refresh on their own.",

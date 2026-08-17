@@ -1,7 +1,6 @@
 package budget
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
@@ -87,7 +86,3 @@ func (r *RoutestoreStore) EnumerateBudgets() ([]Row, error) {
 	}
 	return out, nil
 }
-
-// formatBytes is a tiny helper for diagnostics — kept here to keep the
-// routestore.Store wrapper and its test in one file.
-func formatBytes(n uint64) string { return strconv.FormatUint(n, 10) }

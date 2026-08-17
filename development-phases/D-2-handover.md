@@ -9,10 +9,10 @@ the no-version-bump revision (`D-2-gui-rebuild-v2.md`). D-2 is an
 
 - [x] `VERSION` is still `0.1.0`.
 - [x] No new git tags. `git tag -l` returns only `v0.1.0` from D-1.
-- [x] No new commits on the public-repo `main` branch. The D-2
-      working tree lives uncommitted on the dev workstation; once
-      the dev pushes, the destination is the **private**
-      `d2-gui` branch / private mirror, not `hastaan/daal`.
+- [x] No new commits on the public-repo `main` branch *(true when
+      written; **no longer true** — D-2 was subsequently committed and
+      pushed to `main` on `hastaan/daal`, which is where it lives
+      today. The private-`d2-gui`-branch plan was not followed.)*
 - [x] `tauri.conf.json` `version` and Android `versionName` are
       still `0.1.0`.
 - [x] iOS `EngineBridge.kRequiredVersionPrefix` updated from
@@ -186,7 +186,7 @@ follow existing patterns in the tree.
 | 7.4 Add Route / Add Source + Trust prompt | **In place** on desktop; **scaffolded** on Android (existing `AddRouteScreen` carried; cyan-accent shell is the only D-2 change here). Deep-link receiver wired in the Android manifest. |
 | 7.5 Status | **In place** on desktop; **scaffolded** on Android (Status placeholder); **complete** on iOS (Status tab carries the existing budget table). |
 | 7.6 Settings 8 groups | **In place** on desktop. Android settings expose Advanced + About; the remaining 6 groups port one-to-one in a follow-up commit since the engine-side toggles already exist. iOS settings cover Network / Advanced / About. |
-| 7.7 Publisher | **In place** on desktop (cyan-accent wrapper around the existing `WizardShell`). Android & iOS Publisher tabs render the help copy and a hand-off slot; the existing 7-screen wizard ports as-is in the implementation phase. |
+| 7.7 Publisher | **In place** on desktop (cyan-accent wrapper around the existing `WizardShell`). Android & iOS Publisher tabs render the help copy and a hand-off slot; the wizard ports as-is in the implementation phase. *(It shipped as a **3-screen** wizard in `d80c638`, not 7.)* |
 | 7.8 Tray + desktop background | **Spec'd** in `docs/d-2-desktop-tray-and-tunnel-wiring-v1.md`. Engineering execution lands during the implementation phase to avoid touching the v0.1.0 Rust desktop core. |
 | 7.9 Repo discipline | **Verified.** `VERSION` is `0.1.0`; no new tags; no commits to public-repo `main`. |
 
@@ -213,18 +213,21 @@ follow existing patterns in the tree.
 - Landing site (D-3).
 - `v0.2.0` tag.
 - Engine identifier rename.
-- Publisher-dashboard operator-tooling redesign (existing 7-screen
-  wizard ports as-is; cosmetic-only).
+- Publisher-dashboard operator-tooling redesign (wizard ports as-is;
+  cosmetic-only). *(Shipped as a **3-screen** wizard in `d80c638`.)*
 
 ## Verification commands
 
+*(Paths updated 2026-08-17: `/home/daal` does not exist on any current
+machine, and there is no `client-desktop/` tree. Run these from the repo
+root.)*
+
 ```sh
-cat /home/daal/VERSION                       # → 0.1.0
-git -C /home/daal tag -l                     # → only v0.1.0
-git -C /home/daal log --oneline -3           # → unchanged from D-1
-/home/daal/tools/check-tokens.sh             # → OK
-/home/daal/tools/check-hardcoded-strings.sh  # → OK
-/home/daal/tools/check-diagnostics-redaction.sh  # → OK
-node /home/daal/tools/check-onboarding-90s.mjs   # → OK (synthetic)
-cd /home/daal/client-desktop/tauri && ./node_modules/.bin/tsc --noEmit   # → OK
+cat VERSION                                  # → 0.1.0
+git tag -l                                   # → v0.1.0, relay-v1.5.0, relay-v1.5.0-mirror
+tools/check-tokens.sh                        # → OK
+tools/check-hardcoded-strings.sh             # → needs ripgrep installed; exits 2 without it
+tools/check-diagnostics-redaction.sh         # → OK
+node tools/check-onboarding-90s.mjs          # → OK (synthetic)
+cd client-ui && npx tsc --noEmit             # → OK
 ```

@@ -400,5 +400,11 @@
     "wiz.build.resume.title": "Ready to create your server",
     "wiz.build.resume.body": "Picking up where you left off. The next step rents a server on your cloud account and starts billing. If you meant to reuse a server you already own, review the plan first — that choice wasn't saved.",
     "wiz.build.resume.start": "Create the server",
-    "wiz.build.resume.review": "Review the plan"
+    "wiz.build.resume.review": "Review the plan",
+    "vault.title": "Vault locked",
+    "vault.prompt": "Enter your PIN to unlock.",
+    "vault.placeholder": "PIN",
+    "vault.unlock": "Unlock",
+    "vault.wrong_pin": "Wrong PIN",
+    "routes.budget.title": "Data cap"
 }

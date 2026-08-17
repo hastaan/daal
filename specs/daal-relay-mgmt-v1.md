@@ -33,7 +33,7 @@ where:
 
 * `nonce` is 16 random bytes hex-encoded (32 hex chars). The on-box service does NOT track seen nonces — replay protection comes from the timestamp window plus op-binding.
 * `ts` is the Helper's clock as seconds-since-Unix-epoch.
-* `op` is one of `rotate-credentials`, `rotate-tls`, `users-provision`, `users-revoke`, or `users-list` (the last three added at FRP-14). The on-box service rejects any token whose `op` does not match the URL path.
+* `op` is one of `rotate-credentials`, `rotate-tls`, `users-provision`, `users-revoke`, `users-list` (these three added at FRP-14), or `whoami` (§6) — **six** ops in total, matching `opFromPath` at `cmd/daal-relay-mgmt/main.go:258-272`. The on-box service rejects any token whose `op` does not match the URL path.
 * `<base64-sig>` is the standard-encoding base64 of `Ed25519.Sign(privKey, "<nonce>:<ts>:<op>")`, i.e., the signature covers the first three colon-separated fields verbatim.
 
 The `privKey` is the Helper's per-deploy publisher Ed25519 private key. Its public half is written to `/etc/daal/mgmt/pubkey` by cloud-init at first boot (hex-encoded, 64 chars) so the on-box service can verify tokens without ever holding the private half.
@@ -133,7 +133,7 @@ Box-side `ufw` does **not** open the mgmt port. FRP-10 invariant 18 is structura
 
 ## 7. What this spec does NOT cover
 
-* **Rotation orchestration above the in-box service.** The wizard's mode-aware rotation copy, audit log, and history table (`signed_sbps.rotation_kind`) live in `client-desktop/daal-wizard` and are documented under `specs/relaypack-v1.md` §rotation.
+* **Rotation orchestration above the in-box service.** The wizard's mode-aware rotation copy, audit log, and history table (`signed_sbps.rotation_kind`) live in `client-shell/tauri/daal-wizard` and are documented under `specs/relaypack-v1.md` §rotation.
 * **Provider-firewall rule shapes.** Each `Provider` adapter implements `SetEphemeralFirewallRule` against its native API; the contract is `publisher/deploy/provider/provider.go::Provider`.
 * **The Android wizard.** Per FRP-10 invariant 30 the Android wizard is provision-only and never calls this service. See `specs/android-client-v1.md` for the Android boundary.
 
@@ -141,7 +141,7 @@ Box-side `ufw` does **not** open the mgmt port. FRP-10 invariant 18 is structura
 
 | File | Purpose |
 |---|---|
-| `cmd/daal-relay-mgmt/main_test.go` | 11 baseline + ~10 FRP-14 tests + the `/whoami` set, pinning the wire format, the seven-route invariant, the Ed25519 token shape (op-binding for all 5 ops + timestamp window), the self-signed cert fingerprint stability across restarts, the surgical sing-box JSON rewriters (rotate + per-user paths), and the per-recipient isolation invariants |
+| `cmd/daal-relay-mgmt/main_test.go` | 11 baseline + ~10 FRP-14 tests + the `/whoami` set, pinning the wire format, the seven-route invariant, the Ed25519 token shape (op-binding for all 6 ops + timestamp window), the self-signed cert fingerprint stability across restarts, the surgical sing-box JSON rewriters (rotate + per-user paths), and the per-recipient isolation invariants |
 | `publisher/deploy/mgmt/client_test.go` | 12 tests pinning the Helper-side TLS-pin (wrong fingerprint = error), the token mint/parse round-trip, the ephemeral firewall open/close ordering, and the V1.5-fallback-on-zero-port path |
 | `publisher/deploy/cloudinit/template_test.go` | 6 tests pinning the V2 cloud-init template's mgmt-unit installation, port-input determinism, and the no-cloud-provider-token-in-template invariant |
 

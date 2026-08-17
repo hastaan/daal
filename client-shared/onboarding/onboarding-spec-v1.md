@@ -93,15 +93,22 @@ stateDiagram-v2
 
 ## Per-platform mapping
 
+There is exactly **one** renderer, shared by every platform.
+
 | Platform | Renderer |
 |---|---|
-| Tauri / React | `client-desktop/tauri/src/onboarding/Onboarding.tsx` (router stack rendered before the main app on first run). |
-| Android Compose | `client-android/app/src/main/java/ai/daal/app/ui/onboarding/OnboardingNavHost.kt` (NavHost rendered before the main NavHost on first launch). |
-| iOS SwiftUI | `client-ios/DaalApp/Sources/Onboarding/OnboardingStack.swift` (full-screen `NavigationStack` preceding the `TabView`). |
+| Desktop + Android (Tauri / React) | `client-ui/src/onboarding/Onboarding.tsx` — rendered before the main app on first run. |
+| iOS | none — there is no iOS app shell yet. |
 
-Each renderer exposes a single `OnboardingComplete` callback wired
-to the host so the host can swap to the main UI without the
-state-machine library knowing about hosts.
+It exposes a single `OnboardingComplete` callback wired to the host so
+the host can swap to the main UI without the state-machine library
+knowing about hosts.
+
+*(Until 2026-08-17 this table listed three per-platform renderers,
+including a Compose `OnboardingNavHost.kt` and a SwiftUI
+`OnboardingStack.swift`. Neither ever existed in this repo, and the
+React path was given under a `client-desktop/` tree that has never
+existed either.)*
 
 ## i18n keys
 

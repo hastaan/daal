@@ -22,7 +22,10 @@ most user-visible.
 ## Workstream E — sharing model & publisher (user-reported 2026-08-15)  ← ACTIVE
 Four problems the user hit on-device:
 
-- [~] **E1. Plain `.sbp` didn't connect.** Root cause: `.sbp` shipped metadata-only
+- [x] **E1. Plain `.sbp` didn't connect.** *(Closed 2026-08-17: the REMAINING
+  item below — wiring it into the phone publisher wizard — landed in `d06be4c`
+  (wizard's final step distributes the CONNECTABLE shared pack) and was
+  superseded by `d80c638`.)* Root cause: `.sbp` shipped metadata-only
   profiles; connectable outbounds were injected only in the per-recipient
   `.sbpx` path. FIXED at the pipeline (commit eb42f28, `users-pack-sbp`): a
   plain `.sbp` is now rewritten with ONE shared box user's creds (`r0`) so ANY
@@ -30,7 +33,12 @@ Four problems the user hit on-device:
   the relay from a shared `.sbp`.** REMAINING: wire it into the phone publisher
   wizard so provisioning auto-produces the shared `.sbp` (needs Rust +
   libdaal_deploy.so rebuild).
-- [~] **E2. Publisher simplification.** DONE (core, commit 0c1b437): a "Share
+- [x] **E2. Publisher simplification.** *(Closed 2026-08-17 in `d80c638`: all
+  three REMAINING sub-items are done — the PIN systems were not "unified" but
+  ELIMINATED (Device Custody v1; `pin_lockout.rs` deleted), helper_ip is
+  auto-detected by the new `client-ui/src/publisher/helperIp.ts` (221 lines),
+  and the roster UI is de-duplicated into `RelayListPage.tsx`.)*
+  DONE (core, commit 0c1b437): a "Share
   your relay" card produces one shared `.sbp` (mints `r0`, rewrites profiles)
   and opens the share sheet — the common case no longer needs per-recipient
   provisioning. Also fixed `tls_cert_pem` being dropped on deserialize (naive
@@ -42,6 +50,8 @@ Four problems the user hit on-device:
   5a8b063): real daal eagle on dark teal + adaptive icon; `make-android-icon-
   source.py` + `patch-android-icons.sh` for reproducibility. Ships next build.
 - [x] **E4. Delete imported routes/publishers.** DONE (commit 05d0e30):
+  *(Related, and now also done: real teardown — "delete the server too" — plus
+  provision rollback landed in `58f3fb8`.)*
   routestore DeleteRoute/DeletePublisher (+tests) → engine_route_delete /
   engine_publisher_delete ABI → desktop-core FFI + Tauri commands → a
   "Remove this connection" action on the publisher card (confirm + disconnect
@@ -63,15 +73,16 @@ disconnect obvious.
 - [x] **A4. Export diagnostics + swallowed errors.** DONE (commit b4eb23f).
   Dropped the fake Save dialog (fs plugin unwired), copy to clipboard with a
   visible "copied"/"failed" notice; surface mode-change failures too.
-- [ ] **A5. Per-route connected state + one-tap Disconnect.** Network tab shows
-  "Connect" on every route even when one is active; no disconnect there.
-  Add an active/connected indicator per route and an inline Disconnect.
-- [ ] **A6. Unify the two connect surfaces.** Connection tab ("Press to connect /
-  No route selected") vs Network tab per-route Connect are disjoint; the
-  Connection-tab "dropdown" chevron just navigates to Network. Make the active
-  route reflect across both, or collapse to one model.
-- [ ] **A7. Cosmetic.** Hardcoded non-i18n "Coming soon" (`publisher/PublisherWizard.tsx:1015,959`);
-  disabled QR-fountain placeholder (`:1710`).
+- [x] **A5. Per-route connected state + one-tap Disconnect.** DONE in `3fae4e5`:
+  `NetworkPage.tsx:67 activeRouteId` (fed by the 2 s connectionSummary poll),
+  `:114 onDisconnect`, rendered at `:240-241` and `:325`.
+- [~] **A6. Unify the two connect surfaces.** PARTIAL. The active route now
+  reflects across both — `NetworkPage.tsx:67` shares the same connectionSummary
+  poll, so the two surfaces no longer disagree about what is connected. The
+  second half is still open: two connect surfaces still exist and have not been
+  collapsed to one model.
+- [x] **A7. Cosmetic.** DONE — zero `Coming soon` and zero `fountain` hits
+  remain anywhere in `client-ui/src/publisher/*.tsx` (verified 2026-08-17).
 
 ## Workstream B — Smart routing (root cause behind fake health)
 - [ ] **B1.** The FRP-3 selection engine (`core/internal/selection/*`: `Decide`
@@ -94,11 +105,15 @@ disconnect obvious.
   (handover:83,134). Wire them beside `build-engine-android.sh`.
 - [ ] **C3.** Rebuild + ship `libdaal_deploy.so` from current Tier-2 code in the
   release APK (handover:237). (Done ad-hoc on-device 2026-08-15; not in build.)
-- [ ] **C4.** Push branch `fix/android-dataplane-exclude-self`; tag bump to
-  v0.2.0-dev once the device exit gate is fully green (doc:310).
+- [~] **C4.** Branch `fix/android-dataplane-exclude-self` is pushed and **fully
+  merged into `main`** on both sides — that half is done and the branch is safe
+  to delete. The tag bump to v0.2.0-dev is **still outstanding**: no tag is
+  reachable from HEAD at all (`git describe --tags --always` returns a bare
+  SHA), and the local `v0.1.0` tag has diverged from origin's.
 
 ## Workstream D — Desktop data plane
-- [ ] **D1.** Desktop still links `engine.NewStub()` (`core/abi/abi.go:213`, no
+- [ ] **D1.** Desktop still links `engine.NewStub()` (`core/abi/abi.go:223`,
+  `newEngineDriver()`; no
   `singbox` tag) — no real data plane. Flip desktop to the in-process sing-box
   driver; retire `daal-desktop-core/src/singbox.rs` sidecar + Clash REST path
   (handover:38).
@@ -117,8 +132,9 @@ disconnect obvious.
   GH-Pages Put) stubbed to filesystem; no real origin publish path.
 - [ ] `daal-desktop-core/src/commands.rs:54` — recovery-phrase preview uses
   placeholder wordlists.
-- [ ] Operator resume UX (handover:136) — no inline PIN-unlock on resume; wizard
-  `error` state persists across step changes (stale "invalid PIN").
+- [x] Operator resume UX (handover:136) — **moot.** There is no PIN anywhere in
+  the wizard flow any more (Device Custody v1, `d80c638`), so "no inline
+  PIN-unlock on resume" and the stale "invalid PIN" error state cannot occur.
 
 ## Trust / labels (FRP-11) — stubbed
 - [ ] `contract/D2Contract.ts:356` `cellLabelGet/Set` in-memory stubs (engine

@@ -6,12 +6,25 @@
 //	tag = "vless-in"     → VLESS-Reality   (users[] + reality.short_id[])
 //	tag = "hy2-in"       → Hysteria2       (users[])
 //	tag = "naive-in"     → Naive           (users[])
-//	tag = "ws-r<id>"     → per-user WS-TLS (entire inbound block per user)
+//	tag = "ws-in"        → VLESS-over-WS   (users[])
 //
-// On `addUserToSingbox`, the rewriter appends the new user row to
-// the first three inbounds (creating the inbound if absent — this
-// covers the empty-users[] first-boot case) and adds a new ws-r<id>
-// inbound. On `removeUserFromSingbox` the inverse runs, idempotently.
+// On `addUserToSingbox`, the rewriter appends the new user row to all
+// four inbounds (creating the inbound if absent — this covers the
+// empty-users[] first-boot case). On `removeUserFromSingbox` the
+// inverse runs, idempotently.
+//
+// SHARED WS PATH — read before changing this. Every recipient shares
+// ONE ws-in inbound and therefore ONE `transport.path` (see :55-68 and
+// appendWSUser). The earlier design gave each recipient its own
+// `ws-r<id>` inbound; that could not work, because a single port cannot
+// host per-user WS inbounds — the second recipient collided on port
+// 8445 and crashed sing-box.
+//
+// The privacy cost is real and deliberate: because the path is shared,
+// one leaked pack discloses the WS path that EVERY recipient on this
+// relay uses. Revoking a recipient removes their user row, not the
+// path. Anything that reasons about per-recipient WS isolation is
+// wrong; only the credentials are per-recipient.
 //
 // We work over a generic map[string]any decode of the config so
 // non-Daal sections (route tables, DNS, log levels) survive

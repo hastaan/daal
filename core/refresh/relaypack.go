@@ -46,7 +46,6 @@ import (
 	"daal/bundle-go/bundle"
 	"daal/bundle-go/importer"
 	"daal/core/bootstrap"
-	"daal/core/internal/selection"
 )
 
 // ErrFreshnessExpired is returned when the freshness document's
@@ -132,36 +131,6 @@ func FetchAndVerifyFreshness(
 	}, nil
 }
 
-// FetchAndApplyFreshness fetches the signed freshness document, and
-// when it points at a different signed bundle SHA, fetches
-// current_signed_url and applies it through ApplyRefresh. This is
-// the no-QR public-surface rotation path FRP-9 soaks.
-func FetchAndApplyFreshness(
-	ctx context.Context,
-	freshnessURL string,
-	publisherRootPub ed25519.PublicKey,
-	currentBundleSHA256 string,
-	dialer bootstrap.Dialer,
-	timeout time.Duration,
-	now time.Time,
-	st importer.State,
-	wordlists bundle.Wordlists,
-) (*FreshnessOutcome, importer.Verdict, error) {
-	out, err := FetchAndVerifyFreshness(ctx, freshnessURL, publisherRootPub, currentBundleSHA256, dialer, timeout, now)
-	if err != nil {
-		return nil, importer.Verdict{}, err
-	}
-	if !out.ChangedFromCurrent {
-		return out, importer.Verdict{Kind: importer.VerdictImported, Reason: "freshness_unchanged"}, nil
-	}
-	body, err := bootstrap.FetchRaw(ctx, out.Document.CurrentSignedURL, dialer, timeout)
-	if err != nil {
-		return out, importer.Verdict{}, fmt.Errorf("freshness bundle fetch: %w", err)
-	}
-	verdict, err := ApplyRefresh(body, out.Document, st, wordlists, now)
-	return out, verdict, err
-}
-
 // ApplyRefresh applies the supplied bundle bytes via the importer's
 // ApplyVerifiedRefresh entry point, threading the freshness
 // document's CurrentBundleSHA256 as the cross-check value the
@@ -183,14 +152,6 @@ func ApplyRefresh(
 			errors.New("freshness document required")
 	}
 	return importer.ApplyVerifiedRefresh(bundleBody, doc.CurrentBundleSHA256, st, wordlists, now)
-}
-
-// ShouldFetch is a convenience wrapper for the selection-package
-// pure trigger fn. The host pipeline calls it in a loop; the
-// adapter re-uses selection.ShouldAttemptRefresh so the
-// trigger-policy contract lives in exactly one place.
-func ShouldFetch(p selection.FreshnessPolicy, s selection.FreshnessState, now time.Time) bool {
-	return selection.ShouldAttemptRefresh(p, s, now)
 }
 
 // verifyFreshnessDoc parses + verifies the document. Sub-key-aware:

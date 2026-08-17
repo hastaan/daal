@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions in this file refer to the user-visible app version recorded in
 `VERSION`. The engine ABI version (`daal-core 0.9.0+v3-share`), SBP
-spec version (`4`), and ABI symbol count (`52`) are independent — see
+spec version (`4`), and ABI symbol count (`58`) are independent — see
 `docs/build-and-release.md` for the versioning matrix.
 
 ## [0.1.0] — unreleased
@@ -33,7 +33,12 @@ APK and an iOS .ipa, with no separate native UI codebase.
   router (Desktop / Tablet / Mobile), 27 design-system primitives in
   `client-ui/src/design/primitives/`, oklch token system in
   `tokens.css`, and screen-by-screen clarity passes for Connection,
-  Routes, Sources, Diagnostics, Settings, Publisher, and Onboarding.
+  Network, Status, Settings, Publisher, and Onboarding. (The shipped
+  nav is 5 sections — Connection / Network / Status / Publisher /
+  Settings, per `shell/TabletShell.tsx:33-52`, Publisher being
+  opt-in. "Routes" became the Network page; "Sources" is not a screen
+  at all — it is the Subscriptions panel, and the user-facing label
+  reverted from "Sources" to "Subscriptions".)
 - Settings is one centred column with a sticky chip rail that jumps
   to grouped cards; all `<select>` controls are replaced by the
   `Segmented` primitive; About lives in a brand card with the
@@ -66,10 +71,10 @@ APK and an iOS .ipa, with no separate native UI codebase.
 
 ### Full plumbing pass
 
-- Every `engine_*` ABI export (55 release symbols) now reaches the
+- Every `engine_*` ABI export (58 release symbols) now reaches the
   React UI through a typed three-layer path:
   `Engine ABI → daal-desktop-core/{engine.rs,commands.rs} → #[tauri::command] → D2Contract → screen`.
-- 73 Tauri commands declared, registered, and invoked from the
+- 113 Tauri commands declared, registered, and invoked from the
   client — including `apply_cooldown`, `lifecycle_event`,
   `probe_udp/dns/tcp443`, `scheduler_status`, `stats_redacted`,
   `redistribute_route`, `set_route_budget`,
@@ -77,8 +82,10 @@ APK and an iOS .ipa, with no separate native UI codebase.
   `bootstrap_{install_seeds,refresh,status}`, `uri_detect`,
   `uri_import`, `loaded_wasm_modules`, `wasm_kill_switch_pubkey`,
   plus 22 `wizard_*` commands and 5 `recipient_qr_*` commands.
-- New UI surfaces: Routes page lists live routes with per-row
-  Connect / Cooldown / Data-cap / Redistribute actions; Diagnostics
+- New UI surfaces: the **Network** page lists live routes with per-row
+  Connect / Cooldown / Data-cap / Redistribute actions (it was called
+  "Routes" during the redesign; the shipped page is
+  `client-ui/src/d2pages/NetworkPage.tsx`); Diagnostics
   exposes a 6-tile dashboard with sparkline plus Network test,
   Scheduler, Stats (redacted), and Bootstrap accordions; Settings
   exposes auto-promotion / push rendezvous / experimental families /
@@ -101,13 +108,17 @@ APK and an iOS .ipa, with no separate native UI codebase.
 ### Internationalisation
 
 - Persian translations cover every reachable client surface —
-  Settings, Diagnostics, Connection, Routes, Sources, Publisher
-  wizard, and onboarding — with 370 keys per locale in
+  Settings, Status/Diagnostics, Connection, Network, Subscriptions,
+  Publisher wizard, and onboarding — with 408 keys per locale in
   `client-ui/src/i18n/{en,fa}.json`. Only 22 entries are
   deliberately identical across locales (brand names, protocol
   IDs, region slugs, EN: / FA: line prefixes).
-- `tools/check-hardcoded-strings.sh` runs in CI; the D-2 surfaces
-  report zero hard-coded user-visible strings.
+- `tools/check-hardcoded-strings.sh` reports zero hard-coded
+  user-visible strings on the D-2 surfaces. **It is not run by any
+  CI**: `appveyor.yml` is packaging-only and contains no test or gate
+  step, and there is no `.github/workflows/`. Run it by hand (it needs
+  ripgrep installed, and now exits 2 rather than passing silently if
+  ripgrep is missing).
 
 ### Brand
 

@@ -111,26 +111,3 @@ func ListUsersWithFW(ctx context.Context, prov provider.Provider, rec *provider.
 	}
 	return cli.ListUsers(ctx, rec, privKey)
 }
-
-// RotateTLSWithFW is the L2 equivalent of RotateCredentialsWithFW.
-func RotateTLSWithFW(ctx context.Context, prov provider.Provider, rec *provider.OperatorRecord, privKey ed25519.PrivateKey, callerIP string, profile TLSProfile) (*RotateTLSResp, error) {
-	if rec == nil {
-		return nil, errors.New("mgmt: nil OperatorRecord")
-	}
-	if err := provider.ValidateMgmtPort(rec.MgmtPort); err != nil {
-		return nil, fmt.Errorf("mgmt: OperatorRecord.MgmtPort invalid (V2 fast path not available; redeploy required): %w", err)
-	}
-	rule, err := prov.SetEphemeralFirewallRule(ctx, rec.ServerID, callerIP, rec.MgmtPort, EphemeralWindowSeconds)
-	if err != nil {
-		return nil, fmt.Errorf("mgmt: open ephemeral fw: %w", err)
-	}
-	defer func() {
-		_ = prov.RemoveEphemeralFirewallRule(ctx, rule)
-	}()
-
-	cli, err := NewClient(rec)
-	if err != nil {
-		return nil, err
-	}
-	return cli.RotateTLS(ctx, rec, privKey, profile)
-}

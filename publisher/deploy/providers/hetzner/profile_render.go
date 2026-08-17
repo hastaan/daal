@@ -61,7 +61,7 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 // every recipient uses) carrying empty users[]; cloud-init injects
 // a real REALITY private_key on first boot (see v2.yaml.tmpl) and
 // the on-box mgmt service appends per-recipient user rows via
-// /users/provision and a fresh ws-r<id> inbound per recipient.
+// /users/provision, including a row on the single shared ws-in inbound.
 //
 // The hy2-in inbound ships alongside it (hysteria2 starts fine with an
 // empty users[]). Unlike REALITY, it needs a real certificate: cloud-init
@@ -74,8 +74,8 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 // "missing users" if users[] is empty (protocol/naive/inbound.go), so it
 // can't exist until it has a user. The mgmt service creates it — with its
 // first recipient — in appendNaiveUser (8444/tcp), the same way it creates
-// the per-recipient ws-r<id> inbounds (8445/tcp). Ports come from
-// relayports (the canonical map).
+// the single shared ws-in inbound (8445/tcp) that ALL recipients use.
+// Ports come from relayports (the canonical map).
 func defaultSingBoxConfig(profileName string) string {
 	return `{
   "log": {"level": "info"},

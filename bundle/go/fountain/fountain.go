@@ -18,7 +18,6 @@ package fountain
 import (
 	"encoding/binary"
 	"errors"
-	"hash/crc32"
 	"math"
 	"math/rand"
 )
@@ -293,12 +292,4 @@ func xorInPlace(dst, src []byte) {
 	for i := 0; i < n; i++ {
 		dst[i] ^= src[i]
 	}
-}
-
-// FrameCRC32 returns a CRC32 over (seed||body); useful when QR codes can
-// arrive partially-corrupted but we want the decoder to discard them
-// rather than poison belief propagation. Caller wraps the frame with this
-// hash on the wire.
-func FrameCRC32(frame []byte) uint32 {
-	return crc32.ChecksumIEEE(frame[8:])
 }

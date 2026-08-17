@@ -1,6 +1,6 @@
 # Phase D-1 — Daal Public Release Repository
 
-**Status:** IN PROGRESS - `v0.1.0` release CI is the active gate.
+**Status:** **SHIPPED.** Handover: `development-phases/D-1-handover.md`. (The "`v0.1.0` release CI is the active gate" line is obsolete twice over: the rename landed, and there is no release CI — see `docs/build-and-release.md`.)
 **Maturity target:** first public Daal source snapshot.
 **Engine version target:** `daal-core 0.9.0+v3-share`.
 **ABI release surface target:** unchanged at 48 exported `engine_*`

@@ -72,14 +72,15 @@ via the mgmt API appends one row per transport family.
     },
     {
       "type": "vless",
-      "tag": "ws-r17",                  // per-recipient WS inbound
+      "tag": "ws-in",                   // ONE shared WS inbound, all recipients
       "listen": "0.0.0.0", "listen_port": 8445,
       "users": [
-        { "uuid": "<uuid>", "name": "r17" }
+        { "uuid": "<uuid>", "name": "r17" },
+        { "uuid": "<uuid>", "name": "r18" }   // …every recipient
       ],
       "transport": {
         "type": "ws",
-        "path": "/r17/<8-hex>"
+        "path": "/r<first>/<8-hex>"          // minted once, then reused
       },
       "tls": { "enabled": true, "server_name": "<sni>" }
     }
@@ -88,15 +89,31 @@ via the mgmt API appends one row per transport family.
 }
 ```
 
-### 2.1. Per-recipient WS inbound
+### 2.1. The shared WS inbound
 
-sing-box does not multiplex multiple WS paths on a single inbound's
-`transport.path`. We instead add **one inbound per recipient** for
-the WebSocket-TLS family, tagged `ws-r<id>`. All WS inbounds share
-listen port 8445 — sing-box routes by path, not by listen port — but
-each inbound owns exactly one `transport.path` and one user.
+**Amended 2026-08-17.** This section originally specified **one inbound
+per recipient**, tagged `ws-r<id>`, each owning exactly one
+`transport.path` and one user, all sharing listen port 8445 on the
+assumption that sing-box routes by path rather than by listen port.
 
-Bounded growth: §8 invariant.
+**That assumption was wrong and the design does not work.** Two inbounds
+cannot bind the same port; the second recipient collided on 8445 and
+crashed sing-box.
+
+The shipped design is **one shared `ws-in` inbound** for the whole
+server, with one `transport.path`, and every recipient appended as a row
+in its `users[]`. The path is minted from the first recipient and reused
+verbatim for every recipient thereafter
+(`cmd/daal-relay-mgmt/singbox_users.go:33` `tagWS = "ws-in"`, the reuse
+at `:59-68`, `appendWSUser` at `:363`).
+
+**Privacy cost — deliberate, and it is a real weakening.** Because the
+path is shared, a single leaked pack discloses the WS path that *every*
+recipient on that relay uses. Only the credentials (UUID, passwords)
+remain per-recipient; the WS path does not, and revoking a recipient
+does not rotate it. Any reasoning elsewhere in this spec that assumes
+per-recipient WS isolation is void. Rotating the shared path for
+everyone at once is the mitigation, and it is not implemented.
 
 ### 2.2. Other transports — shared inbound, append users
 
@@ -132,7 +149,10 @@ Side effects:
    * Reality short_id: 4 random bytes hex-encoded (8 chars).
    * Hy2 password: 16 random bytes base64-url (22 chars, no padding).
    * Naive password: same shape as Hy2.
-   * WS path: `/r<id>/<8 hex chars>`.
+   * WS path: `/r<id>/<8 hex chars>` — minted only for the FIRST
+     recipient on the server. Every later recipient reuses the existing
+     `ws-in` path (§2.1); the value is still returned in their creds
+     because the client needs it.
 2. Surgically rewrite `/etc/sing-box/config.json` per §2 above.
 3. Atomic file swap (`tmp file → rename`).
 4. `systemctl reload sing-box.service`.
@@ -164,9 +184,12 @@ Request body:
 ```
 
 Side effects (**hard revoke**):
-1. Remove the user from the four inbounds (`vless-in.users[]`,
-   `hy2-in.users[]`, `naive-in.users[]`, and the entire `ws-r<id>`
-   inbound block).
+1. Remove the user's row from the four inbounds' `users[]` arrays
+   (`vless-in`, `hy2-in`, `naive-in`, `ws-in`). Note this is a **user
+   removal, not an inbound removal** — `removeWSUser`
+   (`singbox_users.go:415`) drops the row; the shared `ws-in` inbound
+   itself disappears only when its last user is revoked. The shared WS
+   path is NOT rotated by a revoke (§2.1).
 2. Remove the recipient's `short_id` from the Reality array.
 3. Set the VLESS inbound's connection idle window to 1 s temporarily
    (a "drain" knob via sing-box config; restored after step 5).
@@ -218,7 +241,8 @@ the publisher app already has them in its own DB.
 `validOps` in `cmd/daal-relay-mgmt/main.go` extends to:
 ```go
 {"rotate-credentials", "rotate-tls",
- "users-provision", "users-revoke", "users-list"}
+ "users-provision", "users-revoke", "users-list",
+ "whoami"}
 ```
 
 The op string in the token MUST match the URL path. A token signed
@@ -361,7 +385,8 @@ UI then calls the platform share dispatcher.
    Pinned by `TestExactlyNRoutes` (n=7).
 2. **Per-recipient credentials are independent.** Adding or revoking
    recipient X never modifies the on-box credentials of recipient Y.
-   Pinned by `TestUsersProvisionIsolated` and `TestUsersRevokeIsolated`.
+   Pinned by `TestUsersProvision_Isolation` and
+   `TestUsersRevoke_DoesNotTouchOtherUsers`.
 3. **Recipient name is stable.** `r<recipient_id>` does not change
    over the lifetime of the recipient. Pinned by the DB schema (PK
    on `recipients.id` is autogenerated, never re-used).
@@ -369,25 +394,46 @@ UI then calls the platform share dispatcher.
    the FRP-14 integration soak (sets up two users, opens a long
    download via user A, revokes A, asserts the socket closes
    within 10 s).
-5. **Empty user table at first boot.** Pinned by
-   `TestRenderV2_EmptyUsers`.
+5. **Empty user table at first boot.** **UNPINNED** — this cited
+   `TestRenderV2_EmptyUsers`, which does not exist anywhere in the tree
+   (verified 2026-08-17). The behaviour is asserted indirectly by
+   `publisher/deploy/cloudinit/template_test.go`, but nothing pins this
+   invariant by name. Write the test or downgrade the invariant.
 6. **Per-recipient credentials never appear in clear in the inner
    `.sbp`'s manifest.** They appear only in the per-recipient
    `profiles/*.json` sing-box configs and the encrypted `.sbpx`
-   envelope. Pinned by `TestManifestNoCreds`.
-7. **WS-per-recipient inbound count cap.** Hard cap 128 inbounds per
-   server. Warning at 32. Pinned by
-   `TestUsersProvisionCapEnforced`.
+   envelope.
+
+   **UNPINNED, and partially superseded.** Two separate problems:
+
+   a. `TestManifestNoCreds` does not exist anywhere in the tree
+      (verified 2026-08-17). This invariant has never been pinned.
+
+   b. The invariant did not anticipate the **shared-pack** path, which
+      is now the default share flow: `publisher/deploy/cli/cli_users_pack.go`
+      builds a plaintext shared `.sbp` carrying `r0`'s live credentials
+      with no age envelope. That does not violate the letter of this
+      invariant (the credentials are in `profiles/*.json`, not the
+      manifest), but it inverts the threat model
+      `specs/sbpx-envelope-v1.md:16-31` states as the justification for
+      `.sbpx` existing at all. **The shared-`.sbp` model has no spec.**
+      Resolve that before treating this invariant as meaningful.
+7. **Recipient count cap.** Hard cap **128 recipients** per server
+   (`cmd/daal-relay-mgmt/users.go:35 MaxRecipientsPerServer`). Warning
+   at 32. This was written as a cap on *inbounds* when the design was
+   one WS inbound per recipient; there is exactly one WS inbound now
+   (§2.1), so it is and always was enforced as a recipient cap. Pinned
+   by `TestUsersProvision_CapEnforced`.
 
 ## 9. Test surface
 
 | File | Tests |
 |---|---|
-| `cmd/daal-relay-mgmt/main_test.go` | provision append, revoke remove, revoke kicks via wrapper, list, op-binding, exactly-6-routes, isolation, idempotency, 128-cap |
-| `cmd/daal-relay-mgmt/singbox_rewriter_test.go` | golden config diffs for VLESS append/remove, Hy2 append/remove, Naive append/remove, WS inbound add/remove |
+| `cmd/daal-relay-mgmt/main_test.go` | provision append, revoke remove, revoke kicks via wrapper, list, op-binding, `TestExactlyNRoutes` (n=**7**), isolation, idempotency, 128-cap |
+| `cmd/daal-relay-mgmt/singbox_users_shortid_test.go`, `singbox_users_tls_test.go` | golden config diffs for VLESS append/remove, Hy2 append/remove, Naive append/remove, shared `ws-in` user add/remove. *(There is no `singbox_rewriter_test.go`; that name was cited here and never existed.)* |
 | `publisher/deploy/mgmt/client_test.go` | new methods round-trip, ephemeral firewall ordering for users routes |
 | `publisher/deploy/cloudinit/template_test.go` | empty users[] at boot, kick-wrapper present, sing-box v1.10 pinned |
-| `client-shell/tauri/daal-wizard/src/recipient_db.rs` | insert/dedupe by address, FK cascade on operator delete, soft-revoke status |
+| `client-shell/tauri/daal-wizard/src/recipient_book.rs` | insert/dedupe by address, FK cascade on operator delete, soft-revoke status |
 | `client-shell/tauri/daal-wizard/src/commands.rs` | recipient_add success, dup-address handling, revoke, resend |
 
 ## 10. Carry-overs

@@ -15,12 +15,18 @@ Android `colors*.xml`, iOS `Colors.xcassets`) is **generated** from
 
 ## Generated outputs
 
+There is exactly **one** target.
+
 | Path | Generator |
 |---|---|
-| `client-desktop/tauri/src/styles.tokens.css` | `tools/gen-tokens.mjs --target=tauri` |
-| `client-android/app/src/main/res/values/colors.daal.xml` | `tools/gen-tokens.mjs --target=android-light` |
-| `client-android/app/src/main/res/values-night/colors.daal.xml` | `tools/gen-tokens.mjs --target=android-dark` |
-| `client-ios/DaalApp/Resources/Assets.xcassets/Colors.colorset/...` | `tools/gen-tokens.mjs --target=ios` |
+| `client-ui/src/styles.tokens.css` | `tools/gen-tokens.mjs --target=tauri` |
+
+The `android-light`, `android-dark` and `ios` targets documented here
+until 2026-08-17 **no longer exist** — running any of them prints
+`[tokens] unknown target: <name>` and exits 2. They were retired in the
+v0.2 unified-client move (`tools/gen-tokens.mjs:84-89`); the native
+Compose / SwiftUI trees they wrote into are gone, and Android now renders
+the same React UI through `client-ui/src/styles.tokens.css`.
 
 ## CI drift check
 

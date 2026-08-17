@@ -1,7 +1,11 @@
 import legacyEn from '../i18n/en.json';
 import legacyFa from '../i18n/fa.json';
-// Catalogs mirrored from client-shared/i18n/ via tools/sync-desktop-i18n.sh.
-// `npm run dev` and `npm run build` both invoke that script first.
+// Catalogs mirrored from client-shared/i18n/ via tools/sync-i18n.mjs.
+// Only `npm run build` invokes it (package.json "build"); `npm run dev`
+// is bare `vite` and does NOT sync — run the mjs by hand after editing a
+// shared catalog. Note that the legacy pair imported just above
+// (../i18n/{en,fa}.json) is NOT mirrored from anywhere; it is edited in
+// place.
 import desktopEn from '../i18n/d2/desktop.en.json';
 import desktopFa from '../i18n/d2/desktop.fa.json';
 import onboardingEn from '../i18n/d2/onboarding.en.json';

@@ -306,7 +306,10 @@ func TestUsersOps_TokenBinding(t *testing.T) {
 	body, _ := json.Marshal(provisionReq{Name: "r1"})
 	req, _ := http.NewRequest("POST", ts.URL+"/users/provision", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("cross-op request: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Errorf("cross-op token: got %d want 401", resp.StatusCode)

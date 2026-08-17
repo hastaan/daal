@@ -84,22 +84,6 @@ export interface RouteHealthDisplayRow {
   proven?: boolean;
 }
 
-export interface PublisherHandoffSummary {
-  publisherFingerprintHex: string;
-  fingerprintEN: string[];
-  fingerprintFA: string[];
-  visualDataUri: string;
-}
-
-export interface TrayState {
-  state: ConnState;
-  routeLabel: string;
-  upBytesPerSec: number;
-  downBytesPerSec: number;
-  modeLabel: string;
-  connectedSinceUnixMs?: number;
-}
-
 export interface ThroughputSnapshot {
   upBytesPerSec: number;
   downBytesPerSec: number;

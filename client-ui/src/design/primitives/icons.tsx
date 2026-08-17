@@ -61,22 +61,6 @@ export const PublisherIcon = (
     </svg>
 );
 
-export const PanicIcon = (
-    <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.8}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden
-    >
-        <path d="M12 2 4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z" />
-        <path d="M12 8v5" />
-        <circle cx="12" cy="16" r="0.6" fill="currentColor" />
-    </svg>
-);
-
 export type SectionId =
     | 'connection'
     | 'network'

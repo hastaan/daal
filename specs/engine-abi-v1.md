@@ -8,14 +8,19 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **44 functions** (14 from Phase 1B + 9 from
-Phase 1C + 3 from Phase 1D + 6 from Phase 1.5A + 1 from Phase 1.5B +
-1 from 1.5C-Polish + 1 from Phase 2F + 1 from Phase 2A + 1 from
-Phase 2C + 2 from Phase 2D + 1 from Phase 2G + 1 from Phase 2E + 1
-from Phase 3A + 2 from Phase 3B). The `engine_version` string at
-Phase 3B is **`daal-core 0.7.1+v3-transport`**, signalling the V3
-transport-agility line including Snowflake. The version bump is
-informative; the surface change itself remains append-only.
+Current surface count: **58 release symbols** (verified 2026-08-17 —
+see the ABI ledger at the end of this document, which is the
+authoritative count). The source tree carries **61** `//export
+engine_*` declarations; the extra three are `//go:build cshared &&
+soak` and are never present in a release build.
+
+The `engine_version` string is **`daal-core 0.9.0+v3-share`**. The
+version bump is informative; the surface change itself remains
+append-only.
+
+The historical per-phase breakdown that used to sit here (14 from
+Phase 1B + 9 from 1C + …, totalling 44) stopped being maintained
+after Phase 3B. Do not use it as a count; use the ledger.
 
 Phase 2G additions:
 
@@ -588,10 +593,13 @@ Spec details: `specs/tunnel-dialer-v1.md`.
 
 When the engine library is built with `-tags soak`, **one** additional
 function is exposed for use by the Phase 1.5C blackout-soak rig only.
-Release builds (the four shipping desktop artifacts and the Android
-`libbox.aar`) do NOT compile this symbol. The release-build CI step in
-`.github/workflows/desktop.yml` asserts that
-`nm libdaalcore.so | grep -c '^[0-9a-f]\+ T engine_'` returns **37**.
+Release builds do NOT compile this symbol.
+
+*(Historical note: this paragraph used to cite a release-build CI step in
+`.github/workflows/desktop.yml` asserting a count of 37. That workflow no
+longer exists — there is no `.github/` directory — and the count is now 58.
+The assertion survives as `EXPECTED_ABI` in `./daal release-check`, which
+you must run yourself. See the ABI ledger at the end of this document.)*
 
 ```c
 /* Soak-tag only — overrides time.Now() inside the engine. */
@@ -632,3 +640,84 @@ Release surface 47 → 48. One new symbol, `engine_redistribute_route(route_id, 
 Diagnostics widen with three always-present fields: `delegate_share_compiled_in` (bool), `delegate_share_counters` (object `{route_id: {shared_with_count, cap}}`), `last_delegate_share_outcome` (string).
 
 Engine version bumps to `daal-core 0.9.0+v3-share`. ABI is append-only; the existing 47 release symbols are unchanged. See `delegate-keys-v1.md`.
+
+---
+
+## ABI ledger — reconciliation pass, 2026-08-17
+
+This section exists because six documents in this repo carried six
+different ABI counts and none matched the binary. **This ledger is the
+authority.** Regenerate it, do not hand-edit it:
+
+```sh
+# release surface (what ships)
+nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_'
+# source surface (includes soak-only symbols)
+grep -rh '^//export engine_' core/ | wc -l
+```
+
+**Release surface: 58.  Source surface: 61.**
+
+### Caveat on `./daal release-check`
+
+`daal:425-427` counts symbols from `$BUILD_DIR/libdaalcore.so`, i.e.
+`build/`, **not** from the copy tracked under
+`client-shell/tauri/src-tauri/resources/`. On a fresh clone `build/` does
+not exist, so the ABI check reports 0 or is skipped. `release-check`'s
+ABI number is only meaningful after `./daal build` in the same tree.
+
+### Symbols previously absent from every spec
+
+These twelve were shipping but documented nowhere. Recorded here to
+close the gap; all are append-only additions that changed no existing
+signature.
+
+| Symbol | Signature | Notes |
+|---|---|---|
+| `engine_route_summary` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 on error |
+| `engine_available_routes` | `(void *out, int out_len) -> int` | JSON body via `copyOut` |
+| `engine_throughput_snapshot` | `(void *out, int out_len) -> int` | JSON body via `copyOut` |
+| `engine_panic_wipe` | `(void) -> int` | 0 on success, -1 on error |
+| `engine_route_delete` | `(const char *route_id) -> int` | 0 on success, -1 on error |
+| `engine_publisher_delete` | `(const char *publisher_id) -> int` | returns routes removed (>= 0), -1 on error |
+| `engine_scheduler_tick` | `(void) -> int` | forces one tick at `time.Now().UTC()` |
+| `engine_set_tun_fd` | `(int fd, void *out, int out_len) -> int` | Android/desktop data plane |
+| `engine_clear_tun_fd` | `(void *out, int out_len) -> int` | idempotent; safe without a prior set |
+| `engine_register_protect_callback` | `(uintptr_t cb, void *out, int out_len) -> int` | `cb == 0` clears the binding |
+
+The TUN triplet was specified only in
+`development-phases/45-gap-dataplane-and-delivery.md` and never merged
+here; `engine_route_delete` / `engine_publisher_delete` (commit
+`05d0e30`) appeared in no spec at all.
+
+### Soak-only symbols — NOT part of the release surface
+
+Guarded by `//go:build cshared && soak`. They exist only in soak-rig
+builds and must never be counted toward the 58, nor relied on by any
+client.
+
+| Symbol | Signature | File |
+|---|---|---|
+| `engine_set_now_unix` | `(long long t) -> void` | `core/abi/clock_soak_export.go` |
+| `engine_soak_set_wg_memory_kib` | `(long long kib) -> void` | `core/abi/ios_handoff_soak_export.go` |
+| `engine_soak_force_wg_handoff` | `(void) -> void` | `core/abi/ios_handoff_soak_export.go` |
+
+### Downstream copies of the count
+
+Every one of these was stale before this pass and has been corrected to
+58. If the surface grows again, update all of them together:
+
+- `daal:50` `EXPECTED_ABI`
+- `specs/frp-track-v1.md`
+- `development-phases/README.md` (states it as an invariant)
+- `docs/build-and-release.md`
+- `CHANGELOG.md`
+- `development-phases/45-gap-dataplane-and-delivery.md`
+
+### A note on the counts appearing earlier in this document
+
+Statements such as "Release surface 47 → 48" and "the existing 47
+release symbols are unchanged" in the Phase 3B / delegate-share section
+are **accurate as history** — they describe the surface at that commit —
+and have deliberately been left alone. Only the header count at the top
+of this document was a live claim, and it has been corrected.

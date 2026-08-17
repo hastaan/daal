@@ -1,9 +1,8 @@
 # Phase D-2 — Daal GUI rebuild (no-version-bump revision)
 
-**Status:** ACTIVE — supersedes the version-bump variant
-(`D-2-gui-rebuild.md`) for execution purposes. The original draft is
-kept on disk as the design-level reference; this revision is the one
-the build follows.
+**Status:** **SHIPPED.** Handover: `development-phases/D-2-handover.md`.
+Supersedes the version-bump variant (`D-2-gui-rebuild.md`), which is kept
+on disk as the design-level reference only.
 
 **VERSION pin:** **`0.1.0` throughout D-2 *and* D-3.** No bump until
 the very end of D-3 (landing site + downloads). All D-2 builds are

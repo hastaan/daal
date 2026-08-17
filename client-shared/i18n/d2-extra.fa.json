@@ -234,6 +234,8 @@
   "settings.custody.event.locked": "نگه‌داشت قفل شد",
   "settings.custody.event.unlocked": "نگه‌داشت باز شد",
   "settings.custody.event.panic_wipe": "پاک‌سازی اضطراری",
+  "settings.custody.event.migrated": "کلیدها منتقل شدند",
+  "settings.custody.event.recovery_exported": "کلید بازیابی صادر شد",
   "subs.section_title": "اشتراک‌ها",
   "subs.empty.title": "هنوز اشتراکی نیست",
   "subs.empty.help": "در صفحهٔ شبکه آدرس اشتراک را الصاق کنید. خودش تازه می‌شود.",

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { applyDir, detectLocale, translate, type Locale } from './lib/i18n';
+import { applyDir, detectLocale, setLocalePref, translate, type Locale } from './lib/i18n';
 import { useContract } from './contract/ContractProvider';
 import { Prefs } from './lib/prefs';
 import { isHarnessActive } from './harness/scenarios';
@@ -160,6 +160,9 @@ export default function App() {
     const handleLocaleChange = (next: Locale) => {
         setLocale(next);
         applyDir(next);
+        // Persist the choice; effectiveLocale() reads it back on the
+        // next launch. Without this the selection is lost on restart.
+        setLocalePref(next);
     };
 
     if (versionMismatch) {

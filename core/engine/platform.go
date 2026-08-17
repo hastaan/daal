@@ -20,8 +20,8 @@ import (
 // the TUN inbound and the upstream-socket protect closure.
 
 var (
-	currentTunFD          atomic.Int32
-	currentProtectCBPtr   atomic.Uintptr
+	currentTunFD        atomic.Int32
+	currentProtectCBPtr atomic.Uintptr
 )
 
 func init() {

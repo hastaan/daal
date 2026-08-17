@@ -12,7 +12,7 @@ package relaypack
 // outbound so the tunnel can actually come up.
 //
 // The families map to the box inbounds provisioned by
-// cmd/daal-relay-mgmt (vless-in / hy2-in / naive-in / ws-r<id>):
+// cmd/daal-relay-mgmt (vless-in / hy2-in / naive-in / ws-in):
 //   - vless-reality: no cert needed (REALITY borrows a real TLS
 //     handshake to server_name); works on a bare-IP VPS.
 //   - websocket-tls / hysteria2 / naive: TLS to a self-signed leaf on

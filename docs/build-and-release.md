@@ -1,28 +1,42 @@
 # Daal build and release
 
-One contract for both you and CI: the root `./daal` script. CI calls the
-same subcommands you do; nothing drifts.
+One contract for building and releasing: the root `./daal` script.
+
+**Read this first: there is no test CI.** `appveyor.yml` is a
+packaging pipeline only — it contains no `test_script` key and no
+`go test`, `cargo test`, or `tsc` invocation, and it references none of
+the five gate scripts under `tools/`. There is no `.github/` directory
+either; GitHub Actions was dropped when the account was rate-throttled
+(see `CHANGELOG.md`). **Every gate in this document runs on your machine
+or it does not run at all.**
 
 ## Quick start
 
 ```bash
-./daal doctor          # check Go / Rust / Node / Android SDK
+./daal doctor          # check Go / Cargo / Node / npm / git
 ./daal test            # run all Go + Rust test suites
-./daal build           # build engine + CLIs + Tauri + Android (slow)
+./daal build           # build engine + CLIs + Tauri desktop (slow)
 ./daal package         # collect artifacts under build/release/
-./daal release-check   # verify ABI=48, engine version, no bad imports
+./daal release-check   # verify ABI=58, engine version, no bad imports
 ./daal manifest        # print build/release/manifest.json
 ```
 
-Each subcommand can be run independently. CI runs `doctor → test → release-check` on every push (see `.github/workflows/ci.yml`).
+Each subcommand can be run independently. Nothing runs them for you on
+push — run `doctor → test → release-check` yourself before a release.
 
-By default, `test` and `build` are strict: Rust parity failures, Tauri failures, and Android build failures fail the command. During local bring-up only, a developer can opt into partial behavior with `DAAL_ALLOW_BUNDLE_RS_WARN=1` or `DAAL_ALLOW_PARTIAL_BUILD=1`.
+By default, `test` and `build` are strict: Rust parity failures and Tauri
+failures fail the command. During local bring-up only, a developer can opt
+into partial behavior with `DAAL_ALLOW_BUNDLE_RS_WARN=1` or
+`DAAL_ALLOW_PARTIAL_BUILD=1`.
 
-The script sets writable defaults for Go and Gradle build state:
+There is no Android target in `cmd_build`; the legacy Android Compose
+build was removed in v0.2 and the Tauri Mobile replacement is built
+separately.
+
+The script sets one writable default for Go build state:
 
 ```bash
 GOCACHE=/tmp/daal-go-build
-GRADLE_USER_HOME=/tmp/daal-gradle-home
 ```
 
 Desktop packaging defaults to a Linux `.deb` bundle because AppImage packaging needs a less restricted host filesystem than the project sandbox provides. Override it on a full release host:
@@ -82,33 +96,63 @@ git push hastaan v0.1.1
 
 Do NOT push to `hastaan/daal` automatically from CI. Pushes to `hastaan/daal` are deliberate: they only happen when you (the human) have decided a release is ready.
 
-Pushing the tag triggers `.github/workflows/release.yml`, which gates on `release-check`, builds desktop bundles on Linux / macOS / Windows runners, builds signed Android APKs, and creates a GitHub Release with the bundles attached and the matching CHANGELOG section as the body. Tags whose name contains a hyphen (e.g. `v0.1.1-rc.1`) are marked as prereleases automatically.
+Pushing the tag does **not** trigger a release workflow — there isn't
+one. What actually exists is AppVeyor (`appveyor.yml`), a three-image
+packaging matrix that runs on push:
+
+| image | `DAAL_TARGET` | produces | staged as |
+|---|---|---|---|
+| Visual Studio 2022 | `windows` | `.exe` (NSIS) + `.msi` | `release-assets\*.exe`, `release-assets\*.msi` |
+| macOS | `macos` | `.app.zip` + `.dmg` (aarch64) | `release-assets/*.dmg`, `release-assets/*.app.zip` |
+| macOS | `ios` | unsigned `.ipa` (re-sign with Sideloadly) | — |
+
+Each image builds the Go engine itself (`-buildmode=c-shared` straight
+into `client-shell/tauri/src-tauri/resources/`), then `tauri build`, then
+renames the bundle into `release-assets/` and publishes it as an AppVeyor
+build artifact.
+
+Three things this does NOT do, and you must do by hand:
+
+1. **It runs no tests and no gates.** Run `./daal test` and
+   `DAAL_RELEASE_STRICT=1 ./daal release-check` locally first.
+2. **It builds no Linux bundle.** There is no Linux image in the matrix.
+   `.deb` comes from a local `./daal build`.
+3. **It creates no GitHub Release.** Download the AppVeyor artifacts and
+   attach them to a release yourself, with the matching CHANGELOG section
+   as the body.
 
 ## What `release-check` enforces
 
 - **Engine version pinned.** `daal-core 0.9.0+v3-share` must appear in `core/` or `specs/`.
 - **Asymmetric module guard.** `core/` and `bundle/` must NOT import `daal/publisher`.
 - **Locked invariant 52.** No `daal/publisher/directory` references anywhere (FRP-13 closure).
-- **Locked invariant 47.** No Android admin / cell-admin / modifier-admin surfaces in `client-android/`.
+- **Locked invariant 47.** No `CellAdminScreen` / `ModifierAdminScreen` / `publisherAdmin` references anywhere in the tree. This was Android-specific when written; since the Compose tree was removed (`daal:405-407`) it greps every `.kt` / `.java` / `.ts` / `.tsx` / `.rs` source file.
 - **`spec_version=4`** pinned in specs / bundle.
-- **ABI symbol count.** If the engine `.so` has been built, `nm -D --defined-only` must show 48 `engine_*` exported symbols. (If you haven't run `./daal build` first, this becomes a warn, not a fail.)
+- **ABI symbol count.** If the engine `.so` has been built, `nm -D --defined-only` must show 58 `engine_*` exported symbols — the authoritative ledger is at the end of `specs/engine-abi-v1.md`. The check reads `build/libdaalcore.so`, not the tracked copy under `client-shell/tauri/src-tauri/resources/`, so without a prior `./daal build` in the same tree it warns rather than fails.
 - **Working tree clean.** A dirty tree is a warn, not a fail — but a dirty tree on a release tag is a problem you should fix.
 
 Set `DAAL_RELEASE_STRICT=1` for release cuts. Strict mode turns a dirty tree or missing built engine binary into a hard failure.
 
 A failure (`exit 2`) means a locked invariant was violated and the release MUST NOT ship.
 
-## CI vs. local
+## What runs where
 
-| | local (your laptop) | CI (`.github/workflows/ci.yml`) |
+| | local (your laptop) | AppVeyor |
 |-|-|-|
-| `./daal doctor` | yes | yes |
-| `./daal test` | yes | yes |
-| `./daal release-check` | yes (`DAAL_RELEASE_STRICT=1` for releases) | yes |
-| `./daal build` (Tauri + Android) | yes | **no** — desktop.yml handles that on its own schedule |
-| `./daal package` | yes (when releasing) | no (the artifacts are local-only by design — no automatic upload to releases) |
+| `./daal doctor` | yes | no |
+| `./daal test` | yes | **no** |
+| the five `tools/` gate scripts | yes, by hand | **no** |
+| `./daal release-check` | yes (`DAAL_RELEASE_STRICT=1` for releases) | **no** |
+| `./daal build` (Tauri desktop `.deb`) | yes | no — no Linux image |
+| Windows `.exe` / `.msi`, macOS `.dmg` / `.app.zip`, iOS `.ipa` | possible but slow | **yes** — this is the only thing it does |
+| `./daal package` | yes (when releasing) | no |
 
-This split is intentional. CI gives you a fast green / red signal on every push (~3 min). Heavyweight Tauri / Android packaging happens locally before a release, so you control exactly which artifacts ship.
+This split is **not** intentional; it is where the project ended up after
+GitHub Actions was dropped. The consequence is that nothing gives you a
+green/red signal on push — the correctness of a commit is only ever
+established by a human running `./daal test` locally. Treat adopting a
+`test_script` block in `appveyor.yml` as outstanding work, not as
+something already covered.
 
 ## What's NOT here
 

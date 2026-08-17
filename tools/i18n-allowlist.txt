@@ -2,11 +2,6 @@
 # Add a substring per line. Keep the list short; new entries
 # require a code-review justification.
 
-# Inline brand glyph in PhoenixButton (the Persian word "دال").
-# This is not localized text — it is the brand mark. The substring
-# below matches the comment context that surrounds it.
-brand silhouette
-
 # CSS / style tokens that look like sentences but aren't user copy.
 linear-gradient
 radial-gradient

@@ -29,10 +29,6 @@ func FamilyCooldownStep(n int) time.Duration {
 	return familyBackoffLadder[n-1]
 }
 
-// FamilyLadderLen is the number of distinct ladder steps. Tests use
-// this to assert clamping behaviour.
-func FamilyLadderLen() int { return len(familyBackoffLadder) }
-
 // IsFamilyClass reports whether a V0.3 cooldown category should fire
 // a family cooldown immediately at ladder step 1, bypassing the
 // per-route 3-failure trigger.

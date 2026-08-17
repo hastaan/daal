@@ -3,7 +3,6 @@ package publisher
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -124,9 +123,6 @@ func LoadPriv(path string) (ed25519.PrivateKey, error) {
 func FingerprintHex(pub ed25519.PublicKey) string {
 	return bundle.PublisherFingerprint(pub).Hex
 }
-
-// HexEncode is a helper exported for tests.
-func HexEncode(b []byte) string { return hex.EncodeToString(b) }
 
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"

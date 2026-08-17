@@ -1,6 +1,6 @@
 # Phase 45 — Data plane: in-process sing-box + Android VpnService
 
-**Status:** ACTIVE build spec.
+**Status:** **SHIPPED** (exit gate met 2026-08-15). See `docs/backlog-post-45.md` for the evidence and for the follow-on workstreams.
 **Branch:** `gap-dataplane-and-delivery` (orphan / force-push pattern continues; tag bump at the end).
 **Position:** slots after Phase FRP-14 (`44-phase-frp-14-pack-to-person.md`) and the v0.1.0 tractable-gap follow-up.
 **Exit gate (single, non-negotiable):** **real tunneled traffic on the Android device**. A `curl` issued from the device through the VPN tunnel returns the relay's egress IP. Disconnect tears everything down cleanly.
@@ -67,7 +67,7 @@ Single mechanism on both Android and Linux desktop:
 1. **`engine.NewDefaultDriver()` is the single constructor call site** in `core/abi/abi.go`. Build tag `singbox` selects the real driver; absent tag keeps the stub for unit tests + ABI-stability soak. Pinned by `TestDriverSelectionByBuildTag` (twin test files per build tag).
 2. **Append-only ABI growth: 53 → 56 in release builds (cshared without `soak`).** Three new symbols: `engine_set_tun_fd(int) → int`, `engine_clear_tun_fd() → int`, `engine_register_protect_callback(uintptr) → int`. No existing symbol is renamed, deleted, or has its signature changed. Pinned by `nm libdaalcore.so | grep -c ' T engine_'` CI gate = 56 (release) / 59 (cshared+soak).
 3. **`engine_set_tun_fd` takes ownership of the fd.** After a successful call the caller MUST NOT `close(fd)`. The engine closes it on `engine_clear_tun_fd` or `engine_shutdown`. Pinned by `TestSetTunFdOwnershipSemantics` (mock Driver + sentinel close).
-4. **`VpnService.protect()` is reachable from Go via the registered callback.** Each upstream socket the in-process driver opens is offered to the callback before its first connect / sendto; the Kotlin side calls `this.protect(fd)`. Pinned by `TestProtectCallbackInvoked` (in-tree mock) + the device exit gate (real traffic actually reaches a remote IP, which is only possible if protect was called).
+4. **`VpnService.protect()` is reachable from Go via the registered callback.** Each upstream socket the in-process driver opens is offered to the callback before its first connect / sendto; the Kotlin side calls `this.protect(fd)`. Pinned by `TestProtectCallbackRegistration` (`core/abi/tun_fd_test.go`; in-tree mock) + the device exit gate (real traffic actually reaches a remote IP, which is only possible if protect was called).
 5. **`libsing_box.so` is gone.** All ABI copies under `gen/android/app/src/main/jniLibs/*/libsing_box.so` are deleted; only `libdaalcore.so` + `libdaal_desktop_tauri_lib.so` ship in jniLibs after this phase. (The 58 MB file is referenced nowhere in source.)
 6. **Plugin's `<service>` + VPN permissions land in the merged manifest at every build.** Even though `gen/android/.../AndroidManifest.xml` is gitignored and regenerated, the Tauri plugin's `android/src/main/AndroidManifest.xml` is part of the source tree and merges into the app manifest via Gradle. Pinned by inspecting `app/build/intermediates/merged_manifest/.../AndroidManifest.xml` after a clean build.
 7. **Real traffic exit gate.** On a fresh install, accepting the VPN consent dialog and connecting to a relay route causes a `curl https://ip.example/` issued from the device to return the relay's egress IP (not the device's WAN IP).
@@ -136,7 +136,7 @@ Tests:
 
 - `core/abi/tun_fd_test.go`:
   - `TestSetTunFdOwnershipSemantics` — installs a mock Driver whose `OnTunFD` records the fd; opens a temp `os.Pipe()` to get a real fd; calls `SetTunFD(fd)`; asserts ownership flag set; calls `ClearTunFD()`; asserts the fd was closed exactly once (using a sentinel `close()` wrapper).
-  - `TestProtectCallbackInvoked` — installs a mock Driver that calls back into the registered C function pointer with a sentinel fd; the test registers a Go-backed `cgo.NewHandle`-style callback that records invocations; asserts the sentinel fd was offered.
+  - `TestProtectCallbackRegistration` (`core/abi/tun_fd_test.go`) — installs a mock Driver that calls back into the registered C function pointer with a sentinel fd; the test registers a Go-backed `cgo.NewHandle`-style callback that records invocations; asserts the sentinel fd was offered.
 
 ### Part 3 — Gap 3b: Tauri mobile plugin + Android VpnService (real)
 
@@ -273,10 +273,10 @@ These permissions / `<service>` declarations merge into the app's regenerated `g
 ## Build / test / validate
 
 1. `go test ./core/...` (default, no `singbox` tag) stays green, including the two new invariant tests.
-2. `PATH=/usr/local/go125/bin:$PATH ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.0.12077973 bash /home/daal/tools/build-engine-android.sh` builds `libdaalcore.so` with `-tags cshared,singbox` for arm64-v8a, armeabi-v7a, x86_64 (the iOS arm64 build uses `build-engine-ios.sh` with the same tag set).
-3. `nm gen/android/app/src/main/jniLibs/arm64-v8a/libdaalcore.so | grep -c ' T engine_'` == **56** (release cshared without `soak`). Per-ABI `.so` size budget ≤ 60 MB.
-4. `cd /home/daal/client-ui && npm run build` (auto-syncs i18n).
-5. `cd /home/daal/client-shell/tauri && PATH=/root/.cargo/bin:$PATH ANDROID_HOME=/opt/android-sdk ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.0.12077973 npx tauri android build --apk`.
+2. `PATH=/usr/local/go125/bin:$PATH ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.0.12077973 bash tools/build-engine-android.sh` builds `libdaalcore.so` with `-tags cshared,singbox` for arm64-v8a, armeabi-v7a, x86_64 (the iOS arm64 build uses `build-engine-ios.sh` with the same tag set).
+3. `nm gen/android/app/src/main/jniLibs/arm64-v8a/libdaalcore.so | grep -c ' T engine_'` == **58** (release cshared without `soak`; it was 56 when this doc was written — `05d0e30` added two symbols on 2026-08-15. Authoritative ledger: end of `specs/engine-abi-v1.md`). Per-ABI `.so` size budget ≤ 60 MB.
+4. `cd client-ui && npm run build` (auto-syncs i18n).
+5. `cd client-shell/tauri && PATH=$HOME/.cargo/bin:$PATH ANDROID_HOME=/opt/android-sdk ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.0.12077973 npx tauri android build --apk`.
 6. Inspect `app/build/intermediates/merged_manifest/universalRelease/.../AndroidManifest.xml` — confirm `<service ... DaalVpnService>` + `BIND_VPN_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE` are present.
 7. Install on the device (192.168.0.172:43951 — port subject to change between sessions; verify with `adb devices`): `adb install -r gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
 8. **Device exit gate:**
@@ -298,13 +298,13 @@ These permissions / `<service>` declarations merge into the app's regenerated `g
 ## Phase exit checklist
 
 - [x] `go test ./core/...` (no tag) green incl. `TestDriverSelectionByBuildTag` (`!singbox`). *(2026-08-14)*
-- [x] `go test -tags singbox ./core/...` green incl. `TestDriverSelectionByBuildTag` (`singbox`) + `TestSetTunFdOwnershipSemantics` + `TestProtectCallbackInvoked`. *(2026-08-14; needed a driver-compile fix + an abi test seam — see `docs/handovers/frp-45-handover.md`)*
+- [x] `go test -tags singbox ./core/...` green incl. `TestDriverSelectionByBuildTag` (`singbox`) + `TestSetTunFdOwnershipSemantics` + `TestProtectCallbackRegistration`. *(2026-08-14; needed a driver-compile fix + an abi test seam — see `docs/handovers/frp-45-handover.md`)*
 - [x] `libdaalcore.so` built with `-tags cshared,singbox` for all Android ABIs (arm64-v8a, armeabi-v7a, x86_64; the fourth, `x86`, is not in the build matrix). *(2026-08-14)*
-- [x] `nm libdaalcore.so | grep -c ' T engine_'` = **56** on every ABI (release cshared without `soak`); 41.5/36.7/41.5 MB, all < 60 MB budget. *(2026-08-14)*
+- [x] `nm libdaalcore.so | grep -c ' T engine_'` = **56** on every ABI (release cshared without `soak`); 41.5/36.7/41.5 MB, all < 60 MB budget. *(2026-08-14 — correct as measured. The count is **58** from `05d0e30` (2026-08-15) onward, which added `engine_route_delete` + `engine_publisher_delete`. Authoritative ledger: end of `specs/engine-abi-v1.md`.)*
 - [x] APK builds and installs cleanly on the device (SM-S931B / One UI 16 / API 36). Fresh test keystore; old app uninstalled. *(2026-08-14)*
 - [x] Merged manifest contains the `<service>` + VPN permissions (`DaalVpnService`, `BIND_VPN_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `vpn` FGS subtype, `android.net.VpnService` intent filter, `POST_NOTIFICATIONS`). *(2026-08-14)*
-- [ ] On first Connect, the system VPN consent dialog appears; on accept, the foreground notification renders. **BLOCKED on a real route** — verified up to the connect screen; `vpn_start` correctly no-ops with no route selected, so the consent path needs an imported `.sbpx`.
-- [ ] In-tunnel probe returns the relay's egress IP. **BLOCKED on a live relay** (device WAN baseline: 92.34.5.244).
-- [ ] Disconnect clears the VPN network and the notification. **BLOCKED** (same).
-- [ ] `libsing_box.so` removed; APK shrinks by ~58 MB (offset by sing-box link-in into `libdaalcore.so`). *(the stale 58 MB blob was never regenerated by this session's `tauri android init`; the new APK ships only `libdaalcore.so` + `libdaal_desktop_tauri_lib.so` per ABI — confirm with `unzip -l` and delete any staged copy before release)*
-- [ ] Handover doc written; v0.2.0-dev tag bumped or the tractable v0.1.0 tag moved per the orphan-branch pattern. *(handover `docs/handovers/frp-45-handover.md` written 2026-08-14; tag bump deferred until the device exit gate is green)*
+- [x] On first Connect, the system VPN consent dialog appears; on accept, the foreground notification renders. *(2026-08-15 — unblocked once a real route existed; see `docs/backlog-post-45.md`.)*
+- [x] In-tunnel probe returns the relay's egress IP. **This is the exit gate and it passed.** *(2026-08-15, Samsung SM-S931B against a live relay, through the proper publisher pipeline — and on all four transport tiers, not just one: vless-reality, websocket-tls, naive/Cronet, hysteria2. Device WAN baseline was 92.34.5.244.)*
+- [ ] Disconnect clears the VPN network and the notification. **NOT SEPARATELY ATTESTED.** The connect path is proven on-device; no record in `docs/backlog-post-45.md` or the handover explicitly confirms the teardown half. Left unticked deliberately — verify it on-device and tick it, do not assume it from the connect result.
+- [ ] (packaging, not part of the exit gate) `libsing_box.so` removed; APK shrinks by ~58 MB (offset by sing-box link-in into `libdaalcore.so`). *(the stale 58 MB blob was never regenerated by this session's `tauri android init`; the new APK ships only `libdaalcore.so` + `libdaal_desktop_tauri_lib.so` per ABI — confirm with `unzip -l` and delete any staged copy before release)*
+- [ ] Handover doc written; v0.2.0-dev tag bumped or the tractable v0.1.0 tag moved per the orphan-branch pattern. *(handover `docs/handovers/frp-45-handover.md` written 2026-08-14. The exit gate went green 2026-08-15, so the tag bump is now unblocked — it is still outstanding, and no tag is currently reachable from HEAD.)*

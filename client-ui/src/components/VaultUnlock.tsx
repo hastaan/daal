@@ -28,7 +28,7 @@ export default function VaultUnlock({ t, onUnlocked }: Props) {
             if (r === 'unlocked' || r === 'not_required') {
                 onUnlocked();
             } else {
-                setError(t('vault.wrong_pin') || 'Wrong PIN');
+                setError(t('vault.wrong_pin'));
                 setPin('');
             }
         } catch (err) {
@@ -61,7 +61,7 @@ export default function VaultUnlock({ t, onUnlocked }: Props) {
                         marginBottom: 12,
                     }}
                 >
-                    {t('vault.title') || 'Vault locked'}
+                    {t('vault.title')}
                 </div>
                 <h1
                     style={{
@@ -71,14 +71,14 @@ export default function VaultUnlock({ t, onUnlocked }: Props) {
                         marginBottom: 22,
                     }}
                 >
-                    {t('vault.prompt') || 'Enter your PIN to unlock.'}
+                    {t('vault.prompt')}
                 </h1>
                 <Input
                     type="password"
                     autoFocus
                     value={pin}
                     onChange={(e) => setPin(e.target.value)}
-                    placeholder={t('vault.placeholder') || 'PIN'}
+                    placeholder={t('vault.placeholder')}
                     aria-label="PIN"
                     style={{
                         fontFamily: 'var(--font-mono)',
@@ -99,7 +99,7 @@ export default function VaultUnlock({ t, onUnlocked }: Props) {
                     </div>
                 )}
                 <Button type="submit" disabled={busy || !pin} block>
-                    {busy ? '…' : t('vault.unlock') || 'Unlock'}
+                    {busy ? '…' : t('vault.unlock')}
                 </Button>
             </form>
         </div>

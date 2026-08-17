@@ -340,13 +340,6 @@ func perRouteCooldown(cat diagnostics.Category) time.Duration {
 	return 5 * time.Minute
 }
 
-// CurrentRoute returns the active route id (empty if none).
-func (m *Manager) CurrentRoute() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.currentRoute
-}
-
 // BudgetExhausted (Phase 2A) is the FSM entry-point invoked when a
 // route hits its hourly byte cap. The route is added to the cooldown
 // map until the next hour bucket; LastReason carries the V2.1 message

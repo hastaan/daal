@@ -100,21 +100,61 @@ provider-agnostic.
 
 ### CLI surface
 
+This list is generated from the dispatch switch in
+`publisher/deploy/cli/cli.go:69-129`, which is the only authority.
+**29 verbs**, not the 7 this section listed until 2026-08-17:
+
 ```
+# lifecycle
 daal-deploy version
-daal-deploy pricing      --provider hetzner --region fsn1 --server-type cx22 \
-                          --token-file <path>
-daal-deploy provision    --provider hetzner --region fsn1 --server-type cx22 \
+daal-deploy pricing            daal-deploy list-server-types
+daal-deploy list-servers
+daal-deploy provision          daal-deploy reprovision
+daal-deploy decommission       daal-deploy verify
+daal-deploy assign-fip         daal-deploy floating-ip {assign,unassign}
+
+# packs + signing
+daal-deploy bind-and-sign      daal-deploy qr-fountain
+daal-deploy publish-freshness  daal-deploy rotate-recommend
+
+# CDN fronting (FRP-8)
+daal-deploy cdn-provision      daal-deploy cdn-rotate-path
+daal-deploy cdn-rotate-hostname
+daal-deploy cdn-rotate-origin
+
+# trusted cells (FRP-11)
+daal-deploy cell-create        daal-deploy cell-invite
+daal-deploy cell-sign          daal-deploy cell-verify
+daal-deploy cell-status
+
+# per-recipient credentials + packs (FRP-14)
+daal-deploy users-provision    daal-deploy users-revoke
+daal-deploy users-list         daal-deploy users-pack-sbp
+daal-deploy users-pack-sbpx    daal-deploy users-unpack-sbpx
+```
+
+Typical invocations (flags unchanged):
+
+```
+daal-deploy pricing      --provider hetzner --region fsn1 \
+                          --server-type <type> --token-file <path>
+daal-deploy provision    --provider hetzner --region fsn1 \
+                          --server-type <type> \
                           --toolbox iran-default --helper-ip <ip> --pubkey <path> \
                           [--dry-run]
 daal-deploy reprovision  --record-file <path> [--new-toolbox <name>] \
                           [--new-sni <host>] [--regen-credentials]
 daal-deploy decommission --record-file <path>
-daal-deploy floating-ip  assign --record-file <path> \
-                          --fip-id <id>
+daal-deploy floating-ip  assign --record-file <path> --fip-id <id>
 daal-deploy floating-ip  unassign --record-file <path>
 daal-deploy verify       --record-file <path>
 ```
+
+**Do not hardcode a `--server-type` from this document.** The examples
+above deliberately say `<type>`: they previously said `cx22`, and
+Hetzner now rejects it with "server type 104 is deprecated"
+(`client-ui/src/publisher/PublisherWizard.tsx:138,570`). Get the current
+catalogue at runtime from `daal-deploy list-server-types`.
 
 Record-producing subcommands emit structured JSON on stdout. The wizard
 shells out via `std::process::Command` and parses JSON for the live
@@ -165,15 +205,31 @@ forbidden tokens.
 
 ## Wizard sections
 
-(Pending FRP-5.)
+*(Was "(Pending FRP-5.)". FRP-5 shipped May 2026 — and the wizard has
+since been rebuilt again. The publisher wizard is now **3 screens**, not
+the 7 FRP-5 planned; see `d80c638` and
+`client-ui/src/publisher/PublisherWizard.tsx`. This section was never
+written and is not a reliable description of anything; treat the code
+and `development-phases/33-phase-frp-5-desktop-wizard.md` as the
+sources.)*
 
 ## End-to-end flow
 
-(Pending FRP-4b.)
+*(Was "(Pending FRP-4b.)". FRP-4b shipped May 2026; see
+`development-phases/34-phase-frp-4b-direct-deploy-integration.md` and
+the handover at `docs/handovers/frp-4b-handover.md`. Never written
+here.)*
 
 ## Rotation playbook
 
-(Pending FRP-7.)
+*(Was "(Pending FRP-7.)". FRP-7 shipped May 2026; see
+`development-phases/36-phase-frp-7-direct-rotation-pilot-soak.md` and
+`docs/handovers/frp-7-handover.md`. Never written here.)*
+
+**This document is therefore partly historical.** Three of its sections
+were placeholders for phases that shipped over a year ago and were never
+filled in. Either write them or retire the file; do not read the empty
+sections as "not done yet".
 
 ## CDN-fronted deployment (FRP-8, V1.6)
 

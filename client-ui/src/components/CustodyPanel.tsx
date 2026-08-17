@@ -285,8 +285,7 @@ export default function CustodyPanel({ t }: Props) {
                                         }}
                                     >
                                         <span style={{ color: 'var(--fg)' }}>
-                                            {t(`settings.custody.event.${e.kind}`) ||
-                                                e.kind}
+                                            {t(`settings.custody.event.${e.kind}`)}
                                         </span>
                                         <span>{fmtTs(e.at_unix)}</span>
                                     </div>

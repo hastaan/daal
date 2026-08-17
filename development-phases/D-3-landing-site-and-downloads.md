@@ -1,6 +1,13 @@
 # Phase D-3 — Daal landing site (GitHub Pages) + downloads + docs
 
-**Status:** PROPOSED — depends on Phase D-2 shipping `Daal v0.2.0`.
+**Status:** **SHIPPED.** The site is live: `landing/` is built and
+deployed to `origin/gh-pages` by `tools/deploy-landing.sh`, and
+`CHANGELOG.md` records it under "Landing".
+
+*(The old precondition — "depends on Phase D-2 shipping `Daal v0.2.0`" —
+can never be met as written: D-2 deliberately did NOT bump the version
+(`D-2-handover.md:9`, "`VERSION` is still `0.1.0`"). The dependency was
+mis-stated; the deliverable shipped regardless.)*
 **Maturity target:** **public-facing landing site** at the project's
 GitHub Pages domain that (1) explains what Daal is, (2) provides
 one-click downloads pointing at the latest signed release on the

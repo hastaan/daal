@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"runtime"
 )
 
 // ErrModifierPlatform is returned by RejectByPlatform when a
@@ -106,11 +105,6 @@ func RejectByPlatform(modifiersJSON string, runtimeGOOS string, desktopHint bool
 	}
 	return nil
 }
-
-// CurrentGOOS exposes runtime.GOOS for callers that don't want to
-// import "runtime" themselves. Kept as a tiny shim so tests can
-// stub out via direct argument passing.
-func CurrentGOOS() string { return runtime.GOOS }
 
 // platformFromGOOS is the engine-local mirror of
 // publisher/deploy/modifiers.PlatformFromGOOS. We duplicate it here

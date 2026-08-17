@@ -168,8 +168,9 @@ on top is a one-line addition rather than a parallel crypto stack.
 ## 6. Recipient key lifecycle
 
 * X25519 keypair generated at first launch of the recipient app.
-* Priv sealed under PIN via existing `Keystore::seal`, alias
-  `daal.recipient.identity.priv`.
+* Priv stored via `custody.put(alias, …)` (Device Custody v1), alias
+  `daal.recipient.identity.priv`. There is no PIN; `Keystore::seal`
+  survives only as the legacy reader for the one-time migration.
 * Pub persisted in plaintext under alias `daal.recipient.identity.pub`.
 * No automatic rotation at V1.6. Rotation requires:
   - Generate new keypair.

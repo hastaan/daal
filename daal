@@ -8,7 +8,7 @@
 #                    gate-eval CLI. Output under build/.
 #   package        — copy final artifacts into build/release/ + write
 #                    build/release/manifest.json.
-#   release-check  — verify ABI=52, engine version unchanged, spec_version=4,
+#   release-check  — verify ABI=58, engine version unchanged, spec_version=4,
 #                    no forbidden imports, working tree clean.
 #   manifest       — print the manifest JSON to stdout (no build).
 #   help           — print this list.
@@ -47,12 +47,16 @@ cd "$REPO_ROOT"
 
 # --- Engine line constants. These MUST match the source of truth.
 EXPECTED_ENGINE_VERSION="daal-core 0.9.0+v3-share"
-EXPECTED_ABI=52
+EXPECTED_ABI=58
 EXPECTED_SPEC_VERSION=4
 
 # --- Tools. Override with env vars if your install paths differ.
-GO_BIN="${GO_BIN:-/usr/local/go/bin/go}"
-CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
+# Prefer whatever is on PATH; fall back to the conventional install
+# location only if the tool is not on PATH at all. Hardcoding the path
+# made `./daal doctor` — the first command README tells a contributor to
+# run — fail on any machine with a distro-packaged toolchain.
+GO_BIN="${GO_BIN:-$(command -v go || echo /usr/local/go/bin/go)}"
+CARGO_BIN="${CARGO_BIN:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}"
 NODE_BIN="${NODE_BIN:-node}"
 NPM_BIN="${NPM_BIN:-npm}"
 TAURI_BUNDLES="${DAAL_TAURI_BUNDLES:-deb}"

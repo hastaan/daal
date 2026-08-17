@@ -40,12 +40,31 @@ At the start of every phase and every major implementation session:
 23. `19-phase-3-ecosystem-integrations.md`
 24. `11-cross-cutting-governance-and-v4.md`
 
+The V3 phase docs themselves (`20-phase-3a` … `27-phase-3-soak`) were
+missing from this index until 2026-08-17:
+
+  * `20-phase-3a-webtunnel-scaffold.md`
+  * `21-phase-3b-snowflake-rendezvous.md`
+  * `22-phase-3c-masque-ladder.md`
+  * `23-phase-3d-refraction-hooks.md`
+  * `24-phase-3e-wasm-transport.md`
+  * `25-phase-3f-one-tap-share.md`
+  * `26-phase-3g-lifeline-relay.md`
+  * `27-phase-3-soak-success-metric.md` (+ `27-phase-3-soak-threshold-comparison.md`)
+
 ### FRP / RelayPack track (post-3-Soak; implementation arm of `daal-roadmap-v3-supplement-diaspora-helper.md`)
 
-The FRP track is a continuation of the closed V3 surface. ABI=48 is preserved
-across the **entire** FRP track (no engine release symbols are added at any
-FRP-N phase); engine `Version` constant in `core/abi/abi.go` stays
-`daal-core 0.9.0+v3-share` across the **entire** FRP track per supplement.
+The FRP track is a continuation of the closed V3 surface. The engine
+`Version` constant in `core/abi/abi.go` stays `daal-core 0.9.0+v3-share`
+across the **entire** FRP track per supplement — that part still holds.
+
+The companion claim that **ABI=48 is preserved across the entire FRP track
+(no engine release symbols are added at any FRP-N phase)** is **no longer
+true** and should not be relied on as an invariant. The release surface is
+**58** as of 2026-08-17. Symbols were added — the append-only rule held (no
+existing signature or semantic changed), but the count did not freeze. See
+the ABI ledger at the end of `specs/engine-abi-v1.md` for the authoritative
+list and the regeneration command.
 `spec_version` bumps at FRP-1 (RelayPack schema land) and FRP-7.5 (sub-key
 cert chain). Milestone tagging (V1.5 / V1.6 / V2 / V3) is recorded in closure
 specs and packaging tags only — never in the engine `Version` constant. The
@@ -69,10 +88,23 @@ handover) as the V0–V3 phases above.
 38. `41-phase-frp-11-trusted-cells.md`             — `specs/cell-v1.md` + `specs/cell-closure-v1.md`
 39. `42-phase-frp-12-modifier-framework.md`        — per-modifier flag + censor-lab pass record
 40. `43-phase-frp-13-public-directory.md`          — gated; requires `specs/cell-closure-v1.md`
+41. `44-phase-frp-14-pack-to-person.md`            — per-recipient credentials + `.sbpx` envelope; SHIPPED
+42. `45-gap-dataplane-and-delivery.md`             — in-process sing-box + Android VpnService; SHIPPED (exit gate met 2026-08-15)
+
+### D track (rename, GUI rebuild, landing site)
+
+Runs alongside the FRP track; not numerically ordered with it.
+
+43. `D-1-rename-and-repo-migration.md`   — hydra → Daal rename + public repo; SHIPPED
+44. `D-2-gui-rebuild-v2.md`              — unified React GUI (supersedes `D-2-gui-rebuild.md`); SHIPPED
+45. `D-3-landing-site-and-downloads.md`  — GitHub Pages landing site + downloads; SHIPPED
 
 The numeric prefix is for filesystem ordering and historical
 continuity, not strict chronology. Read in the list-order above for
 the chronological flow.
+
+**Next up:** smart route selection — wiring `core/internal/selection`
+into the connect path (backlog item B1). Nothing is in flight.
 
 ## Non-Negotiable Principles
 

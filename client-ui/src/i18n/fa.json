@@ -400,5 +400,11 @@
     "wiz.build.resume.title": "آمادهٔ ساخت سرور شما",
     "wiz.build.resume.body": "از همان‌جا که رها کردید ادامه می‌دهیم. گام بعدی یک سرور روی حساب ابری شما اجاره می‌کند و هزینه‌اش شروع می‌شود. اگر می‌خواستید از سروری که خودتان دارید استفاده کنید، اول طرح را بازبینی کنید — آن انتخاب ذخیره نشده بود.",
     "wiz.build.resume.start": "ساخت سرور",
-    "wiz.build.resume.review": "بازبینی طرح"
+    "wiz.build.resume.review": "بازبینی طرح",
+    "vault.title": "گاوصندوق قفل است",
+    "vault.prompt": "برای باز کردن، پین خود را وارد کنید.",
+    "vault.placeholder": "پین",
+    "vault.unlock": "باز کردن",
+    "vault.wrong_pin": "پین نادرست",
+    "routes.budget.title": "سقف داده"
 }

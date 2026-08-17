@@ -17,15 +17,26 @@ format. Those mirrors are loaded into the platform's i18n stack;
 they're allowed to extend (platform-only keys) but **must not
 contradict** keys from the shared catalog.
 
-| Platform | Mirror |
-|---|---|
-| Desktop | `client-desktop/tauri/src/i18n/{en,fa}.json` |
-| Android | `client-android/app/src/main/res/values{,-fa}/strings.xml` |
-| iOS | `client-ios/DaalApp/Resources/{en,fa}.lproj/Localizable.strings` |
+There is now **one** mirror, not three. Desktop and Android render the
+same React UI, and there is no iOS app shell.
 
-A future CI lint (`tools/check-i18n.sh`) parses all four sources and
-fails the build if a shared-catalog key is missing or its value
-diverges from the platform mirror.
+| Source | Mirror | Copied by |
+|---|---|---|
+| `client-shared/i18n/{desktop,onboarding,mobile,d2-extra}.{en,fa}.json` | `client-ui/src/i18n/d2/` | `tools/sync-i18n.mjs` (run by `npm run build`) |
+
+The three per-platform paths documented here until 2026-08-17
+(`client-desktop/tauri/src/i18n/`, `client-android/.../strings.xml`,
+`client-ios/.../Localizable.strings`) never existed in this repo.
+
+Two things to know before editing:
+
+- **`client-shared/i18n/en.json` and `fa.json` are NOT synced.**
+  `tools/sync-i18n.mjs:15-24` copies only the eight files listed above.
+  The app's base catalog is `client-ui/src/i18n/{en,fa}.json`, which is
+  edited directly. The two `client-shared` files are a stale fork and
+  their contents disagree with what ships.
+- There is no `tools/check-i18n.sh` and no CI lint. Nothing verifies
+  that the mirror is in sync or that en/fa are at parity.
 
 ## Naming rules
 
@@ -39,7 +50,9 @@ diverges from the platform mirror.
 ## Allow-listed strings
 
 User-visible strings in code (without an i18n key) are forbidden by
-CI grep (`tools/check-hardcoded-strings.sh`). The grep allow-lists:
+`tools/check-hardcoded-strings.sh` — which you must run **by hand**;
+no CI runs it (see `docs/build-and-release.md`). It needs ripgrep
+installed and exits 2 if ripgrep is absent. The grep allow-lists:
 
 - code identifiers, comments, log lines
 - engine surfaces (diagnostics JSON keys, ABI call names)

@@ -1,6 +1,6 @@
 # Phase 45 handover — Data plane: in-process sing-box + Android VpnService
 
-**Status:** IN PROGRESS. Engine + build + on-device install are green; the single non-negotiable exit gate (real tunneled traffic) is **blocked on a live relay + test `.sbpx`**, not on code.
+**Status:** **SHIPPED.** As written on 2026-08-14 the exit gate was blocked on a live relay + test `.sbpx` (not on code). It was met on **2026-08-15**: all four transport tiers — vless-reality, websocket-tls, naive/Cronet, hysteria2 — carried real tunneled traffic on the device against a live relay, through the proper publisher pipeline. The sections below are preserved as the 2026-08-14 record; read `docs/backlog-post-45.md` for what happened after.
 **Session:** 2026-08-14. **Device:** Samsung SM-S931B, One UI 16 / Android 16 / API 36, wireless adb `192.168.0.172:39471`.
 **Commits:** `ff7b822`..`HEAD` on `main` (see below).
 
@@ -23,9 +23,9 @@ The Phase 45 code had been committed in `73f6c21` ("daal-platform plugin") but *
 
 **Green (verified this session):**
 - `go test ./core/...` (no tag) green, incl. the `!singbox` driver-selection twin.
-- `go test -tags singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api ./core/...` green, incl. the `singbox` twin + `TestSetTunFdOwnershipSemantics` + `TestProtectCallbackInvoked`.
-- `libdaalcore.so` built with the full tag set for arm64-v8a / armeabi-v7a / x86_64. (The phase doc says "4 ABIs" but the build matrix in `tools/build-engine-android.sh` is 3 — `x86` is not built. Reconcile the doc or add x86.)
-- ABI symbol gate = **56** `T engine_` on every ABI (checked with `llvm-nm -D --defined-only`). Sizes 41.5 / 36.7 / 41.5 MB, all under the 60 MB budget.
+- `go test -tags singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api ./core/...` green, incl. the `singbox` twin + `TestSetTunFdOwnershipSemantics` + `TestProtectCallbackRegistration`.
+- `libdaalcore.so` built with the full tag set for arm64-v8a / armeabi-v7a / x86_64. (**Reconciled 2026-08-17:** the build matrix is **3** ABIs — arm64-v8a, armeabi-v7a, x86_64. `tools/build-engine-android.sh` still builds 3; `x86` is deliberately not in the matrix. The phase doc's "4 ABIs" wording was wrong and the phase doc now says 3.)
+- ABI symbol gate = **56** `T engine_` on every ABI (checked with `llvm-nm -D --defined-only`). Sizes 41.5 / 36.7 / 41.5 MB, all under the 60 MB budget. *(Correct as measured; the count is **58** from `05d0e30` (2026-08-15) onward.)*
 - APK builds (universal, 182 MB signed), installs, launches. No `UnsatisfiedLinkError`, no native crash; onboarding → language → permissions → add-source → Connection screen all render.
 - Merged manifest (`app/build/intermediates/merged_manifests/universalRelease/.../AndroidManifest.xml`) carries `DaalVpnService` + `BIND_VPN_SERVICE` + `FOREGROUND_SERVICE_SPECIAL_USE` + the `vpn` FGS-subtype property + the `android.net.VpnService` intent filter + `POST_NOTIFICATIONS`.
 

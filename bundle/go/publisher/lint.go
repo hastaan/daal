@@ -250,6 +250,15 @@ func realityImplausibility(profile []byte) (bool, string) {
 	return false, ""
 }
 
+// publisherKeyReuse flags likely per-endpoint config reuse across routes.
+//
+// Scope note: the check is deliberately coarse. It buckets routes by the
+// first 16 bytes of their profile body and reports any bucket at or above
+// reuseThreshold. It does NOT parse the profile or compare the actual
+// "server" fields, so it catches wholesale copy-paste of a profile but not
+// two profiles that differ only in a trailing endpoint. Tightening it means
+// parsing each profile properly; do that rather than reintroducing a partial
+// string scan.
 func publisherKeyReuse(in LintInput) string {
 	const reuseThreshold = 5
 	prefixCounts := map[string]int{}
@@ -259,21 +268,14 @@ func publisherKeyReuse(in LintInput) string {
 			continue
 		}
 		s := string(body)
-		if idx := strings.Index(s, "\"server\""); idx >= 0 {
-			tail := s[idx:]
-			if end := strings.IndexByte(tail[len("\"server\""):], '"'); end >= 0 {
-				_ = end
-			}
-		}
 		// Coarse heuristic: hash a 16-byte window of the profile.
 		if len(s) >= 16 {
 			prefixCounts[s[:16]]++
 		}
 	}
-	for k, c := range prefixCounts {
+	for _, c := range prefixCounts {
 		if c >= reuseThreshold {
 			return fmt.Sprintf("%d routes share an identical 16-byte profile prefix; consider per-endpoint config divergence", c)
-			_ = k
 		}
 	}
 	return ""

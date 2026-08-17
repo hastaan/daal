@@ -25,17 +25,17 @@ the phone means losing the identity and needing a fresh address.
 
 * **Singleton per app data dir.** A single `recipient_identity`
   row in the operator/recipient DB. CHECK constraint enforces `id = 1`.
-* **PIN-wrapped at rest.** The private key never touches disk in
-  cleartext. It is stored in the same keystore the publisher uses
-  (keyring → AES-GCM, PIN-derived via Argon2id; see `key-vault-v1.md`)
-  under a dedicated alias `recipient_priv_x25519`.
+* **Custody-wrapped at rest.** The private key never touches disk in
+  cleartext. It is stored through the same Device Custody layer the
+  publisher keys use, under a dedicated alias `recipient_priv_x25519`.
+  See the amendment note below — this is **not** PIN-derived any more.
 * **Lazy creation.** Identity is **not** created until the user
-  enters the “My Daal address” screen and supplies a PIN. We do
-  not silently mint keys at first launch — the user is asked to
-  set the PIN explicitly (same prompt pattern as the publisher
-  side of the wizard).
-* **Idempotent.** Re-entering the screen with the correct PIN
-  re-derives nothing — it reads the cached pub from the DB. The
+  enters the “My Daal address” screen. We do not silently mint keys at
+  first launch. On a hardware / OS-keystore device the mint needs no
+  user secret at all; on a session-passphrase device the user is
+  prompted for the session passphrase once, which unlocks custody.
+* **Idempotent.** Re-entering the screen re-derives nothing — it reads
+  the cached pub from the DB. The
   priv is only opened on demand (e.g. when decrypting an
   `.sbpx`).
 * **No rotation in v1.** Once created the keypair is immutable.
@@ -203,8 +203,34 @@ Sections (top to bottom):
    losing this address — get a new one from the publisher after
    reinstalling.”
 
-PIN prompt reuses `Wizard.validatePin` (already pub(crate)) — the
-recipient screen is gated by the same lock pattern as the wizard.
+The first-time CTA shows a passphrase field **only** when custody
+reports the `session_passphrase` level; on hardware / OS-keystore
+devices the key is minted with no prompt (`client-ui/src/recipient/MyAddress.tsx`).
+`Wizard.validatePin` no longer exists.
+
+**Amended 2026-08-17 — Device Custody v1 replaced the PIN model.**
+`pin_lockout.rs` was deleted in `d80c638`; `Wizard.validatePin` no
+longer exists; `daal-wizard/src/lib.rs:11` states "There is no PIN
+anywhere in that flow". Recipient identity keys are stored through
+`ctx.custody.get()` / `ctx.custody.put()`
+(`daal-wizard/src/recipient_identity.rs:110,137,192`), backed by
+`device_custody.rs`.
+
+The model is: on a platform with a hardware/OS keystore (Android
+Keystore, iOS/macOS Keychain, Windows DPAPI, Linux libsecret) the key
+is wrapped by a per-app **Device Wrap Key** held in that keystore and
+**there is no PIN**; where no keystore exists the fallback is a
+**session passphrase** (Argon2id) set once per session. The wrap key
+always mixes in a machine-id binding, so lifting the blob to another
+machine fails even with the DWK alias. The UI labels the active level
+("Hardware" / "OS Keystore" / "Session passphrase") honestly.
+
+Note that `specs/key-vault-v1.md` is **still accurate and still
+PIN-based** — it describes `core/keyvault`, the *engine* vault, which
+is a different subsystem from wizard-side key custody. Do not
+"fix" it to match this note.
+
+
 
 ### 7.1 Navigation
 
