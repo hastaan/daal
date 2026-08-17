@@ -32,6 +32,28 @@ type ProfileCandidate struct {
 	DefaultEnabled   bool   `json:"default_enabled"`
 	ProbingRiskClass string `json:"probing_risk_class"`
 	UDPGated         bool   `json:"udp_gated"`
+
+	// Multiplex is the per-route (one route per family) stream-
+	// multiplexing knob — Wave 2 Step 5. It lives here, in profile data,
+	// rather than in the renderer because the trade is per-transport and
+	// per-network: multiplexing is the only documented defence against
+	// the Xue et al. nested-TLS classifier, but smux over TCP adds
+	// head-of-line blocking, so it belongs on the TLS families and never
+	// on the QUIC-native ones. nil = off, which is the pre-Wave-2 wire
+	// shape and what every already-distributed pack carries.
+	Multiplex *ProfileMultiplex `json:"multiplex,omitempty"`
+}
+
+// ProfileMultiplex is the JSON shape of the per-candidate multiplex knob.
+// It is deliberately narrower than sing-box's OutboundMultiplexOptions:
+// protocol and padding are decided by the renderer (h2mux + padding
+// always), because neither is a per-deployment choice, and Brutal is a
+// congestion-control override that is not a censorship countermeasure.
+type ProfileMultiplex struct {
+	Enabled bool `json:"enabled"`
+	// MaxStreams is the concurrent-stream ceiling per connection; omit
+	// (0) to take the renderer's default.
+	MaxStreams int `json:"max_streams,omitempty"`
 }
 
 // Load parses the given JSON bytes into a Profile.

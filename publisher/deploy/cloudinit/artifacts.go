@@ -8,6 +8,35 @@ package cloudinit
 // Updated by tools/release/relay-v1.5.0.sh on each Daal relay
 // release. The signing key for SigHex is the Daal release Ed25519
 // key whose public half is embedded as DaalReleasePubKeyPEM.
+//
+// RELEASE COUPLING — read before changing cmd/daal-relay-mgmt.
+//
+// The publisher's own binary (daal-deploy) is rebuilt from source on
+// every change; the BOX's binaries are pinned here by hash and only
+// change when somebody rebuilds, re-signs and re-releases them. So any
+// feature whose two halves live on opposite sides of that line is live
+// on one side and absent on the other for as long as the pin is stale,
+// and nothing in the build detects it. Two currently outstanding:
+//
+//   - COVER SNI (Wave 2 Step 4). daal-deploy writes a per-relay cover
+//     host into cloud-init today; the mgmt handler that echoes it back
+//     on /users/provision is in the source tree and NOT in the pinned
+//     artefact below. Mitigated, not fixed: the pack minter falls back
+//     to OperatorRecord.CoverSNI (`users-pack-sbp[x] --cover-sni`, which
+//     the wizard passes), so packs are correct even against an
+//     un-updated box. A raw CLI invocation that omits the flag still
+//     mints a pack advertising the legacy constant against a box serving
+//     a pool host, which kills the vless tier silently.
+//
+//   - MULTIPLEX (Wave 2 Step 5). Fails safe by construction: the
+//     capability travels box→publisher (`mux_inbound`), so an
+//     un-updated box reports nothing, the pack emits no mux block, and
+//     the route works exactly as before — it just gets none of the
+//     benefit until the artefact ships.
+//
+// When re-releasing, bump BOTH Sha256 and SigHex for
+// daal-relay-mgmt-*, and re-run the provisioner-vs-client cross-check
+// (publisher/deploy/providers/hetzner/cover_sni_singbox_test.go).
 
 // Artifact is one pinned binary the box fetches and installs.
 type Artifact struct {

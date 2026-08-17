@@ -80,9 +80,20 @@ var ErrTunnelRequired = errors.New(
 // dialer exists on this platform (an in-process loopback SOCKS inlet plus
 // engine_set_tunnel_socks from the JNI bridge — Wave 2 transport work).
 //
-// Bootstrap is deliberately still allowed: with no route active there is no
-// tunnel to betray, and a first fetch has to start somewhere. The dangerous
-// case is precisely "tunnel up + background timer + direct egress".
+// This guard is stated in terms of ROUTE STATE, not of refresh kind, and
+// that distinction was got wrong once already. Wave 1 exempted bootstrap
+// wholesale on the reasoning "with no route active there is no tunnel to
+// betray, and a first fetch has to start somewhere" — true of the cold
+// fetch, false of the scheduled one, which core/scheduler fires on a 24 h
+// cadence from a pump that only runs WHILE the tunnel is up. The exemption
+// therefore kept the leak open on a third kind for a whole wave. Every
+// dialer selection now asks the same question this variable answers, and
+// only that question: see abi.bootstrapDialer and abi.ensureRefresh.
+//
+// A cold fetch with no route active is still direct — there is genuinely
+// no tunnel to betray, and a device with no routes has to start somewhere.
+// The dangerous case is precisely "tunnel up + background timer + direct
+// egress", and it is the one this refuses.
 var (
 	tunnelRequiredMu sync.RWMutex
 	tunnelRequired   bool

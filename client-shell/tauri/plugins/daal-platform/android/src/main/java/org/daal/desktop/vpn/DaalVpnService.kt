@@ -33,16 +33,23 @@ import org.daal.desktop.platform.DaalCoreBridge
  *   4. Hand the fd to the engine via DaalCoreBridge.setTunFd.
  *   5. Call DaalCoreBridge.setRoute(routeId) — this is what triggers
  *      Start() on the in-process driver.
- *   6. Start the scheduler pump (see startSchedulerPump).
+ *   6. DaalCoreBridge.setTunnelRefresh(true) — put the engine's own
+ *      scheduled fetches on the tunnel via its loopback SOCKS inlet.
+ *   7. Start the scheduler pump (see startSchedulerPump).
  *
  * On `ACTION_STOP` / `onRevoke` / `onDestroy`:
  *   1. stop the scheduler pump
- *   2. DaalCoreBridge.clearRoute()
- *   3. DaalCoreBridge.clearTunFd()  (engine closes the fd)
- *   4. stopForeground + stopSelf.
+ *   2. DaalCoreBridge.setTunnelRefresh(false)
+ *   3. DaalCoreBridge.clearRoute()
+ *   4. DaalCoreBridge.clearTunFd()  (engine closes the fd)
+ *   5. stopForeground + stopSelf.
  *
- * Ordering matters: setTunFd before setRoute, registerProtectCallback
- * before setTunFd, clearRoute before clearTunFd.
+ * Ordering matters, and every pair below has a failure behind it:
+ * registerProtectCallback before setTunFd, setTunFd before setRoute,
+ * setRoute before setTunnelRefresh(true) (the inlet is not bound until
+ * the instance starts), setTunnelRefresh(false) before clearRoute (never
+ * advertise a dialer for a listener that is going away), clearRoute
+ * before clearTunFd.
  */
 class DaalVpnService : VpnService() {
 
@@ -165,9 +172,40 @@ class DaalVpnService : VpnService() {
     activeRouteId = routeId
     connected = true
 
-    // 5. The tunnel is up. Start ticking — but read the REFRESH EGRESS
-    //    note on startSchedulerPump before assuming that means the
-    //    engine's own fetches ride the tunnel. On Android they do not.
+    // 5. Put the engine's OWN fetches on the tunnel, before anything
+    //    starts asking for them.
+    //
+    //    setRoute returning 0 means the in-process sing-box instance
+    //    started, which means it has already bound every inbound in its
+    //    config — including the loopback SOCKS5 refresh inlet. Only then
+    //    does the engine publish that inlet, and only then does this
+    //    call succeed. So the listener provably exists before the
+    //    refresher is ever handed a dialer that points at it; there is
+    //    no window in which a due refresh dials a dead port.
+    //
+    //    A failure here is NOT fatal to the connection: the tunnel works
+    //    either way, and the engine's fetches stay fail-closed
+    //    (refresh.ErrTunnelRequired) rather than falling back to a
+    //    direct dial from the user's real address. Losing scheduled
+    //    refresh is a degradation; leaking the address is not one we
+    //    take. Log it and carry on.
+    val refreshRc = try {
+      DaalCoreBridge.setTunnelRefresh(true)
+    } catch (e: Throwable) {
+      Log.e(TAG, "engine_set_tunnel_refresh threw: ${e.message}")
+      -1
+    }
+    if (refreshRc < 0) {
+      Log.w(
+        TAG,
+        "engine_set_tunnel_refresh returned $refreshRc; scheduled refresh " +
+          "stays disabled for this session (fail-closed, not direct-dial)",
+      )
+    }
+
+    // 6. Now start ticking. The pump comes last on purpose: a tick that
+    //    finds work due dispatches refreshes inline, and step 5 is what
+    //    decides whether those can go anywhere at all.
     startSchedulerPump()
     return true
   }
@@ -176,6 +214,14 @@ class DaalVpnService : VpnService() {
     if (!connected) return
     connected = false
     stopSchedulerPump()
+    // Retract the tunnel dialer BEFORE the route (and with it the
+    // loopback inlet) goes away, so no in-flight or newly-started fetch
+    // can be handed a dialer pointing at a listener that is already
+    // closing. The engine clears the same state itself when the driver
+    // stops — this is belt and braces, and it makes the ordering
+    // readable from the host side, which is where the mistake would be
+    // made.
+    try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) {}
     try { DaalCoreBridge.clearRoute() } catch (_: Throwable) {}
     try { DaalCoreBridge.clearTunFd() } catch (_: Throwable) {}
     DaalCoreBridge.protectImpl = null
@@ -233,38 +279,44 @@ class DaalVpnService : VpnService() {
    *    no android:process attribute) and so keeps running whenever the
    *    process is alive, and (b) the immediate tick at tunnel-up.
    *
-   * REFRESH EGRESS — WHAT THIS PUMP DOES *NOT* FIX.
+   * REFRESH EGRESS — WHERE A TICK'S PACKETS ACTUALLY GO.
    *
-   * On Android the engine's refresh fetches do NOT go through the
-   * tunnel, tunnel up or down. Two facts compose to that:
+   * start() calls builder.addDisallowedApplication(packageName), which
+   * by design keeps every socket owned by this app's UID — including
+   * the Go engine's — OUT of the TUN. That exclusion is load-bearing:
+   * without it the engine's dial to the relay loops back into its own
+   * tunnel. It also means a plain socket from this process does not
+   * ride the tunnel, so for a long time a due subscription / revocation
+   * / bootstrap refresh was fetched over the censored network from the
+   * user's real IP while the UI said "connected". Wave 1 stopped that
+   * by refusing the fetch outright (refresh.ErrTunnelRequired) — never
+   * by dialling direct — which left everything scheduled inert while
+   * connected.
    *
-   *   1. start() calls builder.addDisallowedApplication(packageName),
-   *      which by design keeps every socket owned by this app's UID —
-   *      including the Go engine's — OUT of the TUN. That exclusion is
-   *      load-bearing: without it the engine's dial to the relay loops
-   *      back into its own tunnel.
-   *   2. core/refresh only tunnels when refresh.SetGlobalDialer has
-   *      been installed, and the one production installer is
-   *      abi.SetTunnelSocks (engine_set_tunnel_socks), reached only
-   *      from the DESKTOP sing-box sidecar path — which needs an
-   *      external `sing-box` executable that does not exist on Android.
-   *      So Refresher.dial() falls through to a direct TCP dial.
+   * Wave 2 restores the capability instead of the leak: the engine's
+   * generated sing-box config now carries a loopback SOCKS5 inbound
+   * whose traffic route.final sends to the active outbound, and start()
+   * calls DaalCoreBridge.setTunnelRefresh(true) — AFTER setRoute
+   * succeeds, so the listener is provably bound first — which installs
+   * a tunnel-aware dialer inside the engine. A tick's refreshes then
+   * leave the device over the relay and the audit records
+   * `via_tunnel:true`.
    *
-   * So a due subscription / revocation / bootstrap refresh is fetched
-   * over the censored network from the user's real IP. This pump does
-   * not introduce that — the Tauri shell's thread has driven the same
-   * ticks from the same process since D-2.1, and the engine records the
-   * truth (`via_tunnel:false`) in the refresh audit — but tunnel-up is
-   * NOT the moment that stops being true, and this comment used to
-   * imply it was.
+   * All THREE scheduled kinds are covered, which took two goes to get
+   * right: subscription and revocation read the dialer through
+   * refresh.Refresher, and bootstrap through abi.bootstrapDialer, which
+   * until the Wave 2 repair pass returned a direct dialer
+   * unconditionally — so KindBootstrap kept egressing in the clear on
+   * its 24 h cadence, from this very pump, for a whole wave. If you add
+   * a fourth kind, make its dialer ask refresh.TunnelRequired() too.
    *
-   * Closing it needs a tunnel-aware dialer on Android: an in-process
-   * SOCKS inlet on loopback (core/engine's SingBoxConfig has an
-   * Inbounds slot and currently writes none) plus a JNI call to
-   * engine_set_tunnel_socks after setRoute succeeds. That is a
-   * transport change, not a scheduler change, so it is NOT in this
-   * wave — but until it lands, do not add anything to the tick that
-   * assumes the tunnel carries it.
+   * Two properties to preserve when adding to the tick:
+   *   1. If setTunnelRefresh failed (logged, non-fatal), the engine is
+   *      still fail-closed, NOT direct-dialling. A tick is then a
+   *      no-op for anything network-shaped. Do not "helpfully" add a
+   *      direct-dial fallback anywhere.
+   *   2. The pump starts after step 5 and stops before the dialer is
+   *      retracted in teardown(). Keep that order.
    *
    * REJECTED:
    *

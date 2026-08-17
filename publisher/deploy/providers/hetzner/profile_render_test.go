@@ -2,9 +2,11 @@ package hetzner
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"daal/publisher/deploy/relayports"
+	"daal/publisher/deploy/sni"
 )
 
 // TestDefaultSingBoxConfigStructure proves the shipped box config is
@@ -16,7 +18,7 @@ import (
 // inbound); the mgmt service creates it with its first recipient.
 func TestDefaultSingBoxConfigStructure(t *testing.T) {
 	var doc map[string]any
-	if err := json.Unmarshal([]byte(defaultSingBoxConfig("iran-default")), &doc); err != nil {
+	if err := json.Unmarshal([]byte(defaultSingBoxConfig("iran-default", "mirror.example.net")), &doc); err != nil {
 		t.Fatalf("defaultSingBoxConfig is not valid JSON: %v", err)
 	}
 
@@ -100,6 +102,100 @@ func TestPortDelegationMatchesRelayports(t *testing.T) {
 		}
 		if got := portProto(fam); got != wantProto {
 			t.Errorf("portProto(%q) = %q, want %q", fam, got, wantProto)
+		}
+	}
+}
+
+// TestDefaultSingBoxConfigTemplatesCoverSNI is the Wave-2 regression:
+// the REALITY cover host must be the per-relay value in BOTH
+// tls.server_name and reality.handshake.server, and the fleet-wide
+// constant must be gone from the source entirely.
+func TestDefaultSingBoxConfigTemplatesCoverSNI(t *testing.T) {
+	const want = "mirror.de.leaseweb.net"
+	var doc struct {
+		Inbounds []struct {
+			Tag string `json:"tag"`
+			TLS struct {
+				ServerName string `json:"server_name"`
+				Reality    struct {
+					Enabled   bool `json:"enabled"`
+					Handshake struct {
+						Server     string `json:"server"`
+						ServerPort int    `json:"server_port"`
+					} `json:"handshake"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	body := defaultSingBoxConfig("iran-default", want)
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("not valid JSON: %v", err)
+	}
+	if strings.Contains(body, sni.LegacyCoverSNI) {
+		t.Errorf("rendered config still contains the fleet-wide constant %q", sni.LegacyCoverSNI)
+	}
+	seen := 0
+	for _, in := range doc.Inbounds {
+		if !in.TLS.Reality.Enabled {
+			continue
+		}
+		seen++
+		if in.TLS.ServerName != want {
+			t.Errorf("%s: tls.server_name = %q, want %q", in.Tag, in.TLS.ServerName, want)
+		}
+		if in.TLS.Reality.Handshake.Server != want {
+			t.Errorf("%s: reality.handshake.server = %q, want %q", in.Tag, in.TLS.Reality.Handshake.Server, want)
+		}
+		if in.TLS.Reality.Handshake.ServerPort != 443 {
+			t.Errorf("%s: reality.handshake.server_port = %d, want 443", in.Tag, in.TLS.Reality.Handshake.ServerPort)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no REALITY inbound in the rendered config")
+	}
+}
+
+// TestDefaultSingBoxConfigQuotesTheCoverSNI: the host is interpolated
+// into JSON, so a value containing a quote must not be able to break out
+// of the string. ValidHost rejects such values upstream; this proves the
+// renderer is not the only thing standing between us and broken JSON.
+func TestDefaultSingBoxConfigQuotesTheCoverSNI(t *testing.T) {
+	body := defaultSingBoxConfig("iran-default", `evil".example"`)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("a hostile cover SNI produced invalid JSON: %v", err)
+	}
+}
+
+// TestDefaultSingBoxConfigNeverEmptySNI: sing-box's REALITY inbound
+// needs a name; an empty server_name is a box that does not start. The
+// renderer must degrade to the legacy constant, never to "".
+func TestDefaultSingBoxConfigNeverEmptySNI(t *testing.T) {
+	var doc struct {
+		Inbounds []struct {
+			TLS struct {
+				ServerName string `json:"server_name"`
+				Reality    struct {
+					Enabled   bool `json:"enabled"`
+					Handshake struct {
+						Server string `json:"server"`
+					} `json:"handshake"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(defaultSingBoxConfig("iran-default", "")), &doc); err != nil {
+		t.Fatalf("not valid JSON: %v", err)
+	}
+	for _, in := range doc.Inbounds {
+		if !in.TLS.Reality.Enabled {
+			continue
+		}
+		if in.TLS.ServerName == "" || in.TLS.Reality.Handshake.Server == "" {
+			t.Fatal("empty cover SNI produced an empty server_name/handshake.server")
+		}
+		if in.TLS.ServerName != in.TLS.Reality.Handshake.Server {
+			t.Fatal("fallback path left server_name and handshake.server disagreeing")
 		}
 	}
 }

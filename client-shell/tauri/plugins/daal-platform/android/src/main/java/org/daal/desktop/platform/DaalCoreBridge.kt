@@ -19,6 +19,7 @@ package org.daal.desktop.platform
  *   engine_register_protect_callback() ← DaalCoreBridge.registerProtectCallback
  *   engine_set_route(routeId)          ← DaalCoreBridge.setRoute
  *   engine_clear_route()               ← DaalCoreBridge.clearRoute
+ *   engine_set_tunnel_refresh(on)      ← DaalCoreBridge.setTunnelRefresh
  *   engine_scheduler_tick()            ← DaalCoreBridge.schedulerTick
  *
  * The Phase 45 spec requires these JNI methods to be wired before the
@@ -41,6 +42,34 @@ object DaalCoreBridge {
   external fun registerProtectCallback(): Int
   external fun setRoute(routeId: String): Int
   external fun clearRoute(): Int
+
+  /**
+   * Point the engine's scheduled refresh at the engine's own loopback
+   * SOCKS inlet (`true`), or clear it (`false`). Returns 0 on success,
+   * -1 if there is no live inlet or the engine is not loaded.
+   *
+   * WHY THIS EXISTS. On Android the VpnService excludes our own package
+   * from the TUN — it has to, or the engine's dial to the relay loops
+   * back into its own tunnel — so a plain socket from this process does
+   * NOT ride the tunnel. Since Wave 1 the engine refuses to fetch at all
+   * in that situation rather than beaconing the user's real IP at a
+   * distribution endpoint on a fixed cadence. That refusal is correct
+   * and it is also why nothing scheduled currently reaches the network
+   * while connected. This call is what lifts it: the engine's sing-box
+   * config carries a loopback SOCKS5 inbound whose traffic goes to the
+   * active outbound, and this hands the refresher a dialer that uses it.
+   *
+   * ORDERING — not optional. Call only AFTER setRoute has returned 0:
+   * the engine publishes the inlet when the sing-box instance is up and
+   * its inbounds are bound, so calling earlier returns -1. Call with
+   * `false` BEFORE clearRoute on teardown, so the dialer is retracted
+   * while the listener is still alive rather than after it dies.
+   *
+   * No endpoint and no credential cross this boundary. The inlet is
+   * authenticated (loopback on Android is reachable by every other app
+   * on the device) and the credential stays inside the engine.
+   */
+  external fun setTunnelRefresh(enabled: Boolean): Int
 
   /**
    * One `scheduler.Tick` at the engine's wall clock. Returns 0 on

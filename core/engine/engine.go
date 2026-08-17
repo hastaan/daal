@@ -68,6 +68,10 @@ func (s *Stub) Start(ctx context.Context, configJSON []byte) error {
 
 // Stop stops the stub tunnel.
 func (s *Stub) Stop() error {
+	// The stub never promotes a refresh inlet (nothing is listening on
+	// one), but a build that swaps drivers mid-process must not leave a
+	// stale record behind. Retiring is cheap and unconditional.
+	retireRefreshInlet()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.connected {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"daal/publisher/deploy/provider"
+	"daal/publisher/deploy/sni"
 )
 
 // fakeClient is an in-memory hcloudClient for unit tests.
@@ -36,6 +37,11 @@ type fakeClient struct {
 	failSSHKeyList     error
 	failSSHKeyDelete   error
 	failFirewallDelete error
+
+	// lastUserData is the cloud-init the most recent create/rebuild
+	// was handed. cover_sni_test.go parses it to prove the per-relay
+	// REALITY cover host actually reaches the box's sing-box config.
+	lastUserData string
 }
 
 // fakeSSHKey mirrors what Hetzner stores for an SSH key. Name is
@@ -91,6 +97,7 @@ func (f *fakeClient) ServerCreate(ctx context.Context, opts ServerCreateOpts) (*
 	}
 	f.idCount++
 	id := strconv.FormatInt(f.idCount, 10)
+	f.lastUserData = opts.UserData
 	s := &ServerInfo{
 		ID: id, Name: opts.Name, Status: "running",
 		ServerType: opts.ServerType, Region: opts.Region,
@@ -427,6 +434,9 @@ func TestProvision_ExistingServerRequiresPersistedMgmtPort(t *testing.T) {
 	}
 
 	retry.MgmtPort = 42424
+	// The adopt path also refuses to invent a cover host; state the one
+	// the first Provision wrote.
+	retry.CoverSNI = sni.Pick(derivedServerName(opts.PublisherPubKey, opts.Region), opts.Region)
 	rec, err := p.Provision(context.Background(), retry)
 	if err != nil {
 		t.Fatalf("retry with persisted MgmtPort: %v", err)

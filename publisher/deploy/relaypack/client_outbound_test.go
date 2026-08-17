@@ -3,6 +3,8 @@ package relaypack
 import (
 	"encoding/json"
 	"testing"
+
+	"daal/publisher/deploy/profiles"
 )
 
 // testCertPEM stands in for the box's self-signed data-plane leaf.
@@ -21,6 +23,11 @@ func fullParams() ClientConnParams {
 		WSPath:           "/r1/cafebabe",
 		TLSCertSHA256:    "c3BraS1zaGEyNTYtcGluLWJhc2U2NC12YWx1ZS14eHg=",
 		TLSCertPEM:       testCertPEM,
+		CoverSNI:         "cdn.example-host.net",
+		Multiplex: map[string]MuxPolicy{
+			"vless-reality": {Enabled: true, MaxStreams: 64},
+			"websocket-tls": {Enabled: true, MaxStreams: 64},
+		},
 	}
 }
 
@@ -52,8 +59,8 @@ func TestClientOutbound_VlessReality(t *testing.T) {
 		t.Fatalf("type = %v, want vless", m["type"])
 	}
 	tls := m["tls"].(map[string]any)
-	if tls["server_name"] != RealityServerName {
-		t.Errorf("server_name = %v, want %s", tls["server_name"], RealityServerName)
+	if tls["server_name"] != "cdn.example-host.net" {
+		t.Errorf("server_name = %v, want the pack's CoverSNI", tls["server_name"])
 	}
 	reality := tls["reality"].(map[string]any)
 	if reality["public_key"] == "" || reality["short_id"] != "deadbeef" {
@@ -109,6 +116,110 @@ func TestClientOutbound_NaiveWithoutCertPEMStillRenders(t *testing.T) {
 	}
 	if tls["enabled"] != true {
 		t.Error("naive: TLS must stay on")
+	}
+}
+
+// A pack minted before CoverSNI existed carries an empty field, and the
+// relay it was minted against really does handshake against the old
+// fleet-wide constant — so it must still render that name, not a new one
+// and not an empty SNI. This is the backward-compatibility contract for
+// every already-distributed pack.
+func TestClientOutbound_PreChangePackFallsBackToLegacySNI(t *testing.T) {
+	p := fullParams()
+	p.CoverSNI = ""
+	p.Multiplex = nil // pre-change packs carry no mux either
+	m := parseOutbound(t, "vless-reality", 443, p)
+	tls := m["tls"].(map[string]any)
+	if tls["server_name"] != legacyRealityCoverSNI {
+		t.Errorf("server_name = %v, want the legacy constant %q",
+			tls["server_name"], legacyRealityCoverSNI)
+	}
+	if _, has := m["multiplex"]; has {
+		t.Errorf("pre-change pack must render byte-identically to before: got multiplex %v", m["multiplex"])
+	}
+	// Whitespace-only is the same case as empty (a template that rendered
+	// a blank line must not produce server_name:" ").
+	p.CoverSNI = "   "
+	m = parseOutbound(t, "vless-reality", 443, p)
+	if m["tls"].(map[string]any)["server_name"] != legacyRealityCoverSNI {
+		t.Error("blank CoverSNI must fall back, not advertise whitespace")
+	}
+}
+
+func TestClientOutbound_MultiplexOnTLSFamiliesOnly(t *testing.T) {
+	p := fullParams()
+	// A profile that (wrongly) asks for mux on the QUIC and Cronet
+	// families must be ignored, not obeyed.
+	p.Multiplex["hysteria2"] = MuxPolicy{Enabled: true, MaxStreams: 64}
+	p.Multiplex["naive"] = MuxPolicy{Enabled: true, MaxStreams: 64}
+
+	for _, fam := range []string{"vless-reality", "websocket-tls"} {
+		m := parseOutbound(t, fam, 443, p)
+		mux, ok := m["multiplex"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: expected a multiplex block, got %v", fam, m["multiplex"])
+		}
+		if mux["enabled"] != true || mux["protocol"] != "h2mux" || mux["padding"] != true {
+			t.Errorf("%s: multiplex = %v", fam, mux)
+		}
+		if n, _ := mux["max_streams"].(float64); int(n) != 64 {
+			t.Errorf("%s: max_streams = %v, want 64", fam, mux["max_streams"])
+		}
+	}
+	for _, fam := range []string{"hysteria2", "naive"} {
+		m := parseOutbound(t, fam, 443, p)
+		if _, has := m["multiplex"]; has {
+			// hysteria2's option struct has no Multiplex field at all, so
+			// this would not merely be wrong, it would fail to parse.
+			t.Errorf("%s: must never carry multiplex, got %v", fam, m["multiplex"])
+		}
+	}
+}
+
+// A policy present but disabled, or enabled with no explicit ceiling,
+// must behave as documented: off, and the default ceiling.
+func TestClientOutbound_MultiplexPolicyEdges(t *testing.T) {
+	p := fullParams()
+	p.Multiplex = map[string]MuxPolicy{"vless-reality": {Enabled: false, MaxStreams: 64}}
+	if _, has := parseOutbound(t, "vless-reality", 443, p)["multiplex"]; has {
+		t.Error("enabled:false must emit no multiplex block")
+	}
+	p.Multiplex = map[string]MuxPolicy{"vless-reality": {Enabled: true}}
+	mux := parseOutbound(t, "vless-reality", 443, p)["multiplex"].(map[string]any)
+	if n, _ := mux["max_streams"].(float64); int(n) != DefaultMuxMaxStreams {
+		t.Errorf("max_streams = %v, want the default %d", mux["max_streams"], DefaultMuxMaxStreams)
+	}
+}
+
+// The profile JSON is the knob; this pins the mapping from it, including
+// that an operator's mistaken entry on a non-mux family is inert.
+func TestMultiplexFromProfile(t *testing.T) {
+	prof, err := profiles.IranDefault()
+	if err != nil {
+		t.Fatalf("IranDefault: %v", err)
+	}
+	got := MultiplexFromProfile(prof)
+	if pol := got["vless-reality"]; !pol.Enabled || pol.MaxStreams != 64 {
+		t.Errorf("vless-reality policy = %+v", pol)
+	}
+	if pol := got["websocket-tls"]; !pol.Enabled || pol.MaxStreams != 64 {
+		t.Errorf("websocket-tls policy = %+v", pol)
+	}
+	for _, fam := range []string{"hysteria2", "tuic", "naive"} {
+		if _, has := got[fam]; has {
+			t.Errorf("%s must not get a mux policy from a profile", fam)
+		}
+	}
+	if MultiplexFromProfile(nil) != nil {
+		t.Error("nil profile must yield no policy")
+	}
+	// An operator hand-editing a profile to enable mux on a QUIC family
+	// must be ignored rather than crash or produce an unparseable route.
+	bad := &profiles.Profile{Candidates: []profiles.ProfileCandidate{
+		{Family: "hysteria2", Multiplex: &profiles.ProfileMultiplex{Enabled: true, MaxStreams: 8}},
+	}}
+	if len(MultiplexFromProfile(bad)) != 0 {
+		t.Error("mux on hysteria2 in a profile must be dropped")
 	}
 }
 

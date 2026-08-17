@@ -73,6 +73,39 @@ type OperatorRecord struct {
 	//     until the box ships those TLS inbounds.
 	RealityPublicKey string `json:"reality_public_key,omitempty"`
 	TLSCertSHA256    string `json:"tls_cert_sha256,omitempty"`
+
+	// CoverSNI is THE cover hostname this relay advertises: the
+	// REALITY inbound's tls.server_name, the same inbound's
+	// reality.handshake.server, and the client outbound's
+	// ClientConnParams.CoverSNI. One value, one source, chosen once
+	// per relay at provision time from publisher/deploy/sni.
+	//
+	// It lives on the record rather than in a constant because a
+	// constant is what it replaced: every relay Daal ever built
+	// advertised "www.cloudflare.com" on a Hetzner address, so one
+	// SNI-conditional block would have taken the whole fleet at
+	// once (Irancell blocked all Cloudflare space on 16 Apr 2023).
+	//
+	// WHO READS IT. Two consumers, and both matter:
+	//
+	//   - provider.NextCoverSNI, which excludes this host when
+	//     rotating, so a burned name is not handed straight back;
+	//   - the pack minter, via `daal-deploy users-pack-sbp[x]
+	//     --cover-sni`. That path is a FALLBACK, not the primary: the
+	//     box echoes its own live value on /users/provision and that
+	//     wins, because /rotate-tls can move the box's cover host after
+	//     this record was written. The record is what covers the window
+	//     where a relay was provisioned by a Wave-2 daal-deploy but
+	//     still runs the SHA-pinned pre-Wave-2 mgmt binary, which has no
+	//     cover_sni field to echo.
+	//
+	// Nothing derives it. If this field is wrong, the record is wrong
+	// about a live box, and both consumers act on the lie — hence
+	// ReuseCoverSNI refusing to invent one on the adopt path.
+	//
+	// Empty on records minted before Wave 2, and ONLY then: every
+	// post-Wave-2 path either writes a chosen host or fails.
+	CoverSNI string `json:"cover_sni,omitempty"`
 }
 
 // CandidateMeta is one candidate entry on an OperatorRecord. It is
@@ -130,6 +163,13 @@ type ProvisionOpts struct {
 	// port into OperatorRecord.MgmtPort and stamp it into the V2
 	// cloud-init template.
 	MgmtPort int `json:"mgmt_port,omitempty"`
+	// CoverSNI is optional input, and reads exactly like MgmtPort:
+	// empty means "choose a fresh per-relay cover host from the
+	// sni pool"; non-empty means "this relay already has one, use
+	// it". Retries and rebuilds MUST pass the persisted value, or
+	// the box comes back advertising a different name than the
+	// packs already in recipients' hands expect.
+	CoverSNI string `json:"cover_sni,omitempty"`
 	// WaitForHealth asks a provider's live Provision path to poll
 	// the bootstrap health endpoint and capture
 	// MgmtTLSFingerprint before returning. Tests and dry-runs leave
@@ -262,9 +302,14 @@ func (r *DecommissionReport) Clean() bool {
 // supplement §9.5.1's L1/L2/L4/L5/L6 rotation paths via redeploy.
 type ReprovisionOpts struct {
 	NewToolboxProfile string `json:"new_toolbox_profile,omitempty"`
-	NewSNI            string `json:"new_sni,omitempty"`
-	NewWSPath         string `json:"new_ws_path,omitempty"`
-	RegenCredentials  bool   `json:"regen_credentials,omitempty"`
+	// NewSNI is the explicit L2 cover-host override. Empty is the
+	// normal case and does NOT mean "keep the current one": the
+	// adapter picks a fresh host from the sni pool, excluding the
+	// one the relay is advertising today. Re-provisioning a relay
+	// onto the cover host that was just burned is not a rotation.
+	NewSNI           string `json:"new_sni,omitempty"`
+	NewWSPath        string `json:"new_ws_path,omitempty"`
+	RegenCredentials bool   `json:"regen_credentials,omitempty"`
 }
 
 // Pricing is the live per-hour cost for a server type, surfaced by

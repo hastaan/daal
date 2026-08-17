@@ -2482,6 +2482,7 @@ pub fn run() {
 //   registerProtectCallback(): Int
 //   setRoute(routeId: String): Int
 //   clearRoute(): Int
+//   setTunnelRefresh(enabled: Boolean): Int
 //   schedulerTick(): Int
 //
 // We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
@@ -2505,7 +2506,7 @@ mod jni_bridge {
     use std::sync::Arc;
 
     use jni::objects::{JClass, JString};
-    use jni::sys::jint;
+    use jni::sys::{jboolean, jint};
     use jni::JNIEnv;
 
     use daal_desktop_core::engine::Engine;
@@ -2618,6 +2619,39 @@ mod jni_bridge {
         match eng.clear_route() {
             Ok(_) => 0,
             Err(_) => -1,
+        }
+    }
+
+    /// `engine_set_tunnel_refresh` — turn the engine's own scheduled
+    /// refresh onto its in-process loopback SOCKS inlet, or off again.
+    ///
+    /// This is what makes DaalVpnService's scheduler pump able to do
+    /// anything network-shaped: since Wave 1 the refresher fails closed
+    /// while a route is active (refresh.ErrTunnelRequired) rather than
+    /// fetching from the device's real IP, so until a tunnel dialer is
+    /// installed every due subscription / revocation / bootstrap refresh
+    /// is a deliberate no-op.
+    ///
+    /// No endpoint and no credential cross this boundary: the inlet is
+    /// an inbound of the engine's own sing-box config, so the engine is
+    /// the only party that knows either, and keeping the proxy password
+    /// out of the JVM heap costs nothing. Returns -1 when there is no
+    /// live inlet (i.e. called before set_route succeeded, or on a build
+    /// with no in-process sing-box) — a safe failure, because refresh
+    /// then simply stays fail-closed.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_setTunnelRefresh<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        enabled: jboolean,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        match eng.set_tunnel_refresh(enabled != 0) {
+            Ok(_) => 0,
+            Err(e) => {
+                log::error!("DaalCoreBridge.setTunnelRefresh({enabled}) failed: {e}");
+                -1
+            }
         }
     }
 

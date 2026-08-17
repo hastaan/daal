@@ -71,8 +71,18 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: %w", err)
 	}
+	// The cover host this relay will advertise. Seeded on the derived
+	// server name — a pure function of (publisher key, region) — so the
+	// same relay resolves to the same host on every run, while two
+	// relays land on different ones. opts.CoverSNI, when the caller
+	// persisted it, wins outright.
+	coverSNI, err := provider.ResolveCoverSNI(opts.CoverSNI, name, opts.Region)
+	if err != nil {
+		return nil, fmt.Errorf("hetzner: %w", err)
+	}
+
 	if opts.DryRun {
-		return p.dryRunRecord(name, opts, mgmtPort), nil
+		return p.dryRunRecord(name, opts, mgmtPort, coverSNI), nil
 	}
 
 	// Idempotency: if server already exists with this derived name,
@@ -85,6 +95,17 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		}
 		rec := p.recordFromServer(existing, opts)
 		rec.MgmtPort = mgmtPort
+		// This box already exists; its sing-box config was written at
+		// its own provision time and we are not rewriting it here. So
+		// the record must state what it ACTUALLY serves — which this
+		// code cannot know and must not invent (see ReuseCoverSNI).
+		// NOT the fresh host resolved above: that would be a claim
+		// about a config that was never installed.
+		reused, err := provider.ReuseCoverSNI(opts.CoverSNI)
+		if err != nil {
+			return nil, fmt.Errorf("hetzner: %w", err)
+		}
+		rec.CoverSNI = reused
 		return rec, nil
 	} else if err != nil && !errors.Is(err, errServerNotFound) {
 		return nil, fmt.Errorf("hetzner: lookup existing server: %w", err)
@@ -144,10 +165,11 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 			EphemeralSSHPublicKey: string(pubBytes),
 			ProvisioningClientIP:  opts.HelperIP.String(),
 			HealthToken:           healthToken,
-			SingBoxConfigJSON:     defaultSingBoxConfig(opts.ToolboxProfile),
+			SingBoxConfigJSON:     defaultSingBoxConfig(opts.ToolboxProfile, coverSNI),
 		},
 		MgmtPubKeyHex: hex.EncodeToString(opts.PublisherPubKey),
 		MgmtPort:      mgmtPort,
+		CoverSNI:      coverSNI,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: render cloud-init: %w", err)
@@ -184,6 +206,12 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 	rec := p.recordFromServer(srv, opts)
 	rec.MgmtPort = mgmtPort
+	// The record is the only durable copy of what got written into
+	// /etc/sing-box/config.json above. The pack minter prefers what the
+	// box itself reports on /users/provision, and falls back to this
+	// when the box's mgmt binary is too old to report anything — see
+	// OperatorRecord.CoverSNI.
+	rec.CoverSNI = coverSNI
 	if opts.ExistingServerID != "" {
 		progress("provision_server_ready", fmt.Sprintf("Server rebuilt: %s — waiting for cloud-init (up to 5 min)", rec.PublicIP))
 	} else {
@@ -409,10 +437,21 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	if rec == nil {
 		return errors.New("nil OperatorRecord")
 	}
+	now := p.clock()
+	// Move the cover host BEFORE the destructive call. The rebuilt box
+	// is a different bet than the one being torn down, so it must not
+	// come back advertising the name that was just burned; and a record
+	// that still names a deleted box's SNI would have the binder mint a
+	// pack for a relay that no longer exists. Resolve first so a bad
+	// --new-sni fails without having deleted anything.
+	nextSNI, err := provider.NextCoverSNI(rec, opts.NewSNI, now)
+	if err != nil {
+		return fmt.Errorf("hetzner: %w", err)
+	}
 	if err := p.c.ServerDelete(ctx, rec.ServerID); err != nil {
 		return fmt.Errorf("hetzner: delete during reprovision: %w", err)
 	}
-	now := p.clock()
+	rec.CoverSNI = nextSNI
 	rec.LastReprovisionedAt = &now
 	// The caller is expected to invoke Provision next with the new
 	// opts. We don't re-create here because Reprovision deliberately
@@ -851,7 +890,7 @@ func appendString(buf, s []byte) []byte {
 
 // dryRunRecord returns a synthetic OperatorRecord without making
 // any cloud-API call. Used by `daal-deploy provision --dry-run`.
-func (p *Provider) dryRunRecord(name string, opts provider.ProvisionOpts, mgmtPort int) *provider.OperatorRecord {
+func (p *Provider) dryRunRecord(name string, opts provider.ProvisionOpts, mgmtPort int, coverSNI string) *provider.OperatorRecord {
 	return &provider.OperatorRecord{
 		Provider:        "hetzner",
 		ServerID:        "dry-run-" + name,
@@ -863,6 +902,7 @@ func (p *Provider) dryRunRecord(name string, opts provider.ProvisionOpts, mgmtPo
 		Candidates:      candidatesForProfile(opts.ToolboxProfile, opts.HelperIP, opts.EnabledFamilies),
 		ProvisionedAt:   p.clock().UTC(),
 		MgmtPort:        mgmtPort,
+		CoverSNI:        coverSNI,
 	}
 }
 

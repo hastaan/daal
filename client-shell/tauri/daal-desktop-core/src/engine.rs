@@ -90,6 +90,13 @@ pub struct Engine {
         c_int,
     ) -> c_int,
 
+    // Wave 2 — restore scheduled refresh on in-process-sing-box hosts.
+    // Takes no endpoint and no credential: both belong to the engine's
+    // own loopback SOCKS inlet (core/engine/inlet.go), and handing the
+    // credential to the host would put a live proxy password in the
+    // JVM heap for nothing.
+    set_tunnel_refresh: extern "C" fn(c_int, *mut c_void, c_int) -> c_int,
+
     // Phase 2F — In-engine scheduler (1 added function, surface 34→35).
     scheduler_status: extern "C" fn(*mut c_void, c_int) -> c_int,
 
@@ -248,6 +255,9 @@ impl Engine {
                     c_int,
                 ) -> c_int,
             >(&lib, b"engine_set_tunnel_socks")?;
+            let set_tunnel_refresh = *lookup::<
+                unsafe extern "C" fn(c_int, *mut c_void, c_int) -> c_int,
+            >(&lib, b"engine_set_tunnel_refresh")?;
             let scheduler_status = *lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(
                 &lib,
                 b"engine_scheduler_status",
@@ -408,6 +418,7 @@ impl Engine {
                 pointer_rotation_status: std::mem::transmute(pointer_rotation_status),
                 diagnostics_explain: std::mem::transmute(diagnostics_explain),
                 set_tunnel_socks: std::mem::transmute(set_tunnel_socks),
+                set_tunnel_refresh: std::mem::transmute(set_tunnel_refresh),
                 scheduler_status: std::mem::transmute(scheduler_status),
                 scheduler_tick: std::mem::transmute(scheduler_tick),
                 set_route_budget: std::mem::transmute(set_route_budget),
@@ -744,6 +755,24 @@ impl Engine {
             .map_err(|_| DesktopError::EngineSymbol("password NUL".into()))?;
         call_buf(|buf, len| {
             (self.set_tunnel_socks)(h.as_ptr(), port as c_int, u.as_ptr(), p.as_ptr(), buf, len)
+        })
+    }
+
+    /// `engine_set_tunnel_refresh` — point the Go core's refresh dialer
+    /// at the engine's OWN in-process loopback SOCKS inlet, or clear it.
+    ///
+    /// This is the Android shape of `set_tunnel_socks`. There is no
+    /// sidecar on Android: sing-box runs inside libdaalcore, so the
+    /// inlet's port and credential are engine-side state and the host
+    /// only says on/off. Must be called after `set_route` has succeeded
+    /// — the engine only publishes the inlet once the instance is up and
+    /// its inbounds are bound — and cleared before `clear_route`.
+    ///
+    /// `Err(EngineReturn(-1))` means "no live inlet"; refresh then stays
+    /// fail-closed rather than dialling from the device's real address.
+    pub fn set_tunnel_refresh(&self, enabled: bool) -> Result<String> {
+        call_buf(|buf, len| {
+            (self.set_tunnel_refresh)(if enabled { 1 } else { 0 }, buf, len)
         })
     }
 

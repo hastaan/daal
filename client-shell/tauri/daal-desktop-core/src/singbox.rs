@@ -35,6 +35,18 @@ pub struct SingboxConfig {
     pub clash_port: u16,
     /// Random secret required to call the Clash REST API.
     pub clash_secret: String,
+    /// RFC 1929 credential for the SOCKS5 inbound.
+    ///
+    /// An unauthenticated loopback SOCKS proxy is an open proxy for
+    /// every other process on the machine — including a browser tab's
+    /// helper, a packaged Electron app, or anything a user was tricked
+    /// into running — and this one's `route.final` is `direct`, so it
+    /// egresses from the user's real address. Requiring auth means an
+    /// unauthenticated prober is answered METHOD=0xFF and cannot use
+    /// it. Same reasoning, and the same shape, as the in-process
+    /// Android inlet in core/engine/inlet.go.
+    pub socks_user: String,
+    pub socks_pass: String,
 }
 
 impl SingboxConfig {
@@ -55,7 +67,10 @@ impl SingboxConfig {
                     "type": "socks",
                     "tag": "socks-inlet",
                     "listen": "127.0.0.1",
-                    "listen_port": self.socks_port
+                    "listen_port": self.socks_port,
+                    "users": [
+                        { "username": self.socks_user, "password": self.socks_pass }
+                    ]
                 }
             ],
             "outbounds": [
@@ -94,9 +109,15 @@ impl Singbox {
         &self.cfg
     }
 
-    /// `127.0.0.1:<socks_port>` — the address Tauri passes to
-    /// `engine_set_tunnel_socks` so subscription / revocation refresh
-    /// flows through the active tunnel.
+    /// `127.0.0.1:<socks_port>` — the sidecar's SOCKS5 inlet.
+    ///
+    /// NOT a tunnel endpoint. `render_initial_json` sets
+    /// `route.final = "direct"` and `commands::connect` never rewrites
+    /// the outbound set (the Clash REST translation was never
+    /// implemented), so anything dialled here egresses from the user's
+    /// real address. Handing this to `engine_set_tunnel_socks` would
+    /// install a "tunnel" dialer that is not one, which both leaks and
+    /// suppresses the fail-closed guard — see `commands::start_sidecar`.
     pub fn socks_endpoint(&self) -> SocketAddrV4 {
         SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.cfg.socks_port)
     }

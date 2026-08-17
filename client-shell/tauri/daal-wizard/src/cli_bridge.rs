@@ -410,6 +410,12 @@ pub struct UsersPackSbpxArgs<'a> {
     /// Both None preserves the Tier-1 envelope-unchanged behaviour.
     pub creds_file_path: Option<&'a Path>,
     pub server: Option<&'a str>,
+    /// OperatorRecord.cover_sni for this relay. Used only when the box's
+    /// creds payload carries none — i.e. when the relay runs an
+    /// mgmt binary older than the cover-host echo. Without it such a
+    /// pack advertises the legacy fleet-wide constant against a box
+    /// serving a pool host, and the REALITY tier dies silently.
+    pub cover_sni: Option<&'a str>,
 }
 
 /// FRP-14 Layer 3b.5: JSON returned by `daal-deploy users-pack-sbpx`.
@@ -428,6 +434,8 @@ pub struct UsersPackSbpArgs<'a> {
     pub creds_file_path: &'a Path,
     pub server: &'a str,
     pub out_sbp_path: &'a Path,
+    /// See `UsersPackSbpxArgs::cover_sni`.
+    pub cover_sni: Option<&'a str>,
 }
 
 /// JSON returned by `daal-deploy users-pack-sbp`.
@@ -466,6 +474,19 @@ pub struct ProvisionArgs<'a> {
     pub dry_run: bool,
     /// When non-empty, rebuild this existing server instead of creating new.
     pub existing_server_id: &'a str,
+    /// The REALITY cover host this relay must advertise, or "" to let
+    /// `daal-deploy` pick one from the pool for a brand-new relay.
+    ///
+    /// LOAD-BEARING ON REPROVISION. `daal-deploy provision` derives the
+    /// pool host from the derived server name, which is a pure function
+    /// of (publisher key, region) and does not change when a box is
+    /// rebuilt. So an L2 rotation — whose whole purpose is to move the
+    /// relay off a burned cover host — would compute the ORIGINAL host
+    /// again and hand the operator back the exact name they paid a full
+    /// rebuild to escape. `reprovision` writes the rotated host into the
+    /// record; this field is how it survives the `provision` that
+    /// follows.
+    pub cover_sni: &'a str,
     /// Destroy the box if provisioning fails after it was created.
     ///
     /// `daal-deploy`'s own default is false — for a CLI operator, a box
@@ -877,6 +898,9 @@ impl CliRunner for SubprocessRunner {
         }
         if !args.existing_server_id.is_empty() {
             cmd.arg("--existing-server-id").arg(args.existing_server_id);
+        }
+        if !args.cover_sni.is_empty() {
+            cmd.arg("--cover-sni").arg(args.cover_sni);
         }
         if args.rollback_on_failure {
             cmd.arg("--rollback-on-failure");
@@ -1584,6 +1608,9 @@ impl CliRunner for SubprocessRunner {
             .arg(args.out_sbpx_path);
         if let (Some(creds), Some(server)) = (args.creds_file_path, args.server) {
             cmd.arg("--creds-file").arg(creds).arg("--server").arg(server);
+            if let Some(sni) = args.cover_sni.filter(|s| !s.is_empty()) {
+                cmd.arg("--cover-sni").arg(sni);
+            }
         }
         let mut child = cmd
             .apply_env()
@@ -1615,8 +1642,8 @@ impl CliRunner for SubprocessRunner {
 
     fn run_users_pack_sbp(&self, args: UsersPackSbpArgs<'_>) -> Result<UsersPackSbpResult> {
         // Local file I/O only — no priv-key, no token, no record.
-        let mut child = Command::new(&self.binary)
-            .arg("users-pack-sbp")
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("users-pack-sbp")
             .arg("--in")
             .arg(args.in_sbp_path)
             .arg("--creds-file")
@@ -1624,7 +1651,11 @@ impl CliRunner for SubprocessRunner {
             .arg("--server")
             .arg(args.server)
             .arg("--out")
-            .arg(args.out_sbp_path)
+            .arg(args.out_sbp_path);
+        if let Some(sni) = args.cover_sni.filter(|s| !s.is_empty()) {
+            cmd.arg("--cover-sni").arg(sni);
+        }
+        let mut child = cmd
             .apply_env()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1768,6 +1799,11 @@ pub struct MockRunner {
     pub last_call: Mutex<Option<MockCall>>,
     /// FRP-4b/FRP-7: count live provision calls.
     pub provision_calls: Mutex<usize>,
+    /// Wave 2: the `--cover-sni` each `run_provision` was handed. The L2
+    /// rotation's whole payload travels in this argument, and omitting
+    /// it silently returns the relay to the burned cover host, so a test
+    /// has to be able to see it.
+    pub provision_cover_snis: Mutex<Vec<String>>,
     /// FRP-4b: optional canned record JSON for `run_provision`.
     pub provision_record_json: Mutex<Option<String>>,
     /// FRP-8: optional canned CDN front for `run_cdn_provision`.
@@ -1903,6 +1939,7 @@ impl MockRunner {
             fixture,
             last_call: Mutex::new(None),
             provision_calls: Mutex::new(0),
+            provision_cover_snis: Mutex::new(Vec::new()),
             provision_record_json: Mutex::new(None),
             cdn_front_result: Mutex::new(None),
             bind_result: Mutex::new(None),
@@ -2023,10 +2060,14 @@ impl CliRunner for MockRunner {
 
     fn run_provision(
         &self,
-        _args: ProvisionArgs<'_>,
+        args: ProvisionArgs<'_>,
         on_progress: &mut dyn FnMut(ProgressEvent),
     ) -> Result<String> {
         *self.provision_calls.lock().unwrap() += 1;
+        self.provision_cover_snis
+            .lock()
+            .unwrap()
+            .push(args.cover_sni.to_string());
         on_progress(ProgressEvent {
             step: "provision_start".into(),
             message: "starting".into(),
@@ -2162,6 +2203,14 @@ impl CliRunner for MockRunner {
             });
         let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(args.record_path)?)?;
         v["last_reprovisioned_at"] = serde_json::Value::String("2026-05-03T00:00:00Z".to_string());
+        // Mirror the real adapter: Reprovision sets rec.CoverSNI to
+        // provider.NextCoverSNI(rec, opts.NewSNI, now) — the requested
+        // host when one was named, otherwise a fresh pool host that
+        // excludes the current one. The whole point of L2 is that this
+        // value then survives the `provision` that rebuilds the box.
+        v["cover_sni"] = serde_json::Value::String(
+            args.new_sni.unwrap_or("mirror.rotated.test").to_string(),
+        );
         let body = serde_json::to_string(&v)?;
         std::fs::write(args.record_path, body.as_bytes())?;
         Ok(body)

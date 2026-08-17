@@ -53,6 +53,13 @@ func newSingBox() *singBox {
 func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// From here the previously-live refresh inlet is gone (either this
+	// call tears the old instance down, or it fails and leaves nothing
+	// running). Retract it before doing anything else so no window
+	// exists in which the host is told to dial a dead loopback port —
+	// the staged inlet for THIS activation survives, and is published
+	// again only once the new instance is up. See engine/inlet.go.
+	unpublishRefreshInlet()
 	if s.instance != nil {
 		// Route switch: the host establishes a fresh TUN and calls
 		// set_route for the new route, which can race ahead of the old
@@ -200,6 +207,13 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	s.instance = inst
 
+	// The instance is up, which means sing-box has bound every inbound
+	// in the config — including the loopback SOCKS5 refresh inlet. Only
+	// NOW may the host be told the inlet exists: publishing it earlier
+	// would let the first scheduled refresh dial a port nobody is
+	// listening on. See engine/inlet.go.
+	promoteRefreshInlet()
+
 	s.Stub.mu.Lock()
 	s.Stub.connected = true
 	s.Stub.publishLocked(Event{Type: "state", State: "Connected", Bucket: hourBucket(time.Now())})
@@ -212,6 +226,9 @@ func (s *singBox) Stop() error {
 	inst := s.instance
 	s.instance = nil
 	s.mu.Unlock()
+	// Unconditionally — even on the no-instance path — so a stop can
+	// never leave a live inlet record behind a dead listener.
+	retireRefreshInlet()
 	if inst == nil {
 		return nil
 	}

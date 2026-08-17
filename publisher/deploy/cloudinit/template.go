@@ -164,6 +164,67 @@ func validate(in RenderInput) error {
 	if in.SingBoxConfigJSON == "" {
 		return fmt.Errorf("RenderInput.SingBoxConfigJSON required")
 	}
+	return checkRealityCoverSNI(in.SingBoxConfigJSON)
+}
+
+// checkRealityCoverSNI refuses to render cloud-init for a box whose
+// REALITY inbound advertises one name and falls back to another.
+//
+// This is a choke point, and that is the point: every provider adapter
+// funnels its sing-box config through Render/RenderV2, so enforcing the
+// invariant here makes the mismatch unshippable regardless of which
+// adapter, profile or future template produced the config.
+//
+// Why it matters. tls.server_name is what the client puts in its
+// ClientHello and what a censor reads. reality.handshake.server is the
+// site this box actually completes a TLS handshake against when it
+// cannot authenticate the client — i.e. when an active prober connects.
+// If they differ, the prober asks for name A and is handed site B's
+// certificate: a free, deterministic proxy detection, and precisely the
+// failure REALITY exists to avoid. Both fields were the same hard-coded
+// constant until Wave 2, so nothing enforced their agreement; now that
+// the value is per-relay and rotatable, something must.
+//
+// Configs with no REALITY inbound (the Stark/Vultr placeholders, plain
+// TLS profiles) pass untouched.
+func checkRealityCoverSNI(configJSON string) error {
+	var doc struct {
+		Inbounds []struct {
+			Tag string `json:"tag"`
+			TLS *struct {
+				ServerName string `json:"server_name"`
+				Reality    *struct {
+					Enabled   bool `json:"enabled"`
+					Handshake *struct {
+						Server string `json:"server"`
+					} `json:"handshake"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &doc); err != nil {
+		return fmt.Errorf("RenderInput.SingBoxConfigJSON is not valid JSON: %w", err)
+	}
+	for i, inb := range doc.Inbounds {
+		if inb.TLS == nil || inb.TLS.Reality == nil || !inb.TLS.Reality.Enabled {
+			continue
+		}
+		name := inb.Tag
+		if name == "" {
+			name = fmt.Sprintf("inbounds[%d]", i)
+		}
+		if inb.TLS.ServerName == "" {
+			return fmt.Errorf("cover sni: inbound %s has a REALITY block with an empty tls.server_name", name)
+		}
+		if inb.TLS.Reality.Handshake == nil || inb.TLS.Reality.Handshake.Server == "" {
+			return fmt.Errorf("cover sni: inbound %s has no reality.handshake.server", name)
+		}
+		if inb.TLS.Reality.Handshake.Server != inb.TLS.ServerName {
+			return fmt.Errorf(
+				"cover sni: inbound %s advertises %q but falls back to %q — an active prober would get the wrong site's certificate",
+				name, inb.TLS.ServerName, inb.TLS.Reality.Handshake.Server)
+		}
+	}
 	return nil
 }
 
@@ -198,6 +259,17 @@ type RenderInputV2 struct {
 	// to /etc/daal/mgmt/port for the mgmt service to read at
 	// boot. Empty/zero values fail closed.
 	MgmtPort int
+
+	// CoverSNI is the per-relay REALITY cover host the provider chose
+	// (publisher/deploy/sni). It is already inside SingBoxConfigJSON —
+	// this field writes it to /etc/daal/cover-sni as well, so the box
+	// itself can state what it is advertising without anyone parsing
+	// sing-box's config: the mgmt plane's /rotate-tls needs a source of
+	// truth to rewrite, and an operator on the box needs one to read.
+	//
+	// Empty is allowed (V1.5-era boxes, and non-REALITY profiles); the
+	// file is then not written at all rather than written blank.
+	CoverSNI string
 }
 
 // RenderV2 produces the V2 cloud-init YAML. Same determinism
@@ -223,6 +295,13 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 	if in.MgmtPort < 10000 || in.MgmtPort > 65000 {
 		return nil, fmt.Errorf("RenderInputV2.MgmtPort %d outside [10000, 65000]", in.MgmtPort)
 	}
+	// The box may only declare a cover host it actually serves. A
+	// /etc/daal/cover-sni that disagrees with the config would send
+	// /rotate-tls rewriting the wrong value, which is a slower version
+	// of the same probe mismatch.
+	if err := checkDeclaredCoverSNI(in.CoverSNI, in.SingBoxConfigJSON); err != nil {
+		return nil, err
+	}
 	manifest, err := canonicalManifestJSON(V2Artifacts)
 	if err != nil {
 		return nil, err
@@ -247,6 +326,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		AOPClientCertPEM       string
 		MgmtPubKeyHex          string
 		MgmtPort               int
+		CoverSNI               string
 	}{
 		EphemeralSSHPublicKey:  in.EphemeralSSHPublicKey,
 		ProvisioningClientIP:   in.ProvisioningClientIP,
@@ -261,6 +341,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		AOPClientCertPEM:       in.AOPClientCertPEM,
 		MgmtPubKeyHex:          in.MgmtPubKeyHex,
 		MgmtPort:               in.MgmtPort,
+		CoverSNI:               in.CoverSNI,
 	}
 	tmpl, err := template.New("cloudinit-v2").Funcs(template.FuncMap{
 		"indent": indent,
@@ -273,6 +354,44 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		return nil, fmt.Errorf("execute v2 template: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// checkDeclaredCoverSNI verifies RenderInputV2.CoverSNI against the
+// REALITY inbounds in the config. Empty declares nothing and is fine;
+// a non-empty declaration must match every REALITY inbound's
+// server_name, which checkRealityCoverSNI has already proven equals its
+// handshake.server.
+func checkDeclaredCoverSNI(declared, configJSON string) error {
+	if declared == "" {
+		return nil
+	}
+	var doc struct {
+		Inbounds []struct {
+			Tag string `json:"tag"`
+			TLS *struct {
+				ServerName string `json:"server_name"`
+				Reality    *struct {
+					Enabled bool `json:"enabled"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &doc); err != nil {
+		return fmt.Errorf("RenderInputV2.SingBoxConfigJSON is not valid JSON: %w", err)
+	}
+	for i, inb := range doc.Inbounds {
+		if inb.TLS == nil || inb.TLS.Reality == nil || !inb.TLS.Reality.Enabled {
+			continue
+		}
+		if inb.TLS.ServerName != declared {
+			name := inb.Tag
+			if name == "" {
+				name = fmt.Sprintf("inbounds[%d]", i)
+			}
+			return fmt.Errorf("cover sni: RenderInputV2.CoverSNI is %q but inbound %s serves %q", declared, name, inb.TLS.ServerName)
+		}
+	}
+	return nil
 }
 
 // indent prefixes each line of `s` with `n` spaces. Used by

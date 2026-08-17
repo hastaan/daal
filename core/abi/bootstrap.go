@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
 	"daal/core/bootstrap"
 	"daal/core/bootstrap/embedded"
 	"daal/core/pathmanager"
+	"daal/core/refresh"
 )
 
 // bootstrapState holds the initialised provider. The manifest is loaded
@@ -60,14 +62,76 @@ func ensureBootstrap() (*bootstrap.Provider, error) {
 		}
 		globalBootstrap.manifest = m
 	}
-	dialerFn := func() bootstrap.Dialer {
-		// Phase 1D: only direct dialer is wired. The TunnelDialer hook
-		// lands when the engine exposes a SOCKS5 inlet (V1.5.5).
-		return bootstrap.NewDirectDialer(15 * time.Second)
-	}
 	globalBootstrap.provider = bootstrap.NewProvider(c.store, c.adapter,
-		globalBootstrap.manifest, dialerFn, nowUTC)
+		globalBootstrap.manifest, bootstrapDialer, nowUTC)
 	return globalBootstrap.provider, nil
+}
+
+// bootstrapDialer picks the dialer for one directory fetch.
+//
+// WHY THIS IS NOT `NewDirectDialer` ANY MORE — a leak that survived
+// Wave 1, found 2026-08-17 during the Wave 2 repair pass.
+//
+// Wave 1 made SUBSCRIPTION and REVOCATION refresh fail closed while a
+// route is active (refresh.ErrTunnelRequired), because on Android the
+// engine's own UID is excluded from the TUN and a plain net.Dial from
+// this process therefore leaves over the censored network from the
+// user's real address. Bootstrap was deliberately exempted, on the
+// stated rationale that "with no route active there is no tunnel to
+// betray, and a first fetch has to start somewhere."
+//
+// That rationale is true of the COLD fetch and false of the scheduled
+// one. core/scheduler emits KindBootstrap on a 24 h cadence regardless
+// of connection state (core/scheduler/plan.go:138,206), the tick pump
+// runs precisely while the tunnel is up (DaalVpnService.startSchedulerPump),
+// and abi/scheduler.go's refreshExecutor.RefreshBootstrap lands right
+// here. So the exemption was not "the first fetch is allowed to be
+// direct" — it was "a fixed-cadence TLS fetch to a known bootstrap
+// directory host egresses in the clear, from a residential address,
+// while the UI says connected." Same signal Wave 1 called close to the
+// worst thing this tool can emit; it just arrived on a different kind.
+//
+// The rule is now uniform across all three refresh kinds:
+//
+//	tunnel dialer installed → use it;
+//	no dialer but a route is active → refuse (fail closed);
+//	no route active → direct, because a cold start has to begin
+//	somewhere and there is no tunnel to betray.
+func bootstrapDialer() bootstrap.Dialer {
+	// The process-wide override wins, exactly as it does in
+	// refresh.Refresher.dial(): it is what SetTunnelSocks (desktop
+	// sidecar) and SetTunnelRefresh (in-process inlet) install.
+	if fn := refresh.CurrentGlobalDialer(); fn != nil {
+		d, _, err := fn()
+		if err == nil && d != nil {
+			return d
+		}
+		// The installed factory refused (endpoint cleared mid-session
+		// while a route is up). Do NOT silently fall through to direct.
+		return refusingDialer{err: errOrTunnelRequired(err)}
+	}
+	if refresh.TunnelRequired() {
+		return refusingDialer{err: refresh.ErrTunnelRequired}
+	}
+	return bootstrap.NewDirectDialer(15 * time.Second)
+}
+
+func errOrTunnelRequired(err error) error {
+	if err != nil {
+		return err
+	}
+	return refresh.ErrTunnelRequired
+}
+
+// refusingDialer is how "this fetch does not happen" is expressed to
+// bootstrap.Provider, whose dialerFn signature has no error channel.
+// Provider.Refresh walks every pointer, gets this from each, and
+// returns the error as its own — so the caller sees a failed refresh
+// with ErrTunnelRequired in the reason string, never a direct fetch.
+type refusingDialer struct{ err error }
+
+func (d refusingDialer) DialContext(_ context.Context, _, _ string) (net.Conn, error) {
+	return nil, d.err
 }
 
 // BootstrapInstallSeeds is engine_bootstrap_install_seeds.

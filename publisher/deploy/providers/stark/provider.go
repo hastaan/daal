@@ -52,8 +52,20 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("stark: %w", err)
 	}
+	// Per-relay REALITY cover host, seeded on the derived hostname so
+	// the same relay always resolves to the same name. Stark's
+	// cloud-init carries a placeholder sing-box config rather than a
+	// real one, so nothing on the box serves this yet; the record
+	// carries it so rotation has a value to move away from and so the
+	// pack minter has a fallback when the box cannot report its own.
+	// See OperatorRecord.CoverSNI for who actually reads it.
+	coverSNI, err := provider.ResolveCoverSNI(opts.CoverSNI, hostname, opts.Region)
+	if err != nil {
+		return nil, fmt.Errorf("stark: %w", err)
+	}
+
 	if opts.DryRun {
-		return p.dryRunRecord(hostname, opts, mgmtPort), nil
+		return p.dryRunRecord(hostname, opts, mgmtPort, coverSNI), nil
 	}
 
 	token := p.token()
@@ -63,6 +75,13 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		}
 		rec := p.recordFromVPS(existing, opts)
 		rec.MgmtPort = mgmtPort
+		// The record must state what this already-built box serves, not
+		// what a fresh pick would be. ReuseCoverSNI refuses to guess.
+		reused, err := provider.ReuseCoverSNI(opts.CoverSNI)
+		if err != nil {
+			return nil, fmt.Errorf("stark: %w", err)
+		}
+		rec.CoverSNI = reused
 		return rec, nil
 	} else if err != nil && !errors.Is(err, errStarkNotFound) {
 		return nil, fmt.Errorf("stark: lookup existing: %w", err)
@@ -115,6 +134,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 	rec := p.recordFromVPS(&vpsResp, opts)
 	rec.MgmtPort = mgmtPort
+	rec.CoverSNI = coverSNI
 	if opts.WaitForHealth {
 		fp, err := waitForMgmtFingerprint(ctx, rec.PublicIP, healthToken)
 		if err != nil {
@@ -139,11 +159,19 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	if rec == nil {
 		return errors.New("stark: nil OperatorRecord")
 	}
+	now := p.clock()
+	// Resolve the next cover host before the destructive call, so a bad
+	// --new-sni fails without having deleted anything, and so the
+	// rebuilt box never comes back on the name that was just burned.
+	nextSNI, err := provider.NextCoverSNI(rec, opts.NewSNI, now)
+	if err != nil {
+		return fmt.Errorf("stark: %w", err)
+	}
 	token := p.token()
 	if err := p.client.do(ctx, token, "DELETE", "/vps/"+rec.ServerID, nil, nil); err != nil && !errors.Is(err, errStarkNotFound) {
 		return fmt.Errorf("stark: delete during reprovision: %w", err)
 	}
-	now := p.clock()
+	rec.CoverSNI = nextSNI
 	rec.LastReprovisionedAt = &now
 	return nil
 }
@@ -435,7 +463,7 @@ func appendString(buf, s []byte) []byte {
 	return buf
 }
 
-func (p *Provider) dryRunRecord(hostname string, opts provider.ProvisionOpts, mgmtPort int) *provider.OperatorRecord {
+func (p *Provider) dryRunRecord(hostname string, opts provider.ProvisionOpts, mgmtPort int, coverSNI string) *provider.OperatorRecord {
 	return &provider.OperatorRecord{
 		Provider:        "stark",
 		ServerID:        "dry-run-" + hostname,
@@ -447,6 +475,7 @@ func (p *Provider) dryRunRecord(hostname string, opts provider.ProvisionOpts, mg
 		Candidates:      candidatesForProfile(opts.ToolboxProfile, opts.HelperIP, opts.EnabledFamilies),
 		ProvisionedAt:   p.clock().UTC(),
 		MgmtPort:        mgmtPort,
+		CoverSNI:        coverSNI,
 	}
 }
 

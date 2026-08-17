@@ -49,8 +49,19 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("vultr: %w", err)
 	}
+	// Per-relay REALITY cover host, seeded on the derived instance
+	// label. Vultr's cloud-init carries a placeholder sing-box config
+	// rather than a real one, so nothing on the box serves this yet;
+	// the record carries it so rotation has a value to move away from
+	// and so the pack minter has a fallback when the box cannot report
+	// its own. See OperatorRecord.CoverSNI for who actually reads it.
+	coverSNI, err := provider.ResolveCoverSNI(opts.CoverSNI, label, opts.Region)
+	if err != nil {
+		return nil, fmt.Errorf("vultr: %w", err)
+	}
+
 	if opts.DryRun {
-		return p.dryRunRecord(label, opts, mgmtPort), nil
+		return p.dryRunRecord(label, opts, mgmtPort, coverSNI), nil
 	}
 
 	if existing, err := p.c.InstanceByLabel(ctx, label); err == nil && existing != nil {
@@ -59,6 +70,13 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		}
 		rec := p.recordFromInstance(existing, opts)
 		rec.MgmtPort = mgmtPort
+		// The record must state what this already-built box serves, not
+		// what a fresh pick would be. ReuseCoverSNI refuses to guess.
+		reused, err := provider.ReuseCoverSNI(opts.CoverSNI)
+		if err != nil {
+			return nil, fmt.Errorf("vultr: %w", err)
+		}
+		rec.CoverSNI = reused
 		return rec, nil
 	} else if err != nil && !errors.Is(err, errInstanceNotFound) {
 		return nil, fmt.Errorf("vultr: lookup existing instance: %w", err)
@@ -118,6 +136,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 	rec := p.recordFromInstance(inst, opts)
 	rec.MgmtPort = mgmtPort
+	rec.CoverSNI = coverSNI
 	if opts.WaitForHealth {
 		fp, err := waitForMgmtFingerprint(ctx, rec.PublicIP, healthToken)
 		if err != nil {
@@ -143,10 +162,18 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	if rec == nil {
 		return errors.New("vultr: nil OperatorRecord")
 	}
+	now := p.clock()
+	// Resolve the next cover host before the destructive call, so a bad
+	// --new-sni fails without having deleted anything, and so the
+	// rebuilt box never comes back on the name that was just burned.
+	nextSNI, err := provider.NextCoverSNI(rec, opts.NewSNI, now)
+	if err != nil {
+		return fmt.Errorf("vultr: %w", err)
+	}
 	if err := p.c.InstanceDelete(ctx, rec.ServerID); err != nil {
 		return fmt.Errorf("vultr: delete during reprovision: %w", err)
 	}
-	now := p.clock()
+	rec.CoverSNI = nextSNI
 	rec.LastReprovisionedAt = &now
 	return nil
 }
@@ -403,7 +430,7 @@ func appendString(buf, s []byte) []byte {
 	return buf
 }
 
-func (p *Provider) dryRunRecord(label string, opts provider.ProvisionOpts, mgmtPort int) *provider.OperatorRecord {
+func (p *Provider) dryRunRecord(label string, opts provider.ProvisionOpts, mgmtPort int, coverSNI string) *provider.OperatorRecord {
 	return &provider.OperatorRecord{
 		Provider:        "vultr",
 		ServerID:        "dry-run-" + label,
@@ -415,6 +442,7 @@ func (p *Provider) dryRunRecord(label string, opts provider.ProvisionOpts, mgmtP
 		Candidates:      candidatesForProfile(opts.ToolboxProfile, opts.HelperIP, opts.EnabledFamilies),
 		ProvisionedAt:   p.clock().UTC(),
 		MgmtPort:        mgmtPort,
+		CoverSNI:        coverSNI,
 	}
 }
 

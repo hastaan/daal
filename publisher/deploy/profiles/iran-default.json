@@ -3,11 +3,11 @@
   "description": "Default candidate mix for Iranian network conditions, V1.5 direct-VPS only.",
   "spec_version": 1,
   "candidates": [
-    {"family": "vless-reality", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
-    {"family": "websocket-tls", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
+    {"family": "vless-reality", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
+    {"family": "websocket-tls", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
     {"family": "naive",         "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
-    {"family": "hysteria2",     "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": true},
-    {"family": "tuic",          "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true},
+    {"family": "hysteria2",     "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": true,  "multiplex": {"enabled": false}},
+    {"family": "tuic",          "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true,  "multiplex": {"enabled": false}},
     {"family": "wireguard",     "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true},
     {"family": "amnezia-wg",    "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true}
   ]

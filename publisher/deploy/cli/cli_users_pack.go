@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"daal/bundle-go/envelope"
+	"daal/publisher/deploy/profiles"
 	"daal/publisher/deploy/relaypack"
 )
 
@@ -127,7 +128,37 @@ func trimAscii(s string) string {
 // /users/provision response shape) and maps it to the fields the client
 // outbound assembler needs, with `server` supplied separately (the box
 // public IP is not part of the creds payload).
-func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams, error) {
+//
+// recordCoverSNI is the publisher's own OperatorRecord.CoverSNI for this
+// relay, or "" when the caller has no record to hand. It exists because
+// the two halves of the Wave-2 cover-host change ship on DIFFERENT
+// rails, and the gap between them is a silent tier kill:
+//
+//   - the SNI *selection* lives in daal-deploy, which the publisher
+//     rebuilds from source, so it takes effect on the very next
+//     provision;
+//   - the SNI *echo-back* lives in daal-relay-mgmt, a SHA256+Ed25519
+//     pinned artefact (publisher/deploy/cloudinit/artifacts.go) that
+//     cloud-init downloads by hash. Until that artefact is rebuilt,
+//     re-signed and re-released, every newly provisioned relay serves a
+//     per-relay cover host while reporting no `cover_sni` at all.
+//
+// With only the creds echo to go on, that combination mints packs
+// advertising the legacy constant against a box serving a pool host,
+// and utls bails on the SNI check BEFORE REALITY auth — the vless
+// tier just dies, for every recipient, with no error the publisher can
+// see. The record is the publisher's own durable copy of what
+// cloud-init actually wrote, so preferring it over the constant closes
+// the window without waiting on a release.
+//
+// Precedence, most authoritative first:
+//
+//  1. creds.cover_sni — the box read it off its OWN live inbound, so it
+//     is right even after /rotate-tls moved it;
+//  2. recordCoverSNI — what the publisher wrote into cloud-init;
+//  3. "" — ClientConnParams falls back to the legacy constant, which is
+//     genuinely what a pre-Wave-2 box serves.
+func clientParamsFromCredsFile(path, server, recordCoverSNI string) (relaypack.ClientConnParams, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return relaypack.ClientConnParams{}, err
@@ -142,9 +173,45 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 		WSPath           string `json:"ws_path"`
 		TLSCertSHA256    string `json:"tls_cert_sha256"`
 		TLSCertPEM       string `json:"tls_cert_pem"`
+		// CoverSNI closes the last hop of the Wave-2 cover-host chain
+		// (provisioner → cloud-init → box config → /users/provision →
+		// here → the pack's tls.server_name). The box reads it off its
+		// OWN live vless-in inbound rather than echoing what it was
+		// provisioned with, so a relay whose cover host was moved by
+		// /rotate-tls after provisioning still mints correct packs.
+		// Empty means the box's mgmt binary predates the field — which
+		// is NOT the same as "the box serves the legacy constant", see
+		// the recordCoverSNI parameter above.
+		CoverSNI string `json:"cover_sni"`
+		// MuxInbound reports that this box's vless-family inbounds
+		// carry a `multiplex` block. Emission of the outbound mux
+		// object is gated on it: a mux client against a relay whose
+		// inbound has none routes to the literal mux sentinel
+		// destination and fails hard (measured on sing-box 1.13.12,
+		// curl exit 56, "global multiplex is deprecated"). The reverse
+		// is safe — a mux inbound still serves non-mux clients — which
+		// is why the box may enable it unilaterally and the client may
+		// not.
+		MuxInbound bool `json:"mux_inbound"`
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
 		return relaypack.ClientConnParams{}, fmt.Errorf("parse: %w", err)
+	}
+	coverSNI := c.CoverSNI
+	if coverSNI == "" {
+		coverSNI = recordCoverSNI
+	}
+	// Step 5's payload: only when the box says its inbounds can take it.
+	// The policy itself comes from the toolbox profile, so which
+	// families get mux and at what stream ceiling stays one editable
+	// data file rather than a renderer constant.
+	var mux map[string]relaypack.MuxPolicy
+	if c.MuxInbound {
+		prof, err := profiles.IranDefault()
+		if err != nil {
+			return relaypack.ClientConnParams{}, fmt.Errorf("load profile: %w", err)
+		}
+		mux = relaypack.MultiplexFromProfile(prof)
 	}
 	return relaypack.ClientConnParams{
 		Server:           server,
@@ -157,6 +224,8 @@ func clientParamsFromCredsFile(path, server string) (relaypack.ClientConnParams,
 		WSPath:           c.WSPath,
 		TLSCertSHA256:    c.TLSCertSHA256,
 		TLSCertPEM:       c.TLSCertPEM,
+		CoverSNI:         coverSNI,
+		Multiplex:        mux,
 	}, nil
 }
 
@@ -175,6 +244,7 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 	outPath := fs.String("out", "", "output shared .sbp path")
 	credsFile := fs.String("creds-file", "", "shared creds JSON (mgmt /users/provision shape for the shared user)")
 	server := fs.String("server", "", "box public IP/host for the client outbound")
+	coverSNI := fs.String("cover-sni", "", "OperatorRecord.cover_sni for this relay; used only when the box's creds payload carries none")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -192,7 +262,7 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "read input: %v\n", err)
 		return 1
 	}
-	params, err := clientParamsFromCredsFile(*credsFile, *server)
+	params, err := clientParamsFromCredsFile(*credsFile, *server, *coverSNI)
 	if err != nil {
 		fmt.Fprintf(stderr, "creds-file: %v\n", err)
 		return 2
@@ -231,6 +301,7 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 	// them preserves the Tier-1 behaviour (envelope the .sbp unchanged).
 	credsFile := fs.String("creds-file", "", "per-recipient creds JSON (mgmt /users/provision shape); enables Tier-2 profile rewrite")
 	server := fs.String("server", "", "box public IP/host for the client outbound (required with --creds-file)")
+	coverSNI := fs.String("cover-sni", "", "OperatorRecord.cover_sni for this relay; used only when the box's creds payload carries none")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -271,7 +342,7 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 			fmt.Fprintln(stderr, "--server is required with --creds-file")
 			return 2
 		}
-		params, err := clientParamsFromCredsFile(*credsFile, *server)
+		params, err := clientParamsFromCredsFile(*credsFile, *server, *coverSNI)
 		if err != nil {
 			fmt.Fprintf(stderr, "creds-file: %v\n", err)
 			return 2

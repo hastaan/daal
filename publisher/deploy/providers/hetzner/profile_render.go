@@ -7,6 +7,7 @@ import (
 	"daal/publisher/deploy/profiles"
 	"daal/publisher/deploy/provider"
 	"daal/publisher/deploy/relayports"
+	"daal/publisher/deploy/sni"
 )
 
 // candidatesForProfile produces the unsigned []CandidateMeta the
@@ -76,22 +77,42 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 // first recipient — in appendNaiveUser (8444/tcp), the same way it creates
 // the single shared ws-in inbound (8445/tcp) that ALL recipients use.
 // Ports come from relayports (the canonical map).
-func defaultSingBoxConfig(profileName string) string {
-	return `{
+//
+// coverSNI is the per-relay REALITY cover host chosen at provision time
+// (publisher/deploy/sni). It is substituted into BOTH tls.server_name —
+// the name the client advertises and the censor sees — AND
+// reality.handshake.server — the dest this box actually completes a
+// stolen handshake against. Those two must be the same string. When they
+// disagree, an active prober gets a certificate from one site while the
+// SNI claimed another, which is precisely the mismatch REALITY exists to
+// prevent; both were hard-coded to "www.cloudflare.com" until Wave 2,
+// which also made the entire fleet blockable with one SNI rule.
+//
+// An empty coverSNI is a caller bug, not a config option: sing-box's
+// REALITY inbound needs a name, and an empty server_name is a box that
+// does not start. The provider resolves the value before calling here,
+// so this only ever falls back on a programming error — and it falls
+// back loudly-wrong-but-working rather than silently broken.
+func defaultSingBoxConfig(profileName, coverSNI string) string {
+	if coverSNI == "" {
+		coverSNI = sni.LegacyCoverSNI
+	}
+	// %[1]q, twice: one value, two required sites.
+	return fmt.Sprintf(`{
   "log": {"level": "info"},
   "inbounds": [
     {"type": "vless", "tag": "vless-in", "listen": "0.0.0.0", "listen_port": 443,
      "users": [],
-     "tls": {"enabled": true, "server_name": "www.cloudflare.com",
+     "tls": {"enabled": true, "server_name": %[1]q,
              "reality": {"enabled": true, "private_key": "", "short_id": [],
-                         "handshake": {"server": "www.cloudflare.com", "server_port": 443}}}},
+                         "handshake": {"server": %[1]q, "server_port": 443}}}},
     {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 443,
      "users": [],
      "tls": {"enabled": true,
              "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}
   ],
   "outbounds": [{"type": "direct"}]
-}`
+}`, coverSNI)
 }
 
 // loadProfile dispatches on the profile name. iran-default is the

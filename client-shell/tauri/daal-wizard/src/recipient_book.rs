@@ -160,6 +160,10 @@ pub fn recipient_provision(
         }
     }
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+    // The record's cover host, handed to the pack step as the fallback
+    // for a box whose mgmt binary is too old to echo its own. See
+    // UsersPackSbpxArgs::cover_sni.
+    let record_cover_sni = field("cover_sni");
 
     let inserted = ctx
         .db
@@ -214,6 +218,7 @@ pub fn recipient_provision(
                 out_sbpx_path: &out_path,
                 creds_file_path: creds_arg,
                 server: server_arg,
+                cover_sni: Some(record_cover_sni.as_str()),
             },
         ) {
             summary.sbpx_path = out_path.to_string_lossy().to_string();
@@ -346,6 +351,7 @@ pub fn recipient_repack_sbpx(
         }
     }
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+    let record_cover_sni = field("cover_sni");
 
     let out_path = ctx
         .staging_dir
@@ -361,6 +367,7 @@ pub fn recipient_repack_sbpx(
         out_sbpx_path: &out_path,
         creds_file_path: Some(creds_path.as_path()),
         server: Some(relay_server_ip.as_str()),
+        cover_sni: Some(record_cover_sni.as_str()),
     });
     let _ = std::fs::remove_file(&creds_path);
     // Unlike recipient_provision — which swallows this failure because
@@ -473,6 +480,7 @@ pub fn produce_shared_sbp(
         }
     }
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+    let record_cover_sni = field("cover_sni");
 
     // Rewrite the .sbp's profiles with the shared creds → shared .sbp.
     let out_path = ctx.staging_dir.join(format!("{operator_id}.shared.sbp"));
@@ -484,6 +492,7 @@ pub fn produce_shared_sbp(
         creds_file_path: &creds_path,
         server: &relay_server_ip,
         out_sbp_path: &out_path,
+        cover_sni: Some(record_cover_sni.as_str()),
     });
     let _ = std::fs::remove_file(&creds_path);
     res.map_err(map_bridge_err)?;

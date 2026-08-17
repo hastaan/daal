@@ -74,6 +74,31 @@ type userCreds struct {
 	//     the publisher installs this as the recipient's naive trusted
 	//     root. Empty when the data-plane cert is absent.
 	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
+	//   CoverSNI — the REALITY cover host this box advertises, read from
+	//     the live vless-in inbound. The client outbound's
+	//     tls.server_name must equal it exactly or REALITY fails, so the
+	//     publisher takes it from here rather than from a compile-time
+	//     constant: the whole fleet sharing one cover host is one free
+	//     string match away from being burned at once, and /rotate-tls
+	//     can move this value at any time. Empty on a box provisioned
+	//     before the cover host was templated — the publisher then falls
+	//     back to the legacy constant for that relay only.
+	CoverSNI string `json:"cover_sni,omitempty"`
+	//   MuxInbound — this box's vless-family inbounds carry a
+	//     `multiplex` block, so a pack minted against it MAY emit the
+	//     matching outbound one. The direction is not symmetric and
+	//     that is the whole reason this field exists: a mux inbound
+	//     still serves non-mux clients (sing-box hands a connection to
+	//     the mux service only when its destination equals the mux
+	//     sentinel), but a mux CLIENT against a relay without the block
+	//     routes to that sentinel host and fails hard. So the box may
+	//     turn mux on unilaterally — and does, on every provision —
+	//     while the publisher must wait to be told.
+	//
+	//     Read from the live config, not from what this binary intended
+	//     to write, so an operator who hand-edited the block out is
+	//     believed.
+	MuxInbound bool `json:"mux_inbound"`
 }
 
 type userMeta struct {
@@ -133,7 +158,7 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mint creds: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	effectiveWSPath, err := addUserToSingbox(s.singboxConfig, creds)
+	effectiveWSPath, err := addUserToSingbox(s.singboxConfig, creds, s.singboxCheck)
 	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -153,6 +178,8 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 	creds.RealityPublicKey = s.readRealityPub()
 	creds.TLSCertSHA256 = s.readTLSCertSHA256()
 	creds.TLSCertPEM = s.readTLSCertPEM()
+	creds.CoverSNI = readCoverSNI(s.singboxConfig)
+	creds.MuxInbound = readMuxInbound(s.singboxConfig)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(creds)
 }
@@ -230,7 +257,7 @@ func (s *server) handleUsersRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name must match r[0-9]{1,12}", http.StatusBadRequest)
 		return
 	}
-	removed, err := removeUserFromSingbox(s.singboxConfig, req.Name)
+	removed, err := removeUserFromSingbox(s.singboxConfig, req.Name, s.singboxCheck)
 	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return

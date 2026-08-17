@@ -1574,6 +1574,10 @@ pub fn provision_run(
                 token: token.as_str(),
                 dry_run: false,
                 existing_server_id,
+                // Empty: a relay being built for the first time takes
+                // whatever the pool seeds for it. The rotation path is
+                // the one that must forward a value — see rotate_execute.
+                cover_sni: "",
                 // A failure past ServerCreate must not leave a billing
                 // box behind: this function only persists the
                 // OperatorRecord on success, so a kept box has no server
@@ -1861,6 +1865,11 @@ struct RotateRecordForProvision {
     publisher_pub_key: String,
     #[serde(default)]
     candidates: Vec<RotateCandidateForProvision>,
+    /// The cover host `reprovision` just rotated onto this relay.
+    /// Forwarded to `provision` below; without it the rebuild
+    /// re-derives the ORIGINAL host and the rotation is undone.
+    #[serde(default)]
+    cover_sni: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2080,6 +2089,22 @@ pub fn rotate_execute(
                         token: token.as_str(),
                         dry_run: false,
                         existing_server_id: "",
+                        // THE ROTATION'S ACTUAL PAYLOAD, for L2.
+                        //
+                        // `reprovision` computed a fresh cover host
+                        // (provider.NextCoverSNI, excluding the one this
+                        // relay is advertising today) and wrote it into
+                        // the record we just deserialized. `provision`
+                        // seeds its own pick on the derived server name,
+                        // which is a pure function of (publisher key,
+                        // region) and is unchanged by a rebuild — so
+                        // omitting this hands the relay back the exact
+                        // host it was rotated off, and then rewrites the
+                        // record to agree, making the reversion
+                        // invisible. An operator would burn a relay,
+                        // pay for a full rebuild, and get the blocked
+                        // SNI back.
+                        cover_sni: &rec.cover_sni,
                         // Same reasoning as provision_run: the rotation
                         // only writes the record back on success, so a
                         // kept half-built box would be invisible to the
@@ -4878,6 +4903,72 @@ mod tests {
         assert!(record.contains("\"sni:front.example.com\""), "{record}");
         assert!(record.contains("\"ws_path_fp:"), "{record}");
         assert_eq!(ctx.db.list_signed_sbps_history(id).unwrap().len(), 1);
+    }
+
+    /// Wave 2, Step 4: an L2 rotation must actually MOVE the relay's
+    /// cover host.
+    ///
+    /// The failure this pins is silent and expensive. `reprovision`
+    /// picks a fresh cover host and writes it into the record;
+    /// `provision` then rebuilds the box, and its own pick is seeded on
+    /// the derived server name — `daal-<region>-<hex8 of publisher
+    /// key>` — which a rebuild does not change. So if the rotated value
+    /// is not forwarded, `provision` re-derives the ORIGINAL host, the
+    /// record is overwritten to agree, and the operator has paid for a
+    /// full rebuild to land back on the exact SNI that was blocked.
+    #[test]
+    fn rotate_execute_l2_forwards_the_rotated_cover_host_to_provision() {
+        let bind = BindResult {
+            sbp_path: "/tmp/rotated-l2-sni.sbp".into(),
+            sbp_sha256: "d".repeat(64),
+            relay_pack_id: "rp-rotated-l2-sni".into(),
+            fingerprint_hex: "c".repeat(64),
+            fingerprint_en: "alpha bravo charlie delta".into(),
+            fingerprint_fa: "یک دو سه چهار".into(),
+            lint_warnings: vec![],
+            shared_risk_edges: 3,
+        };
+        let pricing = Pricing {
+            provider: "hetzner".into(),
+            region: "fsn1".into(),
+            server_type: "cx22".into(),
+            hourly_eur: 0.005,
+            monthly_eur: 3.85,
+            included_traffic_tb_per_month: None,
+            overage_eur_per_gb: None,
+        };
+        let mock = Arc::new(
+            MockRunner::new(pricing)
+                .with_provision_record(full_record_json())
+                .with_bind_result(bind),
+        );
+        let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        // No explicit --new-sni: the pool picks, which is the normal
+        // "this host was blocked, move me" case and the one where an
+        // unforwarded value is undetectable by eye.
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L2".into(),
+                reason: "cover host blocked".into(),
+                helper_ip: Some("1.2.3.4".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap();
+
+        let snis = mock.provision_cover_snis.lock().unwrap();
+        assert_eq!(snis.len(), 1, "expected exactly one provision call");
+        assert_eq!(
+            snis[0], "mirror.rotated.test",
+            "the rebuild must be told the cover host reprovision just rotated onto \
+             this relay; an empty value re-derives the burned one"
+        );
     }
 
     // ----- FRP-8 CDN command tests -----

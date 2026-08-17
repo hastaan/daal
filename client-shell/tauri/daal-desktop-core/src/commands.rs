@@ -90,16 +90,31 @@ pub struct ConnectRequest {
     pub route_id: String,
 }
 
-/// Connect: tell the engine which route to activate, then push the
-/// resulting outbound to sing-box via Clash REST. (The route → outbound
-/// translation will land alongside the sing-box Clash REST client; for
-/// 1.5B the engine_set_route call is the contract that matters.)
+/// Connect: tell the engine which route to activate, then turn on
+/// tunnelled refresh if this build can provide it.
+///
+/// The route → outbound translation for the SIDECAR still does not
+/// exist; the sidecar is legacy topology that `deliver_tun_fd` replaces
+/// on builds carrying `-tags singbox`. So refresh is pointed at the
+/// engine's OWN in-process loopback inlet (core/engine/inlet.go), the
+/// same mechanism Android uses, and never at the sidecar — which routes
+/// `final: direct`.
+///
+/// Best-effort by design: `set_tunnel_refresh` returns an error when no
+/// inlet is live (a build whose driver does not host sing-box
+/// in-process, or a race with instance start). That failure leaves
+/// refresh FAIL-CLOSED while the route is up, which is the safe
+/// direction. Never substitute a direct dialer here.
 pub fn connect(state: &AppState, req: ConnectRequest) -> Result<()> {
     state.engine.set_route(&req.route_id)?;
+    let _ = state.engine.set_tunnel_refresh(true);
     Ok(())
 }
 
 pub fn disconnect(state: &AppState) -> Result<()> {
+    // Retract the dialer BEFORE the route goes away, so no refresh can
+    // be handed an inlet whose listener is already gone.
+    let _ = state.engine.set_tunnel_refresh(false);
     state.engine.clear_route()?;
     Ok(())
 }
@@ -242,8 +257,29 @@ pub fn revocation_refresh_all(state: &AppState, timeout_ms: i32) -> Result<Strin
     state.engine.revocation_refresh_all(timeout_ms)
 }
 
-/// Spawn sing-box (if not yet running) and call engine_set_tunnel_socks
-/// so the Go-side refresher routes through the local SOCKS5 inlet.
+/// Spawn the sing-box sidecar (if not yet running).
+///
+/// WHAT THIS DELIBERATELY NO LONGER DOES: install a refresh dialer.
+///
+/// Until the Wave 2 repair pass this called
+/// `engine_set_tunnel_socks(127.0.0.1, socks_port, "", "")` on the
+/// sidecar's inlet, and the Tauri setup hook calls start_sidecar
+/// unconditionally at app launch. But the sidecar's config is
+/// `route.final = "direct"` with a direct/block outbound pair, and the
+/// route → outbound translation that was supposed to replace it never
+/// landed (see `connect` below). So the installed "tunnel" dialer sent
+/// every scheduled subscription / revocation / bootstrap fetch out of
+/// the user's real address — and, worse, did so INVISIBLY: the Go core
+/// reports `via_tunnel: true` for anything that goes through a global
+/// dialer, and a non-nil global dialer takes precedence over the
+/// fail-closed check in `refresh.directFallback`, so Wave 1's guard was
+/// not merely absent on desktop, it was suppressed.
+///
+/// Desktop gets tunnelled refresh the same way Android does — through
+/// the engine's own in-process inlet — which `connect` turns on once a
+/// route is actually up. Builds whose driver does not host sing-box
+/// in-process simply stay fail-closed while connected, which is the
+/// correct direction.
 pub fn start_sidecar(state: &AppState) -> Result<()> {
     let mut guard = state.singbox.write().expect("singbox poisoned");
     if guard.is_some() {
@@ -260,21 +296,23 @@ pub fn start_sidecar(state: &AppState) -> Result<()> {
         socks_port,
         clash_port,
         clash_secret: secret,
+        // Per-spawn credential. Never leaves this process today; if a
+        // caller ever needs the inlet it must take the pair with it,
+        // because an unauthenticated loopback SOCKS on a desktop is an
+        // open proxy for every other program on the machine.
+        socks_user: singbox::random_secret()?,
+        socks_pass: singbox::random_secret()?,
     };
     let sb = Singbox::spawn(cfg)?;
-    let endpoint = sb.socks_endpoint();
     *guard = Some(sb);
-    drop(guard);
-    // Hand the SOCKS5 endpoint to the Go core's refresher.
-    let _ = state
-        .engine
-        .set_tunnel_socks(&endpoint.ip().to_string(), endpoint.port(), "", "")?;
     Ok(())
 }
 
 pub fn stop_sidecar(state: &AppState) -> Result<()> {
-    // Clear the tunnel dialer FIRST so a parallel refresh doesn't try
-    // to dial through a dead SOCKS port.
+    // Clear any dialer the engine may still hold. start_sidecar no
+    // longer installs one, but a route that was up when the sidecar
+    // stops did (via set_tunnel_refresh), and pointing a refresh at a
+    // dead listener is worse than not refreshing.
     let _ = state.engine.set_tunnel_socks("", 0, "", "");
     let mut guard = state.singbox.write().expect("singbox poisoned");
     if let Some(sb) = guard.take() {

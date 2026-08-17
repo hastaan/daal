@@ -144,7 +144,10 @@ Usage:
 
 Subcommands:
   provision     Create a new VPS and emit OperatorRecord JSON to stdout.
-  reprovision   Delete the VPS and re-Provision (full rotation).
+                --cover-sni pins the REALITY cover host; omit it and the relay
+                gets its own from the pool (publisher/deploy/sni).
+  reprovision   Delete the VPS and re-Provision (full rotation). The record
+                comes back with a NEW cover host unless --new-sni pins one.
   decommission  Destroy the cloud resources behind an OperatorRecord: the VPS,
                 its per-server firewall, and the one-shot provisioning SSH key.
                 Emits a per-resource JSON report on stdout (server_deleted /
@@ -207,7 +210,7 @@ const Version = "daal-deploy 0.2.0+frp-4b"
 
 //	runProvision: daal-deploy provision --pubkey-file ... --region ... \
 //	  --server-type ... --toolbox-profile ... --helper-ip ... [--dry-run]
-//	  [--token-file ... ] -o record.json
+//	  [--token-file ... ] [--cover-sni ...] -o record.json
 func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("provision", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -221,6 +224,13 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	families := fs.String("families", "", "comma-separated enabled transport families; empty uses profile defaults")
 	helperIP := fs.String("helper-ip", "", "Helper machine's public IPv4 (for ufw allowlist)")
 	mgmtPort := fs.Int("mgmt-port", 0, "V2 mgmt-plane port in [10000,65000]; 0 generates a random per-deploy port")
+	// Wave 2: the per-relay REALITY cover host. Empty is the normal
+	// case — the provider picks one from publisher/deploy/sni, seeded on
+	// this relay's identity. Pass the persisted value when re-running
+	// provisioning for an existing record (a rebuild, a retry, or the
+	// second half of a reprovision), or the box comes back advertising a
+	// different name than the packs already in recipients' hands.
+	coverSNI := fs.String("cover-sni", "", "REALITY cover hostname; empty picks a per-relay host from the sni pool")
 	dryRun := fs.Bool("dry-run", false, "skip cloud calls; emit synthetic OperatorRecord")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file (omit for --dry-run)")
 	existingServerID := fs.String("existing-server-id", "", "rebuild this existing server instead of creating new")
@@ -288,6 +298,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		EnabledFamilies:   splitCSV(*families),
 		HelperIP:          hip,
 		MgmtPort:          *mgmtPort,
+		CoverSNI:          *coverSNI,
 		WaitForHealth:     !*dryRun,
 		EphemeralSSHKey:   ephem,
 		DryRun:            *dryRun,
@@ -304,6 +315,10 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 	emitProgress(*progressJSON, stderr, "provision_done", "OperatorRecord ready", map[string]any{
 		"server_id": rec.ServerID, "public_ip": rec.PublicIP.String(), "candidates": len(rec.Candidates),
+		// Surfaced so the wizard can show which cover host this relay
+		// got, and so two back-to-back provisions are visibly different
+		// without reading the record file.
+		"cover_sni": rec.CoverSNI,
 	})
 	return emitRecord(rec, *outFile, stdout, stderr)
 }
@@ -342,7 +357,10 @@ func runReprovision(ctx context.Context, args []string, stdout, stderr io.Writer
 	// drive L1 (regen-creds), L2 (sni/ws-path), L4/L5/L6 (new
 	// toolbox profile) over the existing CLI surface.
 	regenCreds := fs.Bool("regen-credentials", false, "FRP-7 L1: regenerate credentials")
-	newSNI := fs.String("new-sni", "", "FRP-7 L2: new TLS SNI")
+	// Empty does NOT mean "keep the current SNI": the provider picks a
+	// fresh host from the sni pool, excluding the one this relay is
+	// advertising today. Set this only to force a specific name.
+	newSNI := fs.String("new-sni", "", "FRP-7 L2: new TLS SNI; empty picks a fresh pool host, excluding the current one")
 	newWSPath := fs.String("new-ws-path", "", "FRP-7 L2: new WebSocket path")
 	newToolboxProfile := fs.String("new-toolbox-profile", "", "FRP-7 L4/L5/L6: new toolbox profile")
 	if rc := parseFlags(fs, args); rc >= 0 {

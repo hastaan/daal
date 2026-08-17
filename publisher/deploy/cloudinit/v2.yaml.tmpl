@@ -87,6 +87,21 @@ write_files:
     owner: root:root
     content: |
       {{ .MgmtPort }}
+{{ if .CoverSNI }}
+  # Wave 2: the REALITY cover host THIS relay advertises, chosen
+  # per-relay by the publisher (publisher/deploy/sni) rather than baked
+  # in as a fleet-wide constant. The same string is already inside
+  # /etc/sing-box/config.json in two places — tls.server_name and
+  # reality.handshake.server, which must never disagree — so this file
+  # is not the source of truth for sing-box. It is the box's own
+  # statement of what it serves, so /rotate-tls and a human on the box
+  # can both read the current value without parsing sing-box's config.
+  - path: /etc/daal/cover-sni
+    permissions: '0644'
+    owner: root:root
+    content: |
+      {{ .CoverSNI }}
+{{ end }}
 {{ if .CDNEnabled }}
   - path: /etc/daal/cdn/origin_ca.pem
     permissions: '0644'

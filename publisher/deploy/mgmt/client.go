@@ -95,10 +95,43 @@ func (c *Client) boxURL(rec *provider.OperatorRecord, path string) string {
 
 // RotateCredentials calls POST /rotate-credentials. Returns the
 // new credentials JSON the box generated, plus any TLS-pin error.
+//
+// WIRE-FORMAT NOTE — RealityPrivKey encoding changed, and the two ends
+// version-skew independently.
+//
+// Pre-Wave-2 boxes return 64 lowercase hex characters. That was a
+// box-bricking bug rather than a style choice: sing-box decodes
+// reality.private_key with base64.RawURLEncoding, so a hex string
+// decodes to 48 bytes and the inbound FATALs on the restart the handler
+// performs. Wave 2's handler emits 43 base64url characters, which is
+// what `sing-box generate reality-keypair` produces and what cloud-init
+// injects.
+//
+// This field is decoded as an untyped string, so neither end notices
+// the mismatch. Nothing depends on it today — RotateCredentials has no
+// production caller, the rotation ladder is a later wave — but the
+// first caller must not inherit a silent skew, so:
+//
+//   - RealityPubKey is new and is ONLY present on a Wave-2 box. Its
+//     absence is the reliable "this box is old" signal, better than
+//     guessing from the private key's length.
+//   - Users is the per-recipient map; a pre-Wave-2 box rotated only
+//     inbounds[0].users[0], so a bare UUID from such a box means "one
+//     recipient was rotated and the rest still have live credentials",
+//     not "rotation complete".
+//   - The handler regenerates the BOX keypair on every call, which
+//     invalidates the pinned public key in every already-distributed
+//     pack. It is therefore only usable together with a redistribution
+//     path.
+//
+// mgmt_encoding_test.go pins the encoding so the skew is caught by a
+// test rather than by a dead relay.
 type Credentials struct {
-	UUID            string `json:"uuid"`
-	RealityPrivKey  string `json:"reality_private_key"`
-	GeneratedAtUnix int64  `json:"generated_at_unix"`
+	UUID            string            `json:"uuid"`
+	Users           map[string]string `json:"users,omitempty"`
+	RealityPrivKey  string            `json:"reality_private_key"`
+	RealityPubKey   string            `json:"reality_public_key,omitempty"`
+	GeneratedAtUnix int64             `json:"generated_at_unix"`
 }
 
 func (c *Client) RotateCredentials(ctx context.Context, rec *provider.OperatorRecord, privKey ed25519.PrivateKey) (*Credentials, error) {

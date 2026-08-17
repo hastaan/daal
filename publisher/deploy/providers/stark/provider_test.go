@@ -274,12 +274,18 @@ func TestProvision_ExistingVPSRequiresPersistedMgmtPort(t *testing.T) {
 	}
 
 	retry.MgmtPort = 42424
+	// The adopt path refuses to invent a cover host for a box it cannot
+	// inspect, so state one. Same shape as MgmtPort two lines up.
+	retry.CoverSNI = "mirror.init7.net"
 	rec, err := p.Provision(context.Background(), retry)
 	if err != nil {
 		t.Fatalf("retry with persisted MgmtPort: %v", err)
 	}
 	if rec.MgmtPort != 42424 {
 		t.Fatalf("MgmtPort = %d, want 42424", rec.MgmtPort)
+	}
+	if rec.CoverSNI != "mirror.init7.net" {
+		t.Fatalf("CoverSNI = %q, want the persisted value verbatim", rec.CoverSNI)
 	}
 }
 

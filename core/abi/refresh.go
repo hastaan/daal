@@ -48,11 +48,29 @@ func ensureRefresh() (*refresh.Refresher, *refresh.RevocationRefresher, error) {
 	globalRefresh.mu.Lock()
 	defer globalRefresh.mu.Unlock()
 	if globalRefresh.subs == nil {
-		// The Phase 1D bootstrap dialer is the same primitive a tunnel
-		// would supply; in Phase 1.5A it is wired direct. Phase 1.5B
-		// will replace the dialer with a TunnelDialer when the engine
-		// exposes a SOCKS5 inlet.
+		// The per-instance fallback used when no tunnel-aware dialer is
+		// installed: Refresher.dial() consults the process-wide
+		// override first (SetTunnelSocks / SetTunnelRefresh) and only
+		// then this field.
+		//
+		// IT MUST HONOUR THE WAVE 1 GUARD. Until 2026-08-17 this closure
+		// returned a direct dialer unconditionally, which meant the leak
+		// Wave 1 believed it had closed was still open on the ONLY path
+		// production uses: refresh.directFallback refuses while a route
+		// is active, but dial() never reaches it when r.Dialer is set,
+		// and abi/scheduler.go's tick gets its refreshers from right
+		// here. So the scheduled subscription / revocation fetches still
+		// egressed in the clear, from the device's real address, on a
+		// fixed cadence, while the UI said "connected".
+		//
+		// The rule is the same one refresh.ErrTunnelRequired states: a
+		// fetch that cannot ride the tunnel does not happen. Bootstrap
+		// (no active route) is still allowed to dial direct — it has to
+		// start somewhere.
 		dialerFn := refresh.DialerFn(func() (bootstrap.Dialer, bool, error) {
+			if refresh.TunnelRequired() {
+				return nil, false, refresh.ErrTunnelRequired
+			}
 			return bootstrap.NewDirectDialer(15 * time.Second), false, nil
 		})
 		globalRefresh.subs = &refresh.Refresher{

@@ -62,6 +62,50 @@ const (
 	naiveListenPort = 8444
 )
 
+// muxInbound is the `multiplex` block written onto the two vless-family
+// inbounds (vless-in, ws-in).
+//
+// WHY. Xue et al. (USENIX Security 2024) detect nested-TLS proxies —
+// REALITY + Vision included — at >70% TPR for 0.054% FPR, and the one
+// mitigation the paper measures as effective (>70% detection reduction)
+// is aggressive stream multiplexing: many concurrent streams over one
+// TCP connection, so the per-flow shape the classifier keys on stops
+// existing. Daal ships exactly the shape that work targets.
+//
+// BACKWARD COMPATIBILITY — the load-bearing question, answered
+// empirically against sing-box 1.13.12, not assumed. A mux-enabled
+// inbound still serves clients that know nothing about mux: sing-box
+// wraps the inbound router (common/mux/router.go) and hands a
+// connection to the mux service ONLY when its destination equals the
+// magic mux destination; every other connection falls straight through
+// to the normal router. Confirmed on the wire by running a real 1.13.12
+// server + client pair over loopback: mux inbound + non-mux client
+// fetched the origin fine, for both the REALITY-shaped vless inbound
+// and the ws one. So enabling this on a live relay does NOT break the
+// packs already in recipients' hands.
+//
+// The reverse is NOT true and must not be assumed: a mux CLIENT against
+// a relay that predates this block fails hard ("global multiplex is
+// deprecated since sing-box v1.7.0" from the router, connection
+// dropped). Pack minting therefore has to gate the outbound `multiplex`
+// on the relay actually having it — an updated pack is not safe against
+// an un-updated box.
+//
+// PADDING is an enforcement flag here, not a behaviour flag: with
+// padding=true the server REJECTS a mux client that did not pad
+// ("non-padded connection rejected", verified). Client and box must
+// agree. Keep this in lockstep with the outbound renderer's
+// `"padding": true`; flipping one side alone breaks every mux route.
+//
+// NOT hy2-in, NOT naive-in. hysteria2 is QUIC-native — smux over TCP
+// would add head-of-line blocking it does not have, and sing-box does
+// not define the field there anyway: both inbounds reject the key
+// outright with `json: unknown field "multiplex"`, which is a FATAL at
+// boot, i.e. a bricked relay. Verified.
+func muxInbound() map[string]any {
+	return map[string]any{"enabled": true, "padding": true}
+}
+
 // addUserToSingbox loads /etc/sing-box/config.json, appends the
 // user across all four inbound types, and atomically writes it back.
 // It returns the effective ws path baked into the user's WS route:
@@ -69,7 +113,11 @@ const (
 // every later recipient reuses it (a single port can't host per-user ws
 // inbounds), so the caller must persist the returned path in the creds
 // it hands back to the client.
-func addUserToSingbox(path string, c userCreds) (string, error) {
+// validate, when non-nil, is handed the candidate config before it
+// replaces the live one; see defaultSingboxCheck. Provisioning reloads
+// sing-box immediately afterwards, so an unloadable config here takes
+// the relay down as surely as a bad rotation does.
+func addUserToSingbox(path string, c userCreds, validate func(string) error) (string, error) {
 	doc, err := loadSingboxDoc(path)
 	if err != nil {
 		return "", err
@@ -91,15 +139,128 @@ func addUserToSingbox(path string, c userCreds) (string, error) {
 	if err := appendWSUser(doc, c); err != nil {
 		return "", err
 	}
-	if err := writeSingboxDoc(path, doc); err != nil {
+	// Runs on every provision, not just the first, so a relay built
+	// before multiplex existed acquires it the next time a recipient is
+	// added — there is no other routine write path to this file, and the
+	// alternative is a fleet that stays fingerprintable until it is
+	// reprovisioned from scratch.
+	ensureMultiplexInbounds(doc)
+	if err := writeSingboxDoc(path, doc, validate); err != nil {
 		return "", err
 	}
 	return c.WSPath, nil
 }
 
+// ensureMultiplexInbounds stamps the multiplex block onto every
+// vless-family inbound (vless-in and ws-in) and onto nothing else. See
+// muxInbound for why, for the compatibility evidence, and for why
+// touching hy2-in/naive-in would brick the box.
+//
+// Idempotent, and it does not clobber an operator's hand-tuned block:
+// an existing `multiplex` object is only forced to enabled+padded, so
+// re-running this never flips a box from working to rejecting.
+func ensureMultiplexInbounds(doc map[string]any) {
+	inbounds, _ := doc["inbounds"].([]any)
+	for _, raw := range inbounds {
+		in, _ := raw.(map[string]any)
+		if in == nil {
+			continue
+		}
+		if t, _ := in["type"].(string); t != "vless" {
+			continue
+		}
+		mux, _ := in["multiplex"].(map[string]any)
+		if mux == nil {
+			in["multiplex"] = muxInbound()
+			continue
+		}
+		mux["enabled"] = true
+		mux["padding"] = true
+	}
+}
+
+// coverSNI returns the REALITY cover host this box actually advertises,
+// read from the live config rather than from anything the caller
+// remembers.
+//
+// The box is the single source of truth for this value: it is written
+// once at provision time and moved only by /rotate-tls, and the client
+// outbound's `tls.server_name` MUST equal it or REALITY fails. Echoing
+// it back on every provision is what lets a pack carry a per-relay
+// cover host instead of a compile-time constant shared by the fleet.
+func coverSNI(doc map[string]any) string {
+	in := findInboundByTag(doc, tagVLESS)
+	if in == nil {
+		return ""
+	}
+	t, _ := in["tls"].(map[string]any)
+	if t == nil {
+		return ""
+	}
+	s, _ := t["server_name"].(string)
+	return s
+}
+
+// readCoverSNI loads the config and returns its advertised cover SNI,
+// or "" when it cannot be determined.
+func readCoverSNI(path string) string {
+	doc, err := loadSingboxDoc(path)
+	if err != nil {
+		return ""
+	}
+	return coverSNI(doc)
+}
+
+// muxInboundEnabled reports whether EVERY vless-family inbound carries
+// an enabled multiplex block.
+//
+// "Every", not "any", on purpose: the publisher gets one boolean and
+// mints one pack covering both the vless-reality and websocket-tls
+// routes. If only one of the two inbounds had the block, a true here
+// would produce a pack with a mux outbound on a route the box cannot
+// serve — one dead tier, silently. Under-reporting only costs the
+// multiplexing benefit until the next provision runs
+// ensureMultiplexInbounds again.
+func muxInboundEnabled(doc map[string]any) bool {
+	ins := 0
+	for _, raw := range asSlice(doc["inbounds"]) {
+		in, _ := raw.(map[string]any)
+		if in == nil {
+			continue
+		}
+		if t, _ := in["type"].(string); t != "vless" {
+			continue
+		}
+		ins++
+		mux, _ := in["multiplex"].(map[string]any)
+		if mux == nil {
+			return false
+		}
+		if on, _ := mux["enabled"].(bool); !on {
+			return false
+		}
+	}
+	return ins > 0
+}
+
+// readMuxInbound loads the config and reports the box's multiplex
+// capability, false when it cannot be determined.
+func readMuxInbound(path string) bool {
+	doc, err := loadSingboxDoc(path)
+	if err != nil {
+		return false
+	}
+	return muxInboundEnabled(doc)
+}
+
+func asSlice(v any) []any {
+	s, _ := v.([]any)
+	return s
+}
+
 // removeUserFromSingbox removes the user across all four inbound
 // types. Returns whether the user was present in any inbound.
-func removeUserFromSingbox(path, name string) (bool, error) {
+func removeUserFromSingbox(path, name string, validate func(string) error) (bool, error) {
 	doc, err := loadSingboxDoc(path)
 	if err != nil {
 		return false, err
@@ -120,7 +281,7 @@ func removeUserFromSingbox(path, name string) (bool, error) {
 	if !found {
 		return false, nil
 	}
-	return true, writeSingboxDoc(path, doc)
+	return true, writeSingboxDoc(path, doc, validate)
 }
 
 // listUsers walks the VLESS inbound users[] (canonical source of
@@ -409,6 +570,7 @@ func appendWSUser(doc map[string]any, c userCreds) error {
 				"name": c.Name,
 			},
 		},
+		"multiplex": muxInbound(),
 		"transport": map[string]any{
 			"type": "ws",
 			"path": c.WSPath,
@@ -501,12 +663,18 @@ func loadSingboxDoc(path string) (map[string]any, error) {
 			return nil, err
 		}
 		// Bootstrap: empty-users scaffold matching the v2 cloud-init template.
+		// Keep the reality.handshake block here even though it is empty:
+		// surgicalSetSNI has to have somewhere to put the dest, and a
+		// REALITY inbound whose advertised name and handshake dest are set
+		// independently is the exact mismatch the design forbids.
 		body = []byte(`{
   "log": {"level": "info"},
   "inbounds": [
     {"type":"vless","tag":"` + tagVLESS + `","listen":"0.0.0.0","listen_port":443,
      "users":[],
-     "tls":{"enabled":true,"server_name":"","reality":{"enabled":true,"private_key":"","short_id":[]}}},
+     "multiplex":{"enabled":true,"padding":true},
+     "tls":{"enabled":true,"server_name":"","reality":{"enabled":true,"private_key":"","short_id":[],
+            "handshake":{"server":"","server_port":443}}}},
     {"type":"hysteria2","tag":"` + tagHy2 + `","listen":"0.0.0.0","listen_port":443,"users":[],
      "tls":{"enabled":true,"certificate_path":"` + tlsCertPath + `","key_path":"` + tlsKeyPath + `"}}
   ],
@@ -520,7 +688,7 @@ func loadSingboxDoc(path string) (map[string]any, error) {
 	return doc, nil
 }
 
-func writeSingboxDoc(path string, doc map[string]any) error {
+func writeSingboxDoc(path string, doc map[string]any, validate func(string) error) error {
 	body, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -531,6 +699,12 @@ func writeSingboxDoc(path string, doc map[string]any) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, body, 0o644); err != nil {
 		return err
+	}
+	if validate != nil {
+		if err := validate(tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
 	}
 	return os.Rename(tmp, path)
 }

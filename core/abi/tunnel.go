@@ -86,12 +86,6 @@ func SetTunnelSocks(host string, port int, username, password string) (string, e
 			}
 			return bootstrap.NewDirectDialer(15 * time.Second), false, nil
 		}
-		// Ignore username/password for now: Phase 1.5B's sing-box
-		// SOCKS5 inlet is unauthenticated on loopback. We carry the
-		// fields in the ABI for forward compatibility (V2 may add
-		// per-process auth tokens).
-		_ = ep.username
-		_ = ep.password
 		// DirectFallback is deliberately nil while a route is active:
 		// TunnelDialer falls back to it whenever SocksAddress is empty,
 		// which would reintroduce the very leak this guard closes if the
@@ -101,8 +95,16 @@ func SetTunnelSocks(host string, port int, username, password string) (string, e
 		if !refresh.TunnelRequired() {
 			escape = bootstrap.NewDirectDialer(15 * time.Second)
 		}
+		// Credentials are honoured (RFC 1929). Empty means "offer no
+		// auth", which is the desktop sidecar's unauthenticated
+		// loopback inlet; the in-process Android inlet always supplies
+		// a per-activation pair — see core/engine/inlet.go for why an
+		// unauthenticated loopback SOCKS on Android is an open proxy
+		// for every other app on the device.
 		return &bootstrap.TunnelDialer{
 			SocksAddress:   net.JoinHostPort(ep.host, strconv.Itoa(ep.port)),
+			Username:       ep.username,
+			Password:       ep.password,
 			DirectFallback: escape,
 			Timeout:        15 * time.Second,
 		}, true, nil

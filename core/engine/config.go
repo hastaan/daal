@@ -57,6 +57,20 @@ func BuildSingBoxConfig(route routestore.RouteRow, profile []byte) (*SingBoxConf
 		// Mark the config so the engine driver knows to gate on UDP probe.
 		cfg.Route["udp_gated"] = true
 	}
+	// The loopback SOCKS5 refresh inlet. route.final already sends
+	// everything to "active", so a fetch dialled here leaves the device
+	// over the relay — which is the only way the engine's own scheduled
+	// fetches can happen at all while refresh.TunnelRequired() holds.
+	// See inlet.go for the loopback-exposure analysis and why the inlet
+	// is authenticated and ephemeral-ported.
+	//
+	// A nil plan is not an error: the tunnel must come up regardless,
+	// and without an inlet refresh simply stays fail-closed.
+	inlet := planRefreshInlet()
+	stageRefreshInlet(inlet)
+	if inlet != nil {
+		cfg.Inbounds = append(cfg.Inbounds, inlet.inboundJSON())
+	}
 	return cfg, nil
 }
 
