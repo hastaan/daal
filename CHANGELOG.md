@@ -10,7 +10,57 @@ Versions in this file refer to the user-visible app version recorded in
 spec version (`4`), and ABI symbol count (`58`) are independent — see
 `docs/build-and-release.md` for the versioning matrix.
 
-## [0.1.0] — unreleased
+## [0.2.0] — unreleased
+
+Everything since the v0.1.0 tag (2026-05-29). Phase 45 and the FRP-14
+publisher track shipped under the `[0.1.0] — unreleased` heading for three
+months; this section exists so the smart-route-selection work lands somewhere
+that is already true.
+
+### Engine / data plane
+
+- In-process sing-box driver (`-tags singbox`) replaces the spawned sidecar on
+  Android; the engine now runs inside the app process behind `VpnService` with
+  a gvisor TUN. Desktop still uses the sidecar — see phase 45 Part 4.
+- All four transports verified end to end on device against a live relay:
+  vless-reality, websocket-tls, naive (Cronet) and hysteria2.
+- `addDisallowedApplication(self)` keeps the engine's own sockets out of the
+  tunnel, fixing "no available network interface" on every outbound dial.
+- ABI grew 48 → 58 exported `engine_` symbols (append-only; see
+  `specs/engine-abi-v1.md`).
+
+### Relay
+
+- Canonical `relayports` family→port map, shared by the box config, the
+  firewall and the client, replacing three separate hardcodings of 443.
+- One shared `ws-in` inbound for all recipients. Per-user WS inbounds all bound
+  the same port, so a relay crashed the moment it had a second recipient.
+- Real teardown: "delete the server too" removes the server, its ephemeral SSH
+  key and its firewall, and provisioning now rolls back on failure. A failed
+  provision used to leave a billing server and an SSH key that permanently
+  wedged every retry.
+- `/whoami` on the mgmt plane (endpoint only; no client leg yet).
+
+### Publisher
+
+- The 6-digit PIN is gone. The signing key and cloud token move to
+  hardware-backed device custody (AndroidKeyStore / OS keystore), which on
+  Android is strictly stronger than what it replaced.
+- Setup collapsed from 7 steps to 3, and the "distribute" step and the
+  SETUP/RECIPIENTS tab split were removed in favour of a relay list whose
+  detail view lists that relay's artifacts.
+- Per-recipient credentials (FRP-14 Tier-2): `.sbp`/`.sbpx` now carry real,
+  connectable client outbounds instead of metadata stubs.
+
+### Fixed
+
+- `core/scheduler` raced on `Stop()`; `cmd/daal-core` and `cmd/daal-soak-engine`
+  could not build at all; `go vet` was red in four modules.
+- `tools/check-hardcoded-strings.sh` reported OK while never running.
+- The engine library, the soak binaries and `daal-core` are no longer tracked
+  in git — see `client-shell/tauri/src-tauri/resources/README.md`.
+
+## [0.1.0] — 2026-05-29
 
 Development phase. **Unified-client architecture** plus **Tauri Mobile
 Android + iOS bundles** rolled together. The same React/TS UI and

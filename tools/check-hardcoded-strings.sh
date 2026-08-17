@@ -23,12 +23,21 @@ ALLOWLIST="tools/i18n-allowlist.txt"
 # ripgrep is exit 1 and must not abort the loop), which also swallows
 # exit 127 when ripgrep is absent — making "no hits" and "no ripgrep"
 # indistinguishable. `set -euo pipefail` does not catch it either,
-# because the invocation sits in a process substitution. Without this
-# check the gate silently passes on any machine lacking ripgrep.
-command -v rg >/dev/null 2>&1 || {
-    echo "[check-hardcoded-strings] FAIL: ripgrep (rg) not installed" >&2
+# because the invocation sits in a process substitution.
+# Pick a scanner. ripgrep is preferred, but it is not installed everywhere
+# (notably it is a shell *function* in some interactive environments, which a
+# clean `#!/usr/bin/env bash` script cannot call) — and a gate that cannot run
+# on a given machine is a gate that silently protects nothing there. Fall back
+# to POSIX grep with the equivalent exclusions rather than failing.
+if command -v rg >/dev/null 2>&1; then
+    SCANNER=rg
+elif command -v grep >/dev/null 2>&1; then
+    SCANNER=grep
+    echo "[check-hardcoded-strings] note: ripgrep not found, using grep fallback" >&2
+else
+    echo "[check-hardcoded-strings] FAIL: neither ripgrep nor grep is available" >&2
     exit 2
-}
+fi
 
 # We only care about new D-2 surfaces; legacy code is allow-listed.
 SCAN_PATHS=(
@@ -64,11 +73,24 @@ for p in "${SCAN_PATHS[@]}"; do
         fi
         echo "$line"
         found=1
-    done < <(rg -n -e "$PATTERN" "$p" \
-        --glob '!**/*.json' \
-        --glob '!**/*.lproj/*' \
-        --glob '!**/test*/**' \
-        --glob '!**/*.snap' || true)
+    done < <(
+        if [ "$SCANNER" = rg ]; then
+            rg -n -e "$PATTERN" "$p" \
+                --glob '!**/*.json' \
+                --glob '!**/*.lproj/*' \
+                --glob '!**/test*/**' \
+                --glob '!**/*.snap' || true
+        else
+            # Same exclusions as the ripgrep globs above.
+            grep -rnE -e "$PATTERN" "$p" \
+                --exclude='*.json' \
+                --exclude='*.snap' \
+                --exclude-dir='*.lproj' \
+                --exclude-dir='test' \
+                --exclude-dir='tests' \
+                --exclude-dir='__tests__' || true
+        fi
+    )
 done
 
 if [ "$found" -ne 0 ]; then

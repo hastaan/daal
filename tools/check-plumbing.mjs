@@ -133,7 +133,25 @@ const missingFromEngineRs = exports_.filter(
     (e) => !engineRs.has(e) && !ENGINE_ALLOWLIST.has(e),
 );
 const declaredNotRegistered = [...declared].filter((d) => !registered.has(d));
-const registeredNotInvoked = [...registered].filter((r) => !invoked.has(r)).sort();
+// Commands deliberately registered before anything calls them. Each entry is a
+// promise that a consumer is coming — keep this list SHORT and delete an entry
+// the moment its caller lands, or it degrades into the false-green this gate
+// exists to prevent.
+const UNINVOKED_ALLOWLIST = new Map([
+    [
+        'scheduler_tick',
+        'FRP-3 selection brain: core/internal/selection is complete but has no ' +
+        'production caller yet (SetRoute still takes a route id verbatim). The ' +
+        'smart-route-selection phase wires it — remove this entry then.',
+    ],
+]);
+
+const registeredNotInvoked = [...registered]
+    .filter((r) => !invoked.has(r) && !UNINVOKED_ALLOWLIST.has(r))
+    .sort();
+const registeredNotInvokedAllowlisted = [...registered]
+    .filter((r) => !invoked.has(r) && UNINVOKED_ALLOWLIST.has(r))
+    .sort();
 
 const report = {
     engineExports: exports_.length,
@@ -166,6 +184,12 @@ if (wantJson) {
     if (registeredNotInvoked.length) {
         console.log('Tauri commands registered but NOT invoked from client-ui:');
         for (const c of registeredNotInvoked) console.log(`  - ${c}`);
+    }
+    if (registeredNotInvokedAllowlisted.length) {
+        console.log('Registered-ahead-of-consumer (allowlisted, not failing):');
+        for (const c of registeredNotInvokedAllowlisted) {
+            console.log(`  - ${c} — ${UNINVOKED_ALLOWLIST.get(c)}`);
+        }
     }
 }
 

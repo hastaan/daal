@@ -16,12 +16,12 @@
     "expect_verify": "ok"
   },
   {
-    "vector": "spec-v3-accepted",
-    "description": "spec_version=3 (RelayPack profile) is accepted by both Go and Rust verifiers since FRP-1",
-    "sbp_file": "invalid-spec-v3.sbp",
+    "vector": "invalid-spec-v5",
+    "description": "spec_version=5 is beyond the supported range and must be rejected",
+    "sbp_file": "invalid-spec-v5.sbp",
     "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
     "expect_parse": "ok",
-    "expect_verify": "ok"
+    "expect_verify": "ErrUnsupportedSpec"
   },
   {
     "vector": "invalid-signature",

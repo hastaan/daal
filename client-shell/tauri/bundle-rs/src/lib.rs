@@ -9,8 +9,11 @@
 //!   Go side uses.
 //! * `parse_sbp` — `.sbp` (zip) archive walk with `unsafe_path` checks.
 //! * `verify_bundle` — full top-level verification matching
-//!   `bundle.VerifyBundle` in Go (spec_version 1 OR 2 accepted; v3+
-//!   rejected with `Error::UnsupportedSpec`).
+//!   `bundle.VerifyBundle` in Go: spec_version 1-4 accepted, anything
+//!   outside that range rejected with `Error::UnsupportedSpec`. (v3 adds
+//!   RelayPack, v4 the sub-key cert chain — FRP-7.5 widened the gate on both
+//!   sides. This comment claimed "1 OR 2 accepted; v3+ rejected" long after
+//!   `sbp.rs` had moved to `1 | 2 | 3 | 4`.)
 //! * `render_fingerprint` — hex + EN words + FA words + visual SVG
 //!   data-URI, byte-identical to `bundle.RenderFingerprint`.
 //! * `verify_rotation_chain` — placeholder; expanded in Phase 2.

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# tools/hooks/pre-push — the repo's only automatic test gate.
+#
+# WHY THIS EXISTS
+#
+# There is no per-push CI. `appveyor.yml` has `branches.only` set to version
+# tags, so it is a *release packaging* pipeline: it never sees an ordinary
+# commit, and until 2026-08-17 it had no test_script at all. GitHub Actions was
+# abandoned after the account was rate-throttled (CHANGELOG "GitHub Actions is
+# no longer used"). The net effect was that nothing ran the test suite
+# automatically, ever.
+#
+# That is not theoretical. A 2026-08-17 audit found, all accumulated silently:
+#   * a data race in core/scheduler's Stop()
+#   * two Go modules (cmd/daal-core, cmd/daal-soak-engine) that could not build
+#   * `go vet` failing in four modules
+#   * tools/check-hardcoded-strings.sh printing OK while never running
+#
+# Every one would have been caught by running the suite once.
+#
+# INSTALL
+#
+#   git config core.hooksPath tools/hooks
+#
+# (Repo-relative, so it is version-controlled and every clone can opt in with
+# one command. .git/hooks/ cannot be tracked.)
+#
+# BYPASS
+#
+#   git push --no-verify        # or: DAAL_SKIP_PREPUSH=1 git push
+#
+# Bypass deliberately, not habitually. If this is slow enough that you want to
+# skip it routinely, fix the slowness — a gate that is always bypassed is the
+# false-green this hook exists to replace.
+
+set -uo pipefail
+
+if [[ "${DAAL_SKIP_PREPUSH:-0}" == "1" ]]; then
+  echo "pre-push: skipped via DAAL_SKIP_PREPUSH=1"
+  exit 0
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+fail=0
+step() {
+  local name="$1"; shift
+  printf '\n\033[1m▶ %s\033[0m\n' "$name"
+  if "$@"; then
+    printf '\033[32m  ✓ %s\033[0m\n' "$name"
+  else
+    printf '\033[31m  ✗ %s\033[0m\n' "$name"
+    fail=1
+  fi
+}
+
+echo "pre-push: running the suite (bypass: git push --no-verify)"
+
+# The build contract: CI and developers both go through ./daal, so the two
+# cannot drift. See the header of ./daal.
+step "daal test"        ./daal test
+
+# go vet across every module. `./daal test` does not vet, and vet was red in
+# four modules for an unknown length of time.
+vet_all() {
+  local rc=0 m
+  for m in $(find . -name go.mod -not -path "*/node_modules/*" | sed 's|/go.mod||'); do
+    # cmd/daal-soak-engine only compiles under its build tag.
+    if [[ "$m" == "./cmd/daal-soak-engine" ]]; then
+      (cd "$m" && go vet -tags soak ./... ) || rc=1
+    else
+      (cd "$m" && go vet ./... ) || rc=1
+    fi
+  done
+  return $rc
+}
+step "go vet (all modules)" vet_all
+
+step "cargo test (daal-wizard)" bash -c 'cd client-shell/tauri/daal-wizard && cargo test --quiet'
+step "tsc + vite build"         bash -c 'cd client-ui && npm run build --silent'
+
+# Static gates. Each exits non-zero on a real finding; check-hardcoded-strings
+# now also exits non-zero when its own dependency (ripgrep) is missing, rather
+# than printing OK and scanning nothing.
+for g in tools/check-hardcoded-strings.sh tools/check-diagnostics-redaction.sh tools/check-tokens.sh; do
+  [[ -x "$g" ]] && step "$(basename "$g")" "./$g"
+done
+[[ -f tools/check-plumbing.mjs ]] && step "check-plumbing.mjs" node tools/check-plumbing.mjs
+
+if (( fail )); then
+  printf '\n\033[31mpre-push: FAILED — push aborted.\033[0m\n'
+  printf 'Fix the above, or bypass deliberately with: git push --no-verify\n'
+  exit 1
+fi
+
+printf '\n\033[32mpre-push: all checks passed.\033[0m\n'
+exit 0

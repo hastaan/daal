@@ -24,27 +24,34 @@ func TestServerTypeAvailableInLocation(t *testing.T) {
 		region string
 		want   bool
 	}{
+		// Fixture type names are synthetic — this exercises the
+		// availability-in-region logic, not Hetzner's catalogue. They are
+		// still kept current so nobody reads a retired type as a live one:
+		// verified 2026-08-17 against /v1/server_types that cpx12 exists and
+		// is not deprecated, and that cx11/cx22 no longer exist at all
+		// (cx22 is why a real provision failed with "server type 104 is
+		// deprecated"), which is what makes it the right retired example.
 		{
 			name:   "available in region",
-			st:     &hcloud.ServerType{Name: "cx22", Locations: []hcloud.ServerTypeLocation{avail}},
+			st:     &hcloud.ServerType{Name: "cpx12", Locations: []hcloud.ServerTypeLocation{avail}},
 			region: "fsn1",
 			want:   true,
 		},
 		{
 			name:   "present but unavailable in region (retired type)",
-			st:     &hcloud.ServerType{Name: "cx11", Locations: []hcloud.ServerTypeLocation{unavail}},
+			st:     &hcloud.ServerType{Name: "cx22", Locations: []hcloud.ServerTypeLocation{unavail}},
 			region: "fsn1",
 			want:   false,
 		},
 		{
 			name:   "available only in another region",
-			st:     &hcloud.ServerType{Name: "cx22", Locations: []hcloud.ServerTypeLocation{otherLoc}},
+			st:     &hcloud.ServerType{Name: "cpx12", Locations: []hcloud.ServerTypeLocation{otherLoc}},
 			region: "fsn1",
 			want:   false,
 		},
 		{
 			name:   "no per-location list, not deprecated -> fall back to allowed",
-			st:     &hcloud.ServerType{Name: "cx22"},
+			st:     &hcloud.ServerType{Name: "cpx12"},
 			region: "fsn1",
 			want:   true,
 		},

@@ -98,8 +98,17 @@ func main() {
 		{name: "valid-v1", desc: "spec_version=1 (legacy), valid signature",
 			mutateManifest: func(m *bundle.Manifest) { m.SpecVersion = 1 },
 			expectParse:    "ok", expectVerify: "ok"},
-		{name: "invalid-spec-v3", desc: "spec_version=3 must be rejected",
-			mutateManifest: func(m *bundle.Manifest) { m.SpecVersion = 3 },
+		// spec_version 3 (RelayPack) and 4 (sub-key cert chain) ARE accepted
+		// by bundle.VerifyBundle — see sbp.go's `case 1, 2, 3, 4`. This vector
+		// used to assert v3 was rejected, which stopped being true when
+		// FRP-7.5 widened the gate; because nothing on the Go side checks the
+		// generator's expectations against Go's own verifier, and the
+		// committed fixtures were never regenerated, the contradiction stayed
+		// invisible until a parity run in 2026-08. Use the lowest genuinely
+		// unsupported version instead — matching bundle/v2_test.go, which
+		// already expects ErrUnsupportedSpec for spec_version=5.
+		{name: "invalid-spec-v5", desc: "spec_version=5 is beyond the supported range and must be rejected",
+			mutateManifest: func(m *bundle.Manifest) { m.SpecVersion = 5 },
 			expectParse:    "ok", expectVerify: "ErrUnsupportedSpec"},
 		{name: "invalid-signature", desc: "manifest.sig flipped",
 			mutateManifest:   func(m *bundle.Manifest) {},

@@ -472,6 +472,17 @@ for:
 
 # Disable email notifications — AppVeyor's free OSS plan defaults to
 # sending build emails, which gets noisy on free tier.
+# `branches.only` (above) means this pipeline only ever runs on a version
+# tag, so this is a RELEASE gate, not CI: it catches a broken release, not a
+# broken commit. The per-commit gate is tools/hooks/pre-push — install it with
+# `git config core.hooksPath tools/hooks`. Both go through ./daal so CI and
+# developers cannot drift; see the header of ./daal.
+test_script:
+  - sh: |
+      set -e
+      ./daal test
+  - cmd: echo "tests run on the macOS image only (one toolchain is enough for a release gate)"
+
 notifications:
   - provider: Email
     on_build_success: false
