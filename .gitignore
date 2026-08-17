@@ -83,3 +83,19 @@ client-desktop/tauri/src-tauri/resources/libdaalcore.*
 docs/pilot/private/
 docs/pilot/signed/
 docs/pilot/*.filled.md
+
+# `tauri icon` emits a full desktop/mobile icon set into
+# client-shell/tauri/src-tauri/icons/ (it has no per-platform switch).
+# tauri.conf.json bundles exactly five of those files plus icon.png, and
+# those six ARE tracked — they are the app's branding and must be
+# committed deliberately whenever the source eagle changes. Everything
+# else it drops there is unreferenced Windows/iOS output that no build
+# reads, is not byte-reproducible between runs, and re-dirties the tree
+# on every regeneration. Ignore it so `git add -A` after
+# tools/patch-android-icons.sh cannot sweep ~29 junk assets into a
+# commit. (The gen/android mipmaps are already covered by the
+# src-tauri/gen/ rule.)
+client-shell/tauri/src-tauri/icons/Square*.png
+client-shell/tauri/src-tauri/icons/StoreLogo.png
+client-shell/tauri/src-tauri/icons/64x64.png
+client-shell/tauri/src-tauri/icons/ios/

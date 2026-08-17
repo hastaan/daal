@@ -989,14 +989,42 @@ impl OperatorDb {
         Ok(())
     }
 
-    /// Delete an operator row. The caller is responsible for
-    /// erasing any associated keystore aliases first.
+    /// Delete an operator row **and everything that references it**,
+    /// in one transaction.
+    ///
+    /// The child sweep is not tidiness, it is the difference between a
+    /// removal that works and one that destroys a signing key for
+    /// nothing. Three tables — `signed_sbps` (V003), `subkeys` (V004)
+    /// and `cdn_fronts` (V005) — declare
+    /// `FOREIGN KEY (operator_id) REFERENCES operators(id)` with **no**
+    /// `ON DELETE CASCADE`, and both constructors run
+    /// `PRAGMA foreign_keys = ON`. So a bare `DELETE FROM operators`
+    /// fails with `FOREIGN KEY constraint failed` the moment an
+    /// operator has ever rotated an `.sbp`, a sub-key or a CDN front.
+    /// `cancel_and_cleanup` used to erase the publisher's custody
+    /// aliases *before* calling this: the constraint error then arrived
+    /// after the irreplaceable Ed25519 key was already gone, and every
+    /// retry failed identically. The later tables (`recipients`,
+    /// `operator_cell_membership`, …) already declare `ON DELETE
+    /// CASCADE` and need no help; these three predate that convention
+    /// and cannot be altered in place without rebuilding the tables.
+    ///
+    /// A transaction so a failure part-way leaves the row and all its
+    /// children exactly as they were — the caller's retry has to see
+    /// the same state, not a half-swept operator.
     pub fn delete(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute("DELETE FROM operators WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Children first: with foreign_keys=ON the parent cannot go
+        // while any of these rows still point at it.
+        tx.execute("DELETE FROM signed_sbps WHERE operator_id = ?1", params![id])?;
+        tx.execute("DELETE FROM subkeys WHERE operator_id = ?1", params![id])?;
+        tx.execute("DELETE FROM cdn_fronts WHERE operator_id = ?1", params![id])?;
+        let n = tx.execute("DELETE FROM operators WHERE id = ?1", params![id])?;
         if n == 0 {
             return Err(DbError::NotFound(id));
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1920,6 +1948,31 @@ mod tests {
         assert_eq!(all.len(), 1);
         db.delete(id).unwrap();
         assert!(db.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_sweeps_children_that_have_no_cascade() {
+        // `signed_sbps` (V003), `subkeys` (V004) and `cdn_fronts`
+        // (V005) declare a FOREIGN KEY on operators(id) with no
+        // ON DELETE CASCADE, and both constructors set
+        // foreign_keys=ON. Before the child sweep, one rotation was
+        // enough to make removing that relay fail with "FOREIGN KEY
+        // constraint failed" — and cancel_and_cleanup had already
+        // erased the publisher's signing key by then.
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        db.record_rotated_sbp(op, 1_000, "/staging/a.sbp", "sha-a", "rp-a", 3, "L1 first")
+            .unwrap();
+        db.insert_subkey_rotation(
+            op, "fp-1", "/s/sub.pub", "/s/sub.priv", "/s/cert.json", "{}", "label", 1, 2, 3,
+        )
+        .unwrap();
+
+        db.delete(op).expect("an operator that has rotated must still be removable");
+        assert!(db.list().unwrap().is_empty());
+        assert!(db.list_signed_sbps_history(op).unwrap().is_empty());
     }
 
     #[test]

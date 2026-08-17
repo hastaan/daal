@@ -53,7 +53,7 @@ import {
     withHelperIp,
 } from './helperIp';
 import { custodyLabelKey, fetchCustodyStatus } from './CustodyGate';
-import { relayTitle } from './RelayListPage';
+import { RelayDestroySheet, relayTitle } from './RelayListPage';
 
 interface Props {
     t: (k: string) => string;
@@ -174,6 +174,9 @@ export default function PublisherRecipientsPage({
 
     // Recovery key / decommission
     const [dangerBusy, setDangerBusy] = useState(false);
+    /** Teardown sheet — the two-outcome confirm shared with the relay
+     *  list. See RelayDestroySheet. */
+    const [confirmDestroy, setConfirmDestroy] = useState(false);
 
     // Helper-IP repair card. Only ever rendered after the automatic
     // detect-and-retry in withHelperIp has already failed once — no
@@ -579,35 +582,21 @@ export default function PublisherRecipientsPage({
         }
     }, [friendlyName, operatorId, t]);
 
-    const onDecommission = useCallback(async () => {
-        // Same honesty rule as the relay list: this removes the relay
-        // from Daal and erases its secrets. It does NOT destroy the
-        // cloud server — no CliRunner verb can — so the confirm prints
-        // the address, because afterwards the app can no longer show it.
-        const where =
-            operator?.public_ip ||
-            operator?.public_ipv6 ||
-            operator?.server_id ||
-            '—';
-        if (
-            !window.confirm(
-                t('pub.relays.decommission.confirm')
-                    .replace('{name}', title)
-                    .replace('{ip}', where),
-            )
-        ) {
-            return;
-        }
-        setDangerBusy(true);
-        try {
-            await Wizard.cancelAndCleanup(operatorId);
-            onBack();
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setDangerBusy(false);
-        }
-    }, [onBack, operator, operatorId, t, title]);
+    /** What the teardown sheet is about to destroy. Detail can be
+     *  rendered before the summary lands, so fall back to the id — the
+     *  sheet still has to be able to name the relay. */
+    const destroyTargetForRelay = useMemo(
+        () => ({
+            operatorId,
+            name: title,
+            where:
+                operator?.public_ip ||
+                operator?.public_ipv6 ||
+                operator?.server_id ||
+                '',
+        }),
+        [operator, operatorId, title],
+    );
 
     // ---- render --------------------------------------------------------
 
@@ -1114,7 +1103,10 @@ export default function PublisherRecipientsPage({
                         trailing={
                             <Button
                                 variant="danger"
-                                onClick={() => void onDecommission()}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmDestroy(true);
+                                }}
                                 disabled={dangerBusy}
                             >
                                 {t('pub.relays.decommission')}
@@ -1384,6 +1376,21 @@ export default function PublisherRecipientsPage({
                         )}
                     </div>
                 </Sheet>
+            )}
+
+            {confirmDestroy && (
+                <RelayDestroySheet
+                    t={t}
+                    target={destroyTargetForRelay}
+                    onClose={(removed) => {
+                        setConfirmDestroy(false);
+                        // Only leave when the row is actually gone. A
+                        // failed cloud teardown keeps the relay — and
+                        // this screen is where the user retries it.
+                        if (removed) onBack();
+                        else void reloadOperator();
+                    }}
+                />
             )}
         </div>
     );

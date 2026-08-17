@@ -46,12 +46,16 @@ func (dryRunClient) ServerTypePrice(ctx context.Context, region, serverType stri
 	return 0, 0, errors.New("hetzner: dry-run client cannot ServerTypePrice")
 }
 
-func (dryRunClient) SSHKeyCreate(ctx context.Context, name string, publicKey []byte) (string, error) {
+func (dryRunClient) SSHKeyCreate(ctx context.Context, name string, publicKey []byte, labels map[string]string) (string, error) {
 	return "", errors.New("hetzner: dry-run client cannot SSHKeyCreate")
 }
 
 func (dryRunClient) SSHKeyDelete(ctx context.Context, id string) error {
 	return errors.New("hetzner: dry-run client cannot SSHKeyDelete")
+}
+
+func (dryRunClient) SSHKeyList(_ context.Context) ([]SSHKeyInfo, error) {
+	return nil, errors.New("hetzner: dry-run client cannot SSHKeyList")
 }
 
 func (dryRunClient) FloatingIPAssign(ctx context.Context, fipID, serverID string) error {
@@ -78,8 +82,8 @@ func (dryRunClient) FirewallEnsureForServer(_ context.Context, _ string) (string
 	return "", errors.New("hetzner: dry-run client cannot FirewallEnsureForServer")
 }
 
-func (dryRunClient) FirewallDeleteForServer(_ context.Context, _ string) error {
-	return errors.New("hetzner: dry-run client cannot FirewallDeleteForServer")
+func (dryRunClient) FirewallDeleteForServer(_ context.Context, _ string) (FirewallTeardownResult, error) {
+	return FirewallTeardownResult{}, errors.New("hetzner: dry-run client cannot FirewallDeleteForServer")
 }
 
 // suppress unused-import warning; net is referenced by other files

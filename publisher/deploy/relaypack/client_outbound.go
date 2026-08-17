@@ -109,9 +109,30 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			"tls": pinnedTLSNoUTLS(p.Server, p.TLSCertSHA256),
 		}
 	case "naive":
-		if p.NaivePassword == "" || p.Name == "" || p.TLSCertPEM == "" {
-			return nil, fmt.Errorf("naive needs naive_password, name and tls_cert_pem")
+		if p.NaivePassword == "" || p.Name == "" {
+			return nil, fmt.Errorf("naive needs naive_password and name")
 		}
+		// naive rides Cronet, which verifies against a trusted-root set
+		// (no CA, no uTLS, no SPKI pin): install the box's leaf as the
+		// trusted root. server_name must match its iPAddress SAN.
+		naiveTLS := map[string]any{
+			"enabled":     true,
+			"server_name": p.Server,
+		}
+		if p.TLSCertPEM != "" {
+			naiveTLS["certificate"] = []any{p.TLSCertPEM}
+		}
+		// An empty PEM means the box predates the data-plane cert (it is
+		// minted by cloud-init at first boot and returned by
+		// /users/provision; a relay provisioned before that change has
+		// neither). Emitting the outbound without a trusted root leaves
+		// Cronet on the system root set, so this route fails closed at
+		// connect — exactly what ws/hy2 already do when TLSCertSHA256 is
+		// absent, and never `insecure: true`. Erroring instead would
+		// fail the WHOLE rewrite (RewriteProfilesForRecipient returns
+		// the first renderer error), which killed every pack for every
+		// pre-existing relay: no recipient could be added at all, and
+		// the raw Go string was what the publisher saw.
 		ob = map[string]any{
 			// The real naive protocol (HTTP/2 CONNECT) — a plain "http"
 			// outbound cannot speak it. Requires the engine to be built
@@ -124,14 +145,7 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			// sets it to the recipient name), or auth fails.
 			"username": p.Name,
 			"password": p.NaivePassword,
-			// naive rides Cronet, which verifies against a trusted-root
-			// set (no CA, no uTLS, no SPKI pin): install the box's leaf as
-			// the trusted root. server_name must match its iPAddress SAN.
-			"tls": map[string]any{
-				"enabled":     true,
-				"server_name": p.Server,
-				"certificate": []any{p.TLSCertPEM},
-			},
+			"tls":      naiveTLS,
 		}
 	default:
 		return nil, fmt.Errorf("no client outbound renderer for family %q", family)

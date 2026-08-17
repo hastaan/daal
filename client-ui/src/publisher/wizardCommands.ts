@@ -305,6 +305,27 @@ export interface RotateExecuteOutput {
     new_active_id?: number;
 }
 
+/**
+ * What `Wizard.relayDestroy` actually accomplished, resource by
+ * resource. Mirrors Rust `commands::DestroyReport`.
+ *
+ * "Deleted" is not one bit of information here: the server, the
+ * ephemeral SSH key and the cloud firewall are three separate objects
+ * in the provider account, each of which can survive a teardown on its
+ * own. A surviving server keeps billing; a surviving SSH key breaks the
+ * user's next provision in that region on a name collision. The UI has
+ * to report which of them are actually gone rather than round a partial
+ * sweep up to success.
+ */
+export interface DestroyReport {
+    server_deleted: boolean;
+    ssh_key_deleted: boolean;
+    firewall_deleted: boolean;
+    local_removed: boolean;
+    /** Non-fatal provider errors. Show verbatim — do not summarise. */
+    warnings: string[];
+}
+
 // ---- Commands (one wrapper per #[tauri::command]) ----
 
 export const Wizard = {
@@ -363,6 +384,32 @@ export const Wizard = {
         invoke<OperatorState>('wizard_get_operator_state', { operatorId: operator_id }),
     cancelAndCleanup: (operator_id: number) =>
         invoke<void>('wizard_cancel_and_cleanup', { operatorId: operator_id }),
+
+    /**
+     * Remove a relay — optionally destroying the cloud server behind it.
+     *
+     * `deleteServer = false` is exactly `cancelAndCleanup`: forget the
+     * keys, drop the row, leave the VPS running and billing. Keep it for
+     * the escape hatches (a stuck custody migration has no readable API
+     * token, so it cannot authenticate a cloud delete).
+     *
+     * `deleteServer = true` destroys the cloud resources FIRST and only
+     * then erases local state, because the token and the record are the
+     * only handles on those resources — once they are gone the server is
+     * unreachable forever. So a cloud failure REJECTS with the relay
+     * still fully intact and retryable; it never half-succeeds. Show the
+     * rejection as "still running, try again", not "deleted".
+     *
+     * On success, check every flag: `server_deleted` without
+     * `ssh_key_deleted` means an orphaned key is left in the account,
+     * and that orphan makes the next provision in the same region fail
+     * on a name collision. `warnings` is provider text — show verbatim.
+     */
+    relayDestroy: (operator_id: number, delete_server: boolean) =>
+        invoke<DestroyReport>('wizard_relay_destroy', {
+            operatorId: operator_id,
+            deleteServer: delete_server,
+        }),
 
     /**
      * Store the cloud-provider API token.

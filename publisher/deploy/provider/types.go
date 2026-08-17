@@ -142,6 +142,21 @@ type ProvisionOpts struct {
 	// server is re-imaged with the same cloud-init as a fresh
 	// provision; its IP and billing stay unchanged.
 	ExistingServerID string `json:"existing_server_id,omitempty"`
+	// RollbackOnFailure asks the provider to destroy the cloud
+	// resources it created when provisioning fails *after* the
+	// server exists (cloud-init never went healthy, the temporary
+	// firewall window could not be opened, …).
+	//
+	// Default false, deliberately: by then the box is a real,
+	// billing resource that the idempotent retry path will reuse,
+	// and a slow boot is not the same thing as a dead box. With
+	// rollback off the provider does the next-best thing and names
+	// the survivors out loud — a "provision_orphan" progress event
+	// plus the server id / IP inside the returned error — so the
+	// caller can offer the user a one-click teardown instead of
+	// silently leaving a server on the meter. Set true for
+	// unattended runs that must never leak a billing resource.
+	RollbackOnFailure bool `json:"rollback_on_failure,omitempty"`
 	// OnProgress is called at key provisioning milestones. May be
 	// nil (no-op). The step string is machine-readable; message is
 	// human-readable.
@@ -173,6 +188,74 @@ func ValidateMgmtPort(port int) error {
 		return fmt.Errorf("mgmt port %d outside [%d, %d]", port, MinMgmtPort, MaxMgmtPort)
 	}
 	return nil
+}
+
+// DecommissionReport is the per-resource outcome of a teardown. It
+// is the wire contract between `daal-deploy decommission` (which
+// prints it as JSON on stdout) and the wizard's DestroyReport — the
+// three booleans map 1:1 onto the shim's server_deleted /
+// ssh_key_deleted / firewall_deleted fields.
+//
+// Boolean semantics, and they matter: a field is true when **nothing
+// of that kind from this deploy is left behind in the cloud
+// account** — which includes "there was never one to begin with".
+// It does NOT mean "this run issued a delete call". False always
+// means something survived, and Warnings then says what and why in
+// operator-readable prose. The UI can render a true field as a
+// green check without lying to anyone.
+//
+// Wire shape: canonical-JSON serialisable; Warnings is never null so
+// the Rust side can deserialise it straight into a Vec<String>.
+type DecommissionReport struct {
+	Provider        string `json:"provider"`
+	ServerID        string `json:"server_id,omitempty"`
+	ServerDeleted   bool   `json:"server_deleted"`
+	SSHKeyDeleted   bool   `json:"ssh_key_deleted"`
+	FirewallDeleted bool   `json:"firewall_deleted"`
+
+	// DeletedSSHKeyIDs / FirewallID are diagnostics: exactly which
+	// cloud objects went away, so an operator cross-checking the
+	// provider console can match them up.
+	DeletedSSHKeyIDs []string `json:"deleted_ssh_key_ids,omitempty"`
+	FirewallID       string   `json:"firewall_id,omitempty"`
+
+	// Preserved names every resource teardown deliberately did not
+	// delete, as "<kind>:<id-or-name>". A shared firewall, a
+	// floating IP the operator owns, a key whose server is still
+	// alive. The user is told, never surprised.
+	Preserved []string `json:"preserved,omitempty"`
+
+	// Warnings are non-fatal cloud errors and preservation reasons,
+	// rendered verbatim by the caller. Never null.
+	Warnings []string `json:"warnings"`
+}
+
+// NewDecommissionReport returns a report with every boolean false
+// (nothing proven gone yet) and a non-nil Warnings slice.
+func NewDecommissionReport(providerName, serverID string) *DecommissionReport {
+	return &DecommissionReport{
+		Provider: providerName,
+		ServerID: serverID,
+		Warnings: []string{},
+	}
+}
+
+// Warnf appends one operator-readable warning. Teardown is
+// best-effort by design: every non-fatal failure lands here instead
+// of aborting the remaining resources.
+func (r *DecommissionReport) Warnf(format string, args ...any) {
+	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
+}
+
+// Preserve records a resource teardown left in place, as
+// "<kind>:<id-or-name>" (e.g. "firewall:daal-relay-42").
+func (r *DecommissionReport) Preserve(resource string) {
+	r.Preserved = append(r.Preserved, resource)
+}
+
+// Clean reports whether the teardown left nothing behind.
+func (r *DecommissionReport) Clean() bool {
+	return r.ServerDeleted && r.SSHKeyDeleted && r.FirewallDeleted && len(r.Preserved) == 0
 }
 
 // ReprovisionOpts is the input to Provider.Reprovision. Implements

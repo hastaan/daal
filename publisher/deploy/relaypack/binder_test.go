@@ -64,9 +64,20 @@ func minimalRec(t *testing.T) *provider.OperatorRecord {
 	}
 }
 
+// testBindNow anchors every BindAndSign fixture to this run's clock,
+// once, so a binary's two builds of the same bundle stay byte-identical
+// while the manifest it signs is never already expired.
+//
+// It used to be a hard-coded `2026-05-01` with a 30-day expiry, which
+// made every signature test a time bomb: from 2026-05-31 onwards
+// `bundle.VerifyBundle` — which checks the manifest against the real
+// `time.Now()` — failed with "bundle expired" in five tests at once,
+// and the failure said nothing about the code under test.
+var testBindNow = time.Now().UTC().Add(-time.Hour)
+
 func defaultOpts() BindOpts {
 	return BindOpts{
-		Now:    time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		Now:    testBindNow,
 		Expiry: 30 * 24 * time.Hour,
 		Phase:  relaypackvalidate.PhaseV15,
 	}

@@ -22,13 +22,29 @@ import (
 //     OperatorRecord (no duplicate VPS created).
 //   - Reprovision is idempotent: re-running on the same record
 //     converges the box to the requested ReprovisionOpts.
-//   - Decommission on an absent server returns nil (success).
+//   - Decommission on an absent server returns an all-true report
+//     and nil (success).
 //   - AssignFloatingIP with an already-attached fipID is a no-op.
 //   - UnassignFloatingIP with no attached floating IP is a no-op.
 type Provider interface {
 	Provision(ctx context.Context, opts ProvisionOpts) (*OperatorRecord, error)
 	Reprovision(ctx context.Context, rec *OperatorRecord, opts ReprovisionOpts) error
-	Decommission(ctx context.Context, rec *OperatorRecord) error
+	// Decommission destroys every cloud resource the adapter
+	// created for this record — the VPS itself plus whatever
+	// provisioning created alongside it (per-server firewall,
+	// one-shot SSH key). Implementations MUST NOT stop at the
+	// server: an orphaned SSH key permanently blocks the next
+	// provision, and an orphaned firewall lingers on the account.
+	//
+	// The returned report is always non-nil, including on error, so
+	// the caller can render exactly how far teardown got. A
+	// non-fatal per-resource failure is recorded in the report
+	// (boolean false + a Warning) and does not abort the remaining
+	// resources. A non-nil error is reserved for the fatal case —
+	// the billing server itself could not be deleted — and the
+	// caller must then NOT discard the local record, because that
+	// record is the only way back to the surviving server.
+	Decommission(ctx context.Context, rec *OperatorRecord) (*DecommissionReport, error)
 	AssignFloatingIP(ctx context.Context, rec *OperatorRecord, fipID string) error
 	UnassignFloatingIP(ctx context.Context, rec *OperatorRecord) error
 	Pricing(ctx context.Context, rec *OperatorRecord) (Pricing, error)

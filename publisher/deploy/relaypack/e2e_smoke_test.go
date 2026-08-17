@@ -34,6 +34,13 @@ import (
 	"daal/publisher/deploy/relaypack"
 )
 
+// e2eBindNow pins --now-unix so the .sbp stays byte-deterministic
+// across the two builds below, while staying anchored to this run's
+// clock: bundle.VerifyBundle checks the manifest expiry against the
+// real time.Now(), so a hard-coded date silently turns into "bundle
+// expired" once it passes.
+var e2eBindNow = time.Now().UTC().Add(-time.Hour)
+
 // TestFRP4b_DryRunProvisionThenBindAndSign exercises the
 // provision -> bind-and-sign chain that the wizard drives at the
 // CLI boundary. Asserts:
@@ -105,7 +112,7 @@ func TestFRP4b_DryRunProvisionThenBindAndSign(t *testing.T) {
 	// 4) Bind-and-sign in-process. We pin --now-unix via opts.Now
 	//    so the .sbp is byte-deterministic across reruns.
 	res, err := relaypack.BindAndSign(&rec, priv, relaypack.BindOpts{
-		Now:    time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		Now:    e2eBindNow,
 		Expiry: 30 * 24 * time.Hour,
 		Phase:  relaypackvalidate.PhaseV15,
 	})
@@ -160,7 +167,7 @@ func TestFRP4b_BindAndSignDeterministicCrossRun(t *testing.T) {
 		},
 	}
 	opts := relaypack.BindOpts{
-		Now:    time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		Now:    e2eBindNow,
 		Expiry: 30 * 24 * time.Hour,
 		Phase:  relaypackvalidate.PhaseV15,
 	}

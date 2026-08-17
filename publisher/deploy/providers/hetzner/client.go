@@ -24,8 +24,19 @@ type hcloudClient interface {
 	ServerDelete(ctx context.Context, id string) error
 	ServerTypePrice(ctx context.Context, region, serverType string) (hourlyEUR, monthlyEUR float64, err error)
 
-	SSHKeyCreate(ctx context.Context, name string, publicKey []byte) (id string, err error)
+	// SSHKeyCreate uploads the public half of the one-shot
+	// provisioning keypair. labels are the ownership stamp
+	// (managed-by=daal-deploy plus daal-relay=<derived server
+	// name>) teardown matches on; see ownsEphemeralKey.
+	SSHKeyCreate(ctx context.Context, name string, publicKey []byte, labels map[string]string) (id string, err error)
 	SSHKeyDelete(ctx context.Context, id string) error
+
+	// SSHKeyList returns every SSH key on the account with the
+	// name + labels teardown needs to prove ownership. Hetzner has
+	// no "get by label" for SSH keys, and neither the key id nor
+	// its name is persisted on OperatorRecord, so the sweep is
+	// list-then-match-by-derived-name.
+	SSHKeyList(ctx context.Context) ([]SSHKeyInfo, error)
 
 	FloatingIPAssign(ctx context.Context, fipID, serverID string) error
 	FloatingIPUnassign(ctx context.Context, fipID string) error
@@ -75,9 +86,47 @@ type hcloudClient interface {
 
 	// FirewallDeleteForServer detaches and deletes the per-server
 	// firewall created by FirewallEnsureForServer. Idempotent:
-	// missing firewall is treated as success.
-	FirewallDeleteForServer(ctx context.Context, serverID string) error
+	// a missing firewall is success (Found=false, Deleted=false).
+	//
+	// Safety: the firewall is deleted ONLY when nothing but
+	// serverID is still attached to it. If the operator (or a
+	// second relay) applied it elsewhere, it is left completely
+	// alone and the other server ids come back in SharedWith so
+	// the caller can tell the user why it survived. Tearing down
+	// one relay must never strip another relay's firewall.
+	FirewallDeleteForServer(ctx context.Context, serverID string) (FirewallTeardownResult, error)
 }
+
+// SSHKeyInfo is the subset of a Hetzner SSH key teardown needs to
+// decide whether the key belongs to a given relay.
+type SSHKeyInfo struct {
+	ID     string
+	Name   string
+	Labels map[string]string
+}
+
+// FirewallTeardownResult is what FirewallDeleteForServer did.
+//
+//	Found   — a firewall named daal-relay-<serverID> exists.
+//	Deleted — it is gone now.
+//	SharedWith — other server ids still attached; non-empty means
+//	             the firewall was deliberately preserved.
+type FirewallTeardownResult struct {
+	FirewallID string
+	Found      bool
+	Deleted    bool
+	SharedWith []string
+}
+
+// Ownership labels stamped on every cloud resource daal-deploy
+// creates. labelRelay carries the derived server name
+// ("daal-<region>-<hex8 of publisher pubkey>"), which is what makes
+// a teardown match proof of ownership rather than a prefix guess.
+const (
+	labelManagedBy      = "managed-by"
+	labelManagedByValue = "daal-deploy"
+	labelRelay          = "daal-relay"
+)
 
 // ServerCreateOpts is the cloud-provider-agnostic input to
 // hcloudClient.ServerCreate. Mirrors the relevant subset of

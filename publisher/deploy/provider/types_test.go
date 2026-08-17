@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -178,5 +179,88 @@ func TestCandidateMeta_OmitEmptyParams(t *testing.T) {
 	body, _ := json.Marshal(m)
 	if bytes.Contains(body, []byte(`"params":null`)) {
 		t.Errorf(`empty Params must omit; got %s`, body)
+	}
+}
+
+// TestDecommissionReport_WireShape locks the JSON contract
+// `daal-deploy decommission` prints and the wizard's DestroyReport
+// reads. Renaming a field here silently breaks the Rust shim, which
+// deserialises by name.
+func TestDecommissionReport_WireShape(t *testing.T) {
+	rep := NewDecommissionReport("hetzner", "12345")
+	rep.ServerDeleted = true
+	rep.FirewallDeleted = true
+	rep.FirewallID = "910"
+	rep.DeletedSSHKeyIDs = []string{"678"}
+	rep.Warnf("floating IP %s stays reserved", "fip-9")
+	rep.Preserve("floating-ip:fip-9")
+
+	body, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, k := range []string{
+		"provider", "server_id", "server_deleted", "ssh_key_deleted",
+		"firewall_deleted", "deleted_ssh_key_ids", "firewall_id",
+		"preserved", "warnings",
+	} {
+		if _, ok := wire[k]; !ok {
+			t.Errorf("missing field %q in %s", k, body)
+		}
+	}
+	if wire["ssh_key_deleted"] != false {
+		t.Errorf("an untouched leg must serialise as false, not be omitted: %s", body)
+	}
+	if w, ok := wire["warnings"].([]any); !ok || len(w) != 1 {
+		t.Errorf("warnings = %v; want a one-element array", wire["warnings"])
+	}
+}
+
+// TestDecommissionReport_WarningsNeverNull: the Rust side reads
+// warnings into a Vec<String>, and a JSON null there is a
+// deserialisation error rather than an empty list.
+func TestDecommissionReport_WarningsNeverNull(t *testing.T) {
+	body, err := json.Marshal(NewDecommissionReport("vultr", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"warnings":[]`) {
+		t.Errorf("warnings must marshal as [] on a fresh report; got %s", body)
+	}
+}
+
+func TestDecommissionReport_CleanRequiresEveryLeg(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func() *DecommissionReport
+		want  bool
+	}{
+		{"all three legs, nothing preserved", func() *DecommissionReport {
+			r := NewDecommissionReport("hetzner", "1")
+			r.ServerDeleted, r.SSHKeyDeleted, r.FirewallDeleted = true, true, true
+			return r
+		}, true},
+		{"a preserved resource is not clean", func() *DecommissionReport {
+			r := NewDecommissionReport("hetzner", "1")
+			r.ServerDeleted, r.SSHKeyDeleted, r.FirewallDeleted = true, true, true
+			r.Preserve("firewall:daal-relay-1")
+			return r
+		}, false},
+		{"a false leg is not clean", func() *DecommissionReport {
+			r := NewDecommissionReport("hetzner", "1")
+			r.ServerDeleted, r.FirewallDeleted = true, true
+			return r
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.build().Clean(); got != tc.want {
+				t.Errorf("Clean() = %v want %v", got, tc.want)
+			}
+		})
 	}
 }

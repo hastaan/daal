@@ -45,12 +45,13 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli_bridge::{
     AssignFipArgs, BindAndSignArgs, BindResult, CdnProvisionArgs, CdnRotateHostnameArgs,
-    CdnRotateOriginArgs, CdnRotatePathArgs, CdnRotateResult, CliRunner, FountainFrame, Pricing,
-    ProgressEvent, ProvisionArgs, PublishFreshnessArgs, ReprovisionArgs,
+    CdnRotateOriginArgs, CdnRotatePathArgs, CdnRotateResult, CliRunner, DecommissionArgs,
+    DecommissionResult, FountainFrame, Pricing, ProgressEvent, ProvisionArgs,
+    PublishFreshnessArgs, ReprovisionArgs,
 };
 use crate::device_custody::{CustodyError, DeviceCustody};
 use crate::keystore::{Keystore, KeystoreError};
-use crate::operator_db::{CdnFrontRow, DbError, OperatorDb, SubkeyRow};
+use crate::operator_db::{CdnFrontRow, DbError, OperatorDb, OperatorRow, SubkeyRow};
 use crate::publisher_key::{self, Fingerprint, KeyError};
 use crate::staging::{self, PreProvisionRecord, StagingError};
 
@@ -1279,13 +1280,27 @@ pub fn set_operator_nickname(ctx: &WizardCtx, operator_id: i64, nickname: &str) 
     Ok(())
 }
 
-/// Cancel-and-cleanup: erase every secret bound to this operator,
-/// delete the DB row, remove the staging file. Idempotent.
+/// Cancel-and-cleanup: delete the DB row, then erase every secret
+/// bound to this operator and its staged files. Idempotent.
 ///
 /// Both stores are swept. Custody holds the live secrets; the legacy
 /// keystore may still hold PIN-sealed copies on an install that never
 /// ran the migration, and leaving those behind would keep a signing
 /// key on disk for a relay the user just deleted.
+///
+/// # Why the row goes first
+///
+/// The DB delete is the only fallible step here — everything after it
+/// is `let _ =` best-effort — and it can genuinely fail (a locked or
+/// full sqlite file, a FK constraint). The old order erased the
+/// custody aliases first, so a failed delete left a live operator row
+/// whose Ed25519 signing key had already been destroyed: unusable,
+/// unrecoverable, and every retry failed the same way. Deleting the
+/// row first means a failure returns `Err` with the keys still there
+/// and the retry able to succeed. The reverse risk — row gone,
+/// secrets briefly stranded — is recoverable: `panic_wipe` and the
+/// next `cancel_and_cleanup` of the same id both re-sweep the same
+/// conventional aliases, which are pure functions of the operator id.
 pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     let row = match ctx.db.get(operator_id) {
         Ok(r) => r,
@@ -1305,6 +1320,13 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     aliases.push(cloudflare_alias(operator_id));
     aliases.sort();
     aliases.dedup();
+
+    // Fallible step first; see the doc comment above.
+    match ctx.db.delete(operator_id) {
+        Ok(()) | Err(DbError::NotFound(_)) => {}
+        Err(e) => return Err(WizardError::Db(e)),
+    }
+
     for alias in &aliases {
         // Both forget()s are idempotent on a missing alias, and a
         // failure to erase one store must not stop us erasing the
@@ -1318,10 +1340,188 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     if staging_path.exists() {
         let _ = std::fs::remove_file(&staging_path);
     }
-    match ctx.db.delete(operator_id) {
-        Ok(()) | Err(DbError::NotFound(_)) => Ok(()),
-        Err(e) => Err(WizardError::Db(e)),
+    // The rotated sub-key lives here, unwrapped: `subkey_rotate`
+    // writes `subkey.priv` as a plaintext 0o600 file under
+    // `<staging>/subkeys/<id>/` and `sign_relaypack` reads it straight
+    // back, so for any operator that has rotated, this directory holds
+    // the *active* signing key. Nothing else removes it per-operator
+    // (`panic_wipe` only catches it because it drops the whole staging
+    // dir), so without this a "removed" relay left its signing key in
+    // the clear on disk forever.
+    let _ = std::fs::remove_dir_all(ctx.staging_dir.join("subkeys").join(operator_id.to_string()));
+    Ok(())
+}
+
+// ---- Real teardown --------------------------------------------------
+
+/// What a "Remove relay" actually accomplished, resource by resource.
+///
+/// Deleting a relay used to be a purely local act — the app forgot the
+/// keys and dropped the row while the VPS stayed up and kept billing.
+/// Now that the cloud legs are real, "it worked" is no longer one bit
+/// of information: a run that killed the server but could not delete
+/// the ephemeral SSH key leaves the user's *next* provision in the same
+/// region permanently broken on a name collision, and they can only act
+/// on that if we say so. Every leg is reported, and `warnings` carries
+/// the provider's own text verbatim rather than a rewritten summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DestroyReport {
+    pub server_deleted: bool,
+    pub ssh_key_deleted: bool,
+    pub firewall_deleted: bool,
+    pub local_removed: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// `relay_destroy`: remove a relay, optionally destroying the cloud
+/// resources behind it first.
+///
+/// `delete_server == false` is byte-for-byte today's behaviour — forget
+/// the secrets, drop the row, leave the box running. That stays the
+/// default for the escape hatches (a stuck custody migration has no
+/// readable token, so it *cannot* authenticate a cloud delete).
+///
+/// `delete_server == true` destroys the cloud side **first**, and the
+/// order is a correctness property rather than a preference:
+/// [`cancel_and_cleanup`] erases the cloud API token and then the row
+/// holding `server_id`, `region` and the publisher pubkey. Those five
+/// values are the *only* way to name the resources to be destroyed.
+/// Run the local sweep first and a failed cloud call is unrecoverable —
+/// a billing server with no credential left to delete it. So a cloud
+/// failure returns `Err` with the local state fully intact, and the
+/// user can retry. Nothing local is touched until the cloud says the
+/// server is gone.
+pub fn relay_destroy(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    delete_server: bool,
+) -> Result<DestroyReport> {
+    if !delete_server {
+        cancel_and_cleanup(ctx, operator_id)?;
+        return Ok(DestroyReport {
+            local_removed: true,
+            ..Default::default()
+        });
     }
+
+    let row = match ctx.db.get(operator_id) {
+        Ok(r) => r,
+        // Already gone: idempotent, same as cancel_and_cleanup. There
+        // is no record left to name a cloud resource with, so there is
+        // nothing truthful to claim about the server either.
+        Err(DbError::NotFound(_)) => {
+            return Ok(DestroyReport {
+                local_removed: true,
+                ..Default::default()
+            })
+        }
+        Err(e) => return Err(WizardError::Db(e)),
+    };
+
+    // Cloud first. A failure here propagates and the local state — row,
+    // token, staged record — survives untouched for the retry.
+    let cloud = destroy_cloud_resources(ctx, operator_id, &row)?;
+
+    // The local sweep is reported, never propagated. Past this point the
+    // VPS is already gone, and `?` here would throw that fact away: the
+    // sheet would render "the server was NOT deleted, it is still
+    // billing" — the exact opposite of the truth — for what is really a
+    // local sqlite problem. `local_removed: false` plus the error text
+    // in `warnings` is what the report shape (and
+    // `pub.relays.destroy.report.local_kept`) exists for.
+    let mut warnings = cloud.warnings;
+    let local_removed = match cancel_and_cleanup(ctx, operator_id) {
+        Ok(()) => true,
+        Err(e) => {
+            warnings.push(format!(
+                "the cloud resources are gone, but this relay could not be removed from \
+                 the app: {e}"
+            ));
+            false
+        }
+    };
+
+    Ok(DestroyReport {
+        server_deleted: cloud.server_deleted,
+        ssh_key_deleted: cloud.ssh_key_deleted,
+        firewall_deleted: cloud.firewall_deleted,
+        local_removed,
+        warnings,
+    })
+}
+
+/// Stage the OperatorRecord and hand it to `daal-deploy decommission`.
+///
+/// Returns `Ok` with everything false and a warning when the relay
+/// never reached the cloud at all — a draft that only ever held a token
+/// has no server id, no region and no publisher key, so there is no
+/// name to derive and nothing to sweep. Failing that case would block
+/// the user from deleting a row that costs nothing.
+fn destroy_cloud_resources(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    row: &OperatorRow,
+) -> Result<DecommissionResult> {
+    let record_json = row.operator_record_json.trim();
+    let rec: Option<PreProvisionRecord> = if record_json.is_empty() {
+        None
+    } else {
+        serde_json::from_str(record_json).ok()
+    };
+    // `server_id` alone is not the test. A provision that failed
+    // partway leaves `server_id` empty while an ephemeral SSH key
+    // named from (publisher pubkey, region) is already orphaned in the
+    // account — and that orphan is what makes every later attempt in
+    // that region fail on a name collision. So a record carrying a
+    // publisher key is worth sweeping even with no server to delete.
+    let has_cloud_footprint = rec.as_ref().is_some_and(|r| {
+        !r.provider.trim().is_empty()
+            && (!r.server_id.trim().is_empty() || !r.publisher_pub_key.trim().is_empty())
+    });
+    if !has_cloud_footprint {
+        // Every flag true, because each one answers "is it gone now?",
+        // not "did this run delete it" — and nothing was ever created.
+        // Reporting false here made the teardown sheet raise its red
+        // "the server is still running and still billing" alarm over a
+        // VPS that never existed, and send the user hunting through a
+        // cloud console for it. The warning below still says plainly
+        // that there was nothing to delete.
+        return Ok(DecommissionResult {
+            server_deleted: true,
+            ssh_key_deleted: true,
+            firewall_deleted: true,
+            warnings: vec![
+                "this relay was never provisioned — nothing exists in your cloud account to \
+                 delete"
+                    .to_string(),
+            ],
+        });
+    }
+
+    if row.cloud_token_keystore_alias.is_empty() {
+        // No credential means no way to authenticate the delete. Say so
+        // rather than silently downgrading to a local-only removal that
+        // strands a billing server.
+        return Err(WizardError::EmptyToken);
+    }
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
+
+    let record_path = ctx.staging_dir.join(format!("{operator_id}.record.json"));
+    std::fs::create_dir_all(&ctx.staging_dir)
+        .map_err(|e| WizardError::Pricing(format!("mkdir staging: {e}")))?;
+    std::fs::write(&record_path, record_json.as_bytes())
+        .map_err(|e| WizardError::Pricing(format!("write record: {e}")))?;
+
+    let res = ctx.cli.run_decommission(DecommissionArgs {
+        record_path: &record_path,
+        token: token.as_str(),
+    });
+    // Erase the staged record on both paths; it carries no secret but
+    // leaving it behind after a failure would desync the next retry.
+    let _ = std::fs::remove_file(&record_path);
+
+    res.map_err(map_deploy_err)
 }
 
 // ---- FRP-4b live operations ----------------------------------------
@@ -1374,6 +1574,12 @@ pub fn provision_run(
                 token: token.as_str(),
                 dry_run: false,
                 existing_server_id,
+                // A failure past ServerCreate must not leave a billing
+                // box behind: this function only persists the
+                // OperatorRecord on success, so a kept box has no server
+                // id anywhere in the app and no reusable mgmt port. See
+                // ProvisionArgs::rollback_on_failure.
+                rollback_on_failure: true,
             },
             on_progress,
         )
@@ -1874,6 +2080,11 @@ pub fn rotate_execute(
                         token: token.as_str(),
                         dry_run: false,
                         existing_server_id: "",
+                        // Same reasoning as provision_run: the rotation
+                        // only writes the record back on success, so a
+                        // kept half-built box would be invisible to the
+                        // app and still billing.
+                        rollback_on_failure: true,
                     },
                     on_progress,
                 )
@@ -2786,12 +2997,9 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use tempfile::tempdir;
 
-    fn ctx(now: i64) -> (WizardCtx, tempfile::TempDir) {
-        let dir = tempdir().unwrap();
-        let db = Arc::new(OperatorDb::open_in_memory().unwrap());
-        let ks = Arc::new(Keystore::new_in_memory(dir.path()));
-        let staging_dir = dir.path().join("staging");
-        let pricing = Pricing {
+    /// The canned pricing fixture every mock runner is built on.
+    fn test_pricing() -> Pricing {
+        Pricing {
             provider: "hetzner".into(),
             region: "fsn1".into(),
             server_type: "cx22".into(),
@@ -2799,8 +3007,15 @@ mod tests {
             monthly_eur: 3.85,
             included_traffic_tb_per_month: None,
             overage_eur_per_gb: None,
-        };
-        let cli = Arc::new(MockRunner::new(pricing));
+        }
+    }
+
+    fn ctx(now: i64) -> (WizardCtx, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(OperatorDb::open_in_memory().unwrap());
+        let ks = Arc::new(Keystore::new_in_memory(dir.path()));
+        let staging_dir = dir.path().join("staging");
+        let cli = Arc::new(MockRunner::new(test_pricing()));
         let clock_tick = AtomicI64::new(now);
         let clock_arc: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
             // Deterministic clock: ticks 1 s per call.
@@ -2995,6 +3210,50 @@ mod tests {
     }
 
     #[test]
+    fn cancel_and_cleanup_removes_the_plaintext_subkey_directory() {
+        // `subkey_rotate` writes the rotated sub-key private key as a
+        // plaintext 0o600 file under `<staging>/subkeys/<id>/` and
+        // `sign_relaypack` reads it straight back — for any operator
+        // that has rotated, that IS the active signing key, and it is
+        // not under DeviceCustody. Removing the relay while leaving it
+        // there means the key outlives the relay in the clear.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        let subkeys = ctx.staging_dir.join("subkeys").join(id.to_string());
+        std::fs::create_dir_all(&subkeys).unwrap();
+        std::fs::write(subkeys.join("subkey.priv"), b"-----BEGIN PRIVATE KEY-----").unwrap();
+
+        cancel_and_cleanup(&ctx, id).unwrap();
+
+        assert!(
+            !subkeys.exists(),
+            "the operator's unwrapped signing key survived its own removal"
+        );
+    }
+
+    #[test]
+    fn cancel_and_cleanup_keeps_the_signing_key_when_the_row_cannot_go() {
+        // Ordering property: the DB delete is the only fallible step,
+        // so it runs FIRST. A relay that has rotated used to fail the
+        // delete on a FOREIGN KEY violation *after* its custody aliases
+        // were already forgotten — key gone, row still there, every
+        // retry identical. The child sweep in OperatorDb::delete is the
+        // primary fix; this pins the ordering that made the failure
+        // unrecoverable rather than merely annoying.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        ctx.db
+            .record_rotated_sbp(id, 1_000, "/staging/a.sbp", "sha-a", "rp-a", 3, "L1")
+            .unwrap();
+
+        cancel_and_cleanup(&ctx, id).unwrap();
+
+        assert!(list_operators(&ctx).unwrap().is_empty());
+        assert!(ctx.custody.get(&pub_alias(id)).is_err());
+    }
+
+    #[test]
     fn cancel_and_cleanup_erases_custody_and_legacy_secrets() {
         // Deleting a relay must leave nothing behind in EITHER store —
         // a signing key surviving a deletion is a signing key on disk
@@ -3014,6 +3273,235 @@ mod tests {
         assert!(ctx.custody.get(&pub_alias(id)).is_err(), "custody priv");
         assert!(ctx.custody.get(&cloud_alias(id)).is_err(), "custody token");
         assert!(!ctx.keystore.has(&pub_alias(id)), "legacy priv");
+    }
+
+    // ---- Real teardown (relay_destroy) ---------------------------
+
+    /// Drive a relay to a state that looks provisioned: a record with a
+    /// server id, a region and a publisher key, i.e. one that genuinely
+    /// owns cloud resources.
+    fn provisioned_relay(ctx: &WizardCtx) -> i64 {
+        let id = store_cloud_token(ctx, "hetzner", "tok-live", None).unwrap();
+        select_profile(
+            ctx,
+            id,
+            "fsn1",
+            "cpx12",
+            "iran-default",
+            vec!["vless-reality".into()],
+        )
+        .unwrap();
+        publisher_keygen(ctx, id).unwrap();
+        let mut rec: PreProvisionRecord =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        rec.server_id = "12345678".into();
+        rec.public_ip = "203.0.113.9".into();
+        ctx.db
+            .update_record_json(id, &serde_json::to_string(&rec).unwrap())
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn relay_destroy_local_only_matches_cancel_and_cleanup() {
+        // delete_server=false must not touch the cloud at all — this is
+        // the path CustodyGate's "forget relay" escape uses, where there
+        // is no readable token to authenticate a delete with.
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(MockRunner::new(test_pricing())),
+        );
+        let id = provisioned_relay(&ctx);
+
+        let rep = relay_destroy(&ctx, id, false).unwrap();
+        assert!(rep.local_removed);
+        assert!(!rep.server_deleted, "must not claim a cloud delete");
+        assert!(!rep.ssh_key_deleted);
+        assert!(!rep.firewall_deleted);
+        assert!(rep.warnings.is_empty());
+        assert!(
+            mock.decommission_calls.lock().unwrap().is_empty(),
+            "local-only removal must never reach the provider"
+        );
+
+        // Same observable end state as today's cancel_and_cleanup.
+        assert!(list_operators(&ctx).unwrap().is_empty());
+        assert!(ctx.custody.get(&pub_alias(id)).is_err(), "custody priv");
+        assert!(ctx.custody.get(&cloud_alias(id)).is_err(), "custody token");
+        // And it stays idempotent on a row that is already gone.
+        assert!(relay_destroy(&ctx, id, false).unwrap().local_removed);
+    }
+
+    #[test]
+    fn relay_destroy_with_server_sweeps_cloud_then_local() {
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(MockRunner::new(test_pricing())),
+        );
+        let id = provisioned_relay(&ctx);
+
+        let rep = relay_destroy(&ctx, id, true).unwrap();
+        assert_eq!(
+            rep,
+            DestroyReport {
+                server_deleted: true,
+                ssh_key_deleted: true,
+                firewall_deleted: true,
+                local_removed: true,
+                warnings: vec![],
+            }
+        );
+
+        // The CLI was handed the real record + the real token.
+        let calls = mock.decommission_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly one decommission");
+        assert_eq!(calls[0].token, "tok-live");
+        assert!(
+            calls[0].record_json.contains("12345678"),
+            "record must carry the server id: {}",
+            calls[0].record_json
+        );
+
+        // Local state is gone afterwards, staged record included.
+        assert!(list_operators(&ctx).unwrap().is_empty());
+        assert!(ctx.custody.get(&cloud_alias(id)).is_err());
+        assert!(!calls[0].record_path.exists(), "staged record swept");
+    }
+
+    #[test]
+    fn relay_destroy_cloud_failure_leaves_local_state_intact() {
+        // THE ordering property. cancel_and_cleanup destroys the cloud
+        // token and then the row holding server_id/region/pubkey — the
+        // only handles on the resources. If it ran before a failed
+        // cloud call, the user would be left with a billing server and
+        // no credential to delete it. A cloud failure must therefore
+        // surface as an error with everything local still in place.
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(
+                MockRunner::new(test_pricing())
+                    .with_decommission_error("hetzner: server delete: 503 service unavailable\n"),
+            ),
+        );
+        let id = provisioned_relay(&ctx);
+
+        let err = relay_destroy(&ctx, id, true).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("503 service unavailable"),
+            "provider error must reach the user verbatim: {text}"
+        );
+
+        assert_eq!(mock.decommission_calls.lock().unwrap().len(), 1);
+        // Everything needed for the retry survived.
+        assert_eq!(list_operators(&ctx).unwrap().len(), 1, "row survives");
+        assert_eq!(
+            ctx.custody.get(&cloud_alias(id)).unwrap(),
+            b"tok-live",
+            "cloud token survives"
+        );
+        assert!(ctx.custody.get(&pub_alias(id)).is_ok(), "signing key survives");
+        assert!(ctx
+            .db
+            .get(id)
+            .unwrap()
+            .operator_record_json
+            .contains("12345678"));
+
+        // And the retry works once the provider recovers.
+        *mock.decommission_error.lock().unwrap() = None;
+        assert!(relay_destroy(&ctx, id, true).unwrap().server_deleted);
+        assert!(list_operators(&ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn relay_destroy_propagates_partial_sweep_warnings() {
+        // A run that killed the box but could not delete the ephemeral
+        // SSH key is not a success to round up: that orphan key is what
+        // makes the next provision in this region fail forever on a
+        // name collision. The warning has to reach the user intact.
+        let (ctx, _dir, _mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(MockRunner::new(test_pricing()).with_decommission_result(
+                DecommissionResult {
+                    server_deleted: true,
+                    ssh_key_deleted: false,
+                    firewall_deleted: true,
+                    warnings: vec!["hetzner: delete ssh key: 409 conflict".into()],
+                },
+            )),
+        );
+        let id = provisioned_relay(&ctx);
+
+        let rep = relay_destroy(&ctx, id, true).unwrap();
+        assert!(rep.server_deleted);
+        assert!(!rep.ssh_key_deleted);
+        assert!(rep.firewall_deleted);
+        assert!(rep.local_removed, "a live box is gone — finish locally too");
+        assert_eq!(rep.warnings, vec!["hetzner: delete ssh key: 409 conflict"]);
+    }
+
+    #[test]
+    fn relay_destroy_skips_cloud_for_a_never_provisioned_draft() {
+        // A row that only ever held a token has no server id, no region
+        // and no publisher key, so there is no resource name to derive.
+        // Calling the provider would fail on an empty record and block
+        // the user from deleting a relay that costs nothing.
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(MockRunner::new(test_pricing())),
+        );
+        let id = store_cloud_token(&ctx, "hetzner", "tok-draft", None).unwrap();
+
+        let rep = relay_destroy(&ctx, id, true).unwrap();
+        assert!(rep.local_removed);
+        // Every flag true because each answers "is it gone now?" — and
+        // nothing was ever created. Reporting false made the teardown
+        // sheet raise its red "the server is still running and still
+        // billing" alarm over a VPS that never existed.
+        assert!(rep.server_deleted);
+        assert!(rep.ssh_key_deleted);
+        assert!(rep.firewall_deleted);
+        assert_eq!(rep.warnings.len(), 1, "the skip is stated, not silent");
+        assert!(rep.warnings[0].contains("never provisioned"));
+        assert!(mock.decommission_calls.lock().unwrap().is_empty());
+        assert!(list_operators(&ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn relay_destroy_sweeps_a_failed_provision_with_no_server_id() {
+        // The orphaned-SSH-key case: provision died after creating the
+        // key, so server_id is empty but `daal-<region>-<hex8>-ephemeral`
+        // exists and poisons every retry. Skipping the cloud call here
+        // would leave the user permanently unable to provision.
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(MockRunner::new(test_pricing()).with_decommission_result(
+                DecommissionResult {
+                    server_deleted: false,
+                    ssh_key_deleted: true,
+                    firewall_deleted: false,
+                    warnings: vec![],
+                },
+            )),
+        );
+        let id = store_cloud_token(&ctx, "hetzner", "tok-failed", None).unwrap();
+        select_profile(&ctx, id, "fsn1", "cpx12", "iran-default", vec![]).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        assert!(
+            ctx.db
+                .get(id)
+                .unwrap()
+                .operator_record_json
+                .contains("\"server_id\":\"\""),
+            "precondition: no server was ever created"
+        );
+
+        let rep = relay_destroy(&ctx, id, true).unwrap();
+        assert_eq!(mock.decommission_calls.lock().unwrap().len(), 1);
+        assert!(rep.ssh_key_deleted, "the orphan key is the whole point");
+        assert!(!rep.server_deleted);
+        assert!(rep.local_removed);
     }
 
     #[test]
@@ -3559,7 +4047,11 @@ mod tests {
         // claim staleness; an application error from a box we clearly
         // reached must not be papered over with a retry.
         assert!(looks_like_stale_allowlist(
-            "daal-deploy failed: rc=1 stderr=dial tcp 91.98.92.73:17847: i/o timeout"
+            // RFC 5737 documentation address on purpose: this fixture
+            // only has to *look* like a transport failure, and a real
+            // relay's IP + its randomised mgmt port is exactly the pair
+            // this project exists to keep off a public git remote.
+            "daal-deploy failed: rc=1 stderr=dial tcp 203.0.113.7:17847: i/o timeout"
         ));
         assert!(looks_like_stale_allowlist("connection refused"));
         assert!(looks_like_stale_allowlist(

@@ -795,6 +795,23 @@ fn wizard_cancel_and_cleanup(
     wcmd::cancel_and_cleanup(&wstate.0, operator_id).map_err(|e| e.to_string())
 }
 
+/// `wizard_relay_destroy`: remove a relay, and — when the user asked
+/// for it — destroy the cloud server, ephemeral SSH key and firewall
+/// behind it first.
+///
+/// `delete_server: false` is exactly [`wizard_cancel_and_cleanup`].
+/// `delete_server: true` reaches the provider API, so it blocks for as
+/// long as that takes; an `Err` here means the cloud side refused and
+/// the relay is still fully intact locally, ready to retry.
+#[tauri::command]
+fn wizard_relay_destroy(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    delete_server: bool,
+) -> Result<wcmd::DestroyReport, String> {
+    wcmd::relay_destroy(&wstate.0, operator_id, delete_server).map_err(|e| e.to_string())
+}
+
 // ---- FRP-4b live operations ----------------------------------------
 
 /// `wizard_provision_run`: runs `daal-deploy provision` on a
@@ -2175,7 +2192,22 @@ pub fn run() {
 
     let lib_path = locate_engine_lib(&state_dir)
         .expect("could not find libdaalcore — set $DAAL_ENGINE_LIB or install the engine library");
-    let engine = Engine::load(&lib_path).expect("engine load");
+    // `Engine::load` resolves ~50 symbols up front, so the usual way it
+    // fails is not "no library" but "library older than this shell" —
+    // `libdaalcore` is a build artifact and the one under `resources/`
+    // is only as fresh as whoever last built it. A bare `.expect` turned
+    // that into a black window and an unattributable panic, so name the
+    // path and the missing symbol: the fix is always to rebuild the
+    // engine (`go build -buildmode=c-shared -tags cshared
+    // ./cmd/libdaalcore` from `core/`) into that directory.
+    let engine = Engine::load(&lib_path).unwrap_or_else(|e| {
+        panic!(
+            "engine load failed for {}: {e}\n\
+             the engine library is out of date or corrupt — rebuild it into that path with:\n\
+             (cd core && CGO_ENABLED=1 go build -buildmode=c-shared -tags cshared -o <path> ./cmd/libdaalcore)",
+            lib_path.display()
+        )
+    });
     engine.init(&state_dir, "warn").expect("engine init");
 
     // Phase 45 — publish a global Arc<Engine> so the Android JNI bridge
@@ -2233,6 +2265,7 @@ pub fn run() {
             wizard_list_operators,
             wizard_get_operator_state,
             wizard_cancel_and_cleanup,
+            wizard_relay_destroy,
             wizard_provision_run,
             wizard_sign_relaypack,
             wizard_qr_render,

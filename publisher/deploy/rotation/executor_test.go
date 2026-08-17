@@ -48,9 +48,14 @@ func (m *mockProvider) Reprovision(_ context.Context, rec *provider.OperatorReco
 	return m.reprovisionErr
 }
 
-func (m *mockProvider) Decommission(_ context.Context, _ *provider.OperatorRecord) error {
+func (m *mockProvider) Decommission(_ context.Context, rec *provider.OperatorRecord) (*provider.DecommissionReport, error) {
 	m.decommissionCalls++
-	return nil
+	rep := provider.NewDecommissionReport("mock", "")
+	if rec != nil {
+		rep.ServerID = rec.ServerID
+	}
+	rep.ServerDeleted, rep.SSHKeyDeleted, rep.FirewallDeleted = true, true, true
+	return rep, nil
 }
 
 func (m *mockProvider) AssignFloatingIP(_ context.Context, rec *provider.OperatorRecord, fipID string) error {
@@ -602,7 +607,7 @@ func (p *tickingProvider) Reprovision(ctx context.Context, rec *provider.Operato
 	return p.base.Reprovision(ctx, rec, opts)
 }
 
-func (p *tickingProvider) Decommission(ctx context.Context, rec *provider.OperatorRecord) error {
+func (p *tickingProvider) Decommission(ctx context.Context, rec *provider.OperatorRecord) (*provider.DecommissionReport, error) {
 	p.clock.Tick(p.tick)
 	return p.base.Decommission(ctx, rec)
 }

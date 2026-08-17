@@ -198,29 +198,50 @@ func removeVLESSUser(doc map[string]any, name string) bool {
 	}
 	users, _ := in["users"].([]any)
 	out := make([]any, 0, len(users))
-	removedShortID := ""
-	for _, raw := range users {
+	// Index correspondence is the whole mechanism: appendVLESSUser adds
+	// the user and its REALITY short_id in the same call, in the same
+	// order, so users[i] owns short_id[i]. Removing by index preserves
+	// that invariant.
+	//
+	// Truncating the list to the new user count — what this used to do —
+	// does not: revoking r1 (index 0) from [r1, r2] left short_id [A],
+	// i.e. it revoked r2's credential and kept the revoked r1's. The
+	// still-live recipient's vless-reality route, the primary 443/tcp
+	// transport, then silently stopped working because someone *else*
+	// was revoked.
+	removed := make([]int, 0, 1)
+	for i, raw := range users {
 		u, _ := raw.(map[string]any)
 		if n, _ := u["name"].(string); n == name {
-			// We don't have a stable name→short_id index on the
-			// box; instead, we drop the same-index entry from the
-			// short_id list below. Stash to log here.
-			_ = removedShortID
+			removed = append(removed, i)
 			continue
 		}
 		out = append(out, raw)
 	}
-	if len(out) == len(users) {
+	if len(removed) == 0 {
 		return false
 	}
 	in["users"] = out
-	// Truncate or rebuild the short_id list to the new user count.
+
 	tlsBlock, _ := in["tls"].(map[string]any)
 	if tlsBlock != nil {
 		reality, _ := tlsBlock["reality"].(map[string]any)
 		if reality != nil {
 			sids, _ := reality["short_id"].([]any)
-			if len(sids) > len(out) {
+			if len(sids) == len(users) {
+				// Aligned: drop exactly the revoked user's entries.
+				// Highest index first so earlier indices stay valid.
+				for i := len(removed) - 1; i >= 0; i-- {
+					j := removed[i]
+					sids = append(sids[:j], sids[j+1:]...)
+				}
+				reality["short_id"] = sids
+			} else if len(sids) > len(out) {
+				// Not aligned (hand-edited config, or a box that
+				// predates the paired append). There is no way to tell
+				// which entry belongs to whom, so fall back to the old
+				// truncation rather than leaving a stale credential
+				// accepted — but never grow the list.
 				reality["short_id"] = sids[:len(out)]
 			}
 		}

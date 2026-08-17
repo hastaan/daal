@@ -31,17 +31,32 @@ type Provider struct {
 	c           hcloudClient
 	clock       func() time.Time
 	tokenSource func() string // optional: how to fetch fresh API tokens
+	health      healthWaiter
 }
+
+// healthWaiter is the seam Provision uses to wait for a freshly
+// created box to finish cloud-init. Production binds
+// Provider.waitForHealthy; tests inject a stub, because the real
+// waiter dials SSH and HTTP against a public IP for up to five
+// minutes — and the interesting behaviour around it (rollback of a
+// half-built relay) only happens when it fails.
+type healthWaiter func(ctx context.Context, rec *provider.OperatorRecord, srv *ServerInfo, healthToken string, opts provider.ProvisionOpts, progress func(step, message string)) error
 
 // New returns a Provider bound to the given hcloudClient. The
 // production path is `New(NewLiveClient(token))`; tests pass a fake
 // client.
 func New(c hcloudClient) *Provider {
-	return &Provider{c: c, clock: time.Now}
+	p := &Provider{c: c, clock: time.Now}
+	p.health = p.waitForHealthy
+	return p
 }
 
 // SetClock injects a deterministic clock for tests.
 func (p *Provider) SetClock(now func() time.Time) { p.clock = now }
+
+// setHealthWaiter swaps the cloud-init health poll. Test-only seam;
+// see healthWaiter.
+func (p *Provider) setHealthWaiter(h healthWaiter) { p.health = h }
 
 // Provision creates a new VPS, runs the cloud-init, and returns an
 // OperatorRecord. Idempotent: if a server with the derived name
@@ -83,14 +98,43 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	// Render cloud-init (needed for both create and rebuild paths).
 	progress("provision_ssh_key", "Creating SSH key")
 	pubBytes := sshPublicKeyBytes(opts.EphemeralSSHKey)
-	sshKeyID, err := p.c.SSHKeyCreate(ctx, name+"-ephemeral", pubBytes)
+	keyName, err := ephemeralSSHKeyName(name)
+	if err != nil {
+		return nil, fmt.Errorf("hetzner: name ssh key: %w", err)
+	}
+	sshKeyID, err := p.c.SSHKeyCreate(ctx, keyName, pubBytes, map[string]string{
+		labelManagedBy: labelManagedByValue,
+		labelRelay:     name,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: create ssh key: %w", err)
 	}
+	// Delete the cloud-side key resource on EVERY exit path, success
+	// included. The private half of this keypair is generated per
+	// invocation and never leaves this process's memory (supplement
+	// §9.5.1), so once Provision returns, the uploaded public half is
+	// dead weight in every case. Leaving it behind is what used to
+	// wedge accounts: the old name was a pure function of (publisher
+	// key, region), so one survivor made every future attempt fail
+	// with "SSH key not unique" forever.
+	//
+	// Removing the SSHKey resource does not revoke access to a
+	// running box — Hetzner materialises authorized_keys at
+	// create/rebuild time — so this is safe even on the success path.
+	//
+	// context.WithoutCancel: cleanup must still run when the caller
+	// cancelled the provision. A cancelled provision is exactly the
+	// case that must not leak.
+	defer func() {
+		if err := p.c.SSHKeyDelete(context.WithoutCancel(ctx), sshKeyID); err != nil {
+			progress("provision_ssh_key", fmt.Sprintf(
+				"could not remove one-shot SSH key %q (id %s): %v — delete it in your provider console",
+				keyName, sshKeyID, err))
+		}
+	}()
 
 	healthToken, err := generateHealthToken()
 	if err != nil {
-		_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 		return nil, fmt.Errorf("hetzner: generate health token: %w", err)
 	}
 
@@ -106,7 +150,6 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		MgmtPort:      mgmtPort,
 	})
 	if err != nil {
-		_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 		return nil, fmt.Errorf("hetzner: render cloud-init: %w", err)
 	}
 
@@ -117,7 +160,6 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		progress("provision_rebuild_server", "Rebuilding existing server with daal configuration")
 		srv, err = p.c.ServerRebuild(ctx, opts.ExistingServerID, "ubuntu-24.04", string(userData))
 		if err != nil {
-			_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 			return nil, fmt.Errorf("hetzner: rebuild server: %w", err)
 		}
 	} else {
@@ -130,10 +172,13 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 			Image:      "ubuntu-24.04",
 			UserData:   string(userData),
 			SSHKeyIDs:  []string{sshKeyID},
-			Labels:     map[string]string{"managed-by": "daal-deploy", "toolbox": opts.ToolboxProfile},
+			Labels: map[string]string{
+				labelManagedBy: labelManagedByValue,
+				labelRelay:     name,
+				"toolbox":      opts.ToolboxProfile,
+			},
 		})
 		if err != nil {
-			_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 			return nil, fmt.Errorf("hetzner: create server: %w", err)
 		}
 	}
@@ -161,121 +206,201 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		// Log via the progress channel and continue.
 		progress("provision_cloud_firewall", fmt.Sprintf("firewall ensure failed: %v", err))
 	}
+
+	// ---- past this line a real, billing server exists ----
+	//
+	// Every failure from here on must either roll the server back or
+	// name it out loud. Silently returning an error used to leave the
+	// user paying for a box nothing in the app knew about; see
+	// afterServerFailure.
 	if opts.WaitForHealth {
-		// If the server has a Hetzner Cloud Firewall attached, the
-		// box-side UFW rule is not enough; open the provisioning
-		// health endpoint from this helper IP while cloud-init runs.
-		// Servers without an attached firewall don't need this.
-		var healthRuleID string
-		if id, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 9876, p.clock().Add(10*time.Minute)); err == nil {
-			healthRuleID = id
-			defer func() { _ = p.c.FirewallRemoveEphemeralRule(ctx, healthRuleID) }()
-			progress("provision_cloud_firewall", "Opened temporary cloud firewall window for server health")
-		} else if !strings.Contains(err.Error(), "no attached firewall") {
-			return nil, fmt.Errorf("hetzner: open temporary health firewall: %w", err)
+		wait := p.health
+		if wait == nil { // Provider built without New(); fall back to the real poll
+			wait = p.waitForHealthy
 		}
-		var sshRuleID string
-		if id, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 22, p.clock().Add(10*time.Minute)); err == nil {
-			sshRuleID = id
-			defer func() { _ = p.c.FirewallRemoveEphemeralRule(ctx, sshRuleID) }()
-			progress("provision_cloud_firewall", "Opened temporary cloud firewall window for SSH log streaming")
-		} else if !strings.Contains(err.Error(), "no attached firewall") {
-			return nil, fmt.Errorf("hetzner: open temporary ssh firewall: %w", err)
-		}
-
-		// Poll with progress updates so the UI shows server-side
-		// cloud-init output when the temporary debug endpoint is up,
-		// without spamming repeated connection errors.
-		var sshSigner ssh.Signer
-		if signer, err := ssh.NewSignerFromKey(opts.EphemeralSSHKey); err == nil {
-			sshSigner = signer
-		} else {
-			progress("provision_ssh_debug", fmt.Sprintf("SSH observer key unavailable: %v", err))
-		}
-		poller := &health.Poller{BoxIP: rec.PublicIP, Token: healthToken}
-		maxAttempts := 60
-		interval := 5 * time.Second
-		var fp string
-		var healthErr error
-		var lastDebugLog string
-		var lastSSHDebug string
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			if sshSigner != nil || srv.RootPassword != "" {
-				if logTail, err := sshCloudInitTail(rec.PublicIP.String(), sshSigner, srv.RootPassword); err == nil && logTail != "" && logTail != lastDebugLog {
-					lastDebugLog = logTail
-					progress("provision_cloud_init", logTail)
-				} else if err != nil {
-					var fatal *provisionFatalError
-					if errors.As(err, &fatal) {
-						if fatal.Log != "" && fatal.Log != lastDebugLog {
-							lastDebugLog = fatal.Log
-							progress("provision_cloud_init_fatal", fatal.Log)
-						}
-						return nil, fmt.Errorf("hetzner: server provisioning failed: %s", fatal.Summary())
-					}
-					if attempt == 1 || attempt%6 == 0 {
-						msg := fmt.Sprintf("SSH observer waiting: %v", err)
-						if len(msg) > 500 {
-							msg = msg[:500]
-						}
-						if msg != lastSSHDebug {
-							lastSSHDebug = msg
-							progress("provision_ssh_debug", msg)
-						}
-					}
-				}
-			}
-			st, err := poller.PollOnce(ctx)
-			if err == nil && st != nil && st.Healthy {
-				candidate := strings.ToLower(strings.TrimSpace(st.MgmtTLSFingerprint))
-				raw, decErr := hex.DecodeString(candidate)
-				if decErr == nil && len(raw) == 32 {
-					fp = candidate
-					break
-				}
-				if st.DebugLog != "" && st.DebugLog != lastDebugLog {
-					lastDebugLog = st.DebugLog
-					progress("provision_cloud_init", st.DebugLog)
-				}
-			} else {
-				if st != nil && st.DebugLog != "" && st.DebugLog != lastDebugLog {
-					lastDebugLog = st.DebugLog
-					progress("provision_cloud_init", st.DebugLog)
-				}
-			}
-			if attempt == maxAttempts {
-				healthErr = fmt.Errorf("hetzner: health check timed out after %d attempts", maxAttempts)
-				break
-			}
-			select {
-			case <-ctx.Done():
-				healthErr = ctx.Err()
-				break
-			case <-time.After(interval):
-			}
-		}
-		if healthErr != nil {
-			return nil, healthErr
-		}
-		rec.MgmtTLSFingerprint = fp
-
-		// FRP-14 Tier-2: read the box's client-connection material over
-		// the same ephemeral SSH session while it is still open. The box
-		// writes reality.pub at cloud-init (independent of the released
-		// daal-relay-mgmt binary), so this works without a new release.
-		// Best-effort: a pre-Tier-2 box simply leaves the fields empty.
-		if sshSigner != nil || srv.RootPassword != "" {
-			if pub, err := sshReadFile(rec.PublicIP.String(), sshSigner, srv.RootPassword, "/etc/daal/reality.pub"); err == nil {
-				rec.RealityPublicKey = strings.TrimSpace(pub)
-			}
-			if pin, err := sshReadFile(rec.PublicIP.String(), sshSigner, srv.RootPassword,
-				"/etc/daal/tls-spki-sha256.b64"); err == nil {
-				rec.TLSCertSHA256 = strings.TrimSpace(pin)
-			}
+		if err := wait(ctx, rec, srv, healthToken, opts, progress); err != nil {
+			return nil, p.afterServerFailure(ctx, opts, progress, rec, err)
 		}
 	}
 	progress("provision_healthy", "Server is up and healthy")
 	return rec, nil
+}
+
+// waitForHealthy blocks until the box finishes cloud-init and
+// publishes a usable mgmt-TLS fingerprint, streaming cloud-init
+// output through progress as it goes. It fills rec.MgmtTLSFingerprint
+// (and the FRP-14 Tier-2 connection material) in place.
+//
+// It is the production binding of Provider.health; on failure the
+// caller decides what happens to the server that is already running.
+func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRecord, srv *ServerInfo, healthToken string, opts provider.ProvisionOpts, progress func(step, message string)) error {
+	// If the server has a Hetzner Cloud Firewall attached, the
+	// box-side UFW rule is not enough; open the provisioning
+	// health endpoint from this helper IP while cloud-init runs.
+	// Servers without an attached firewall don't need this.
+	var healthRuleID string
+	if id, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 9876, p.clock().Add(10*time.Minute)); err == nil {
+		healthRuleID = id
+		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), healthRuleID) }()
+		progress("provision_cloud_firewall", "Opened temporary cloud firewall window for server health")
+	} else if !strings.Contains(err.Error(), "no attached firewall") {
+		return fmt.Errorf("hetzner: open temporary health firewall: %w", err)
+	}
+	var sshRuleID string
+	if id, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 22, p.clock().Add(10*time.Minute)); err == nil {
+		sshRuleID = id
+		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), sshRuleID) }()
+		progress("provision_cloud_firewall", "Opened temporary cloud firewall window for SSH log streaming")
+	} else if !strings.Contains(err.Error(), "no attached firewall") {
+		return fmt.Errorf("hetzner: open temporary ssh firewall: %w", err)
+	}
+
+	// Poll with progress updates so the UI shows server-side
+	// cloud-init output when the temporary debug endpoint is up,
+	// without spamming repeated connection errors.
+	var sshSigner ssh.Signer
+	if signer, err := ssh.NewSignerFromKey(opts.EphemeralSSHKey); err == nil {
+		sshSigner = signer
+	} else {
+		progress("provision_ssh_debug", fmt.Sprintf("SSH observer key unavailable: %v", err))
+	}
+	poller := &health.Poller{BoxIP: rec.PublicIP, Token: healthToken}
+	maxAttempts := 60
+	interval := 5 * time.Second
+	var fp string
+	var healthErr error
+	var lastDebugLog string
+	var lastSSHDebug string
+	// Labelled so `break poll` leaves the loop. The bare `break`
+	// this replaced only left the select, so a cancelled context
+	// still burned the full 5-minute timeout before returning —
+	// which made "cancel provisioning" look hung and kept the
+	// half-built server billing for the whole window.
+poll:
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if sshSigner != nil || srv.RootPassword != "" {
+			if logTail, err := sshCloudInitTail(rec.PublicIP.String(), sshSigner, srv.RootPassword); err == nil && logTail != "" && logTail != lastDebugLog {
+				lastDebugLog = logTail
+				progress("provision_cloud_init", logTail)
+			} else if err != nil {
+				var fatal *provisionFatalError
+				if errors.As(err, &fatal) {
+					if fatal.Log != "" && fatal.Log != lastDebugLog {
+						lastDebugLog = fatal.Log
+						progress("provision_cloud_init_fatal", fatal.Log)
+					}
+					return fmt.Errorf("hetzner: server provisioning failed: %s", fatal.Summary())
+				}
+				if attempt == 1 || attempt%6 == 0 {
+					msg := fmt.Sprintf("SSH observer waiting: %v", err)
+					if len(msg) > 500 {
+						msg = msg[:500]
+					}
+					if msg != lastSSHDebug {
+						lastSSHDebug = msg
+						progress("provision_ssh_debug", msg)
+					}
+				}
+			}
+		}
+		st, err := poller.PollOnce(ctx)
+		if err == nil && st != nil && st.Healthy {
+			candidate := strings.ToLower(strings.TrimSpace(st.MgmtTLSFingerprint))
+			raw, decErr := hex.DecodeString(candidate)
+			if decErr == nil && len(raw) == 32 {
+				fp = candidate
+				break poll
+			}
+			if st.DebugLog != "" && st.DebugLog != lastDebugLog {
+				lastDebugLog = st.DebugLog
+				progress("provision_cloud_init", st.DebugLog)
+			}
+		} else {
+			if st != nil && st.DebugLog != "" && st.DebugLog != lastDebugLog {
+				lastDebugLog = st.DebugLog
+				progress("provision_cloud_init", st.DebugLog)
+			}
+		}
+		if attempt == maxAttempts {
+			healthErr = fmt.Errorf("hetzner: health check timed out after %d attempts", maxAttempts)
+			break poll
+		}
+		select {
+		case <-ctx.Done():
+			healthErr = ctx.Err()
+			break poll
+		case <-time.After(interval):
+		}
+	}
+	if healthErr != nil {
+		return healthErr
+	}
+	rec.MgmtTLSFingerprint = fp
+
+	// FRP-14 Tier-2: read the box's client-connection material over
+	// the same ephemeral SSH session while it is still open. The box
+	// writes reality.pub at cloud-init (independent of the released
+	// daal-relay-mgmt binary), so this works without a new release.
+	// Best-effort: a pre-Tier-2 box simply leaves the fields empty.
+	if sshSigner != nil || srv.RootPassword != "" {
+		if pub, err := sshReadFile(rec.PublicIP.String(), sshSigner, srv.RootPassword, "/etc/daal/reality.pub"); err == nil {
+			rec.RealityPublicKey = strings.TrimSpace(pub)
+		}
+		if pin, err := sshReadFile(rec.PublicIP.String(), sshSigner, srv.RootPassword,
+			"/etc/daal/tls-spki-sha256.b64"); err == nil {
+			rec.TLSCertSHA256 = strings.TrimSpace(pin)
+		}
+	}
+	return nil
+}
+
+// afterServerFailure decides what happens to the cloud resources a
+// half-finished provision left behind, and returns the error
+// Provision should surface.
+//
+// Two honest outcomes, never a third silent one:
+//
+//   - RollbackOnFailure: destroy what we created (server, per-server
+//     firewall; the one-shot SSH key is handled by Provision's
+//     defer) so the meter stops. The rollback's own outcome is
+//     folded into the error text — a failed rollback is worse news
+//     than the original failure, not less.
+//   - default: leave the box alone (a slow boot is recoverable, and
+//     the idempotent retry path reuses it) but emit a
+//     "provision_orphan" progress event and repeat the server id +
+//     IP inside the error, so the caller can show the user exactly
+//     what is running and offer to remove it.
+func (p *Provider) afterServerFailure(ctx context.Context, opts provider.ProvisionOpts, progress func(step, message string), rec *provider.OperatorRecord, cause error) error {
+	where := fmt.Sprintf("server_id=%s ip=%s region=%s", rec.ServerID, rec.PublicIP, rec.Region)
+	if opts.ExistingServerID != "" {
+		// Rebuild path. This server is the caller's own machine, which
+		// we were asked to re-image, not one we created — rollback
+		// would destroy a box we do not own. Report, never delete.
+		progress("provision_orphan", fmt.Sprintf(
+			"Provisioning failed on your existing server %s. It is untouched by daal beyond the re-image and is still running.", where))
+		return fmt.Errorf("%w [your existing server is still running: %s]", cause, where)
+	}
+	if !opts.RollbackOnFailure {
+		progress("provision_orphan", fmt.Sprintf(
+			"Provisioning failed but the server is still running and still billing: %s. "+
+				"Remove the relay from Daal (delete the server) or destroy it in your provider console.", where))
+		return fmt.Errorf("%w [the server is still running and still billing: %s]", cause, where)
+	}
+	progress("provision_rollback", fmt.Sprintf("Provisioning failed — removing the server that was just created (%s)", where))
+	// WithoutCancel: a cancelled provision is precisely the case
+	// whose cleanup must still reach the cloud API.
+	rep, err := p.Decommission(context.WithoutCancel(ctx), rec)
+	if err != nil {
+		progress("provision_orphan", fmt.Sprintf(
+			"Rollback failed — the server is still running and still billing: %s (%v)", where, err))
+		return fmt.Errorf("%w [rollback failed, the server is still running and still billing: %s: %v]", cause, where, err)
+	}
+	if len(rep.Warnings) > 0 {
+		progress("provision_rollback", "Rolled back with warnings: "+strings.Join(rep.Warnings, "; "))
+		return fmt.Errorf("%w [rolled back with warnings: %s]", cause, strings.Join(rep.Warnings, "; "))
+	}
+	progress("provision_rollback", "Rolled back: the server has been deleted, nothing is billing")
+	return fmt.Errorf("%w [rolled back: server deleted, nothing is billing]", cause)
 }
 
 // Reprovision deletes-and-recreates the box. At V1.5 this is the
@@ -296,14 +421,242 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	return nil
 }
 
-// Decommission deletes the VPS. Idempotent: deleting an absent
-// server returns nil.
-func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecord) error {
-	if rec == nil || rec.ServerID == "" {
-		return nil
+// Decommission destroys everything provisioning created for this
+// record: the VPS, its per-server baseline firewall, and the
+// one-shot SSH key(s). Idempotent — an already-absent resource is
+// success, not an error.
+//
+// # How the resources are identified
+//
+// Neither the firewall ID nor the SSH key ID is persisted:
+// provider.OperatorRecord has no field for either (the firewall ID
+// is discarded at the FirewallEnsureForServer call site, and the
+// key ID only ever lived in a local variable). So teardown re-derives
+// exactly the names provisioning minted, from material that IS on the
+// record:
+//
+//	firewall  "daal-relay-<server_id>"      <- rec.ServerID
+//	ssh key   "daal-<region>-<hex8>-ephemeral[-<rand>]"
+//	                                        <- rec.Region + rec.PublisherPubKey
+//
+// Both names are pure functions of this operator's own material, so a
+// name match is proof of ownership — not a guess. Current builds also
+// carry the managed-by/daal-relay label pair, and for those the label
+// must match too (see ownsEphemeralKey). Nothing is ever deleted on a
+// loose "daal-" prefix: that would let one operator's teardown eat
+// another operator's key.
+//
+// # What it refuses to delete
+//
+//   - a firewall another server is still attached to (SharedWith),
+//   - the SSH key of a relay whose server is still alive,
+//   - a floating IP: the operator owns it, daal-deploy never made it.
+//
+// Each refusal is reported, never silent.
+//
+// # Failure semantics
+//
+// Best-effort per resource: a failed key delete does not stop the
+// firewall delete and vice versa; both land in the report as a false
+// boolean plus a warning. The one fatal case is the server itself —
+// if the billing box survives, its firewall and key must survive too
+// (stripping a live relay's firewall would expose its mgmt port), so
+// we stop and return an error. The caller must then keep the local
+// record: it is the only remaining route back to that server.
+func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecord) (*provider.DecommissionReport, error) {
+	rep := provider.NewDecommissionReport("hetzner", "")
+	if rec == nil {
+		// Nothing to identify and nothing to delete: vacuously clean.
+		rep.ServerDeleted, rep.SSHKeyDeleted, rep.FirewallDeleted = true, true, true
+		return rep, nil
 	}
-	return p.c.ServerDelete(ctx, rec.ServerID)
+	rep.ServerID = rec.ServerID
+
+	// 0. Resolve the server. A record with no ServerID is NOT proof
+	// that no server exists: the wizard only writes the OperatorRecord
+	// back on a *successful* provision, so the single most common way
+	// to arrive here — a provision that created the box and then failed
+	// its health wait — persists `"server_id":""` while a real, billing
+	// VPS carries the derived name. Claiming ServerDeleted on that
+	// record told the user "the server is gone and the billing has
+	// stopped" and then erased the token and the row, which were the
+	// only remaining handle on it. So: no ServerID means look it up by
+	// the name provisioning would have minted, exactly as
+	// sweepEphemeralKeys already does for the key.
+	serverID, err := p.resolveServerID(ctx, rec, rep)
+	if err != nil {
+		return rep, err
+	}
+
+	// 1. The VPS — the thing that costs money. First, and fatal.
+	if serverID == "" {
+		// Genuinely nothing there: either the provision died before
+		// ServerCreate returned, or the box is already gone. No server
+		// means no firewall either (its name is derived from the server
+		// id), but there may well be an orphaned SSH key — the exact
+		// state that used to block every retry — so keep going.
+		rep.ServerDeleted = true
+		rep.FirewallDeleted = true
+	} else {
+		rep.ServerID = serverID
+		if err := p.c.ServerDelete(ctx, serverID); err != nil {
+			rep.Warnf("could not delete server %s: %v", serverID, err)
+			rep.Preserve("server:" + serverID)
+			return rep, fmt.Errorf("hetzner: delete server %s: %w", serverID, err)
+		}
+		rep.ServerDeleted = true
+
+		// 2. The per-server baseline firewall.
+		res, err := p.c.FirewallDeleteForServer(ctx, serverID)
+		switch {
+		case err != nil:
+			rep.Warnf("could not delete firewall %q: %v — delete it in your provider console", firewallNameForServer(serverID), err)
+			rep.Preserve("firewall:" + firewallNameForServer(serverID))
+		case len(res.SharedWith) > 0:
+			rep.FirewallID = res.FirewallID
+			rep.Warnf("firewall %q is still attached to server(s) %s and was left in place",
+				firewallNameForServer(serverID), strings.Join(res.SharedWith, ", "))
+			rep.Preserve("firewall:" + res.FirewallID)
+		default:
+			// Deleted, or never existed. Either way nothing of ours
+			// is left behind.
+			rep.FirewallDeleted = true
+			rep.FirewallID = res.FirewallID
+		}
+	}
+
+	// 3. The one-shot SSH key(s).
+	p.sweepEphemeralKeys(ctx, rec, rep)
+
+	// 4. Resources we deliberately do not touch.
+	if rec.FloatingIPID != "" {
+		rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy did not create it, so it is yours to release", rec.FloatingIPID)
+		rep.Preserve("floating-ip:" + rec.FloatingIPID)
+	}
+	return rep, nil
 }
+
+// resolveServerID returns the id of the server this record's relay
+// owns, or "" when there provably is none.
+//
+// rec.ServerID wins when it is set. When it is empty the name
+// provisioning derives — a pure function of (publisher pubkey, region),
+// so a match is proof of ownership rather than a guess, same argument
+// as ownsEphemeralKey — is looked up instead. This is the orphan case:
+// a provision that created the box and then failed never gets its
+// OperatorRecord written back, so the id is lost while the VPS keeps
+// billing under that name.
+//
+// The error return is the important half. If the lookup itself fails we
+// have not proved anything, and reporting "deleted" would be a lie about
+// a billing resource that the caller would act on by erasing the local
+// row and the cloud token. That case returns an error with ServerDeleted
+// still false: teardown stops, the local record survives, the user can
+// retry.
+//
+// A record with neither a server id nor (region, pubkey) is the one
+// remaining "provably none" case: validateProvisionOpts refuses to
+// provision without both, so no server can ever have been created for
+// it. "" with no error is honest there.
+func (p *Provider) resolveServerID(ctx context.Context, rec *provider.OperatorRecord, rep *provider.DecommissionReport) (string, error) {
+	if rec.ServerID != "" {
+		return rec.ServerID, nil
+	}
+	if len(rec.PublisherPubKey) == 0 || rec.Region == "" {
+		return "", nil
+	}
+	relay := derivedServerName(rec.PublisherPubKey, rec.Region)
+	srv, err := p.c.ServerByName(ctx, relay)
+	switch {
+	case err == nil && srv != nil:
+		return srv.ID, nil
+	case err == nil, errors.Is(err, errServerNotFound):
+		// Proved absent. Nothing to delete, nothing to lie about.
+		return "", nil
+	default:
+		rep.Warnf("could not confirm whether a server named %q exists (%v) — nothing was deleted", relay, err)
+		rep.Preserve("server:" + relay)
+		return "", fmt.Errorf("hetzner: look up server %q: %w", relay, err)
+	}
+}
+
+// sweepEphemeralKeys deletes the one-shot provisioning SSH key(s)
+// belonging to rec's relay, recording the outcome on rep. Separated
+// out because it is the leg with the ownership + liveness proofs.
+func (p *Provider) sweepEphemeralKeys(ctx context.Context, rec *provider.OperatorRecord, rep *provider.DecommissionReport) {
+	if len(rec.PublisherPubKey) == 0 || rec.Region == "" {
+		rep.Warnf("record carries no region/publisher_pub_key, so the one-shot SSH key cannot be identified — look for a key named \"daal-<region>-<id>-ephemeral*\" in your provider console")
+		return
+	}
+	relay := derivedServerName(rec.PublisherPubKey, rec.Region)
+
+	// Liveness proof. The key name and label are functions of
+	// (publisher pubkey, region), i.e. of exactly one derived server
+	// name. If a server still carries that name, that relay is alive
+	// and its provisioning key is not ours to remove — this is the
+	// "shared resource must be preserved" case for keys.
+	if srv, err := p.c.ServerByName(ctx, relay); err == nil && srv != nil {
+		rep.Warnf("server %s (%q) is still running, so its one-shot SSH key was left in place", srv.ID, relay)
+		rep.Preserve("ssh-key:" + relay + "-ephemeral*")
+		return
+	} else if err != nil && !errors.Is(err, errServerNotFound) {
+		rep.Warnf("could not confirm server %q is gone (%v), so its one-shot SSH key was left in place", relay, err)
+		rep.Preserve("ssh-key:" + relay + "-ephemeral*")
+		return
+	}
+
+	keys, err := p.c.SSHKeyList(ctx)
+	if err != nil {
+		rep.Warnf("could not list SSH keys (%v) — a key named %q may still be on the account; it will block the next provision until removed", err, relay+"-ephemeral")
+		rep.Preserve("ssh-key:" + relay + "-ephemeral*")
+		return
+	}
+	failed := 0
+	for _, k := range keys {
+		if !ownsEphemeralKey(k, relay) {
+			continue
+		}
+		if err := p.c.SSHKeyDelete(ctx, k.ID); err != nil {
+			rep.Warnf("could not delete SSH key %q (id %s): %v — it will block the next provision until removed", k.Name, k.ID, err)
+			rep.Preserve("ssh-key:" + k.Name)
+			failed++
+			continue
+		}
+		rep.DeletedSSHKeyIDs = append(rep.DeletedSSHKeyIDs, k.ID)
+	}
+	// True means "no one-shot key of ours is left behind", which
+	// includes the common case of there being none to start with.
+	rep.SSHKeyDeleted = failed == 0
+}
+
+// ownsEphemeralKey reports whether k is a one-shot provisioning key
+// this adapter created for the relay named relay (itself
+// "daal-<region>-<hex8 of publisher pubkey>"). Two shapes are
+// accepted, both anchored on that derived name:
+//
+//	pre-fix builds   name == "<relay>-ephemeral", no labels
+//	current builds   name starts "<relay>-ephemeral-" AND carries
+//	                 managed-by=daal-deploy + daal-relay=<relay>
+//
+// The current shape demands both the naming convention and the
+// ownership labels. A key that merely starts with "daal-" never
+// matches — a loose prefix would happily delete a different
+// operator's key out of the same account.
+func ownsEphemeralKey(k SSHKeyInfo, relay string) bool {
+	legacy := relay + "-ephemeral"
+	if k.Name == legacy {
+		return true
+	}
+	if !strings.HasPrefix(k.Name, legacy+"-") {
+		return false
+	}
+	return k.Labels[labelManagedBy] == labelManagedByValue && k.Labels[labelRelay] == relay
+}
+
+// firewallNameForServer mirrors the name liveClient.
+// FirewallEnsureForServer mints, so teardown messages can name the
+// resource the operator will see in the console.
+func firewallNameForServer(serverID string) string { return "daal-relay-" + serverID }
 
 // AssignFloatingIP attaches the given floating IP to the
 // OperatorRecord's server. Idempotent: same fipID twice is a no-op.
@@ -383,6 +736,49 @@ func derivedServerName(pubKey []byte, region string) string {
 		return fmt.Sprintf("daal-%s-%x", region, pubKey)
 	}
 	return fmt.Sprintf("daal-%s-%s", region, hex.EncodeToString(pubKey[:8]))
+}
+
+// ephemeralSSHKeyName returns the name for one provisioning
+// attempt's one-shot SSH key: "<derived server name>-ephemeral-<8
+// hex>".
+//
+// The random suffix is the fix for the worst failure this adapter
+// had. Hetzner enforces uniqueness on SSH-key *names*, and the old
+// name was "<derived server name>-ephemeral" — a pure function of
+// (publisher pubkey, region), hence identical on every attempt
+// forever. One orphaned key (a crashed run, a server deleted from
+// the console) meant every later provision died at
+// `create ssh key: SSH key not unique (uniqueness_error)`, with no
+// way out of the app: the key is only removable through the Hetzner
+// API or console.
+//
+// Of the three candidate fixes:
+//
+//   - reuse-if-fingerprint-matches cannot work. The ephemeral keypair
+//     is regenerated per invocation, so the fingerprint never matches;
+//     making it deterministic would destroy the one-shot property of
+//     supplement §9.5.1 and let one leaked private half be replayed
+//     against every future provision.
+//   - delete-then-recreate unbricks existing accounts but keeps the
+//     shared name, so two concurrent provisions for the same
+//     publisher+region can still delete each other's key mid-flight.
+//   - a per-attempt random suffix has no shared name at all: two
+//     attempts, concurrent or sequential, simply cannot collide, and
+//     a pre-existing orphan from an older build (which has no
+//     suffix) is not in the way either. Retry-after-failure works
+//     without anyone touching the cloud console.
+//
+// The cost of the suffix is that a crash between create and cleanup
+// leaves a key that no longer has a predictable name — paid for by
+// (a) Provision deleting the key by ID on every exit path, and (b)
+// the managed-by/daal-relay labels, which let Decommission sweep any
+// stragglers by ownership rather than by guessing at names.
+func ephemeralSSHKeyName(relay string) (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-ephemeral-%s", relay, hex.EncodeToString(b[:])), nil
 }
 
 // generateHealthToken returns a random hex token for the box's

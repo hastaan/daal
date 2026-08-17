@@ -117,7 +117,6 @@ disconnect obvious.
   GH-Pages Put) stubbed to filesystem; no real origin publish path.
 - [ ] `daal-desktop-core/src/commands.rs:54` — recovery-phrase preview uses
   placeholder wordlists.
-- [ ] `daal-wizard/src/pin_lockout.rs:96` — lockout iterations hardcoded (=1000).
 - [ ] Operator resume UX (handover:136) — no inline PIN-unlock on resume; wizard
   `error` state persists across step changes (stale "invalid PIN").
 

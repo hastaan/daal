@@ -22,6 +22,7 @@ type fakeStarkServer struct {
 	idCount     int64
 	vpses       map[string]*VPSResp       // id -> resp
 	rules       map[string]map[string]any // ruleID -> input
+	sshKeys     map[string]string         // keyID -> name
 	authHeaders []string                  // every Authorization header observed
 	expectToken string                    // tests set this; server 401s on mismatch
 }
@@ -30,6 +31,7 @@ func newFakeServer(token string) (*fakeStarkServer, *httptest.Server) {
 	f := &fakeStarkServer{
 		vpses:       map[string]*VPSResp{},
 		rules:       map[string]map[string]any{},
+		sshKeys:     map[string]string{},
 		expectToken: token,
 	}
 	mux := http.NewServeMux()
@@ -42,11 +44,35 @@ func newFakeServer(token string) (*fakeStarkServer, *httptest.Server) {
 			http.Error(w, "method", 405)
 			return
 		}
+		var req SSHKeyReq
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
 		f.idCount++
 		id := "ssh-" + strconvI(f.idCount)
+		f.sshKeys[id] = req.Name
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(SSHKeyResp{KeyID: id})
+	})
+
+	// DELETE /ssh-keys/<id> — the leg the adapter now calls on every
+	// exit path so a one-shot key never outlives its provision.
+	mux.HandleFunc("/v1/ssh-keys/", func(w http.ResponseWriter, r *http.Request) {
+		if !f.checkAuth(w, r) {
+			return
+		}
+		if r.Method != "DELETE" {
+			http.Error(w, "method", 405)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/ssh-keys/")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if _, ok := f.sshKeys[id]; !ok {
+			http.Error(w, "not found", 404)
+			return
+		}
+		delete(f.sshKeys, id)
+		w.WriteHeader(204)
 	})
 
 	mux.HandleFunc("/v1/vps", func(w http.ResponseWriter, r *http.Request) {
@@ -424,11 +450,127 @@ func TestRegions_IsSupported(t *testing.T) {
 func TestDecommission_AbsentIsNoOp(t *testing.T) {
 	p, _, cleanup := mkProvider(t, "tok")
 	defer cleanup()
-	if err := p.Decommission(context.Background(), nil); err != nil {
+	rep, err := p.Decommission(context.Background(), nil)
+	if err != nil {
 		t.Errorf("nil rec must be nil; got %v", err)
 	}
-	if err := p.Decommission(context.Background(), &provider.OperatorRecord{ServerID: "absent"}); err != nil {
+	if !rep.Clean() {
+		t.Errorf("Decommission(nil) must report a clean teardown; got %+v", rep)
+	}
+	if _, err := p.Decommission(context.Background(), &provider.OperatorRecord{ServerID: "absent"}); err != nil {
 		t.Errorf("absent server must be nil; got %v", err)
+	}
+}
+
+// TestProvision_RemovesOneShotKey pins the leak this adapter used to
+// have: the ephemeral key was created and then never deleted on ANY
+// path, success included.
+func TestProvision_RemovesOneShotKey(t *testing.T) {
+	p, srv, cleanup := mkProvider(t, "tok")
+	defer cleanup()
+	opts := mkOpts()
+	opts.DryRun = false
+	if _, err := p.Provision(context.Background(), opts); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.sshKeys) != 0 {
+		t.Errorf("one-shot ssh key left on the account: %v", srv.sshKeys)
+	}
+}
+
+// TestDecommission_ReportsWhatItCannotProve pins the honesty
+// contract: the VPS goes, firewall rules are vps-scoped with a
+// server-side TTL, and the one-shot key is deleted by id at the end of
+// every provision — so all three legs report gone, and the only
+// warning left is the reserved IP the operator owns.
+func TestDecommission_ReportsWhatItCannotProve(t *testing.T) {
+	p, srv, cleanup := mkProvider(t, "tok")
+	defer cleanup()
+	opts := mkOpts()
+	opts.DryRun = false
+	rec, err := p.Provision(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	rec.FloatingIPID = "rip-3"
+
+	rep, err := p.Decommission(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("Decommission: %v", err)
+	}
+	if !rep.ServerDeleted || !rep.FirewallDeleted {
+		t.Errorf("vps + vps-scoped rules must be reported gone; got %+v", rep)
+	}
+	if !rep.SSHKeyDeleted {
+		t.Errorf("one-shot key is deleted by id at the end of every provision: %+v", rep)
+	}
+	srv.mu.Lock()
+	left := len(srv.vpses)
+	srv.mu.Unlock()
+	if left != 0 {
+		t.Errorf("vps survived teardown")
+	}
+	for _, want := range []string{
+		"rip-3",
+	} {
+		found := false
+		for _, w := range rep.Warnings {
+			if strings.Contains(w, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("warnings %v do not mention %q", rep.Warnings, want)
+		}
+	}
+}
+
+// A record with no ServerID is the shape a failed provision leaves —
+// the wizard only writes the OperatorRecord back on success — so an
+// empty id must not be read as "nothing to delete" while a real,
+// billing VPS runs under the derived hostname.
+func TestDecommission_FindsOrphanVPSByDerivedHostname(t *testing.T) {
+	p, srv, cleanup := mkProvider(t, "tok")
+	defer cleanup()
+	opts := mkOpts()
+	opts.DryRun = false
+	if _, err := p.Provision(context.Background(), opts); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	stale := &provider.OperatorRecord{
+		Provider:        "stark",
+		Region:          opts.Region,
+		PublisherPubKey: opts.PublisherPubKey,
+	}
+	rep, err := p.Decommission(context.Background(), stale)
+	if err != nil {
+		t.Fatalf("Decommission: %v", err)
+	}
+	if !rep.ServerDeleted {
+		t.Errorf("orphan vps must be reported deleted: %+v", rep)
+	}
+	srv.mu.Lock()
+	left := len(srv.vpses)
+	srv.mu.Unlock()
+	if left != 0 {
+		t.Errorf("the billing orphan survived a teardown that claimed server_deleted=%v", rep.ServerDeleted)
+	}
+}
+
+func TestEphemeralSSHKeyName_UniquePerAttempt(t *testing.T) {
+	a, err := ephemeralSSHKeyName("daal-vno-0011223344556677")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ephemeralSSHKeyName("daal-vno-0011223344556677")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("two attempts produced the same key name (%q)", a)
 	}
 }
 

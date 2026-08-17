@@ -9,6 +9,16 @@
 #
 # Regenerate that source from the raw eagle with:
 #   python3 tools/make-android-icon-source.py   (see that file)
+#
+# SIDE EFFECT, read before committing: `tauri icon` has no per-platform
+# switch, so it also rewrites the DESKTOP icon set in
+# src-tauri/icons/. Six of those files are tracked and bundled
+# (32x32.png, 128x128.png, 128x128@2x.png, icon.icns, icon.ico,
+# icon.png — see tauri.conf.json) and nothing in any build regenerates
+# them, so if the eagle changed they must be committed here or the
+# desktop app ships the old icon. The rest of what it drops there
+# (Square*Logo.png, 64x64.png, ios/) is unreferenced Windows/iOS output
+# and is gitignored.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

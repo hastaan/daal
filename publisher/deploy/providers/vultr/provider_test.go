@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -248,11 +249,114 @@ func TestProvision_ExistingInstanceRequiresPersistedMgmtPort(t *testing.T) {
 
 func TestDecommission_AbsentIsNoOp(t *testing.T) {
 	p := New(newFake())
-	if err := p.Decommission(context.Background(), &provider.OperatorRecord{ServerID: "9999"}); err != nil {
+	if _, err := p.Decommission(context.Background(), &provider.OperatorRecord{ServerID: "9999"}); err != nil {
 		t.Errorf("Decommission of absent must be nil; got %v", err)
 	}
-	if err := p.Decommission(context.Background(), nil); err != nil {
+	rep, err := p.Decommission(context.Background(), nil)
+	if err != nil {
 		t.Errorf("Decommission(nil) must be nil; got %v", err)
+	}
+	if !rep.Clean() {
+		t.Errorf("Decommission(nil) must report a clean teardown; got %+v", rep)
+	}
+}
+
+// TestDecommission_ReportsWhatItCannotProve pins the honesty
+// contract: this adapter deletes the instance, creates no firewall
+// group of its own, and has no key-lookup call — so it must not claim
+// the one-shot SSH key is gone.
+func TestDecommission_ReportsWhatItCannotProve(t *testing.T) {
+	f := newFake()
+	p := New(f)
+	opts := mkOpts()
+	opts.DryRun = false
+	rec, err := p.Provision(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if len(f.sshKeys) != 0 {
+		t.Errorf("provision left %d one-shot ssh key(s) behind", len(f.sshKeys))
+	}
+	rec.FloatingIPID = "rip-7"
+
+	rep, err := p.Decommission(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("Decommission: %v", err)
+	}
+	if !rep.ServerDeleted {
+		t.Errorf("instance not deleted: %+v", rep)
+	}
+	if !rep.FirewallDeleted {
+		t.Errorf("adapter creates no firewall group; nothing of ours is left behind")
+	}
+	// Provision deletes the one-shot key by id on every exit path (the
+	// assertion above proves it for this run) and the name carries
+	// random bytes per attempt, so nothing is left that can bite the
+	// user. A ✗ on every clean teardown was training users to ignore
+	// the same mark where it is real.
+	if !rep.SSHKeyDeleted {
+		t.Errorf("one-shot key is deleted by id at the end of every provision: %+v", rep)
+	}
+	if len(f.instances) != 0 {
+		t.Errorf("instance survived teardown")
+	}
+	wantMentions := []string{
+		"rip-7",
+	}
+	for _, want := range wantMentions {
+		found := false
+		for _, w := range rep.Warnings {
+			if strings.Contains(w, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("warnings %v do not mention %q", rep.Warnings, want)
+		}
+	}
+}
+
+// A record with no ServerID is the shape a failed provision leaves —
+// the wizard only writes the OperatorRecord back on success — so an
+// empty id must not be read as "nothing to delete" while a real,
+// billing instance runs under the derived label.
+func TestDecommission_FindsOrphanInstanceByDerivedLabel(t *testing.T) {
+	f := newFake()
+	p := New(f)
+	opts := mkOpts()
+	opts.DryRun = false
+	if _, err := p.Provision(context.Background(), opts); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	stale := &provider.OperatorRecord{
+		Provider:        "vultr",
+		Region:          opts.Region,
+		PublisherPubKey: opts.PublisherPubKey,
+	}
+	rep, err := p.Decommission(context.Background(), stale)
+	if err != nil {
+		t.Fatalf("Decommission: %v", err)
+	}
+	if !rep.ServerDeleted {
+		t.Errorf("orphan instance must be reported deleted: %+v", rep)
+	}
+	if len(f.instances) != 0 {
+		t.Errorf("the billing orphan survived a teardown that claimed server_deleted=%v", rep.ServerDeleted)
+	}
+}
+
+func TestEphemeralSSHKeyName_UniquePerAttempt(t *testing.T) {
+	a, err := ephemeralSSHKeyName("daal-fra-0011223344556677")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ephemeralSSHKeyName("daal-fra-0011223344556677")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("two attempts produced the same key name (%q)", a)
 	}
 }
 

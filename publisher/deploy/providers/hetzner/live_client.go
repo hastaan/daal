@@ -141,15 +141,39 @@ func (l *liveClient) ServerTypePrice(ctx context.Context, region, serverType str
 	return 0, 0, fmt.Errorf("no pricing for %s in %s", serverType, region)
 }
 
-func (l *liveClient) SSHKeyCreate(ctx context.Context, name string, publicKey []byte) (string, error) {
+func (l *liveClient) SSHKeyCreate(ctx context.Context, name string, publicKey []byte, labels map[string]string) (string, error) {
 	k, _, err := l.c.SSHKey.Create(ctx, hcloud.SSHKeyCreateOpts{
 		Name:      name,
 		PublicKey: string(publicKey),
+		Labels:    labels,
 	})
 	if err != nil {
 		return "", err
 	}
 	return strconv.FormatInt(k.ID, 10), nil
+}
+
+// SSHKeyList returns every SSH key on the account. Used by teardown
+// to find the one-shot provisioning key(s) for a relay: their ids
+// are not persisted anywhere, so the only handle is the derived name
+// plus the daal ownership labels.
+func (l *liveClient) SSHKeyList(ctx context.Context) ([]SSHKeyInfo, error) {
+	keys, err := l.c.SSHKey.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SSHKeyInfo, 0, len(keys))
+	for _, k := range keys {
+		if k == nil {
+			continue
+		}
+		out = append(out, SSHKeyInfo{
+			ID:     strconv.FormatInt(k.ID, 10),
+			Name:   k.Name,
+			Labels: k.Labels,
+		})
+	}
+	return out, nil
 }
 
 func (l *liveClient) SSHKeyDelete(ctx context.Context, id string) error {
@@ -464,38 +488,65 @@ func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID strin
 }
 
 // FirewallDeleteForServer detaches and deletes the per-server
-// firewall named "daal-relay-<serverID>". Idempotent: missing
-// firewall is treated as success.
-func (l *liveClient) FirewallDeleteForServer(ctx context.Context, serverID string) error {
+// firewall named "daal-relay-<serverID>" — the name
+// FirewallEnsureForServer minted, so a match is proof the firewall
+// belongs to this server and no other.
+//
+// Idempotent: a missing firewall is success (Found=false).
+//
+// Shared-resource guard: if AppliedTo still lists a server other
+// than serverID, the firewall is left completely intact (not even
+// detached) and the other ids come back in SharedWith. Hetzner
+// refuses to delete a firewall attached to a live server anyway
+// (HTTP 422), but the point is not to be talked out of it by an
+// error message — a firewall another relay depends on is its only
+// protection for a random mgmt port.
+func (l *liveClient) FirewallDeleteForServer(ctx context.Context, serverID string) (FirewallTeardownResult, error) {
+	var res FirewallTeardownResult
 	name := "daal-relay-" + serverID
 	fws, err := l.c.Firewall.All(ctx)
 	if err != nil {
-		return err
+		return res, err
 	}
 	for _, f := range fws {
 		if f.Name != name {
 			continue
 		}
-		// Detach from any servers first.
-		var resources []hcloud.FirewallResource
+		res.Found = true
+		res.FirewallID = strconv.FormatInt(f.ID, 10)
+
+		// Who else is still behind this firewall? Our own server is
+		// expected (Hetzner drops it from AppliedTo asynchronously
+		// after a delete); anybody else is a hard stop.
+		var ours []hcloud.FirewallResource
 		for _, ap := range f.AppliedTo {
-			if ap.Type == hcloud.FirewallResourceTypeServer && ap.Server != nil {
-				resources = append(resources, hcloud.FirewallResource{
-					Type:   hcloud.FirewallResourceTypeServer,
-					Server: &hcloud.FirewallResourceServer{ID: ap.Server.ID},
-				})
+			if ap.Type != hcloud.FirewallResourceTypeServer || ap.Server == nil {
+				continue
 			}
+			id := strconv.FormatInt(ap.Server.ID, 10)
+			if id != serverID {
+				res.SharedWith = append(res.SharedWith, id)
+				continue
+			}
+			ours = append(ours, hcloud.FirewallResource{
+				Type:   hcloud.FirewallResourceTypeServer,
+				Server: &hcloud.FirewallResourceServer{ID: ap.Server.ID},
+			})
 		}
-		if len(resources) > 0 {
-			_, _, _ = l.c.Firewall.RemoveResources(ctx, f, resources)
+		if len(res.SharedWith) > 0 {
+			return res, nil // preserved on purpose; caller reports it
+		}
+		if len(ours) > 0 {
+			_, _, _ = l.c.Firewall.RemoveResources(ctx, f, ours)
 		}
 		if _, err := l.c.Firewall.Delete(ctx, f); err != nil &&
 			!hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
-			return fmt.Errorf("hetzner firewall delete: %w", err)
+			return res, fmt.Errorf("hetzner firewall delete: %w", err)
 		}
-		return nil
+		res.Deleted = true
+		return res, nil
 	}
-	return nil
+	return res, nil
 }
 
 // errServerNotFound is the sentinel for an absent server. The

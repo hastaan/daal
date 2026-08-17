@@ -27,7 +27,14 @@ pub mod cli_bridge;
 pub mod commands;
 pub mod device_custody;
 pub mod keystore;
-pub mod modifiers_i18n;
+// `modifiers_i18n` is gone. It guarded 11 `wizard.modifiers.*` keys in
+// `tauri/src/wizard/i18n/wizard.{en,fa}.json` for
+// `tauri/src/wizard/screens/Screen6Handoff.tsx` — a tree that no longer
+// exists (the wizard frontend moved to client-ui/, which has neither the
+// bundle nor the keys nor a consumer). Its two tests could only ever
+// report "skipped", so they were counted as green while asserting
+// nothing: a guard that cannot fire is worse than no guard, because it
+// makes the suite look like it still covers a surface it does not.
 pub mod operator_db;
 pub mod publisher_key;
 pub mod recipient_book;

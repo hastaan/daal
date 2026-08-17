@@ -173,10 +173,19 @@ export function buildPublisherTree(
             trustLevel = 'pinned';
         }
         out.push({
-            // Real engine publisher_id (fingerprint) from the routes, so
-            // delete/forget target the right publisher; fall back to the
-            // display name for subscription-only groups with no routes yet.
-            publisherId: list[0]?.publisherId ?? name,
+            // The real engine publisher_id (fingerprint) from the
+            // routes, so delete/forget target the right publisher.
+            //
+            // Empty — never the display name — for subscription-only
+            // groups whose first refresh has not landed yet, because
+            // there is no publisher in the engine to name. Substituting
+            // the display name made `publisherDelete` a silent no-op
+            // (Store::DeletePublisher matches the literal string, finds
+            // nothing and returns 0, nil by design) while the caller
+            // still tore the tunnel down: the button looked broken and
+            // cost the user their connection. Callers must treat "" as
+            // "no publisher row to remove".
+            publisherId: list[0]?.publisherId ?? '',
             displayName: name,
             trustLevel,
             sourceKind: sub ? 'subscription' : inferSourceKind(list),

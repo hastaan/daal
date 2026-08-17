@@ -226,11 +226,16 @@ export default function NetworkPage({ t }: Props) {
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                     {tree.map((p) => (
                         <PublisherRowView
-                            key={p.publisherId}
+                            // displayName, not publisherId: the tree is
+                            // grouped by display name (so it is unique by
+                            // construction) and publisherId is empty for a
+                            // subscription-only row whose first refresh
+                            // has not landed.
+                            key={p.displayName}
                             t={t}
                             p={p}
-                            open={expanded.has(p.publisherId)}
-                            onToggle={() => toggle(p.publisherId)}
+                            open={expanded.has(p.displayName)}
+                            onToggle={() => toggle(p.displayName)}
                             connectingId={connectingId}
                             activeRouteId={activeRouteId}
                             onDisconnect={onDisconnect}
@@ -308,9 +313,24 @@ export default function NetworkPage({ t }: Props) {
                                 )
                                     return;
                                 try {
-                                    // Drop the tunnel if it's this publisher's
-                                    // route, then hard-delete publisher + routes.
-                                    await contract.disconnect().catch(() => {});
+                                    // Drop the tunnel ONLY if the live route
+                                    // belongs to this publisher. The bare
+                                    // disconnect that used to sit here fired
+                                    // on every removal, so tidying up
+                                    // publisher B killed a working tunnel
+                                    // through publisher A — on a censored
+                                    // network, with no warning and nothing in
+                                    // the confirm text to explain it.
+                                    const ownsActiveRoute =
+                                        activeRouteId !== null &&
+                                        p.cells.some((c) =>
+                                            c.routes.some(
+                                                (r) => r.routeId === activeRouteId,
+                                            ),
+                                        );
+                                    if (ownsActiveRoute) {
+                                        await contract.disconnect().catch(() => {});
+                                    }
                                     await contract.publisherDelete(p.publisherId);
                                     await load();
                                 } catch (e) {
@@ -532,22 +552,29 @@ function PublisherRowView({
                                 </Button>
                             </div>
                         )}
-                        <div
-                            style={{
-                                display: 'flex',
-                                justifyContent: 'flex-end',
-                                paddingTop: 6,
-                                borderTop: '1px dashed var(--line-soft)',
-                            }}
-                        >
-                            <Button
-                                variant="danger"
-                                size="sm"
-                                onClick={() => void onRemovePublisher()}
+                        {/* Only offered when there is an engine publisher
+                            to remove. A subscription-only row whose first
+                            refresh has not landed has no publisher_id, so
+                            this action could only ever no-op; its own
+                            "Remove" above (onRemoveSub) is the real one. */}
+                        {p.publisherId !== '' && (
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'flex-end',
+                                    paddingTop: 6,
+                                    borderTop: '1px dashed var(--line-soft)',
+                                }}
                             >
-                                {t('network.remove_publisher')}
-                            </Button>
-                        </div>
+                                <Button
+                                    variant="danger"
+                                    size="sm"
+                                    onClick={() => void onRemovePublisher()}
+                                >
+                                    {t('network.remove_publisher')}
+                                </Button>
+                            </div>
+                        )}
                     </div>
                 )}
             </Card>

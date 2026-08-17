@@ -65,14 +65,28 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 
 	pubBytes := sshPublicKeyBytes(opts.EphemeralSSHKey)
-	sshKeyID, err := p.c.SSHKeyCreate(ctx, label+"-ephemeral", pubBytes)
+	keyName, err := ephemeralSSHKeyName(label)
+	if err != nil {
+		return nil, fmt.Errorf("vultr: name ssh key: %w", err)
+	}
+	sshKeyID, err := p.c.SSHKeyCreate(ctx, keyName, pubBytes)
 	if err != nil {
 		return nil, fmt.Errorf("vultr: create ssh key: %w", err)
 	}
+	// Same contract as the Hetzner adapter: the private half never
+	// leaves this process, so the uploaded public half is dead weight
+	// the moment Provision returns — delete it on every exit path,
+	// success included, and never leave a name behind that a later
+	// attempt would collide with. WithoutCancel so a cancelled
+	// provision still cleans up.
+	defer func() {
+		if err := p.c.SSHKeyDelete(context.WithoutCancel(ctx), sshKeyID); err != nil {
+			_ = err // best-effort; vultr has no progress channel to report on
+		}
+	}()
 
 	healthToken, err := generateHealthToken()
 	if err != nil {
-		_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 		return nil, fmt.Errorf("vultr: generate health token: %w", err)
 	}
 
@@ -87,7 +101,6 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		MgmtPort:      mgmtPort,
 	})
 	if err != nil {
-		_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 		return nil, fmt.Errorf("vultr: render cloud-init: %w", err)
 	}
 
@@ -101,7 +114,6 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		Tags:     []string{"managed-by:daal-deploy", "toolbox:" + opts.ToolboxProfile},
 	})
 	if err != nil {
-		_ = p.c.SSHKeyDelete(ctx, sshKeyID)
 		return nil, fmt.Errorf("vultr: create instance: %w", err)
 	}
 	rec := p.recordFromInstance(inst, opts)
@@ -109,7 +121,17 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if opts.WaitForHealth {
 		fp, err := waitForMgmtFingerprint(ctx, rec.PublicIP, healthToken)
 		if err != nil {
-			return nil, fmt.Errorf("vultr: wait for mgmt fingerprint: %w", err)
+			// A real, billing instance exists by now. Roll it back
+			// when asked; otherwise say its id and IP out loud so the
+			// caller can offer teardown instead of leaving the user
+			// paying for a box the app forgot about.
+			if opts.RollbackOnFailure {
+				if _, dErr := p.Decommission(context.WithoutCancel(ctx), rec); dErr != nil {
+					return nil, fmt.Errorf("vultr: wait for mgmt fingerprint: %w [rollback failed, instance %s (%s) still running and billing: %v]", err, rec.ServerID, rec.PublicIP, dErr)
+				}
+				return nil, fmt.Errorf("vultr: wait for mgmt fingerprint: %w [rolled back: instance deleted]", err)
+			}
+			return nil, fmt.Errorf("vultr: wait for mgmt fingerprint: %w [instance %s (%s) is still running and still billing]", err, rec.ServerID, rec.PublicIP)
 		}
 		rec.MgmtTLSFingerprint = fp
 	}
@@ -129,12 +151,89 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	return nil
 }
 
-// Decommission deletes the instance. Idempotent.
-func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecord) error {
-	if rec == nil || rec.ServerID == "" {
-		return nil
+// Decommission deletes the instance and reports honestly on the rest.
+// Idempotent.
+//
+// What this adapter creates per relay is the instance and the
+// one-shot SSH key; it never creates a firewall group (the ephemeral
+// mgmt rules go onto whatever group the instance already has), so
+// FirewallDeleted is true because there is nothing of ours to leave
+// behind.
+//
+// An empty ServerID is not taken as "nothing to delete": the wizard
+// only writes the OperatorRecord back on a successful provision, so a
+// run that created the instance and then failed its health wait leaves
+// an empty id on the record and a real, billing instance under the
+// derived label. That label is a pure function of (publisher pubkey,
+// region) — a match is proof of ownership, not a guess — so it is
+// looked up before anything is claimed. A lookup that fails is an
+// error, not an assumption: the caller must keep the local record.
+//
+// SSHKeyDeleted is true. Provision deletes the key by id on every exit
+// path (a `defer` with context.WithoutCancel, so a cancelled run still
+// reaches it), and since the key name now carries 4 random bytes per
+// attempt, even a survivor cannot collide with or block a later
+// provision. There is nothing left that can bite the user, and a
+// warning that fired on every clean teardown only taught them to ignore
+// the same line where it is real.
+func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecord) (*provider.DecommissionReport, error) {
+	rep := provider.NewDecommissionReport("vultr", "")
+	if rec == nil {
+		rep.ServerDeleted, rep.SSHKeyDeleted, rep.FirewallDeleted = true, true, true
+		return rep, nil
 	}
-	return p.c.InstanceDelete(ctx, rec.ServerID)
+	rep.ServerID = rec.ServerID
+	rep.FirewallDeleted = true // this adapter creates no firewall group
+	rep.SSHKeyDeleted = true   // deleted by id at the end of every provision
+
+	instanceID, err := p.resolveInstanceID(ctx, rec, rep)
+	if err != nil {
+		return rep, err
+	}
+	if instanceID == "" {
+		rep.ServerDeleted = true
+	} else if err := p.c.InstanceDelete(ctx, instanceID); err != nil {
+		rep.Warnf("could not delete instance %s: %v", instanceID, err)
+		rep.Preserve("instance:" + instanceID)
+		return rep, fmt.Errorf("vultr: delete instance %s: %w", instanceID, err)
+	} else {
+		rep.ServerID = instanceID
+		rep.ServerDeleted = true
+	}
+
+	if rec.FloatingIPID != "" {
+		rep.Warnf("reserved IP %s stays on your account and keeps billing — daal-deploy did not create it, so it is yours to release", rec.FloatingIPID)
+		rep.Preserve("reserved-ip:" + rec.FloatingIPID)
+	}
+	return rep, nil
+}
+
+// resolveInstanceID returns the id of the instance this record's relay
+// owns, or "" when there provably is none. See the Decommission doc for
+// why an empty rec.ServerID must not be read as "nothing to delete".
+//
+// A record with neither an id nor (region, pubkey) provably never
+// created an instance — validateProvisionOpts refuses to provision
+// without both — so "" with no error is honest there.
+func (p *Provider) resolveInstanceID(ctx context.Context, rec *provider.OperatorRecord, rep *provider.DecommissionReport) (string, error) {
+	if rec.ServerID != "" {
+		return rec.ServerID, nil
+	}
+	if len(rec.PublisherPubKey) == 0 || rec.Region == "" {
+		return "", nil
+	}
+	label := derivedInstanceLabel(rec.PublisherPubKey, rec.Region)
+	inst, err := p.c.InstanceByLabel(ctx, label)
+	switch {
+	case err == nil && inst != nil:
+		return inst.ID, nil
+	case err == nil, errors.Is(err, errInstanceNotFound):
+		return "", nil
+	default:
+		rep.Warnf("could not confirm whether an instance labelled %q exists (%v) — nothing was deleted", label, err)
+		rep.Preserve("instance:" + label)
+		return "", fmt.Errorf("vultr: look up instance %q: %w", label, err)
+	}
 }
 
 // AssignFloatingIP attaches a Vultr Reserved IP to the instance.
@@ -245,6 +344,19 @@ func derivedInstanceLabel(pubKey []byte, region string) string {
 		return fmt.Sprintf("daal-%s-%x", region, pubKey)
 	}
 	return fmt.Sprintf("daal-%s-%s", region, hex.EncodeToString(pubKey[:8]))
+}
+
+// ephemeralSSHKeyName names one attempt's one-shot key. The random
+// suffix mirrors the Hetzner adapter (see its ephemeralSSHKeyName for
+// the full reasoning): a name derived only from (publisher pubkey,
+// region) repeats on every attempt, so a single orphan blocks every
+// retry on a provider that enforces name uniqueness.
+func ephemeralSSHKeyName(label string) (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-ephemeral-%s", label, hex.EncodeToString(b[:])), nil
 }
 
 func generateHealthToken() (string, error) {

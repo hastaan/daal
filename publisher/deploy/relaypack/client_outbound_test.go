@@ -5,9 +5,14 @@ import (
 	"testing"
 )
 
+// testCertPEM stands in for the box's self-signed data-plane leaf.
+// Only its presence matters here — nothing in this package parses it.
+const testCertPEM = "-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n"
+
 func fullParams() ClientConnParams {
 	return ClientConnParams{
 		Server:           "78.47.152.16",
+		Name:             "r1",
 		VLESSUUID:        "11111111-2222-3333-4444-555555555555",
 		RealityShortID:   "deadbeef",
 		RealityPublicKey: "cHVia2V5LWJhc2U2NC0zMi1ieXRlcy1oZXJlLXh4eHg=",
@@ -15,6 +20,7 @@ func fullParams() ClientConnParams {
 		NaivePassword:    "naivesecretpassword22",
 		WSPath:           "/r1/cafebabe",
 		TLSCertSHA256:    "c3BraS1zaGEyNTYtcGluLWJhc2U2NC12YWx1ZS14eHg=",
+		TLSCertPEM:       testCertPEM,
 	}
 }
 
@@ -60,7 +66,8 @@ func TestClientOutbound_VlessReality(t *testing.T) {
 }
 
 func TestClientOutbound_TLSFamiliesPinNotInsecure(t *testing.T) {
-	for _, fam := range []string{"websocket-tls", "hysteria2", "naive"} {
+	// ws/hy2 pin the leaf by SPKI SHA-256.
+	for _, fam := range []string{"websocket-tls", "hysteria2"} {
 		m := parseOutbound(t, fam, 443, fullParams())
 		tls := m["tls"].(map[string]any)
 		if tls["insecure"] == true {
@@ -69,6 +76,39 @@ func TestClientOutbound_TLSFamiliesPinNotInsecure(t *testing.T) {
 		if tls["certificate_public_key_sha256"] == nil {
 			t.Errorf("%s: expected a cert pin", fam)
 		}
+	}
+	// naive rides Cronet, which has no SPKI-pin knob: it trusts the
+	// box's leaf as a root instead. Same fail-closed contract.
+	m := parseOutbound(t, "naive", 443, fullParams())
+	tls := m["tls"].(map[string]any)
+	if tls["insecure"] == true {
+		t.Error("naive: must never set insecure:true")
+	}
+	certs, _ := tls["certificate"].([]any)
+	if len(certs) != 1 || certs[0] != testCertPEM {
+		t.Errorf("naive: expected the box leaf as trusted root, got %v", tls["certificate"])
+	}
+}
+
+// A relay provisioned before the data-plane cert existed returns no
+// tls_cert_pem. That must degrade the naive route (which then fails
+// closed at connect, exactly as ws/hy2 do with no pin) rather than
+// abort the rewrite — RewriteProfilesForRecipient returns the FIRST
+// renderer error, so erroring here killed the whole pack and with it
+// every other family, for every pre-existing box.
+func TestClientOutbound_NaiveWithoutCertPEMStillRenders(t *testing.T) {
+	p := fullParams()
+	p.TLSCertPEM = ""
+	m := parseOutbound(t, "naive", 443, p)
+	tls := m["tls"].(map[string]any)
+	if _, has := tls["certificate"]; has {
+		t.Errorf("no PEM available: must not emit an empty trusted root, got %v", tls["certificate"])
+	}
+	if tls["insecure"] == true {
+		t.Error("naive: must never set insecure:true")
+	}
+	if tls["enabled"] != true {
+		t.Error("naive: TLS must stay on")
 	}
 }
 
@@ -82,6 +122,10 @@ func TestClientOutbound_MissingFieldsError(t *testing.T) {
 		{"websocket-tls", func(p *ClientConnParams) { p.WSPath = "" }},
 		{"hysteria2", func(p *ClientConnParams) { p.Hy2Password = "" }},
 		{"naive", func(p *ClientConnParams) { p.NaivePassword = "" }},
+		// The naive proxy username must match the box's naive-in user,
+		// so an empty name is an unauthenticatable route, not a
+		// degraded one.
+		{"naive", func(p *ClientConnParams) { p.Name = "" }},
 	}
 	for _, c := range cases {
 		p := fullParams()

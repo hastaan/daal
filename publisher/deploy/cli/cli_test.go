@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -319,5 +321,214 @@ func TestRotateRecommend_Run_DispatchesSubcommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--record-file") {
 		t.Errorf("expected --record-file required error; got %s", stderr.String())
+	}
+}
+
+// --- decommission: the JSON contract the wizard's DestroyReport
+// --- deserialises. Field names and the always-present `warnings`
+// --- array are load-bearing; changing them breaks the Rust shim.
+
+// fakeTeardownProvider is a providerFace whose only interesting
+// method is Decommission. Injected through buildProviderFn so the
+// contract can be asserted without a live cloud token.
+type fakeTeardownProvider struct {
+	providerFace // nil: any other method call panics, which is the point
+	report       *provider.DecommissionReport
+	err          error
+}
+
+func (f *fakeTeardownProvider) Decommission(_ context.Context, _ *provider.OperatorRecord) (*provider.DecommissionReport, error) {
+	return f.report, f.err
+}
+
+func withFakeProvider(t *testing.T, p providerFace) {
+	t.Helper()
+	prev := buildProviderFn
+	buildProviderFn = func(string, string, bool) (providerFace, error) { return p, nil }
+	t.Cleanup(func() { buildProviderFn = prev })
+}
+
+func writeDecommissionFixture(t *testing.T) (recordFile, tokenFile string) {
+	t.Helper()
+	tmp := t.TempDir()
+	pub, _, _ := ed25519.GenerateKey(nil)
+	rec := provider.OperatorRecord{
+		Provider:        "hetzner",
+		ServerID:        "12345",
+		ServerType:      "cx22",
+		Region:          "fsn1",
+		PublisherPubKey: pub,
+	}
+	body, _ := json.Marshal(rec)
+	recordFile = filepath.Join(tmp, "rec.json")
+	tokenFile = filepath.Join(tmp, "tok")
+	if err := os.WriteFile(recordFile, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenFile, []byte("dummy-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return recordFile, tokenFile
+}
+
+func TestDecommission_EmitsPerResourceJSONReport(t *testing.T) {
+	rep := provider.NewDecommissionReport("hetzner", "12345")
+	rep.ServerDeleted, rep.SSHKeyDeleted, rep.FirewallDeleted = true, true, true
+	rep.DeletedSSHKeyIDs = []string{"678"}
+	rep.FirewallID = "910"
+	withFakeProvider(t, &fakeTeardownProvider{report: rep})
+
+	recordFile, tokenFile := writeDecommissionFixture(t)
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"decommission", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
+	}
+
+	// Assert on the raw keys, not the round-tripped struct: the Rust
+	// side reads these names.
+	var wire map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &wire); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	for _, k := range []string{"server_deleted", "ssh_key_deleted", "firewall_deleted", "warnings"} {
+		if _, ok := wire[k]; !ok {
+			t.Errorf("missing required field %q in %s", k, stdout.String())
+		}
+	}
+	if wire["server_deleted"] != true || wire["ssh_key_deleted"] != true || wire["firewall_deleted"] != true {
+		t.Errorf("booleans wrong: %s", stdout.String())
+	}
+	if w, ok := wire["warnings"].([]any); !ok || len(w) != 0 {
+		t.Errorf("warnings must be an empty array, never null: %s", stdout.String())
+	}
+	if wire["server_id"] != "12345" {
+		t.Errorf("server_id = %v", wire["server_id"])
+	}
+}
+
+// The Rust bridge (cli_bridge.rs `run_decommission`) sends `--json` on
+// the first attempt and only retries without it when the binary exits 2
+// on a flag-parse failure. If this flag is ever dropped, that retry
+// becomes the normal path: every teardown runs the verb twice and the
+// second run is read through the legacy branch, which reports the SSH
+// key and the firewall as unconfirmed even when they were deleted.
+// Nothing else would fail, which is exactly why this needs a test.
+func TestDecommission_AcceptsJSONFlag(t *testing.T) {
+	rep := provider.NewDecommissionReport("hetzner", "12345")
+	rep.ServerDeleted, rep.SSHKeyDeleted, rep.FirewallDeleted = true, true, true
+	withFakeProvider(t, &fakeTeardownProvider{report: rep})
+
+	recordFile, tokenFile := writeDecommissionFixture(t)
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"decommission", "--record-file", recordFile, "--token-file", tokenFile, "--json"}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("--json must be accepted, got rc=%d stderr=%s", rc, stderr.String())
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &wire); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if wire["server_deleted"] != true {
+		t.Errorf("server_deleted = %v", wire["server_deleted"])
+	}
+}
+
+func TestDecommission_PartialTeardownIsStillReported(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*provider.DecommissionReport)
+		err        error
+		wantRC     int
+		wantServer bool
+	}{
+		{
+			name: "warnings only: exit 0, resources named",
+			mutate: func(r *provider.DecommissionReport) {
+				r.ServerDeleted, r.FirewallDeleted = true, true
+				r.Warnf("could not delete SSH key %q: 503", "daal-fsn1-aa-ephemeral")
+				r.Preserve("ssh-key:daal-fsn1-aa-ephemeral")
+			},
+			wantRC:     0,
+			wantServer: true,
+		},
+		{
+			name: "server survived: exit 1, report still on stdout",
+			mutate: func(r *provider.DecommissionReport) {
+				r.Warnf("could not delete server 12345: 503")
+				r.Preserve("server:12345")
+			},
+			err:        errors.New("hetzner: delete server 12345: 503"),
+			wantRC:     1,
+			wantServer: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := provider.NewDecommissionReport("hetzner", "12345")
+			tc.mutate(rep)
+			withFakeProvider(t, &fakeTeardownProvider{report: rep, err: tc.err})
+
+			recordFile, tokenFile := writeDecommissionFixture(t)
+			var stdout, stderr bytes.Buffer
+			rc := Run([]string{"decommission", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr)
+			if rc != tc.wantRC {
+				t.Fatalf("rc=%d want %d; stderr=%s", rc, tc.wantRC, stderr.String())
+			}
+			var wire map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &wire); err != nil {
+				t.Fatalf("a partial teardown must still print its report: %v\n%s", err, stdout.String())
+			}
+			if wire["server_deleted"] != tc.wantServer {
+				t.Errorf("server_deleted = %v want %v", wire["server_deleted"], tc.wantServer)
+			}
+			if w, _ := wire["warnings"].([]any); len(w) == 0 {
+				t.Errorf("a partial teardown must carry warnings: %s", stdout.String())
+			}
+			if p, _ := wire["preserved"].([]any); len(p) == 0 {
+				t.Errorf("a survivor must be listed in preserved: %s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "decommission") {
+				t.Errorf("stderr should explain the partial teardown; got %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestDecommission_RequiresRecordAndToken(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"decommission"}, &stdout, &stderr)
+	if rc != 2 {
+		t.Errorf("rc=%d want 2 for missing flags", rc)
+	}
+	for _, want := range []string{"--record-file", "--token-file"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("expected %s in %q", want, stderr.String())
+		}
+	}
+}
+
+func TestProvision_AcceptsRollbackOnFailureFlag(t *testing.T) {
+	tmp := t.TempDir()
+	pubFile := filepath.Join(tmp, "pub")
+	pub, _, _ := ed25519.GenerateKey(nil)
+	if err := os.WriteFile(pubFile, pub, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{
+		"provision",
+		"--pubkey-file", pubFile,
+		"--region", "fsn1",
+		"--toolbox-profile", "iran-default",
+		"--helper-ip", "1.2.3.4",
+		"--rollback-on-failure",
+		"--dry-run",
+	}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Errorf("--rollback-on-failure not accepted: %s", stderr.String())
 	}
 }

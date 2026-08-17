@@ -69,10 +69,22 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 
 	pubBytes := sshPublicKeyBytes(opts.EphemeralSSHKey)
+	keyName, err := ephemeralSSHKeyName(hostname)
+	if err != nil {
+		return nil, fmt.Errorf("stark: name ssh key: %w", err)
+	}
 	var sshResp SSHKeyResp
-	if err := p.client.do(ctx, token, "POST", "/ssh-keys", SSHKeyReq{Name: hostname + "-ephemeral", PublicKey: string(pubBytes)}, &sshResp); err != nil {
+	if err := p.client.do(ctx, token, "POST", "/ssh-keys", SSHKeyReq{Name: keyName, PublicKey: string(pubBytes)}, &sshResp); err != nil {
 		return nil, fmt.Errorf("stark: create ssh key: %w", err)
 	}
+	// This adapter used to leak the key on every path — success and
+	// failure alike. The private half never leaves this process, so
+	// the uploaded public half is dead weight once Provision returns:
+	// delete it by id on every exit path. WithoutCancel so a
+	// cancelled provision still cleans up.
+	defer func() {
+		_ = p.client.do(context.WithoutCancel(ctx), token, "DELETE", "/ssh-keys/"+sshResp.KeyID, nil, nil)
+	}()
 
 	healthToken, err := generateHealthToken()
 	if err != nil {
@@ -106,7 +118,16 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if opts.WaitForHealth {
 		fp, err := waitForMgmtFingerprint(ctx, rec.PublicIP, healthToken)
 		if err != nil {
-			return nil, fmt.Errorf("stark: wait for mgmt fingerprint: %w", err)
+			// A real, billing VPS exists by now. Roll it back when
+			// asked; otherwise name it so the caller can offer
+			// teardown rather than leaving it silently on the meter.
+			if opts.RollbackOnFailure {
+				if _, dErr := p.Decommission(context.WithoutCancel(ctx), rec); dErr != nil {
+					return nil, fmt.Errorf("stark: wait for mgmt fingerprint: %w [rollback failed, vps %s (%s) still running and billing: %v]", err, rec.ServerID, rec.PublicIP, dErr)
+				}
+				return nil, fmt.Errorf("stark: wait for mgmt fingerprint: %w [rolled back: vps deleted]", err)
+			}
+			return nil, fmt.Errorf("stark: wait for mgmt fingerprint: %w [vps %s (%s) is still running and still billing]", err, rec.ServerID, rec.PublicIP)
 		}
 		rec.MgmtTLSFingerprint = fp
 	}
@@ -127,17 +148,60 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	return nil
 }
 
-// Decommission deletes the VPS. Idempotent.
-func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecord) error {
-	if rec == nil || rec.ServerID == "" {
-		return nil
+// Decommission deletes the VPS and reports honestly on the rest.
+// Idempotent: an already-absent VPS is success.
+//
+// Stark's firewall rules are per-(vps_id, port, src) with a
+// server-side TTL (expires_at_unix), so deleting the VPS leaves
+// nothing of ours behind — FirewallDeleted is true.
+//
+// An empty ServerID is not taken as "nothing to delete": the wizard
+// only writes the OperatorRecord back on a successful provision, so a
+// run that created the VPS and then failed its health wait leaves an
+// empty id on the record and a real, billing box under the derived
+// hostname. That hostname is a pure function of (publisher pubkey,
+// region) — a match is proof of ownership, not a guess — so it is
+// looked up before anything is claimed. A lookup that fails is an
+// error, not an assumption: the caller must keep the local record.
+//
+// SSHKeyDeleted is true. Provision deletes the key by id on every exit
+// path (a `defer` with context.WithoutCancel, so a cancelled run still
+// reaches it), and since the key name now carries random bytes per
+// attempt, even a survivor cannot collide with or block a later
+// provision. A warning that fired on every clean teardown only taught
+// the user to ignore the same line where it is real.
+func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecord) (*provider.DecommissionReport, error) {
+	rep := provider.NewDecommissionReport("stark", "")
+	if rec == nil {
+		rep.ServerDeleted, rep.SSHKeyDeleted, rep.FirewallDeleted = true, true, true
+		return rep, nil
 	}
-	token := p.token()
-	err := p.client.do(ctx, token, "DELETE", "/vps/"+rec.ServerID, nil, nil)
-	if err != nil && !errors.Is(err, errStarkNotFound) {
-		return err
+	rep.ServerID = rec.ServerID
+	rep.FirewallDeleted = true // rules are vps-scoped with server-side TTL
+	rep.SSHKeyDeleted = true   // deleted by id at the end of every provision
+
+	vpsID, err := p.resolveVPSID(ctx, rec, rep)
+	if err != nil {
+		return rep, err
 	}
-	return nil
+	if vpsID == "" {
+		rep.ServerDeleted = true
+	} else {
+		err := p.client.do(ctx, p.token(), "DELETE", "/vps/"+vpsID, nil, nil)
+		if err != nil && !errors.Is(err, errStarkNotFound) {
+			rep.Warnf("could not delete vps %s: %v", vpsID, err)
+			rep.Preserve("vps:" + vpsID)
+			return rep, fmt.Errorf("stark: delete vps %s: %w", vpsID, err)
+		}
+		rep.ServerID = vpsID
+		rep.ServerDeleted = true
+	}
+
+	if rec.FloatingIPID != "" {
+		rep.Warnf("reserved IP %s stays on your account and keeps billing — daal-deploy did not create it, so it is yours to release", rec.FloatingIPID)
+		rep.Preserve("reserved-ip:" + rec.FloatingIPID)
+	}
+	return rep, nil
 }
 
 // AssignFloatingIP attaches a Stark Reserved IP to the VPS.
@@ -241,6 +305,34 @@ func (p *Provider) token() string {
 	return p.tokenSource()
 }
 
+// resolveVPSID returns the id of the VPS this record's relay owns, or
+// "" when there provably is none. See the Decommission doc for why an
+// empty rec.ServerID must not be read as "nothing to delete".
+//
+// A record with neither an id nor (region, pubkey) provably never
+// created a VPS — validateProvisionOpts refuses to provision without
+// both — so "" with no error is honest there.
+func (p *Provider) resolveVPSID(ctx context.Context, rec *provider.OperatorRecord, rep *provider.DecommissionReport) (string, error) {
+	if rec.ServerID != "" {
+		return rec.ServerID, nil
+	}
+	if len(rec.PublisherPubKey) == 0 || rec.Region == "" {
+		return "", nil
+	}
+	hostname := derivedHostname(rec.PublisherPubKey, rec.Region)
+	vps, err := p.findByHostname(ctx, p.token(), hostname)
+	switch {
+	case err == nil && vps != nil:
+		return vps.ID, nil
+	case err == nil, errors.Is(err, errStarkNotFound):
+		return "", nil
+	default:
+		rep.Warnf("could not confirm whether a vps named %q exists (%v) — nothing was deleted", hostname, err)
+		rep.Preserve("vps:" + hostname)
+		return "", fmt.Errorf("stark: look up vps %q: %w", hostname, err)
+	}
+}
+
 func (p *Provider) findByHostname(ctx context.Context, token, hostname string) (*VPSResp, error) {
 	var list []VPSResp
 	if err := p.client.do(ctx, token, "GET", "/vps?hostname="+hostname, nil, &list); err != nil {
@@ -279,6 +371,19 @@ func derivedHostname(pubKey []byte, region string) string {
 		return fmt.Sprintf("daal-%s-%x", region, pubKey)
 	}
 	return fmt.Sprintf("daal-%s-%s", region, hex.EncodeToString(pubKey[:8]))
+}
+
+// ephemeralSSHKeyName names one attempt's one-shot key. The random
+// suffix mirrors the Hetzner adapter (see its ephemeralSSHKeyName for
+// the full reasoning): a name derived only from (publisher pubkey,
+// region) repeats on every attempt, so a single orphan blocks every
+// retry on a provider that enforces name uniqueness.
+func ephemeralSSHKeyName(hostname string) (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-ephemeral-%s", hostname, hex.EncodeToString(b[:])), nil
 }
 
 func generateHealthToken() (string, error) {

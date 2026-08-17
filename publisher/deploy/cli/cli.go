@@ -9,7 +9,9 @@
 //
 //	provision      create a new VPS, return OperatorRecord JSON.
 //	reprovision    delete-and-recreate an existing record's box.
-//	decommission   delete the VPS associated with a record.
+//	decommission   destroy the VPS + the firewall and one-shot SSH key
+//	               provisioning created, and print a per-resource JSON
+//	               report.
 //	pricing        fetch live per-hour cost for a record's server type.
 //	assign-fip     attach a floating IP to a record's server.
 //	floating-ip    assign or unassign a floating IP.
@@ -142,7 +144,11 @@ Usage:
 Subcommands:
   provision     Create a new VPS and emit OperatorRecord JSON to stdout.
   reprovision   Delete the VPS and re-Provision (full rotation).
-  decommission  Delete the VPS associated with an OperatorRecord.
+  decommission  Destroy the cloud resources behind an OperatorRecord: the VPS,
+                its per-server firewall, and the one-shot provisioning SSH key.
+                Emits a per-resource JSON report on stdout (server_deleted /
+                ssh_key_deleted / firewall_deleted / preserved / warnings).
+                Exit 1 means the billing server survived — keep the record.
   pricing       Print live per-hour cost for a record's server type.
   assign-fip    Attach a floating IP to a record's server.
   floating-ip   Assign or unassign a floating IP.
@@ -217,6 +223,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	dryRun := fs.Bool("dry-run", false, "skip cloud calls; emit synthetic OperatorRecord")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file (omit for --dry-run)")
 	existingServerID := fs.String("existing-server-id", "", "rebuild this existing server instead of creating new")
+	rollbackOnFailure := fs.Bool("rollback-on-failure", false, "destroy the server if provisioning fails after it was created (default: keep it and name it in the error, so a slow boot stays recoverable)")
 	outFile := fs.String("o", "", "write OperatorRecord JSON here (default: stdout)")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per provisioning step on stderr (FRP-4b)")
 
@@ -273,17 +280,18 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	emitProgress(*progressJSON, stderr, "provision_cloud_call", "calling cloud provider", map[string]any{"provider": *providerName, "region": *region})
 
 	rec, err := p.Provision(ctx, provider.ProvisionOpts{
-		PublisherPubKey: pub,
-		Region:          *region,
-		ServerType:      *serverType,
-		ToolboxProfile:  *toolboxProfile,
-		EnabledFamilies: splitCSV(*families),
-		HelperIP:        hip,
-		MgmtPort:        *mgmtPort,
-		WaitForHealth:   !*dryRun,
-		EphemeralSSHKey:  ephem,
-		DryRun:          *dryRun,
-		ExistingServerID: *existingServerID,
+		PublisherPubKey:   pub,
+		Region:            *region,
+		ServerType:        *serverType,
+		ToolboxProfile:    *toolboxProfile,
+		EnabledFamilies:   splitCSV(*families),
+		HelperIP:          hip,
+		MgmtPort:          *mgmtPort,
+		WaitForHealth:     !*dryRun,
+		EphemeralSSHKey:   ephem,
+		DryRun:            *dryRun,
+		ExistingServerID:  *existingServerID,
+		RollbackOnFailure: *rollbackOnFailure,
 		OnProgress: func(step, msg string) {
 			emitProgress(*progressJSON, stderr, step, msg, nil)
 		},
@@ -368,11 +376,51 @@ func runReprovision(ctx context.Context, args []string, stdout, stderr io.Writer
 	return emitRecord(rec, *recordFile, stdout, stderr)
 }
 
+// runDecommission tears down the cloud side of an OperatorRecord and
+// prints a per-resource JSON report on stdout:
+//
+//	{
+//	  "provider": "hetzner",
+//	  "server_id": "12345",
+//	  "server_deleted": true,
+//	  "ssh_key_deleted": true,
+//	  "firewall_deleted": true,
+//	  "deleted_ssh_key_ids": ["678"],
+//	  "firewall_id": "910",
+//	  "preserved": ["floating-ip:42"],
+//	  "warnings": ["floating IP 42 stays reserved on your account …"]
+//	}
+//
+// Each boolean means "nothing of that kind from this deploy is left
+// behind" — see provider.DecommissionReport for the full semantics.
+// `warnings` is always present (possibly empty) and is meant to be
+// shown to the user verbatim.
+//
+// The JSON is printed on BOTH exit paths so a partial teardown is
+// still legible. Exit 0 means the billing server is gone (warnings
+// may still describe preserved resources); exit 1 means it is not,
+// and the caller must keep its local record — that record is the
+// only remaining way to reach the surviving server.
+//
+// (Before this commit the command printed the bare line
+// "decommissioned" and deleted only the server. Nothing consumed
+// that line.)
+//
+// `--json` is accepted and ignored: the report is unconditional. The
+// Rust bridge asks for it explicitly because the app and this binary
+// are not the same vintage — on Android the deploy engine is a pinned
+// `libdaal_deploy.so` that can lag the shell — so it sends `--json`,
+// treats a flag-parse exit (2) as "old binary" and retries without it.
+// Accepting the flag here is what keeps the first attempt the one that
+// works; without it every teardown would run the verb twice and land
+// in the legacy-compat branch. Do not remove it to "clean up an unused
+// flag" — an older shell in the field still sends it.
 func runDecommission(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("decommission", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file")
+	_ = fs.Bool("json", false, "emit the report as JSON (always on; accepted for compatibility)")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -387,16 +435,33 @@ func runDecommission(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "read record-file: %v\n", err)
 		return 1
 	}
-	p, err := buildProvider(rec.Provider, *tokenFile, false)
+	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
 		return 1
 	}
-	if err := p.Decommission(ctx, rec); err != nil {
-		fmt.Fprintf(stderr, "decommission: %v\n", err)
+	rep, decErr := p.Decommission(ctx, rec)
+	if rep == nil {
+		// Defensive: the interface promises a non-nil report, but a
+		// silent teardown is the one outcome we refuse to produce.
+		rep = provider.NewDecommissionReport(rec.Provider, rec.ServerID)
+		if decErr != nil {
+			rep.Warnf("%v", decErr)
+		}
+	}
+	body, mErr := json.MarshalIndent(rep, "", "  ")
+	if mErr != nil {
+		fmt.Fprintf(stderr, "marshal decommission report: %v\n", mErr)
 		return 1
 	}
-	fmt.Fprintln(stdout, "decommissioned")
+	fmt.Fprintln(stdout, string(body))
+	if decErr != nil {
+		fmt.Fprintf(stderr, "decommission: %v\n", decErr)
+		return 1
+	}
+	for _, w := range rep.Warnings {
+		fmt.Fprintf(stderr, "decommission warning: %s\n", w)
+	}
 	return 0
 }
 
@@ -661,6 +726,12 @@ func runListServers(ctx context.Context, args []string, stdout, stderr io.Writer
 		return 1
 	}
 }
+
+// buildProviderFn is the seam runDecommission builds its adapter
+// through, so cli_test.go can assert the decommission JSON contract
+// against an in-memory provider instead of a live cloud token.
+// Production always leaves it pointing at buildProvider.
+var buildProviderFn = buildProvider
 
 // buildProvider returns the selected FRP provider adapter. When
 // dryRun is true and tokenFile is empty, each adapter is constructed

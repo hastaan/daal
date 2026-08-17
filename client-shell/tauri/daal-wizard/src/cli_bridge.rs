@@ -250,6 +250,21 @@ pub trait CliRunner: Send + Sync {
     /// back from `args.record_path`.
     fn run_assign_fip(&self, args: AssignFipArgs<'_>) -> Result<String>;
 
+    /// Teardown: invoke `daal-deploy decommission` to destroy the
+    /// cloud resources this record owns — the VPS, the ephemeral
+    /// SSH key and the baseline firewall.
+    ///
+    /// This is the only verb in the bridge whose whole point is to
+    /// make the record's subject stop existing (and stop billing),
+    /// so it reports **per resource** rather than pass/fail: a run
+    /// that killed the server but could not reach the firewall is a
+    /// materially different outcome from a clean sweep, and the user
+    /// has to be told which one they got. Non-fatal cloud errors come
+    /// back in `warnings` and are shown verbatim; only a failure that
+    /// leaves the *server* alive is an `Err`, because that is the one
+    /// the caller must not treat as "safe to forget this relay".
+    fn run_decommission(&self, args: DecommissionArgs<'_>) -> Result<DecommissionResult>;
+
     /// FRP-4b: invoke `daal-deploy bind-and-sign`, piping the
     /// 64-byte privkey through stdin (never to disk). Streams
     /// progress events; returns the parsed BindResult on success.
@@ -451,6 +466,22 @@ pub struct ProvisionArgs<'a> {
     pub dry_run: bool,
     /// When non-empty, rebuild this existing server instead of creating new.
     pub existing_server_id: &'a str,
+    /// Destroy the box if provisioning fails after it was created.
+    ///
+    /// `daal-deploy`'s own default is false — for a CLI operator, a box
+    /// that failed its health wait is worth keeping: they have the id in
+    /// their scrollback and the idempotent retry can reuse it. Neither
+    /// is true from the app. `provision_run` only writes the
+    /// OperatorRecord back on success, so a failure persists
+    /// `server_id: ""` and the mgmt port that was minted for that box is
+    /// gone with the process; the retry path then refuses ("existing
+    /// server requires persisted MgmtPort") because it cannot know the
+    /// port the running box was configured with. The kept box is
+    /// therefore unusable *and* unnamed — a billing server the app can
+    /// only reach by re-deriving its name at teardown. Rolling back
+    /// stops the meter at the moment of failure and frees the derived
+    /// name so "Try again" works.
+    pub rollback_on_failure: bool,
 }
 
 /// Static shape passed to `daal-deploy cdn-provision`.
@@ -585,6 +616,30 @@ pub struct AssignFipArgs<'a> {
     pub fip_id: &'a str,
 }
 
+/// Static shape passed to `run_decommission`. Field names
+/// correspond to the `daal-deploy decommission` flags 1:1.
+pub struct DecommissionArgs<'a> {
+    pub record_path: &'a Path,
+    pub token: &'a str,
+}
+
+/// JSON returned by `daal-deploy decommission --json`, one flag per
+/// cloud resource the provisioner creates.
+///
+/// The flags are "is it gone now", not "did this run delete it":
+/// a resource that was already absent reports `true`, because the
+/// user's question is whether anything is still billing, not which
+/// invocation removed it. `warnings` carries the provider's own
+/// error text for any leg that could not be confirmed gone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DecommissionResult {
+    pub server_deleted: bool,
+    pub ssh_key_deleted: bool,
+    pub firewall_deleted: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// Static shape passed to `run_bind_and_sign`. Field names follow
 /// the `daal-deploy bind-and-sign` flags 1:1.
 pub struct BindAndSignArgs<'a> {
@@ -627,6 +682,43 @@ impl SubprocessRunner {
     pub fn new(bin: Option<PathBuf>) -> Self {
         let binary = bin.unwrap_or_else(|| PathBuf::from("daal-deploy"));
         Self { binary }
+    }
+
+    /// One `decommission` invocation. Split out of the trait method
+    /// so the `--json` capability probe can run the same command
+    /// twice without duplicating the token-tempfile dance; the token
+    /// file is re-minted per attempt and dropped the instant the
+    /// child exits.
+    fn decommission_once(
+        &self,
+        args: &DecommissionArgs<'_>,
+        want_json: bool,
+    ) -> Result<std::process::Output> {
+        let tmp = tempfile_with_secret(args.token)?;
+        let token_path = tmp.path().to_path_buf();
+
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("decommission")
+            .arg("--record-file")
+            .arg(args.record_path)
+            .arg("--token-file")
+            .arg(&token_path);
+        if want_json {
+            cmd.arg("--json");
+        }
+        let out = cmd
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        drop(tmp);
+
+        match out {
+            Ok(o) => Ok(o),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(BridgeError::BinaryMissing),
+            Err(e) => Err(BridgeError::Io(e)),
+        }
     }
 }
 
@@ -785,6 +877,9 @@ impl CliRunner for SubprocessRunner {
         }
         if !args.existing_server_id.is_empty() {
             cmd.arg("--existing-server-id").arg(args.existing_server_id);
+        }
+        if args.rollback_on_failure {
+            cmd.arg("--rollback-on-failure");
         }
         if args.dry_run {
             cmd.arg("--dry-run");
@@ -1151,6 +1246,57 @@ impl CliRunner for SubprocessRunner {
             });
         }
         std::fs::read_to_string(args.record_path).map_err(BridgeError::Io)
+    }
+
+    fn run_decommission(&self, args: DecommissionArgs<'_>) -> Result<DecommissionResult> {
+        // `--json` is an additive flag on a verb that shipped emitting
+        // the bare line `decommissioned`. The app and the CLI are not
+        // guaranteed to be the same vintage — on Android the deploy
+        // engine is a pinned `libdaal_deploy.so` that lags the shell —
+        // so an old binary rejecting the flag (flag-parse failures exit
+        // 2) must degrade instead of turning a routine teardown into a
+        // dead end. Retry once without it and read the legacy output.
+        let (out, sent_json_flag) = match self.decommission_once(&args, true) {
+            Ok(o) if o.status.code() == Some(2) => (self.decommission_once(&args, false)?, false),
+            Ok(o) => (o, true),
+            Err(e) => return Err(e),
+        };
+        if !out.status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let body = stdout.trim();
+        let parse_err = match serde_json::from_str::<DecommissionResult>(body) {
+            Ok(res) => return Ok(res),
+            Err(e) => e,
+        };
+        // The verb may narrate before it reports; take the last
+        // non-empty line as the result document.
+        if let Some(last) = body.lines().rev().find(|l| !l.trim().is_empty()) {
+            if let Ok(res) = serde_json::from_str::<DecommissionResult>(last.trim()) {
+                return Ok(res);
+            }
+        }
+        // Legacy binary: exit 0 means the server call returned, and
+        // nothing else was ever attempted. Claiming the key and the
+        // firewall are gone here would be a lie the user acts on, so
+        // report them unconfirmed and say why.
+        if !sent_json_flag || body.contains("decommissioned") {
+            return Ok(DecommissionResult {
+                server_deleted: true,
+                ssh_key_deleted: false,
+                firewall_deleted: false,
+                warnings: vec![
+                    "this daal-deploy build removes only the server; the ephemeral SSH key and \
+                     the cloud firewall may still exist in your provider account"
+                        .to_string(),
+                ],
+            });
+        }
+        Err(BridgeError::Parse(parse_err))
     }
 
     fn run_bind_and_sign(
@@ -1641,6 +1787,15 @@ pub struct MockRunner {
     pub reprovision_calls: Mutex<Vec<MockReprovisionCall>>,
     /// FRP-7: recorded floating-IP assign calls.
     pub assign_fip_calls: Mutex<Vec<MockAssignFipCall>>,
+    /// Teardown: recorded decommission calls.
+    pub decommission_calls: Mutex<Vec<MockDecommissionCall>>,
+    /// Teardown: optional canned result for `run_decommission`.
+    /// `None` means "clean sweep, no warnings".
+    pub decommission_result: Mutex<Option<DecommissionResult>>,
+    /// Teardown: when set, `run_decommission` fails with this stderr
+    /// instead of succeeding. Tests use it to prove a cloud failure
+    /// leaves the local relay record intact.
+    pub decommission_error: Mutex<Option<String>>,
     /// FRP-9: recorded CDN-rotate-path calls.
     pub cdn_rotate_path_calls: Mutex<Vec<MockCdnRotatePathCall>>,
     /// FRP-9: recorded CDN-rotate-hostname calls.
@@ -1726,6 +1881,17 @@ pub struct MockAssignFipCall {
     pub fip_id: String,
 }
 
+/// The record body is captured, not just its path: the staged file
+/// is deleted the moment `relay_destroy` returns, so a test that only
+/// kept the path could never assert *which* server the app asked the
+/// cloud to destroy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MockDecommissionCall {
+    pub record_path: PathBuf,
+    pub record_json: String,
+    pub token: String,
+}
+
 impl MockRunner {
     pub fn new(fixture: Pricing) -> Self {
         Self {
@@ -1740,6 +1906,9 @@ impl MockRunner {
             rotation_recommendation: Mutex::new(None),
             reprovision_calls: Mutex::new(Vec::new()),
             assign_fip_calls: Mutex::new(Vec::new()),
+            decommission_calls: Mutex::new(Vec::new()),
+            decommission_result: Mutex::new(None),
+            decommission_error: Mutex::new(None),
             cdn_rotate_path_calls: Mutex::new(Vec::new()),
             cdn_rotate_hostname_calls: Mutex::new(Vec::new()),
             cdn_rotate_origin_calls: Mutex::new(Vec::new()),
@@ -1773,6 +1942,22 @@ impl MockRunner {
 
     pub fn with_bind_result(self, res: BindResult) -> Self {
         *self.bind_result.lock().unwrap() = Some(res);
+        self
+    }
+
+    /// Teardown: stamp the per-resource result `run_decommission`
+    /// will return — used to exercise the partial-sweep path where
+    /// the server dies but a warning comes back with it.
+    pub fn with_decommission_result(self, res: DecommissionResult) -> Self {
+        *self.decommission_result.lock().unwrap() = Some(res);
+        self
+    }
+
+    /// Teardown: make `run_decommission` fail. The relay's local row
+    /// and cloud token must survive that, so this is the switch the
+    /// ordering test is built on.
+    pub fn with_decommission_error(self, stderr: impl Into<String>) -> Self {
+        *self.decommission_error.lock().unwrap() = Some(stderr.into());
         self
     }
 }
@@ -1988,6 +2173,33 @@ impl CliRunner for MockRunner {
         let body = serde_json::to_string(&v)?;
         std::fs::write(args.record_path, body.as_bytes())?;
         Ok(body)
+    }
+
+    fn run_decommission(&self, args: DecommissionArgs<'_>) -> Result<DecommissionResult> {
+        // Record the call BEFORE the injected-failure check: a test
+        // asserting "the cloud was asked first, and nothing local was
+        // touched after it refused" needs the evidence that the ask
+        // happened even on the failing path.
+        self.decommission_calls
+            .lock()
+            .unwrap()
+            .push(MockDecommissionCall {
+                record_path: args.record_path.to_path_buf(),
+                record_json: std::fs::read_to_string(args.record_path).unwrap_or_default(),
+                token: args.token.to_string(),
+            });
+        if let Some(stderr) = self.decommission_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc: 1, stderr });
+        }
+        if let Some(res) = self.decommission_result.lock().unwrap().clone() {
+            return Ok(res);
+        }
+        Ok(DecommissionResult {
+            server_deleted: true,
+            ssh_key_deleted: true,
+            firewall_deleted: true,
+            warnings: Vec::new(),
+        })
     }
 
     fn run_bind_and_sign(
@@ -2240,6 +2452,157 @@ mod tests {
         match err {
             BridgeError::BinaryMissing => (),
             e => panic!("wanted BinaryMissing, got {e:?}"),
+        }
+    }
+
+    /// Write an executable stand-in for `daal-deploy` and return its
+    /// path. `script` is a `sh` body; `"$@"` is the real arg vector.
+    #[cfg(unix)]
+    fn fake_deploy(dir: &std::path::Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("daal-deploy");
+        std::fs::write(&p, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decommission_parses_per_resource_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, "{}").unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            r#"echo '{"server_deleted":true,"ssh_key_deleted":true,"firewall_deleted":false,"warnings":["firewall 422"]}'"#,
+        );
+        let got = SubprocessRunner::new(Some(bin))
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+            })
+            .unwrap();
+        assert_eq!(
+            got,
+            DecommissionResult {
+                server_deleted: true,
+                ssh_key_deleted: true,
+                firewall_deleted: false,
+                warnings: vec!["firewall 422".into()],
+            }
+        );
+    }
+
+    /// The seam itself. The test above uses a hand-written one-liner;
+    /// this one is the byte-for-byte stdout of a real
+    /// `daal-deploy decommission --json` run, captured from the
+    /// compiled binary. It is `MarshalIndent`, so the document spans
+    /// many lines (the "last non-empty line" salvage path would see a
+    /// bare `}`), and it carries four fields the Rust struct does not
+    /// declare — `provider`, `preserved`, `deleted_ssh_key_ids`,
+    /// `firewall_id`. Both properties have to hold or a real teardown
+    /// reports nothing: no `deny_unknown_fields`, and the whole body
+    /// parsed as one document.
+    #[cfg(unix)]
+    #[test]
+    fn decommission_parses_the_real_binarys_indented_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, "{}").unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            r#"cat <<'EOF'
+{
+  "provider": "hetzner",
+  "server_id": "12345",
+  "server_deleted": true,
+  "ssh_key_deleted": false,
+  "firewall_deleted": true,
+  "deleted_ssh_key_ids": ["678"],
+  "firewall_id": "910",
+  "preserved": [
+    "ssh-key:daal-fsn1-000000-ephemeral*"
+  ],
+  "warnings": [
+    "could not confirm the one-shot SSH key is gone"
+  ]
+}
+EOF
+echo 'decommission warning: could not confirm the one-shot SSH key is gone' >&2"#,
+        );
+        let got = SubprocessRunner::new(Some(bin))
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+            })
+            .unwrap();
+        assert_eq!(
+            got,
+            DecommissionResult {
+                server_deleted: true,
+                ssh_key_deleted: false,
+                firewall_deleted: true,
+                warnings: vec!["could not confirm the one-shot SSH key is gone".into()],
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decommission_retries_without_json_on_a_legacy_binary() {
+        // On Android the deploy engine is a pinned libdaal_deploy.so
+        // that can lag the shell. A build predating `--json` rejects
+        // the flag at parse time (exit 2); that must degrade to the
+        // legacy text protocol rather than fail the teardown — and it
+        // must NOT claim the key and firewall are gone, because that
+        // build never touched them.
+        let dir = tempfile::tempdir().unwrap();
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, "{}").unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            r#"for a in "$@"; do
+  if [ "$a" = "--json" ]; then
+    echo "flag provided but not defined: -json" >&2
+    exit 2
+  fi
+done
+echo decommissioned"#,
+        );
+        let got = SubprocessRunner::new(Some(bin))
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+            })
+            .unwrap();
+        assert!(got.server_deleted);
+        assert!(!got.ssh_key_deleted, "legacy build never deletes the key");
+        assert!(!got.firewall_deleted);
+        assert_eq!(got.warnings.len(), 1, "the gap is stated, not hidden");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decommission_surfaces_a_real_failure_not_a_flag_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, "{}").unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            "echo 'decommission: 503 service unavailable' >&2\nexit 1",
+        );
+        let err = SubprocessRunner::new(Some(bin))
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+            })
+            .unwrap_err();
+        match err {
+            BridgeError::SubprocessFailed { rc, stderr } => {
+                assert_eq!(rc, 1);
+                assert!(stderr.contains("503 service unavailable"), "{stderr}");
+            }
+            e => panic!("wanted SubprocessFailed, got {e:?}"),
         }
     }
 }
