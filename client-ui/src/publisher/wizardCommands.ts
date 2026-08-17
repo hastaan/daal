@@ -164,6 +164,110 @@ export interface OperatorSummary {
     signed_sbp_at_unix: number;
     live_recipient_count: number;
     total_recipient_count: number;
+    /** Wave 3 Step 9 (L3): provider-side id of the floating IP attached
+     *  to this relay, or "" when it has none.
+     *
+     *  NOT a gate on the address swap. Before Step 9 nothing could mint
+     *  a floating IP, so empty did mean "nothing to re-point" — and the
+     *  relay screen disabled the rung on that basis. Step 9 made empty
+     *  the SELF-SERVICE path (the CLI reserves one in the relay's own
+     *  region), and since no relay in the field could ever have had an
+     *  address, gating on this disabled the wave's headline capability
+     *  on all of them. Use `can_reserve_address` for availability; use
+     *  this to show which address the relay is on and to refuse a
+     *  re-attach of the same one. */
+    floating_ip_id: string;
+    /** Whether this relay's provider adapter can reserve an address by
+     *  itself (Hetzner can; adapters that only attach an operator-owned
+     *  one cannot). This is what decides whether "leave it empty" is an
+     *  offer the UI can make. */
+    can_reserve_address: boolean;
+}
+
+/**
+ * Wave 3 Step 8 — one configured freshness mirror.
+ *
+ * Carries NO credential and never can: the R2 secret key and the
+ * GitHub PAT live in device custody on the Rust side, and
+ * `has_credential` is a probe result, not a copy.
+ */
+export interface FreshnessEndpointSummary {
+    id: number;
+    /** Provider label: "r2" | "ghpages". The unit of independence. */
+    kind: string;
+    public_url: string;
+    /** "bucket/key" or "owner/repo@branch" — enough to tell two apart. */
+    target: string;
+    has_credential: boolean;
+    /** 0 = never published. Render as "never", never as "fine". */
+    last_publish_at_unix: number;
+    /** The ONLY field that may be used to claim a publish worked. */
+    last_publish_ok: boolean;
+    /** The provider's own words. Shown verbatim. */
+    last_publish_detail: string;
+    last_published_url: string;
+}
+
+/** Wave 3 Step 8 — the whole freshness panel state in one call. */
+export interface FreshnessStatus {
+    endpoints: FreshnessEndpointSummary[];
+    /** DISTINCT providers, not endpoints. Two buckets at one provider
+     *  fall over together, so this is the number the single-point-of-
+     *  censorship warning is computed from. */
+    distinct_providers: number;
+    /** Floor below which packs get no freshness path at all. */
+    min_mirrors: number;
+    pack_url: string;
+    /** The mirror set inside the pack recipients are holding RIGHT NOW.
+     *  Empty means the files already handed out cannot learn about a
+     *  rotation — which is true of every pack signed before this
+     *  existed. Never inferred from `endpoints`. */
+    mirrors_in_pack: string[];
+    pack_signed_at_unix: number;
+}
+
+/** What the operator types to add one mirror. Credentials travel this
+ *  way exactly once, inbound; nothing sends them back. */
+export interface FreshnessEndpointInput {
+    kind: 'r2' | 'ghpages';
+    public_url: string;
+    account_id?: string;
+    bucket?: string;
+    object_key?: string;
+    access_key_id?: string;
+    secret_access_key?: string;
+    gh_owner?: string;
+    gh_repo?: string;
+    gh_path?: string;
+    gh_branch?: string;
+    gh_pat?: string;
+}
+
+/** One provider's outcome from a publish run. */
+export interface PublishOutcome {
+    endpoint_id: number;
+    kind: string;
+    url: string;
+    ok: boolean;
+    detail: string;
+}
+
+/**
+ * The result of one publish run.
+ *
+ * `blocked_reason` is non-empty when the run could not even be
+ * attempted; it is a stable token ("no_signed_pack" | "no_pack_url" |
+ * "too_few_providers") so the UI can point at the field that fixes it.
+ * When it is empty the CLI ran, and the per-provider truth is in
+ * `results` — including the case where every one of them failed.
+ */
+export interface PublishReport {
+    results: PublishOutcome[];
+    succeeded: number;
+    min_mirrors: number;
+    sequence: number;
+    not_after: string;
+    blocked_reason: string;
 }
 
 export interface OperatorState {
@@ -380,6 +484,12 @@ export interface BindResult {
 export interface RotateExecuteOutput {
     summary: string;
     new_active_id?: number;
+    /** Non-fatal facts the operator must hear after a rotation that
+     *  otherwise succeeded — chiefly an address that is still attached
+     *  and still billing. The success sheet says the old address no
+     *  longer serves; when the release leg could not make that true,
+     *  it says so here instead of the UI quietly asserting it. */
+    warnings?: string[];
 }
 
 /**
@@ -698,16 +808,76 @@ export const Wizard = {
             operatorId: operator_id,
             args,
         }),
-    rotateExecute: (operator_id: number, level: string, reason: string) =>
+    /**
+     * Run one rung of the rotation ladder.
+     *
+     * `newFloatingIpId` is OPTIONAL for L3 and meaningless elsewhere.
+     * Empty means "reserve a new address for this relay in its own
+     * region", which is what makes the rung reachable at all on a
+     * relay that has never had one — i.e. every relay in the field.
+     * Supplying the id the relay is ALREADY on is refused rather than
+     * performed: it completes, changes nothing a censor can see, and
+     * would report a successful rotation.
+     *
+     * `newRegion` / `newProvider` are the same shape one rung up, and
+     * the wizard REFUSES the rung without them rather than quietly
+     * rebuilding into the same place: an L4 with no new region and an
+     * L5 with no new provider are both L1 wearing a bigger warning.
+     * No screen drives L4/L5 yet — they are passed here so the
+     * boundary carries them the day one does, not so the UI can omit
+     * them and get a silent no-op.
+     */
+    rotateExecute: (
+        operator_id: number,
+        level: string,
+        reason: string,
+        opts?: { newFloatingIpId?: string; newRegion?: string; newProvider?: string },
+    ) =>
         invoke<RotateExecuteOutput>('wizard_rotate_execute', {
             operatorId: operator_id,
             level,
             reason,
+            newFloatingIpId: opts?.newFloatingIpId ?? null,
+            newRegion: opts?.newRegion ?? null,
+            newProvider: opts?.newProvider ?? null,
         }),
     rotateRevert: (operator_id: number) =>
         invoke<SignedSbpRow>('wizard_rotate_revert', { operatorId: operator_id }),
     rotateHistory: (operator_id: number) =>
         invoke<SignedSbpRow[]>('wizard_rotate_history', { operatorId: operator_id }),
+
+    // Wave 3 Step 8 — freshness (remote pack replacement).
+    //
+    // Four verbs, deliberately not one. Configuring a mirror, saying
+    // where the pack will live, and publishing are three acts that fail
+    // independently; one combined call would have to report one outcome
+    // for three different problems.
+    freshnessStatus: (operator_id: number) =>
+        invoke<FreshnessStatus>('wizard_freshness_status', {
+            operatorId: operator_id,
+        }),
+    /** The credential crosses this boundary once, inbound. */
+    addFreshnessEndpoint: (operator_id: number, endpoint: FreshnessEndpointInput) =>
+        invoke<number>('wizard_freshness_add_endpoint', {
+            operatorId: operator_id,
+            endpoint,
+        }),
+    /** Deletes the mirror AND forgets its write-key. */
+    deleteFreshnessEndpoint: (endpoint_id: number) =>
+        invoke<void>('wizard_freshness_delete_endpoint', {
+            endpointId: endpoint_id,
+        }),
+    setFreshnessPackUrl: (operator_id: number, url: string) =>
+        invoke<void>('wizard_freshness_set_pack_url', {
+            operatorId: operator_id,
+            url,
+        }),
+    /** Returns a report, not a throw: "one provider took it, the other
+     *  refused" is the interesting case and it is neither. */
+    publishFreshness: (operator_id: number) =>
+        invoke<PublishReport>('wizard_freshness_publish', {
+            operatorId: operator_id,
+        }),
 
     // Sub-key rotation
     subkeyRotate: (operator_id: number, validity?: string, label?: string) =>

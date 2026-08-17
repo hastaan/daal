@@ -188,6 +188,96 @@ func (l *liveClient) SSHKeyDelete(ctx context.Context, id string) error {
 	return err
 }
 
+// FloatingIPCreate reserves a new IPv4 floating IP in opts.HomeLocation.
+//
+// IPv4 only, deliberately. The relay's dialed address flows into
+// OperatorRecord.PublicIP and from there into every candidate's
+// public_ip:* tag and every client outbound; the whole recipient-side
+// path (and the sing-box configs it renders) is written against an IPv4
+// literal today. Handing back a v6 address here would produce a pack
+// that validates and cannot be dialed from a v4-only Iranian mobile
+// network, which is most of them.
+func (l *liveClient) FloatingIPCreate(ctx context.Context, opts FloatingIPCreateOpts) (*FloatingIPInfo, error) {
+	if opts.HomeLocation == "" {
+		return nil, errors.New("hetzner: floating ip needs a home location")
+	}
+	copts := hcloud.FloatingIPCreateOpts{
+		Type:         hcloud.FloatingIPTypeIPv4,
+		HomeLocation: &hcloud.Location{Name: opts.HomeLocation},
+		Labels:       opts.Labels,
+	}
+	if opts.Name != "" {
+		name := opts.Name
+		copts.Name = &name
+	}
+	if opts.Description != "" {
+		desc := opts.Description
+		copts.Description = &desc
+	}
+	res, _, err := l.c.FloatingIP.Create(ctx, copts)
+	if err != nil {
+		return nil, err
+	}
+	if res.FloatingIP == nil {
+		return nil, errors.New("hetzner: floating-ip create returned no object")
+	}
+	return floatingIPInfoFromHcloud(res.FloatingIP), nil
+}
+
+// FloatingIPDelete releases the address. Absent ids are success, so a
+// rollback that runs twice does not turn a recovered rotation into an
+// error.
+func (l *liveClient) FloatingIPDelete(ctx context.Context, fipID string) error {
+	fipInt, err := strconv.ParseInt(fipID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid floating-ip id %q: %w", fipID, err)
+	}
+	_, err = l.c.FloatingIP.Delete(ctx, &hcloud.FloatingIP{ID: fipInt})
+	if hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
+		return nil
+	}
+	return err
+}
+
+// FloatingIPByID resolves an id to an address + home location + current
+// attachment. Returns errFloatingIPNotFound when the id does not exist,
+// which the caller must distinguish from a transport error: "this
+// address is gone" and "we could not ask" lead to opposite decisions
+// during a rollback.
+func (l *liveClient) FloatingIPByID(ctx context.Context, fipID string) (*FloatingIPInfo, error) {
+	fipInt, err := strconv.ParseInt(fipID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid floating-ip id %q: %w", fipID, err)
+	}
+	fip, _, err := l.c.FloatingIP.GetByID(ctx, fipInt)
+	if err != nil {
+		return nil, err
+	}
+	if fip == nil {
+		return nil, errFloatingIPNotFound
+	}
+	return floatingIPInfoFromHcloud(fip), nil
+}
+
+// floatingIPInfoFromHcloud narrows the SDK object to the four facts the
+// adapter acts on. Server is flattened to an id string because that is
+// what OperatorRecord.ServerID holds and the read-back compares against.
+func floatingIPInfoFromHcloud(f *hcloud.FloatingIP) *FloatingIPInfo {
+	out := &FloatingIPInfo{
+		ID:     strconv.FormatInt(f.ID, 10),
+		IP:     f.IP,
+		Name:   f.Name,
+		Labels: f.Labels,
+	}
+	if f.HomeLocation != nil {
+		out.HomeLocation = f.HomeLocation.Name
+	}
+	if f.Server != nil {
+		out.ServerID = strconv.FormatInt(f.Server.ID, 10)
+	}
+	return out
+}
+
 func (l *liveClient) FloatingIPAssign(ctx context.Context, fipID, serverID string) error {
 	fipInt, err := strconv.ParseInt(fipID, 10, 64)
 	if err != nil {

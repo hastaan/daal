@@ -47,7 +47,7 @@ use crate::cli_bridge::{
     AssignFipArgs, BindAndSignArgs, BindResult, CdnProvisionArgs, CdnRotateHostnameArgs,
     CdnRotateOriginArgs, CdnRotatePathArgs, CdnRotateResult, CliRunner, DecommissionArgs,
     DecommissionResult, FountainFrame, Pricing, ProgressEvent, ProvisionArgs,
-    PublishFreshnessArgs, ReprovisionArgs,
+    ReprovisionArgs,
 };
 use crate::device_custody::{CustodyError, DeviceCustody};
 use crate::keystore::{Keystore, KeystoreError};
@@ -359,7 +359,7 @@ fn map_custody_err(ctx: &WizardCtx, alias: &str, e: CustodyError) -> WizardError
 }
 
 /// Write a publisher secret into custody under the same code mapping.
-fn custody_put(ctx: &WizardCtx, alias: &str, secret: &[u8]) -> Result<()> {
+pub(crate) fn custody_put(ctx: &WizardCtx, alias: &str, secret: &[u8]) -> Result<()> {
     ctx.custody
         .put(alias, secret)
         .map_err(|e| map_custody_err(ctx, alias, e))
@@ -426,6 +426,34 @@ pub struct OperatorSummary {
     pub signed_sbp_at_unix: i64,
     pub live_recipient_count: i64,
     pub total_recipient_count: i64,
+    /// Wave 3 Step 9 (L3): the provider-side id of the floating IP
+    /// currently attached to this relay, or "" when it has none.
+    ///
+    /// IT IS NOT A GATE ON THE ADDRESS SWAP, and reading it as one was
+    /// the bug. Before Step 9 nothing in this repo could mint a
+    /// floating IP, so an empty value did mean "there is nothing to
+    /// swap and the operator must reserve one at the provider first" —
+    /// and the relay screen disabled the rung on exactly that basis.
+    /// Step 9 made an empty id the SELF-SERVICE path: `assign-fip`
+    /// with no --fip-id reserves one in the relay's own region. So the
+    /// value that used to mean "unavailable" now means "we will
+    /// reserve", and every relay in the field has it empty, because
+    /// none of them could have had one. Gating on it disabled the
+    /// wave's headline capability on 100% of relays.
+    ///
+    /// What it is FOR: telling the operator which address they are on,
+    /// and letting the swap refuse a re-attach of that same address —
+    /// a no-op that would otherwise report a successful rotation.
+    pub floating_ip_id: String,
+    /// Whether this relay's provider adapter can reserve an address by
+    /// itself. True on Hetzner; false on adapters that can only attach
+    /// one the operator already owns, where L3 needs an id typed in.
+    ///
+    /// Derived from the provider rather than from the record, because
+    /// "can this account mint an address" is a property of the adapter
+    /// and the UI must not infer it from whether an address happens to
+    /// be attached today.
+    pub can_reserve_address: bool,
 }
 
 /// `OperatorState` is the full resumable state returned by
@@ -1316,6 +1344,24 @@ pub fn finalize_pre_provision(ctx: &WizardCtx, operator_id: i64) -> Result<PathB
     Ok(path)
 }
 
+/// Whether a provider adapter can MINT a floating IP, as opposed to
+/// only attaching one the operator already reserved by hand.
+///
+/// Pinned to which adapters implement `CreateFloatingIP`
+/// (publisher/deploy/providers/*): Hetzner does; Vultr and Stark do
+/// not, and their `AssignFloatingIP` does not move the record's dialled
+/// address either, so L3 there fails at the CLI's post-condition rather
+/// than re-signing a pack aimed at the burned address.
+///
+/// The UI reads this to decide whether "leave the field empty" is an
+/// offer it can make. It must not infer that from whether an address is
+/// currently attached — that inference is what disabled the whole rung
+/// on every relay in the field, since none of them could have had one
+/// before this wave.
+fn provider_can_reserve_address(provider: &str) -> bool {
+    matches!(provider.trim().to_ascii_lowercase().as_str(), "hetzner")
+}
+
 /// List all operators (any status), fully populated for the relay
 /// list. Touches no secrets, so it is always safe to call on boot.
 pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
@@ -1327,6 +1373,7 @@ pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
         // whole OperatorRecord back and we store it verbatim.
         let rec: PreProvisionRecord =
             serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
+        let can_reserve_address = provider_can_reserve_address(&rec.provider);
         out.push(OperatorSummary {
             id: row.id,
             status: row.status,
@@ -1346,6 +1393,8 @@ pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
             signed_sbp_at_unix: row.signed_sbp_at_unix.unwrap_or(0),
             live_recipient_count: ctx.db.count_live_recipients(row.id)?,
             total_recipient_count: ctx.db.count_total_recipients(row.id)?,
+            floating_ip_id: rec.floating_ip_id,
+            can_reserve_address,
         });
     }
     Ok(out)
@@ -1757,6 +1806,7 @@ pub fn sign_relaypack(
     let output_path = output_dir.join(format!("{operator_id}.sbp"));
 
     let now = (ctx.clock)();
+    let mirrors = crate::freshness::mirror_args(ctx, operator_id)?;
     let res = ctx
         .cli
         .run_bind_and_sign(
@@ -1768,6 +1818,11 @@ pub fn sign_relaypack(
                 expiry_days: 30,
                 publisher_name,
                 subkey_cert_path: subkey_cert_path.as_deref(),
+                // Wave 3 Step 8. Empty unless the publisher has
+                // configured MIN_MIRRORS distinct providers — see
+                // freshness::mirror_args for why one is worse than
+                // none.
+                freshness_mirrors: &mirrors,
             },
             priv_buf.as_slice(),
             on_progress,
@@ -1779,6 +1834,14 @@ pub fn sign_relaypack(
 
     ctx.db
         .record_signed_sbp(operator_id, &res.sbp_sha256, &res.relay_pack_id, now)?;
+    // Stamp what actually went INTO this pack, not what is configured.
+    // The distinction is the whole point: a publisher who adds mirrors
+    // tomorrow has not repaired the bundle somebody imported today, and
+    // the relay screen must keep saying so until a fresh pack is signed
+    // and delivered.
+    let mirrors_json = serde_json::to_string(&mirrors).unwrap_or_else(|_| "[]".into());
+    ctx.db
+        .set_freshness_mirrors_in_pack(operator_id, &mirrors_json)?;
     Ok(res)
 }
 
@@ -1890,6 +1953,35 @@ pub struct RotateExecuteInput {
     pub new_ws_path: Option<String>,
     /// L4/L5/L6: new toolbox profile slug.
     pub new_toolbox_profile: Option<String>,
+    /// L4 only: the region to rebuild into.
+    ///
+    /// Without this field L4 was byte-identical to L1. The rebuild
+    /// passed `region: &rec.region` — the region the relay is already
+    /// in — so "move to a different datacenter", the rung whose entire
+    /// content is moving the relay's network neighbourhood, produced a
+    /// new box in the same datacenter, in the same AS, one address
+    /// along. An operator who ran L4 because a whole prefix was
+    /// blocked got a new address inside that prefix.
+    ///
+    /// Empty keeps the current region, which makes L4 an L1 again —
+    /// so the caller must supply it for a real L4, and rotate_execute
+    /// refuses an L4 without it rather than silently doing nothing.
+    pub new_region: Option<String>,
+    /// L5 only: the cloud provider to rebuild onto.
+    ///
+    /// Same story as new_region, one level up: L5 reused
+    /// `rec.provider`, so "move to a different provider" rebuilt on
+    /// the same one. When the reason to rotate is that the provider's
+    /// whole AS is graylisted — which is the case Daal's four
+    /// transports share — staying on it is not a rotation.
+    ///
+    /// Changing provider also changes what a region code MEANS
+    /// ("fra" is a Vultr and a Stark region; Hetzner has no such
+    /// code), so an L5 that does not also carry new_region is
+    /// rejected: silently handing a Hetzner region code to Vultr is a
+    /// provision failure at best and a box in an unintended country at
+    /// worst.
+    pub new_provider: Option<String>,
     /// FRP-9 L7/L8/L9 (cdn_fronted modes): the cdn_fronts row to
     /// rotate. The wizard CDN screen surfaces this via
     /// list_cdn_fronts; one row per front.
@@ -1924,6 +2016,18 @@ pub struct RotateExecuteOutput {
     pub signed_sbp_id: i64,
     pub bind_result: crate::cli_bridge::BindResult,
     pub signed_at_unix: i64,
+    /// Non-fatal facts the operator has to hear, chiefly about money
+    /// and about what is still true after a "successful" rotation.
+    ///
+    /// The L3 copy says the old address no longer serves. That is only
+    /// true once the previous floating IP has been released, which
+    /// happens after the history row commits and can fail on its own —
+    /// so when it does, it is said here rather than swallowed. A
+    /// warning cannot fail the rotation: the pack is signed and
+    /// committed, and undoing that to tidy up a billing resource would
+    /// be the wrong trade.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1955,6 +2059,84 @@ struct RotateCandidateForProvision {
     family: String,
 }
 
+/// Read `floating_ip_id` out of a serialised OperatorRecord.
+///
+/// Needed on both sides of an L3: before the swap, to know which
+/// address the relay is moving OFF (the swap overwrites the field, so
+/// nothing downstream can recover it); and after, to know which one it
+/// landed on when the CLI reserved it for us and the caller never named
+/// an id.
+fn record_floating_ip_id(record_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(record_json)
+        .ok()
+        .and_then(|v| {
+            v.get("floating_ip_id")
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Carry `floating_ip_id` from the pre-rotation record onto a freshly
+/// provisioned one.
+///
+/// EVERY destroy-and-rebuild rung dropped it. `recordFromServer` builds
+/// a brand-new OperatorRecord and never sets the field, and
+/// `update_record_json` replaces the stored JSON wholesale — so an
+/// address reserved by a previous L3 vanished from the record while
+/// staying reserved on the account. It then billed forever and
+/// `Decommission`'s "still on your bill" warning, which is gated on
+/// `rec.FloatingIPID != ""`, could never fire for it. Step 9 is the
+/// first code in the repo that mints these, so this is newly reachable.
+///
+/// The address is NOT re-attached here — the rebuild produced a new
+/// server with its own primary address and the record must name what is
+/// actually routed to it. Carrying the id forward is what makes the
+/// address visible to the release and teardown paths again; the
+/// operator is told in the same breath.
+fn carry_floating_ip_forward(
+    provisioned: &str,
+    prior_fip_id: &str,
+    same_provider: bool,
+) -> (String, Option<String>) {
+    if prior_fip_id.is_empty() {
+        return (provisioned.to_string(), None);
+    }
+    if !same_provider {
+        // An L5 moved the relay to a different cloud. A Hetzner
+        // floating-IP id is meaningless on Vultr, and writing it onto
+        // the new record would point every release and teardown path at
+        // an id that provider has never heard of. The address is still
+        // reserved on the OLD account, so the only honest thing left is
+        // to name it.
+        return (
+            provisioned.to_string(),
+            Some(format!(
+                "the reserved address (floating IP {prior_fip_id}) is on the PREVIOUS provider and cannot follow the relay across clouds — it is still reserved and still billing there, and Daal can no longer see it. Release it in that provider's console"
+            )),
+        );
+    }
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(provisioned) else {
+        return (provisioned.to_string(), None);
+    };
+    if v.get("floating_ip_id").and_then(|f| f.as_str()).unwrap_or("") == prior_fip_id {
+        return (provisioned.to_string(), None);
+    }
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "floating_ip_id".into(),
+            serde_json::Value::String(prior_fip_id.to_string()),
+        );
+    }
+    let warning = format!(
+        "the reserved address (floating IP {prior_fip_id}) is not attached to the rebuilt relay and is still reserved and still billing — re-attach it with an address swap, or release it"
+    );
+    match serde_json::to_string(&v) {
+        Ok(body) => (body, Some(warning)),
+        Err(_) => (provisioned.to_string(), None),
+    }
+}
+
 fn trimmed_opt(value: Option<&String>) -> Option<&str> {
     value.map(|s| s.trim()).filter(|s| !s.is_empty())
 }
@@ -1977,6 +2159,20 @@ fn rotation_families(rec: &RotateRecordForProvision) -> Vec<String> {
         out.push(c.family.clone());
     }
     out
+}
+
+/// The V1.5 wall-clock budget for the L3 floating-IP fast path.
+///
+/// Pinned to `publisher/deploy/rotation.L3FastPathBudget`. The soak
+/// rig's `v1-5-l3-fast-path` scenario asserts the same number, so
+/// changing it here alone would put two green suites on opposite sides
+/// of one promise.
+const L3_FAST_PATH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Split out from the call site so the budget rule is testable without
+/// a 15-second test.
+fn l3_budget_exceeded(elapsed: std::time::Duration) -> bool {
+    elapsed > L3_FAST_PATH_BUDGET
 }
 
 fn ws_path_fingerprint(path: &str) -> String {
@@ -2062,12 +2258,89 @@ fn apply_l2_route_param_overrides(
 /// mutation via the CLI (`reprovision` for L1/L2/L4/L5/L6,
 /// `assign-fip` for L3), then (2) re-sign the RelayPack and
 /// commit the V003 history transaction.
+///
+/// # THERE IS A SECOND IMPLEMENTATION OF THIS, IN GO
+///
+/// `publisher/deploy/rotation.Executor` is the same ladder written
+/// again, with the same level dispatch, the same re-sign, and the same
+/// three-statement history transaction against the same V003 schema.
+/// Its header says the reciprocal thing; read both or neither.
+///
+/// **This one is the live path.** The Go executor has no production
+/// caller and structurally cannot get one cheaply: its `SBPStore` /
+/// `SBPTx` interfaces are the wizard's SQLite database, which is
+/// opened, migrated and written by rusqlite in this process. Calling
+/// the Go executor from here would mean either handing a second writer
+/// a connection to that database — giving up the single-writer
+/// property the whole V003 transaction depends on — or inventing a
+/// callback protocol over the subprocess boundary so Go could drive a
+/// transaction it cannot see. Neither is a Step 8/9/10 change, and
+/// doing it badly under a rotation is how a relay ends up with a
+/// history table that disagrees with the pack on disk.
+///
+/// So the honest position for this wave is: keep one live path, and
+/// close the gaps that mattered rather than the duplication that did
+/// not.
+///
+///   * **The 15s L3 wall-clock budget** existed only in Go. It is now
+///     here too (`L3_FAST_PATH_BUDGET` below), enforced before the
+///     history transaction, exactly as Go enforces it before its
+///     commit.
+///   * **The Revert transaction** was in fact NOT missing on this side:
+///     `rotate_revert` + `OperatorDb::revert_to_previous_sbp` implement
+///     it against the same rows. The plan's note that the Rust path
+///     lacked it does not match the code.
+///   * What genuinely remains Go-only is the ordering/rollback prose
+///     around `runL3` — and it is prose, because nothing calls it.
+///
+/// If a later wave does collapse the two, the direction that works is
+/// deleting the Go executor and keeping its *tests* as a specification,
+/// not the other way round: the database is here.
 pub fn rotate_execute(
     ctx: &WizardCtx,
     operator_id: i64,
     input: RotateExecuteInput,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<RotateExecuteOutput> {
+    // THE UNWIND. Snapshot the stored record before anything touches
+    // the provider, and put it back if the rotation does not reach its
+    // history commit.
+    //
+    // The failure this closes is specific to L3 and specific to the
+    // live path. `run_assign_fip` persists a NEW record the moment the
+    // address lands; the re-sign, the 15-second budget, the freshness
+    // publish and the history insert all come after it and all can
+    // fail. Without a restore the operator is left with a stored record
+    // naming the new address while the ACTIVE pack names the old one —
+    // and every later re-sign, of any level, binds from the wrong one.
+    // The Go executor's `l3Swap.rollback` is exactly this and has no
+    // production caller.
+    //
+    // Record first, cloud second, same as Go: an orphaned reservation
+    // is recoverable, a record naming an address that routes nowhere is
+    // every recipient's connection.
+    let before = ctx.db.get(operator_id)?.operator_record_json;
+    let out = rotate_execute_inner(ctx, operator_id, input, on_progress);
+    if out.is_err() {
+        if let Ok(after) = ctx.db.get(operator_id) {
+            if after.operator_record_json != before {
+                let _ = ctx.db.update_record_json(operator_id, &before);
+            }
+        }
+    }
+    out
+}
+
+fn rotate_execute_inner(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    input: RotateExecuteInput,
+    on_progress: &mut dyn FnMut(ProgressEvent),
+) -> Result<RotateExecuteOutput> {
+    // The L3 budget is measured from here — the operator's "go" — not
+    // from the provider call, because the seconds a user waits are the
+    // seconds that count.
+    let started = std::time::Instant::now();
     let row = ctx.db.get(operator_id)?;
     let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
 
@@ -2086,17 +2359,121 @@ pub fn rotate_execute(
         extra: Default::default(),
     });
 
+    // THE UNWIND STATE for L3.
+    //
+    // `prior_record_json` is the record exactly as it was before the
+    // provider was touched. The L3 arm persists a NEW record the moment
+    // the swap lands, and everything after it — the re-sign, the 15s
+    // budget, the freshness publish, the history insert — can still
+    // fail. Without a restore, that failure leaves the stored record
+    // naming the new address while the ACTIVE pack still names the old
+    // one, and the next rotation of any level binds from the wrong
+    // address. The Go executor's `l3Swap.rollback` exists for exactly
+    // this and is not on the live path.
+    //
+    // `prior_floating_ip_id` is the address the relay is moving OFF. It
+    // is dropped from the record by the swap, so unless it is captured
+    // here nothing can ever release it: it stays attached, keeps
+    // billing, and keeps answering — while the success sheet says "the
+    // old one no longer serves".
+    let prior_record_json = row.operator_record_json.clone();
+    let prior_floating_ip_id = record_floating_ip_id(&prior_record_json);
+    let mut warnings: Vec<String> = Vec::new();
+    let mut l3_new_fip_id = String::new();
+
+    // A RUNG THAT MOVES NOTHING MUST BE REFUSED BEFORE THE PROVIDER IS
+    // TOUCHED, not after.
+    //
+    // These checks used to sit between `reprovision` and `provision` —
+    // which is to say, AFTER the box had already been deleted. An L4
+    // with no new region, an L5 with no new provider, and an L6 with no
+    // new profile were each an expensive L1 to begin with; running the
+    // refusal downstream of the delete turned them into "the operator
+    // is left with no relay at all, over a missing field the form
+    // should have caught". The pre-rotation record is right here and
+    // answers every one of these questions with zero API calls.
+    if matches!(input.level.as_str(), "L4" | "L5" | "L6") {
+        let cur: RotateRecordForProvision =
+            serde_json::from_str(&prior_record_json).map_err(StagingError::from)?;
+        let new_region = trimmed_opt(input.new_region.as_ref());
+        let new_provider = trimmed_opt(input.new_provider.as_ref());
+        let new_profile = trimmed_opt(input.new_toolbox_profile.as_ref());
+        match input.level.as_str() {
+            "L4" if new_region.is_none() || new_region == Some(cur.region.as_str()) => {
+                let _ = std::fs::remove_file(&record_path);
+                return Err(WizardError::Pricing(
+                    "L4 rebuilds the relay in a DIFFERENT region; supply new_region (the record is already in this one, so this would destroy the box and change nothing)".into(),
+                ));
+            }
+            "L5" if new_provider.is_none() || new_provider == Some(cur.provider.as_str()) => {
+                let _ = std::fs::remove_file(&record_path);
+                return Err(WizardError::Pricing(
+                    "L5 rebuilds the relay on a DIFFERENT provider; supply new_provider (the record is already on this one, so this would destroy the box and change nothing)".into(),
+                ));
+            }
+            // Region codes are provider-scoped: "fra" exists on Vultr
+            // and Stark, "fsn1" only on Hetzner. Carrying the old
+            // provider's code across is a provision failure at best,
+            // and at worst a relay in a country the operator did not
+            // choose.
+            "L5" if new_region.is_none() => {
+                let _ = std::fs::remove_file(&record_path);
+                return Err(WizardError::Pricing(
+                    "L5 also needs new_region: region codes are provider-specific, so the current record's region is not meaningful on the new provider".into(),
+                ));
+            }
+            "L6" if new_profile.is_none() => {
+                let _ = std::fs::remove_file(&record_path);
+                return Err(WizardError::Pricing(
+                    "L6 rebuilds the relay onto a DIFFERENT toolbox profile; supply new_toolbox_profile (without one this destroys the box, invalidates every distributed pack, and rebuilds the same wire shape)".into(),
+                ));
+            }
+            "L6" if new_profile == Some(cur.toolbox_profile.as_str()) => {
+                let _ = std::fs::remove_file(&record_path);
+                return Err(WizardError::Pricing(format!(
+                    "L6 rebuilds the relay onto a DIFFERENT toolbox profile; this relay is already on {}",
+                    cur.toolbox_profile
+                )));
+            }
+            _ => {}
+        }
+    }
+
     match input.level.as_str() {
         "L3" => {
-            let fip_id = require_rotate_param(input.new_floating_ip_id.as_ref(), "floating IP id")?;
+            // NO LONGER REQUIRED, and that is the point of Step 9. This
+            // used to be `require_rotate_param(...)`, so the cheapest
+            // recovery rung — the one that answers the failure which
+            // actually kills relays, a blocked address — could only be
+            // climbed by an operator who had already reserved a floating
+            // IP by hand in their provider console and knew its numeric
+            // id, for which the wizard has no input field. Empty now
+            // means "reserve one for this relay in its own region";
+            // `daal-deploy assign-fip` does the reserving, and gives the
+            // address back if the attach then fails.
+            let fip_id = trimmed_opt(input.new_floating_ip_id.as_ref()).unwrap_or("");
+            // Re-attaching the address the relay is already on is not a
+            // rotation; it is a no-op that would report success, write a
+            // history row and publish a freshness document while the
+            // relay stayed on the burned address. The CLI's
+            // post-condition (rotation.CheckAddressMoved) catches it
+            // too, but refusing before the provider is touched costs
+            // nothing and gives a message that names the actual mistake.
+            if !fip_id.is_empty() && fip_id == prior_floating_ip_id {
+                let _ = std::fs::remove_file(&record_path);
+                return Err(WizardError::Pricing(format!(
+                    "this relay is already on floating IP {fip_id}; re-attaching it would change nothing a censor can see. Leave the field empty to reserve a NEW address, or supply a different id"
+                )));
+            }
             let updated = ctx
                 .cli
                 .run_assign_fip(AssignFipArgs {
                     record_path: &record_path,
                     token: token.as_str(),
-                    fip_id: &fip_id,
+                    fip_id,
                 })
                 .map_err(|e| WizardError::Pricing(e.to_string()))?;
+            l3_new_fip_id = record_floating_ip_id(&updated);
             ctx.db.update_record_json(operator_id, &updated)?;
         }
         "L1" | "L2" | "L4" | "L5" | "L6" => {
@@ -2132,10 +2509,13 @@ pub fn rotate_execute(
 
             let families_owned = rotation_families(&rec);
             let families: Vec<&str> = families_owned.iter().map(|s| s.as_str()).collect();
-            let provider = if rec.provider.is_empty() {
-                row.cloud_provider.as_str()
-            } else {
-                rec.provider.as_str()
+            // L5's payload. An override wins; otherwise stay where we
+            // are. Before Step 10 there was no override to win, which
+            // is why L5 rebuilt on the same provider every time.
+            let provider = match trimmed_opt(input.new_provider.as_ref()) {
+                Some(p) => p,
+                None if rec.provider.is_empty() => row.cloud_provider.as_str(),
+                None => rec.provider.as_str(),
             };
             if rec.region.is_empty() || rec.server_type.is_empty() {
                 let _ = std::fs::remove_file(&pubkey_path);
@@ -2143,6 +2523,9 @@ pub fn rotate_execute(
                     "rotation record missing region/server_type".into(),
                 ));
             }
+            // L4's payload, with the same override-or-keep rule.
+            let region = trimmed_opt(input.new_region.as_ref()).unwrap_or(rec.region.as_str());
+
             let toolbox_profile = trimmed_opt(input.new_toolbox_profile.as_ref())
                 .or_else(|| {
                     if rec.toolbox_profile.is_empty() {
@@ -2157,7 +2540,7 @@ pub fn rotate_execute(
                 .run_provision(
                     ProvisionArgs {
                         provider,
-                        region: &rec.region,
+                        region,
                         server_type: &rec.server_type,
                         toolbox_profile,
                         families,
@@ -2181,7 +2564,25 @@ pub fn rotate_execute(
                         // invisible. An operator would burn a relay,
                         // pay for a full rebuild, and get the blocked
                         // SNI back.
-                        cover_sni: &rec.cover_sni,
+                        //
+                        // EXCEPT when the region moved (L4/L5). The
+                        // cover host `reprovision` picked is drawn from
+                        // the OLD region's peering neighbourhood
+                        // (publisher/deploy/sni, rule R6), and carrying
+                        // it to a box in a different neighbourhood
+                        // recreates the Wave-2 bug one relay at a time:
+                        // a TLS destination that does not belong
+                        // anywhere near the address it is advertised
+                        // from. Empty here means "pick for where this
+                        // box actually is", which is what provision
+                        // does, seeded on the derived server name — a
+                        // function of (publisher key, region), so the
+                        // new region genuinely yields a new pick.
+                        cover_sni: if region == rec.region {
+                            &rec.cover_sni
+                        } else {
+                            ""
+                        },
                         // Same reasoning as provision_run: the rotation
                         // only writes the record back on success, so a
                         // kept half-built box would be invisible to the
@@ -2199,6 +2600,18 @@ pub fn rotate_execute(
                 )?;
             }
             let _ = std::fs::remove_file(&pubkey_path);
+            // A reserved address survives the rebuild on the account
+            // but not in the record, and a field the record has lost is
+            // a field no teardown or release path can act on. See
+            // carry_floating_ip_forward.
+            let (provisioned, fip_warning) = carry_floating_ip_forward(
+                &provisioned,
+                &prior_floating_ip_id,
+                provider == rec.provider,
+            );
+            if let Some(w) = fip_warning {
+                warnings.push(w);
+            }
             ctx.db.update_record_json(operator_id, &provisioned)?;
             ctx.db.mark_provisioned(operator_id, (ctx.clock)())?;
         }
@@ -2291,6 +2704,7 @@ pub fn rotate_execute(
                 signed_sbp_id: 0,
                 bind_result: crate::cli_bridge::BindResult::default(),
                 signed_at_unix: now,
+                warnings,
             });
         }
         other => {
@@ -2332,22 +2746,70 @@ pub fn rotate_execute(
         on_progress,
     )?;
 
-    // FRP-9 commit 4/8: on L7 (path) and L8 (hostname) rotations
-    // we MUST re-publish the freshness JSON document so recipients
-    // can re-walk the sub-key chain on the new bundle. L1–L6 keep
-    // the existing freshness document because the public-domain /
-    // path / SNI / WS path that the recipient connects to is
-    // unchanged from the freshness fetcher's vantage at V1.5
-    // (freshness URL itself is FRP-controlled and stable).
+    // THE L3 WALL-CLOCK BUDGET.
     //
-    // Per supplement §14.4 the L9 origin-only path early-returns
-    // before this point; freshness is intentionally NOT touched.
-    if matches!(input.level.as_str(), "L7_CDN_PATH" | "L8_CDN_HOSTNAME") {
-        let signed_url = require_rotate_param(
-            input.freshness_signed_sbp_url.as_ref(),
-            "freshness_signed_sbp_url",
-        )?;
-        publish_freshness_after_rotate(ctx, operator_id, &bind, &signed_url, on_progress)?;
+    // Ported from the Go executor (`rotation.L3FastPathBudget`, 15s),
+    // which the Rust path did not have. L3 is the floating-IP swap: the
+    // rung whose entire value is that a burned address is replaced
+    // faster than a censor can react and faster than a user gives up.
+    // A 90-second "fast path" is not a fast path — it is an outage the
+    // operator was not warned about — so overrunning the budget is a
+    // FAILED rotation, not a slow success.
+    //
+    // Checked here, before the history transaction, for the same reason
+    // Go checks it before its commit: the new bundle must not be
+    // published as active once we already know the invariant broke. The
+    // re-sign itself has already happened and cannot be unwound; that
+    // is why the message says what state the operator is in rather than
+    // pretending nothing changed.
+    if input.level == "L3" && l3_budget_exceeded(started.elapsed()) {
+        return Err(WizardError::Pricing(format!(
+            "the address swap took {}s, over the {}s budget the fast path promises — the new pack was signed but has NOT been made active; check the relay reachable on its new address before retrying",
+            started.elapsed().as_secs(),
+            L3_FAST_PATH_BUDGET.as_secs(),
+        )));
+    }
+
+    // Re-publish the freshness document.
+    //
+    // THIS USED TO BE L7/L8 ONLY, and the comment justifying that said
+    // L1–L6 could keep the existing document because the recipient's
+    // connection parameters were unchanged. That was never true of the
+    // document: its payload is `current_bundle_sha256` plus the URL of
+    // the bundle carrying it, and EVERY rung above re-signs the pack.
+    // A rotation that re-signs without re-publishing leaves the
+    // document naming a digest that no longer exists, so every
+    // recipient checks, sees nothing new, and keeps dialling the relay
+    // that was just rotated away from — the exact failure Step 8 exists
+    // to remove.
+    //
+    // The gate is what the pack ACTUALLY CARRIES, not what is
+    // configured. `sign_relaypack` has just stamped it. A pack with no
+    // mirrors cannot be repaired over the network no matter how many
+    // endpoints the publisher adds afterwards, so the rotation says so
+    // and completes; a pack WITH mirrors must reach them, and failing
+    // to is a hard error, because the alternative is an operator
+    // closing this screen believing a fleet will heal itself.
+    //
+    // Per supplement §14.4 the L9 origin-only path early-returns before
+    // this point: nothing was re-signed, so the existing document is
+    // still exactly true.
+    let pack_mirrors = ctx.db.get(operator_id)?.freshness_mirrors_in_pack;
+    let pack_has_mirrors = !crate::freshness::parse_mirrors_json(&pack_mirrors).is_empty();
+    if pack_has_mirrors {
+        // L7/L8 collect the bundle URL on the rotation form; every
+        // other rung uses the one already stored. Either way it is
+        // persisted, so the freshness panel and the rotation path
+        // cannot disagree about where the pack lives.
+        let signed_url = trimmed_opt(input.freshness_signed_sbp_url.as_ref()).unwrap_or("");
+        publish_freshness_after_rotate(ctx, operator_id, &bind, signed_url, on_progress)?;
+    } else {
+        on_progress(ProgressEvent {
+            step: "publish_freshness_skipped".into(),
+            message: "the pack recipients hold carries no refresh address; they will not learn about this rotation over the network".into(),
+            ts: String::new(),
+            extra: Default::default(),
+        });
     }
 
     let now = (ctx.clock)();
@@ -2362,6 +2824,55 @@ pub fn rotate_execute(
         &format!("{} | {}", input.level, input.reason),
     )?;
 
+    // RELEASE THE ADDRESS THE RELAY MOVED OFF — after the commit,
+    // never before.
+    //
+    // Hetzner keeps both addresses attached across an L3 (the adapter
+    // deliberately does not detach), which is the rotation's safety
+    // property: between the swap and this line the relay answers on
+    // BOTH, so a failure anywhere in between leaves every distributed
+    // pack working. It is also why this leg is mandatory rather than
+    // cosmetic. Without it the old address stays attached, stays
+    // billing, and keeps serving — while `pub.danger.address.confirm.old_ip`
+    // and `pub.danger.address.done.body` both tell the operator it does
+    // not. One of the two had to change; this is the one that should.
+    //
+    // Failures here cost money, not connectivity, so they are warnings
+    // on the result rather than a failed rotation: the pack is signed
+    // and committed and undoing that to tidy up a billing resource
+    // would be the wrong trade. Same rule the Go executor's
+    // `l3Swap.finish` applies.
+    if input.level == "L3" && !prior_floating_ip_id.is_empty() && prior_floating_ip_id != l3_new_fip_id
+    {
+        let release_path = ctx
+            .staging_dir
+            .join(format!("{operator_id}.release.record.json"));
+        let current = ctx.db.get(operator_id)?.operator_record_json;
+        match std::fs::write(&release_path, current.as_bytes()) {
+            Ok(()) => {
+                match ctx.cli.run_release_fip(crate::cli_bridge::ReleaseFipArgs {
+                    record_path: &release_path,
+                    token: token.as_str(),
+                    fip_id: &prior_floating_ip_id,
+                }) {
+                    Ok(outcome) => {
+                        warnings.extend(outcome.warnings);
+                        if !outcome.record_json.is_empty() {
+                            let _ = ctx.db.update_record_json(operator_id, &outcome.record_json);
+                        }
+                    }
+                    Err(e) => warnings.push(format!(
+                        "the previous address (floating IP {prior_floating_ip_id}) is still attached and still billing — releasing it failed: {e}"
+                    )),
+                }
+                let _ = std::fs::remove_file(&release_path);
+            }
+            Err(e) => warnings.push(format!(
+                "the previous address (floating IP {prior_floating_ip_id}) is still attached and still billing — could not stage the release: {e}"
+            )),
+        }
+    }
+
     on_progress(ProgressEvent {
         step: "rotate_done".into(),
         message: format!("signed_sbps id={new_sbp_id}"),
@@ -2374,123 +2885,65 @@ pub fn rotate_execute(
         signed_sbp_id: new_sbp_id,
         bind_result: bind,
         signed_at_unix: now,
+        warnings,
     })
 }
 
-/// FRP-9 commit 4/8: build + sign + (eventually) publish a fresh
-/// freshness JSON document after an L7 / L8 rotation. The current
-/// signed-SBP URL is the FRP's published bundle URL; the
-/// recipient's freshness fetcher (core/refresh/relaypack.go)
-/// reads this document and redirects to the new bundle.
+/// Re-publish the freshness document after a rotation that changed
+/// the pack.
 ///
-/// This commit ships the wizard ↔ CLI plumbing and the in-memory
-/// build + sign flow (covered by publisher/deploy/freshness
-/// tests). Live backend Put (R2 / GH Pages) lands in a follow-up
-/// patch alongside the SDK wiring; the wizard stages the signed
-/// bytes in `<staging_dir>/freshness.<operator_id>.json` so a
-/// manual upload (or the CI bridge planned for FRP-9 commit 8/8)
-/// can publish them.
+/// WHERE THE WORK ACTUALLY IS. This used to be 90 lines that staged the
+/// signing key, called `publish-freshness`, and wrote the signed bytes
+/// into the staging directory for a human to upload by hand — because
+/// the live upload was stubbed. It is now a thin adapter over
+/// [`crate::freshness::publish`], which does the same staging for every
+/// credential (signing key AND cloud write-keys), calls the same CLI
+/// with the upload flags, and records the per-provider outcome. Two
+/// copies of the credential-staging dance was one copy too many; the
+/// one that survived is the one the freshness panel also calls, so the
+/// rotation path and the manual "publish now" button cannot drift.
+///
+/// `signed_sbp_url` is the operator's answer to "where will the new
+/// .sbp be downloadable". It is persisted here rather than passed
+/// through, because the freshness panel needs the same answer and a
+/// rotation is not the only thing that publishes.
 fn publish_freshness_after_rotate(
     ctx: &WizardCtx,
     operator_id: i64,
-    bind: &BindResult,
+    _bind: &BindResult,
     signed_sbp_url: &str,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<()> {
-    let row = ctx.db.get(operator_id)?;
-    // publisher_pub_hex is already stored as hex in V002.
-    let publisher_pub_hex = row.publisher_pub_hex.clone();
-
-    // Stash the priv key (or active sub-key) in a mode-0600
-    // tempfile inside the staging dir; delete on exit. The
-    // daal-deploy publish-freshness CLI reads from a path
-    // (rather than stdin) so this temp-file step is unavoidable
-    // — we keep its lifetime as short as possible.
-    let active_subkey = ctx.db.active_subkey(operator_id)?;
-    let priv_dir = ctx.staging_dir.join(format!("freshness.{operator_id}"));
-    std::fs::create_dir_all(&priv_dir)
-        .map_err(|e| WizardError::Pricing(format!("mkdir freshness staging: {e}")))?;
-    let priv_path = priv_dir.join("priv.bin");
-    let mut subkey_cert_path: Option<PathBuf> = None;
-
-    let mut priv_buf = if let Some(subkey) = active_subkey {
-        subkey_cert_path = Some(PathBuf::from(subkey.subkey_cert_path.clone()));
-        let bytes = std::fs::read(&subkey.subkey_priv_path).map_err(|e| {
-            WizardError::Pricing(format!(
-                "read sub-key priv {}: {e}",
-                subkey.subkey_priv_path
-            ))
-        })?;
-        Zeroizing::new(bytes)
-    } else {
-        custody_get(ctx, &row.publisher_priv_keystore_alias)?
-    };
-    std::fs::write(&priv_path, priv_buf.as_slice())
-        .map_err(|e| WizardError::Pricing(format!("write priv tempfile: {e}")))?;
-    // mode-0600 on POSIX. tempfile crate's NamedTempFile would
-    // also work; we open + chmod by hand to stay on the same
-    // path-based contract used by cf_token elsewhere.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600));
+    if !signed_sbp_url.trim().is_empty() {
+        crate::freshness::set_pack_url(ctx, operator_id, signed_sbp_url)?;
     }
-    priv_buf.zeroize();
-
-    let out_file = ctx
-        .staging_dir
-        .join(format!("freshness.{operator_id}.json"));
-
-    on_progress(ProgressEvent {
-        step: "publish_freshness_start".into(),
-        message: format!("relay_pack_id={}", bind.relay_pack_id),
-        ts: String::new(),
-        extra: Default::default(),
-    });
-
-    let res = if subkey_cert_path.is_some() {
-        ctx.cli.run_publish_freshness(PublishFreshnessArgs {
-            relay_pack_id: &bind.relay_pack_id,
-            current_bundle_sha256: &bind.sbp_sha256,
-            current_signed_url: signed_sbp_url,
-            publisher_pub_hex: &publisher_pub_hex,
-            root_priv_path: None,
-            subkey_priv_path: Some(&priv_path),
-            subkey_cert_path: subkey_cert_path.as_deref(),
-            out_file: Some(&out_file),
-            now_unix: (ctx.clock)(),
-        })
-    } else {
-        ctx.cli.run_publish_freshness(PublishFreshnessArgs {
-            relay_pack_id: &bind.relay_pack_id,
-            current_bundle_sha256: &bind.sbp_sha256,
-            current_signed_url: signed_sbp_url,
-            publisher_pub_hex: &publisher_pub_hex,
-            root_priv_path: Some(&priv_path),
-            subkey_priv_path: None,
-            subkey_cert_path: None,
-            out_file: Some(&out_file),
-            now_unix: (ctx.clock)(),
-        })
-    };
-    // Always best-effort wipe + delete the priv tempfile.
-    if let Ok(mut fbytes) = std::fs::read(&priv_path) {
-        for b in fbytes.iter_mut() {
-            *b = 0;
-        }
-        let _ = std::fs::write(&priv_path, &fbytes);
+    let report = crate::freshness::publish(ctx, operator_id, on_progress)?;
+    // A rotation whose freshness publish did not land is NOT a
+    // successful rotation from the recipient's point of view: the pack
+    // changed and nobody can find out. The rotation itself has already
+    // committed, so this cannot be unwound — it is surfaced as a hard
+    // error precisely so the operator does not close the screen
+    // believing the fleet will heal itself.
+    if !report.blocked_reason.is_empty() {
+        return Err(WizardError::Pricing(format!(
+            "the pack was re-signed but its freshness document could not be published ({}); recipients will keep using the old pack until you deliver files by hand or fix this on the relay's freshness settings",
+            report.blocked_reason
+        )));
     }
-    let _ = std::fs::remove_file(&priv_path);
-    let _ = std::fs::remove_dir(&priv_dir);
-
-    let res = res.map_err(|e| WizardError::Pricing(format!("publish-freshness: {e}")))?;
-
-    on_progress(ProgressEvent {
-        step: "publish_freshness_done".into(),
-        message: format!("doc={}", res.signed_doc_path),
-        ts: String::new(),
-        extra: Default::default(),
-    });
+    if report.succeeded < report.min_mirrors {
+        let failures: Vec<String> = report
+            .results
+            .iter()
+            .filter(|r| !r.ok)
+            .map(|r| format!("{}: {}", r.kind, r.detail))
+            .collect();
+        return Err(WizardError::Pricing(format!(
+            "the pack was re-signed but its freshness document reached only {} of {} required mirrors — {}",
+            report.succeeded,
+            report.min_mirrors,
+            failures.join("; ")
+        )));
+    }
     Ok(())
 }
 
@@ -3203,6 +3656,9 @@ mod tests {
             helper_ip: String::new(),
             helper_ip_source: String::new(),
             helper_ip_at_unix: 0,
+            freshness_mirrors_in_pack: String::new(),
+            freshness_pack_url: String::new(),
+            freshness_last_sequence: 0,
         }
     }
 
@@ -4635,6 +5091,305 @@ mod tests {
 
     // ---- FRP-7 rotation surface ----------------------------------
 
+    /// Give a relay the two DISTINCT providers a publish needs.
+    ///
+    /// Two, not one, because `freshness::publish` refuses to run below
+    /// `MIN_MIRRORS` — a rotation that lands a freshness document on a
+    /// single host has quietly handed the censor an off switch while
+    /// reporting success, so the guard is load-bearing and every test
+    /// that exercises the publish path has to satisfy it honestly.
+    fn stage_two_freshness_mirrors(ctx: &WizardCtx, operator_id: i64) {
+        crate::freshness::set_pack_url(
+            ctx,
+            operator_id,
+            "https://packs.example.com/operator-1.sbp",
+        )
+        .unwrap();
+        crate::freshness::add_endpoint(
+            ctx,
+            operator_id,
+            crate::freshness::FreshnessEndpointInput {
+                kind: "r2".into(),
+                public_url: "https://r2.example.com/f.json".into(),
+                account_id: "acc".into(),
+                bucket: "buck".into(),
+                object_key: "f.json".into(),
+                access_key_id: "AKIA_TEST".into(),
+                secret_access_key: "shhh".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::freshness::add_endpoint(
+            ctx,
+            operator_id,
+            crate::freshness::FreshnessEndpointInput {
+                kind: "ghpages".into(),
+                public_url: "https://o.github.io/r/f.json".into(),
+                gh_owner: "o".into(),
+                gh_repo: "r".into(),
+                gh_path: "f.json".into(),
+                gh_pat: "ghp_test".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    // -----------------------------------------------------------
+    // Wave 3 Step 8 — freshness
+    // -----------------------------------------------------------
+
+    /// The single most important property of this feature: a cloud
+    /// WRITE credential must not be reachable from the database. If it
+    /// were, a publisher's SQLite backup — or the recovery-key export,
+    /// or a support bundle — would carry the ability to replace the
+    /// document every one of their recipients trusts.
+    #[test]
+    fn freshness_credentials_never_touch_the_database() {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, _dir, _m) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        crate::freshness::add_endpoint(
+            &ctx,
+            id,
+            crate::freshness::FreshnessEndpointInput {
+                kind: "r2".into(),
+                public_url: "https://r2.example.com/f.json".into(),
+                account_id: "acc".into(),
+                bucket: "buck".into(),
+                object_key: "f.json".into(),
+                access_key_id: "AKIA_SECRET_ID".into(),
+                secret_access_key: "SUPER_SECRET_KEY".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rows = ctx.db.list_freshness_endpoints(id).unwrap();
+        assert_eq!(rows.len(), 1);
+        let serialised = serde_json::to_string(&rows[0]).unwrap();
+        assert!(
+            !serialised.contains("SUPER_SECRET_KEY"),
+            "secret access key reached the DB row: {serialised}"
+        );
+        assert!(
+            !serialised.contains("AKIA_SECRET_ID"),
+            "access key id reached the DB row: {serialised}"
+        );
+        // …and the UI shape, which is what actually crosses the IPC
+        // boundary, must not carry it either.
+        let status = crate::freshness::status(&ctx, id).unwrap();
+        let ui = serde_json::to_string(&status).unwrap();
+        assert!(!ui.contains("SUPER_SECRET_KEY"), "{ui}");
+        assert!(!ui.contains("AKIA_SECRET_ID"), "{ui}");
+        // It IS in custody, or the endpoint could never publish.
+        let blob = ctx.custody.get(&rows[0].secret_alias).unwrap();
+        assert!(String::from_utf8_lossy(&blob).contains("SUPER_SECRET_KEY"));
+    }
+
+    /// Deleting an endpoint must forget its key. A cloud write-key
+    /// still in the keystore for an account the operator has stopped
+    /// thinking about is a live credential nobody is watching.
+    #[test]
+    fn deleting_an_endpoint_forgets_its_credential() {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, _dir, _m) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        stage_two_freshness_mirrors(&ctx, id);
+        let rows = ctx.db.list_freshness_endpoints(id).unwrap();
+        let alias = rows[0].secret_alias.clone();
+        assert!(ctx.custody.get(&alias).is_ok());
+        crate::freshness::delete_endpoint(&ctx, rows[0].id).unwrap();
+        assert!(
+            ctx.custody.get(&alias).is_err(),
+            "credential survived the endpoint it belonged to"
+        );
+    }
+
+    /// Two buckets at one provider is not diversity. Refusing it in
+    /// code as well as in the schema is what stops the
+    /// distinct-provider count — the number the censorship warning is
+    /// computed from — being inflated.
+    #[test]
+    fn a_second_endpoint_at_the_same_provider_is_refused() {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, _dir, _m) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        let mk = || crate::freshness::FreshnessEndpointInput {
+            kind: "r2".into(),
+            public_url: "https://r2.example.com/f.json".into(),
+            account_id: "acc".into(),
+            bucket: "buck".into(),
+            object_key: "f.json".into(),
+            access_key_id: "id".into(),
+            secret_access_key: "s".into(),
+            ..Default::default()
+        };
+        crate::freshness::add_endpoint(&ctx, id, mk()).unwrap();
+        assert!(crate::freshness::add_endpoint(&ctx, id, mk()).is_err());
+    }
+
+    /// ONE mirror is worse than none: the publisher believes they are
+    /// covered while a censor turns the whole recovery path off with a
+    /// single DNS entry. mirror_args must therefore return nothing,
+    /// and the pack must be signed with no freshness path at all.
+    #[test]
+    fn one_configured_provider_yields_no_freshness_path_at_all() {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, _dir, _m) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        crate::freshness::add_endpoint(
+            &ctx,
+            id,
+            crate::freshness::FreshnessEndpointInput {
+                kind: "r2".into(),
+                public_url: "https://r2.example.com/f.json".into(),
+                account_id: "acc".into(),
+                bucket: "buck".into(),
+                object_key: "f.json".into(),
+                access_key_id: "id".into(),
+                secret_access_key: "s".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(crate::freshness::mirror_args(&ctx, id).unwrap().is_empty());
+        let st = crate::freshness::status(&ctx, id).unwrap();
+        assert_eq!(st.distinct_providers, 1);
+        assert_eq!(st.min_mirrors, 2);
+        assert!(st.mirrors_in_pack.is_empty());
+    }
+
+    /// The relay screen must answer "will the files people already hold
+    /// repair themselves?" from what went INTO the pack, never from
+    /// what is configured now. Configuring mirrors today does not
+    /// change a bundle somebody imported last month.
+    #[test]
+    fn mirrors_in_pack_reflect_the_signed_pack_not_the_configuration() {
+        let bind = BindResult {
+            sbp_path: "/tmp/x.sbp".into(),
+            sbp_sha256: "a".repeat(64),
+            relay_pack_id: "rp-fresh".into(),
+            ..Default::default()
+        };
+        let mock = Arc::new(MockRunner::new(test_pricing()).with_bind_result(bind));
+        let (ctx, dir, mock) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+
+        // Signed BEFORE any mirror exists: the pack cannot self-heal.
+        sign_relaypack(
+            &ctx,
+            id,
+            crate::phase::RELAYPACK_PHASE,
+            dir.path(),
+            "pub",
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(crate::freshness::status(&ctx, id)
+            .unwrap()
+            .mirrors_in_pack
+            .is_empty());
+        assert!(mock.last_freshness_mirrors().is_empty());
+
+        // Configuring two providers does NOT retroactively fix it.
+        stage_two_freshness_mirrors(&ctx, id);
+        assert!(
+            crate::freshness::status(&ctx, id)
+                .unwrap()
+                .mirrors_in_pack
+                .is_empty(),
+            "configuration must not be mistaken for a signed pack"
+        );
+
+        // Only a fresh signature does.
+        sign_relaypack(
+            &ctx,
+            id,
+            crate::phase::RELAYPACK_PHASE,
+            dir.path(),
+            "pub",
+            &mut |_| {},
+        )
+        .unwrap();
+        let st = crate::freshness::status(&ctx, id).unwrap();
+        assert_eq!(
+            st.mirrors_in_pack,
+            vec![
+                "r2=https://r2.example.com/f.json".to_string(),
+                "ghpages=https://o.github.io/r/f.json".to_string(),
+            ]
+        );
+        assert_eq!(mock.last_freshness_mirrors().len(), 2);
+    }
+
+    /// A publish that cannot run must say WHY in a machine-readable
+    /// form the UI can render next to the field that fixes it — not
+    /// throw a red error with no next step.
+    #[test]
+    fn publish_reports_the_specific_thing_that_is_missing() {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, _dir, _m) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+
+        // No signed pack yet.
+        let r = crate::freshness::publish(&ctx, id, &mut |_| {}).unwrap();
+        assert_eq!(r.blocked_reason, "no_signed_pack");
+
+        ctx.db
+            .record_signed_sbp(id, &"b".repeat(64), "rp-1", 1_700_000_000)
+            .unwrap();
+        let r = crate::freshness::publish(&ctx, id, &mut |_| {}).unwrap();
+        assert_eq!(r.blocked_reason, "no_pack_url");
+
+        crate::freshness::set_pack_url(&ctx, id, "https://packs.example.com/x.sbp").unwrap();
+        let r = crate::freshness::publish(&ctx, id, &mut |_| {}).unwrap();
+        assert_eq!(r.blocked_reason, "too_few_providers");
+    }
+
+    /// A provider that refused the write must be recorded as refused,
+    /// per provider, with the provider's own words — and the run must
+    /// NOT report success just because the other one worked.
+    #[test]
+    fn a_refusing_provider_is_recorded_as_refusing() {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        ctx.db
+            .record_signed_sbp(id, &"c".repeat(64), "rp-2", 1_700_000_000)
+            .unwrap();
+        stage_two_freshness_mirrors(&ctx, id);
+        mock.publish_freshness_fail
+            .lock()
+            .unwrap()
+            .push("ghpages".into());
+
+        let report = crate::freshness::publish(&ctx, id, &mut |_| {}).unwrap();
+        assert_eq!(report.blocked_reason, "");
+        assert_eq!(report.succeeded, 1, "one provider refused");
+        assert!(report.succeeded < report.min_mirrors);
+
+        let rows = ctx.db.list_freshness_endpoints(id).unwrap();
+        let gh = rows.iter().find(|r| r.kind == "ghpages").unwrap();
+        assert!(!gh.last_publish_ok);
+        assert_ne!(gh.last_publish_at_unix, 0, "a refusal is still an attempt");
+        assert!(gh.last_published_url.is_empty(), "nothing is fetchable there");
+        let r2 = rows.iter().find(|r| r.kind == "r2").unwrap();
+        assert!(r2.last_publish_ok);
+        assert!(!r2.last_published_url.is_empty());
+    }
+
+    /// The L3 fast path's promise is the number, so the number is
+    /// tested rather than trusted.
+    #[test]
+    fn l3_budget_is_fifteen_seconds() {
+        use std::time::Duration;
+        assert_eq!(L3_FAST_PATH_BUDGET, Duration::from_secs(15));
+        assert!(!l3_budget_exceeded(Duration::from_secs(15)));
+        assert!(l3_budget_exceeded(Duration::from_millis(15_001)));
+    }
+
     fn make_provisioned_op(ctx: &WizardCtx) -> i64 {
         let id = store_cloud_token(ctx, "hetzner", "tok-abc", None).unwrap();
         select_profile(
@@ -4798,6 +5553,291 @@ mod tests {
         assert!(events.iter().any(|e| e.step == "rotate_provider_done"));
     }
 
+    /// THE NO-OP THAT REPORTED SUCCESS.
+    ///
+    /// The address-swap sheet used to pre-fill the field with the id the
+    /// relay was ALREADY on and enable the button. Pressing it ran a
+    /// rotation that attached the same address, wrote a history row,
+    /// published a freshness document and told the operator "the relay
+    /// now answers on the new address" — while it sat on the burned one
+    /// and the operator stopped looking. A failure that reports success
+    /// is worse than one that reports failure.
+    #[test]
+    fn rotate_execute_l3_refuses_reattaching_the_current_address() {
+        let (ctx, _dir, mock) = l3_ctx();
+        let id = make_provisioned_op(&ctx);
+        // The relay is already on fip-42.
+        let mut rec: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        rec["floating_ip_id"] = serde_json::Value::String("fip-42".into());
+        ctx.db
+            .update_record_json(id, &serde_json::to_string(&rec).unwrap())
+            .unwrap();
+
+        let before = ctx.db.get(id).unwrap().operator_record_json;
+        let mut on_prog = |_: ProgressEvent| {};
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                new_floating_ip_id: Some("fip-42".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("already on floating IP fip-42"),
+            "the refusal must name the mistake: {err}"
+        );
+        // The provider was never touched, no history row was written,
+        // and the record is byte-identical.
+        assert_eq!(mock.assign_fip_calls.lock().unwrap().len(), 0);
+        assert!(ctx.db.list_signed_sbps_history(id).unwrap().is_empty());
+        assert_eq!(ctx.db.get(id).unwrap().operator_record_json, before);
+    }
+
+    /// The previous address is released AFTER the history row commits,
+    /// and never before.
+    ///
+    /// Hetzner keeps both attached across the swap, which is the
+    /// rotation's safety property — every distributed pack keeps working
+    /// until the new one is signed. It is also why the release leg is
+    /// mandatory rather than cosmetic: without it the old address stays
+    /// attached, stays billing, and keeps serving, while two
+    /// operator-facing strings say it does not.
+    #[test]
+    fn rotate_execute_l3_releases_the_previous_address_after_the_commit() {
+        let (ctx, _dir, mock) = l3_ctx();
+        let id = make_provisioned_op(&ctx);
+        let mut rec: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        rec["floating_ip_id"] = serde_json::Value::String("fip-old".into());
+        ctx.db
+            .update_record_json(id, &serde_json::to_string(&rec).unwrap())
+            .unwrap();
+
+        let mut on_prog = |_: ProgressEvent| {};
+        let out = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                new_floating_ip_id: Some("fip-new".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap();
+        assert_eq!(out.level, "L3");
+        let released = mock.release_fip_calls.lock().unwrap().clone();
+        assert_eq!(
+            released,
+            vec!["fip-old".to_string()],
+            "the address the relay moved off was never given back — it keeps billing and keeps serving"
+        );
+        // And it happened after the commit: the history row exists.
+        assert_eq!(ctx.db.list_signed_sbps_history(id).unwrap().len(), 1);
+    }
+
+    /// L6's payload is the toolbox profile. Without a refusal,
+    /// `new_toolbox_profile: None` made it an expensive L1 — the box is
+    /// destroyed, every distributed pack is invalidated, and the wire
+    /// shape is unchanged.
+    #[test]
+    fn rotate_execute_l6_requires_a_profile_that_differs() {
+        let (ctx, _dir, mock) = l3_ctx();
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_: ProgressEvent| {};
+
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L6".into(),
+                reason: "profile".into(),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("DIFFERENT toolbox profile"), "{err}");
+
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L6".into(),
+                reason: "profile".into(),
+                new_toolbox_profile: Some("iran-default".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("already on iran-default"), "{err}");
+        // Nothing was rebuilt on either refusal, which is the point:
+        // the box is deleted before the profile is ever resolved.
+        assert_eq!(*mock.provision_calls.lock().unwrap(), 0);
+    }
+
+    /// THE ROTATION'S DOCUMENT HAS TO BE ADDRESSED TO THE PACKS PEOPLE
+    /// ARE ACTUALLY HOLDING.
+    ///
+    /// `relay_pack_id` is a hash of provider|server_id|region|public_ip|
+    /// families, so re-signing after an L3 produces a NEW id. The
+    /// document goes to the same object URL every recipient polls, and
+    /// a recipient compares it against the id stamped on its own route
+    /// rows — the OLD one. Without the supersedes list every device
+    /// rejects the document that repairs it while the publisher's
+    /// screen reports a successful two-mirror publish.
+    ///
+    /// And the sequence has to strictly advance, with the counter
+    /// persisted: derived from the clock alone, a machine whose clock
+    /// went backwards mints a document the whole fleet refuses.
+    #[test]
+    fn rotate_execute_publishes_a_document_that_supersedes_the_prior_packs() {
+        let (ctx, _dir, mock) = l3_ctx();
+        let id = make_provisioned_op(&ctx);
+        stage_two_freshness_mirrors(&ctx, id);
+        ctx.db
+            .set_freshness_pack_url(id, "https://packs.example.com/relay.sbp")
+            .unwrap();
+        // Two earlier packs are already in people's hands.
+        ctx.db
+            .record_rotated_sbp(id, 1_699_000_000, "/tmp/a.sbp", &"a".repeat(64), "rp-old", 1, "seed")
+            .unwrap();
+        ctx.db
+            .record_rotated_sbp(id, 1_699_100_000, "/tmp/b.sbp", &"b".repeat(64), "rp-older", 1, "seed")
+            .unwrap();
+
+        let mut on_prog = |_: ProgressEvent| {};
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                new_floating_ip_id: Some("fip-new".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap();
+
+        let pf = mock.publish_freshness_calls.lock().unwrap();
+        assert_eq!(pf.len(), 1, "the rotation must publish");
+        assert_eq!(pf[0].relay_pack_id, "rp-rotated");
+        let mut sup = pf[0].supersedes.clone();
+        sup.sort();
+        assert_eq!(
+            sup,
+            vec!["rp-old".to_string(), "rp-older".to_string()],
+            "the document does not name the packs recipients are holding, so none of them will accept it"
+        );
+        assert!(
+            pf[0].sequence > pf[0].min_sequence,
+            "sequence {} does not advance past the last published {}",
+            pf[0].sequence,
+            pf[0].min_sequence
+        );
+        drop(pf);
+
+        // The counter is persisted, so the NEXT publish cannot re-use
+        // it even if the clock has since gone backwards.
+        let stored = ctx.db.get(id).unwrap().freshness_last_sequence;
+        assert!(stored > 0, "the published sequence was not persisted");
+    }
+
+    /// Shared setup for the L3/L6 rotation tests above.
+    fn l3_ctx() -> (WizardCtx, tempfile::TempDir, Arc<MockRunner>) {
+        let bind = BindResult {
+            sbp_path: "/tmp/rotated.sbp".into(),
+            sbp_sha256: "b".repeat(64),
+            relay_pack_id: "rp-rotated".into(),
+            fingerprint_hex: "e".repeat(64),
+            fingerprint_en: "alpha bravo charlie delta".into(),
+            fingerprint_fa: "یک دو سه چهار".into(),
+            lint_warnings: vec![],
+            shared_risk_edges: 2,
+        };
+        let pricing = Pricing {
+            provider: "hetzner".into(),
+            region: "fsn1".into(),
+            server_type: "cx22".into(),
+            hourly_eur: 0.005,
+            monthly_eur: 3.85,
+            included_traffic_tb_per_month: None,
+            overage_eur_per_gb: None,
+        };
+        let mock = Arc::new(
+            MockRunner::new(pricing)
+                .with_provision_record(full_record_json())
+                .with_bind_result(bind),
+        );
+        ctx_with_mock(1_700_000_000, mock)
+    }
+
+    // An L3 with no floating-IP id used to be rejected outright
+    // ("rotation requires floating IP id"), which meant the rung was
+    // reachable only by an operator who had reserved an address by hand
+    // in their provider console and knew its numeric id — and the
+    // wizard has no field to type one into. The empty id now reaches
+    // `daal-deploy assign-fip`, which reserves one.
+    #[test]
+    fn rotate_execute_l3_without_an_id_reserves_an_address() {
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(
+                MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cx22".into(),
+                    hourly_eur: 0.005,
+                    monthly_eur: 3.85,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })
+                .with_provision_record(full_record_json())
+                .with_bind_result(BindResult {
+                    sbp_path: "/tmp/rotated-l3b.sbp".into(),
+                    sbp_sha256: "a".repeat(64),
+                    relay_pack_id: "rp-rotated-l3b".into(),
+                    fingerprint_hex: "b".repeat(64),
+                    fingerprint_en: "alpha bravo charlie delta".into(),
+                    fingerprint_fa: "یک دو سه چهار".into(),
+                    lint_warnings: vec![],
+                    shared_risk_edges: 2,
+                }),
+            ),
+        );
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                // no new_floating_ip_id
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .expect("an L3 with no id must reserve an address, not refuse");
+
+        let calls = mock.assign_fip_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].fip_id, "",
+            "the empty id must reach the CLI, which is what triggers the reservation"
+        );
+    }
+
     /// The gate this whole step exists to close, on the Rust side.
     ///
     /// `sign_relaypack` is called from two places: the wizard's build
@@ -4898,6 +5938,12 @@ mod tests {
                 reason: "datacenter prefix burned".into(),
                 helper_ip: Some("1.2.3.4".into()),
                 new_toolbox_profile: Some("tcp-only-vps-native".into()),
+                // THE RUNG'S ENTIRE PAYLOAD. Without it the rebuild
+                // passed `region: &rec.region` and L4 was an expensive
+                // L1: the box destroyed, every pack invalidated, and
+                // the new server one address along in the same
+                // datacenter and the same AS.
+                new_region: Some("hel1".into()),
                 ..Default::default()
             },
             &mut on_prog,
@@ -4912,7 +5958,185 @@ mod tests {
         );
         drop(reprovision_calls);
         assert_eq!(*mock.provision_calls.lock().unwrap(), 1);
+        let targets = mock.provision_targets.lock().unwrap();
+        assert_eq!(
+            targets[0],
+            ("hetzner".to_string(), "hel1".to_string()),
+            "L4 rebuilt in the record's existing region — the rung moved nothing"
+        );
+        drop(targets);
+        // The cover host was picked for the OLD region's peering
+        // neighbourhood, so it must NOT be carried across: an empty
+        // --cover-sni tells provision to pick for where the box
+        // actually is.
+        assert_eq!(
+            mock.provision_cover_snis.lock().unwrap()[0],
+            "",
+            "L4 carried the old region's cover host into the new neighbourhood"
+        );
         assert_eq!(ctx.db.list_signed_sbps_history(id).unwrap().len(), 1);
+    }
+
+    // A rung that destroys the box and changes nothing must refuse,
+    // not report success. Before Step 10 this was the ONLY thing L4
+    // could do.
+    #[test]
+    fn rotate_execute_l4_without_a_new_region_is_refused() {
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(
+                MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cx22".into(),
+                    hourly_eur: 0.005,
+                    monthly_eur: 3.85,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })
+                .with_provision_record(full_record_json()),
+            ),
+        );
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L4".into(),
+                reason: "datacenter prefix burned".into(),
+                helper_ip: Some("1.2.3.4".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("new_region"),
+            "the refusal must name the missing input: {err}"
+        );
+        assert_eq!(*mock.provision_calls.lock().unwrap(), 0);
+    }
+
+    // L5 is the same story one level up: it reused `rec.provider`, so
+    // "move to a different provider" rebuilt on the same one — while
+    // the reason to run it is usually that the provider's whole AS is
+    // graylisted.
+    #[test]
+    fn rotate_execute_l5_moves_provider_and_requires_a_region() {
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(
+                MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cx22".into(),
+                    hourly_eur: 0.005,
+                    monthly_eur: 3.85,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })
+                .with_provision_record(full_record_json())
+                .with_bind_result(BindResult {
+                    sbp_path: "/tmp/rotated-l5.sbp".into(),
+                    sbp_sha256: "e".repeat(64),
+                    relay_pack_id: "rp-rotated-l5".into(),
+                    fingerprint_hex: "f".repeat(64),
+                    fingerprint_en: "alpha bravo charlie delta".into(),
+                    fingerprint_fa: "یک دو سه چهار".into(),
+                    lint_warnings: vec![],
+                    shared_risk_edges: 3,
+                }),
+            ),
+        );
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        // Region codes are provider-scoped ("fra" is Vultr's and
+        // Stark's; "fsn1" is Hetzner's), so carrying the old one
+        // across is a provision failure at best.
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L5".into(),
+                reason: "provider AS graylisted".into(),
+                helper_ip: Some("1.2.3.4".into()),
+                new_provider: Some("vultr".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("new_region"),
+            "an L5 with no region must say why: {err}"
+        );
+
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L5".into(),
+                reason: "provider AS graylisted".into(),
+                helper_ip: Some("1.2.3.4".into()),
+                new_provider: Some("vultr".into()),
+                new_region: Some("fra".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap();
+        let targets = mock.provision_targets.lock().unwrap();
+        assert_eq!(
+            targets.last().unwrap(),
+            &("vultr".to_string(), "fra".to_string()),
+            "L5 rebuilt on the provider it was told to leave"
+        );
+    }
+
+    // Same provider on an L5 is an expensive no-op: the box is
+    // destroyed and rebuilt on exactly the thing being rotated away
+    // from.
+    #[test]
+    fn rotate_execute_l5_without_a_new_provider_is_refused() {
+        let (ctx, _dir, mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(
+                MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cx22".into(),
+                    hourly_eur: 0.005,
+                    monthly_eur: 3.85,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })
+                .with_provision_record(full_record_json()),
+            ),
+        );
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L5".into(),
+                reason: "provider AS graylisted".into(),
+                helper_ip: Some("1.2.3.4".into()),
+                new_region: Some("nbg1".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("new_provider"),
+            "the refusal must name the missing input: {err}"
+        );
+        assert_eq!(*mock.provision_calls.lock().unwrap(), 0);
     }
 
     #[test]
@@ -5322,6 +6546,7 @@ mod tests {
         ctx.custody
             .put(&cloudflare_alias(id), b"cf-token")
             .unwrap();
+        stage_two_freshness_mirrors(&ctx, id);
         let row = cdn_row_fixture(id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
 
@@ -5400,6 +6625,7 @@ mod tests {
         ctx.custody
             .put(&cloudflare_alias(id), b"cf-token")
             .unwrap();
+        stage_two_freshness_mirrors(&ctx, id);
         let row = cdn_row_fixture(id, "front.example.com");
         let front_id = record_cdn_front_attestation(&ctx, &row).unwrap();
 

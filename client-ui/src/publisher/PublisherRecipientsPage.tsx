@@ -55,6 +55,11 @@ import {
     withHelperIp,
 } from './helperIp';
 import { custodyLabelKey, fetchCustodyStatus } from './CustodyGate';
+// Wave 3 Step 8 + 9. Both live in their own files because both are
+// substantial screens in their own right, and this page is already the
+// single busiest file in the publisher surface.
+import { FreshnessPanel } from './FreshnessPanel';
+import { AddressSwap } from './AddressSwap';
 import { RelayDestroySheet, relayTitle } from './RelayListPage';
 
 interface Props {
@@ -172,6 +177,15 @@ export default function PublisherRecipientsPage({
     onBack,
 }: Props) {
     const [operator, setOperator] = useState<OperatorSummary | null>(null);
+    // Wave 3 Step 8. `freshTick` is bumped after anything that re-signs
+    // the pack, because the freshness panel's headline answer ("can the
+    // files people hold repair themselves?") is stamped at sign time and
+    // would otherwise sit there stale.
+    const [freshTick, setFreshTick] = useState(0);
+    // How many refresh addresses are inside the SIGNED pack. Drives the
+    // consequence copy on the address swap; loaded alongside the relay
+    // so the sheet never has to ask while the operator is reading it.
+    const [mirrorsInPack, setMirrorsInPack] = useState(0);
     const [recipients, setRecipients] = useState<RecipientSummary[]>([]);
     const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
     const [custody, setCustody] = useState<PublisherCustodyStatus | null>(null);
@@ -264,6 +278,14 @@ export default function PublisherRecipientsPage({
             setOperator(ops.find((o) => o.id === operatorId) ?? null);
         } catch (e) {
             setError(String(e));
+        }
+        // Best-effort: a relay with no freshness configured is the
+        // common case and must not turn the whole page red.
+        try {
+            const f = await Wizard.freshnessStatus(operatorId);
+            setMirrorsInPack(f.mirrors_in_pack.length);
+        } catch {
+            setMirrorsInPack(0);
         }
     }, [operatorId]);
 
@@ -1235,6 +1257,8 @@ export default function PublisherRecipientsPage({
             </Section>
 
             {/* ---------------- Danger ---------------- */}
+            <FreshnessPanel t={t} operatorId={operatorId} reloadToken={freshTick} />
+
             <Section
                 eyebrow={t('pub.danger.eyebrow')}
                 title={t('pub.danger.title')}
@@ -1276,6 +1300,26 @@ export default function PublisherRecipientsPage({
                                 {t('pub.danger.rotate_tls.action')}
                             </Button>
                         }
+                    />
+                    {/* Wave 3 Step 9 (L3). Placed ABOVE decommission and
+                        below the disguise change, which is the order of
+                        increasing blast radius: this one keeps the
+                        server, its keys and everyone's credentials —
+                        only the address people dial moves. */}
+                    <AddressSwap
+                        t={t}
+                        operatorId={operatorId}
+                        relayLabel={title}
+                        currentFloatingIpId={operator?.floating_ip_id ?? ''}
+                        canReserve={operator?.can_reserve_address ?? false}
+                        mirrorsInPack={mirrorsInPack}
+                        liveRecipients={operator?.live_recipient_count ?? 0}
+                        disabled={dangerBusy || rotateTlsBusy}
+                        onDone={() => {
+                            void reloadOperator();
+                            void reloadArtifacts();
+                            setFreshTick((n) => n + 1);
+                        }}
                     />
                     <ListRow
                         title={t('pub.danger.decommission.title')}
@@ -1768,7 +1812,17 @@ export default function PublisherRecipientsPage({
                                 lineHeight: 1.55,
                             }}
                         >
-                            {t('pub.danger.rotate_tls.confirm.body')}
+                            {/* Wave 3 Step 8 made half of this
+                                sentence obsolete. The old copy said
+                                flatly that Daal cannot send new settings
+                                over the network — still true for a pack
+                                with no refresh addresses in it, and a
+                                lie for one that has them. It branches on
+                                the SIGNED pack, not on what is
+                                configured. */}
+                            {mirrorsInPack > 0
+                                ? t('pub.danger.rotate_tls.confirm.body_fresh')
+                                : t('pub.danger.rotate_tls.confirm.body')}
                         </div>
                         {/* Put a number on it. "Every file stops working"
                             is abstract until it says how many people that
@@ -1843,7 +1897,9 @@ export default function PublisherRecipientsPage({
                             </div>
                         )}
                         <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
-                            {t('pub.danger.rotate_tls.done.next')}
+                            {mirrorsInPack > 0
+                                ? t('pub.danger.rotate_tls.done.next_fresh')
+                                : t('pub.danger.rotate_tls.done.next')}
                         </div>
                         {/* PAST tense, not the confirm sheet's string. By
                             the time this panel renders the files are

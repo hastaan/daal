@@ -109,13 +109,12 @@ func TestActionFor_HeavyRungsAreUnchanged(t *testing.T) {
 	if a.Kind != ActionFloatingIPSwap || a.DestroysServer {
 		t.Errorf("L3 = %+v", a)
 	}
-	// L3 must not claim to be ready while it rotates nothing:
-	// AssignFloatingIP updates rec.FloatingIPID only, so the dialled
-	// address and the candidate tags still name the burned IP. A
-	// consumer reading availability:"ready" would offer the cheapest
-	// rung as a working one-tap action.
-	if a.Availability == AvailabilityReady {
-		t.Error(`L3 is stamped "ready" while the swap does not move rec.PublicIP or the public_ip:* candidate tags`)
+	// Without a provider name there is nothing to be confident about:
+	// whether a swap moves the record's dialled address is a property
+	// of the adapter, so "we were not told which" is its own state and
+	// must never round up to ready.
+	if a.Availability != AvailabilityUnknown {
+		t.Errorf(`L3 with no provider = %q, want unknown`, a.Availability)
 	}
 	if a.Note == "" {
 		t.Error("L3 carries no note saying what is missing")
@@ -203,5 +202,51 @@ func TestRecommendation_ActionJSONKeys(t *testing.T) {
 		if !strings.Contains(string(body), key) {
 			t.Errorf("missing %s in %s", key, body)
 		}
+	}
+}
+
+// L3's availability now differs by cloud adapter, because the adapters
+// differ: Hetzner moves the record's dialled address, Vultr and Stark
+// record the id and stop. Reporting one answer for both would either
+// hide a working rung or offer a broken one.
+func TestActionForProvider_L3DiffersByAdapter(t *testing.T) {
+	ready := ActionForProvider(L3, RelayCapabilities{}, "hetzner")
+	if ready.Availability != AvailabilityReady {
+		t.Errorf("hetzner L3 = %q, want ready", ready.Availability)
+	}
+	if !ready.InPlace || ready.DestroysServer {
+		t.Errorf("hetzner L3 should keep the server: %+v", ready)
+	}
+	if !ready.InvalidatesEveryPack {
+		t.Error("an address swap invalidates every distributed pack; the flag must say so")
+	}
+
+	for _, p := range []string{"vultr", "stark"} {
+		a := ActionForProvider(L3, RelayCapabilities{}, p)
+		if a.Availability != AvailabilityUnsupported {
+			t.Errorf("%s L3 = %q, want unsupported (the adapter attaches an address without moving the record onto it)", p, a.Availability)
+		}
+		if a.Note == "" {
+			t.Errorf("%s L3 carries no remediation note", p)
+		}
+	}
+
+	if got := ActionForProvider(L3, RelayCapabilities{}, "  HETZNER  ").Availability; got != AvailabilityReady {
+		t.Errorf("provider name matching should be case- and space-insensitive; got %q", got)
+	}
+	if got := ActionForProvider(L3, RelayCapabilities{}, "digitalocean").Availability; got != AvailabilityUnknown {
+		t.Errorf("unrecognised provider = %q, want unknown", got)
+	}
+}
+
+// The relay-capability probe says nothing about a cloud account, so it
+// must not move L3's answer in either direction.
+func TestActionForProvider_L3IgnoresRelayCapabilities(t *testing.T) {
+	probed := RelayCapabilities{Known: true, RotateCredentialsInPlace: true, RotateTLSInPlace: true}
+	if a := ActionForProvider(L3, probed, "vultr"); a.Availability != AvailabilityUnsupported {
+		t.Errorf("a fully-capable box does not make a Vultr address swap work: %q", a.Availability)
+	}
+	if a := ActionForProvider(L3, RelayCapabilities{}, "hetzner"); a.Availability != AvailabilityReady {
+		t.Errorf("an unprobed box does not stop a Hetzner address swap from working: %q", a.Availability)
 	}
 }

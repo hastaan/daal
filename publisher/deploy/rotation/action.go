@@ -1,5 +1,7 @@
 package rotation
 
+import "strings"
+
 // WHY THIS FILE EXISTS
 //
 // Until Step 7 the recommender named rungs nothing could execute. It
@@ -115,6 +117,33 @@ const unknownNote = "not probed yet — ask the relay (mgmt.CapabilitiesWithFW) 
 // comes back with the in-place action marked unknown — the right shape,
 // with an explicit "verify first".
 func ActionFor(level Level, caps RelayCapabilities) Action {
+	return ActionForProvider(level, caps, "")
+}
+
+// ActionForProvider is ActionFor plus the one fact L3 turns on: which
+// cloud adapter is behind this relay.
+//
+// WHY L3 NEEDS IT AND THE OTHER RUNGS DO NOT. Every other rung's
+// availability is a property of the remote box's pinned mgmt binary,
+// which this process can only learn by probing — hence RelayCapabilities
+// and its three states. L3 touches the cloud account, not the box, so
+// its availability is a property of code in THIS repository, and
+// pretending otherwise (asking the caller to probe for it) would be
+// theatre. Since Step 9 the Hetzner adapter reserves an address, attaches
+// it, reads it back, and moves rec.PublicIP plus every candidate's
+// public_ip:* tag onto it. The Vultr and Stark adapters still do what
+// Hetzner did before Step 9 — set FloatingIPID and stop — so on those
+// providers a "successful" L3 re-signs a pack aimed at the burned
+// address. That is a real difference between two relays and the answer
+// has to differ with it.
+//
+// An empty or unrecognised providerName yields AvailabilityUnknown,
+// which is the same rule the rest of this file follows: not knowing is
+// its own state, never rounded up to "ready".
+func ActionForProvider(level Level, caps RelayCapabilities, providerName string) Action {
+	if level == L3 {
+		return floatingIPSwapAction(providerName)
+	}
 	switch level {
 	case L1:
 		a := Action{
@@ -141,31 +170,6 @@ func ActionFor(level Level, caps RelayCapabilities) Action {
 		}
 		return withAvailability(a, caps.Known, caps.RotateTLSInPlace, fallbackReprovision(
 			"relay cannot rotate TLS in place; reprovision --new-sni rebuilds the box instead"))
-	case L3:
-		return Action{
-			Kind:                 ActionFloatingIPSwap,
-			CLIVerb:              "floating-ip",
-			Scope:                "server",
-			InPlace:              true,
-			InvalidatesEveryPack: true,
-			// NOT "ready", however cheap the rung looks. The floating-IP
-			// swap does not yet move the address anyone dials:
-			// hetzner.AssignFloatingIP sets rec.FloatingIPID and nothing
-			// else, so rec.PublicIP and the candidates' public_ip:* tags
-			// still name the burned address and a pack re-signed after an
-			// L3 points straight back at it. There is also no
-			// floating-IP CREATION anywhere in the repo, so the operator
-			// must have reserved one by hand and know its numeric ID.
-			// Marking this "ready" would tell a reader — the wizard, or a
-			// human running rotate-recommend — that the cheapest recovery
-			// rung is a working one-tap action, which is the precise lie
-			// this file's header says an Action exists to end. Step 9 is
-			// what makes it true; until then the honest state is "not
-			// something this publisher can confirm it can do".
-			Availability: AvailabilityUnknown,
-			Note: "not usable yet: the floating-IP swap does not update the record's public IP or its candidate tags, " +
-				"so a pack re-signed after it still points at the old address; it also requires a floating IP reserved by hand",
-		}
 	case L4, L5, L6:
 		return Action{
 			Kind:                 ActionReprovision,
@@ -179,6 +183,54 @@ func ActionFor(level Level, caps RelayCapabilities) Action {
 		return Action{Availability: AvailabilityUnknown, Note: "no executable action for this level"}
 	}
 }
+
+// floatingIPSwapAction answers "can this publisher actually swap this
+// relay's address?" — per provider adapter, because the answer differs.
+//
+// Read the note fields as the operator will: each one says what will
+// happen if they press the button, not what the roadmap intends.
+func floatingIPSwapAction(providerName string) Action {
+	a := Action{
+		Kind:    ActionFloatingIPSwap,
+		CLIVerb: "floating-ip",
+		Scope:   "server",
+		InPlace: true,
+		// The address is pinned in every pack's public_ip:* tags and in
+		// every client outbound. Moving it strands every already-
+		// distributed pack until each recipient gets the new one —
+		// which, without the freshness path, means a courier.
+		InvalidatesEveryPack: true,
+	}
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case "hetzner":
+		a.Availability = AvailabilityReady
+		a.Note = "reserves an address if you do not supply one, attaches it, confirms the attachment with the provider, " +
+			"and moves the record's public IP and every candidate public_ip:* tag onto it; the relay answers on BOTH addresses until the previous one is released after the new pack is signed"
+		return a
+	case "vultr", "stark":
+		// Known-unsupported, and it must not read as merely unproven.
+		// These adapters set FloatingIPID and return success while
+		// rec.PublicIP and the candidate tags still name the burned
+		// address, so the rotation would report success and change
+		// nothing a censor can see. CheckAddressMoved stops it on the
+		// live path (`daal-deploy assign-fip` runs it after the
+		// adapter returns), which turns a silent non-rotation into a
+		// visible failure — but a rung that always fails is not a
+		// rung, so say so before it is pressed.
+		a.Availability = AvailabilityUnsupported
+		a.Note = "this provider adapter attaches a reserved IP without moving the record onto it, so the swap would leave every pack " +
+			"pointing at the address you are rotating away from; the rotation will refuse rather than re-sign a stale pack. " +
+			"Use reprovision (a new server gets a new address) until the adapter is updated"
+		return a
+	default:
+		a.Availability = AvailabilityUnknown
+		a.Note = unknownProviderNote
+		return a
+	}
+}
+
+const unknownProviderNote = "the record does not say which cloud provider this relay is on, and whether an address swap " +
+	"moves the record's public IP depends on the adapter — check the record's provider field before offering this as a one-tap action"
 
 // withAvailability stamps the three-state answer onto an in-place
 // action, swapping in the fallback when the relay is known not to

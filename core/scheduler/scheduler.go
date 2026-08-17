@@ -24,6 +24,17 @@ type Executor interface {
 	// budget.Engine.HourRollover(now). Returning an error is logged
 	// but does not stop the tick.
 	RefreshBudgetReset(ctx context.Context, now time.Time) error
+	// RefreshFreshness (Step 8) polls one RelayPack's freshness
+	// endpoints and, when the publisher has published a newer signed
+	// pack, fetches and applies it. relayPackID is the Ref of a
+	// KindFreshness action.
+	//
+	// The implementation MUST persist a last-success / last-failure
+	// stamp before returning, whatever the outcome: the planner's only
+	// defence against a tick storm is that stamp, and an executor that
+	// silently returns without writing one converts a 15-minute floor
+	// into a per-tick beacon.
+	RefreshFreshness(ctx context.Context, relayPackID string) error
 }
 
 // Scheduler is the in-engine ticker. Production hosts call
@@ -166,6 +177,8 @@ func (s *Scheduler) Tick(now time.Time) {
 			_ = s.exe.RefreshBootstrap(ctx)
 		case KindBudgetReset:
 			_ = s.exe.RefreshBudgetReset(ctx, now)
+		case KindFreshness:
+			_ = s.exe.RefreshFreshness(ctx, a.Ref)
 		}
 	}
 }
@@ -182,10 +195,16 @@ type Status struct {
 	NextDue  []ActionJSON `json:"next_due"`
 }
 
-// CadenceJSON is the JSON-friendly view of Cadence.
+// CadenceJSON is the JSON-friendly view of Cadence. Additive only —
+// the GUI and the CLI parse this shape from specs/scheduler-v1.md.
 type CadenceJSON struct {
 	RevocationSec int64 `json:"revocation_sec"`
 	BootstrapSec  int64 `json:"bootstrap_sec"`
+	// Step 8. The freshness floor and ceiling, so a diagnostics screen
+	// can say "next freshness poll no sooner than X" without hard-coding
+	// the policy a second time.
+	FreshnessMinIntervalSec  int64 `json:"freshness_min_interval_sec"`
+	FreshnessMaxStalenessSec int64 `json:"freshness_max_staleness_sec"`
 }
 
 // ActionJSON is the JSON-friendly view of Action.
@@ -207,10 +226,13 @@ func (s *Scheduler) StatusJSON() ([]byte, error) {
 	s.mu.Unlock()
 
 	all := AllNextDues(s.src, cad, now)
+	fresh := defaultedFreshness(cad.Freshness)
 	out := Status{
 		Cadence: CadenceJSON{
-			RevocationSec: int64(cad.Revocation.Seconds()),
-			BootstrapSec:  int64(cad.Bootstrap.Seconds()),
+			RevocationSec:            int64(cad.Revocation.Seconds()),
+			BootstrapSec:             int64(cad.Bootstrap.Seconds()),
+			FreshnessMinIntervalSec:  int64(fresh.MinInterval.Seconds()),
+			FreshnessMaxStalenessSec: int64(fresh.MaxStaleness.Seconds()),
 		},
 		Ticks: ticks,
 	}

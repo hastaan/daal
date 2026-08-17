@@ -7,10 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"daal/bundle-go/bundle"
 	"daal/bundle-go/relaypackvalidate"
+	"daal/publisher/deploy/freshness"
 	"daal/publisher/deploy/modifiers"
 	"daal/publisher/deploy/provider"
 )
@@ -41,9 +44,52 @@ type BindOpts struct {
 	// modifiers.
 	Phase relaypackvalidate.Phase
 
-	// FreshnessURL is empty at V1.5 (RP021 rejects non-empty values);
-	// FRP-8 populates the actual URL at V1.6.
-	FreshnessURL string
+	// Freshness is the pack's freshness endpoint SET. Nil means the
+	// pack ships without remote replacement (V1.5 behaviour: RP021
+	// rejects a populated slot there anyway).
+	//
+	// It is a *freshness.MirrorSet and not a string on purpose. The
+	// slot in the manifest is a single string, and a single fixed
+	// URL is a censorship target with a shorter shelf life than the
+	// relay it describes — so the type a caller has to construct
+	// cannot hold fewer than freshness.MinMirrors entries on
+	// distinct providers. There is no way to reach BindAndSign with
+	// one host; the previous `FreshnessURL string` field was
+	// removed rather than deprecated for that reason.
+	//
+	// When set, BindAndSign writes BOTH:
+	//   - manifest.relay_pack.freshness_url  = set.LegacyScalarURL()
+	//   - trust/freshness-mirrors.json       = the signed set
+	// See freshness.MirrorsArchivePath for why the set travels as
+	// an archive entry instead of a manifest field.
+	Freshness *freshness.MirrorSet
+
+	// RevocationURL is the publisher's signed revocation list
+	// endpoint, written to manifest.publisher.revocation_url.
+	//
+	// Leaving it empty is what has kept the ENTIRE revocation
+	// subsystem inert: core/routestore.ListPublishersWithRevocationURL
+	// selects `WHERE revocation_url <> ''`, so with no publisher
+	// ever setting it, the per-publisher revocation refresher
+	// iterates zero rows on every device, forever, while the code
+	// that would act on a revocation sits fully written and tested.
+	RevocationURL string
+
+	// RevocationPubHex is the revocation list's SIGNING PUBLIC KEY
+	// in hex (32 bytes), written to
+	// manifest.publisher.revocation_fingerprint_hex.
+	//
+	// The field name says "fingerprint" and the value is not one.
+	// core/refresh/revocation.go:refreshOne hex-decodes this field
+	// and uses it directly as the ed25519.PublicKey that verifies
+	// the fetched list ("the hex field is the SHA-256 of the key,
+	// not the key itself... for Phase 1.5A we treat it as a key
+	// pin"). Writing an actual fingerprint here produces the
+	// `bad_fingerprint` outcome on every refresh — a failure that
+	// only shows up in an audit row on a recipient's device. So
+	// BindAndSign requires a 32-byte hex value and rejects
+	// anything else at sign time, where the publisher can see it.
+	RevocationPubHex string
 
 	// PublisherDisplayName is the human-readable name shown to the
 	// recipient on TOFU. Optional; defaults to "Family Relay
@@ -104,6 +150,14 @@ var (
 	ErrSubkeyCertWithRootKey = errors.New("relaypack: sub-key cert supplied with root signing key")
 	// ErrNoPhase is returned when opts.Phase is empty.
 	ErrNoPhase = errors.New("relaypack: BindOpts.Phase is required")
+	// ErrBadRevocationPub is returned when RevocationURL is set
+	// without a 32-byte hex signing key beside it (or vice versa).
+	// A revocation URL with no verifying key is a URL the recipient
+	// polls and can never act on.
+	ErrBadRevocationPub = errors.New("relaypack: RevocationURL requires a 32-byte hex RevocationPubHex (the list's SIGNING KEY, not a fingerprint)")
+	// ErrBadRevocationURL is returned when RevocationURL is not an
+	// absolute https URL.
+	ErrBadRevocationURL = errors.New("relaypack: RevocationURL must be an absolute https:// URL")
 )
 
 // BindAndSign is the FRP-4b binder.
@@ -153,6 +207,16 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	if opts.Phase == "" {
 		return nil, ErrNoPhase
 	}
+	// Freshness sanity before any work: a MirrorSet can only exist
+	// in a valid state, but a caller can still hand us a non-nil
+	// zero value.
+	if opts.Freshness != nil && opts.Freshness.Len() < freshness.MinMirrors {
+		return nil, freshness.ErrTooFewMirrors
+	}
+	revocationURL, revocationPub, err := normaliseRevocation(opts.RevocationURL, opts.RevocationPubHex)
+	if err != nil {
+		return nil, err
+	}
 
 	now := opts.Now.UTC()
 	expiry := opts.Expiry
@@ -179,12 +243,35 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 
 	// ---- 4. Build the manifest -----------------------------------
 	specVersion := 3
-	extras := map[string][]byte(nil)
+	extras := map[string][]byte{}
 	if usingSubkey {
 		specVersion = 4
-		extras = map[string][]byte{
-			"trust/subkey-cert.json": append([]byte(nil), opts.SubkeyCertJSON...),
+		extras["trust/subkey-cert.json"] = append([]byte(nil), opts.SubkeyCertJSON...)
+	}
+	// The mirror set travels as a signed archive entry, NOT as a
+	// manifest field, and therefore does NOT bump spec_version.
+	// bundle.VerifyManifest verifies over
+	// CanonicalManifestJSON(parsed struct), so a manifest field an
+	// already-distributed client does not know is dropped on its
+	// side before canonicalisation and the whole pack fails to
+	// verify. An unknown archive entry is simply ignored (ParseSBP
+	// keeps only the names it knows), which is the same route the
+	// FRP-11 cell documents took. Old client: sees freshness_url,
+	// polls one host. New client: reads the set. Neither breaks.
+	if opts.Freshness != nil {
+		// notAfter is the ENCLOSING BUNDLE's expires_at, not a TTL of
+		// its own. The mirror set says where to look for this pack, so
+		// letting it outlive the pack would leave a signed, in-transit-
+		// mutable list of hosts valid forever — see MirrorDoc.NotAfter.
+		mirrorsJSON, err := freshness.SignMirrors(
+			opts.Freshness, relayPackID, rootPub, priv, opts.SubkeyCertJSON, now, now.Add(expiry))
+		if err != nil {
+			return nil, fmt.Errorf("relaypack: sign freshness mirrors: %w", err)
 		}
+		extras[freshness.MirrorsArchivePath] = mirrorsJSON
+	}
+	if len(extras) == 0 {
+		extras = nil
 	}
 	fingerprint := bundle.PublisherFingerprint(rootPub)
 	manifest := bundle.Manifest{
@@ -194,6 +281,10 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 			KeyFingerprintHex: fingerprint.Hex,
 			KeyCreatedAt:      createdAt,
 			TrustClass:        "unknown",
+			// Both halves or neither — normaliseRevocation has
+			// already refused a URL without a key.
+			RevocationURL:            revocationURL,
+			RevocationFingerprintHex: revocationPub,
 		},
 		Bundle: bundle.BundleInfo{
 			ID:             relayPackID,
@@ -206,7 +297,10 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 		RelayPack: &bundle.RelayPack{
 			RelayPackID:     relayPackID,
 			SharedRiskGraph: srg,
-			FreshnessURL:    opts.FreshnessURL,
+			// Empty when Freshness is nil. Never a lone host: the
+			// scalar is only ever written together with the signed
+			// mirror set above.
+			FreshnessURL: opts.Freshness.LegacyScalarURL(),
 		},
 	}
 
@@ -251,6 +345,41 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 		RelayPackID:     relayPackID,
 		SharedRiskGraph: srg,
 	}, nil
+}
+
+// normaliseRevocation validates the revocation pair and returns
+// the values to stamp on PublisherInfo.
+//
+// Empty+empty is legal (a publisher with no revocation endpoint).
+// Anything else must be a complete, usable pair, because both
+// half-configured states fail silently on the recipient:
+//   - URL without key → refreshOne records `missing_fingerprint`
+//     in an audit row and returns;
+//   - key without URL → the publisher row is never selected at
+//     all, because the query filters on a non-empty
+//     revocation_url.
+//
+// Both are invisible from the publisher's side, so they are
+// refused here where the operator is watching.
+func normaliseRevocation(rawURL, pubHex string) (string, string, error) {
+	if rawURL == "" && pubHex == "" {
+		return "", "", nil
+	}
+	if rawURL == "" || pubHex == "" {
+		return "", "", ErrBadRevocationPub
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+		return "", "", ErrBadRevocationURL
+	}
+	// 32 raw bytes == 64 hex chars. This is a signing key.
+	if len(pubHex) != ed25519.PublicKeySize*2 {
+		return "", "", ErrBadRevocationPub
+	}
+	if _, err := hex.DecodeString(pubHex); err != nil {
+		return "", "", ErrBadRevocationPub
+	}
+	return rawURL, strings.ToLower(pubHex), nil
 }
 
 func isAllZero(b []byte) bool {

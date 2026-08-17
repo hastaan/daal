@@ -26,6 +26,10 @@
 pub mod cli_bridge;
 pub mod commands;
 pub mod device_custody;
+// Wave 3 Step 8: the freshness upload — SigV4 + the two static-host
+// backends. It is the ONE place this crate opens a socket; everything
+// else reaches the network through the `daal-deploy` subprocess.
+pub mod freshness;
 pub mod keystore;
 // `modifiers_i18n` is gone. It guarded 11 `wizard.modifiers.*` keys in
 // `tauri/src/wizard/i18n/wizard.{en,fa}.json` for

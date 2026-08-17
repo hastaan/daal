@@ -157,7 +157,13 @@ type signalSet struct {
 	hasFloatingIP   bool
 	credLeakHinted  bool
 	relayCaps       RelayCapabilities
-	source          string // "explanation" or "context"
+	// providerName is the record's cloud adapter ("hetzner", "vultr",
+	// "stark"). It decides L3's availability, because whether an
+	// address swap actually moves the record's dialled address is a
+	// property of the adapter, not of the remote box — see
+	// ActionForProvider.
+	providerName string
+	source       string // "explanation" or "context"
 }
 
 func newSignalSet(source string) *signalSet {
@@ -189,6 +195,7 @@ func signalSetFromExplanation(e Explanation, rec *provider.OperatorRecord) *sign
 	}
 	if rec != nil {
 		s.hasFloatingIP = rec.FloatingIPID != ""
+		s.providerName = rec.Provider
 	}
 	return s
 }
@@ -207,6 +214,7 @@ func signalSetFromContext(ctx RotationContext) *signalSet {
 	}
 	if ctx.OperatorRecord != nil {
 		s.hasFloatingIP = ctx.OperatorRecord.FloatingIPID != ""
+		s.providerName = ctx.OperatorRecord.Provider
 	}
 	s.credLeakHinted = ctx.CredentialLeakSuspected
 	s.relayCaps = ctx.RelayCapabilities
@@ -378,7 +386,7 @@ func (s *signalSet) build(level Level, reason string, override []Level) Rotation
 	if !ok {
 		wc = "~unknown"
 	}
-	action := ActionFor(level, s.relayCaps)
+	action := ActionForProvider(level, s.relayCaps, s.providerName)
 	// The ~90s figures for L1/L2 are the IN-PLACE cost. On a relay too
 	// old for the split endpoints the only route to the same outcome is
 	// destroy-and-rebuild, and quoting 90 seconds for a 3-minute

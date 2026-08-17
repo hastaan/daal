@@ -114,12 +114,14 @@ type replayingSource struct {
 	pubs    []PublisherState
 	bs      time.Time
 	budgRst time.Time // Phase 2A: last budget-reset
+	packs   []RelayPackState
 }
 
 func (r *replayingSource) Subscriptions() []SubscriptionState         { return r.subs }
 func (r *replayingSource) PublishersWithRevocation() []PublisherState { return r.pubs }
 func (r *replayingSource) LastBootstrapRefresh() time.Time            { return r.bs }
 func (r *replayingSource) LastBudgetReset() time.Time                 { return r.budgRst }
+func (r *replayingSource) RelayPacks() []RelayPackState               { return r.packs }
 
 func (r *replayingSource) markFired(a Action, now time.Time) {
 	switch a.Kind {
@@ -139,5 +141,12 @@ func (r *replayingSource) markFired(a Action, now time.Time) {
 		r.bs = now
 	case KindBudgetReset:
 		r.budgRst = now
+	case KindFreshness:
+		for i, p := range r.packs {
+			if p.RelayPackID == a.Ref {
+				r.packs[i].LastSuccessAt = now
+				r.packs[i].LastFailureAt = time.Time{}
+			}
+		}
 	}
 }

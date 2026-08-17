@@ -2,6 +2,7 @@ package hetzner
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 
@@ -196,6 +197,58 @@ func TestDefaultSingBoxConfigNeverEmptySNI(t *testing.T) {
 		}
 		if in.TLS.ServerName != in.TLS.Reality.Handshake.Server {
 			t.Fatal("fallback path left server_name and handshake.server disagreeing")
+		}
+	}
+}
+
+// A bad toolbox-profile slug must be an error at the moment it is read.
+// This is the L6 fix: candidatesForProfile used to swallow the load
+// error and return nil, which the caller could not tell apart from
+// "this profile enables no families" — producing an OperatorRecord with
+// zero candidates that provisions and signs happily and yields a pack
+// with no routes in it. L6 is the one rung whose entire content is
+// passing a NEW profile name here, so it is the rung the silent nil was
+// guaranteed to hit.
+func TestCandidatesForProfile_UnknownProfileFailsLoudly(t *testing.T) {
+	got, err := candidatesForProfile("tcp-only-vps-native", net.ParseIP("5.75.0.1"), nil)
+	if err == nil {
+		t.Fatalf("unknown profile returned %d candidates and no error", len(got))
+	}
+	if !strings.Contains(err.Error(), "tcp-only-vps-native") {
+		t.Errorf("the error must name the profile the operator typed: %v", err)
+	}
+	if got != nil {
+		t.Errorf("candidates returned alongside an error: %v", got)
+	}
+}
+
+// The other road to a zero-route record: a profile that loads but whose
+// families do not intersect the requested set. Same outcome for the
+// recipient, so the same refusal.
+func TestCandidatesForProfile_NoMatchingFamiliesFailsLoudly(t *testing.T) {
+	_, err := candidatesForProfile("iran-default", net.ParseIP("5.75.0.1"), []string{"no-such-family"})
+	if err == nil {
+		t.Fatal("a family set that selects nothing must not produce a routeless record silently")
+	}
+}
+
+func TestCandidatesForProfile_HappyPathStillWorks(t *testing.T) {
+	got, err := candidatesForProfile("iran-default", net.ParseIP("5.75.0.1"), nil)
+	if err != nil {
+		t.Fatalf("iran-default: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("iran-default produced no candidates")
+	}
+	for _, c := range got {
+		found := false
+		for _, tag := range c.PublicRiskTags {
+			if tag == "public_ip:5.75.0.1" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: no public_ip tag in %v", c.Family, c.PublicRiskTags)
 		}
 	}
 }

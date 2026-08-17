@@ -109,6 +109,29 @@ type RelayPackMeta struct {
 	RelayPackID         string
 	FreshnessURL        string
 	SharedRiskGraphJSON string
+
+	// FreshnessMirrorsJSON is the raw, UNVERIFIED
+	// `trust/freshness-mirrors.json` entry from the archive (empty
+	// when the pack carries none).
+	//
+	// It must reach the store, because FreshnessURL above is ONE url —
+	// the manifest's legacy scalar slot, which carries a single
+	// endpoint on purpose so that clients minted before FRP-8 still
+	// read something valid. The other N-1 endpoints exist only in this
+	// entry, and a recipient whose one scalar host is blocked is
+	// exactly the recipient the other N-1 were added for. Dropping it
+	// here leaves them unreadable until a refresh succeeds, i.e. until
+	// the blocked host answers — the mechanism would be inert in the
+	// only case it exists for.
+	//
+	// UNVERIFIED is load-bearing: this entry is NOT covered by
+	// manifest.sig (see bundle.FreshnessMirrorsPath), so anyone who
+	// can hand over a .sbp can rewrite it without breaking the pack.
+	// It carries its own publisher signature, and the recipient
+	// verifies that signature against the PINNED publisher key before
+	// any URL in it is fetched (core/refresh.VerifyMirrorDocument).
+	// The importer only ferries the bytes; it must not act on them.
+	FreshnessMirrorsJSON string
 }
 
 // Verdict is what an Import call returns to the caller.
@@ -338,11 +361,18 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 	// FRP-2: bundle-level RelayPack metadata is denormalised onto
 	// every per-candidate RelayPackMeta. Compute the canonical
 	// shared_risk_graph JSON once.
-	var rpID, rpFreshness, rpGraphJSON string
+	var rpID, rpFreshness, rpGraphJSON, rpMirrors string
 	hasRP := parsed.Manifest.RelayPack != nil
 	if hasRP {
 		rpID = parsed.Manifest.RelayPack.RelayPackID
 		rpFreshness = parsed.Manifest.RelayPack.FreshnessURL
+		// Raw bytes, ferried unverified; see RelayPackMeta. Oversized
+		// is dropped rather than truncated: a truncated document
+		// cannot verify, so keeping a prefix would only move the
+		// failure somewhere less obvious.
+		if len(parsed.FreshnessMirrorsJSON) <= bundle.MaxFreshnessMirrorsBytes {
+			rpMirrors = string(parsed.FreshnessMirrorsJSON)
+		}
 		if g, err := json.Marshal(parsed.Manifest.RelayPack.SharedRiskGraph); err == nil {
 			rpGraphJSON = string(g)
 			if rpGraphJSON == "null" {
@@ -385,6 +415,8 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 					RelayPackID:         rpID,
 					FreshnessURL:        rpFreshness,
 					SharedRiskGraphJSON: rpGraphJSON,
+
+					FreshnessMirrorsJSON: rpMirrors,
 				}
 			}
 			// errors.Is(err, bundle.ErrNoRelayPack) means this candidate

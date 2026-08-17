@@ -13,8 +13,12 @@
 //	               provisioning created, and print a per-resource JSON
 //	               report.
 //	pricing        fetch live per-hour cost for a record's server type.
-//	assign-fip     attach a floating IP to a record's server.
-//	floating-ip    assign or unassign a floating IP.
+//	assign-fip     attach a floating IP to a record's server, reserving
+//	               a fresh one when --fip-id is omitted.
+//	floating-ip    assign | unassign | release a floating IP. unassign
+//	               detaches (the address stays reserved and billing);
+//	               release detaches AND gives the address back, but only
+//	               when daal-deploy reserved it.
 //	verify         validate OperatorRecord JSON.
 //	bind-and-sign  bind an OperatorRecord into a signed RelayPack .sbp (FRP-4b).
 //	qr-fountain    stream LT-fountain frames for a .sbp as JSON lines (FRP-4b).
@@ -29,6 +33,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -47,6 +52,8 @@ import (
 	"daal/bundle-go/relaypackvalidate"
 	"daal/publisher/deploy/cloudflare"
 	"daal/publisher/deploy/freshness"
+	"daal/publisher/deploy/freshness/backends/ghpages"
+	"daal/publisher/deploy/freshness/backends/r2"
 	"daal/publisher/deploy/provider"
 	"daal/publisher/deploy/providers/hetzner"
 	"daal/publisher/deploy/providers/stark"
@@ -162,6 +169,15 @@ Subcommands:
   floating-ip   Assign or unassign a floating IP.
   verify        Validate OperatorRecord JSON.
   bind-and-sign Bind OperatorRecord -> signed RelayPack .sbp (FRP-4b).
+                --freshness-mirror provider=url (REPEAT, min 2, distinct
+                providers) attaches the pack's freshness endpoint SET: the
+                signed trust/freshness-mirrors.json entry plus the legacy
+                scalar slot. A single freshness host is not a supported pack
+                shape — it is one block away from no recovery path — so the
+                old --freshness-url is retired and errors.
+                --revocation-url + --revocation-pub-hex set the publisher's
+                revocation endpoint. Without them recipients never poll a
+                revocation list and a leaked pack can never be withdrawn.
   qr-fountain   Stream LT-fountain frames for a .sbp (FRP-4b).
   rotate-recommend
                 Read an Explanation JSON on stdin (or a context flag set)
@@ -195,10 +211,17 @@ Subcommands:
                 path unchanged. Emits CdnRotateResult JSON. Caller MUST NOT
                 re-sign RelayPack — origin-only is invisible to the family (FRP-9).
   publish-freshness
-                Build + sign a freshness JSON document for the current SBP and
-                emit it to stdout (or --out-file). Wizard calls this on L7/L8
-                public-surface rotations after the RelayPack is re-signed.
+                Build, sign and PUBLISH the freshness document for the current
+                SBP; emits it to stdout (or --out-file). Wizard calls this on
+                L7/L8 public-surface rotations after the RelayPack is re-signed.
                 MUST NOT be called on L9 origin-only rotations (FRP-9).
+                The document carries a monotonic --sequence (default: the
+                publish timestamp) and a --ttl-hours expiry: together they are
+                what stops a censor replaying an older signed document to
+                freeze a recipient or walk it back onto revoked credentials.
+                Supply --r2-* and/or --gh-* credentials to upload; the upload
+                is an error unless at least 2 mirrors accept it. With no
+                credentials the verb signs only and says so on stderr.
   cell-create   Generate a fresh per-admin Ed25519 keypair (FRP-11). Emits
                 JSON with both halves; operator persists to encrypted keystore.
   cell-invite   Wrap an admin-quorum-signed membership doc into a .cell-join
@@ -550,19 +573,31 @@ func runPricing(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	return 0
 }
 
+// floatingIPReserver is the optional half of the provider contract that
+// can mint an address rather than only attach one the operator already
+// owns. Mirrors rotation.FloatingIPProvisioner; declared locally for the
+// same reason providerFace is.
+type floatingIPReserver interface {
+	CreateFloatingIP(ctx context.Context, rec *provider.OperatorRecord) (string, net.IP, error)
+	ReleaseFloatingIP(ctx context.Context, rec *provider.OperatorRecord, fipID string) (bool, error)
+}
+
 func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("assign-fip", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file")
-	fipID := fs.String("fip-id", "", "Hetzner floating-IP ID")
+	// OPTIONAL SINCE STEP 9. It used to be mandatory, which made the
+	// whole L3 rung reachable only by an operator who had reserved an
+	// address by hand in the provider console and knew its numeric id.
+	// Empty now means "reserve a fresh one for this relay".
+	fipID := fs.String("fip-id", "", "floating-IP ID to attach; empty reserves a new address in the relay's region")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
 	if err := requireAll(stderr, map[string]string{
 		"--record-file": *recordFile,
 		"--token-file":  *tokenFile,
-		"--fip-id":      *fipID,
 	}); err != nil {
 		return 2
 	}
@@ -571,14 +606,164 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "read record-file: %v\n", err)
 		return 1
 	}
-	p, err := buildProvider(rec.Provider, *tokenFile, false)
+	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
 		return 1
 	}
-	if err := p.AssignFloatingIP(ctx, rec, *fipID); err != nil {
+
+	id := *fipID
+	reservedHere := false
+	if id == "" {
+		res, ok := p.(floatingIPReserver)
+		if !ok {
+			fmt.Fprintf(stderr, "assign-fip: the %s adapter cannot reserve an address — pass --fip-id with one you reserved in the provider console\n", rec.Provider)
+			return 2
+		}
+		newID, addr, err := res.CreateFloatingIP(ctx, rec)
+		if err != nil {
+			fmt.Fprintf(stderr, "assign-fip: reserve address: %v\n", err)
+			return 1
+		}
+		id, reservedHere = newID, true
+		fmt.Fprintf(stderr, "reserved floating IP %s (%s)\n", newID, addr)
+	}
+
+	// Snapshot the address BEFORE the swap. rec.PublicIP is a net.IP
+	// (a slice), and adoptPublicIP replaces the header rather than
+	// writing through it — but a copy costs nothing and a post-
+	// condition that aliases the thing it is checking is not a
+	// post-condition.
+	priorIP := append(net.IP(nil), rec.PublicIP...)
+	priorFIPID := rec.FloatingIPID
+
+	giveBack := func() {
+		if !reservedHere {
+			return
+		}
+		res, ok := p.(floatingIPReserver)
+		if !ok {
+			return
+		}
+		if deleted, rerr := res.ReleaseFloatingIP(ctx, rec, id); rerr != nil || !deleted {
+			fmt.Fprintf(stderr, "warning: reserved floating IP %s could not be released (%v) and is still billing\n", id, rerr)
+		}
+	}
+
+	if err := p.AssignFloatingIP(ctx, rec, id); err != nil {
+		// An address we minted seconds ago and could not attach is a
+		// billing resource with no purpose. Give it back rather than
+		// leave the operator to find it in the console — the same
+		// leak-on-failure the provisioning path was fixed for.
+		giveBack()
 		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
 		return 1
+	}
+
+	// THE POST-CONDITION, AND WHY IT LIVES HERE RATHER THAN IN THE
+	// GO ROTATION EXECUTOR.
+	//
+	// rotation.Executor has exactly this check (checkAddressMoved,
+	// checkRecordAddressConsistent) and it is correct — and it has no
+	// production caller. The shipped rotation path is the wizard's
+	// Rust re-implementation, and the ONLY provider mutation it makes
+	// for L3 is this subprocess. So a guard that is not on this seam
+	// is not on any seam a user can reach.
+	//
+	// What it catches is the bug Step 9 exists to end, in its two live
+	// forms. (1) An adapter that records the floating-IP id and stops:
+	// Vultr and Stark both do exactly that today, by their own
+	// comments, so an L3 there re-signs a pack still naming the burned
+	// address. (2) An operator who re-attaches the address the relay
+	// is already on — the UI used to pre-fill that value — which
+	// completes, reports success, publishes a freshness document and
+	// changes nothing a censor can see. Both used to exit 0.
+	//
+	// The record is NOT emitted on failure, so nothing downstream
+	// persists or re-signs against a half-applied swap.
+	if err := rotation.CheckAddressMoved(priorIP, rec.PublicIP); err != nil {
+		giveBack()
+		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
+		return 1
+	}
+	if err := rotation.CheckRecordAddressConsistent(rec); err != nil {
+		giveBack()
+		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
+		return 1
+	}
+	// The address the relay just moved OFF is still attached and still
+	// billing — AssignFloatingIP deliberately does not detach it, so
+	// that every already-distributed pack keeps working until the new
+	// one is signed. Say so on stderr with the id the operator needs,
+	// because "the old one no longer serves" is what the wizard tells
+	// them and it is not true until someone releases it.
+	if priorFIPID != "" && priorFIPID != id {
+		fmt.Fprintf(stderr, "note: floating IP %s (%s) is still attached to this relay and still billing; "+
+			"release it with `daal-deploy floating-ip release --fip-id %s` once the new pack is signed and distributed\n",
+			priorFIPID, priorIP, priorFIPID)
+	}
+	return emitRecord(rec, *recordFile, stdout, stderr)
+}
+
+// runReleaseFIP gives an address back. Separate from `unassign`, which
+// only detaches: an address that is merely detached is still reserved
+// and still billing, and until Step 9 there was no way at all to stop
+// paying for one from inside the app.
+func runReleaseFIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("floating-ip release", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
+	tokenFile := fs.String("token-file", "", "Hetzner API token file")
+	fipID := fs.String("fip-id", "", "floating-IP ID to release; empty releases the one on the record")
+	if rc := parseFlags(fs, args); rc >= 0 {
+		return rc
+	}
+	if err := requireAll(stderr, map[string]string{
+		"--record-file": *recordFile,
+		"--token-file":  *tokenFile,
+	}); err != nil {
+		return 2
+	}
+	rec, err := readRecord(*recordFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "read record-file: %v\n", err)
+		return 1
+	}
+	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "build provider: %v\n", err)
+		return 1
+	}
+	res, ok := p.(floatingIPReserver)
+	if !ok {
+		fmt.Fprintf(stderr, "floating-ip release: the %s adapter cannot release addresses — remove it in the provider console\n", rec.Provider)
+		return 2
+	}
+	id := *fipID
+	if id == "" {
+		id = rec.FloatingIPID
+	}
+	if id == "" {
+		fmt.Fprintln(stderr, "floating-ip release: no --fip-id and the record carries none")
+		return 2
+	}
+	// Releasing the address the record is CURRENTLY on would leave the
+	// record naming an unrouted address, which is the exact failure the
+	// L3 work exists to prevent. Detach through the provider first so
+	// the record falls back to the server's own primary address.
+	if id == rec.FloatingIPID {
+		if err := p.UnassignFloatingIP(ctx, rec); err != nil {
+			fmt.Fprintf(stderr, "floating-ip release: detach: %v\n", err)
+			return 1
+		}
+	}
+	deleted, err := res.ReleaseFloatingIP(ctx, rec, id)
+	if err != nil {
+		fmt.Fprintf(stderr, "floating-ip release: %v\n", err)
+		return 1
+	}
+	if !deleted {
+		fmt.Fprintf(stderr, "floating IP %s was detached but left reserved (daal-deploy did not create it) — it is still on your account and still billing\n", id)
 	}
 	return emitRecord(rec, *recordFile, stdout, stderr)
 }
@@ -594,8 +779,10 @@ func runFloatingIP(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return runAssignFIP(ctx, args[1:], stdout, stderr)
 	case "unassign":
 		return runUnassignFIP(ctx, args[1:], stdout, stderr)
+	case "release":
+		return runReleaseFIP(ctx, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown floating-ip action %q (want assign or unassign)\n", action)
+		fmt.Fprintf(stderr, "unknown floating-ip action %q (want assign, unassign or release)\n", action)
 		return 2
 	}
 }
@@ -619,7 +806,7 @@ func runUnassignFIP(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "read record-file: %v\n", err)
 		return 1
 	}
-	p, err := buildProvider(rec.Provider, *tokenFile, false)
+	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
 		return 1
@@ -765,10 +952,11 @@ func runListServers(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 }
 
-// buildProviderFn is the seam runDecommission builds its adapter
-// through, so cli_test.go can assert the decommission JSON contract
-// against an in-memory provider instead of a live cloud token.
-// Production always leaves it pointing at buildProvider.
+// buildProviderFn is the seam the teardown and floating-IP paths build
+// their adapter through, so cli_test.go can assert their contracts —
+// the decommission JSON report, and the address-swap behaviour L3
+// depends on — against an in-memory provider instead of a live cloud
+// token. Production always leaves it pointing at buildProvider.
 var buildProviderFn = buildProvider
 
 // buildProvider returns the selected FRP provider adapter. When
@@ -1112,7 +1300,21 @@ type publishFreshnessResult struct {
 	SignedDocPath   string `json:"signed_doc_path"`
 	RelayPackID     string `json:"relay_pack_id"`
 	BundleSHA256Hex string `json:"current_bundle_sha256"`
-	PublishedURL    string `json:"published_url"`
+	// PublishedURL is the first mirror that accepted the write.
+	// Retained because the Rust bridge's PublishFreshnessResult
+	// deserialises it by name and would fail on a missing field;
+	// Published[] is the field that actually describes the outcome.
+	PublishedURL string `json:"published_url"`
+	// Sequence is the monotonic counter stamped into the document.
+	// Surfaced so the caller can persist it and pass a strictly
+	// greater value next time.
+	Sequence uint64 `json:"sequence"`
+	NotAfter string `json:"not_after"`
+	// Published carries one row per configured mirror, including
+	// the failures — a publish that only reached one provider is
+	// reported as an error, but the operator still needs to see
+	// which one refused.
+	Published []freshness.PublishResult `json:"published"`
 }
 
 // runPublishFreshness builds and signs a freshness JSON document
@@ -1123,13 +1325,13 @@ type publishFreshnessResult struct {
 // called on L9 origin-only rotations** — the bundle is unchanged
 // and the existing freshness document is still valid.
 //
-// This commit ships build + sign only; live backend Put (R2 /
-// GH Pages) is gated behind freshness.ErrBackendNotImplemented
-// and will be wired alongside the SDK in a follow-up. The wizard
-// stores the signed bytes in the operator's staging directory so
-// a manual `gh-pages push` (or equivalent) can publish them in the
-// interim.
-func runPublishFreshness(_ context.Context, args []string, stdout, stderr io.Writer) int {
+// Publishing is live: with --r2-* / --gh-* credentials supplied
+// the signed bytes are PUT to every configured mirror and the
+// per-mirror outcome is reported. With none supplied the verb
+// builds and signs only (the pre-Wave-3 behaviour), so the wizard
+// path that stashes the bytes in the staging directory keeps
+// working.
+func runPublishFreshness(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("publish-freshness", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	relayPackID := fs.String("relay-pack-id", "", "RelayPack.RelayPackID for the current bundle")
@@ -1141,6 +1343,27 @@ func runPublishFreshness(_ context.Context, args []string, stdout, stderr io.Wri
 	subkeyCertFile := fs.String("subkey-cert-file", "", "subkey cert JSON file; required when subkey-priv-file set")
 	outFile := fs.String("out-file", "", "write signed JSON to this path (else stdout-only)")
 	nowOverride := fs.Int64("now-unix", 0, "freshness LastModified override; 0 = wall clock")
+	sequence := fs.Uint64("sequence", 0, "monotonic document counter; 0 = derive from the publish timestamp")
+	minSequence := fs.Uint64("min-sequence", 0,
+		"refuse to publish unless the document's sequence is strictly greater than this (the caller's last published value)")
+	supersedes := commaListFlag(fs, "supersedes",
+		"a relay_pack_id this pack replaces; repeat once per prior id, newest first")
+	ttlHours := fs.Int("ttl-hours", 0, "document validity window in hours (0 = 72h default)")
+	advertise := commaListFlag(fs, "mirror",
+		"advertise this endpoint set in the document as provider=https://url; repeat (min 2)")
+	// Live-upload credentials. Absent ⇒ build+sign only.
+	r2Account := fs.String("r2-account", "", "Cloudflare account ID for the R2 mirror")
+	r2Bucket := fs.String("r2-bucket", "", "R2 bucket")
+	r2Key := fs.String("r2-object-key", "", "R2 object key, e.g. freshness/<relay_pack_id>.json")
+	r2PublicURL := fs.String("r2-public-url", "", "recipient-facing https URL of the R2 object")
+	r2AccessKeyID := fs.String("r2-access-key-id", "", "R2 S3-compatible access key id")
+	r2SecretFile := fs.String("r2-secret-file", "", "file holding the R2 secret access key")
+	ghOwner := fs.String("gh-owner", "", "GitHub Pages owner")
+	ghRepo := fs.String("gh-repo", "", "GitHub Pages repo")
+	ghPath := fs.String("gh-path", "", "path inside the repo, e.g. freshness/<relay_pack_id>.json")
+	ghBranch := fs.String("gh-branch", "", "branch (default main)")
+	ghPublicURL := fs.String("gh-public-url", "", "recipient-facing https://owner.github.io/repo/path URL")
+	ghPATFile := fs.String("gh-pat-file", "", "file holding the fine-grained PAT (Contents: RW)")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -1161,16 +1384,73 @@ func runPublishFreshness(_ context.Context, args []string, stdout, stderr io.Wri
 		fmt.Fprintln(stderr, "publish-freshness: --subkey-priv-file requires --subkey-cert-file")
 		return 2
 	}
-	var lastModified time.Time
+	lastModified := time.Now().UTC()
 	if *nowOverride != 0 {
 		lastModified = time.Unix(*nowOverride, 0).UTC()
 	}
+	// THE SEQUENCE, AND WHY THE CLOCK IS NOT ENOUGH ON ITS OWN.
+	//
+	// The sequence is what makes a replayed document harmless. It has
+	// to move forward on every publish, forever, per relay_pack_id.
+	// Deriving it from the publish timestamp gets that for free while
+	// a clock only moves forward — and a clock is not a counter. An
+	// NTP correction after a dead RTC, a restored VM snapshot, or
+	// simply publishing from a second laptop whose clock lags, all
+	// produce a document with a LOWER sequence than one recipients
+	// have already accepted and persisted as their high-water mark.
+	// Those recipients then reject every document until wall clock
+	// catches up, for hours or days, while this command exits 0 and
+	// the panel goes green. Nothing on either side would notice.
+	//
+	// So the counter has an owner: the caller. --min-sequence is the
+	// caller's statement of the last value it published, and a
+	// document that does not strictly exceed it is refused HERE,
+	// loudly, instead of being uploaded and silently ignored by the
+	// fleet. The wizard passes max(last+1, now) as --sequence, so in
+	// normal operation this never fires; when it does, it means the
+	// publishing machine's clock went backwards and the operator
+	// needs to know that before it costs them a recovery.
+	seq := *sequence
+	if seq == 0 {
+		seq = uint64(lastModified.Unix())
+		if *minSequence >= seq {
+			// Clock behind the counter: keep publishing, but on the
+			// counter's terms rather than the clock's. Refusing here
+			// would leave an operator with a backwards clock unable
+			// to recover a relay at all, which is a worse failure
+			// than a sequence that has run ahead of wall time.
+			seq = *minSequence + 1
+			fmt.Fprintf(stderr, "publish-freshness: this machine's clock (%d) is at or behind the last published sequence (%d); "+
+				"using %d instead — check the clock, because every OTHER thing that derives a timestamp here is also wrong\n",
+				lastModified.Unix(), *minSequence, seq)
+		}
+	}
+	if *minSequence > 0 && seq <= *minSequence {
+		fmt.Fprintf(stderr, "publish-freshness: refusing to publish sequence %d — it is not greater than the last published value (%d), "+
+			"so every recipient that already accepted %d would reject this document as a rollback and keep serving the previous one\n",
+			seq, *minSequence, *minSequence)
+		return 2
+	}
+	advertised, err := parseFreshnessMirrors(*advertise)
+	if err != nil {
+		fmt.Fprintf(stderr, "publish-freshness: %v\n", err)
+		return 2
+	}
+	warnSharedDomains(stderr, "publish-freshness", advertised)
 	doc, err := freshness.Build(freshness.BuildOpts{
-		RelayPackID:         *relayPackID,
+		RelayPackID: *relayPackID,
+		// The ids this pack replaces. Without them the document is
+		// addressed to a name no existing recipient answers to: the
+		// pack id is a hash of the very attributes L3/L4/L5/L6
+		// change, so the rung that rotates a relay also renames it.
+		Supersedes:          *supersedes,
+		Sequence:            seq,
 		CurrentBundleSHA256: *currentBundleSHA,
 		CurrentSignedURL:    *currentSignedURL,
 		PublisherPubHex:     *publisherPubHex,
+		Mirrors:             advertised,
 		LastModified:        lastModified,
+		TTL:                 time.Duration(*ttlHours) * time.Hour,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "publish-freshness: build: %v\n", err)
@@ -1226,17 +1506,130 @@ func runPublishFreshness(_ context.Context, args []string, stdout, stderr io.Wri
 		SignedDocPath:   *outFile,
 		RelayPackID:     *relayPackID,
 		BundleSHA256Hex: *currentBundleSHA,
-		// PublishedURL is left empty: live backend Put is stubbed
-		// at this commit; a follow-up FRP-9 patch wires R2 / GH
-		// Pages SDKs and fills this in.
+		Sequence:        doc.Sequence,
+		NotAfter:        doc.NotAfter,
 	}
+
+	targets, err := freshnessTargets(freshnessTargetArgs{
+		r2Account: *r2Account, r2Bucket: *r2Bucket, r2Key: *r2Key,
+		r2PublicURL: *r2PublicURL, r2AccessKeyID: *r2AccessKeyID, r2SecretFile: *r2SecretFile,
+		ghOwner: *ghOwner, ghRepo: *ghRepo, ghPath: *ghPath, ghBranch: *ghBranch,
+		ghPublicURL: *ghPublicURL, ghPATFile: *ghPATFile,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "publish-freshness: %v\n", err)
+		return 2
+	}
+	publishFailed := false
+	if len(targets) > 0 {
+		results, perr := freshness.PublishAll(ctx, signed, targets)
+		res.Published = results
+		for _, r := range results {
+			if r.OK && res.PublishedURL == "" {
+				res.PublishedURL = r.URL
+			}
+			if !r.OK {
+				// The failure is printed on stderr as well as
+				// carried in the JSON: an operator watching a
+				// terminal must not have to parse stdout to learn
+				// that half their mirrors are down.
+				fmt.Fprintf(stderr, "publish-freshness: mirror %s FAILED: %s\n", r.Provider, r.Error)
+			}
+		}
+		if perr != nil {
+			fmt.Fprintf(stderr, "publish-freshness: %v\n", perr)
+			publishFailed = true
+		}
+	} else {
+		fmt.Fprintln(stderr, "publish-freshness: no mirror credentials supplied — "+
+			"document signed but NOT published; recipients will keep serving the previous document until it expires")
+	}
+
 	body, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "publish-freshness: marshal: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, string(body))
+	if publishFailed {
+		return 1
+	}
 	return 0
+}
+
+// freshnessTargetArgs groups the per-backend upload credentials so
+// freshnessTargets stays readable.
+type freshnessTargetArgs struct {
+	r2Account, r2Bucket, r2Key, r2PublicURL, r2AccessKeyID, r2SecretFile string
+	ghOwner, ghRepo, ghPath, ghBranch, ghPublicURL, ghPATFile            string
+}
+
+// freshnessTargets builds the upload targets from whichever
+// credential groups the operator supplied. A group is "supplied"
+// if any of its flags is set; a partially-supplied group is an
+// error rather than a silently-skipped mirror, because a silently
+// skipped mirror is a pack that promises two endpoints and has
+// one.
+//
+// Secrets are read into byte slices and zeroized by the caller's
+// deferred wipe; they are never placed in argv (which is world-
+// readable on Linux) — hence --r2-secret-file / --gh-pat-file
+// rather than --r2-secret / --gh-pat.
+func freshnessTargets(a freshnessTargetArgs) ([]freshness.Target, error) {
+	var targets []freshness.Target
+
+	r2Set := a.r2Account != "" || a.r2Bucket != "" || a.r2Key != "" ||
+		a.r2PublicURL != "" || a.r2AccessKeyID != "" || a.r2SecretFile != ""
+	if r2Set {
+		if a.r2Account == "" || a.r2Bucket == "" || a.r2Key == "" ||
+			a.r2PublicURL == "" || a.r2AccessKeyID == "" || a.r2SecretFile == "" {
+			return nil, errors.New("r2 mirror: --r2-account, --r2-bucket, --r2-object-key, " +
+				"--r2-public-url, --r2-access-key-id and --r2-secret-file are all required")
+		}
+		secret, err := os.ReadFile(a.r2SecretFile)
+		if err != nil {
+			return nil, fmt.Errorf("read r2-secret-file: %w", err)
+		}
+		be, err := r2.New(r2.Config{
+			AccountID:       a.r2Account,
+			Bucket:          a.r2Bucket,
+			ObjectKey:       a.r2Key,
+			AccessKeyID:     a.r2AccessKeyID,
+			SecretAccessKey: bytes.TrimSpace(secret),
+			PublicReadURL:   a.r2PublicURL,
+		})
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, freshness.Target{Provider: freshness.ProviderR2, Backend: be})
+	}
+
+	ghSet := a.ghOwner != "" || a.ghRepo != "" || a.ghPath != "" ||
+		a.ghPublicURL != "" || a.ghPATFile != ""
+	if ghSet {
+		if a.ghOwner == "" || a.ghRepo == "" || a.ghPath == "" ||
+			a.ghPublicURL == "" || a.ghPATFile == "" {
+			return nil, errors.New("ghpages mirror: --gh-owner, --gh-repo, --gh-path, " +
+				"--gh-public-url and --gh-pat-file are all required")
+		}
+		pat, err := os.ReadFile(a.ghPATFile)
+		if err != nil {
+			return nil, fmt.Errorf("read gh-pat-file: %w", err)
+		}
+		be, err := ghpages.New(ghpages.Config{
+			Owner:         a.ghOwner,
+			Repo:          a.ghRepo,
+			Path:          a.ghPath,
+			Branch:        a.ghBranch,
+			PAT:           bytes.TrimSpace(pat),
+			PublicReadURL: a.ghPublicURL,
+		})
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, freshness.Target{Provider: freshness.ProviderGHPages, Backend: be})
+	}
+	return targets, nil
 }
 
 func readRecord(path string) (*provider.OperatorRecord, error) {
@@ -1327,7 +1720,18 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	expiryDays := fs.Int("expiry-days", 30, "bundle validity window in days")
 	publisherName := fs.String("publisher-name", "", "human-readable publisher name (default: Family Relay Publisher)")
 	subkeyCert := fs.String("subkey-cert", "", "FRP-7.5 trust/subkey-cert.json path when --priv-key is a certified sub-key")
-	freshnessURL := fs.String("freshness-url", "", "FRP-8 V1.6 freshness endpoint URL (https://); empty for V1.5")
+	// Repeatable: --freshness-mirror r2=https://… --freshness-mirror ghpages=https://…
+	// One pair per storage account the publisher actually holds.
+	// Fewer than freshness.MinMirrors is refused by NewMirrorSet.
+	freshnessMirrors := commaListFlag(fs, "freshness-mirror",
+		"FRP-8 freshness endpoint as provider=https://url; repeat for each provider (min 2, distinct providers)")
+	// Retired. Kept as a recognised flag so a caller that still
+	// passes it fails loudly instead of silently minting a pack
+	// with no freshness path at all.
+	freshnessURLRetired := fs.String("freshness-url", "",
+		"RETIRED — use --freshness-mirror provider=url (repeat); a single freshness host is not a supported pack shape")
+	revocationURL := fs.String("revocation-url", "", "publisher revocation list URL (https://); requires --revocation-pub-hex")
+	revocationPubHex := fs.String("revocation-pub-hex", "", "revocation list SIGNING public key, 64 hex chars (not a fingerprint)")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
@@ -1339,6 +1743,28 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		"--output":          *outFile,
 	}); err != nil {
 		return 2
+	}
+	if *freshnessURLRetired != "" {
+		fmt.Fprintln(stderr, "bind-and-sign: --freshness-url is retired.")
+		fmt.Fprintln(stderr, "  A freshness endpoint is a fixed URL inside a signed pack: it is itself a")
+		fmt.Fprintln(stderr, "  censorship target, and one host means one block away from no recovery path.")
+		fmt.Fprintf(stderr, "  Pass %d or more: --freshness-mirror r2=https://… --freshness-mirror ghpages=https://…\n",
+			freshness.MinMirrors)
+		return 2
+	}
+	mirrorSet, err := parseFreshnessMirrors(*freshnessMirrors)
+	if err != nil {
+		fmt.Fprintf(stderr, "bind-and-sign: %v\n", err)
+		return 2
+	}
+	warnSharedDomains(stderr, "bind-and-sign", mirrorSet)
+	// Non-blocking, but said out loud: a pack with no revocation
+	// endpoint cannot ever be revoked, and the recipient-side
+	// machinery that would act on one selects on this field being
+	// non-empty.
+	if *revocationURL == "" {
+		fmt.Fprintln(stderr, "bind-and-sign: warning: no --revocation-url; recipients of this pack "+
+			"will never poll a revocation list and a leaked pack cannot be withdrawn")
 	}
 
 	emitProgress(*progressJSON, stderr, "bind_start", "starting bind", nil)
@@ -1390,7 +1816,9 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		Phase:                ph,
 		PublisherDisplayName: *publisherName,
 		SubkeyCertJSON:       subkeyCertJSON,
-		FreshnessURL:         *freshnessURL,
+		Freshness:            mirrorSet,
+		RevocationURL:        *revocationURL,
+		RevocationPubHex:     *revocationPubHex,
 	})
 	if err != nil {
 		emitProgress(*progressJSON, stderr, "bind_error", err.Error(), nil)
@@ -1412,6 +1840,8 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		"sbp_path":          *outFile,
 		"sbp_sha256":        res.BundleSHA256,
 		"relay_pack_id":     res.RelayPackID,
+		"freshness_mirrors": mirrorSet.Len(),
+		"revocation_url":    *revocationURL,
 		"fingerprint_hex":   res.FingerprintHex,
 		"fingerprint_en":    res.FingerprintEN,
 		"fingerprint_fa":    res.FingerprintFA,
@@ -1629,6 +2059,56 @@ func runRotateRecommend(args []string, stdin io.Reader, stdout, stderr io.Writer
 		return 1
 	}
 	return 0
+}
+
+// warnSharedDomains says out loud when two "distinct providers" share a
+// registrable domain.
+//
+// The distinctness the type enforces is label + host, and neither is a
+// failure domain. Two subdomains of one zone is one registration, one
+// account and one takedown — and every honesty surface downstream (the
+// panel's provider count, the MIN_MIRRORS gate, the recipient's
+// Providers) would report it as redundancy. This is not a refusal
+// because the configuration can be legitimate; it is the one place the
+// operator is told what they actually bought.
+func warnSharedDomains(stderr io.Writer, verb string, set *freshness.MirrorSet) {
+	for _, group := range set.SharedDomains() {
+		labels := make([]string, 0, len(group))
+		for _, m := range group {
+			labels = append(labels, fmt.Sprintf("%s=%s", m.Provider, m.URL))
+		}
+		fmt.Fprintf(stderr, "%s: warning: these mirrors share one domain and will very likely fail together, "+
+			"so they count as ONE provider however they are labelled: %s\n", verb, strings.Join(labels, ", "))
+	}
+}
+
+// parseFreshnessMirrors turns repeated `provider=https://url`
+// flag values into a validated MirrorSet. An empty list yields a
+// nil set (a pack with no freshness path, which is still a legal
+// pack — it just cannot be healed remotely).
+//
+// The provider label is split on the FIRST '=' only: the URL may
+// itself contain one in a query string.
+func parseFreshnessMirrors(pairs []string) (*freshness.MirrorSet, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	mirrors := make([]freshness.Mirror, 0, len(pairs))
+	for _, p := range pairs {
+		name, rawURL, ok := strings.Cut(p, "=")
+		if !ok || name == "" || rawURL == "" {
+			return nil, fmt.Errorf("--freshness-mirror %q: want provider=https://url", p)
+		}
+		mirrors = append(mirrors, freshness.Mirror{
+			Provider: freshness.Provider(strings.ToLower(strings.TrimSpace(name))),
+			URL:      strings.TrimSpace(rawURL),
+		})
+	}
+	set, err := freshness.NewMirrorSet(mirrors)
+	if err != nil {
+		return nil, fmt.Errorf("--freshness-mirror: %w", err)
+	}
+	return set, nil
 }
 
 // commaListFlag is a small helper that wires a repeatable string

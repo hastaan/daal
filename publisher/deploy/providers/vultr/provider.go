@@ -264,6 +264,34 @@ func (p *Provider) resolveInstanceID(ctx context.Context, rec *provider.Operator
 }
 
 // AssignFloatingIP attaches a Vultr Reserved IP to the instance.
+//
+// INCOMPLETE FOR L3, AND KNOWINGLY SO. It records the id and stops. It
+// does NOT move rec.PublicIP or the candidates' public_ip:* tags onto
+// the reserved address, because Vultr's client surface here has no
+// "read this reserved IP back and tell me its address" call — and an id
+// is not an address. So an L3 rotation on Vultr would attach the new
+// address and then re-sign a pack that still names the burned one.
+//
+// That failure is contained on the LIVE path, which is the only
+// containment worth claiming: `daal-deploy assign-fip` snapshots
+// rec.PublicIP, calls this, and then runs rotation.CheckAddressMoved
+// on the result — so an L3 here exits non-zero with
+// ErrL3AddressUnchanged, before the record is emitted and therefore
+// before anything is persisted or re-signed. That is the seam the
+// wizard's rotation actually goes through.
+//
+// Two other guards exist and neither is load-bearing here, which is
+// worth stating because an earlier version of this comment cited them
+// as if they were: rotation.Executor's own post-condition has no
+// production caller, and rotation.ActionForProvider marks L3
+// AvailabilityUnsupported on this provider but only reaches
+// rotate_recommend — the address-swap sheet never consults a
+// recommendation.
+//
+// Completing it means adding a ReservedIPGet to the client + the
+// read-back/retag sequence the Hetzner adapter's floating_ip.go
+// carries; it is not done here because nothing has exercised the Vultr
+// live client against a real account.
 func (p *Provider) AssignFloatingIP(ctx context.Context, rec *provider.OperatorRecord, fipID string) error {
 	if rec == nil || rec.ServerID == "" {
 		return errors.New("vultr: OperatorRecord without ServerID")

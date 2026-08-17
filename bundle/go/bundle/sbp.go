@@ -15,6 +15,28 @@ import (
 	"time"
 )
 
+// FreshnessMirrorsPath is the .sbp archive entry carrying the
+// publisher-signed FRP-8 freshness mirror set.
+//
+// It lives HERE, in the module both the publisher and the recipient
+// already depend on, because the path is a wire contract between two
+// separately-compiled programs. It had three independent spellings —
+// publisher/deploy/freshness, core/refresh, and the archive writer —
+// and three copies of a string is a rename away from a publisher that
+// writes an entry no recipient looks for, which fails silently in both
+// directions: the pack still verifies, the mirrors are simply never
+// found. Both sides now alias this constant.
+const FreshnessMirrorsPath = "trust/freshness-mirrors.json"
+
+// MaxFreshnessMirrorsBytes bounds that entry for any consumer that
+// keeps it. A real one is a few hundred bytes (MaxMirrors is 8), it is
+// NOT covered by manifest.sig, and it survives import into on-device
+// storage — so without a bound, "here is a relay pack" is also "please
+// store this 200 MB blob in your secrets table forever". Matches
+// core/bootstrap's per-entry archive cap so a document that is
+// storable is also readable.
+const MaxFreshnessMirrorsBytes = 256 * 1024
+
 // sha256BodyHex returns the hex-encoded SHA-256 of body. Used by
 // the 3E transport_modules[] hash-check.
 func sha256BodyHex(body []byte) string {
@@ -111,6 +133,13 @@ func ParseSBP(r io.ReaderAt, size int64) (*Bundle, error) {
 	}
 	if delBytes, ok := files["trust/cell-delegation.json"]; ok {
 		b.CellDelegationJSON = append([]byte(nil), delBytes...)
+	}
+	// FRP-8: capture the signed freshness mirror set when present.
+	// Same contract as the cell documents above — raw bytes, no parse,
+	// no verification, VerifyBundle unextended so a pack carrying this
+	// entry still verifies on a client that has never heard of it.
+	if mirrorBytes, ok := files[FreshnessMirrorsPath]; ok {
+		b.FreshnessMirrorsJSON = append([]byte(nil), mirrorBytes...)
 	}
 	return b, nil
 }

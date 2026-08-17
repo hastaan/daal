@@ -38,6 +38,14 @@ type fakeClient struct {
 	failSSHKeyDelete   error
 	failFirewallDelete error
 
+	// fips is the floating-IP table: id -> address + home location +
+	// current attachment, i.e. everything the L3 swap reads back.
+	fips                 map[string]*FloatingIPInfo
+	failFloatingIPCreate error
+	failFloatingIPDelete error
+	failFloatingIPByID   error
+	failFloatingIPAssign error
+
 	// lastUserData is the cloud-init the most recent create/rebuild
 	// was handed. cover_sni_test.go parses it to prove the per-relay
 	// REALITY cover host actually reaches the box's sing-box config.
@@ -68,6 +76,7 @@ func newFake() *fakeClient {
 		sshKeys:          map[string]*fakeSSHKey{},
 		priceM:           map[string]struct{ hourly, monthly float64 }{"fsn1/cx22": {0.005, 3.85}},
 		floating:         map[string]string{},
+		fips:             map[string]*FloatingIPInfo{},
 		ensuredFirewalls: map[string]string{},
 		fwAppliedTo:      map[string][]string{},
 	}
@@ -213,7 +222,14 @@ func (f *fakeClient) SSHKeyList(ctx context.Context) ([]SSHKeyInfo, error) {
 func (f *fakeClient) FloatingIPAssign(ctx context.Context, fipID, serverID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failFloatingIPAssign != nil {
+		return f.failFloatingIPAssign
+	}
+	if _, ok := f.fips[fipID]; !ok {
+		return errFloatingIPNotFound
+	}
 	f.floating[fipID] = serverID
+	f.fips[fipID].ServerID = serverID
 	return nil
 }
 
@@ -221,7 +237,81 @@ func (f *fakeClient) FloatingIPUnassign(ctx context.Context, fipID string) error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.floating, fipID)
+	if fip, ok := f.fips[fipID]; ok {
+		fip.ServerID = ""
+	}
 	return nil
+}
+
+// seedFloatingIP plants an address on the account belonging to the
+// relay fipRecord() describes. ownedByDaal controls BOTH ownership
+// labels, which together decide whether ReleaseFloatingIP may delete
+// it — managed-by says "some daal relay owns this", and the relay
+// label says which one. Use seedSiblingFloatingIP for an address that
+// belongs to a DIFFERENT relay in the same account.
+func (f *fakeClient) seedFloatingIP(id, addr, homeLocation string, ownedByDaal bool) *FloatingIPInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	labels := map[string]string{}
+	if ownedByDaal {
+		labels[labelManagedBy] = labelManagedByValue
+		labels[labelRelay] = derivedServerName([]byte("0123456789abcdef"), homeLocation)
+	}
+	fip := &FloatingIPInfo{ID: id, IP: net.ParseIP(addr), HomeLocation: homeLocation, Labels: labels}
+	f.fips[id] = fip
+	return fip
+}
+
+func (f *fakeClient) FloatingIPCreate(_ context.Context, opts FloatingIPCreateOpts) (*FloatingIPInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failFloatingIPCreate != nil {
+		return nil, f.failFloatingIPCreate
+	}
+	for _, existing := range f.fips {
+		if existing.Name != "" && existing.Name == opts.Name {
+			// Hetzner enforces name uniqueness on floating IPs the
+			// same way it does on SSH keys. Modelled so the
+			// random-suffix requirement is testable.
+			return nil, errors.New("floating ip not unique (uniqueness_error)")
+		}
+	}
+	f.idCount++
+	id := "fip-" + strconv.FormatInt(f.idCount, 10)
+	fip := &FloatingIPInfo{
+		ID:           id,
+		IP:           net.ParseIP("203.0.113." + strconv.FormatInt(f.idCount, 10)),
+		HomeLocation: opts.HomeLocation,
+		Name:         opts.Name,
+		Labels:       opts.Labels,
+	}
+	f.fips[id] = fip
+	return fip, nil
+}
+
+func (f *fakeClient) FloatingIPDelete(_ context.Context, fipID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failFloatingIPDelete != nil {
+		return f.failFloatingIPDelete
+	}
+	delete(f.fips, fipID)
+	delete(f.floating, fipID)
+	return nil
+}
+
+func (f *fakeClient) FloatingIPByID(_ context.Context, fipID string) (*FloatingIPInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failFloatingIPByID != nil {
+		return nil, f.failFloatingIPByID
+	}
+	fip, ok := f.fips[fipID]
+	if !ok {
+		return nil, errFloatingIPNotFound
+	}
+	cp := *fip
+	return &cp, nil
 }
 
 // fakeFirewalls and FirewallApplyCloudflareRule track the
@@ -469,22 +559,72 @@ func TestDecommission_NilRecordIsNoOp(t *testing.T) {
 	}
 }
 
-func TestAssignFloatingIP_SameIDIsNoOp(t *testing.T) {
+// "Same id twice" is a no-op only when the record is ACTUALLY
+// converged — id, address and candidate tags all naming the attached
+// address. The old short-circuit fired on the id alone, which made the
+// one call that could repair a half-applied swap the one call that
+// returned early.
+func TestAssignFloatingIP_ConvergedRecordSkipsTheCloudCall(t *testing.T) {
 	f := newFake()
+	f.servers["1"] = &ServerInfo{ID: "1", Name: "srv", PublicIP: net.ParseIP("5.75.0.1")}
+	f.seedFloatingIP("fip-100", "203.0.113.5", "fsn1", true)
+	if err := f.FloatingIPAssign(context.Background(), "fip-100", "1"); err != nil {
+		t.Fatal(err)
+	}
 	p := New(f)
-	rec := &provider.OperatorRecord{ServerID: "1", FloatingIPID: "fip-100"}
+	rec := &provider.OperatorRecord{
+		ServerID: "1", FloatingIPID: "fip-100", PublicIP: net.ParseIP("203.0.113.5"),
+		Candidates: []provider.CandidateMeta{{Family: "vless-reality", PublicRiskTags: []string{"public_ip:203.0.113.5"}}},
+	}
 	if err := p.AssignFloatingIP(context.Background(), rec, "fip-100"); err != nil {
 		t.Errorf("idempotent assign must be nil; got %v", err)
 	}
-	if len(f.floating) != 0 {
-		t.Errorf("idempotent path must not call cloud API; got %d floating entries", len(f.floating))
+	if rec.PublicIP.String() != "203.0.113.5" {
+		t.Errorf("record.PublicIP = %s, want 203.0.113.5", rec.PublicIP)
 	}
 }
 
-func TestAssignFloatingIP_NewIDUpdatesRecord(t *testing.T) {
+// The half-applied record is the state every pre-Step-9 rotation left
+// behind: the id was recorded, the address never moved. Re-running the
+// assign must repair it rather than declare victory.
+func TestAssignFloatingIP_RepairsAHalfAppliedRecord(t *testing.T) {
 	f := newFake()
+	f.servers["1"] = &ServerInfo{ID: "1", Name: "srv", PublicIP: net.ParseIP("5.75.0.1")}
+	f.seedFloatingIP("fip-100", "203.0.113.5", "fsn1", true)
+	if err := f.FloatingIPAssign(context.Background(), "fip-100", "1"); err != nil {
+		t.Fatal(err)
+	}
 	p := New(f)
-	rec := &provider.OperatorRecord{ServerID: "1"}
+	rec := &provider.OperatorRecord{
+		ServerID: "1", FloatingIPID: "fip-100",
+		PublicIP:   net.ParseIP("5.75.0.1"), // still the burned address
+		Candidates: []provider.CandidateMeta{{Family: "vless-reality", PublicRiskTags: []string{"public_ip:5.75.0.1", "public_port:tcp443"}}},
+	}
+	if err := p.AssignFloatingIP(context.Background(), rec, "fip-100"); err != nil {
+		t.Fatal(err)
+	}
+	if rec.PublicIP.String() != "203.0.113.5" {
+		t.Errorf("record.PublicIP = %s, want 203.0.113.5 — the repair path returned early instead of converging", rec.PublicIP)
+	}
+	if got := rec.Candidates[0].PublicRiskTags; got[0] != "public_ip:203.0.113.5" || got[1] != "public_port:tcp443" {
+		t.Errorf("candidate tags = %v, want the address replaced in place and the port tag untouched", got)
+	}
+}
+
+// THE WHOLE POINT: the swap moves the address recipients dial, in both
+// of the places the record keeps it.
+func TestAssignFloatingIP_MovesPublicIPAndCandidateTags(t *testing.T) {
+	f := newFake()
+	f.servers["1"] = &ServerInfo{ID: "1", Name: "srv", PublicIP: net.ParseIP("5.75.0.1")}
+	f.seedFloatingIP("fip-200", "203.0.113.7", "fsn1", true)
+	p := New(f)
+	rec := &provider.OperatorRecord{
+		ServerID: "1", Region: "fsn1", PublicIP: net.ParseIP("5.75.0.1"),
+		Candidates: []provider.CandidateMeta{
+			{Family: "vless-reality", PublicRiskTags: []string{"public_ip:5.75.0.1", "public_port:tcp443"}},
+			{Family: "hysteria2", PublicRiskTags: []string{"public_ip:5.75.0.1", "public_port:udp443"}},
+		},
+	}
 	if err := p.AssignFloatingIP(context.Background(), rec, "fip-200"); err != nil {
 		t.Fatal(err)
 	}
@@ -494,13 +634,76 @@ func TestAssignFloatingIP_NewIDUpdatesRecord(t *testing.T) {
 	if f.floating["fip-200"] != "1" {
 		t.Errorf("fake-client did not see assign call")
 	}
+	if rec.PublicIP.String() != "203.0.113.7" {
+		t.Errorf("record.PublicIP = %s, want 203.0.113.7 — a swap that leaves the burned address in place rotates nothing", rec.PublicIP)
+	}
+	for i, c := range rec.Candidates {
+		if c.PublicRiskTags[0] != "public_ip:203.0.113.7" {
+			t.Errorf("candidate %d tags = %v, want the new address", i, c.PublicRiskTags)
+		}
+	}
 }
 
-func TestUnassignFloatingIP_UpdatesRecord(t *testing.T) {
+// Stealing an address off another live relay would take that relay
+// down. A rotation must never do that.
+func TestAssignFloatingIP_RefusesAnAddressHeldByAnotherServer(t *testing.T) {
 	f := newFake()
+	f.servers["1"] = &ServerInfo{ID: "1", PublicIP: net.ParseIP("5.75.0.1")}
+	f.servers["2"] = &ServerInfo{ID: "2", PublicIP: net.ParseIP("5.75.0.2")}
+	f.seedFloatingIP("fip-300", "203.0.113.8", "fsn1", true)
+	if err := f.FloatingIPAssign(context.Background(), "fip-300", "2"); err != nil {
+		t.Fatal(err)
+	}
 	p := New(f)
-	rec := &provider.OperatorRecord{ServerID: "1", FloatingIPID: "fip-200"}
-	f.floating["fip-200"] = "1"
+	rec := &provider.OperatorRecord{ServerID: "1", PublicIP: net.ParseIP("5.75.0.1")}
+	err := p.AssignFloatingIP(context.Background(), rec, "fip-300")
+	if err == nil {
+		t.Fatal("expected a refusal to steal an address from another server")
+	}
+	if rec.PublicIP.String() != "5.75.0.1" {
+		t.Errorf("record was mutated by a refused assign: %s", rec.PublicIP)
+	}
+}
+
+// A failed assign must leave the record exactly as it was; there is
+// nothing to unwind if nothing was written.
+func TestAssignFloatingIP_FailureLeavesRecordUntouched(t *testing.T) {
+	f := newFake()
+	f.servers["1"] = &ServerInfo{ID: "1", PublicIP: net.ParseIP("5.75.0.1")}
+	f.seedFloatingIP("fip-400", "203.0.113.9", "fsn1", true)
+	f.failFloatingIPAssign = errors.New("cloud says no")
+	p := New(f)
+	rec := &provider.OperatorRecord{
+		ServerID: "1", PublicIP: net.ParseIP("5.75.0.1"),
+		Candidates: []provider.CandidateMeta{{Family: "vless-reality", PublicRiskTags: []string{"public_ip:5.75.0.1"}}},
+	}
+	if err := p.AssignFloatingIP(context.Background(), rec, "fip-400"); err == nil {
+		t.Fatal("expected the assign failure to surface")
+	}
+	if rec.PublicIP.String() != "5.75.0.1" || rec.FloatingIPID != "" {
+		t.Errorf("record mutated by a failed assign: ip=%s fip=%q", rec.PublicIP, rec.FloatingIPID)
+	}
+	if rec.Candidates[0].PublicRiskTags[0] != "public_ip:5.75.0.1" {
+		t.Errorf("candidate tags mutated by a failed assign: %v", rec.Candidates[0].PublicRiskTags)
+	}
+}
+
+// Detaching must put the record back on the server's own primary
+// address. Clearing the id and leaving PublicIP on the detached address
+// is the same bug as the assign, mirrored: a record naming a route that
+// no longer exists.
+func TestUnassignFloatingIP_FallsBackToThePrimaryAddress(t *testing.T) {
+	f := newFake()
+	f.servers["1"] = &ServerInfo{ID: "1", PublicIP: net.ParseIP("5.75.0.1")}
+	f.seedFloatingIP("fip-200", "203.0.113.5", "fsn1", true)
+	if err := f.FloatingIPAssign(context.Background(), "fip-200", "1"); err != nil {
+		t.Fatal(err)
+	}
+	p := New(f)
+	rec := &provider.OperatorRecord{
+		ServerID: "1", FloatingIPID: "fip-200", PublicIP: net.ParseIP("203.0.113.5"),
+		Candidates: []provider.CandidateMeta{{Family: "vless-reality", PublicRiskTags: []string{"public_ip:203.0.113.5"}}},
+	}
 	if err := p.UnassignFloatingIP(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
@@ -509,6 +712,32 @@ func TestUnassignFloatingIP_UpdatesRecord(t *testing.T) {
 	}
 	if _, ok := f.floating["fip-200"]; ok {
 		t.Errorf("fake-client did not see unassign call")
+	}
+	if rec.PublicIP.String() != "5.75.0.1" {
+		t.Errorf("record.PublicIP = %s, want the server's own 5.75.0.1", rec.PublicIP)
+	}
+	if rec.Candidates[0].PublicRiskTags[0] != "public_ip:5.75.0.1" {
+		t.Errorf("candidate tags = %v, want the primary address", rec.Candidates[0].PublicRiskTags)
+	}
+}
+
+// If the server cannot be read back we do not know what address to fall
+// back to, so the address stays attached and the call fails. An
+// attached address costs money; a record naming an unrouted address
+// costs every recipient their connection.
+func TestUnassignFloatingIP_RefusesWhenThePrimaryAddressIsUnknown(t *testing.T) {
+	f := newFake()
+	f.seedFloatingIP("fip-200", "203.0.113.5", "fsn1", true)
+	if err := f.FloatingIPAssign(context.Background(), "fip-200", "1"); err != nil && !errors.Is(err, errFloatingIPNotFound) {
+		t.Fatal(err)
+	}
+	p := New(f)
+	rec := &provider.OperatorRecord{ServerID: "missing", FloatingIPID: "fip-200", PublicIP: net.ParseIP("203.0.113.5")}
+	if err := p.UnassignFloatingIP(context.Background(), rec); err == nil {
+		t.Fatal("expected a refusal when the fallback address cannot be established")
+	}
+	if rec.FloatingIPID != "fip-200" {
+		t.Errorf("FloatingIPID cleared despite the failure: %q", rec.FloatingIPID)
 	}
 }
 

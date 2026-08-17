@@ -3,6 +3,8 @@ package scheduler
 import (
 	"sort"
 	"time"
+
+	"daal/core/internal/selection"
 )
 
 // Kind enumerates the schedulable refresh actions.
@@ -17,6 +19,22 @@ const (
 	// budget.Engine.HourRollover at the new hour bucket. This action
 	// has no Ref because budget rollover is process-global.
 	KindBudgetReset Kind = "budget-reset"
+	// KindFreshness (Wave 3 / Step 8) fires per RelayPack that carries
+	// at least one freshness endpoint. Ref is the relay_pack_id. The
+	// executor's RefreshFreshness implementation drives
+	// refresh.RelayPackRefresher, which is what turns a publisher-side
+	// rotation into something recipients pick up over the network
+	// instead of by courier.
+	//
+	// Cadence for this kind is NOT a Cadence duration: it is the
+	// FRP-8 trigger policy in core/internal/selection/freshness.go
+	// (MinInterval / MaxStaleness / RetryBackoff), which already
+	// encodes the "do not storm the endpoint" rule and the
+	// "over-stale → force" rule. Reusing it rather than inventing a
+	// second cadence is deliberate: two policies that must agree and
+	// live in different files is exactly how this codebase acquired
+	// its stock of code that exists and does nothing.
+	KindFreshness Kind = "freshness"
 )
 
 // Cadence is the per-kind interval policy. Subscription cadence is
@@ -27,16 +45,25 @@ type Cadence struct {
 	Revocation  time.Duration
 	Bootstrap   time.Duration
 	BudgetReset time.Duration // Phase 2A. Defaults to 1 h.
+
+	// Freshness is the FRP-8 per-RelayPack trigger policy. Zero value
+	// is replaced by selection.DefaultPolicy() in Plan/AllNextDues, so
+	// a host that constructs a Cadence by hand cannot accidentally get
+	// "MinInterval 0" and hammer a publisher's freshness endpoint once
+	// per tick.
+	Freshness selection.FreshnessPolicy
 }
 
 // DefaultCadence returns the production cadence: revocation every 6 h,
-// bootstrap every 24 h, budget-reset every hour. Subscription cadence
-// is per-row.
+// bootstrap every 24 h, budget-reset every hour, freshness on the FRP-8
+// default policy (15 min floor, 6 h staleness ceiling, 5 min retry
+// backoff). Subscription cadence is per-row.
 func DefaultCadence() Cadence {
 	return Cadence{
 		Revocation:  6 * time.Hour,
 		Bootstrap:   24 * time.Hour,
 		BudgetReset: 1 * time.Hour,
+		Freshness:   selection.DefaultPolicy(),
 	}
 }
 
@@ -67,6 +94,13 @@ type Source interface {
 	// LastBudgetReset returns the wall-clock of the last budget-reset
 	// hour-rollover. Phase 2A. Zero → never (so first tick fires).
 	LastBudgetReset() time.Time
+	// RelayPacks enumerates every imported RelayPack that carries at
+	// least one freshness endpoint, with its last successful and last
+	// failed refresh. A pack with no endpoint MUST NOT be returned:
+	// there is nothing to fetch, and emitting it would make the
+	// scheduler's status JSON claim a capability the pack does not
+	// have. Step 8.
+	RelayPacks() []RelayPackState
 }
 
 // SubscriptionState is a snapshot of one subscriptions row for the
@@ -82,6 +116,26 @@ type SubscriptionState struct {
 type PublisherState struct {
 	PublisherID         string
 	LastRevocationCheck time.Time
+}
+
+// RelayPackState is a snapshot of one RelayPack's freshness state for
+// the planner. Both timestamps are persisted by the executor
+// (core/refresh writes them into secrets_kv), so the cadence survives a
+// process restart — a tick storm caused by an app that is being killed
+// and relaunched must not turn into a fetch storm at the endpoint.
+type RelayPackState struct {
+	RelayPackID   string
+	LastSuccessAt time.Time // zero if never
+	LastFailureAt time.Time // zero if never
+
+	// ConsecutiveFailures drives the escalating retry gap, and
+	// JitterOffset is the per-device random delay. Both are persisted
+	// by the executor beside the timestamps and are passed through
+	// unchanged: the planner must compute the SAME due time the
+	// policy will accept, and it can only do that by reading the same
+	// state rather than re-deriving either value.
+	ConsecutiveFailures int
+	JitterOffset        time.Duration
 }
 
 // Plan returns the deterministic ordered list of actions that have
@@ -100,6 +154,7 @@ func Plan(src Source, c Cadence, now time.Time) []Action {
 	if c.BudgetReset == 0 {
 		c.BudgetReset = 1 * time.Hour
 	}
+	c.Freshness = defaultedFreshness(c.Freshness)
 	var due []Action
 
 	for _, s := range src.Subscriptions() {
@@ -148,6 +203,37 @@ func Plan(src Source, c Cadence, now time.Time) []Action {
 		})
 	}
 
+	for _, rp := range src.RelayPacks() {
+		if rp.RelayPackID == "" {
+			continue
+		}
+		st := selection.FreshnessState{
+			LastSuccessAt:       rp.LastSuccessAt,
+			LastFailureAt:       rp.LastFailureAt,
+			ConsecutiveFailures: rp.ConsecutiveFailures,
+			JitterOffset:        rp.JitterOffset,
+		}
+		// Two gates that must agree, asserted together rather than
+		// re-derived: nextFreshnessDue computes the instant the policy
+		// first permits an attempt (that is what Status renders), and
+		// ShouldAttemptRefresh is the policy itself. If they ever
+		// disagree the conservative one wins, because the failure mode
+		// on this path is a fixed-cadence beacon at a small, unique,
+		// pollable URL.
+		next := nextFreshnessDue(st, c.Freshness, now)
+		if next.After(now) {
+			continue
+		}
+		if !selection.ShouldAttemptRefresh(c.Freshness, st, now) {
+			continue
+		}
+		due = append(due, Action{
+			Kind:    KindFreshness,
+			Ref:     rp.RelayPackID,
+			NextDue: next,
+		})
+	}
+
 	sort.SliceStable(due, func(i, j int) bool {
 		if due[i].Kind != due[j].Kind {
 			return due[i].Kind < due[j].Kind
@@ -155,6 +241,66 @@ func Plan(src Source, c Cadence, now time.Time) []Action {
 		return due[i].Ref < due[j].Ref
 	})
 	return due
+}
+
+// defaultedFreshness fills a zero-valued policy with the FRP-8 ship
+// defaults. A zero MinInterval would mean "attempt on every tick",
+// i.e. once a minute against a URL that exists precisely so a censor
+// can find it — so the zero value must never be honoured literally.
+func defaultedFreshness(p selection.FreshnessPolicy) selection.FreshnessPolicy {
+	d := selection.DefaultPolicy()
+	if p.MinInterval <= 0 {
+		p.MinInterval = d.MinInterval
+	}
+	if p.MaxStaleness <= 0 {
+		p.MaxStaleness = d.MaxStaleness
+	}
+	if p.RetryBackoff <= 0 {
+		p.RetryBackoff = d.RetryBackoff
+	}
+	if p.MaxJitter <= 0 {
+		p.MaxJitter = d.MaxJitter
+	}
+	return p
+}
+
+// nextFreshnessDue is the inverse of selection.ShouldAttemptRefresh: the
+// earliest instant at which that function would return true, given the
+// same policy and state. Status() renders it, and Plan cross-checks
+// against it.
+//
+// The rule ordering is the policy's, not ours: retry backoff suppresses
+// even an over-stale pack (freshness_test.go pins that), so a pack that
+// has failed is gated on LastFailureAt+RetryBackoff regardless of how
+// stale it is.
+// The jitter offset and the failure count both come from the SAME
+// persisted state the policy reads, so the two gates cannot disagree.
+// Deriving either here would put the planner on a different lattice
+// from the executor and render a due time the policy then refuses.
+func nextFreshnessDue(s selection.FreshnessState, p selection.FreshnessPolicy, now time.Time) time.Time {
+	p = defaultedFreshness(p)
+	if s.LastSuccessAt.IsZero() && s.LastFailureAt.IsZero() {
+		// Never attempted: due now. One nanosecond back, matching
+		// nextDue's convention so the action lands in the due list.
+		return now.Add(-time.Nanosecond)
+	}
+	j := s.JitterOffset
+	if j < 0 {
+		j = 0
+	}
+	if j > p.MaxJitter {
+		j = p.MaxJitter
+	}
+	var next time.Time
+	if !s.LastFailureAt.IsZero() {
+		next = s.LastFailureAt.Add(selection.EffectiveRetryBackoff(p, s.ConsecutiveFailures) + j)
+	}
+	if !s.LastSuccessAt.IsZero() {
+		if t := s.LastSuccessAt.Add(p.MinInterval + j); t.After(next) {
+			next = t
+		}
+	}
+	return next
 }
 
 // nextDue returns last + interval; if last is zero we say "due now"
@@ -180,6 +326,7 @@ func AllNextDues(src Source, c Cadence, now time.Time) []Action {
 	if c.BudgetReset == 0 {
 		c.BudgetReset = 1 * time.Hour
 	}
+	c.Freshness = defaultedFreshness(c.Freshness)
 	var all []Action
 	for _, s := range src.Subscriptions() {
 		mins := s.ProfileUpdateMin
@@ -210,6 +357,21 @@ func AllNextDues(src Source, c Cadence, now time.Time) []Action {
 		Kind:    KindBudgetReset,
 		NextDue: nextDue(src.LastBudgetReset(), c.BudgetReset, now),
 	})
+	for _, rp := range src.RelayPacks() {
+		if rp.RelayPackID == "" {
+			continue
+		}
+		all = append(all, Action{
+			Kind: KindFreshness,
+			Ref:  rp.RelayPackID,
+			NextDue: nextFreshnessDue(selection.FreshnessState{
+				LastSuccessAt:       rp.LastSuccessAt,
+				LastFailureAt:       rp.LastFailureAt,
+				ConsecutiveFailures: rp.ConsecutiveFailures,
+				JitterOffset:        rp.JitterOffset,
+			}, c.Freshness, now),
+		})
+	}
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].Kind != all[j].Kind {
 			return all[i].Kind < all[j].Kind

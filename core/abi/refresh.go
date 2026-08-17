@@ -33,6 +33,10 @@ func resetRefreshForShutdown() {
 	globalRefresh.subs = nil
 	globalRefresh.revoke = nil
 	globalRefresh.mu.Unlock()
+	// The RelayPack freshness refresher holds the same store handle
+	// and must die with it; a survivor would keep writing freshness
+	// stamps into a database the engine has already closed.
+	resetRelayPackRefreshForShutdown()
 }
 
 func ensureRefresh() (*refresh.Refresher, *refresh.RevocationRefresher, error) {

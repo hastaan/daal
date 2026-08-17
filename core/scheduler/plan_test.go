@@ -13,12 +13,14 @@ type fakeSource struct {
 	pubs    []PublisherState
 	bs      time.Time
 	budgRst time.Time // Phase 2A
+	packs   []RelayPackState
 }
 
 func (f fakeSource) Subscriptions() []SubscriptionState         { return f.subs }
 func (f fakeSource) PublishersWithRevocation() []PublisherState { return f.pubs }
 func (f fakeSource) LastBootstrapRefresh() time.Time            { return f.bs }
 func (f fakeSource) LastBudgetReset() time.Time                 { return f.budgRst }
+func (f fakeSource) RelayPacks() []RelayPackState               { return f.packs }
 
 func ts(s string) time.Time {
 	t, err := time.Parse(time.RFC3339, s)

@@ -15,6 +15,7 @@ func TestBuild_Defaults(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	body := []byte("signed sbp bytes")
 	doc, err := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp-aaaa",
 		BundleBytes:      body,
 		CurrentSignedURL: "https://frp.example.com/current.sbp",
@@ -23,7 +24,7 @@ func TestBuild_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc.Kind != "daal/freshness-v1" {
+	if doc.Kind != Kind {
 		t.Errorf("kind = %q", doc.Kind)
 	}
 	if doc.RelayPackID != "rp-aaaa" {
@@ -41,16 +42,16 @@ func TestBuild_Defaults(t *testing.T) {
 func TestBuild_RequiresFields(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	pubHex := hex.EncodeToString(pub)
-	if _, err := Build(BuildOpts{BundleBytes: []byte("x"), CurrentSignedURL: "https://x/sbp", PublisherPubHex: pubHex}); err == nil {
+	if _, err := Build(BuildOpts{Sequence: 1, BundleBytes: []byte("x"), CurrentSignedURL: "https://x/sbp", PublisherPubHex: pubHex}); err == nil {
 		t.Error("want error on empty RelayPackID")
 	}
-	if _, err := Build(BuildOpts{RelayPackID: "x", CurrentSignedURL: "https://x/sbp", PublisherPubHex: pubHex}); err == nil {
+	if _, err := Build(BuildOpts{Sequence: 1, RelayPackID: "x", CurrentSignedURL: "https://x/sbp", PublisherPubHex: pubHex}); err == nil {
 		t.Error("want error on empty bundle sha")
 	}
-	if _, err := Build(BuildOpts{RelayPackID: "x", BundleBytes: []byte("x"), PublisherPubHex: pubHex}); err == nil {
+	if _, err := Build(BuildOpts{Sequence: 1, RelayPackID: "x", BundleBytes: []byte("x"), PublisherPubHex: pubHex}); err == nil {
 		t.Error("want error on missing signed URL")
 	}
-	if _, err := Build(BuildOpts{RelayPackID: "x", BundleBytes: []byte("x"), CurrentSignedURL: "http://x/sbp", PublisherPubHex: pubHex}); err == nil {
+	if _, err := Build(BuildOpts{Sequence: 1, RelayPackID: "x", BundleBytes: []byte("x"), CurrentSignedURL: "http://x/sbp", PublisherPubHex: pubHex}); err == nil {
 		t.Error("want error on non-https signed URL")
 	}
 }
@@ -61,6 +62,7 @@ func TestSign_RootRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc, _ := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp-1",
 		BundleBytes:      []byte("bundle"),
 		CurrentSignedURL: "https://frp.example.com/rp-1.sbp",
@@ -70,7 +72,7 @@ func TestSign_RootRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Verify(bytes_, VerifyOpts{PublisherRootPub: pub})
+	got, err := VerifyDocument(bytes_, VerifyOpts{PublisherRootPub: pub})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -85,6 +87,7 @@ func TestSign_RootRoundTrip(t *testing.T) {
 func TestSign_Tampered(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	doc, _ := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp-1",
 		BundleBytes:      []byte("x"),
 		CurrentSignedURL: "https://frp.example.com/rp.sbp",
@@ -96,7 +99,7 @@ func TestSign_Tampered(t *testing.T) {
 		t.Fatal("test setup")
 	}
 	b[idx] = 'X'
-	if _, err := Verify(b, VerifyOpts{PublisherRootPub: pub}); err == nil {
+	if _, err := VerifyDocument(b, VerifyOpts{PublisherRootPub: pub}); err == nil {
 		t.Fatal("want signature failure on tampered body")
 	}
 }
@@ -104,7 +107,7 @@ func TestSign_Tampered(t *testing.T) {
 func TestSign_MissingFieldsRejected(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	bad := `{"kind":"daal/freshness-v1","relay_pack_id":"","current_bundle_sha256":"","current_signed_url":"","last_modified":"","publisher_pub_hex":"","signature_hex":""}`
-	if _, err := Verify([]byte(bad), VerifyOpts{PublisherRootPub: pub}); err == nil {
+	if _, err := VerifyDocument([]byte(bad), VerifyOpts{PublisherRootPub: pub}); err == nil {
 		t.Fatal("want error on missing fields")
 	}
 }
@@ -112,7 +115,7 @@ func TestSign_MissingFieldsRejected(t *testing.T) {
 func TestSign_WrongVersion(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	bad := `{"kind":"relaypack_freshness","relay_pack_id":"rp","current_bundle_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","current_signed_url":"https://x/sbp","last_modified":"2099-01-01T00:00:00Z","publisher_pub_hex":"aa","signature_hex":""}`
-	if _, err := Verify([]byte(bad), VerifyOpts{PublisherRootPub: pub}); err == nil {
+	if _, err := VerifyDocument([]byte(bad), VerifyOpts{PublisherRootPub: pub}); err == nil {
 		t.Fatal("want error on unsupported kind")
 	}
 }
@@ -140,6 +143,7 @@ func TestSignWithSubkey_RoundTrip(t *testing.T) {
 	certJSON, _ := json.Marshal(cert)
 
 	doc, _ := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp-2",
 		BundleBytes:      []byte("bundle"),
 		CurrentSignedURL: "https://frp.example.com/rp-2.sbp",
@@ -149,7 +153,7 @@ func TestSignWithSubkey_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	got, err := Verify(signed, VerifyOpts{PublisherRootPub: rootPub})
+	got, err := VerifyDocument(signed, VerifyOpts{PublisherRootPub: rootPub})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -161,6 +165,7 @@ func TestSignWithSubkey_RoundTrip(t *testing.T) {
 func TestSignWithSubkey_RequiresCert(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	doc, _ := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp",
 		BundleBytes:      []byte("x"),
 		CurrentSignedURL: "https://frp.example.com/rp.sbp",
@@ -189,13 +194,14 @@ func TestSignWithSubkey_RootMismatchRejected(t *testing.T) {
 	certJSON, _ := json.Marshal(cert)
 
 	doc, _ := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp",
 		BundleBytes:      []byte("x"),
 		CurrentSignedURL: "https://frp.example.com/rp.sbp",
 		PublisherPubHex:  hex.EncodeToString(rootPub),
 	})
 	signed, _ := SignWithSubkey(doc, subPriv, certJSON)
-	if _, err := Verify(signed, VerifyOpts{PublisherRootPub: rootPub}); err == nil {
+	if _, err := VerifyDocument(signed, VerifyOpts{PublisherRootPub: rootPub}); err == nil {
 		t.Fatal("want error on root mismatch")
 	}
 }
@@ -217,13 +223,14 @@ func TestSignWithSubkey_OutOfWindowRejected(t *testing.T) {
 	certJSON, _ := json.Marshal(cert)
 
 	doc, _ := Build(BuildOpts{
+		Sequence:         1,
 		RelayPackID:      "rp",
 		BundleBytes:      []byte("x"),
 		CurrentSignedURL: "https://frp.example.com/rp.sbp",
 		PublisherPubHex:  hex.EncodeToString(rootPub),
 	})
 	signed, _ := SignWithSubkey(doc, subPriv, certJSON)
-	if _, err := Verify(signed, VerifyOpts{PublisherRootPub: rootPub}); err == nil {
+	if _, err := VerifyDocument(signed, VerifyOpts{PublisherRootPub: rootPub}); err == nil {
 		t.Fatal("want error on cert out-of-window")
 	}
 }

@@ -18,10 +18,24 @@ import (
 // probing_risk_class + udp_gated.
 //
 // FRP-8 will widen this to include cdn_fronted candidates.
-func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies []string) []provider.CandidateMeta {
+//
+// IT RETURNS AN ERROR NOW, and that is the entire fix for L6.
+//
+// This function used to swallow a profile load error and return nil.
+// The caller could not tell that apart from "this profile enables no
+// families", so a typo'd or missing profile slug produced an
+// OperatorRecord with zero candidates: a record that provisions
+// happily, signs happily, and yields a pack with no routes in it. L6 —
+// the rung whose whole content is "move to a different toolbox
+// profile" — is the one operation that passes a NEW profile name here,
+// so it is the operation the silent nil was guaranteed to hit, and it
+// is why L6 has been invisible. A wrong profile name must be an error
+// at the moment it is read, not a shape that looks like an empty
+// choice three layers downstream.
+func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies []string) ([]provider.CandidateMeta, error) {
 	p, err := loadProfile(profileName)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("hetzner: toolbox profile %q: %w", profileName, err)
 	}
 	selected := map[string]bool{}
 	for _, family := range enabledFamilies {
@@ -53,7 +67,14 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 			OriginRiskTags:   []string{}, // empty at V1.5
 		})
 	}
-	return out
+	// A profile that loaded but selects nothing is also a record with
+	// no routes, just arrived at by a different path — an
+	// enabled-families list naming a family this profile does not
+	// carry. Same outcome for the recipient, same refusal here.
+	if len(out) == 0 {
+		return nil, fmt.Errorf("hetzner: toolbox profile %q yields no candidates for families %v", profileName, enabledFamilies)
+	}
+	return out, nil
 }
 
 // defaultSingBoxConfig produces a sing-box config skeleton
@@ -115,13 +136,16 @@ func defaultSingBoxConfig(profileName, coverSNI string) string {
 }`, coverSNI)
 }
 
-// loadProfile dispatches on the profile name. iran-default is the
-// only supported profile at V1.5.
+// loadProfile dispatches on the profile name.
+//
+// The dispatch lives in the profiles package now rather than here, so
+// a profile added to the registry is reachable from every adapter at
+// once. A per-adapter switch is how "the wizard offers a slug the
+// provisioner cannot resolve" gets introduced, and on L6 that costs
+// the relay: Reprovision has already deleted the box by the time an
+// unresolvable slug is noticed.
 func loadProfile(name string) (*profiles.Profile, error) {
-	if name == "iran-default" {
-		return profiles.IranDefault()
-	}
-	return nil, fmt.Errorf("unknown toolbox profile %q", name)
+	return profiles.ByName(name)
 }
 
 func defaultPortForFamily(family string) int {

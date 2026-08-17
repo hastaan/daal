@@ -175,6 +175,11 @@ type RefreshResult struct {
 	RoutesAdded      int    `json:"routes_added"`
 	RoutesUpdated    int    `json:"routes_updated"`
 	Reason           string `json:"reason,omitempty"`
+	// PointersRotated reports whether the fetched directory carried a
+	// pointer-rotation envelope that verified AND extended the
+	// device's current validity window. False is the normal case and
+	// must be rendered as "no rotation offered", never as a failure.
+	PointersRotated bool `json:"pointers_rotated"`
 }
 
 // Refresh fetches a Tier-3 bootstrap directory through whichever dialer
@@ -187,19 +192,28 @@ func (p *Provider) Refresh(ctx context.Context, timeout time.Duration) (RefreshR
 	}
 	now := p.now()
 
-	// Verify both pointer sets first, against the project root pubkey.
-	if err := VerifyPointerSet(p.manifest.PrimaryPointers, p.manifest.ProjectRootPub, now); err != nil {
+	// Use the EFFECTIVE pointer sets — persisted rotation overlaid on
+	// the embedded ones — not the embedded sets alone. Embedded
+	// pointers expire (Tier-1 sets carry a valid_until), and a build
+	// old enough for both sets to have lapsed would otherwise refuse
+	// to fetch at all, which is exactly the device that most needs
+	// the rotation it has already been handed. This is the read side
+	// of PersistPointerRotation below; the two together are the
+	// bootstrap-pointer recovery layer that Step 8's freshness path
+	// falls through to when every mirror is blocked.
+	primary, fallback := EffectivePointerSets(p.store, p.manifest)
+	if err := VerifyPointerSet(primary, p.manifest.ProjectRootPub, now); err != nil {
 		return RefreshResult{Reason: "primary_pointers_invalid: " + err.Error()},
 			fmt.Errorf("bootstrap: primary pointers invalid: %w", err)
 	}
-	if err := VerifyPointerSet(p.manifest.FallbackPointers, p.manifest.ProjectRootPub, now); err != nil {
+	if err := VerifyPointerSet(fallback, p.manifest.ProjectRootPub, now); err != nil {
 		return RefreshResult{Reason: "fallback_pointers_invalid: " + err.Error()},
 			fmt.Errorf("bootstrap: fallback pointers invalid: %w", err)
 	}
 
 	dialer := p.dialerFn()
-	tryOrder := append([]Pointer{}, p.manifest.PrimaryPointers.Pointers...)
-	tryOrder = append(tryOrder, p.manifest.FallbackPointers.Pointers...)
+	tryOrder := append([]Pointer{}, primary.Pointers...)
+	tryOrder = append(tryOrder, fallback.Pointers...)
 
 	var lastErr error
 	for _, ptr := range tryOrder {
@@ -216,12 +230,21 @@ func (p *Provider) Refresh(ctx context.Context, timeout time.Duration) (RefreshR
 		}
 		// Demote Tier-2 seeds.
 		_ = p.demoteTier2(now)
+		// Persist any pointer-rotation envelope this directory
+		// carried. This is the write side of the recovery layer: it
+		// is how a device that can still reach ONE pointer today
+		// learns the pointers it will need tomorrow. Failure is
+		// deliberately non-fatal — the directory fetch already
+		// succeeded, and losing an opportunistic pointer upgrade must
+		// not turn a good refresh into a failed one.
+		rotated, _ := p.persistPointerRotation(fr.Bytes, now)
 		return RefreshResult{
 			DirectoryFetched: true,
 			PointerUsed:      ptr.URL,
 			ExpiresAt:        expiresAt,
 			RoutesAdded:      added,
 			RoutesUpdated:    updated,
+			PointersRotated:  rotated,
 		}, nil
 	}
 	if lastErr == nil {
@@ -274,6 +297,19 @@ func (p *Provider) applyDirectory(body []byte, now time.Time) (added, updated in
 		}
 	}
 	return added, updated, expiresAt, nil
+}
+
+// persistPointerRotation applies the rotation envelope a directory
+// bundle carried, if any. See directory_rotation.go for why extracting
+// it from an unsigned archive slot is safe (every inner PointerSet
+// carries its own project-root signature, and the persist step refuses
+// anything that does not extend the window we already hold).
+func (p *Provider) persistPointerRotation(body []byte, now time.Time) (bool, error) {
+	parsed, err := bundle.ParseSBP(bytesReader(body), int64(len(body)))
+	if err != nil {
+		return false, err
+	}
+	return ApplyDirectoryPointerRotation(p.store, body, parsed.Manifest, p.manifest, now)
 }
 
 // demoteTier2 sets a UserNote marker on every Tier-2 route so the path

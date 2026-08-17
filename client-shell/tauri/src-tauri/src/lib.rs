@@ -40,6 +40,7 @@ use daal_wizard::commands as wcmd;
 use daal_wizard::commands::{
     RotateExecuteInput, RotateExecuteOutput, RotateRecommendInput, SubkeyRotateResult,
 };
+use daal_wizard::freshness::{FreshnessEndpointInput, FreshnessStatus, PublishReport};
 use daal_wizard::keystore::Keystore;
 use daal_wizard::operator_db::OperatorDb;
 use daal_wizard::operator_db::{CdnFrontRow, SignedSbpRow, SubkeyRow};
@@ -1105,6 +1106,15 @@ fn wizard_rotate_execute(
     new_sni: Option<String>,
     new_ws_path: Option<String>,
     new_toolbox_profile: Option<String>,
+    // L4/L5 (Wave 3 Step 10). These are Options that the wizard
+    // REFUSES to default: an L4 without a new region rebuilt into the
+    // region it was already in, and an L5 without a new provider onto
+    // the provider it was already on, which is how both rungs became
+    // byte-identical to L1. Passing them through the shim rather than
+    // defaulting them here keeps that refusal at the one layer that
+    // can explain it to the operator.
+    new_region: Option<String>,
+    new_provider: Option<String>,
     cdn_front_id: Option<i64>,
     cdn_account_id: Option<String>,
     cdn_new_public_path: Option<String>,
@@ -1126,6 +1136,8 @@ fn wizard_rotate_execute(
         new_sni,
         new_ws_path,
         new_toolbox_profile,
+        new_region,
+        new_provider,
         cdn_front_id,
         cdn_account_id,
         cdn_new_public_path,
@@ -1157,6 +1169,85 @@ fn wizard_rotate_history(
     operator_id: i64,
 ) -> Result<Vec<SignedSbpRow>, String> {
     wcmd::list_rotation_history(&wstate.0, operator_id).map_err(|e| e.to_string())
+}
+
+// ---- Wave 3 Step 8: freshness command shims -------------------------
+//
+// Five verbs, deliberately separate. There is no combined "set up
+// freshness" call: configuring an endpoint, naming where the pack will
+// live, and actually publishing are three things an operator does at
+// different times and can fail independently, and merging them would
+// force the UI to report one outcome for three different failures.
+
+/// `wizard_freshness_status`: everything the freshness panel renders —
+/// configured endpoints with their real last-publish outcome, the
+/// DISTINCT-provider count, and the mirror set that is inside the pack
+/// recipients are currently holding.
+#[tauri::command]
+fn wizard_freshness_status(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<FreshnessStatus, String> {
+    daal_wizard::freshness::status(&wstate.0, operator_id).map_err(|e| e.to_string())
+}
+
+/// `wizard_freshness_add_endpoint`: store one provider's routing, and
+/// move its write-credential into device custody.
+///
+/// The credential crosses this boundary exactly once, on the way in.
+/// It is never returned by any command, and `FreshnessStatus` has no
+/// field that could carry it back.
+#[tauri::command]
+fn wizard_freshness_add_endpoint(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    endpoint: FreshnessEndpointInput,
+) -> Result<i64, String> {
+    daal_wizard::freshness::add_endpoint(&wstate.0, operator_id, endpoint)
+        .map_err(|e| e.to_string())
+}
+
+/// `wizard_freshness_delete_endpoint`: forget one provider, including
+/// its credential.
+#[tauri::command]
+fn wizard_freshness_delete_endpoint(
+    wstate: State<'_, WizardStateMgr>,
+    endpoint_id: i64,
+) -> Result<(), String> {
+    daal_wizard::freshness::delete_endpoint(&wstate.0, endpoint_id).map_err(|e| e.to_string())
+}
+
+/// `wizard_freshness_set_pack_url`: where the signed .sbp itself will
+/// be downloadable. The freshness document points at it, so nothing
+/// can be published until it is set.
+#[tauri::command]
+fn wizard_freshness_set_pack_url(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    url: String,
+) -> Result<(), String> {
+    daal_wizard::freshness::set_pack_url(&wstate.0, operator_id, &url).map_err(|e| e.to_string())
+}
+
+/// `wizard_freshness_publish`: sign and upload the document now.
+///
+/// Returns a report rather than throwing, because "R2 accepted it and
+/// GitHub refused" is the interesting case and it is neither a success
+/// nor an exception. The UI renders one row per provider from
+/// `results` and compares `succeeded` with `min_mirrors`; it must not
+/// infer success from the absence of an error.
+#[tauri::command]
+fn wizard_freshness_publish(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<PublishReport, String> {
+    let app_clone = app.clone();
+    let mut on_progress = move |ev: ProgressEvent| {
+        let _ = app_clone.emit("wizard://freshness-event", ev);
+    };
+    daal_wizard::freshness::publish(&wstate.0, operator_id, &mut on_progress)
+        .map_err(|e| e.to_string())
 }
 
 // ---- FRP-7.5 sub-key rotation command shims ------------------------
@@ -2343,6 +2434,12 @@ pub fn run() {
             wizard_rotate_execute,
             wizard_rotate_revert,
             wizard_rotate_history,
+            // Wave 3 Step 8: freshness (remote pack replacement)
+            wizard_freshness_status,
+            wizard_freshness_add_endpoint,
+            wizard_freshness_delete_endpoint,
+            wizard_freshness_set_pack_url,
+            wizard_freshness_publish,
             // FRP-7.5 sub-key rotation surface
             wizard_subkey_rotate,
             wizard_subkey_active,

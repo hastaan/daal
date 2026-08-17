@@ -233,6 +233,22 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 }
 
 // AssignFloatingIP attaches a Stark Reserved IP to the VPS.
+//
+// INCOMPLETE FOR L3, AND KNOWINGLY SO — same shape as the Vultr
+// adapter. It records the id and stops; it does not move rec.PublicIP
+// or the candidates' public_ip:* tags onto the reserved address, so an
+// L3 here would re-sign a pack still naming the burned one.
+// The containment is on the LIVE path: `daal-deploy assign-fip`
+// snapshots rec.PublicIP and runs rotation.CheckAddressMoved after
+// this returns, so the verb exits non-zero and the record is never
+// emitted — nothing downstream persists or re-signs. (The Go
+// rotation.Executor has the same post-condition and no production
+// caller; ActionForProvider's AvailabilityUnsupported only reaches
+// rotate_recommend, which the address-swap sheet does not consult.
+// Neither is what stops this.) Completing it needs a reserved-IP
+// read-back call plus the
+// retag sequence in the Hetzner adapter's floating_ip.go — and this
+// whole adapter has never been exercised against a live Stark account.
 func (p *Provider) AssignFloatingIP(ctx context.Context, rec *provider.OperatorRecord, fipID string) error {
 	if rec == nil || rec.ServerID == "" {
 		return errors.New("stark: OperatorRecord without ServerID")

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -531,5 +532,190 @@ func TestProvision_AcceptsRollbackOnFailureFlag(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "flag provided but not defined") {
 		t.Errorf("--rollback-on-failure not accepted: %s", stderr.String())
+	}
+}
+
+// --- floating-ip: the L3 rung's CLI surface ------------------------
+
+// fakeFIPProvider is a providerFace that also reserves and releases
+// addresses, i.e. the post-Step-9 Hetzner shape.
+type fakeFIPProvider struct {
+	providerFace // nil: any other method call panics, which is the point
+	assigned     []string
+	created      int
+	released     []string
+	releaseOwned bool
+	assignErr    error
+	newIP        string
+	idOnly       bool
+}
+
+func (f *fakeFIPProvider) AssignFloatingIP(_ context.Context, rec *provider.OperatorRecord, fipID string) error {
+	f.assigned = append(f.assigned, fipID)
+	if f.assignErr != nil {
+		return f.assignErr
+	}
+	rec.FloatingIPID = fipID
+	// idOnly models the Vultr and Stark adapters, which record the id
+	// and stop. It is not a hypothetical: both ship that way today.
+	if f.idOnly {
+		return nil
+	}
+	rec.PublicIP = net.ParseIP(f.newIP)
+	for i := range rec.Candidates {
+		tags := rec.Candidates[i].PublicRiskTags
+		for j, tg := range tags {
+			if strings.HasPrefix(tg, "public_ip:") {
+				tags[j] = "public_ip:" + f.newIP
+			}
+		}
+		rec.Candidates[i].PublicRiskTags = tags
+	}
+	return nil
+}
+
+func (f *fakeFIPProvider) UnassignFloatingIP(_ context.Context, rec *provider.OperatorRecord) error {
+	rec.FloatingIPID = ""
+	return nil
+}
+
+func (f *fakeFIPProvider) CreateFloatingIP(_ context.Context, _ *provider.OperatorRecord) (string, net.IP, error) {
+	f.created++
+	return "fip-reserved", net.ParseIP(f.newIP), nil
+}
+
+func (f *fakeFIPProvider) ReleaseFloatingIP(_ context.Context, _ *provider.OperatorRecord, id string) (bool, error) {
+	f.released = append(f.released, id)
+	return f.releaseOwned, nil
+}
+
+// --fip-id used to be mandatory, which put the whole L3 rung behind an
+// address the operator had to reserve by hand in the provider console
+// plus a numeric id no screen asks for.
+func TestAssignFIP_WithoutAnIDReservesOne(t *testing.T) {
+	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true}
+	withFakeProvider(t, f)
+	recordFile, tokenFile := writeDecommissionFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
+	}
+	if f.created != 1 {
+		t.Errorf("CreateFloatingIP calls = %d, want 1", f.created)
+	}
+	if len(f.assigned) != 1 || f.assigned[0] != "fip-reserved" {
+		t.Errorf("assigned = %v, want [fip-reserved]", f.assigned)
+	}
+	// The written-back record must carry the NEW address, or the pack
+	// signed from it points straight back at the burned one.
+	body, err := os.ReadFile(recordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("record is not JSON: %v\n%s", err, body)
+	}
+	if wire["public_ip"] != "203.0.113.5" {
+		t.Errorf("record public_ip = %v, want 203.0.113.5 — the swap left the burned address in the record", wire["public_ip"])
+	}
+	if wire["floating_ip_id"] != "fip-reserved" {
+		t.Errorf("record floating_ip_id = %v, want fip-reserved", wire["floating_ip_id"])
+	}
+}
+
+// An address minted seconds ago that could not be attached is a billing
+// resource with no purpose — the same leak class as an orphaned server.
+func TestAssignFIP_ReservedAddressIsReturnedWhenTheAttachFails(t *testing.T) {
+	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, assignErr: errors.New("cloud says no")}
+	withFakeProvider(t, f)
+	recordFile, tokenFile := writeDecommissionFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	if rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr); rc == 0 {
+		t.Fatal("a failed attach must not exit 0")
+	}
+	if len(f.released) != 1 || f.released[0] != "fip-reserved" {
+		t.Errorf("released = %v, want the reserved address handed back", f.released)
+	}
+}
+
+// `unassign` detaches; the address stays reserved and keeps billing.
+// `release` gives it back — but only when daal-deploy created it, and
+// it says so out loud when it did not.
+func TestFloatingIPRelease_ReportsAnAddressItMayNotDelete(t *testing.T) {
+	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: false}
+	withFakeProvider(t, f)
+	recordFile, tokenFile := writeDecommissionFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"floating-ip", "release", "--record-file", recordFile, "--token-file", tokenFile, "--fip-id", "fip-theirs"}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "still billing") {
+		t.Errorf("an address left reserved must be reported, not passed over: %q", stderr.String())
+	}
+}
+
+// THE POST-CONDITION, ON THE SEAM THAT ACTUALLY SHIPS.
+//
+// The Go rotation.Executor has had this check since Step 9 and has no
+// production caller: the live rotation path is the wizard's Rust
+// re-implementation, whose ONLY provider mutation for L3 is this
+// subprocess. A guard that is not here is on no path a user can reach.
+//
+// The failure it catches is the one Step 9 exists to end. An adapter
+// that records the floating-IP id and stops — Vultr and Stark, by their
+// own comments — leaves rec.PublicIP naming the burned address, so the
+// verb used to exit 0, the wizard persisted the record, re-signed a
+// pack aimed at the address the operator was rotating AWAY from,
+// published a freshness document about it, and reported success.
+func TestAssignFIP_RefusesWhenTheAddressDidNotMove(t *testing.T) {
+	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, idOnly: true}
+	withFakeProvider(t, f)
+	recordFile, tokenFile := writeDecommissionFixture(t)
+	before, err := os.ReadFile(recordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile,
+		"--token-file", tokenFile, "--fip-id", "fip-42"}, &stdout, &stderr)
+	if rc == 0 {
+		t.Fatal("an adapter that attaches the address without moving the record onto it exited 0; " +
+			"the caller would now re-sign a pack pointing at the burned address")
+	}
+	if !strings.Contains(stderr.String(), "without moving the record") {
+		t.Errorf("the refusal does not name the problem: %q", stderr.String())
+	}
+	// Nothing is written back on the failing path, so nothing
+	// downstream can persist or sign a half-applied swap.
+	after, err := os.ReadFile(recordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("the record was rewritten despite the refusal")
+	}
+}
+
+// An address minted for a swap that then fails its post-condition is
+// the same leak as one that failed to attach: give it back.
+func TestAssignFIP_ReservedAddressIsReturnedWhenThePostConditionFails(t *testing.T) {
+	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, idOnly: true}
+	withFakeProvider(t, f)
+	recordFile, tokenFile := writeDecommissionFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	if rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile,
+		"--token-file", tokenFile}, &stdout, &stderr); rc == 0 {
+		t.Fatal("expected a refusal")
+	}
+	if len(f.released) != 1 || f.released[0] != "fip-reserved" {
+		t.Errorf("released = %v, want the address we had just reserved", f.released)
 	}
 }

@@ -129,20 +129,43 @@ func PersistPointerRotation(store *routestore.Store, rot PointerRotation,
 	return true, nil
 }
 
+// EffectivePointerSets returns the pointer sets a fetch should actually
+// use: the persisted (rotated) set when it outlives the embedded one,
+// otherwise the embedded set.
+//
+// Read-only by design. Provider.Refresh calls this on every fetch
+// rather than mutating the process-wide Manifest, because that Manifest
+// is also read concurrently by engine_pointer_rotation_status — an
+// in-place overlay there is a data race, and the race would be on the
+// one structure that decides where the device looks for help.
+func EffectivePointerSets(store *routestore.Store, m *Manifest) (primary, fallback PointerSet) {
+	if m == nil {
+		return PointerSet{}, PointerSet{}
+	}
+	primary, fallback = m.PrimaryPointers, m.FallbackPointers
+	if store == nil {
+		return primary, fallback
+	}
+	persisted, _ := LoadPersistedPointers(store)
+	if before(primary.ValidUntil, persisted.Primary.ValidUntil) {
+		primary = persisted.Primary
+	}
+	if before(fallback.ValidUntil, persisted.Fallback.ValidUntil) {
+		fallback = persisted.Fallback
+	}
+	return primary, fallback
+}
+
 // OverlayPersistedOntoManifest mutates `m` so that any persisted pointer
 // set with a later valid_until than the embedded one wins. Called during
-// engine boot — after embedded.LoadManifest(), before PinTier1.
+// engine boot — after embedded.LoadManifest(), before PinTier1 — where
+// nothing else holds a reference to `m` yet. Anything running after boot
+// must use EffectivePointerSets instead.
 func OverlayPersistedOntoManifest(store *routestore.Store, m *Manifest) {
 	if store == nil || m == nil {
 		return
 	}
-	persisted, _ := LoadPersistedPointers(store)
-	if before(m.PrimaryPointers.ValidUntil, persisted.Primary.ValidUntil) {
-		m.PrimaryPointers = persisted.Primary
-	}
-	if before(m.FallbackPointers.ValidUntil, persisted.Fallback.ValidUntil) {
-		m.FallbackPointers = persisted.Fallback
-	}
+	m.PrimaryPointers, m.FallbackPointers = EffectivePointerSets(store, m)
 }
 
 // PointerRotationStatus is the JSON shape returned by the ABI.

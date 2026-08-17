@@ -1,0 +1,10 @@
+{
+  "name": "iran-tcp443",
+  "description": "TCP/443-only mix for networks where UDP is throttled, blocked or rate-limited, and where a QUIC-shaped flow is itself the signal. Drops every udp_gated family; keeps the multiplexed TLS ones.",
+  "spec_version": 1,
+  "candidates": [
+    {"family": "vless-reality", "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
+    {"family": "websocket-tls", "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
+    {"family": "naive",         "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false}
+  ]
+}

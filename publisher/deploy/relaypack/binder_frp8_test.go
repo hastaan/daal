@@ -10,6 +10,7 @@ import (
 
 	"daal/bundle-go/bundle"
 	"daal/bundle-go/relaypackvalidate"
+	"daal/publisher/deploy/freshness"
 	"daal/publisher/deploy/provider"
 )
 
@@ -53,10 +54,17 @@ func TestBindAndSign_EmitsCDNAttestation(t *testing.T) {
 			},
 		},
 	}
+	mirrors, err := freshness.NewMirrorSet([]freshness.Mirror{
+		{Provider: freshness.ProviderR2, URL: "https://freshness.example.com/rp.json"},
+		{Provider: freshness.ProviderGHPages, URL: "https://frp.github.io/f/rp.json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	res, err := BindAndSign(rec, priv, BindOpts{
-		Now:          time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC),
-		Phase:        relaypackvalidate.PhaseV16,
-		FreshnessURL: "https://freshness.example.com/rp.json",
+		Now:       time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC),
+		Phase:     relaypackvalidate.PhaseV16,
+		Freshness: mirrors,
 	})
 	if err != nil {
 		t.Fatalf("BindAndSign: %v", err)
@@ -68,7 +76,11 @@ func TestBindAndSign_EmitsCDNAttestation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Manifest.RelayPack == nil || parsed.Manifest.RelayPack.FreshnessURL != "https://freshness.example.com/rp.json" {
+	// The legacy scalar slot carries the lowest-sorting mirror
+	// (provider "ghpages" sorts before "r2"), not the order the
+	// caller happened to list them in — the set is ordered so the
+	// pack stays byte-identical across runs.
+	if parsed.Manifest.RelayPack == nil || parsed.Manifest.RelayPack.FreshnessURL != "https://frp.github.io/f/rp.json" {
 		t.Errorf("FreshnessURL not propagated: %+v", parsed.Manifest.RelayPack)
 	}
 	for _, r := range parsed.Manifest.Routes {

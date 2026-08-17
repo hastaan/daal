@@ -96,6 +96,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "operators_nickname_helper_ip",
         sql: include_str!("../migrations/V012__operators_nickname_helper_ip.sql"),
     },
+    Migration {
+        version: 13,
+        name: "freshness_endpoints",
+        sql: include_str!("../migrations/V013__freshness_endpoints.sql"),
+    },
 ];
 
 /// `OperatorRow` mirrors a row of the `operators` table.
@@ -142,6 +147,57 @@ pub struct OperatorRow {
     pub helper_ip_source: String,
     /// V012: when `helper_ip` was last written. Diagnostic only.
     pub helper_ip_at_unix: i64,
+    /// V013: the freshness mirror set that is actually inside the pack
+    /// this relay's recipients are holding, as a JSON array of
+    /// "<provider>=<url>" strings. Empty means the currently-signed
+    /// pack has no way to hear about a rotation, which is true for
+    /// every pack signed before Wave 3 Step 8 and for every relay whose
+    /// publisher has not configured enough mirrors. The UI branches on
+    /// this to decide whether a rotation ends in "it will heal itself"
+    /// or in "you have to deliver files by hand"; nothing may infer
+    /// that from the presence of configured endpoints, because
+    /// configuring one does not retroactively change a signed bundle
+    /// somebody already imported.
+    pub freshness_mirrors_in_pack: String,
+    /// V013: publisher-controlled HTTPS URL where the signed .sbp is
+    /// downloadable. The freshness document points at it; without it no
+    /// document can be built at all.
+    pub freshness_pack_url: String,
+    /// V013: the highest freshness-document sequence published for this
+    /// relay. The publish path passes max(this + 1, now) so a machine
+    /// whose clock went backwards cannot mint a document every recipient
+    /// will reject as a rollback while the panel goes green.
+    pub freshness_last_sequence: i64,
+}
+
+/// `FreshnessEndpointRow` mirrors a row of the V013
+/// `freshness_endpoints` table. Contains routing only — the
+/// credential lives under `secret_alias` in DeviceCustody, and this
+/// struct is safe to serialise straight to the UI.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FreshnessEndpointRow {
+    pub id: i64,
+    pub operator_id: i64,
+    /// "r2" | "ghpages" — the provider identity. The UI counts
+    /// DISTINCT kinds, because two buckets at one provider fall over
+    /// together.
+    pub kind: String,
+    pub position: i64,
+    pub public_base_url: String,
+    pub account_id: String,
+    pub bucket: String,
+    pub key_prefix: String,
+    pub gh_owner: String,
+    pub gh_repo: String,
+    pub gh_path_prefix: String,
+    pub gh_branch: String,
+    pub secret_alias: String,
+    pub created_unix: i64,
+    pub last_publish_at_unix: i64,
+    pub last_publish_ok: bool,
+    pub last_publish_status: i64,
+    pub last_publish_detail: String,
+    pub last_published_url: String,
 }
 
 /// `SignedSbpRow` mirrors a row of the V003 `signed_sbps` history
@@ -419,7 +475,9 @@ impl OperatorDb {
                         last_provisioned_at_unix, decommissioned_at_unix,
                         signed_sbp_sha256, signed_sbp_relay_pack_id, signed_sbp_at_unix,
                         mgmt_port, mgmt_tls_fingerprint,
-                        nickname, helper_ip, helper_ip_source, helper_ip_at_unix
+                        nickname, helper_ip, helper_ip_source, helper_ip_at_unix,
+                        freshness_mirrors_in_pack, freshness_pack_url,
+                        freshness_last_sequence
                  FROM operators WHERE id = ?1",
                 params![id],
                 row_to_operator,
@@ -438,7 +496,9 @@ impl OperatorDb {
                     last_provisioned_at_unix, decommissioned_at_unix,
                     signed_sbp_sha256, signed_sbp_relay_pack_id, signed_sbp_at_unix,
                     mgmt_port, mgmt_tls_fingerprint,
-                    nickname, helper_ip, helper_ip_source, helper_ip_at_unix
+                    nickname, helper_ip, helper_ip_source, helper_ip_at_unix,
+                    freshness_mirrors_in_pack, freshness_pack_url,
+                    freshness_last_sequence
              FROM operators ORDER BY created_at_unix DESC",
         )?;
         let rows: std::result::Result<Vec<_>, _> = stmt.query_map([], row_to_operator)?.collect();
@@ -650,6 +710,240 @@ impl OperatorDb {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    // -----------------------------------------------------------
+    // V013 freshness endpoints (Wave 3 Step 8)
+    // -----------------------------------------------------------
+
+    /// Insert one freshness endpoint and return its row id.
+    ///
+    /// `secret_alias` must already hold the credential in
+    /// DeviceCustody: this method is deliberately incapable of
+    /// accepting a secret, so there is no code path by which an R2
+    /// key or a GitHub PAT can reach SQLite.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_freshness_endpoint(
+        &self,
+        operator_id: i64,
+        kind: &str,
+        public_base_url: &str,
+        account_id: &str,
+        bucket: &str,
+        key_prefix: &str,
+        gh_owner: &str,
+        gh_repo: &str,
+        gh_path_prefix: &str,
+        gh_branch: &str,
+        secret_alias: &str,
+        now_unix: i64,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        // Position is "one past whatever exists", so the list order is
+        // insertion order and the operator can reason about which
+        // endpoint the binder is being offered.
+        let next_pos: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM freshness_endpoints WHERE operator_id = ?1",
+            params![operator_id],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "INSERT INTO freshness_endpoints (
+                operator_id, kind, position, public_base_url,
+                account_id, bucket, key_prefix,
+                gh_owner, gh_repo, gh_path_prefix, gh_branch,
+                secret_alias, created_unix
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                operator_id,
+                kind,
+                next_pos,
+                public_base_url,
+                account_id,
+                bucket,
+                key_prefix,
+                gh_owner,
+                gh_repo,
+                gh_path_prefix,
+                gh_branch,
+                secret_alias,
+                now_unix,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// List one relay's freshness endpoints in operator-chosen order.
+    pub fn list_freshness_endpoints(&self, operator_id: i64) -> Result<Vec<FreshnessEndpointRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, operator_id, kind, position, public_base_url,
+                    account_id, bucket, key_prefix,
+                    gh_owner, gh_repo, gh_path_prefix, gh_branch,
+                    secret_alias, created_unix,
+                    last_publish_at_unix, last_publish_ok,
+                    last_publish_status, last_publish_detail,
+                    last_published_url
+             FROM freshness_endpoints
+             WHERE operator_id = ?1
+             ORDER BY position ASC, id ASC",
+        )?;
+        let rows: std::result::Result<Vec<_>, _> = stmt
+            .query_map(params![operator_id], row_to_freshness_endpoint)?
+            .collect();
+        Ok(rows?)
+    }
+
+    /// Delete one endpoint. Returns its custody alias so the caller can
+    /// forget the credential too — a deleted endpoint whose write-key
+    /// is still in the keystore is a live credential nobody is
+    /// watching.
+    pub fn delete_freshness_endpoint(&self, endpoint_id: i64) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let alias: Option<String> = conn
+            .query_row(
+                "SELECT secret_alias FROM freshness_endpoints WHERE id = ?1",
+                params![endpoint_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        conn.execute(
+            "DELETE FROM freshness_endpoints WHERE id = ?1",
+            params![endpoint_id],
+        )?;
+        Ok(alias.unwrap_or_default())
+    }
+
+    /// Record the outcome of one upload attempt.
+    ///
+    /// Both outcomes are written. Recording only successes would make
+    /// "last published 3 days ago" indistinguishable from "has been
+    /// failing for 3 days", which is precisely the state a publisher
+    /// needs to see before a rotation, not after.
+    pub fn record_freshness_publish(
+        &self,
+        endpoint_id: i64,
+        at_unix: i64,
+        ok: bool,
+        status: i64,
+        detail: &str,
+        published_url: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        // last_published_url is only advanced on success: it means
+        // "recipients can fetch this", and a failed upload proves the
+        // opposite.
+        if ok {
+            conn.execute(
+                "UPDATE freshness_endpoints
+                    SET last_publish_at_unix = ?2, last_publish_ok = 1,
+                        last_publish_status = ?3, last_publish_detail = '',
+                        last_published_url = ?4
+                  WHERE id = ?1",
+                params![endpoint_id, at_unix, status, published_url],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE freshness_endpoints
+                    SET last_publish_at_unix = ?2, last_publish_ok = 0,
+                        last_publish_status = ?3, last_publish_detail = ?4
+                  WHERE id = ?1",
+                params![endpoint_id, at_unix, status, detail],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Point an endpoint row at its custody alias. Separate from the
+    /// insert because the alias is keyed by the row id, which does not
+    /// exist until the insert has run.
+    pub fn set_freshness_endpoint_alias(&self, endpoint_id: i64, alias: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE freshness_endpoints SET secret_alias = ?2 WHERE id = ?1",
+            params![endpoint_id, alias],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp the mirror set that was baked into the pack at sign time,
+    /// as a JSON array of "<provider>=<url>". Pass "[]" (or "") when
+    /// the pack was signed without a freshness path — writing the
+    /// CONFIGURED mirrors here instead would be the exact lie the UI
+    /// exists to avoid.
+    pub fn set_freshness_mirrors_in_pack(&self, operator_id: i64, mirrors_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE operators SET freshness_mirrors_in_pack = ?2 WHERE id = ?1",
+            params![operator_id, mirrors_json],
+        )?;
+        Ok(())
+    }
+
+    /// Set (or clear, with "") the URL the signed .sbp is published at.
+    pub fn set_freshness_pack_url(&self, operator_id: i64, url: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE operators SET freshness_pack_url = ?2 WHERE id = ?1",
+            params![operator_id, url],
+        )?;
+        Ok(())
+    }
+
+    /// Record the freshness-document sequence just published.
+    ///
+    /// MAX(), not assignment: two publishes racing (the rotation path
+    /// and the panel's "publish now" button) must never let the lower
+    /// of the two become the stored high-water mark, because the next
+    /// publish would then derive a sequence recipients have already
+    /// seen and refuse.
+    pub fn record_freshness_sequence(&self, operator_id: i64, sequence: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE operators SET freshness_last_sequence = MAX(freshness_last_sequence, ?2) WHERE id = ?1",
+            params![operator_id, sequence],
+        )?;
+        Ok(())
+    }
+
+    /// Every relay_pack_id this operator has previously signed, newest
+    /// first, excluding `current`.
+    ///
+    /// This is the supersedes list the freshness document carries, and
+    /// without it the document is addressed to a name no existing
+    /// recipient answers to. The pack id is a hash of
+    /// provider|server_id|region|public_ip|families — the very fields
+    /// L3/L4/L5/L6 change — so the rung that repairs a relay renames
+    /// its pack, and a recipient matching on the id stamped on its own
+    /// route rows rejects the new document as belonging to some other
+    /// pack. The history table already holds every prior id; this is
+    /// the query that was missing.
+    pub fn prior_relay_pack_ids(&self, operator_id: i64, current: &str, limit: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        // Newest first, de-duplicated in one pass rather than with
+        // DISTINCT: the truncation on the far side keeps a PREFIX, so
+        // the ordering has to be by recency and DISTINCT would discard
+        // it. An in-place rotation repeats an id (L1/L2/L7 do not
+        // change what the id is derived from), which is why the dedupe
+        // is needed at all.
+        let mut stmt = conn.prepare(
+            "SELECT relay_pack_id FROM signed_sbps
+              WHERE operator_id = ?1 AND relay_pack_id <> '' AND relay_pack_id <> ?2
+              ORDER BY signed_at_unix DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![operator_id, current], |r| r.get::<_, String>(0))?;
+        let mut out: Vec<String> = Vec::new();
+        for row in rows {
+            let id = row?;
+            if out.iter().any(|v| v == &id) {
+                continue;
+            }
+            out.push(id);
+            if limit > 0 && out.len() as i64 >= limit {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// FRP-7: revert to the most recent inactive history row for
@@ -1888,6 +2182,37 @@ fn row_to_operator(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorRow> {
         helper_ip: row.get(16)?,
         helper_ip_source: row.get(17)?,
         helper_ip_at_unix: row.get(18)?,
+        // V013 — appended last for the same reason V012 was.
+        freshness_mirrors_in_pack: row.get(19)?,
+        freshness_pack_url: row.get(20)?,
+        freshness_last_sequence: row.get(21)?,
+    })
+}
+
+fn row_to_freshness_endpoint(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<FreshnessEndpointRow> {
+    let ok_int: i64 = row.get(15)?;
+    Ok(FreshnessEndpointRow {
+        id: row.get(0)?,
+        operator_id: row.get(1)?,
+        kind: row.get(2)?,
+        position: row.get(3)?,
+        public_base_url: row.get(4)?,
+        account_id: row.get(5)?,
+        bucket: row.get(6)?,
+        key_prefix: row.get(7)?,
+        gh_owner: row.get(8)?,
+        gh_repo: row.get(9)?,
+        gh_path_prefix: row.get(10)?,
+        gh_branch: row.get(11)?,
+        secret_alias: row.get(12)?,
+        created_unix: row.get(13)?,
+        last_publish_at_unix: row.get(14)?,
+        last_publish_ok: ok_int == 1,
+        last_publish_status: row.get(16)?,
+        last_publish_detail: row.get(17)?,
+        last_published_url: row.get(18)?,
     })
 }
 

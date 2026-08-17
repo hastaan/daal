@@ -43,6 +43,18 @@ type ModifierPlatformAllow struct {
 	Platforms []string
 }
 
+// FreshnessMirrorsKey is the secrets_kv key holding one pack's raw,
+// unverified `trust/freshness-mirrors.json` as it arrived in the .sbp.
+//
+// It lives in this package rather than in core/refresh (which reads it)
+// because core/refresh already depends on core/trust and the reverse
+// edge would be a cycle. The writer therefore owns the name, and the
+// reader aliases it — one spelling, checked by the compiler, which is
+// the whole reason this value goes missing when it goes missing.
+func FreshnessMirrorsKey(relayPackID string) string {
+	return "freshness-mirrors:" + relayPackID
+}
+
 // LookupPublisher implements importer.State.
 func (a *StoreAdapter) LookupPublisher(fingerprint string) (importer.Pin, bool, error) {
 	row, err := a.S.GetPublisher(fingerprint)
@@ -99,6 +111,9 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 		"import via Phase 1B importer", time.Now().UTC()); err != nil {
 		return err
 	}
+	// One pack's mirror set is denormalised onto every one of its
+	// candidates; write it once.
+	mirrorsSaved := map[string]bool{}
 	for _, r := range routes {
 		row := routestore.RouteRow{
 			RouteID:         r.RouteID,
@@ -130,6 +145,34 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 		}
 		if err := a.S.UpsertRoute(row); err != nil {
 			return fmt.Errorf("save route %s: %w", r.RouteID, err)
+		}
+		// FRP-8: park the pack's signed freshness mirror set where the
+		// refresher can find it.
+		//
+		// This is the ONE seam every import path shares — .sbp file,
+		// QR/URI paste, subscription refresh, bootstrap directory and
+		// the freshness path itself all end at SaveImport — which is
+		// why it is here and not sprinkled over the seven callers of
+		// importer.ImportBytes. The row's FreshnessURL is a SINGLE url
+		// (the manifest's legacy scalar); without this, a recipient
+		// holding a 3-mirror pack polls one host until a refresh
+		// succeeds, and the recipient who needs the other two is by
+		// definition the one whose refreshes are failing.
+		//
+		// Stored raw and UNVERIFIED, deliberately: this entry is not
+		// covered by manifest.sig, so it is attacker-writable in
+		// transit. core/refresh verifies its publisher signature
+		// against the pinned key on every read, before any URL in it
+		// is dialled. Nothing here may treat it as trusted, and a
+		// failure to store it must not fail the import — the pack and
+		// its routes are the thing the user asked for; losing the
+		// spare endpoints degrades recovery, refusing the import
+		// destroys the route.
+		if r.RelayPack != nil && r.RelayPack.RelayPackID != "" &&
+			r.RelayPack.FreshnessMirrorsJSON != "" && !mirrorsSaved[r.RelayPack.RelayPackID] {
+			mirrorsSaved[r.RelayPack.RelayPackID] = true
+			_ = a.S.PutSecret(FreshnessMirrorsKey(r.RelayPack.RelayPackID),
+				[]byte(r.RelayPack.FreshnessMirrorsJSON))
 		}
 		if len(r.Profile) > 0 {
 			if err := a.S.PutSecret("route:"+r.RouteID, r.Profile); err != nil {

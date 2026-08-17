@@ -38,6 +38,43 @@ type hcloudClient interface {
 	// list-then-match-by-derived-name.
 	SSHKeyList(ctx context.Context) ([]SSHKeyInfo, error)
 
+	// FloatingIPCreate reserves a new floating IP on the account.
+	//
+	// Until Step 9 no floating-IP CREATION existed anywhere in this
+	// repository, which meant the whole L3 rung — the cheapest and
+	// fastest answer to the one failure that actually kills a relay,
+	// a blocked address — was reachable only by an operator who had
+	// reserved an IP by hand in the provider console and knew its
+	// numeric id. There was no field to type it into either. A rung
+	// nobody can climb is not a rung.
+	//
+	// opts.HomeLocation is load-bearing, not cosmetic: a floating IP
+	// is announced from its home location, and that location is what
+	// decides whether the relay's cover SNI is still plausible for
+	// the address (see assignFloatingIP's zone check).
+	FloatingIPCreate(ctx context.Context, opts FloatingIPCreateOpts) (*FloatingIPInfo, error)
+
+	// FloatingIPDelete releases a floating IP back to the provider.
+	// Idempotent: deleting an absent id returns nil.
+	//
+	// This is the only call in the adapter that STOPS billing for an
+	// address, and it is also the only one that can destroy something
+	// the operator created themselves. Callers must delete only ids
+	// they created (see Provider.ReleaseFloatingIP), because a
+	// floating IP the operator reserved by hand is not ours to bin.
+	FloatingIPDelete(ctx context.Context, fipID string) error
+
+	// FloatingIPByID reads a floating IP back: its address, its home
+	// location, and which server (if any) it is currently attached to.
+	//
+	// AssignFloatingIP cannot do its job without this. The whole point
+	// of an L3 swap is to change the address recipients dial, and the
+	// caller supplies an opaque numeric id — so something has to turn
+	// that id into an address before the record and the candidate
+	// tags can name it. Before Step 9 nothing did, which is exactly
+	// why the swap moved nothing.
+	FloatingIPByID(ctx context.Context, fipID string) (*FloatingIPInfo, error)
+
 	FloatingIPAssign(ctx context.Context, fipID, serverID string) error
 	FloatingIPUnassign(ctx context.Context, fipID string) error
 
@@ -95,6 +132,45 @@ type hcloudClient interface {
 	// the caller can tell the user why it survived. Tearing down
 	// one relay must never strip another relay's firewall.
 	FirewallDeleteForServer(ctx context.Context, serverID string) (FirewallTeardownResult, error)
+}
+
+// FloatingIPCreateOpts is the input to hcloudClient.FloatingIPCreate.
+type FloatingIPCreateOpts struct {
+	// Name is the provider-side object name. Derived from the relay
+	// so an operator reading their Hetzner console can tell which
+	// address belongs to which relay.
+	Name string
+	// HomeLocation is the Hetzner location code the address is
+	// announced from ("fsn1", "hel1", …). Required: an address with
+	// no home location cannot be checked against the relay's cover
+	// SNI, and Hetzner will not create one without it.
+	HomeLocation string
+	// Description is free text shown in the console.
+	Description string
+	// Labels are the ownership stamp (managed-by=daal-deploy plus
+	// daal-relay=<derived server name>). They are what makes it safe
+	// to delete an address later: without them, teardown cannot tell
+	// an address daal-deploy reserved from one the operator did.
+	Labels map[string]string
+}
+
+// FloatingIPInfo is what an hcloudClient returns for a floating IP.
+type FloatingIPInfo struct {
+	ID string
+	// IP is the actual address. This is the field the whole L3 rung
+	// turns on — it becomes OperatorRecord.PublicIP and every
+	// candidate's public_ip:* tag.
+	IP net.IP
+	// HomeLocation is where the address is announced from. May differ
+	// from the attached server's region: Hetzner allows the
+	// cross-location attachment and routes via the home location.
+	HomeLocation string
+	// ServerID is the server the address is currently attached to,
+	// or "" when unattached. Read back after an assign so the adapter
+	// proves the routing change landed instead of assuming it.
+	ServerID string
+	Name     string
+	Labels   map[string]string
 }
 
 // SSHKeyInfo is the subset of a Hetzner SSH key teardown needs to

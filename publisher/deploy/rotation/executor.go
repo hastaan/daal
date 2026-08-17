@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"daal/publisher/deploy/provider"
@@ -32,8 +34,9 @@ type SignedSBP struct {
 
 // Binder is the FRP-4b BindAndSign contract abstracted to an
 // interface so the executor can be unit-tested without the full
-// relaypackvalidate stack. Production wires this to
-// publisher/deploy/relaypack.BindAndSign via [BinderFunc].
+// relaypackvalidate stack. It is INTENDED to be wired to
+// publisher/deploy/relaypack.BindAndSign via [BinderFunc]; read
+// [BinderFunc] for why nothing wires it today.
 type Binder interface {
 	Bind(rec *provider.OperatorRecord, priv ed25519.PrivateKey, now time.Time) (BinderResult, error)
 }
@@ -47,9 +50,28 @@ type BinderResult struct {
 	RouteCount   int
 }
 
-// BinderFunc adapts a function to the [Binder] interface. The
-// production caller (in wizard's commands.rs / TODO) supplies a
-// closure over relaypack.BindAndSign; tests supply a fake.
+// BinderFunc adapts a function to the [Binder] interface. Tests supply
+// a fake.
+//
+// READ THIS BEFORE TRUSTING THE REST OF THIS FILE'S COMMENTS. There is
+// no production caller of [Executor] anywhere in the repository, and
+// the ones the surrounding comments used to name do not exist. The
+// wizard drives rotation through a SECOND implementation in Rust
+// (client-shell/tauri/daal-wizard/src/commands.rs, rotate_execute),
+// which shells out to `daal-deploy` per level and runs its own
+// signed_sbps transaction. So:
+//
+//   - the provider-side behaviour this package's L3 path depends on
+//     (an address swap that actually moves rec.PublicIP and the
+//     candidates' public_ip:* tags) IS live, because both paths go
+//     through the same provider adapter and the same CLI;
+//   - the ordering, rollback and post-commit release logic below is
+//     NOT live, because only this executor implements it.
+//
+// Collapsing the two is its own piece of work (the plan's S3 item 18:
+// delete the Rust re-implementation and call this). Until then, do not
+// read a guarantee written here as a guarantee the shipped wizard
+// makes.
 type BinderFunc func(rec *provider.OperatorRecord, priv ed25519.PrivateKey, now time.Time) (BinderResult, error)
 
 // Bind implements [Binder] for [BinderFunc].
@@ -58,9 +80,11 @@ func (f BinderFunc) Bind(rec *provider.OperatorRecord, priv ed25519.PrivateKey, 
 }
 
 // SBPStore is the persistence contract the executor uses to commit
-// the signed_sbps history transaction (V003). Concrete implementation
-// lives in the Tauri layer (Rust); for unit-test coverage we use an
-// in-memory store. Insert/MarkInactive/UpdateOperatorActive happen
+// the signed_sbps history transaction (V003). No Go implementation
+// exists: the Tauri layer runs the equivalent transaction in Rust
+// against the same V003 schema rather than through this interface (see
+// [BinderFunc]), so the only implementation here is the in-memory
+// store the unit tests use. Insert/MarkInactive/UpdateOperatorActive happen
 // inside the same transaction; on any error the caller MUST roll back.
 type SBPStore interface {
 	// Begin opens a new transaction. The returned [SBPTx] must be
@@ -84,19 +108,20 @@ type SBPTx interface {
 	Rollback() error
 }
 
-// SBPWritePath is a hook the production caller uses to persist the
-// fresh SBP bytes to the staging directory. Tests pass a fake.
+// SBPWritePath persists the fresh SBP bytes to the staging directory.
+// Tests pass a fake; see [BinderFunc] on the absence of a production
+// caller.
 type SBPWritePath func(rec *provider.OperatorRecord, sbpBytes []byte, signedAt time.Time) (path string, err error)
 
-// Clock abstracts time.Now for deterministic tests. Production
-// passes [WallClock]; the wallclock-pin test passes a synthetic
-// clock so the L3 budget assertion is reproducible.
+// Clock abstracts time.Now for deterministic tests. [WallClock] is the
+// real implementation; the wallclock-pin test passes a synthetic clock
+// so the L3 budget assertion is reproducible.
 type Clock interface {
 	Now() time.Time
 	Since(t time.Time) time.Duration
 }
 
-// WallClock is the production clock.
+// WallClock is the real-time clock.
 type WallClock struct{}
 
 // Now returns time.Now in UTC.
@@ -112,14 +137,33 @@ func (WallClock) Since(t time.Time) time.Duration { return time.Since(t) }
 const L3FastPathBudget = 15 * time.Second
 
 // Executor wires Provider + Binder + SBPStore into a single
-// transactional rotate-step. One executor per wizard process; all
-// fields are required.
+// transactional rotate-step. Every field except VerifyReachable is
+// required; a missing one is [ErrExecutorIncomplete] rather than a
+// half-run rotation.
 type Executor struct {
 	Provider provider.Provider
 	Binder   Binder
 	Store    SBPStore
 	WriteSBP SBPWritePath
 	Clock    Clock
+
+	// VerifyReachable is the OPTIONAL data-plane check between an L3
+	// swap and the re-sign. Nil skips it.
+	//
+	// It exists because "the cloud API accepted the assignment" and
+	// "packets reach port 443 on the new address" are different
+	// claims, and only the first is checkable from inside this
+	// process. The provider adapter proves the first by reading the
+	// object back. The second needs a dial from outside the publisher's
+	// machine — so this is a seam rather than an implementation, and
+	// the honest reading of an L3 run with VerifyReachable==nil is
+	// "the control plane agreed", not "the relay is reachable".
+	//
+	// A verifier that fails rolls the swap back, so a slow or flaky
+	// probe costs the operator a failed rotation rather than a wrong
+	// pack. Whatever is bound here must also fit inside
+	// [L3FastPathBudget] together with the bind and the store write.
+	VerifyReachable func(ctx context.Context, rec *provider.OperatorRecord) error
 }
 
 // RotateRequest is the input to [Executor.Rotate].
@@ -142,7 +186,15 @@ type RotateRequest struct {
 	// have overridden Level via the override dropdown.
 	Recommendation RotationRecommendation
 
-	// NewFloatingIPID is required iff Recommendation.Level == L3.
+	// NewFloatingIPID is the address to move onto, for L3.
+	//
+	// Empty is now legal and is the normal case: leave it empty and the
+	// executor reserves a fresh address for this relay (see
+	// [FloatingIPProvisioner]). Before Step 9 it was mandatory, which
+	// meant L3 — the cheapest and fastest recovery from the failure
+	// that actually kills relays — was reachable only by an operator
+	// who had reserved an address by hand in the provider console and
+	// knew its numeric id, for which no input field existed anywhere.
 	NewFloatingIPID string
 
 	// ReprovisionOpts is required for L1, L2, L4, L5, L6.
@@ -166,19 +218,100 @@ type RotateResult struct {
 	// for this operator. Used by the wizard to decide if Revert
 	// is offered.
 	PriorWasActive bool
+
+	// L3 carries what the floating-IP swap actually did. Zero value
+	// on every other level.
+	L3 L3Outcome
+}
+
+// L3Outcome is the operator-facing account of a floating-IP swap: the
+// address recipients will dial from now on, and what happened to the one
+// they were dialing before.
+type L3Outcome struct {
+	// NewFloatingIPID / NewPublicIP are the address now attached.
+	NewFloatingIPID string
+	NewPublicIP     net.IP
+
+	// PriorFloatingIPID is what the relay was on before, "" if it was
+	// running on the server's own primary address.
+	PriorFloatingIPID string
+
+	// PriorReleased reports whether the prior address is actually gone
+	// from the account. False with no error means it was detached but
+	// left reserved because daal-deploy did not create it — still on
+	// the operator's bill, so the caller must say so rather than show
+	// a clean success.
+	PriorReleased bool
+
+	// ReservedHere is true when the executor reserved the new address
+	// itself (as opposed to attaching one the operator supplied). It
+	// is what makes rollback able to delete the address without
+	// risking one the operator owns.
+	ReservedHere bool
+
+	// Warnings are non-fatal problems from the post-commit release
+	// leg. That leg runs AFTER the pack is signed and stored, so its
+	// failures cannot fail the rotation — but leaving them unsaid is
+	// how an address quietly keeps billing.
+	Warnings []string
 }
 
 // errors -------------------------------------------------------------
 
 var (
-	ErrNilRequest         = errors.New("rotation: nil RotateRequest")
-	ErrNilRecord          = errors.New("rotation: nil OperatorRecord")
-	ErrNilPrivKey         = errors.New("rotation: empty private key")
-	ErrL3MissingFipID     = errors.New("rotation: L3 requires NewFloatingIPID")
-	ErrL3WallClockBudget  = errors.New("rotation: L3 fast path exceeded the V1.5 wall-clock budget")
-	ErrUnsupportedLevel   = errors.New("rotation: unsupported level")
+	ErrNilRequest        = errors.New("rotation: nil RotateRequest")
+	ErrNilRecord         = errors.New("rotation: nil OperatorRecord")
+	ErrNilPrivKey        = errors.New("rotation: empty private key")
+	ErrL3WallClockBudget = errors.New("rotation: L3 fast path exceeded the V1.5 wall-clock budget")
+	ErrUnsupportedLevel  = errors.New("rotation: unsupported level")
+
+	// ErrL3NoAddressSource: no floating-IP id was supplied AND the
+	// Provider cannot reserve one. Previously this surfaced as
+	// "L3 requires NewFloatingIPID", which named the missing input
+	// without saying that on some providers there is no way to
+	// produce it.
+	ErrL3NoAddressSource = errors.New("rotation: L3 needs either NewFloatingIPID or a Provider that can reserve one")
+
+	// ErrL3AddressUnchanged is the post-condition that makes an L3 on
+	// an un-fixed provider fail loudly instead of quietly re-signing
+	// against the burned address. See CheckAddressMoved.
+	ErrL3AddressUnchanged = errors.New("rotation: L3 completed without moving the record's dialled address")
+
+	// ErrRecordAddressInconsistent fires when rec.PublicIP and the
+	// candidates' public_ip:* tags disagree — a record that would sign
+	// a pack dialling one address while declaring another.
+	ErrRecordAddressInconsistent = errors.New("rotation: record's public IP and candidate public_ip:* tags disagree")
+
 	ErrExecutorIncomplete = errors.New("rotation: Executor missing required field")
 )
+
+// ErrL3MissingFipID is retained as an alias so callers that matched on
+// it keep compiling and keep matching.
+//
+// Deprecated: use [ErrL3NoAddressSource].
+var ErrL3MissingFipID = ErrL3NoAddressSource
+
+// FloatingIPProvisioner is the OPTIONAL half of the provider contract
+// that makes L3 self-service.
+//
+// It is deliberately not on provider.Provider. Reserving and releasing
+// an address is a capability a provider adapter either has or does not
+// (today: Hetzner does; Vultr and Stark attach an address the operator
+// already owns and cannot mint one), and forcing it into the shared
+// interface would mean two adapters growing methods that return
+// "not implemented" — a shape this repository already has too much of.
+// An optional interface lets the executor ask, and say plainly what is
+// missing when the answer is no.
+type FloatingIPProvisioner interface {
+	// CreateFloatingIP reserves a fresh address for this relay,
+	// unattached, and returns its provider id and the address itself.
+	CreateFloatingIP(ctx context.Context, rec *provider.OperatorRecord) (id string, addr net.IP, err error)
+
+	// ReleaseFloatingIP detaches an address and, if the adapter
+	// created it, deletes it. deleted=false with a nil error means
+	// "detached, still reserved, still billing, not ours to delete".
+	ReleaseFloatingIP(ctx context.Context, rec *provider.OperatorRecord, id string) (deleted bool, err error)
+}
 
 // Rotate runs the chosen rotation level, re-signs the RelayPack,
 // and commits the (mark-prior-inactive, insert-active, update-
@@ -199,12 +332,21 @@ var (
 // execution path through this Executor would add a caller-less
 // abstraction on top of a CLI the wizard already shells out to.
 //
-// On Provider or
-// Binder failure the transaction never opens; on store failure the
-// transaction rolls back and the rec is left unchanged on disk
-// (the in-memory rec may already reflect a successful Provider
-// call — the caller is responsible for retrying or surfacing the
-// error to the operator).
+// FAILURE BEHAVIOUR, which differs by level and it matters.
+//
+// On Provider or Binder failure the transaction never opens; on store
+// failure the transaction rolls back and the rec is left unchanged on
+// disk. For the DESTROY-AND-REBUILD levels the in-memory rec may
+// already reflect a successful Provider call and there is nothing to
+// undo — the old box is gone — so the caller is responsible for
+// retrying or surfacing the error to the operator.
+//
+// L3 is the exception and now genuinely unwinds. Every failure after
+// the address is attached — bind, write, budget, transaction — restores
+// the record's previous address and hands the new one back (deleting it
+// if the executor reserved it). The invariant that buys is stated on
+// [Executor.beginL3]: the record always names an address that is
+// currently routed to this server, at every instant, on every path.
 func (e *Executor) Rotate(ctx context.Context, req *RotateRequest) (*RotateResult, error) {
 	if e.Provider == nil || e.Binder == nil || e.Store == nil || e.WriteSBP == nil || e.Clock == nil {
 		return nil, ErrExecutorIncomplete
@@ -222,11 +364,19 @@ func (e *Executor) Rotate(ctx context.Context, req *RotateRequest) (*RotateResul
 	start := e.Clock.Now()
 
 	// 1. Provider call (or floating-IP swap).
+	//
+	// l3 is non-nil only on the L3 path and is what every later
+	// failure unwinds through. Nothing else in this function has
+	// anything to unwind: the rebuild levels have already deleted the
+	// old box by the time they return.
+	var l3 *l3Swap
 	switch req.Recommendation.Level {
 	case L3:
-		if err := e.runL3(ctx, req); err != nil {
+		st, err := e.beginL3(ctx, req)
+		if err != nil {
 			return nil, fmt.Errorf("rotation L3: %w", err)
 		}
+		l3 = st
 	case L1, L2, L4, L5, L6:
 		if err := e.Provider.Reprovision(ctx, req.Record, req.ReprovisionOpts); err != nil {
 			return nil, fmt.Errorf("rotation %s reprovision: %w", req.Recommendation.Level, err)
@@ -235,17 +385,28 @@ func (e *Executor) Rotate(ctx context.Context, req *RotateRequest) (*RotateResul
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedLevel, req.Recommendation.Level)
 	}
 
+	// abort undoes the swap (L3 only) and returns the error. Every
+	// early return below goes through it; a bare `return nil, err`
+	// after this point is a bug, because it would leave the relay on
+	// an address no signed pack names.
+	abort := func(err error) (*RotateResult, error) {
+		if l3 != nil {
+			l3.rollback(ctx, e, req.Record)
+		}
+		return nil, err
+	}
+
 	// 2. Re-sign the RelayPack against the (possibly mutated) rec.
 	now := e.Clock.Now()
 	bind, err := e.Binder.Bind(req.Record, req.PrivKey, now)
 	if err != nil {
-		return nil, fmt.Errorf("rotation bind: %w", err)
+		return abort(fmt.Errorf("rotation bind: %w", err))
 	}
 
 	// 3. Persist the bytes to the staging dir.
 	sbpPath, err := e.WriteSBP(req.Record, bind.SBPBytes, now)
 	if err != nil {
-		return nil, fmt.Errorf("rotation write sbp: %w", err)
+		return abort(fmt.Errorf("rotation write sbp: %w", err))
 	}
 
 	// 4. Enforce the L3 wall-clock budget before publishing the
@@ -254,7 +415,7 @@ func (e *Executor) Rotate(ctx context.Context, req *RotateRequest) (*RotateResul
 	// not be committed after we already know the invariant broke.
 	dur := e.Clock.Since(start)
 	if req.Recommendation.Level == L3 && dur > L3FastPathBudget {
-		return nil, fmt.Errorf("%w: took %s > %s", ErrL3WallClockBudget, dur, L3FastPathBudget)
+		return abort(fmt.Errorf("%w: took %s > %s", ErrL3WallClockBudget, dur, L3FastPathBudget))
 	}
 
 	// 5. Commit the history transaction.
@@ -270,40 +431,300 @@ func (e *Executor) Rotate(ctx context.Context, req *RotateRequest) (*RotateResul
 	}
 	tx, err := e.Store.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("rotation tx begin: %w", err)
+		return abort(fmt.Errorf("rotation tx begin: %w", err))
 	}
 	priorWasActive, err := commitRotationTx(tx, row)
 	if err != nil {
 		_ = tx.Rollback()
-		return nil, fmt.Errorf("rotation tx commit: %w", err)
+		return abort(fmt.Errorf("rotation tx commit: %w", err))
 	}
 
-	return &RotateResult{
+	res := &RotateResult{
 		SignedSBP:      row,
 		WallClock:      dur,
 		PriorWasActive: priorWasActive,
-	}, nil
+	}
+
+	// 6. ONLY NOW release the address the relay just moved off.
+	//
+	// After the commit, never before. Until this line the relay is
+	// answering on both addresses and every already-distributed pack
+	// still works; releasing earlier would open a window in which a
+	// failure leaves recipients holding a pack for an address that
+	// routes nowhere. Failures here cost money, not connectivity, so
+	// they are warnings on the result rather than a failed rotation —
+	// the pack is signed and committed and undoing that to tidy up a
+	// billing resource would be the wrong trade.
+	if l3 != nil {
+		res.L3 = l3.finish(ctx, e, req.Record)
+	}
+	return res, nil
 }
 
-// runL3 executes the floating-IP fast path: unassign the current
-// FIP (if any), assign the new one, update the in-memory record.
-// At V1.5 the box's PublicIP slot is not mutated by AssignFloatingIP
-// directly — the family-side QR carries the floating IP via the
-// CandidateMeta render path; the Provider's Assign call updates
-// rec.FloatingIPID and rec.PublicIP per the FRP-4a contract.
-func (e *Executor) runL3(ctx context.Context, req *RotateRequest) error {
-	if req.NewFloatingIPID == "" {
-		return ErrL3MissingFipID
+// l3Swap is the in-flight state of a floating-IP rotation: enough to put
+// the record back exactly as it was, and enough to know which cloud
+// objects are ours to destroy.
+type l3Swap struct {
+	// priorIP / priorFIPID / priorTags are the pre-swap record. Tags
+	// are captured per candidate because adopting an address rewrites
+	// each candidate's public_ip:* tag in place.
+	priorIP    net.IP
+	priorFIPID string
+	priorTags  [][]string
+
+	// newFIPID is the address now attached.
+	newFIPID string
+	// reservedHere: the executor minted newFIPID, so rollback may
+	// delete it. An address the operator supplied is never deleted.
+	reservedHere bool
+}
+
+// beginL3 performs the swap and leaves the record naming the new
+// address. It is step one of three; steps two and three are
+// [l3Swap.rollback] and [l3Swap.finish].
+//
+// THE SEQUENCE, and why it is this way round:
+//
+//	reserve (if needed) → attach NEW → provider reads it back →
+//	record adopts the new address → re-sign → store →
+//	release OLD (in Rotate, after the commit)
+//
+// The old address is never detached first. A Hetzner server keeps its
+// own primary IPv4 and can hold two floating IPs at once, so between
+// attach and release the relay answers on both, and any failure in
+// between leaves every already-distributed pack still working. The
+// previous implementation unassigned first, which meant a failure at
+// the assign step took the relay off the address every recipient had
+// while the record still named it — an outage manufactured out of a
+// recovery attempt.
+//
+// THE INVARIANT: rec.PublicIP always names an address that is currently
+// routed to rec.ServerID. Before the swap that is the old address;
+// after a successful swap the new one; after a rolled-back swap the old
+// one again, because rollback restores the record BEFORE it detaches
+// anything. There is no instant at which the relay is reachable on no
+// address at all: the swap only ever ADDS an address, and the server's
+// own primary address is never touched by any of this.
+//
+// WHAT IS NOT VERIFIED HERE, stated because the gap is the difference
+// between this being correct and this being proven. The provider adapter
+// reads the address back from the cloud API and refuses to claim an
+// attachment it cannot see, which proves the control plane accepted the
+// change. It does not prove a packet from Iran reaches port 443 on the
+// new address — that needs a dial from outside, which no unit test and
+// no offline publisher can do. VerifyReachable is the seam for it.
+func (e *Executor) beginL3(ctx context.Context, req *RotateRequest) (*l3Swap, error) {
+	rec := req.Record
+	st := &l3Swap{
+		priorIP:    append(net.IP(nil), rec.PublicIP...),
+		priorFIPID: rec.FloatingIPID,
+		priorTags:  snapshotCandidateTags(rec),
+		newFIPID:   req.NewFloatingIPID,
 	}
-	if req.Record.FloatingIPID != "" && req.Record.FloatingIPID != req.NewFloatingIPID {
-		if err := e.Provider.UnassignFloatingIP(ctx, req.Record); err != nil {
-			return fmt.Errorf("unassign prior floating IP: %w", err)
+
+	if st.newFIPID == "" {
+		res, ok := e.Provider.(FloatingIPProvisioner)
+		if !ok {
+			return nil, ErrL3NoAddressSource
+		}
+		id, _, err := res.CreateFloatingIP(ctx, rec)
+		if err != nil {
+			return nil, fmt.Errorf("reserve floating IP: %w", err)
+		}
+		st.newFIPID, st.reservedHere = id, true
+	}
+
+	if err := e.Provider.AssignFloatingIP(ctx, rec, st.newFIPID); err != nil {
+		// Nothing has been adopted onto the record by a failed
+		// assign, but an address we just minted would leak.
+		st.releaseIfReservedHere(ctx, e, rec)
+		return nil, fmt.Errorf("assign new floating IP: %w", err)
+	}
+
+	// POST-CONDITIONS. The provider contract says AssignFloatingIP
+	// moves the record's dialled address; these two checks are what
+	// make that a contract rather than a comment. They are exported
+	// because the LIVE path is the CLI's assign-fip verb, not this
+	// executor, and a post-condition that only one of two
+	// implementations runs is a post-condition on neither.
+	//
+	// An adapter that only sets FloatingIPID — which is what every
+	// adapter did before Step 9, and what the Vultr and Stark adapters
+	// still do — now fails here instead of returning success and
+	// letting the binder sign a pack aimed at the burned address.
+	if err := CheckAddressMoved(st.priorIP, rec.PublicIP); err != nil {
+		st.rollback(ctx, e, rec)
+		return nil, err
+	}
+	if err := CheckRecordAddressConsistent(rec); err != nil {
+		st.rollback(ctx, e, rec)
+		return nil, err
+	}
+
+	if e.VerifyReachable != nil {
+		if err := e.VerifyReachable(ctx, rec); err != nil {
+			st.rollback(ctx, e, rec)
+			return nil, fmt.Errorf("new address did not verify: %w", err)
 		}
 	}
-	if err := e.Provider.AssignFloatingIP(ctx, req.Record, req.NewFloatingIPID); err != nil {
-		return fmt.Errorf("assign new floating IP: %w", err)
+	return st, nil
+}
+
+// rollback puts the record back on the address it had and gives up the
+// one it just took. Record FIRST, cloud SECOND: if the process dies
+// between the two, an operator is left with a record naming a routed
+// address plus an orphaned reservation — recoverable, and far better
+// than the reverse, which is a record naming an address that is gone.
+//
+// Best-effort by construction. rollback runs on a path that is already
+// failing; the caller's error is the one that matters, so problems here
+// are swallowed rather than allowed to mask it. The cost of a swallowed
+// error is a leaked address, which the wizard's teardown path reports.
+func (st *l3Swap) rollback(ctx context.Context, e *Executor, rec *provider.OperatorRecord) {
+	if st == nil || rec == nil {
+		return
+	}
+	if len(st.priorIP) > 0 {
+		rec.PublicIP = st.priorIP
+	}
+	rec.FloatingIPID = st.priorFIPID
+	restoreCandidateTags(rec, st.priorTags)
+	st.releaseIfReservedHere(ctx, e, rec)
+	if !st.reservedHere && st.newFIPID != "" && st.newFIPID != st.priorFIPID {
+		// Operator-owned address: detach so it is not left routing to
+		// a relay no pack names, but never delete it.
+		if res, ok := e.Provider.(FloatingIPProvisioner); ok {
+			_, _ = res.ReleaseFloatingIP(ctx, rec, st.newFIPID)
+		}
+	}
+}
+
+func (st *l3Swap) releaseIfReservedHere(ctx context.Context, e *Executor, rec *provider.OperatorRecord) {
+	if !st.reservedHere || st.newFIPID == "" {
+		return
+	}
+	if res, ok := e.Provider.(FloatingIPProvisioner); ok {
+		_, _ = res.ReleaseFloatingIP(ctx, rec, st.newFIPID)
+	}
+	st.reservedHere = false
+}
+
+// finish releases the address the relay moved off, after the new pack is
+// signed and committed. Returns the operator-facing account.
+func (st *l3Swap) finish(ctx context.Context, e *Executor, rec *provider.OperatorRecord) L3Outcome {
+	out := L3Outcome{
+		NewFloatingIPID:   st.newFIPID,
+		PriorFloatingIPID: st.priorFIPID,
+		ReservedHere:      st.reservedHere,
+	}
+	if st.priorFIPID == "" || st.priorFIPID == st.newFIPID {
+		// The relay was on the server's own primary address (or is
+		// converging onto the same floating IP). Nothing to give back.
+		return out
+	}
+	res, ok := e.Provider.(FloatingIPProvisioner)
+	if !ok {
+		out.Warnings = append(out.Warnings, fmt.Sprintf(
+			"floating IP %s is still attached to this relay and still billing: this provider adapter cannot release addresses",
+			st.priorFIPID))
+		return out
+	}
+	deleted, err := res.ReleaseFloatingIP(ctx, rec, st.priorFIPID)
+	switch {
+	case err != nil:
+		out.Warnings = append(out.Warnings, fmt.Sprintf(
+			"could not release the previous address (floating IP %s): %v — it is still on your account and still billing",
+			st.priorFIPID, err))
+	case !deleted:
+		out.Warnings = append(out.Warnings, fmt.Sprintf(
+			"floating IP %s was detached but left reserved because daal-deploy did not create it — it is still on your account and still billing",
+			st.priorFIPID))
+	}
+	out.PriorReleased = deleted
+	return out
+}
+
+// CheckAddressMoved is the post-condition that turns "the provider says
+// it swapped" into "the record actually moved".
+//
+// The failure it catches is the whole reason Step 9 exists: an adapter
+// that records the floating-IP id and leaves rec.PublicIP naming the
+// burned address produces a rotation that reports success, re-signs a
+// pack, and changes nothing a censor can see. That is strictly worse
+// than a visible failure, because the operator stops looking.
+func CheckAddressMoved(before, after net.IP) error {
+	if len(after) == 0 {
+		return fmt.Errorf("%w: the record has no public IP after the swap", ErrL3AddressUnchanged)
+	}
+	if len(before) > 0 && before.Equal(after) {
+		return fmt.Errorf("%w: still %s — this provider adapter attaches the address without moving the record onto it, "+
+			"so a pack signed now would point straight back at the address you are rotating away from", ErrL3AddressUnchanged, after)
 	}
 	return nil
+}
+
+// CheckRecordAddressConsistent enforces that the record's two copies of
+// the dialled address agree: OperatorRecord.PublicIP, which the client
+// outbound is built from, and each candidate's public_ip:* tag, which
+// the risk graph groups on and the recommender reads back when deciding
+// whether an address is in cooldown.
+//
+// They are separate fields, so they can drift, and a drifted record
+// signs a pack that dials one address while declaring another — the
+// address cooldown then keeps firing against a relay that has already
+// moved, which reads to the operator as "rotation did not help".
+func CheckRecordAddressConsistent(rec *provider.OperatorRecord) error {
+	if rec == nil || len(rec.PublicIP) == 0 {
+		return nil
+	}
+	want := publicIPTag + rec.PublicIP.String()
+	for i, c := range rec.Candidates {
+		seen := 0
+		for _, t := range c.PublicRiskTags {
+			if !strings.HasPrefix(t, publicIPTag) {
+				continue
+			}
+			seen++
+			if t != want {
+				return fmt.Errorf("%w: candidate %d (%s) carries %q while the record says %s",
+					ErrRecordAddressInconsistent, i, c.Family, t, rec.PublicIP)
+			}
+		}
+		if seen == 0 {
+			return fmt.Errorf("%w: candidate %d (%s) carries no %s tag at all",
+				ErrRecordAddressInconsistent, i, c.Family, publicIPTag)
+		}
+	}
+	return nil
+}
+
+// publicIPTag is the candidate-tag prefix carrying the dialled address.
+// Mirrors the providers' own constant; the recommender keys its L3
+// recommendation off the same string (recommender.go), so all three
+// must stay in step.
+const publicIPTag = "public_ip:"
+
+func snapshotCandidateTags(rec *provider.OperatorRecord) [][]string {
+	if rec == nil {
+		return nil
+	}
+	out := make([][]string, len(rec.Candidates))
+	for i, c := range rec.Candidates {
+		out[i] = append([]string(nil), c.PublicRiskTags...)
+	}
+	return out
+}
+
+func restoreCandidateTags(rec *provider.OperatorRecord, tags [][]string) {
+	if rec == nil || len(tags) != len(rec.Candidates) {
+		// Length mismatch means the provider replaced the candidate
+		// set wholesale, which no L3 path does. Restoring a
+		// mismatched snapshot would corrupt the record, so leave it.
+		return
+	}
+	for i := range rec.Candidates {
+		rec.Candidates[i].PublicRiskTags = tags[i]
+	}
 }
 
 // commitRotationTx runs the three-step transaction. Returns
@@ -345,12 +766,26 @@ func rotationReason(rec RotationRecommendation) string {
 	return fmt.Sprintf("%s | %s | conf=%s", rec.Level, rec.Reason, rec.Confidence)
 }
 
-// Revert is the inverse of Rotate. The caller specifies which
-// SignedSBP history row to restore (typically the most recent
-// inactive one). The executor flips that row to active=1, marks
-// the current active=0, and updates the projection. No Provider
-// or Binder call is made — Revert is a pure DB operation; the
-// underlying VPS keeps whatever state Rotate left it in.
+// Revert is the inverse of Rotate ONLY in the history table. The caller
+// specifies which SignedSBP history row to restore (typically the most
+// recent inactive one). The executor flips that row to active=1, marks
+// the current active=0, and updates the projection. No Provider or
+// Binder call is made — Revert is a pure DB operation; the underlying
+// VPS keeps whatever state Rotate left it in.
+//
+// AFTER AN L3 THAT IS USUALLY THE WRONG THING TO DO, and the UI must
+// not offer it as a symmetric undo. A committed L3 releases the
+// previous address (Rotate step 6), so the pack Revert makes active
+// again names an address that no longer routes to this relay — or, once
+// the provider re-issues it, to somebody else's server entirely. Revert
+// is meaningful for the levels where the packs differ only in
+// credentials or cover host and every candidate address still points at
+// the same box; for a completed address swap the way back is another
+// rotation, not this.
+//
+// The narrow exception is a rotation that failed BEFORE its commit:
+// there the swap has already been unwound in the cloud, no new row was
+// inserted, and there is nothing for Revert to do either.
 func (e *Executor) Revert(ctx context.Context, target SignedSBP) error {
 	if e.Store == nil {
 		return ErrExecutorIncomplete

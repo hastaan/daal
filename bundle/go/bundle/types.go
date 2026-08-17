@@ -361,6 +361,23 @@ type Bundle struct {
 	// specs/cell-v1.md.
 	CellMembershipJSON []byte
 	CellDelegationJSON []byte
+
+	// FRP-8: when present, the archive carried
+	// `trust/freshness-mirrors.json` — the publisher-signed set of N
+	// freshness endpoints across N DISTINCT providers. Raw bytes only:
+	// this package neither parses nor verifies it, exactly as it
+	// leaves the cell documents alone, because the one implementation
+	// of that wire format lives on the recipient side
+	// (core/refresh.VerifyMirrorDocument) and a second one here would
+	// be a second thing to keep in step.
+	//
+	// It is a separate archive entry rather than a manifest field
+	// because VerifyManifest canonicalises the PARSED struct: a
+	// manifest field an already-distributed client does not know is
+	// dropped before its canonicalisation, so its computed body
+	// diverges and it rejects the ENTIRE pack. An unknown zip entry is
+	// ignored. Nil for packs minted before FRP-8.
+	FreshnessMirrorsJSON []byte
 }
 
 // CellMembershipDoc is the locked-at-FRP-11 wire shape of

@@ -29,6 +29,24 @@ type mockProvider struct {
 	reprovisionErr   error
 	assignFloatErr   error
 	unassignFloatErr error
+
+	// addressFor maps a floating-IP id to the address it carries, the
+	// way the real cloud API does. A mock that skipped this could not
+	// exercise the one thing L3 is for.
+	addressFor map[string]net.IP
+
+	// legacyAssign models the PRE-Step-9 adapter (and the Vultr/Stark
+	// adapters today): set FloatingIPID, move nothing else. The
+	// executor's post-condition must reject it.
+	legacyAssign bool
+
+	// reserve/release plumbing for the FloatingIPProvisioner half.
+	createCalls  int
+	createErr    error
+	releaseCalls int
+	releasedIDs  []string
+	releaseErr   error
+	releaseOwned bool
 }
 
 func (m *mockProvider) Provision(_ context.Context, _ provider.ProvisionOpts) (*provider.OperatorRecord, error) {
@@ -58,13 +76,49 @@ func (m *mockProvider) Decommission(_ context.Context, rec *provider.OperatorRec
 	return rep, nil
 }
 
+// AssignFloatingIP models the FIXED adapter contract: attach, and move
+// every copy of the dialled address onto the new one (rec.PublicIP plus
+// each candidate's public_ip:* tag). Set legacyAssign to get the broken
+// pre-Step-9 behaviour instead.
 func (m *mockProvider) AssignFloatingIP(_ context.Context, rec *provider.OperatorRecord, fipID string) error {
 	m.assignFloatingCalls++
 	m.lastAssignedFipID = fipID
-	if m.assignFloatErr == nil && rec != nil {
-		rec.FloatingIPID = fipID
+	if m.assignFloatErr != nil || rec == nil {
+		return m.assignFloatErr
 	}
-	return m.assignFloatErr
+	rec.FloatingIPID = fipID
+	if m.legacyAssign {
+		return nil
+	}
+	ip := m.addressOf(fipID)
+	rec.PublicIP = ip
+	for i := range rec.Candidates {
+		tags := []string{}
+		for _, t := range rec.Candidates[i].PublicRiskTags {
+			if !hasPublicIPPrefix(t) {
+				tags = append(tags, t)
+			}
+		}
+		rec.Candidates[i].PublicRiskTags = append(tags, "public_ip:"+ip.String())
+	}
+	return nil
+}
+
+func (m *mockProvider) addressOf(fipID string) net.IP {
+	if ip, ok := m.addressFor[fipID]; ok {
+		return ip
+	}
+	// Deterministic synthetic address so every id maps to a distinct,
+	// stable value without every test having to populate the map.
+	sum := 0
+	for _, b := range []byte(fipID) {
+		sum = (sum + int(b)) % 250
+	}
+	return net.IPv4(203, 0, 113, byte(sum+1))
+}
+
+func hasPublicIPPrefix(t string) bool {
+	return len(t) >= len("public_ip:") && t[:len("public_ip:")] == "public_ip:"
 }
 
 func (m *mockProvider) UnassignFloatingIP(_ context.Context, rec *provider.OperatorRecord) error {
@@ -73,6 +127,27 @@ func (m *mockProvider) UnassignFloatingIP(_ context.Context, rec *provider.Opera
 		rec.FloatingIPID = ""
 	}
 	return m.unassignFloatErr
+}
+
+// CreateFloatingIP / ReleaseFloatingIP make the mock a
+// FloatingIPProvisioner, which is what lets an L3 run without the
+// operator having reserved an address by hand.
+func (m *mockProvider) CreateFloatingIP(_ context.Context, _ *provider.OperatorRecord) (string, net.IP, error) {
+	m.createCalls++
+	if m.createErr != nil {
+		return "", nil, m.createErr
+	}
+	id := "fip-reserved"
+	return id, m.addressOf(id), nil
+}
+
+func (m *mockProvider) ReleaseFloatingIP(_ context.Context, _ *provider.OperatorRecord, id string) (bool, error) {
+	m.releaseCalls++
+	m.releasedIDs = append(m.releasedIDs, id)
+	if m.releaseErr != nil {
+		return false, m.releaseErr
+	}
+	return m.releaseOwned, nil
 }
 
 func (m *mockProvider) Pricing(_ context.Context, _ *provider.OperatorRecord) (provider.Pricing, error) {
@@ -211,7 +286,7 @@ func newPriv(t *testing.T) ed25519.PrivateKey {
 	return priv
 }
 
-func newExecutor(prov *mockProvider, b *mockBinder, st *memStore, clk Clock) *Executor {
+func newExecutor(prov provider.Provider, b *mockBinder, st *memStore, clk Clock) *Executor {
 	return &Executor{
 		Provider: prov,
 		Binder:   b,
@@ -231,6 +306,16 @@ func newRecord(withFipID string) *provider.OperatorRecord {
 		Region:          "fsn1",
 		PublicIP:        net.ParseIP("198.51.100.10"),
 		PublisherPubKey: []byte("placeholder"),
+		// Candidates carry the SECOND copy of the dialled address.
+		// Every L3 test needs them present, because a swap that moves
+		// rec.PublicIP and leaves these behind is exactly the
+		// half-applied state that signs a self-contradicting pack.
+		Candidates: []provider.CandidateMeta{
+			{Family: "vless-reality", Port: 443,
+				PublicRiskTags: []string{"public_ip:198.51.100.10", "public_port:tcp443"}},
+			{Family: "hysteria2", Port: 443,
+				PublicRiskTags: []string{"public_ip:198.51.100.10", "public_port:udp443"}},
+		},
 	}
 	if withFipID != "" {
 		rec.FloatingIPID = withFipID
@@ -271,8 +356,16 @@ func TestRotate_L3_FastPath_Succeeds(t *testing.T) {
 	if prov.assignFloatingCalls != 1 {
 		t.Errorf("AssignFloatingIP calls = %d, want 1", prov.assignFloatingCalls)
 	}
-	if prov.unassignFloatingCalls != 1 {
-		t.Errorf("UnassignFloatingIP calls = %d, want 1", prov.unassignFloatingCalls)
+	// The prior address is given back exactly once, and only through
+	// the post-commit release leg. A pre-swap UnassignFloatingIP would
+	// take the relay off the address every distributed pack names
+	// BEFORE the replacement is proven — the window this ordering
+	// exists to close.
+	if prov.unassignFloatingCalls != 0 {
+		t.Errorf("UnassignFloatingIP calls = %d, want 0 (the old address is released after the commit, not detached before the swap)", prov.unassignFloatingCalls)
+	}
+	if len(prov.releasedIDs) != 1 || prov.releasedIDs[0] != "fip-old" {
+		t.Errorf("released = %v, want exactly [fip-old]", prov.releasedIDs)
 	}
 	if prov.reprovisionCalls != 0 {
 		t.Errorf("Reprovision calls = %d, want 0 (L3 must NOT call Reprovision)", prov.reprovisionCalls)
@@ -300,6 +393,18 @@ func TestRotate_L3_FastPath_Succeeds(t *testing.T) {
 	}
 	if rec.FloatingIPID != "fip-new" {
 		t.Errorf("record.FloatingIPID = %s, want fip-new", rec.FloatingIPID)
+	}
+	// THE POINT OF THE WHOLE RUNG: the address recipients dial moved,
+	// in both places the record keeps it.
+	want := prov.addressOf("fip-new").String()
+	if rec.PublicIP.String() != want {
+		t.Errorf("record.PublicIP = %s, want %s — an L3 that leaves the burned address in place is a rotation that rotates nothing", rec.PublicIP, want)
+	}
+	if err := CheckRecordAddressConsistent(rec); err != nil {
+		t.Errorf("record left inconsistent after L3: %v", err)
+	}
+	if res.L3.NewFloatingIPID != "fip-new" || res.L3.PriorFloatingIPID != "fip-old" {
+		t.Errorf("L3 outcome = %+v", res.L3)
 	}
 }
 
@@ -478,8 +583,47 @@ func TestRotate_StoreInsertFailure_RollsBack(t *testing.T) {
 	}
 }
 
-func TestRotate_L3_RequiresFipID(t *testing.T) {
+// An empty NewFloatingIPID used to be a hard error, which meant the
+// rung could only be climbed by an operator who had reserved an address
+// by hand in the provider console and knew its numeric id. Now the
+// executor reserves one.
+func TestRotate_L3_WithoutFipIDReservesOne(t *testing.T) {
 	prov := &mockProvider{}
+	b := &mockBinder{res: okBinderRes()}
+	st := &memStore{}
+	clk := &fakeClock{t: time.Unix(1700000000, 0).UTC()}
+	exec := newExecutor(prov, b, st, clk)
+	rec := newRecord("")
+
+	res, err := exec.Rotate(context.Background(), &RotateRequest{
+		Record:         rec,
+		PrivKey:        newPriv(t),
+		Recommendation: RotationRecommendation{Level: L3},
+		// NewFloatingIPID empty
+	})
+	if err != nil {
+		t.Fatalf("Rotate L3 without a supplied address: %v", err)
+	}
+	if prov.createCalls != 1 {
+		t.Errorf("CreateFloatingIP calls = %d, want 1", prov.createCalls)
+	}
+	if rec.FloatingIPID != "fip-reserved" {
+		t.Errorf("record.FloatingIPID = %q, want fip-reserved", rec.FloatingIPID)
+	}
+	if !res.L3.ReservedHere {
+		t.Error("L3 outcome does not record that the executor reserved the address")
+	}
+	// The relay was on its server's primary address, so there is no
+	// prior floating IP to hand back.
+	if len(prov.releasedIDs) != 0 {
+		t.Errorf("released = %v, want nothing", prov.releasedIDs)
+	}
+}
+
+// A provider that cannot mint an address must say so, not fail with a
+// message about a missing input the operator has no way to produce.
+func TestRotate_L3_NoAddressSourceIsNamed(t *testing.T) {
+	prov := &noReserveProvider{mockProvider: &mockProvider{}}
 	b := &mockBinder{res: okBinderRes()}
 	st := &memStore{}
 	clk := &fakeClock{t: time.Unix(1700000000, 0).UTC()}
@@ -489,15 +633,30 @@ func TestRotate_L3_RequiresFipID(t *testing.T) {
 		Record:         newRecord(""),
 		PrivKey:        newPriv(t),
 		Recommendation: RotationRecommendation{Level: L3},
-		// NewFloatingIPID empty
 	})
-	if err == nil {
-		t.Fatal("expected ErrL3MissingFipID")
+	if !errors.Is(err, ErrL3NoAddressSource) {
+		t.Fatalf("err = %v, want ErrL3NoAddressSource", err)
 	}
 	if prov.assignFloatingCalls != 0 {
 		t.Errorf("AssignFloatingIP called: %d", prov.assignFloatingCalls)
 	}
 }
+
+// noReserveProvider is a provider.Provider that is NOT a
+// FloatingIPProvisioner — the Vultr/Stark shape. Embedding by value
+// (not by pointer to a type that has the methods) is what keeps the
+// optional interface unsatisfied.
+type noReserveProvider struct {
+	*mockProvider
+}
+
+// CreateFloatingIP deliberately has the WRONG signature, so
+// noReserveProvider does not satisfy FloatingIPProvisioner even though
+// it embeds a type that does.
+func (n *noReserveProvider) CreateFloatingIP() {}
+
+// ReleaseFloatingIP likewise.
+func (n *noReserveProvider) ReleaseFloatingIP() {}
 
 func TestRotate_NilRequestRejected(t *testing.T) {
 	prov := &mockProvider{}
@@ -541,9 +700,10 @@ func TestRotate_L3_WallClockBudgetPin(t *testing.T) {
 
 	exec := newExecutor(prov, b, st, clk)
 	exec.Provider = tickingProv
+	rec := newRecord("fip-old")
 
 	_, err := exec.Rotate(context.Background(), &RotateRequest{
-		Record:          newRecord("fip-old"),
+		Record:          rec,
 		PrivKey:         newPriv(t),
 		Recommendation:  RotationRecommendation{Level: L3},
 		NewFloatingIPID: "fip-new",
@@ -553,6 +713,16 @@ func TestRotate_L3_WallClockBudgetPin(t *testing.T) {
 	}
 	if !errors.Is(err, ErrL3WallClockBudget) {
 		t.Errorf("err = %v, want ErrL3WallClockBudget", err)
+	}
+	// A budget miss is a FAILED rotation, so it unwinds like every
+	// other pre-commit failure. Leaving the relay on an address that
+	// no committed pack names would turn a slow rotation into an
+	// outage.
+	if got := rec.PublicIP.String(); got != "198.51.100.10" {
+		t.Errorf("record.PublicIP = %s, want the pre-swap 198.51.100.10 after a budget miss", got)
+	}
+	if rec.FloatingIPID != "fip-old" {
+		t.Errorf("record.FloatingIPID = %q, want the pre-swap fip-old after a budget miss", rec.FloatingIPID)
 	}
 	if st.committed != 0 {
 		t.Errorf("commits = %d, want 0 on budget failure", st.committed)

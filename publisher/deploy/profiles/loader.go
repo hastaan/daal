@@ -17,6 +17,30 @@ import (
 //go:embed iran-default.json
 var IranDefaultJSON []byte
 
+// IranTCP443JSON embeds the second profile, and the reason it exists is
+// L6.
+//
+// L6 is the rung whose entire content is "rebuild this relay onto a
+// different toolbox profile". With ONE profile in the repo it was
+// byte-identical to L1 — an expensive rebuild that changed nothing —
+// and the only way to invoke it non-degenerately was to name a slug
+// that did not resolve, which (before this wave) silently produced a
+// record with zero candidates.
+//
+// The difference is the one that matters on Iranian networks: every
+// udp_gated family is gone. Where UDP is throttled or dropped outright,
+// hysteria2/tuic/wireguard are not merely slow — a QUIC-shaped flow to
+// a graylisted host is itself the distinguishing feature, so a relay
+// that keeps offering them keeps offering a signal. The resulting pack
+// has a genuinely different family SET, which is also what makes the
+// rung observable: DeriveRelayPackID hashes the family set, so an L6
+// visibly renames the pack, and the Step-10 DONE test ("the re-signed
+// pack's family set differs from the previous pack's") has something to
+// assert.
+//
+//go:embed iran-tcp443.json
+var IranTCP443JSON []byte
+
 // Profile is one toolbox profile parsed from JSON.
 type Profile struct {
 	Name        string             `json:"name"`
@@ -78,4 +102,30 @@ func Load(body []byte) (*Profile, error) {
 // the CLI on `--toolbox iran-default`.
 func IranDefault() (*Profile, error) {
 	return Load(IranDefaultJSON)
+}
+
+// IranTCP443 parses the embedded iran-tcp443 profile.
+func IranTCP443() (*Profile, error) {
+	return Load(IranTCP443JSON)
+}
+
+// Slugs lists every profile this build ships, in the order a UI should
+// offer them. Single source of truth: the provider adapters' loadProfile
+// dispatch and any picker must both come from here, or "the wizard
+// offers a profile the provisioner cannot resolve" becomes a rotation
+// that destroys a relay and then errors.
+func Slugs() []string { return []string{"iran-default", "iran-tcp443"} }
+
+// ByName resolves a slug. Unknown is an error, never a nil profile —
+// see candidatesForProfile in the hetzner adapter for the shape of bug
+// a silent nil here produced.
+func ByName(name string) (*Profile, error) {
+	switch name {
+	case "iran-default":
+		return IranDefault()
+	case "iran-tcp443":
+		return IranTCP443()
+	default:
+		return nil, fmt.Errorf("unknown toolbox profile %q (have: %v)", name, Slugs())
+	}
 }

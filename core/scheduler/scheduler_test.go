@@ -51,6 +51,14 @@ func (r *recordingExecutor) RefreshBudgetReset(_ context.Context, _ time.Time) e
 	return nil
 }
 
+func (r *recordingExecutor) RefreshFreshness(_ context.Context, id string) error {
+	r.calls = append(r.calls, "freshness:"+id)
+	if r.fail[KindFreshness] {
+		return errFake
+	}
+	return nil
+}
+
 type fakeErr string
 
 func (e fakeErr) Error() string { return string(e) }

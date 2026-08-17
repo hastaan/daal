@@ -58,6 +58,18 @@ func (dryRunClient) SSHKeyList(_ context.Context) ([]SSHKeyInfo, error) {
 	return nil, errors.New("hetzner: dry-run client cannot SSHKeyList")
 }
 
+func (dryRunClient) FloatingIPCreate(_ context.Context, _ FloatingIPCreateOpts) (*FloatingIPInfo, error) {
+	return nil, errors.New("hetzner: dry-run client cannot FloatingIPCreate")
+}
+
+func (dryRunClient) FloatingIPDelete(_ context.Context, _ string) error {
+	return errors.New("hetzner: dry-run client cannot FloatingIPDelete")
+}
+
+func (dryRunClient) FloatingIPByID(_ context.Context, _ string) (*FloatingIPInfo, error) {
+	return nil, errors.New("hetzner: dry-run client cannot FloatingIPByID")
+}
+
 func (dryRunClient) FloatingIPAssign(ctx context.Context, fipID, serverID string) error {
 	return errors.New("hetzner: dry-run client cannot FloatingIPAssign")
 }

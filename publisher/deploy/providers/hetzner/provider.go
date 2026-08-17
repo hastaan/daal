@@ -82,7 +82,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 
 	if opts.DryRun {
-		return p.dryRunRecord(name, opts, mgmtPort, coverSNI), nil
+		return p.dryRunRecord(name, opts, mgmtPort, coverSNI)
 	}
 
 	// Idempotency: if server already exists with this derived name,
@@ -93,7 +93,10 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		if opts.MgmtPort == 0 {
 			return nil, errors.New("hetzner: existing server requires persisted MgmtPort")
 		}
-		rec := p.recordFromServer(existing, opts)
+		rec, err := p.recordFromServer(existing, opts)
+		if err != nil {
+			return nil, err
+		}
 		rec.MgmtPort = mgmtPort
 		// This box already exists; its sing-box config was written at
 		// its own provision time and we are not rewriting it here. So
@@ -204,7 +207,10 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 			return nil, fmt.Errorf("hetzner: create server: %w", err)
 		}
 	}
-	rec := p.recordFromServer(srv, opts)
+	rec, err := p.recordFromServer(srv, opts)
+	if err != nil {
+		return nil, err
+	}
 	rec.MgmtPort = mgmtPort
 	// The record is the only durable copy of what got written into
 	// /etc/sing-box/config.json above. The pack minter prefers what the
@@ -567,9 +573,33 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 	// 3. The one-shot SSH key(s).
 	p.sweepEphemeralKeys(ctx, rec, rep)
 
-	// 4. Resources we deliberately do not touch.
+	// 4. The floating IP, if any.
+	//
+	// Teardown does NOT delete it, and the reason changed with Step 9,
+	// so the message has to as well. It used to say "daal-deploy did
+	// not create it", which was true when no floating-IP creation
+	// existed anywhere in the repo; now an L3 rotation can mint one, so
+	// the report must distinguish an address the operator reserved from
+	// one this tool did.
+	//
+	// Neither is deleted here on purpose. An address is the one
+	// resource whose whole value is that it OUTLIVES the server: the
+	// operator tears a relay down and stands the next one up on the
+	// same address, which is the cheapest continuity they have. Binning
+	// it as part of a teardown would silently spend that. `daal-deploy
+	// floating-ip release` is the deliberate act; this is the honest
+	// notice that something is still on the meter.
 	if rec.FloatingIPID != "" {
-		rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy did not create it, so it is yours to release", rec.FloatingIPID)
+		ours := false
+		if fip, err := p.c.FloatingIPByID(ctx, rec.FloatingIPID); err == nil {
+			ours = ownsFloatingIP(fip, rec)
+		}
+		if ours {
+			rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy reserved it, so run `daal-deploy floating-ip release --fip-id %s` to stop paying for it, or keep it for the next relay",
+				rec.FloatingIPID, rec.FloatingIPID)
+		} else {
+			rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy did not create it, so it is yours to release", rec.FloatingIPID)
+		}
 		rep.Preserve("floating-ip:" + rec.FloatingIPID)
 	}
 	return rep, nil
@@ -697,37 +727,10 @@ func ownsEphemeralKey(k SSHKeyInfo, relay string) bool {
 // resource the operator will see in the console.
 func firewallNameForServer(serverID string) string { return "daal-relay-" + serverID }
 
-// AssignFloatingIP attaches the given floating IP to the
-// OperatorRecord's server. Idempotent: same fipID twice is a no-op.
-func (p *Provider) AssignFloatingIP(ctx context.Context, rec *provider.OperatorRecord, fipID string) error {
-	if rec == nil || rec.ServerID == "" {
-		return errors.New("OperatorRecord without ServerID")
-	}
-	if rec.FloatingIPID == fipID {
-		return nil // idempotent
-	}
-	if err := p.c.FloatingIPAssign(ctx, fipID, rec.ServerID); err != nil {
-		return fmt.Errorf("hetzner: assign floating ip: %w", err)
-	}
-	rec.FloatingIPID = fipID
-	return nil
-}
-
-// UnassignFloatingIP detaches the currently recorded floating IP.
-// Idempotent: records without a floating IP are already converged.
-func (p *Provider) UnassignFloatingIP(ctx context.Context, rec *provider.OperatorRecord) error {
-	if rec == nil {
-		return nil
-	}
-	if rec.FloatingIPID == "" {
-		return nil
-	}
-	if err := p.c.FloatingIPUnassign(ctx, rec.FloatingIPID); err != nil {
-		return fmt.Errorf("hetzner: unassign floating ip: %w", err)
-	}
-	rec.FloatingIPID = ""
-	return nil
-}
+// AssignFloatingIP / UnassignFloatingIP / CreateFloatingIP /
+// ReleaseFloatingIP live in floating_ip.go — the L3 rung is a single
+// subject with one invariant (the record must always name an address
+// that is routed to this server) and reads better in one place.
 
 // Pricing returns the live per-hour cost for the OperatorRecord's
 // server type. The wizard caches this for 60 s on its side.
@@ -757,6 +760,20 @@ func validateProvisionOpts(opts provider.ProvisionOpts) error {
 	}
 	if opts.ToolboxProfile == "" {
 		return errors.New("ProvisionOpts.ToolboxProfile required")
+	}
+	// RESOLVE THE PROFILE BEFORE ANYTHING BILLABLE HAPPENS.
+	//
+	// The slug used to be checked only inside recordFromServer, which
+	// runs AFTER ServerCreate. On an L6 — the rung whose entire content
+	// is "move to a different toolbox profile" — the sequence was:
+	// Reprovision deletes the relay, Provision creates a replacement,
+	// and only then does the unknown slug surface, so the rollback
+	// tears the new server down and the operator is left with no relay
+	// at all over a typo. A name that cannot be resolved is knowable
+	// with zero API calls; spending a server to discover it is not a
+	// trade worth making.
+	if _, err := loadProfile(opts.ToolboxProfile); err != nil {
+		return fmt.Errorf("hetzner: %w", err)
 	}
 	if opts.HelperIP == nil {
 		return errors.New("ProvisionOpts.HelperIP required")
@@ -831,8 +848,10 @@ func generateHealthToken() (string, error) {
 }
 
 // recordFromServer builds an OperatorRecord from the cloud-side
-// ServerInfo + the caller's ProvisionOpts.
-func (p *Provider) recordFromServer(s *ServerInfo, opts provider.ProvisionOpts) *provider.OperatorRecord {
+// ServerInfo + the caller's ProvisionOpts. Errors when the toolbox
+// profile does not resolve — see candidatesForProfile for why a record
+// with zero candidates must never be returned as a success.
+func (p *Provider) recordFromServer(s *ServerInfo, opts provider.ProvisionOpts) (*provider.OperatorRecord, error) {
 	// Hetzner's ServerCreate response does not always populate the
 	// server_type / datacenter names, which would leave the persisted
 	// OperatorRecord with empty ServerType/Region — and the wizard's
@@ -847,6 +866,10 @@ func (p *Provider) recordFromServer(s *ServerInfo, opts provider.ProvisionOpts) 
 	if region == "" {
 		region = opts.Region
 	}
+	cands, err := candidatesForProfile(opts.ToolboxProfile, s.PublicIP, opts.EnabledFamilies)
+	if err != nil {
+		return nil, err
+	}
 	return &provider.OperatorRecord{
 		Provider:        "hetzner",
 		ServerID:        s.ID,
@@ -856,9 +879,9 @@ func (p *Provider) recordFromServer(s *ServerInfo, opts provider.ProvisionOpts) 
 		PublicIPv6:      s.PublicIPv6,
 		ToolboxProfile:  opts.ToolboxProfile,
 		PublisherPubKey: opts.PublisherPubKey,
-		Candidates:      candidatesForProfile(opts.ToolboxProfile, s.PublicIP, opts.EnabledFamilies),
+		Candidates:      cands,
 		ProvisionedAt:   p.clock().UTC(),
-	}
+	}, nil
 }
 
 // sshPublicKeyBytes encodes the public half of an ed25519 keypair
@@ -890,7 +913,15 @@ func appendString(buf, s []byte) []byte {
 
 // dryRunRecord returns a synthetic OperatorRecord without making
 // any cloud-API call. Used by `daal-deploy provision --dry-run`.
-func (p *Provider) dryRunRecord(name string, opts provider.ProvisionOpts, mgmtPort int, coverSNI string) *provider.OperatorRecord {
+func (p *Provider) dryRunRecord(name string, opts provider.ProvisionOpts, mgmtPort int, coverSNI string) (*provider.OperatorRecord, error) {
+	// A dry run exists to tell the operator what a real one would do.
+	// Silently emitting zero candidates for a bad profile slug would
+	// make the dry run agree with a broken provision instead of
+	// warning about it — which is the one job it has.
+	cands, err := candidatesForProfile(opts.ToolboxProfile, opts.HelperIP, opts.EnabledFamilies)
+	if err != nil {
+		return nil, err
+	}
 	return &provider.OperatorRecord{
 		Provider:        "hetzner",
 		ServerID:        "dry-run-" + name,
@@ -899,11 +930,11 @@ func (p *Provider) dryRunRecord(name string, opts provider.ProvisionOpts, mgmtPo
 		PublicIP:        opts.HelperIP, // placeholder; live call would assign real IP
 		ToolboxProfile:  opts.ToolboxProfile,
 		PublisherPubKey: opts.PublisherPubKey,
-		Candidates:      candidatesForProfile(opts.ToolboxProfile, opts.HelperIP, opts.EnabledFamilies),
+		Candidates:      cands,
 		ProvisionedAt:   p.clock().UTC(),
 		MgmtPort:        mgmtPort,
 		CoverSNI:        coverSNI,
-	}
+	}, nil
 }
 
 func waitForMgmtFingerprint(ctx context.Context, ip net.IP, token string) (string, error) {

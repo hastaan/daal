@@ -300,6 +300,12 @@ pub trait CliRunner: Send + Sync {
     /// back from `args.record_path`.
     fn run_assign_fip(&self, args: AssignFipArgs<'_>) -> Result<String>;
 
+    /// Give an address back. Never fails a rotation: the caller folds
+    /// the outcome's warnings into its result instead, because the
+    /// pack is already signed and committed and undoing that to tidy
+    /// up a billing resource would be the wrong trade.
+    fn run_release_fip(&self, args: ReleaseFipArgs<'_>) -> Result<ReleaseFipOutcome>;
+
     /// Teardown: invoke `daal-deploy decommission` to destroy the
     /// cloud resources this record owns — the VPS, the ephemeral
     /// SSH key and the baseline firewall.
@@ -824,6 +830,83 @@ pub struct PublishFreshnessArgs<'a> {
     pub subkey_cert_path: Option<&'a Path>,
     pub out_file: Option<&'a Path>,
     pub now_unix: i64,
+    /// The monotonic counter stamped into the document. Zero lets the
+    /// CLI derive it from the publish timestamp; the wizard always
+    /// supplies max(last_published + 1, now) so a publishing machine
+    /// whose clock went backwards cannot mint a document every already
+    /// -provisioned recipient will reject as a rollback.
+    pub sequence: u64,
+    /// The last sequence this wizard published for this pack. The CLI
+    /// refuses to publish anything that does not strictly exceed it,
+    /// which is the only place the counter has an owner.
+    pub min_sequence: u64,
+    /// The relay_pack_ids this pack replaces, newest first.
+    ///
+    /// WITHOUT THESE THE DOCUMENT REACHES NOBODY AFTER A ROTATION. The
+    /// pack id is a hash of provider|server_id|region|public_ip|
+    /// families — exactly the fields L3/L4/L5/L6 change — so the rung
+    /// that repairs a relay also renames it, and a recipient matching
+    /// on the id it has installed rejects the new document as
+    /// belonging to a different pack.
+    pub supersedes: &'a [String],
+    /// Wave 3 Step 8: the endpoint set to ADVERTISE inside the
+    /// document, as `provider=https://url`. The document names every
+    /// mirror so a recipient that reached one blocked-but-alive mirror
+    /// learns the others even if its pack predates them.
+    pub mirrors: &'a [String],
+    /// Wave 3 Step 8: where to actually upload. Empty fields mean
+    /// "build and sign only" — which the CLI reports on stderr as
+    /// NOT PUBLISHED rather than treating as success.
+    pub upload: &'a FreshnessUploadArgs,
+}
+
+/// Wave 3 Step 8: per-provider upload routing for
+/// `daal-deploy publish-freshness`.
+///
+/// The two secret fields are PATHS, not bytes. `daal-deploy` reads
+/// credentials only from files (same contract as the publisher signing
+/// key and the Cloudflare token), so the wizard decrypts from
+/// DeviceCustody into a mode-0600 file for the length of one
+/// subprocess and wipes it afterwards. Nothing here may ever become a
+/// command-line argument: argv is world-readable on Linux.
+#[derive(Debug, Clone, Default)]
+pub struct FreshnessUploadArgs {
+    pub r2_account: String,
+    pub r2_bucket: String,
+    pub r2_object_key: String,
+    pub r2_public_url: String,
+    /// The access key ID is passed as an argument because it is an
+    /// identifier rather than an authenticator; the SECRET half never
+    /// leaves the file.
+    pub r2_access_key_id: String,
+    pub r2_secret_file: Option<PathBuf>,
+    pub gh_owner: String,
+    pub gh_repo: String,
+    pub gh_path: String,
+    pub gh_branch: String,
+    pub gh_public_url: String,
+    pub gh_pat_file: Option<PathBuf>,
+}
+
+impl FreshnessUploadArgs {
+    /// True when at least one provider is fully specified. The CLI
+    /// refuses a partially-specified provider, so this only gates
+    /// "should we pass any upload flags at all".
+    pub fn has_any(&self) -> bool {
+        self.r2_secret_file.is_some() || self.gh_pat_file.is_some()
+    }
+}
+
+/// One mirror's outcome, as reported by `publish-freshness`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PublishedMirror {
+    pub provider: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub error: String,
 }
 
 /// FRP-9 commit 4/8: result shape returned by
@@ -837,6 +920,20 @@ pub struct PublishFreshnessResult {
     pub relay_pack_id: String,
     pub current_bundle_sha256: String,
     pub published_url: String,
+    /// Monotonic document counter. A recipient ignores a document whose
+    /// sequence is not higher than the last one it accepted, so this is
+    /// what makes a replayed old document harmless.
+    #[serde(default)]
+    pub sequence: u64,
+    /// RFC3339 instant after which recipients stop trusting the
+    /// document.
+    #[serde(default)]
+    pub not_after: String,
+    /// One row per configured mirror. THIS is the field the wizard's
+    /// honesty ledger is written from; `published_url` is only the
+    /// first success and says nothing about the others.
+    #[serde(default)]
+    pub published: Vec<PublishedMirror>,
 }
 
 /// FRP-9 rotate result; mirrors the parts of the FrontRecord that
@@ -866,6 +963,34 @@ pub struct AssignFipArgs<'a> {
     pub record_path: &'a Path,
     pub token: &'a str,
     pub fip_id: &'a str,
+}
+
+/// Static shape passed to `run_release_fip`.
+///
+/// Releasing is a SEPARATE verb from attaching on purpose, and the
+/// rotation calls it only after the new pack is signed and the history
+/// row is committed. Between the attach and this call the relay answers
+/// on BOTH addresses, so every already-distributed pack keeps working;
+/// releasing earlier would open a window in which a failure leaves
+/// recipients holding a pack for an address that routes nowhere.
+pub struct ReleaseFipArgs<'a> {
+    pub record_path: &'a Path,
+    pub token: &'a str,
+    /// The address to give back. Empty means "the one on the record",
+    /// which is NOT what a rotation wants — it wants the PRIOR id.
+    pub fip_id: &'a str,
+}
+
+/// What `floating-ip release` did, in operator-facing terms.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseFipOutcome {
+    /// The record as it stands after the release.
+    pub record_json: String,
+    /// Non-fatal notes: an address that was detached but left reserved
+    /// (daal-deploy did not create it), or one that could not be
+    /// released at all. Both mean "still on your bill", which is the
+    /// opposite of what the rotation's success copy used to claim.
+    pub warnings: Vec<String>,
 }
 
 /// Static shape passed to `run_decommission`. Field names
@@ -902,6 +1027,17 @@ pub struct BindAndSignArgs<'a> {
     pub expiry_days: u32,
     pub publisher_name: &'a str,
     pub subkey_cert_path: Option<&'a Path>,
+    /// Wave 3 Step 8: the freshness mirror set to bake into the pack,
+    /// as `provider=https://url` entries.
+    ///
+    /// Empty means "sign a pack with no freshness path", which is a
+    /// legal shape and is what happens for a publisher who has not
+    /// configured mirrors. What is NOT legal is one entry: the CLI
+    /// rejects a single-mirror set, and `freshness::mirror_args`
+    /// returns empty rather than one, because a lone freshness URL is a
+    /// recovery mechanism a censor disables with one DNS entry while
+    /// the publisher believes they are covered.
+    pub freshness_mirrors: &'a [String],
 }
 
 /// Extension trait so `.apply_env()` can be chained on `Command`.
@@ -1393,6 +1529,52 @@ impl CliRunner for SubprocessRunner {
         if args.now_unix != 0 {
             cmd.arg("--now-unix").arg(args.now_unix.to_string());
         }
+        if args.sequence != 0 {
+            cmd.arg("--sequence").arg(args.sequence.to_string());
+        }
+        if args.min_sequence != 0 {
+            cmd.arg("--min-sequence").arg(args.min_sequence.to_string());
+        }
+        for id in args.supersedes {
+            cmd.arg("--supersedes").arg(id);
+        }
+        // Wave 3 Step 8: the endpoint set advertised INSIDE the
+        // document, and the credentials to upload it with.
+        for m in args.mirrors {
+            cmd.arg("--mirror").arg(m);
+        }
+        let up = args.upload;
+        if let Some(secret) = up.r2_secret_file.as_ref() {
+            cmd.arg("--r2-account")
+                .arg(&up.r2_account)
+                .arg("--r2-bucket")
+                .arg(&up.r2_bucket)
+                .arg("--r2-object-key")
+                .arg(&up.r2_object_key)
+                .arg("--r2-public-url")
+                .arg(&up.r2_public_url)
+                .arg("--r2-access-key-id")
+                .arg(&up.r2_access_key_id)
+                // The secret itself is NEVER an argument — argv is
+                // readable by any process on the box.
+                .arg("--r2-secret-file")
+                .arg(secret);
+        }
+        if let Some(pat) = up.gh_pat_file.as_ref() {
+            cmd.arg("--gh-owner")
+                .arg(&up.gh_owner)
+                .arg("--gh-repo")
+                .arg(&up.gh_repo)
+                .arg("--gh-path")
+                .arg(&up.gh_path)
+                .arg("--gh-public-url")
+                .arg(&up.gh_public_url)
+                .arg("--gh-pat-file")
+                .arg(pat);
+            if !up.gh_branch.is_empty() {
+                cmd.arg("--gh-branch").arg(&up.gh_branch);
+            }
+        }
         let out = cmd
             .apply_env()
             .stdin(Stdio::null())
@@ -1503,6 +1685,60 @@ impl CliRunner for SubprocessRunner {
         std::fs::read_to_string(args.record_path).map_err(BridgeError::Io)
     }
 
+    fn run_release_fip(&self, args: ReleaseFipArgs<'_>) -> Result<ReleaseFipOutcome> {
+        let tmp = tempfile_with_secret(args.token)?;
+        let token_path = tmp.path().to_path_buf();
+
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("floating-ip")
+            .arg("release")
+            .arg("--record-file")
+            .arg(args.record_path)
+            .arg("--token-file")
+            .arg(&token_path);
+        if !args.fip_id.is_empty() {
+            cmd.arg("--fip-id").arg(args.fip_id);
+        }
+        let out = cmd
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        drop(tmp);
+
+        let out = match out {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BridgeError::BinaryMissing);
+            }
+            Err(e) => return Err(BridgeError::Io(e)),
+        };
+        if !out.status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            });
+        }
+        // The CLI reports "detached but still reserved" and "could not
+        // release" on stderr with a zero exit, because neither is a
+        // failure of the release — they are facts about the operator's
+        // bill. Carry them up rather than dropping them: the rotation's
+        // own copy says the old address no longer serves, and if it
+        // still does the operator has to hear it here.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let warnings: Vec<String> = stderr
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && (l.contains("still billing") || l.contains("still reserved")))
+            .map(|l| l.to_string())
+            .collect();
+        Ok(ReleaseFipOutcome {
+            record_json: std::fs::read_to_string(args.record_path).map_err(BridgeError::Io)?,
+            warnings,
+        })
+    }
+
     fn run_decommission(&self, args: DecommissionArgs<'_>) -> Result<DecommissionResult> {
         // `--json` is an additive flag on a verb that shipped emitting
         // the bare line `decommissioned`. The app and the CLI are not
@@ -1580,6 +1816,12 @@ impl CliRunner for SubprocessRunner {
         }
         if let Some(path) = args.subkey_cert_path {
             cmd.arg("--subkey-cert").arg(path);
+        }
+        // Wave 3 Step 8. Repeated, not comma-joined: the flag is a
+        // repeatable list on the Go side and a URL may legitimately
+        // contain a comma, so joining would silently corrupt one.
+        for m in args.freshness_mirrors {
+            cmd.arg("--freshness-mirror").arg(m);
         }
         let mut child = cmd
             .apply_env()
@@ -2075,6 +2317,13 @@ pub struct MockRunner {
     /// it silently returns the relay to the burned cover host, so a test
     /// has to be able to see it.
     pub provision_cover_snis: Mutex<Vec<String>>,
+    /// Step 10: the `(provider, region)` each `run_provision` was
+    /// handed. L4's whole payload is the region and L5's is the
+    /// provider, and both were previously read off the EXISTING record
+    /// — which made both rungs byte-identical to L1 while still
+    /// destroying the box. Only a recorded transcript catches that:
+    /// the rotation succeeds either way.
+    pub provision_targets: Mutex<Vec<(String, String)>>,
     /// FRP-4b: optional canned record JSON for `run_provision`.
     pub provision_record_json: Mutex<Option<String>>,
     /// FRP-8: optional canned CDN front for `run_cdn_provision`.
@@ -2093,12 +2342,22 @@ pub struct MockRunner {
     /// agree; they did not, and only a recorded transcript catches
     /// that (both calls succeed either way).
     pub bind_phases: Mutex<Vec<String>>,
+    /// Wave 3 Step 8: the `--freshness-mirror` set passed on each
+    /// bind-and-sign, newest last. A pack's mirror set is the only
+    /// thing that decides whether a rotation can heal itself, so a test
+    /// has to be able to see exactly what was baked in.
+    pub bind_freshness_mirrors: Mutex<Vec<Vec<String>>>,
     /// FRP-7: optional canned rotation recommendation.
     pub rotation_recommendation: Mutex<Option<RotationRecommendation>>,
     /// FRP-7: recorded reprovision calls.
     pub reprovision_calls: Mutex<Vec<MockReprovisionCall>>,
     /// FRP-7: recorded floating-IP assign calls.
     pub assign_fip_calls: Mutex<Vec<MockAssignFipCall>>,
+    /// Floating-IP ids handed to `floating-ip release`, in order. The
+    /// rotation must release the PRIOR address after the history row
+    /// commits, and only then — before it, a failure strands every
+    /// distributed pack on an address that routes nowhere.
+    pub release_fip_calls: Mutex<Vec<String>>,
     /// Teardown: recorded decommission calls.
     pub decommission_calls: Mutex<Vec<MockDecommissionCall>>,
     /// Teardown: optional canned result for `run_decommission`.
@@ -2116,6 +2375,9 @@ pub struct MockRunner {
     pub cdn_rotate_origin_calls: Mutex<Vec<MockCdnRotateOriginCall>>,
     /// FRP-9: recorded publish-freshness calls.
     pub publish_freshness_calls: Mutex<Vec<MockPublishFreshnessCall>>,
+    /// Provider labels the mock should report as REFUSING the write.
+    /// Lets a test drive the degraded-publish path without a network.
+    pub publish_freshness_fail: Mutex<Vec<String>>,
     /// FRP-14: optional canned per-recipient credentials returned
     /// by `run_users_provision`.
     pub users_provision_result: Mutex<Option<UserCredsResult>>,
@@ -2167,6 +2429,21 @@ pub struct MockPublishFreshnessCall {
     pub current_bundle_sha256: String,
     pub current_signed_url: String,
     pub used_subkey: bool,
+    /// Wave 3 Step 8: the `provider=url` set the wizard advertised.
+    pub mirrors: Vec<String>,
+    /// True when upload credentials were staged, i.e. the call was a
+    /// real publish rather than a build-and-sign.
+    pub uploaded: bool,
+    /// The prior relay_pack_ids the document claims to supersede. This
+    /// is what decides whether the document reaches anybody after a
+    /// rotation: the pack id is a hash of the fields the ladder
+    /// changes, so the rung that repairs a relay also renames its pack.
+    pub supersedes: Vec<String>,
+    /// The monotonic counter and the caller's high-water mark. The
+    /// sequence must strictly advance or every recipient that already
+    /// accepted a higher one refuses the document as a rollback.
+    pub sequence: u64,
+    pub min_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2230,15 +2507,19 @@ impl MockRunner {
             last_call: Mutex::new(None),
             provision_calls: Mutex::new(0),
             provision_cover_snis: Mutex::new(Vec::new()),
+            provision_targets: Mutex::new(Vec::new()),
             provision_record_json: Mutex::new(None),
             cdn_front_result: Mutex::new(None),
             bind_result: Mutex::new(None),
             last_priv_key: Mutex::new(None),
             last_subkey_cert_path: Mutex::new(None),
             bind_phases: Mutex::new(Vec::new()),
+            bind_freshness_mirrors: Mutex::new(Vec::new()),
             rotation_recommendation: Mutex::new(None),
             reprovision_calls: Mutex::new(Vec::new()),
+            publish_freshness_fail: Mutex::new(Vec::new()),
             assign_fip_calls: Mutex::new(Vec::new()),
+            release_fip_calls: Mutex::new(Vec::new()),
             decommission_calls: Mutex::new(Vec::new()),
             decommission_result: Mutex::new(None),
             decommission_error: Mutex::new(None),
@@ -2276,6 +2557,16 @@ impl MockRunner {
     pub fn with_cdn_front_result(self, res: CdnFrontResult) -> Self {
         *self.cdn_front_result.lock().unwrap() = Some(res);
         self
+    }
+
+    /// The freshness mirror set baked into the most recent bind.
+    pub fn last_freshness_mirrors(&self) -> Vec<String> {
+        self.bind_freshness_mirrors
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn with_bind_result(self, res: BindResult) -> Self {
@@ -2363,6 +2654,10 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(args.cover_sni.to_string());
+        self.provision_targets
+            .lock()
+            .unwrap()
+            .push((args.provider.to_string(), args.region.to_string()));
         on_progress(ProgressEvent {
             step: "provision_start".into(),
             message: "starting".into(),
@@ -2473,7 +2768,34 @@ impl CliRunner for MockRunner {
                 current_bundle_sha256: args.current_bundle_sha256.to_string(),
                 current_signed_url: args.current_signed_url.to_string(),
                 used_subkey: args.subkey_priv_path.is_some(),
+                mirrors: args.mirrors.to_vec(),
+                uploaded: args.upload.has_any(),
+                supersedes: args.supersedes.to_vec(),
+                sequence: args.sequence,
+                min_sequence: args.min_sequence,
             });
+        // The mock reports every advertised mirror as accepted. Tests
+        // that need a partial failure override `publish_freshness_fail`
+        // — the default has to be "it worked", or every unrelated
+        // rotation test would trip the fewer-than-MinMirrors guard.
+        let published = args
+            .mirrors
+            .iter()
+            .map(|m| {
+                let (provider, url) = m.split_once('=').unwrap_or((m.as_str(), ""));
+                PublishedMirror {
+                    provider: provider.to_string(),
+                    url: url.to_string(),
+                    ok: !self
+                        .publish_freshness_fail
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p == provider),
+                    error: String::new(),
+                }
+            })
+            .collect::<Vec<_>>();
         Ok(PublishFreshnessResult {
             signed_doc_b64: "MOCK_BASE64".into(),
             signed_doc_path: args
@@ -2482,7 +2804,18 @@ impl CliRunner for MockRunner {
                 .unwrap_or_default(),
             relay_pack_id: args.relay_pack_id.to_string(),
             current_bundle_sha256: args.current_bundle_sha256.to_string(),
-            published_url: String::new(),
+            published_url: published
+                .iter()
+                .find(|p| p.ok)
+                .map(|p| p.url.clone())
+                .unwrap_or_default(),
+            sequence: if args.sequence != 0 {
+                args.sequence
+            } else {
+                args.now_unix.max(0) as u64
+            },
+            not_after: String::new(),
+            published,
         })
     }
 
@@ -2511,6 +2844,17 @@ impl CliRunner for MockRunner {
         Ok(body)
     }
 
+    /// Mirrors the FIXED hetzner adapter, not the broken one.
+    ///
+    /// `assign-fip` moves every copy of the dialled address — the
+    /// record's public_ip AND each candidate's public_ip:* tag — and
+    /// exits non-zero if it did not (rotation.CheckAddressMoved). A
+    /// mock that only stamped floating_ip_id, which is what this used
+    /// to do, models the pre-Step-9 bug and would let a test assert
+    /// that a no-op rotation "succeeded".
+    ///
+    /// An empty fip_id means "reserve one", which the real CLI does and
+    /// which the UI must be able to reach.
     fn run_assign_fip(&self, args: AssignFipArgs<'_>) -> Result<String> {
         self.assign_fip_calls
             .lock()
@@ -2519,10 +2863,49 @@ impl CliRunner for MockRunner {
                 fip_id: args.fip_id.to_string(),
             });
         let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(args.record_path)?)?;
-        v["floating_ip_id"] = serde_json::Value::String(args.fip_id.to_string());
+        let prior_ip = v["public_ip"].as_str().unwrap_or_default().to_string();
+        let assigned = if args.fip_id.is_empty() {
+            "fip-reserved-by-cli".to_string()
+        } else {
+            args.fip_id.to_string()
+        };
+        // The real CLI refuses when the swap did not move the address —
+        // re-attaching the address the relay is already on is the
+        // default a pre-filled UI field used to produce.
+        if v["floating_ip_id"].as_str().unwrap_or_default() == assigned && !prior_ip.is_empty() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: "assign-fip: rotation: L3 completed without moving the record's dialled address".into(),
+            });
+        }
+        let new_ip = format!("198.51.100.{}", (assigned.len() % 200) + 1);
+        v["floating_ip_id"] = serde_json::Value::String(assigned);
+        v["public_ip"] = serde_json::Value::String(new_ip.clone());
+        if let Some(cands) = v["candidates"].as_array_mut() {
+            for c in cands {
+                if let Some(tags) = c["public_risk_tags"].as_array_mut() {
+                    for t in tags.iter_mut() {
+                        if t.as_str().unwrap_or_default().starts_with("public_ip:") {
+                            *t = serde_json::Value::String(format!("public_ip:{new_ip}"));
+                        }
+                    }
+                }
+            }
+        }
         let body = serde_json::to_string(&v)?;
         std::fs::write(args.record_path, body.as_bytes())?;
         Ok(body)
+    }
+
+    fn run_release_fip(&self, args: ReleaseFipArgs<'_>) -> Result<ReleaseFipOutcome> {
+        self.release_fip_calls
+            .lock()
+            .unwrap()
+            .push(args.fip_id.to_string());
+        Ok(ReleaseFipOutcome {
+            record_json: std::fs::read_to_string(args.record_path).unwrap_or_default(),
+            warnings: vec![],
+        })
     }
 
     fn run_decommission(&self, args: DecommissionArgs<'_>) -> Result<DecommissionResult> {
@@ -2565,6 +2948,10 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(args.phase.to_string());
+        self.bind_freshness_mirrors
+            .lock()
+            .unwrap()
+            .push(args.freshness_mirrors.to_vec());
         on_progress(ProgressEvent {
             step: "bind_done".into(),
             message: "signed".into(),
