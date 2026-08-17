@@ -194,11 +194,50 @@ func TestGeneratedConfigLoadsInRealSingBox(t *testing.T) {
 		}
 		return nil
 	}
-	if err := srv.rewriteSingboxTLS(path, "cdn.example.net", []string{"cdn.example.net:443"}, "/r1/cafef00d"); err != nil {
+	if _, _, err := srv.rewriteSingboxTLS(path, rotateTLSReq{
+		NewSNI: "cdn.example.net", NewDests: []string{"cdn.example.net:443"}, NewWSPath: "/r1/cafef00d",
+	}); err != nil {
 		t.Fatalf("rotate-tls produced a config sing-box rejects: %v", err)
 	}
 	if out, err := exec.Command(bin, "check", "-c", path).CombinedOutput(); err != nil {
 		t.Fatalf("final config rejected by sing-box: %s", out)
+	}
+
+	// And a per-recipient credential rotation on top of it — the config the
+	// box actually ends up serving after both Step-7 operations have run.
+	// This is the only oracle that catches the failures this file's history
+	// is made of: a document Go marshals happily that the strict 1.13 parser
+	// then FATALs on, on a box with no SSH path back in.
+	doc, err := loadSingboxDoc(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := mintCreds("r2", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rotateRecipientCreds(doc, "r2", fresh)
+	if err != nil {
+		t.Fatalf("rotate-credentials: %v", err)
+	}
+	if err := assertRetiredAbsent(doc, res.retired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.commitSingboxDoc(path, doc); err != nil {
+		t.Fatalf("rotate-credentials produced a config sing-box rejects: %v", err)
+	}
+	if out, err := exec.Command(bin, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("post-credential-rotation config rejected by sing-box: %s", out)
+	}
+	// A rotation must leave the multiplex block where it found it: it is the
+	// mitigation the nested-TLS detection work measures as effective, and a
+	// silent drop makes the relay fingerprintable again.
+	rotated, err := loadSingboxDoc(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !muxInboundEnabled(rotated) {
+		t.Error("multiplex lost across the rotation pair")
 	}
 }
 

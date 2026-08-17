@@ -119,6 +119,56 @@ pub struct RotationRecommendation {
     pub est_wallclock: String,
     #[serde(rename = "override", default, alias = "override_levels")]
     pub override_levels: Vec<String>,
+    /// Step 7's `rotation.Action`: the concrete operation behind the
+    /// named rung — which verb, what it touches, whether the server
+    /// survives, and whether the relay in front of you can do it.
+    ///
+    /// Declared here because serde drops unknown keys silently, which is
+    /// the same trap that made `cover_sni`/`mux_inbound` inert one hop
+    /// down; a field the Go side emits and this struct omits dies with
+    /// no error anywhere.
+    ///
+    /// `availability` is "unknown" on every recommendation the wizard
+    /// currently produces, and that is honest rather than broken: the
+    /// recommender is offline by design, so it can only be told what a
+    /// relay supports by a caller that probed it
+    /// (`mgmt.CapabilitiesWithFW` / `--relay-capabilities`), and the
+    /// wizard has no probe step yet. A UI must therefore render "not
+    /// verified" and let the rotation's own capability interlock refuse,
+    /// never a confident one-tap button.
+    #[serde(default)]
+    pub action: RotationAction,
+}
+
+/// `RotationAction` mirrors the Go `rotation.Action`. Every field is
+/// `#[serde(default)]`-friendly so a recommendation from an older
+/// `daal-deploy` (which emits no `action` at all) decodes to the zero
+/// value — which reads as "unknown", the safe answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RotationAction {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub cli_verb: String,
+    /// "recipient" | "relay" | "server" — how much of the world this
+    /// touches if it goes wrong.
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub in_place: bool,
+    #[serde(default)]
+    pub needs_recipient_name: bool,
+    #[serde(default)]
+    pub destroys_server: bool,
+    /// After this runs, EVERY already-distributed pack stops working
+    /// until its recipient is handed a new one by hand.
+    #[serde(default)]
+    pub invalidates_every_pack: bool,
+    /// "ready" | "unknown" | "unsupported".
+    #[serde(default)]
+    pub availability: String,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// `RotateRecommendArgs` is the FRP-7 input shape for the rotation
@@ -339,6 +389,165 @@ pub trait CliRunner: Send + Sync {
         args: UsersUnpackSbpxArgs<'_>,
         priv_key_hex: &str,
     ) -> Result<UsersUnpackSbpxResult>;
+
+    /// Wave 3 Step 7 (L1): invoke `daal-deploy rotate-credentials`.
+    ///
+    /// A **targeted revocation**: it re-keys ONE named recipient across
+    /// every inbound on the box and leaves every other recipient — and
+    /// the box's REALITY keypair — alone. `args.name` is mandatory;
+    /// there is deliberately no "rotate everything" call, because that
+    /// would be a fleet-wide outage wearing a per-row button.
+    fn run_rotate_credentials(
+        &self,
+        args: RotateCredentialsArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RotateCredentialsResult>;
+
+    /// Wave 3 Step 7 (L2): invoke `daal-deploy rotate-tls`.
+    ///
+    /// Moves the relay's cover hostname and TLS parameters. It does NOT
+    /// touch user credentials and does NOT touch the REALITY keypair —
+    /// those are two other operations with two other blast radii. The
+    /// publisher picks the replacement host (`provider.NextCoverSNI`
+    /// excludes the burned one), so this call carries no SNI argument
+    /// and reads the applied value back off the box.
+    fn run_rotate_tls(
+        &self,
+        args: RotateTlsArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RotateTlsResult>;
+}
+
+/// Wave 3 Step 7: args for `daal-deploy rotate-credentials`.
+pub struct RotateCredentialsArgs<'a> {
+    pub record_path: &'a Path,
+    pub helper_ip: &'a str,
+    pub token: &'a str,
+    /// The box-side recipient name (`r1`, `r7`, …). Never empty — see
+    /// [`CliRunner::run_rotate_credentials`].
+    pub name: &'a str,
+}
+
+/// Wave 3 Step 7: args for `daal-deploy rotate-tls`.
+pub struct RotateTlsArgs<'a> {
+    pub record_path: &'a Path,
+    pub helper_ip: &'a str,
+    pub token: &'a str,
+}
+
+/// JSON returned by `daal-deploy rotate-credentials` — the Rust mirror
+/// of `mgmt.RotatedCreds` (which embeds `mgmt.UserCreds`).
+///
+/// It is deliberately the provision shape plus rotation-specific fields,
+/// because the pack minter consumes provision output: a rotation then
+/// feeds the existing mint path with no translation layer.
+///
+/// EVERY credential field is carried, even ones this app never reads
+/// itself. This struct is a TRANSPORT — the document is re-serialised
+/// into the creds file that `users-pack-sbp[x]` parses — and serde drops
+/// unknown keys silently, so a field omitted here is a field the pack
+/// loses with no error anywhere. That is not hypothetical: `cover_sni`
+/// and `mux_inbound` were echoed by the box and swallowed on this hop
+/// once already.
+///
+/// EVERY field is `#[serde(default)]` on purpose. The box binary is a
+/// hash-pinned artifact (`publisher/deploy/cloudinit/artifacts.go`) and
+/// version-skews independently of this app, so a missing field must read
+/// as "this relay did not tell us", never as a parse failure that hides
+/// which half of the rotation actually happened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RotateCredentialsResult {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vless_uuid: String,
+    #[serde(default)]
+    pub reality_short_id: String,
+    #[serde(default)]
+    pub hy2_password: String,
+    #[serde(default)]
+    pub naive_password: String,
+    #[serde(default)]
+    pub ws_path: String,
+    /// The embedded `UserCreds` spelling. Present because the struct is
+    /// shared with the provision path; the rotation's own clock is
+    /// `rotated_at_unix`.
+    #[serde(default)]
+    pub provisioned_at_unix: i64,
+    /// Box-wide connection material, echoed so the pack rewrite does
+    /// not have to fall back to a possibly-stale OperatorRecord.
+    #[serde(default)]
+    pub reality_public_key: String,
+    #[serde(default)]
+    pub tls_cert_sha256: String,
+    #[serde(default)]
+    pub tls_cert_pem: String,
+    #[serde(default)]
+    pub cover_sni: String,
+    #[serde(default)]
+    pub mux_inbound: bool,
+
+    /// The box's own clock at the moment the rewritten config went live,
+    /// so "when did this recipient's old UUID stop working?" has an
+    /// answer.
+    #[serde(default)]
+    pub rotated_at_unix: i64,
+    /// The legacy spelling the box still emits alongside it.
+    #[serde(default)]
+    pub generated_at_unix: i64,
+    /// Every inbound whose user table the box actually rewrote.
+    ///
+    /// The honesty field, and the whole reason BUG-6 was a bug rather
+    /// than a typo: a revocation that reached three of four inbounds
+    /// leaves the leaked credential live on the fourth, and a 200 looks
+    /// identical either way. Empty means nothing verified that the
+    /// revocation was complete — which the caller must say out loud.
+    #[serde(default)]
+    pub updated_inbounds: Vec<String>,
+    /// Must be false. It exists so "the box keypair was not touched" is
+    /// something the publisher can CHECK rather than assume. True means
+    /// every distributed pack just died, and the operator has to be told
+    /// immediately rather than discovering it from silent disconnects.
+    #[serde(default)]
+    pub box_keys_rotated: bool,
+    /// Anything the relay or the CLI wants said out loud. Rendered
+    /// verbatim; never summarised.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// JSON returned by `daal-deploy rotate-tls`.
+///
+/// Note what is NOT here: the updated OperatorRecord. The CLI writes it
+/// back to `--record-file` (mode 0600) rather than emitting it on
+/// stdout, so the caller must read that file before deleting it — see
+/// `relay_rotation::rotate_tls`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RotateTlsResult {
+    #[serde(default)]
+    pub applied_at_unix: i64,
+    /// The cover host the record now carries — the value the pack minter
+    /// will use. Empty only if the CLI could not resolve one at all.
+    #[serde(default)]
+    pub cover_sni: String,
+    #[serde(default)]
+    pub previous_cover_sni: String,
+    /// What the box says it applied, as opposed to what was asked for.
+    /// Empty from a relay whose mgmt binary predates the echo, and that
+    /// gap has to reach the screen: `cover_sni` is then what was
+    /// REQUESTED, not what was verified.
+    #[serde(default)]
+    pub applied_sni: String,
+    #[serde(default)]
+    pub applied_handshake: String,
+    /// Echo of what was asked for; the box does not echo a ws path.
+    #[serde(default)]
+    pub ws_path: String,
+    /// Path the CLI wrote the updated OperatorRecord to.
+    #[serde(default)]
+    pub record_written: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// FRP-14: args for `daal-deploy users-provision`.
@@ -384,6 +593,28 @@ pub struct UserCredsResult {
     /// (Cronet). Without it the naive outbound can't be assembled.
     #[serde(default)]
     pub tls_cert_pem: String,
+
+    // Wave 2 fields. They were added to `mgmt.UserCreds` on the Go side
+    // and never here, which is the SAME silent-drop bug in a second
+    // language: serde discards unknown keys exactly as encoding/json
+    // does, so the box echoed both values, this struct omitted them, and
+    // the creds file this app re-serialises for `users-pack-sbp[x]` lost
+    // them with no error anywhere. `mux_inbound` is the one that bites —
+    // `clientParamsFromCredsFile` gates mux emission on it and has no
+    // fallback, so every pack minted through the wizard came out without
+    // multiplexing. Anything the box learns and the minter reads MUST
+    // appear here.
+    /// The cover host this box actually serves, read off its own live
+    /// inbound. Authoritative over the OperatorRecord, which only
+    /// records what was *requested* — `/rotate-tls` can move the box.
+    #[serde(default)]
+    pub cover_sni: String,
+    /// Whether every vless-family inbound carries an enabled multiplex
+    /// block. The client may emit a mux outbound ONLY when this is true:
+    /// mux client vs mux-less inbound fails hard, while a mux inbound
+    /// serves a plain client fine. False is the safe default.
+    #[serde(default)]
+    pub mux_inbound: bool,
 }
 
 /// FRP-14: JSON returned by `daal-deploy users-revoke`.
@@ -1574,6 +1805,42 @@ impl CliRunner for SubprocessRunner {
         Ok(serde_json::from_str(&stdout)?)
     }
 
+    fn run_rotate_credentials(
+        &self,
+        args: RotateCredentialsArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RotateCredentialsResult> {
+        let stdout = run_users_subprocess(
+            &self.binary,
+            "rotate-credentials",
+            args.record_path,
+            args.helper_ip,
+            args.token,
+            Some(args.name),
+            priv_key,
+        )?;
+        Ok(serde_json::from_str(&stdout)?)
+    }
+
+    fn run_rotate_tls(
+        &self,
+        args: RotateTlsArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RotateTlsResult> {
+        let stdout = run_users_subprocess(
+            &self.binary,
+            "rotate-tls",
+            args.record_path,
+            args.helper_ip,
+            args.token,
+            // No --name. rotate-tls is relay-wide by definition; passing
+            // a recipient here would imply a scope it does not have.
+            None,
+            priv_key,
+        )?;
+        Ok(serde_json::from_str(&stdout)?)
+    }
+
     fn run_users_list(
         &self,
         args: UsersListArgs<'_>,
@@ -1728,9 +1995,13 @@ impl CliRunner for SubprocessRunner {
     }
 }
 
-// FRP-14: shared driver for the three users-* subcommands. Pipes
-// `priv_key` through stdin (never to disk) and the cloud-provider
-// token through a mode-0600 tempfile.
+// FRP-14: shared driver for every mgmt-plane subcommand that takes the
+// same four inputs — the three users-* verbs and, since Wave 3 Step 7,
+// rotate-credentials / rotate-tls. Pipes `priv_key` through stdin
+// (never to disk) and the cloud-provider token through a mode-0600
+// tempfile. `name` is threaded through as `--name` when present, which
+// is exactly the flag that separates a per-recipient operation from a
+// relay-wide one.
 fn run_users_subprocess(
     binary: &Path,
     subcommand: &str,
@@ -1862,6 +2133,25 @@ pub struct MockRunner {
     pub users_list_calls: Mutex<usize>,
     /// FRP-14 Layer 3b.5: recorded pack-sbpx calls.
     pub users_pack_sbpx_calls: Mutex<Vec<MockPackSbpxCall>>,
+    /// Wave 3 Step 7: recorded rotate-credentials calls (name).
+    pub rotate_credentials_calls: Mutex<Vec<String>>,
+    /// Wave 3 Step 7: canned rotate-credentials response. Tests set
+    /// this to fake a relay whose mgmt binary answers in the old,
+    /// unscoped shape.
+    pub rotate_credentials_result: Mutex<Option<RotateCredentialsResult>>,
+    /// Wave 3 Step 7: count of rotate-tls calls.
+    pub rotate_tls_calls: Mutex<usize>,
+    /// Wave 3 Step 7: canned rotate-tls response.
+    pub rotate_tls_result: Mutex<Option<RotateTlsResult>>,
+    /// Wave 3 Step 7: make rotate-tls FAIL after it has already
+    /// rewritten the record. That combination is not contrived — it is
+    /// the CLI's documented behaviour: `mgmt.RotateTLSWithFW` returns a
+    /// response alongside an error when the box applied something the
+    /// publisher disagrees with, and `runRotateTLS` persists the record
+    /// and prints the JSON before exiting non-zero. Callers that consume
+    /// the read-back only on the Ok path lose the new cover host exactly
+    /// here.
+    pub rotate_tls_err: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1963,6 +2253,11 @@ impl MockRunner {
             users_revoke_calls: Mutex::new(Vec::new()),
             users_list_calls: Mutex::new(0),
             users_pack_sbpx_calls: Mutex::new(Vec::new()),
+            rotate_credentials_calls: Mutex::new(Vec::new()),
+            rotate_credentials_result: Mutex::new(None),
+            rotate_tls_calls: Mutex::new(0),
+            rotate_tls_result: Mutex::new(None),
+            rotate_tls_err: Mutex::new(None),
         }
     }
 
@@ -2328,6 +2623,19 @@ impl CliRunner for MockRunner {
             reason: "mock default".into(),
             est_wallclock: "~90s".into(),
             override_levels: vec!["L2".into(), "L3".into()],
+            // Unprobed, like every recommendation the wizard can
+            // currently obtain: nothing in this app calls
+            // mgmt.CapabilitiesWithFW or passes --relay-capabilities, so
+            // the Go recommender always answers "unknown" here.
+            action: RotationAction {
+                kind: "rotate-credentials".into(),
+                cli_verb: "rotate-credentials".into(),
+                scope: "recipient".into(),
+                in_place: true,
+                needs_recipient_name: true,
+                availability: "unknown".into(),
+                ..Default::default()
+            },
         })
     }
 
@@ -2354,6 +2662,8 @@ impl CliRunner for MockRunner {
             reality_public_key: "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into(),
             tls_cert_sha256: "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into(),
             tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
+            cover_sni: "ftp.plusline.net".into(),
+            mux_inbound: true,
         })
     }
 
@@ -2372,6 +2682,94 @@ impl CliRunner for MockRunner {
         Ok(UsersRevokeResult {
             revoked_at_unix: 1_700_000_001,
         })
+    }
+
+    fn run_rotate_credentials(
+        &self,
+        args: RotateCredentialsArgs<'_>,
+        _priv_key: &[u8],
+    ) -> Result<RotateCredentialsResult> {
+        self.rotate_credentials_calls
+            .lock()
+            .unwrap()
+            .push(args.name.to_string());
+        if let Some(r) = self.rotate_credentials_result.lock().unwrap().clone() {
+            return Ok(r);
+        }
+        // The default mock is a CORRECT box: it echoes the name it was
+        // asked for and returns per-user material. Tests that want the
+        // old, unscoped box override `rotate_credentials_result`.
+        Ok(RotateCredentialsResult {
+            name: args.name.to_string(),
+            vless_uuid: "11111111-1111-1111-1111-111111111111".into(),
+            reality_short_id: "beefcafe".into(),
+            hy2_password: "rotatedhy2password0000".into(),
+            naive_password: "rotatednaivepassword00".into(),
+            ws_path: format!("/{}/feedface", args.name),
+            provisioned_at_unix: 1_700_000_000,
+            reality_public_key: "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into(),
+            tls_cert_sha256: "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into(),
+            tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
+            cover_sni: "ftp.plusline.net".into(),
+            mux_inbound: true,
+            rotated_at_unix: 1_700_000_600,
+            generated_at_unix: 1_700_000_600,
+            updated_inbounds: vec![
+                "vless-reality".into(),
+                "vless-ws".into(),
+                "hy2".into(),
+                "naive".into(),
+            ],
+            box_keys_rotated: false,
+            warnings: vec![],
+        })
+    }
+
+    fn run_rotate_tls(
+        &self,
+        args: RotateTlsArgs<'_>,
+        _priv_key: &[u8],
+    ) -> Result<RotateTlsResult> {
+        *self.rotate_tls_calls.lock().unwrap() += 1;
+        let canned = self.rotate_tls_result.lock().unwrap().clone();
+        let res = canned.unwrap_or(RotateTlsResult {
+            applied_at_unix: 1_700_000_700,
+            cover_sni: "mirror.hetzner.com".into(),
+            previous_cover_sni: "ftp.plusline.net".into(),
+            applied_sni: "mirror.hetzner.com".into(),
+            applied_handshake: "mirror.hetzner.com:443".into(),
+            ws_path: String::new(),
+            record_written: args.record_path.to_string_lossy().to_string(),
+            warnings: vec![],
+        });
+        // The real CLI REWRITES --record-file in place with the updated
+        // OperatorRecord and does not put it on stdout. Callers read that
+        // file back, so the mock has to move it too or the read-back path
+        // goes untested.
+        if !res.cover_sni.is_empty() {
+            if let Ok(body) = std::fs::read_to_string(args.record_path) {
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "cover_sni".into(),
+                            serde_json::Value::String(res.cover_sni.clone()),
+                        );
+                        if let Ok(s) = serde_json::to_string(&v) {
+                            let _ = std::fs::write(args.record_path, s);
+                        }
+                    }
+                }
+            }
+        }
+        // Ordering matters: the record has already been rewritten above,
+        // exactly as the CLI does before a non-zero exit.
+        if let Some(msg) = self.rotate_tls_err.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: msg,
+            });
+        }
+        Ok(res)
     }
 
     fn run_users_list(
@@ -2502,6 +2900,38 @@ mod tests {
         assert_eq!(call.region, "fsn1");
         assert_eq!(call.server_type, "cx22");
         assert_eq!(call.token, "tok-123");
+    }
+
+    /// The recommender's `action` must survive the Go→Rust hop. serde
+    /// drops unknown keys silently, so a field the CLI emits and this
+    /// struct omits dies with no error anywhere — the same trap that
+    /// made `cover_sni`/`mux_inbound` inert on the provision path. Pin
+    /// the wire shape rather than trusting the two structs to stay in
+    /// step by inspection.
+    #[test]
+    fn rotation_recommendation_carries_the_action() {
+        let body = r#"{"level":"L1","confidence":"high","reason":"leak",
+            "est_wallclock":"~90s","override":["L2"],
+            "action":{"kind":"rotate-credentials","cli_verb":"rotate-credentials",
+                      "scope":"recipient","in_place":true,"needs_recipient_name":true,
+                      "destroys_server":false,"invalidates_every_pack":false,
+                      "availability":"unknown","note":"not probed yet"}}"#;
+        let r: RotationRecommendation = serde_json::from_str(body).unwrap();
+        assert_eq!(r.action.kind, "rotate-credentials");
+        assert_eq!(r.action.scope, "recipient");
+        assert!(r.action.needs_recipient_name);
+        assert_eq!(r.action.availability, "unknown");
+        assert!(!r.action.note.is_empty());
+
+        // An older daal-deploy emits no `action` at all. That must decode
+        // to the zero value — availability "" reads as "not known", never
+        // as a confident "ready".
+        let old: RotationRecommendation = serde_json::from_str(
+            r#"{"level":"L1","confidence":"low","reason":"x","est_wallclock":"~90s","override":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.action, RotationAction::default());
+        assert!(old.action.availability.is_empty());
     }
 
     #[test]

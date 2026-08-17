@@ -25,6 +25,22 @@ package cloudinit
 //     depth for boxes provisioned before this release — a raw CLI
 //     invocation against such a box still needs the flag.
 //
+//   - IN-PLACE ROTATION (Wave 3 Step 7). OUTSTANDING as of this commit.
+//     The box half — scoped `/rotate-credentials`, key-free
+//     `/rotate-tls`, the `/health` capability advertisement, the
+//     rollback-on-failed-reload and the mutex that serializes the four
+//     mutating routes — is in this tree but NOT in the artefact pinned
+//     below, so every already-provisioned relay still runs the
+//     pre-Step-7 handler. That case fails CLOSED rather than
+//     dangerously: the publisher probes `/health` first
+//     (mgmt/capability.go) and refuses with E_RELAY_TOO_OLD before
+//     sending a mutating byte, because the old handler ignores `name`,
+//     rotates every recipient and re-keys the box. The rotation buttons
+//     therefore do nothing on any relay built before this pin moves —
+//     including one provisioned an hour ago. Bump the pin, then
+//     provision a NEW relay to exercise them; the binary cannot be
+//     patched in place.
+//
 //   - MULTIPLEX (Wave 2 Step 5). Fails safe by construction: the
 //     capability travels box→publisher (`mux_inbound`), so an
 //     un-updated box reports nothing, the pack emits no mux block, and

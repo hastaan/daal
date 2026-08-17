@@ -87,6 +87,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runQRFountain(rest, stdout, stderr)
 	case "rotate-recommend":
 		return runRotateRecommend(rest, os.Stdin, stdout, stderr)
+	case "rotate-credentials":
+		return runRotateCredentials(ctx, rest, os.Stdin, stdout, stderr)
+	case "rotate-tls":
+		return runRotateTLS(ctx, rest, os.Stdin, stdout, stderr)
 	case "cdn-provision":
 		return runCDNProvision(ctx, rest, stdout, stderr)
 	case "cdn-rotate-path":
@@ -162,6 +166,21 @@ Subcommands:
   rotate-recommend
                 Read an Explanation JSON on stdin (or a context flag set)
                 and emit a RotationRecommendation JSON on stdout (FRP-7).
+  rotate-credentials
+                L1 in place: rotate ONE recipient's per-user credentials across
+                every inbound on a live relay (~90s, server survives). --name is
+                required; there is no rotate-all. Emits the new creds as JSON in
+                users-provision shape — persist them, they exist nowhere else.
+                Other recipients are unaffected and their packs stay valid.
+  rotate-tls    L2 in place: rotate the relay's cover SNI / TLS parameters on a
+                live relay (~90s, server survives). REALITY keypairs and every
+                recipient's credentials are untouched. Omit --new-sni to draw a
+                fresh admissible host from the relay's zone. REWRITES the
+                OperatorRecord (--record-out to redirect) because the record's
+                cover host is what the pack minter reads. Every distributed pack
+                pins the old host and must be re-minted afterwards.
+                Exit 3 from either verb means the relay's daal-relay-mgmt is too
+                old for in-place rotation — reprovision or re-release.
   cdn-provision Provision Cloudflare fronting + firewall and emit FrontRecord JSON (FRP-8).
   cdn-rotate-path
                 Rotate the visible /r/<hex> path on a CDN-fronted candidate
@@ -1539,9 +1558,35 @@ func runRotateRecommend(args []string, stdin io.Reader, stdout, stderr io.Writer
 	signals := commaListFlag(fs, "signal", "comma-separated network signals (with --context-only)")
 	credLeak := fs.Bool("credential-leak", false, "operator-asserted credential leak (with --context-only)")
 	exposureMode := fs.String("exposure-mode", "direct_vps", "candidate exposure mode (direct_vps at V1.5)")
+	// Step 7: what this relay's in-box mgmt binary can actually do.
+	// PRESENCE of the flag means "probed" — even with an empty value,
+	// which is the honest way to say "probed, and it can do neither".
+	// Absence means unprobed, and the emitted Action says so rather
+	// than claiming a one-tap rotation that may not exist. This verb
+	// stays offline (Position B), so the probe belongs to the caller:
+	// `daal-deploy rotate-tls`/`rotate-credentials` do it themselves,
+	// and the wizard gets it from mgmt.CapabilitiesWithFW.
+	relayCaps := fs.String("relay-capabilities", "",
+		"comma list of in-place verbs this relay advertises (rotate-credentials,rotate-tls); "+
+			"passing the flag at all means 'probed', omitting it means 'unknown'")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
+	caps := rotation.RelayCapabilities{}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name != "relay-capabilities" {
+			return
+		}
+		caps.Known = true
+		for _, v := range splitCSV(*relayCaps) {
+			switch strings.TrimSpace(v) {
+			case "rotate-credentials":
+				caps.RotateCredentialsInPlace = true
+			case "rotate-tls":
+				caps.RotateTLSInPlace = true
+			}
+		}
+	})
 	if err := requireAll(stderr, map[string]string{"--record-file": *recordFile}); err != nil {
 		return 2
 	}
@@ -1559,6 +1604,7 @@ func runRotateRecommend(args []string, stdin io.Reader, stdout, stderr io.Writer
 			ExposureMode:            *exposureMode,
 			OperatorRecord:          rec,
 			CredentialLeakSuspected: *credLeak,
+			RelayCapabilities:       caps,
 		})
 	} else {
 		raw, err := io.ReadAll(stdin)
@@ -1573,7 +1619,7 @@ func runRotateRecommend(args []string, stdin io.Reader, stdout, stderr io.Writer
 				return 1
 			}
 		}
-		recommendation = rotation.FromExplanation(exp, rec)
+		recommendation = rotation.FromExplanationWithCapabilities(exp, rec, caps)
 	}
 
 	enc := json.NewEncoder(stdout)

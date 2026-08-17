@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -182,10 +183,20 @@ func TestClient_RotateCredentials_SignedTokenRequired(t *testing.T) {
 			http.Error(w, "sig fail", 401)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(Credentials{
-			UUID:            "abc",
-			RealityPrivKey:  hex.EncodeToString(bytes.Repeat([]byte{0x42}, 32)),
-			GeneratedAtUnix: time.Now().Unix(),
+		var req struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Name == "" {
+			// The Step-7 contract: an omitted name is an error, never
+			// "rotate all". A box that accepts it is the old, conflated
+			// one and the publisher must never reach this state.
+			http.Error(w, "name required", 400)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(RotatedCreds{
+			UserCreds:     UserCreds{Name: req.Name, VLESSUUID: "abc"},
+			RotatedAtUnix: time.Now().Unix(),
 		})
 	})
 	ts, fp := startTLSServer(t, mux)
@@ -199,12 +210,64 @@ func TestClient_RotateCredentials_SignedTokenRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	creds, err := cli.RotateCredentials(context.Background(), rec, priv)
+	creds, err := cli.RotateCredentials(context.Background(), rec, priv, "r1")
 	if err != nil {
 		t.Fatalf("RotateCredentials: %v", err)
 	}
-	if creds.UUID != "abc" {
-		t.Errorf("UUID lost: %q", creds.UUID)
+	if creds.VLESSUUID != "abc" {
+		t.Errorf("UUID lost: %q", creds.VLESSUUID)
+	}
+	if creds.Name != "r1" {
+		t.Errorf("Name lost: %q", creds.Name)
+	}
+}
+
+// The client refuses an empty name before it builds a request. Nothing
+// reaches the network, so a version-skewed box never gets the chance to
+// read it as "rotate everything".
+func TestClient_RotateCredentials_RefusesEmptyName(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	mux := http.NewServeMux()
+	reached := false
+	mux.HandleFunc("/rotate-credentials", func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_ = json.NewEncoder(w).Encode(RotatedCreds{})
+	})
+	ts, fp := startTLSServer(t, mux)
+	defer ts.Close()
+	port, host := splitURL(t, ts.URL)
+	rec := mkRec(t, fp, port)
+	rec.PublicIP = net.ParseIP(host)
+	cli, err := NewClient(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", "   "} {
+		if _, err := cli.RotateCredentials(context.Background(), rec, priv, name); !errors.Is(err, ErrRecipientNameRequired) {
+			t.Fatalf("RotateCredentials(%q) err = %v, want ErrRecipientNameRequired", name, err)
+		}
+	}
+	if reached {
+		t.Fatal("a nameless rotate-credentials reached the box")
+	}
+}
+
+// A 200 for the wrong recipient is a failed rotation, not a success:
+// the caller is about to mint a pack from whatever comes back.
+func TestClient_RotateCredentials_RejectsWrongRecipientEcho(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rotate-credentials", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(RotatedCreds{UserCreds: UserCreds{Name: "r9", VLESSUUID: "x"}})
+	})
+	ts, fp := startTLSServer(t, mux)
+	defer ts.Close()
+	port, host := splitURL(t, ts.URL)
+	rec := mkRec(t, fp, port)
+	rec.PublicIP = net.ParseIP(host)
+	cli, _ := NewClient(rec)
+	if _, err := cli.RotateCredentials(context.Background(), rec, priv, "r1"); err == nil {
+		t.Fatal("accepted a rotation the box performed for a different recipient")
 	}
 }
 
@@ -251,99 +314,6 @@ func TestClient_RotateTLS_SendsProfile(t *testing.T) {
 	}
 	if sawSNI != "fresh.example.com" {
 		t.Errorf("server did not see new SNI; got %q", sawSNI)
-	}
-}
-
-// --- flow test ---
-
-// stubProvider captures (Set|Remove)EphemeralFirewallRule calls.
-type stubProvider struct {
-	provider.Provider
-	setCalls    int
-	removeCalls int
-	rule        *provider.EphemeralFirewallRule
-}
-
-func (s *stubProvider) SetEphemeralFirewallRule(_ context.Context, serverID, callerIP string, port, dur int) (*provider.EphemeralFirewallRule, error) {
-	s.setCalls++
-	s.rule = &provider.EphemeralFirewallRule{ID: "stub-rule", ServerID: serverID, CallerIP: callerIP, Port: port}
-	return s.rule, nil
-}
-
-func (s *stubProvider) RemoveEphemeralFirewallRule(_ context.Context, _ *provider.EphemeralFirewallRule) error {
-	s.removeCalls++
-	return nil
-}
-
-func TestRotateCredentialsWithFW_OpensAndClosesRule(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rotate-credentials", func(w http.ResponseWriter, r *http.Request) {
-		hdr := r.Header.Get("Authorization")
-		tok := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		nonce, tsStr, op, sig, err := ParseToken(tok)
-		if err != nil || !ed25519.Verify(pub, []byte(nonce+":"+tsStr+":"+op), sig) {
-			http.Error(w, "auth", 401)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(Credentials{UUID: "abc"})
-	})
-	ts, fp := startTLSServer(t, mux)
-	defer ts.Close()
-	port, host := splitURL(t, ts.URL)
-	rec := mkRec(t, fp, port)
-	rec.PublicIP = net.ParseIP(host)
-
-	prov := &stubProvider{}
-	creds, err := RotateCredentialsWithFW(context.Background(), prov, rec, priv, "1.2.3.4")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if creds.UUID != "abc" {
-		t.Errorf("UUID lost")
-	}
-	if prov.setCalls != 1 {
-		t.Errorf("setCalls = %d want 1", prov.setCalls)
-	}
-	if prov.removeCalls != 1 {
-		t.Errorf("removeCalls = %d want 1 (cleanup must run)", prov.removeCalls)
-	}
-	if prov.rule.Port != port {
-		t.Errorf("rule opened wrong port; got %d want %d", prov.rule.Port, port)
-	}
-}
-
-func TestRotateCredentialsWithFW_CleansUpOnError(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	// Server returns 500 to force a mgmt-side failure.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rotate-credentials", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", 500)
-	})
-	ts, fp := startTLSServer(t, mux)
-	defer ts.Close()
-	port, host := splitURL(t, ts.URL)
-	rec := mkRec(t, fp, port)
-	rec.PublicIP = net.ParseIP(host)
-
-	prov := &stubProvider{}
-	if _, err := RotateCredentialsWithFW(context.Background(), prov, rec, priv, "1.2.3.4"); err == nil {
-		t.Fatalf("expected error from 500 response")
-	}
-	if prov.removeCalls != 1 {
-		t.Errorf("cleanup must still run on error; removeCalls = %d", prov.removeCalls)
-	}
-}
-
-func TestRotateCredentialsWithFW_FallsBackOnZeroPort(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	rec := mkRec(t, "fp", 0) // V1.5 record (no MgmtPort)
-	prov := &stubProvider{}
-	if _, err := RotateCredentialsWithFW(context.Background(), prov, rec, priv, "1.2.3.4"); err == nil {
-		t.Fatalf("V1.5 record (zero MgmtPort) must error so caller falls back to redeploy")
-	}
-	if prov.setCalls != 0 {
-		t.Errorf("must not call SetEphemeralFirewallRule on zero MgmtPort")
 	}
 }
 

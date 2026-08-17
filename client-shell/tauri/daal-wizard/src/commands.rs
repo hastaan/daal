@@ -127,10 +127,87 @@ pub const E_HELPER_IP_MISSING: &str = "E_HELPER_IP_MISSING";
 /// The box was unreachable in a way consistent with a stale
 /// firewall allowlist entry for the publisher's IP.
 pub const E_HELPER_IP_STALE: &str = "E_HELPER_IP_STALE";
+/// The relay answered, but its `daal-relay-mgmt` binary is older than
+/// the operation we asked for, so the operation was NOT performed.
+///
+/// This exists because `cmd/daal-relay-mgmt` ships as a hash-pinned
+/// artifact (`publisher/deploy/cloudinit/artifacts.go`): a box keeps
+/// running whatever binary it was born with until a human rebuilds,
+/// re-signs, re-uploads and bumps the pin. So this app is routinely
+/// newer than the relays it talks to, and the gap is not an error the
+/// user caused — it is a fact about their relay that has to be stated,
+/// not hidden behind a generic failure.
+///
+/// It matters most for `rotate-credentials`. On a pre-Step-7 relay that
+/// verb re-keyed the whole box (every recipient's pinned REALITY public
+/// key, invalidating every pack ever handed out) instead of one named
+/// recipient. Presenting that as a per-recipient button would be the
+/// single most destructive mislabelled control in the app, so the
+/// publisher fails closed on it rather than guessing.
+pub const E_RELAY_TOO_OLD: &str = "E_RELAY_TOO_OLD";
 
 /// Build a [`WizardError::Coded`] from a code constant and a tail.
-fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
+pub(crate) fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
     WizardError::Coded(format!("{code}: {tail}"))
+}
+
+/// Does this `daal-deploy` failure mean "the thing you asked for does
+/// not exist on the other end", as opposed to "it failed"?
+///
+/// The primary signal is the CLI's **exit code 3**, which the rotation
+/// verbs reserve for `mgmt.ErrCapabilityUnsupported` — the fail-closed
+/// verdict of the non-mutating `GET /health` capability probe, returned
+/// *before* any rotation request is sent. That probe is the safety
+/// interlock this whole step rests on: an old `/rotate-credentials`
+/// answers 200 and re-keys the entire box, so behaviour can never be
+/// used to detect capability and a distinct exit code is how the
+/// refusal arrives intact.
+///
+/// The text markers are the belt to that braces. They cover the second
+/// "other end" — this app's own bundled `daal-deploy` predating the verb
+/// (`unknown subcommand "rotate-tls"`, exit 2) — and a relay reached
+/// through a path that surfaces a bare 404/405/501.
+///
+/// Deliberately narrow. A 4xx from an endpoint we *did* reach — 400 on a
+/// missing `name`, 409 on a duplicate — is a real answer from a capable
+/// box and must never be softened into "your relay is old".
+pub(crate) fn looks_like_missing_capability(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        // mgmt.ErrCapabilityUnsupported's own words, so the CLI, this
+        // bridge and the UI all quote the same sentence.
+        "too old for this operation",
+        "too old to rotate in place",
+        "unknown subcommand",
+        "404 not found",
+        "status 404",
+        "405 method not allowed",
+        "status 405",
+        "501 not implemented",
+        "status 501",
+    ];
+    MARKERS.iter().any(|m| s.contains(m))
+}
+
+/// Map a rotation subprocess failure onto the error contract.
+///
+/// Capability is checked BEFORE transport: a box that answered `404`
+/// is reachable, so promoting it to `E_HELPER_IP_STALE` would send the
+/// UI into a re-detect-and-retry loop that can never succeed and would
+/// tell the user their network changed when their relay is simply old.
+pub(crate) fn map_rotation_err(e: crate::cli_bridge::BridgeError) -> WizardError {
+    // Exit 3 is the rotation verbs' reserved "this relay's software
+    // predates the operation" code (publisher/deploy/cli/cli_rotate.go).
+    // It is only meaningful for those verbs, which is why this lives in
+    // the rotation-specific mapper and not in map_deploy_err.
+    if let crate::cli_bridge::BridgeError::SubprocessFailed { rc: 3, stderr } = &e {
+        return coded(E_RELAY_TOO_OLD, stderr.trim());
+    }
+    let text = e.to_string();
+    if looks_like_missing_capability(&text) {
+        return coded(E_RELAY_TOO_OLD, text);
+    }
+    map_deploy_err(e)
 }
 
 /// Does this `daal-deploy` stderr look like the box refusing us at
@@ -4597,6 +4674,7 @@ mod tests {
                 reason: "tcp_reset on burned IP".into(),
                 est_wallclock: "~10s".into(),
                 override_levels: vec!["L4".into(), "L2".into()],
+                action: Default::default(),
             }),
         );
         let ctx2 = WizardCtx {

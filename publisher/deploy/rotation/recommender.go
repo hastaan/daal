@@ -64,6 +64,12 @@ type RotationRecommendation struct {
 	Reason       string     `json:"reason"`
 	EstWallClock string     `json:"est_wallclock"`
 	Override     []Level    `json:"override"`
+
+	// Action is the concrete operation that performs this rung on this
+	// relay — which verb, what it touches, and whether the relay in
+	// front of you can actually do it. Added at Step 7, when L1 and L2
+	// stopped being advice and became executable. See action.go.
+	Action Action `json:"action"`
 }
 
 // Explanation is the publisher-side mirror of
@@ -132,6 +138,13 @@ type RotationContext struct {
 	// CredentialLeakSuspected is the FRP-side hygiene flag.
 	// True ⇒ recommend L1 with operator-asserted confidence.
 	CredentialLeakSuspected bool
+
+	// RelayCapabilities is what the caller learned by probing this
+	// relay's in-box mgmt binary (mgmt.CapabilitiesWithFW). The zero
+	// value means "not probed", which yields an Action marked
+	// AvailabilityUnknown rather than a confident one — the recommender
+	// is offline and must never guess a relay's vintage.
+	RelayCapabilities RelayCapabilities
 }
 
 // signalSet is the recommender's internal, normalised view of the
@@ -143,6 +156,7 @@ type signalSet struct {
 	exposureMode    string
 	hasFloatingIP   bool
 	credLeakHinted  bool
+	relayCaps       RelayCapabilities
 	source          string // "explanation" or "context"
 }
 
@@ -195,6 +209,7 @@ func signalSetFromContext(ctx RotationContext) *signalSet {
 		s.hasFloatingIP = ctx.OperatorRecord.FloatingIPID != ""
 	}
 	s.credLeakHinted = ctx.CredentialLeakSuspected
+	s.relayCaps = ctx.RelayCapabilities
 	return s
 }
 
@@ -216,7 +231,18 @@ func (s *signalSet) hasTagPrefix(prefix string) bool {
 // carries any signal the recommender recognises; low when the
 // Explanation is empty (no failures, no signals, no cooldowns).
 func FromExplanation(e Explanation, rec *provider.OperatorRecord) RotationRecommendation {
+	return FromExplanationWithCapabilities(e, rec, RelayCapabilities{})
+}
+
+// FromExplanationWithCapabilities is FromExplanation plus what the
+// caller probed about the relay's in-box mgmt binary. The recommendation
+// is identical; only [Action] differs, and only in whether it can claim
+// the in-place verb is reachable. FromExplanation delegates here with an
+// unprobed RelayCapabilities, so an un-updated caller gets
+// AvailabilityUnknown — never a false "ready".
+func FromExplanationWithCapabilities(e Explanation, rec *provider.OperatorRecord, caps RelayCapabilities) RotationRecommendation {
 	s := signalSetFromExplanation(e, rec)
+	s.relayCaps = caps
 	return s.recommend()
 }
 
@@ -352,12 +378,22 @@ func (s *signalSet) build(level Level, reason string, override []Level) Rotation
 	if !ok {
 		wc = "~unknown"
 	}
+	action := ActionFor(level, s.relayCaps)
+	// The ~90s figures for L1/L2 are the IN-PLACE cost. On a relay too
+	// old for the split endpoints the only route to the same outcome is
+	// destroy-and-rebuild, and quoting 90 seconds for a 3-minute
+	// reprovision is the kind of dial-that-lies this project spent a
+	// step removing.
+	if action.DestroysServer && (level == L1 || level == L2) {
+		wc = estWallClockV15[L4] + " (reprovision fallback: this relay cannot rotate in place)"
+	}
 	return RotationRecommendation{
 		Level:        level,
 		Confidence:   s.confidenceFor(level),
 		Reason:       reason,
 		EstWallClock: wc,
 		Override:     dedupeLevels(override),
+		Action:       action,
 	}
 }
 

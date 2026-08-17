@@ -32,6 +32,58 @@ export interface RecipientSummary {
     sbpx_path: string;
 }
 
+/**
+ * Wave 3 Step 7 — the outcome of a PER-RECIPIENT credential rotation.
+ * Mirrors `relay_rotation::RotateCredentialsSummary`.
+ */
+export interface RotateCredentialsSummary {
+    recipient_id: number;
+    /** Box-side name (`r1`, `r7`, …). */
+    name: string;
+    display_name: string;
+    rotated_at_unix: number;
+    /** Path to the freshly built `.sbpx`. Empty means the rebuild
+     *  failed — NOT that nothing happened: the relay has already moved
+     *  by then, so `warnings` explains and the roster row is updated so
+     *  the existing Rebuild affordance can finish the job. */
+    sbpx_path: string;
+    /** Every inbound the relay says it actually rewrote. Empty means the
+     *  relay would not say, and therefore that nothing confirmed the
+     *  revocation reached all of them — the gap BUG-6 lived in. */
+    updated_inbounds: string[];
+    /** True if the relay ALSO replaced its own key material. Must be
+     *  false. True means this stopped being a per-recipient action and
+     *  became a fleet-wide one, so the result panel escalates instead of
+     *  showing "one person needs a new file". */
+    box_keys_rotated: boolean;
+    /** Rendered verbatim. Never summarise these. */
+    warnings: string[];
+}
+
+/**
+ * Wave 3 Step 7 — the outcome of a RELAY-LEVEL TLS rotation.
+ * Mirrors `relay_rotation::RotateTlsSummary`.
+ */
+export interface RotateTlsSummary {
+    applied_at_unix: number;
+    /** The cover host the relay advertises now — what the pack minter
+     *  will use from here on. */
+    cover_sni: string;
+    previous_cover_sni: string;
+    /** The rotation landed, but the relay did not ECHO the host it
+     *  landed on, so `cover_sni` is what was requested rather than what
+     *  was verified. The UI must carry that difference. */
+    cover_sni_unknown: boolean;
+    /** Whether the new cover host was written back to the stored relay
+     *  record, so packs built from here on name the right host. */
+    record_updated: boolean;
+    /** How many people are now holding a file that stopped working. */
+    live_recipients: number;
+    /** Whether an everyone-pack exists and is now dead too. */
+    shared_pack_stale: boolean;
+    warnings: string[];
+}
+
 // ---- Stable error codes -------------------------------------------
 //
 // Every publisher command that can fail for a custody or helper-IP
@@ -49,6 +101,7 @@ export type PublisherErrorCode =
     | 'E_SECRET_MISSING'
     | 'E_HELPER_IP_MISSING'
     | 'E_HELPER_IP_STALE'
+    | 'E_RELAY_TOO_OLD'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -59,6 +112,13 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     'E_SECRET_MISSING',
     'E_HELPER_IP_MISSING',
     'E_HELPER_IP_STALE',
+    // The relay answered, but its management service predates the
+    // operation — so NOTHING was changed. Distinct from every other
+    // code here because it is not the user's device or network at
+    // fault: the box binary is hash-pinned at provision time and only
+    // a human re-release moves it. The UI must say that plainly rather
+    // than showing a raw Go error, and must not offer a retry.
+    'E_RELAY_TOO_OLD',
 ];
 
 /**
@@ -263,6 +323,31 @@ export interface RotationRecommendation {
     level: string;
     confidence: number;
     reason: string;
+    /** Step 7: the concrete operation behind the named rung. Optional
+     *  because an older daal-deploy emits no `action` at all.
+     *
+     *  `availability` is "unknown" on everything the wizard can produce
+     *  today — the recommender is offline by design and nothing here
+     *  probes the relay yet — so this must render as "not verified",
+     *  never as a confident one-tap button. The rotation's own
+     *  capability interlock is what refuses an old relay. */
+    action?: RotationAction;
+}
+
+export interface RotationAction {
+    kind: string;
+    cli_verb: string;
+    /** "recipient" | "relay" | "server" */
+    scope: string;
+    in_place: boolean;
+    needs_recipient_name: boolean;
+    destroys_server: boolean;
+    /** After this runs, every distributed file must be rebuilt and
+     *  hand-delivered before anyone can connect. */
+    invalidates_every_pack: boolean;
+    /** "ready" | "unknown" | "unsupported" */
+    availability: string;
+    note?: string;
 }
 
 export interface ProgressEvent {
@@ -685,6 +770,45 @@ export const Wizard = {
         invoke<void>('wizard_recipient_delete', {
             operatorId: operator_id,
             recipientId: recipient_id,
+        }),
+
+    // ---- Wave 3 Step 7: heal a relay in place ----------------------
+    //
+    // Two calls, two blast radii, and keeping them apart is the point.
+    // There is no combined "rotate everything" wrapper and there must
+    // never be one: the relay's mgmt service used to do both in a
+    // single handler, which is how a targeted revocation and a
+    // fleet-wide outage ended up sharing one button.
+
+    /**
+     * Re-key ONE recipient on the relay and rebuild their `.sbpx`.
+     *
+     * `name` is the box-side name (`r1`), not the roster row id —
+     * that is what `/rotate-credentials` scopes on, and an empty one
+     * is an error on both ends rather than "rotate all".
+     *
+     * Blast radius: exactly this person. Their current file stops
+     * working and they need the new one; every other recipient keeps
+     * connecting with what they already hold.
+     */
+    rotateCredentials: (operator_id: number, name: string) =>
+        invoke<RotateCredentialsSummary>('wizard_rotate_credentials', {
+            operatorId: operator_id,
+            recipientName: name,
+        }),
+
+    /**
+     * Move the relay's cover hostname / TLS parameters.
+     *
+     * Touches no credentials and no REALITY keypair. It DOES invalidate
+     * every connection file already handed out, and Step 8 (remote pack
+     * replacement) is not built — so nothing repairs itself over the
+     * network and every recipient needs a new file delivered by hand.
+     * The returned counts exist so the UI can say that with numbers.
+     */
+    rotateTls: (operator_id: number) =>
+        invoke<RotateTlsSummary>('wizard_rotate_tls', {
+            operatorId: operator_id,
         }),
 };
 

@@ -182,7 +182,24 @@ var (
 
 // Rotate runs the chosen rotation level, re-signs the RelayPack,
 // and commits the (mark-prior-inactive, insert-active, update-
-// projection) triple inside one DB transaction. On Provider or
+// projection) triple inside one DB transaction.
+//
+// SCOPE, since Step 7 split the ladder's cheapest rungs in two: L1 and
+// L2 here are the DESTROY-AND-REBUILD route. Every level except L3 goes
+// through Provider.Reprovision, which deletes the box and builds a new
+// one — new IP, new mgmt TLS pin, minutes not seconds. That is the
+// correct behaviour for L4/L5/L6, and for L1/L2 it is the FALLBACK for a
+// relay whose pinned mgmt artifact predates the in-place endpoints.
+//
+// The in-place path is not here and deliberately so: it is
+// mgmt.RotateCredentialsWithFW / mgmt.RotateTLSWithFW, driven by
+// `daal-deploy rotate-credentials` / `rotate-tls`, and it touches no
+// signed_sbps transaction because the server survives. [ActionFor] is
+// what tells a caller which of the two it is looking at; wiring a second
+// execution path through this Executor would add a caller-less
+// abstraction on top of a CLI the wizard already shells out to.
+//
+// On Provider or
 // Binder failure the transaction never opens; on store failure the
 // transaction rolls back and the rec is left unchanged on disk
 // (the in-memory rec may already reflect a successful Provider

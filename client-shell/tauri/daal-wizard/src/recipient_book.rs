@@ -325,55 +325,17 @@ pub fn recipient_repack_sbpx(
         )
         .map_err(WizardError::Db)?;
 
-    // Same record-first precedence as recipient_provision: the box
-    // material read over SSH at provision time beats whatever the mgmt
-    // response carried.
-    let rec_val = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
-        .unwrap_or(serde_json::Value::Null);
-    let field = |k: &str| -> String {
-        rec_val.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
-    };
-    let relay_server_ip = field("public_ip");
-    if relay_server_ip.is_empty() {
-        return Err(WizardError::Pricing(
-            "operator record has no public_ip — reprovision the box".into(),
-        ));
-    }
-    let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = creds_val.as_object_mut() {
-        let reality_pub = field("reality_public_key");
-        let tls_pin = field("tls_cert_sha256");
-        if !reality_pub.is_empty() {
-            obj.insert("reality_public_key".into(), reality_pub.into());
-        }
-        if !tls_pin.is_empty() {
-            obj.insert("tls_cert_sha256".into(), tls_pin.into());
-        }
-    }
-    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
-    let record_cover_sni = field("cover_sni");
-
-    let out_path = ctx
-        .staging_dir
-        .join(format!("{operator_id}.{}.sbpx", r.name));
-    let creds_path = ctx
-        .staging_dir
-        .join(format!("{operator_id}.{}.creds.json", r.name));
-    std::fs::write(&creds_path, creds_json.as_bytes())
-        .map_err(|e| WizardError::Pricing(format!("stage creds: {e}")))?;
-    let res = ctx.cli.run_users_pack_sbpx(crate::cli_bridge::UsersPackSbpxArgs {
-        in_sbp_path: &in_sbp_path,
-        recipient_pub_hex: &r.pubkey_x25519_hex,
-        out_sbpx_path: &out_path,
-        creds_file_path: Some(creds_path.as_path()),
-        server: Some(relay_server_ip.as_str()),
-        cover_sni: Some(record_cover_sni.as_str()),
-    });
-    let _ = std::fs::remove_file(&creds_path);
-    // Unlike recipient_provision — which swallows this failure because
+    // Unlike recipient_provision — which swallows a pack failure because
     // the recipient row and box user are the durable outcome — the pack
     // IS the outcome here, so a failure must surface.
-    res.map_err(map_bridge_err)?;
+    let out_path = merge_and_pack_sbpx(
+        ctx,
+        operator_id,
+        &r.name,
+        &r.pubkey_x25519_hex,
+        &creds,
+        &row.operator_record_json,
+    )?;
 
     let updated = ctx
         .db
@@ -672,7 +634,83 @@ fn decode_recipient_address(s: &str) -> Result<[u8; 32], WizardError> {
         .map_err(|e| WizardError::Pricing(format!("recipient address: {e}")))
 }
 
-fn write_record_staging(
+/// Merge one box credentials document with the relay's box-wide
+/// connection material and drive `users-pack-sbpx` for a single
+/// recipient. Returns the envelope path.
+///
+/// Two callers with the same requirement: the "Rebuild" repair
+/// ([`recipient_repack_sbpx`]) and Wave 3 Step 7's per-recipient
+/// credential rotation (`relay_rotation::rotate_credentials`). Both
+/// hand the box's response straight to the rewrite, and both have to
+/// apply the same precedence rule, so the rule lives here once.
+///
+/// PRECEDENCE. The OperatorRecord's `reality_public_key` /
+/// `tls_cert_sha256` win over whatever the mgmt response carried,
+/// because those are read off the box over SSH at provision time and
+/// are present even when the relay runs a mgmt binary too old to echo
+/// them. `cover_sni` goes the other way and is passed as the
+/// **fallback** only — the box's own live value is authoritative,
+/// because `/rotate-tls` can move it after the record was written.
+pub(crate) fn merge_and_pack_sbpx<C: Serialize>(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    name: &str,
+    recipient_pub_hex: &str,
+    creds: &C,
+    record_json: &str,
+) -> Result<PathBuf, WizardError> {
+    let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
+    if !in_sbp_path.exists() {
+        return Err(WizardError::Pricing(
+            "no signed bundle yet — build the relay pack first".into(),
+        ));
+    }
+
+    let rec_val =
+        serde_json::from_str::<serde_json::Value>(record_json).unwrap_or(serde_json::Value::Null);
+    let field = |k: &str| -> String {
+        rec_val.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
+    };
+    let relay_server_ip = field("public_ip");
+    if relay_server_ip.is_empty() {
+        return Err(WizardError::Pricing(
+            "operator record has no public_ip — reprovision the box".into(),
+        ));
+    }
+    let mut creds_val = serde_json::to_value(creds).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = creds_val.as_object_mut() {
+        let reality_pub = field("reality_public_key");
+        let tls_pin = field("tls_cert_sha256");
+        if !reality_pub.is_empty() {
+            obj.insert("reality_public_key".into(), reality_pub.into());
+        }
+        if !tls_pin.is_empty() {
+            obj.insert("tls_cert_sha256".into(), tls_pin.into());
+        }
+    }
+    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+    let record_cover_sni = field("cover_sni");
+
+    let out_path = ctx.staging_dir.join(format!("{operator_id}.{name}.sbpx"));
+    let creds_path = ctx
+        .staging_dir
+        .join(format!("{operator_id}.{name}.creds.json"));
+    std::fs::write(&creds_path, creds_json.as_bytes())
+        .map_err(|e| WizardError::Pricing(format!("stage creds: {e}")))?;
+    let res = ctx.cli.run_users_pack_sbpx(crate::cli_bridge::UsersPackSbpxArgs {
+        in_sbp_path: &in_sbp_path,
+        recipient_pub_hex,
+        out_sbpx_path: &out_path,
+        creds_file_path: Some(creds_path.as_path()),
+        server: Some(relay_server_ip.as_str()),
+        cover_sni: Some(record_cover_sni.as_str()),
+    });
+    let _ = std::fs::remove_file(&creds_path);
+    res.map_err(map_bridge_err)?;
+    Ok(out_path)
+}
+
+pub(crate) fn write_record_staging(
     ctx: &WizardCtx,
     operator_id: i64,
     record_json: &str,
@@ -685,7 +723,7 @@ fn write_record_staging(
     Ok(path)
 }
 
-fn map_bridge_err(e: BridgeError) -> WizardError {
+pub(crate) fn map_bridge_err(e: BridgeError) -> WizardError {
     // Surface the full stderr from the daal-deploy subprocess so
     // the React layer can render the actual mgmt-plane / firewall /
     // routing failure to the operator. Until FRP-14 this was

@@ -41,4 +41,5 @@ pub mod publisher_key;
 pub mod recipient_book;
 pub mod recipient_identity;
 pub mod recipient_sbpx;
+pub mod relay_rotation;
 pub mod staging;

@@ -134,6 +134,13 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialized against the other three mutating endpoints; see cfgMu.
+	// The duplicate check, the append and the reload are one critical
+	// section — two concurrent provisions would otherwise both pass
+	// userExists and the second rename would drop the first recipient.
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	count, err := countUsers(s.singboxConfig)
 	if err != nil {
 		http.Error(w, "count users: "+err.Error(), http.StatusInternalServerError)
@@ -257,6 +264,10 @@ func (s *server) handleUsersRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name must match r[0-9]{1,12}", http.StatusBadRequest)
 		return
 	}
+	// Serialized against the other three mutating endpoints; see cfgMu.
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	removed, err := removeUserFromSingbox(s.singboxConfig, req.Name, s.singboxCheck)
 	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)

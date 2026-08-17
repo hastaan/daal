@@ -1319,6 +1319,70 @@ fn wizard_recipient_delete(
         .map_err(|e| e.to_string())
 }
 
+// ---- Wave 3 Step 7: in-place relay healing -------------------------
+//
+// Two commands, two blast radii, and they are separate on purpose. The
+// relay's mgmt service used to rotate one recipient's credentials AND
+// the box-wide REALITY key material in a single handler; that is a
+// targeted revocation and a fleet-wide outage sharing one button. There
+// is deliberately no "rotate everything" command here, and box REALITY
+// keypair rotation — the third operation — is not exposed at all.
+
+/// Re-key ONE recipient on the relay and rebuild their `.sbpx`.
+///
+/// Scoped to the box-side name (`r1`), which is what
+/// `/rotate-credentials` scopes on. Exactly one person's file dies;
+/// every other recipient keeps connecting with what they already have.
+#[tauri::command]
+fn wizard_rotate_credentials(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    recipient_name: String,
+) -> Result<daal_wizard::relay_rotation::RotateCredentialsSummary, String> {
+    // Logcat trace: the short wrapped error the UI shows is not enough
+    // to debug an on-box auth/firewall/version failure from a device.
+    eprintln!("[rotate_credentials] op={operator_id} name={recipient_name}");
+    let r = daal_wizard::relay_rotation::rotate_credentials(
+        &wstate.0,
+        operator_id,
+        &recipient_name,
+    );
+    match &r {
+        Ok(s) => eprintln!(
+            "[rotate_credentials] ok name={} sbpx={:?} warnings={}",
+            s.name,
+            s.sbpx_path,
+            s.warnings.len()
+        ),
+        Err(e) => eprintln!("[rotate_credentials] err: {e}"),
+    }
+    r.map_err(|e| e.to_string())
+}
+
+/// Move the relay's cover hostname / TLS parameters.
+///
+/// Touches no credentials and no REALITY keypair. It does invalidate
+/// every connection file already handed out, and since Step 8 (remote
+/// pack replacement) is not built, nothing repairs itself over the
+/// network — the summary carries the counts the UI needs to say that
+/// plainly instead of implying a self-healing that does not exist.
+#[tauri::command]
+fn wizard_rotate_tls(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::relay_rotation::RotateTlsSummary, String> {
+    eprintln!("[rotate_tls] op={operator_id}");
+    let r = daal_wizard::relay_rotation::rotate_tls(&wstate.0, operator_id);
+    match &r {
+        Ok(s) => eprintln!(
+            "[rotate_tls] ok sni={:?} unknown={} record_updated={} live={}",
+            s.cover_sni, s.cover_sni_unknown, s.record_updated, s.live_recipients
+        ),
+        Err(e) => eprintln!("[rotate_tls] err: {e}"),
+    }
+    r.map_err(|e| e.to_string())
+}
+
 // ---- Publisher custody: status, migration, recovery ----------------
 
 /// Honest custody report for the publisher surface. The UI renders a
@@ -2291,6 +2355,10 @@ pub fn run() {
             wizard_recipient_list_remote,
             wizard_recipient_delete,
             wizard_produce_shared_sbp,
+            // Wave 3 Step 7: in-place relay healing. Two verbs, two
+            // blast radii — never one combined "rotate everything".
+            wizard_rotate_credentials,
+            wizard_rotate_tls,
             // Publisher custody: status, one-time PIN migration, recovery
             publisher_custody_status,
             publisher_migrate_from_pin,

@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -196,87 +198,63 @@ func TestRotateCreds_RejectsExpiredTimestamp(t *testing.T) {
 	}
 }
 
+// TestRotateCreds_RewritesConfigAndReturnsCreds is the happy path for the
+// TARGETED rotation: name one recipient, get one recipient's replacement
+// credentials, complete enough to mint a pack from without a second call.
+//
+// The exhaustive isolation assertions live in rotate_test.go, over a
+// three-recipient fixture — two recipients cannot distinguish "rotated the
+// one I named" from "rotated everyone", which is exactly the bug.
 func TestRotateCreds_RewritesConfigAndReturnsCreds(t *testing.T) {
 	srv, _, priv, configPath := newTestServer(t)
+	// The pinning material the publisher needs back; provision writes these
+	// at first boot on a real box.
+	if err := os.WriteFile(srv.realityPubPath, []byte("Ck9nvVEcYnAlUUlBl9dqfKvyEpqTFDTjHmwPmLnKvVM\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	tok := mintToken(priv, "rotate-credentials", srv.now().Unix())
-	req, _ := http.NewRequest("POST", ts.URL+"/rotate-credentials", nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	got := rotateCreds(t, ts, priv, `{"name":"r2"}`, 200)
+
+	if len(got.VLESSUUID) != 36 {
+		t.Errorf("vless_uuid wrong shape: %q", got.VLESSUUID)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200; got %d", resp.StatusCode)
+	if got.Name != "r2" {
+		t.Errorf("name = %q, want r2", got.Name)
 	}
-	var got rotateCredentialsResp
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		t.Fatal(err)
+	if got.UUID != got.VLESSUUID {
+		t.Errorf("legacy uuid alias %q != vless_uuid %q", got.UUID, got.VLESSUUID)
 	}
-	if len(got.UUID) != 36 {
-		t.Errorf("UUID wrong shape: %q", got.UUID)
+	if len(got.Users) != 1 || got.Users["r2"] != got.VLESSUUID {
+		t.Errorf("users = %v, want exactly the one rotated recipient", got.Users)
 	}
-	// base64 raw-URL, not hex: that is the only encoding sing-box's
-	// reality_server.go accepts for private_key, and a hex string decodes
-	// to 48 bytes and FATALs the inbound on the restart this handler runs.
-	rawPriv, err := base64.RawURLEncoding.DecodeString(got.RealityPrivKey)
-	if err != nil || len(rawPriv) != 32 {
-		t.Errorf("RealityPrivKey must be 32 bytes base64url; got %q (err=%v)", got.RealityPrivKey, err)
+	// The box keypair is a separate operation with a fleet-wide blast
+	// radius; this endpoint must not have touched it, and must say so.
+	if got.BoxKeysRotated {
+		t.Error("box_keys_rotated = true: /rotate-credentials must never rotate the box REALITY keypair")
 	}
-	rawPub, err := base64.RawURLEncoding.DecodeString(got.RealityPubKey)
-	if err != nil || len(rawPub) != 32 {
-		t.Errorf("RealityPubKey must be 32 bytes base64url; got %q (err=%v)", got.RealityPubKey, err)
+	// It must still hand back the CURRENT public key, unchanged, or the
+	// publisher cannot pin the replacement pack.
+	if got.RealityPublicKey != "Ck9nvVEcYnAlUUlBl9dqfKvyEpqTFDTjHmwPmLnKvVM" {
+		t.Errorf("reality_public_key = %q, want the box's unchanged key", got.RealityPublicKey)
 	}
-	// The public half must land on disk, or /users/provision keeps
-	// handing out the retired key and every pack minted afterwards is
-	// unusable against this box.
-	onDisk, err := os.ReadFile(srv.realityPubPath)
-	if err != nil {
-		t.Fatalf("reality.pub not written: %v", err)
+	// The ws path is shared by every recipient on this box. Rotating it to
+	// revoke one person would take the ws tier from everyone else, so it is
+	// echoed as-is — and it must be the path the box actually serves.
+	if got.WSPath != "/r1/deadbeef" {
+		t.Errorf("ws_path = %q, want the live shared path unchanged", got.WSPath)
 	}
-	if strings.TrimSpace(string(onDisk)) != got.RealityPubKey {
-		t.Errorf("reality.pub = %q, want %q", strings.TrimSpace(string(onDisk)), got.RealityPubKey)
+	if got.CoverSNI != "www.cloudflare.com" {
+		t.Errorf("cover_sni = %q, want the live cover host", got.CoverSNI)
+	}
+	sort.Strings(got.UpdatedInbounds)
+	want := []string{"hy2-in", "naive-in", "vless-in", "ws-in"}
+	if !reflect.DeepEqual(got.UpdatedInbounds, want) {
+		t.Errorf("updated_inbounds = %v, want every tier %v — a rotation that misses one leaves the leaked credential live there", got.UpdatedInbounds, want)
 	}
 
-	// Every recipient must be rotated, in every vless-family inbound, and
-	// the two rows for one recipient must still agree. Rotating row 0 of
-	// inbound 0 — what this used to do — revoked nobody: r2 kept working
-	// everywhere, and r1 simply moved to the untouched ws-in route.
-	body, _ := os.ReadFile(configPath)
-	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Users) != 2 {
-		t.Fatalf("users map = %v, want one entry per recipient", got.Users)
-	}
-	if got.Users["r1"] == got.Users["r2"] {
-		t.Errorf("r1 and r2 share a UUID %q — per-recipient credentials collapsed", got.Users["r1"])
-	}
-	for _, tag := range []string{"vless-in", "ws-in"} {
-		in := findInboundByTag(doc, tag)
-		if in == nil {
-			t.Fatalf("inbound %q missing", tag)
-		}
-		users, _ := in["users"].([]any)
-		if len(users) != 2 {
-			t.Fatalf("inbound %q has %d users, want 2", tag, len(users))
-		}
-		for _, raw := range users {
-			u, _ := raw.(map[string]any)
-			name, _ := u["name"].(string)
-			uuid, _ := u["uuid"].(string)
-			if uuid != got.Users[name] {
-				t.Errorf("%s/%s uuid = %q, want the rotated %q", tag, name, uuid, got.Users[name])
-			}
-			if uuid == "uuid-1" || uuid == "uuid-2" {
-				t.Errorf("%s/%s kept its pre-rotation UUID %q", tag, name, uuid)
-			}
-		}
-	}
+	doc := readDoc(t, configPath)
 	// hy2-in and naive-in use different user shapes; writing a `uuid`
 	// into them is an unknown field and a FATAL at boot.
 	for _, tag := range []string{"hy2-in", "naive-in"} {
@@ -291,6 +269,104 @@ func TestRotateCreds_RewritesConfigAndReturnsCreds(t *testing.T) {
 	if srv.rotateCredCnt.Load() != 1 {
 		t.Errorf("rotateCredCnt = %d want 1", srv.rotateCredCnt.Load())
 	}
+}
+
+// A nameless rotation must be refused. The pre-Step-7 publisher client posts
+// a nil body, and under the old semantics that meant "rotate every recipient
+// and the box keypair" — one mis-click away from severing a whole family.
+func TestRotateCreds_NamelessRequestIsRefused(t *testing.T) {
+	for _, body := range []string{"", "{}", `{"name":""}`, `{"name":"all"}`, `{"name":"../r1"}`} {
+		srv, _, priv, configPath := newTestServer(t)
+		before, _ := os.ReadFile(configPath)
+		ts := httptest.NewServer(srv.routes())
+
+		rotateCreds(t, ts, priv, body, 400)
+
+		after, _ := os.ReadFile(configPath)
+		if !bytes.Equal(before, after) {
+			t.Errorf("body %q: config was rewritten by a request that must have been refused", body)
+		}
+		ts.Close()
+	}
+}
+
+func TestRotateCreds_UnknownRecipientIs404(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	before, _ := os.ReadFile(configPath)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	rotateCreds(t, ts, priv, `{"name":"r99"}`, 404)
+
+	after, _ := os.ReadFile(configPath)
+	if !bytes.Equal(before, after) {
+		t.Error("config was rewritten for a recipient that does not exist on this box")
+	}
+}
+
+// The pre-write `check` is what turns "unreachable box" into "500, config
+// untouched" — the same guard /rotate-tls has, on the endpoint an operator
+// reaches for when something has already gone wrong.
+func TestRotateCreds_RejectsUnloadableConfig(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	before, _ := os.ReadFile(configPath)
+	srv.singboxCheck = func(string) error { return errors.New(`unknown field "nope"`) }
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	rotateCreds(t, ts, priv, `{"name":"r1"}`, 500)
+
+	after, _ := os.ReadFile(configPath)
+	if !bytes.Equal(before, after) {
+		t.Error("live config was replaced with a config that does not load")
+	}
+	if _, err := os.Stat(configPath + ".tmp"); err == nil {
+		t.Error("rejected temp config left behind")
+	}
+}
+
+// rotateCreds posts a signed /rotate-credentials request, asserts the status
+// and decodes the body on success.
+func rotateCreds(t *testing.T, ts *httptest.Server, priv ed25519.PrivateKey, body string, wantStatus int) rotateCredentialsResp {
+	t.Helper()
+	tok := mintToken(priv, "rotate-credentials", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Unix())
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req, _ := http.NewRequest("POST", ts.URL+"/rotate-credentials", rdr)
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		msg, _ := io.ReadAll(resp.Body)
+		t.Fatalf("rotate-credentials(%s) = %d, want %d: %s", body, resp.StatusCode, wantStatus, msg)
+	}
+	var got rotateCredentialsResp
+	if wantStatus == 200 {
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return got
+}
+
+// readDoc re-reads the live config as a generic document.
+func readDoc(t *testing.T, path string) map[string]any {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc
 }
 
 func TestRotateTLS_RewritesConfig(t *testing.T) {
@@ -496,14 +572,99 @@ func TestSplitDest(t *testing.T) {
 	}
 }
 
-func TestRotateTLS_RejectsMissingFields(t *testing.T) {
-	srv, _, priv, _ := newTestServer(t)
+// A handshake dest with no advertised name, or one that names a DIFFERENT
+// host, is the IP-to-SNI mismatch REALITY exists to prevent. Refuse it
+// outright rather than write a box that advertises one cover host while
+// handing every probe to another.
+func TestRotateTLS_RejectsContradictoryCoverIdentity(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"dest without sni", `{"new_dests":["example.com:443"]}`},
+		{"dest host disagrees with sni", `{"new_sni":"example.com","new_dests":["other.example:443"]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, priv, configPath := newTestServer(t)
+			before, _ := os.ReadFile(configPath)
+			ts := httptest.NewServer(srv.routes())
+			defer ts.Close()
+
+			rotateTLS(t, ts, priv, tc.body, 400)
+
+			after, _ := os.ReadFile(configPath)
+			if !bytes.Equal(before, after) {
+				t.Error("config was rewritten by a request that must have been refused")
+			}
+		})
+	}
+}
+
+// The pinned contract's `POST /rotate-tls {}`. The box cannot invent a
+// plausible cover host — that depends on the relay's provider and region,
+// which is publisher knowledge, and a constant compiled into this binary
+// would be one string match away from burning the whole fleet. So an empty
+// body rotates only what the box owns, and `changed` says so, so the caller
+// can tell the operator the cover host was NOT replaced instead of showing a
+// green tick over a half-done job.
+func TestRotateTLS_EmptyBodyRotatesOnlyWhatTheBoxOwns(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	tok := mintToken(priv, "rotate-tls", srv.now().Unix())
-	body, _ := json.Marshal(rotateTLSReq{NewSNI: "", NewDests: nil})
-	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", bytes.NewReader(body))
+	got := rotateTLS(t, ts, priv, "{}", 200)
+
+	if !reflect.DeepEqual(got.Changed, []string{"ws_path"}) {
+		t.Errorf("changed = %v, want exactly [ws_path]: an empty body must not claim to have moved the cover host", got.Changed)
+	}
+	if got.AppliedSNI != "www.cloudflare.com" {
+		t.Errorf("applied_sni = %q, want the unchanged cover host", got.AppliedSNI)
+	}
+	if got.AppliedWSPath == "/r1/deadbeef" || got.AppliedWSPath == "" {
+		t.Errorf("applied_ws_path = %q, want a freshly minted path", got.AppliedWSPath)
+	}
+	// Shape-preserving: a rotated path must be indistinguishable on the wire
+	// from a provisioned one (`/r<id>/<8 hex>`, see mintCreds).
+	if !regexp.MustCompile(`^/r1/[0-9a-f]{8}$`).MatchString(got.AppliedWSPath) {
+		t.Errorf("applied_ws_path = %q does not keep the provisioned path shape", got.AppliedWSPath)
+	}
+	doc := readDoc(t, configPath)
+	if p := wsInboundPath(doc); p != got.AppliedWSPath {
+		t.Errorf("live ws path %q != reported %q", p, got.AppliedWSPath)
+	}
+	// The cover-SNI declaration file must NOT be touched when the cover host
+	// did not move.
+	if _, err := os.Stat(srv.coverSNIPath); err == nil {
+		t.Error("/etc/daal/cover-sni written on a rotation that did not change the cover host")
+	}
+}
+
+// A no-op must not report success. A box with no ws inbound and no new_sni
+// has nothing this endpoint can rotate; a cheerful 200 there is how an
+// operator concludes a burned cover host has been replaced when it has not.
+func TestRotateTLS_EmptyBodyWithNothingToRotateIsRefused(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	doc := readDoc(t, configPath)
+	kept := []any{}
+	for _, raw := range doc["inbounds"].([]any) {
+		if in, _ := raw.(map[string]any); in["tag"] != tagWS {
+			kept = append(kept, raw)
+		}
+	}
+	doc["inbounds"] = kept
+	if err := writeSingboxDoc(configPath, doc, nil); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	rotateTLS(t, ts, priv, "{}", 400)
+}
+
+// rotateTLS posts a signed /rotate-tls request, asserts the status and
+// decodes the body on success.
+func rotateTLS(t *testing.T, ts *httptest.Server, priv ed25519.PrivateKey, body string, wantStatus int) rotateTLSResp {
+	t.Helper()
+	tok := mintToken(priv, "rotate-tls", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Unix())
+	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", strings.NewReader(body))
 	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -511,9 +672,17 @@ func TestRotateTLS_RejectsMissingFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("expected 400 for missing fields; got %d", resp.StatusCode)
+	if resp.StatusCode != wantStatus {
+		msg, _ := io.ReadAll(resp.Body)
+		t.Fatalf("rotate-tls(%s) = %d, want %d: %s", body, resp.StatusCode, wantStatus, msg)
 	}
+	var got rotateTLSResp
+	if wantStatus == 200 {
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return got
 }
 
 func TestSelfSignedCert_FingerprintStableAcrossRestarts(t *testing.T) {
@@ -808,5 +977,80 @@ func TestWhoAmI_MalformedOrAbsentRemoteAddr(t *testing.T) {
 				t.Errorf("api_version = %d want %d", got.APIVersion, whoAmIAPIVersion)
 			}
 		})
+	}
+}
+
+// TestHealthAdvertisesSplitRotation pins the capability advertisement
+// the publisher's safety interlock reads.
+//
+// This is a CROSS-MODULE WIRE CONTRACT and the literals are the
+// contract, not the constant names: publisher/deploy/mgmt/capability.go
+// fails CLOSED, so if these strings drift the publisher stops believing
+// any relay can rotate in place and every in-place rotation is refused
+// — against correct new boxes as well as old ones. That failure is
+// silent at compile time in both modules (separate go.mod files, no
+// shared symbol), which is exactly why it is asserted here as raw text.
+// The peer assertion lives in
+// publisher/deploy/mgmt.TestCapabilities_AcceptsRealBoxHealthBody, and
+// the two hardcode the same bytes on purpose.
+func TestHealthAdvertisesSplitRotation(t *testing.T) {
+	srv, _, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d want 200", resp.StatusCode)
+	}
+	var got struct {
+		OK             bool     `json:"ok"`
+		MgmtAPIVersion int      `json:"mgmt_api_version"`
+		Capabilities   []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	// "ok" must survive: a pre-Step-7 publisher and the provisioning
+	// liveness probe both read only this field.
+	if !got.OK {
+		t.Error(`"ok" must stay true — the liveness probe reads it`)
+	}
+	if got.MgmtAPIVersion != 2 {
+		t.Errorf("mgmt_api_version = %d want 2 (the split-rotation contract)", got.MgmtAPIVersion)
+	}
+	// Exact literals, spelled out rather than referencing the consts,
+	// so renaming a const cannot quietly rename the wire value.
+	for _, want := range []string{"rotate-credentials-scoped", "rotate-tls-scoped"} {
+		found := false
+		for _, c := range got.Capabilities {
+			if c == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("capabilities %v missing %q — the publisher will refuse to rotate this box", got.Capabilities, want)
+		}
+	}
+}
+
+// TestHealthCapabilityConstantsMatchTheWire guards the other direction:
+// the constants the handler emits are the ones the publisher looks for.
+func TestHealthCapabilityConstantsMatchTheWire(t *testing.T) {
+	if capRotateCredentialsScoped != "rotate-credentials-scoped" {
+		t.Errorf("capRotateCredentialsScoped = %q; publisher looks for %q",
+			capRotateCredentialsScoped, "rotate-credentials-scoped")
+	}
+	if capRotateTLSScoped != "rotate-tls-scoped" {
+		t.Errorf("capRotateTLSScoped = %q; publisher looks for %q",
+			capRotateTLSScoped, "rotate-tls-scoped")
+	}
+	// A box that advertises a version BELOW the split contract while
+	// serving split semantics would be refused by its own publisher.
+	if mgmtAPIVersion < 2 {
+		t.Errorf("mgmtAPIVersion = %d; the split-rotation contract is 2", mgmtAPIVersion)
 	}
 }

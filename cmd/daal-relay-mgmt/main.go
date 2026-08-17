@@ -7,15 +7,21 @@
 // The API surface is intentionally narrow (FRP-10 invariant 29 +
 // FRP-14 extension):
 //
-//	POST /rotate-credentials  — L1 (~5 s); regenerate EVERY recipient's
-//	                             VLESS UUID across every vless-family
-//	                             inbound + the box REALITY keypair;
-//	                             restart sing-box; return new
-//	                             credentials.
+//	POST /rotate-credentials  — L1 (~5 s); re-mint ONE named recipient's
+//	                             per-user credentials across every
+//	                             inbound that carries a row for them
+//	                             (vless-in, ws-in, hy2-in, naive-in);
+//	                             kick + reload sing-box; return the new
+//	                             credentials. A missing "name" is an
+//	                             ERROR — see rotate.go for why "rotate
+//	                             everything" must never be a default.
+//	                             Touches no other recipient and no
+//	                             box-wide key material.
 //	POST /rotate-tls          — L2 (~20 s); move the cover identity —
 //	                             advertised SNI and REALITY handshake
-//	                             dest together — plus the shared ws
-//	                             path; reload sing-box.
+//	                             dest together — and/or the shared ws
+//	                             path; reload sing-box. Touches no user
+//	                             credentials and no REALITY keypair.
 //	GET  /health              — liveness probe (no auth).
 //	POST /users/provision     — FRP-14; append fresh per-recipient
 //	                             credentials (UUID + short_id +
@@ -48,7 +54,6 @@
 package main
 
 import (
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -72,6 +77,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -135,8 +141,33 @@ func run(paths configPaths) error {
 
 // server is the routing + auth state.
 type server struct {
-	pubkey         ed25519.PublicKey
-	singboxConfig  string
+	pubkey        ed25519.PublicKey
+	singboxConfig string
+	// cfgMu serializes every read-modify-write of singboxConfig.
+	//
+	// net/http runs each request on its own goroutine, and all four
+	// mutating endpoints (/rotate-credentials, /rotate-tls,
+	// /users/provision, /users/revoke) do the same load → mutate →
+	// rename over ONE file. Without this lock two overlapping calls both
+	// read the pre-call document and the second rename wins wholesale, so
+	// one of the two operations is silently discarded — and a discarded
+	// ROTATION is the worst case of all: the publisher has already filed
+	// it as a completed revocation and handed the operator a rebuilt
+	// pack, while the leaked credential is still live in the file the box
+	// serves. None of the in-flight guards can catch that, because
+	// assertRetiredAbsent and `sing-box check` both validate the
+	// in-memory candidate rather than the file being overwritten.
+	//
+	// Overlap is not hypothetical: ephemeral firewall windows are
+	// additive and last 300 s each, so a wizard rotation and a terminal
+	// `daal-deploy users-provision` from the same allowlisted IP overlap
+	// freely.
+	//
+	// Held across the reload as well as the write, so the config on disk
+	// and the running process cannot be re-crossed by a second writer
+	// mid-rollback. One mutex is enough and costs nothing: these calls
+	// are seconds apart at worst and all target the same file.
+	cfgMu          sync.Mutex
 	realityPubPath string // /etc/daal/reality.pub (FRP-14 Tier-2)
 	tlsCertPath    string // /etc/daal/tls-cert.pem (self-signed leaf, ws/hy2/naive)
 	coverSNIPath   string // /etc/daal/cover-sni (the box's own statement of its cover host)
@@ -367,105 +398,248 @@ func decodeBase64(s string) ([]byte, error) {
 
 // --- handlers ---
 
+// Capability advertisement carried by GET /health.
+//
+// WHY THE BOX HAS TO SAY THIS OUT LOUD. daal-relay-mgmt ships as a
+// hash-pinned artifact (publisher/deploy/cloudinit/artifacts.go), so a
+// relay keeps running whatever binary it was born with until a human
+// rebuilds, re-signs, re-uploads and bumps the pin. The fleet therefore
+// contains both the pre-Step-7 conflated rotator and this one at the
+// same time, and the publisher is the only party that can tell them
+// apart before it sends anything mutating.
+//
+// It cannot tell them apart by probing. /rotate-credentials and
+// /rotate-tls have been REGISTERED since FRP-10, so an old box answers
+// 200 rather than 404 — the route's existence says nothing about its
+// semantics. And probing by behaviour is destructive: the old handler
+// ignores the body, rotates every recipient AND the box-wide REALITY
+// keypair, which invalidates the pinned public key in every pack
+// already distributed. A probe whose failure mode is "silently bricked
+// the whole relay" is not a probe.
+//
+// So the signal has to be POSITIVE and it has to come from here. The
+// tokens name the SEMANTICS, not the route — the "-scoped" suffix is
+// what distinguishes the split, targeted behaviour from the conflated
+// one, because the bare route name is true of every box ever shipped.
+// An old box answers `{"ok":true}`, which decodes into an empty verb
+// set, so "old" falls out of the wire format instead of needing a
+// special case, and the publisher fails closed by construction.
+//
+// These strings are a wire contract with publisher/deploy/mgmt
+// (mgmt.CapRotateCredentialsScoped / CapRotateTLSScoped /
+// MgmtAPIVersionSplitRotation). Changing one end alone re-breaks the
+// interlock silently; TestHealthAdvertisesSplitRotation pins the exact
+// literals here so a rename cannot drift unnoticed.
+const (
+	// capRotateCredentialsScoped: POST /rotate-credentials {"name":"r1"}
+	// rotates ONLY that recipient, across every inbound, and touches no
+	// REALITY keypair. A missing name is an error, never "rotate all".
+	capRotateCredentialsScoped = "rotate-credentials-scoped"
+
+	// capRotateTLSScoped: POST /rotate-tls moves cover SNI / TLS
+	// parameters only, leaving keypairs and user credentials alone, and
+	// echoes what it applied.
+	capRotateTLSScoped = "rotate-tls-scoped"
+
+	// mgmtAPIVersion is the second signal, sufficient on its own so a
+	// box that reports a version but not a verb list is still usable.
+	// v2 == the Step-7 split-rotation contract.
+	mgmtAPIVersion = 2
+)
+
+// handleHealth is the liveness probe AND the capability advertisement.
+//
+// Both live on this route deliberately: /health already exists, needs
+// no auth, and mutates nothing, so advertising here costs no new route
+// — and specs/daal-relay-mgmt-v1.md §4 pins the surface at seven, with
+// an eighth requiring a supplement amendment (TestExactlyNRoutes).
+// Extending an existing response with additive fields is compatible in
+// both directions: an old publisher reading a new box still sees
+// "ok":true and ignores the rest.
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
 	s.healthCnt.Add(1)
-	_, _ = io.WriteString(w, `{"ok":true}`)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":               true,
+		"mgmt_api_version": mgmtAPIVersion,
+		"capabilities": []string{
+			capRotateCredentialsScoped,
+			capRotateTLSScoped,
+		},
+	})
+}
+
+// rotateCredsReq names the ONE recipient whose credentials are to be
+// re-minted. There is no "all" spelling and no default: see rotate.go.
+type rotateCredsReq struct {
+	Name string `json:"name"`
 }
 
 // rotateCredentialsResp is the JSON returned to the Helper.
 //
-// ENCODING — RealityPrivKey is base64 (raw URL alphabet), NOT hex. It
-// used to be hex, and that was a box-bricking bug rather than a
-// cosmetic one: sing-box decodes `reality.private_key` with
-// base64.RawURLEncoding, so a 64-char hex string decodes to 48 bytes
-// and the inbound FATALs "invalid private key" on the restart this
-// handler performs. Verified against sing-box 1.13.12. The endpoint has
-// no callers yet (the ladder is wired in a later wave), so nothing is
-// depending on the old spelling.
+// It embeds userCreds, so the shape is byte-for-byte the one
+// /users/provision already returns — same field names, same semantics,
+// including the box-wide material (reality_public_key, tls_cert_sha256,
+// tls_cert_pem, cover_sni, mux_inbound). That is deliberate: a rotation's
+// entire purpose is to produce a replacement pack, and forcing the publisher
+// to follow a rotate with a provision to learn the pinning material is how
+// the two ends drift. One call, one complete credential set.
 //
-// Users maps recipient name → new UUID. A box carries one row per
-// recipient in both vless-in and ws-in; UUID alone (the first row) can
-// only ever describe one of them, and is kept for wire compatibility.
+// WHAT IS NO LONGER HERE, and why the removal is the point:
+//
+//	reality_private_key — the box keypair is NOT rotated by this endpoint
+//	  any more. Returning a field named after an operation that did not
+//	  happen is worse than omitting it. reality_public_key is still
+//	  present, carrying the box's CURRENT (unchanged) key, because the
+//	  publisher needs it to pin the replacement pack.
+//
+// BoxKeysRotated is always false today and exists so a caller can assert
+// that rather than infer it from a missing field.
+//
+// UpdatedInbounds is the honesty field: a revocation that reached three of
+// four inbounds leaves the leaked credential live on the fourth. The caller
+// can and should check that this lists every tier the recipient uses.
+//
+// UUID and Users are retained for wire compatibility with the pre-Step-7
+// publisher client (mgmt.Credentials), which decodes exactly those two.
+// Users now carries a single entry — the rotated recipient — which is the
+// truthful rendering of the new semantics in the old field.
 type rotateCredentialsResp struct {
+	userCreds
 	UUID            string            `json:"uuid"`
 	Users           map[string]string `json:"users,omitempty"`
-	RealityPrivKey  string            `json:"reality_private_key"`
-	RealityPubKey   string            `json:"reality_public_key"`
+	UpdatedInbounds []string          `json:"updated_inbounds"`
+	Warnings        []string          `json:"warnings,omitempty"`
+	BoxKeysRotated  bool              `json:"box_keys_rotated"`
+	RotatedAtUnix   int64             `json:"rotated_at_unix"`
 	GeneratedAtUnix int64             `json:"generated_at_unix"`
 }
 
-// handleRotateCreds rotates BOTH per-recipient UUIDs and the box-wide
-// REALITY keypair.
+// handleRotateCreds re-mints ONE named recipient's per-user credentials.
 //
-// Conflating those two is a known wart: rotating the keypair invalidates
-// the pinned public key in EVERY distributed pack, so it can only be
-// used together with a redistribution path, whereas rotating one
-// recipient's UUID is a targeted revocation. Splitting them into
-// separate operations belongs to the rotation-ladder work; what is
-// fixed here is that the handler no longer leaves the box in a state
-// that cannot boot or that revokes nobody.
+// BLAST RADIUS: exactly one recipient. Every other recipient's rows are
+// untouched in every inbound, and no box-wide material (REALITY keypair,
+// cover SNI, shared ws path, data-plane cert) moves. Sessions belonging to
+// other recipients are dropped by the reload and reconnect on credentials
+// that still work; the rotated recipient stays off until they receive the
+// pack this response feeds.
+//
+// A MISSING NAME IS AN ERROR. The pre-Step-7 publisher client posts a nil
+// body, which decodes to an empty name and lands here as a 400 — exactly the
+// right outcome, because that client believes this endpoint rotates everyone
+// and regenerates the box keypair. Failing loudly is how an un-updated caller
+// finds out the semantics changed, instead of discovering it from a relay
+// that severed every recipient at once.
 func (s *server) handleRotateCreds(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
 	s.rotateCredCnt.Add(1)
-	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		http.Error(w, "reality key: "+err.Error(), http.StatusInternalServerError)
+	var req rotateCredsReq
+	// An absent body is EOF, not a malformed one; it still fails the name
+	// check below, with a message that says what to send.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "decode: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	privB64 := base64.RawURLEncoding.EncodeToString(priv.Bytes())
-	pubB64 := base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
+	if !nameRegex.MatchString(req.Name) {
+		http.Error(w, `"name" is required and must match r[0-9]{1,12}: this endpoint rotates ONE recipient, never all of them`, http.StatusBadRequest)
+		return
+	}
 
-	assigned, order, err := s.rewriteSingboxCreds(s.singboxConfig, genUUID, privB64)
+	// Load → mutate → commit → reload is one critical section; see cfgMu.
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	doc, err := loadSingboxDoc(s.singboxConfig)
 	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Persist the public half next to the private one. /users/provision
-	// reads this file to tell the publisher which key to pin; without
-	// this write a rotation silently makes every subsequently minted
-	// pack unusable, because it would carry the retired public key.
-	if s.realityPubPath != "" {
-		if err := os.WriteFile(s.realityPubPath, []byte(pubB64+"\n"), 0o644); err != nil {
-			http.Error(w, "persist reality pubkey: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	if err := s.singboxControl("restart"); err != nil {
-		http.Error(w, "singbox restart: "+err.Error(), http.StatusInternalServerError)
+	fresh, err := mintCreds(req.Name, s.now().Unix())
+	if err != nil {
+		http.Error(w, "mint creds: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Named recipients only: the synthetic keys surgicalSetUUIDs invents
-	// for unnamed legacy rows are an internal detail, not something a
-	// caller can act on.
-	users := map[string]string{}
-	for name, uuid := range assigned {
-		if nameRegex.MatchString(name) {
-			users[name] = uuid
-		}
+	res, err := rotateRecipientCreds(doc, req.Name, fresh)
+	if errors.Is(err, errRecipientNotFound) {
+		http.Error(w, fmt.Sprintf("user %q not found", req.Name), http.StatusNotFound)
+		return
 	}
-	first := ""
-	if len(order) > 0 {
-		first = assigned[order[0]]
+	if err != nil {
+		http.Error(w, "rotate: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	resp := rotateCredentialsResp{
-		UUID:            first,
-		Users:           users,
-		RealityPrivKey:  privB64,
-		RealityPubKey:   pubB64,
-		GeneratedAtUnix: s.now().Unix(),
+	if err := assertRetiredAbsent(doc, res.retired); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	// Validates against the strict parser and only then renames over the
+	// live file: a rotation must never be able to leave the box holding a
+	// config it cannot start.
+	rollback, err := s.commitSingboxDoc(s.singboxConfig, doc)
+	if err != nil {
+		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// APPLY SEMANTICS — the same pair /users/revoke uses, and for the same
+	// reason. Rewriting the file alone would only stop NEW authentications;
+	// the seized credential's established session would keep carrying
+	// traffic indefinitely. The kick wrapper sends SIGUSR2 (graceful inbound
+	// drop) and then reloads, evicting live sessions within ~10 s. Every
+	// other recipient is disconnected too and reconnects automatically on
+	// credentials that did not change — a few seconds of interruption is the
+	// price of the revocation being real.
+	//
+	// Kick is soft-fail (a box whose sing-box build ignores SIGUSR2 still
+	// gets correct semantics on the next reconnect); reload is hard-fail,
+	// because without it the box is still serving the pre-rotation user
+	// table and reporting success would be a lie.
+	//
+	// The hard failure ROLLS BACK (applyReload). Without that, the new
+	// UUID and passwords would exist only in a file the box is not
+	// running and that nobody has a copy of — this response is the one
+	// time they leave the box — so the recipient would be cut off at the
+	// next unrelated reload with credentials recoverable from nowhere.
+	if err := s.singboxKick(); err != nil {
+		_ = err // best effort; the config is already the source of truth
+	}
+	if err := s.applyReload(rollback); err != nil {
+		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Box-wide connection material, exactly as /users/provision attaches it,
+	// so this one response is enough to mint the replacement pack. Read from
+	// the live box, not from what this handler intended.
+	creds := res.Creds
+	creds.RealityPublicKey = s.readRealityPub()
+	creds.TLSCertSHA256 = s.readTLSCertSHA256()
+	creds.TLSCertPEM = s.readTLSCertPEM()
+	creds.CoverSNI = readCoverSNI(s.singboxConfig)
+	creds.MuxInbound = readMuxInbound(s.singboxConfig)
+
+	now := s.now().Unix()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(rotateCredentialsResp{
+		userCreds:       creds,
+		UUID:            creds.VLESSUUID,
+		Users:           map[string]string{creds.Name: creds.VLESSUUID},
+		UpdatedInbounds: res.Inbounds,
+		Warnings:        res.Warnings,
+		BoxKeysRotated:  false,
+		RotatedAtUnix:   now,
+		GeneratedAtUnix: now,
+	})
 }
 
-// rotateTLSReq accepts a new cover identity from the Helper.
+// rotateTLSReq accepts a new cover identity from the Helper. Every field
+// is optional; the pinned contract's `POST /rotate-tls {}` is a valid
+// request (see rewriteSingboxTLS for what an empty body does).
 //
 // NewSNI is the cover host the box advertises and the client's outbound
 // must send. NewDests[0] is the REALITY handshake dest ("host" or
@@ -484,12 +658,26 @@ type rotateTLSReq struct {
 // verify the two names moved TOGETHER instead of trusting a bare 200.
 // Additive fields: an older client decoding only applied_at_unix is
 // unaffected.
+//
+// Changed is the field that keeps an empty-bodied call honest — it names
+// the parameters that actually moved, so a caller that sent `{}` and got a
+// 200 can still tell the operator that the cover host was NOT replaced.
 type rotateTLSResp struct {
-	AppliedAtUnix    int64  `json:"applied_at_unix"`
-	AppliedSNI       string `json:"applied_sni"`
-	AppliedHandshake string `json:"applied_handshake"`
+	AppliedAtUnix    int64    `json:"applied_at_unix"`
+	AppliedSNI       string   `json:"applied_sni"`
+	AppliedHandshake string   `json:"applied_handshake"`
+	AppliedWSPath    string   `json:"applied_ws_path,omitempty"`
+	Changed          []string `json:"changed"`
 }
 
+// handleRotateTLS moves the box's cover identity and/or the shared ws path.
+//
+// BLAST RADIUS: the whole relay. Every recipient's pack pins the advertised
+// SNI (and, for the ws tier, the path), so anything this endpoint changes
+// invalidates every distributed pack until each recipient is refreshed. It
+// does NOT invalidate credentials — no user row and no REALITY keypair is
+// touched — so the recipients keep their identities and need only new
+// connection parameters.
 func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -497,23 +685,57 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.rotateTLSCnt.Add(1)
 	var req rotateTLSReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		http.Error(w, "decode: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.NewSNI == "" || len(req.NewDests) == 0 {
-		http.Error(w, "new_sni and new_dests required", http.StatusBadRequest)
+	// A handshake dest without an advertised name is exactly the IP-to-SNI
+	// mismatch REALITY exists to prevent, so it is refused rather than
+	// half-applied.
+	if req.NewSNI == "" && len(req.NewDests) > 0 {
+		http.Error(w, "new_dests without new_sni would leave the advertised name and the handshake dest disagreeing", http.StatusBadRequest)
 		return
 	}
-	if err := s.rewriteSingboxTLS(s.singboxConfig, req.NewSNI, req.NewDests, req.NewWSPath); err != nil {
+	// The two names must name the same HOST. The port may differ (a cover
+	// host reachable on something other than 443 is legitimate); the host
+	// may not — a box that advertises one name while handing probes to
+	// another is the single most cited "trivially anomalous" signature in
+	// the research corpus, and it is the failure L2 shipped with before
+	// Wave 2.
+	if req.NewSNI != "" && len(req.NewDests) > 0 {
+		if host, _ := splitDest(strings.TrimSpace(req.NewDests[0])); host != "" && host != req.NewSNI {
+			http.Error(w, fmt.Sprintf("new_dests[0] host %q must equal new_sni %q (only the port may differ)", host, req.NewSNI), http.StatusBadRequest)
+			return
+		}
+	}
+	// Load → mutate → commit → reload is one critical section; see cfgMu.
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	applied, rollback, err := s.rewriteSingboxTLS(s.singboxConfig, req)
+	if errors.Is(err, errNothingToRotate) {
+		http.Error(w, "nothing to rotate: supply new_sni (and optionally new_dests/new_ws_path); an empty request rotates only the shared ws path, and this box has no ws inbound", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.singboxControl("reload"); err != nil {
+	// Cover-identity parameters are inbound-construction material, so the
+	// reload rebuilds the inbounds and every live session is dropped. All
+	// recipients reconnect only once they hold the new parameters — which is
+	// what makes this the heavy operation of the two.
+	//
+	// Rolls back on failure (applyReload). This is the endpoint where an
+	// un-rolled-back commit does the most damage: the publisher treats a
+	// failure with no response as "nothing was applied" and keeps the old
+	// cover host in its record, so an orphaned config would put the box on
+	// a name no pack will ever carry, at whatever unrelated moment
+	// something else reloads sing-box.
+	if err := s.applyReload(rollback); err != nil {
 		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	host, port := splitDest(strings.TrimSpace(req.NewDests[0]))
 	// Keep /etc/daal/cover-sni in step with the config we just wrote.
 	// cloud-init writes that file once at first boot, and its stated
 	// purpose is to be the box's own answer to "what do you advertise?"
@@ -521,19 +743,33 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	// answer is worse than no file, because a human debugging a dead
 	// tier reads it and concludes the rotation never happened.
 	//
+	// Written only when the advertised name actually moved, and from the
+	// EFFECTIVE value read back out of the config rather than the request.
+	//
 	// Best-effort on purpose: the config rename already succeeded and
 	// sing-box already reloaded, so failing the request here would
 	// report a rotation that in fact applied. The config is the source
 	// of truth (readCoverSNI parses it); this file is a convenience.
-	if s.coverSNIPath != "" {
-		_ = os.WriteFile(s.coverSNIPath, []byte(req.NewSNI+"\n"), 0o644)
+	if s.coverSNIPath != "" && applied.SNI != "" && contains(applied.Changed, "cover_sni") {
+		_ = os.WriteFile(s.coverSNIPath, []byte(applied.SNI+"\n"), 0o644)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(rotateTLSResp{
 		AppliedAtUnix:    s.now().Unix(),
-		AppliedSNI:       req.NewSNI,
-		AppliedHandshake: net.JoinHostPort(host, strconv.Itoa(port)),
+		AppliedSNI:       applied.SNI,
+		AppliedHandshake: applied.Handshake,
+		AppliedWSPath:    applied.WSPath,
+		Changed:          applied.Changed,
 	})
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 // whoAmIResp is the JSON returned to the Helper. Deliberately tiny:
@@ -739,92 +975,105 @@ func readPubkey(path string) (ed25519.PublicKey, error) {
 // so writing `uuid` into a hysteria2 user or `multiplex` into a naive
 // inbound is not a no-op, it is a box that will not boot.
 
-// rewriteSingboxCreds patches the vless-family users' UUIDs + the
-// REALITY private key. The schema is the standard sing-box JSON; we do
-// a narrow surgical edit so non-Daal config sections survive unchanged.
-//
-// mintUUID is called once per distinct recipient, so a box with N
-// recipients ends with N fresh, still-distinct UUIDs — the same value
-// applied to that recipient's row in every vless-family inbound.
-// Rotating one recipient's identity onto all of them would collapse the
-// per-recipient credentials FRP-14 exists to keep apart; rotating only
-// row 0 (what this did) left recipients 2..N with live credentials, and
-// left EVERY recipient's ws-in row untouched, so the "rotation" revoked
-// nothing at all — the recipient just moved to the ws tier.
-//
-// Returns name→new-UUID for every row rewritten, in config order.
-func (s *server) rewriteSingboxCreds(path string, mintUUID func() (string, error), realityKey string) (map[string]string, []string, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		body = []byte(`{"inbounds":[{"type":"vless","tag":"` + tagVLESS + `","users":[{"uuid":""}],"tls":{"reality":{"private_key":""}}}]}`)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, nil, fmt.Errorf("singbox config not JSON: %w", err)
-	}
-	assigned, order, err := surgicalSetUUIDs(doc, mintUUID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := surgicalSetRealityKey(doc, realityKey); err != nil {
-		return nil, nil, err
-	}
-	if err := s.commitSingboxDoc(path, doc); err != nil {
-		return nil, nil, err
-	}
-	return assigned, order, nil
-}
-
-// rewriteSingboxTLS applies a new cover identity to the box: the
-// advertised SNI, the REALITY handshake dest that must corroborate it,
-// and (optionally) the shared ws path.
-func (s *server) rewriteSingboxTLS(path, sni string, dests []string, wsPath string) error {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		body = []byte(`{"inbounds":[{"type":"vless","tag":"` + tagVLESS + `","tls":{"server_name":"","reality":{"handshake":{"server":"","server_port":443}}}}]}`)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return fmt.Errorf("singbox config not JSON: %w", err)
-	}
-	if err := surgicalSetSNI(doc, sni, dests); err != nil {
-		return err
-	}
-	if wsPath != "" {
-		// Not "best effort" any more. This used to be `_ =`, and it always
-		// failed: it looked for a transport block on inbounds[0], which is
-		// vless-in and has none. A rotation therefore reported success
-		// while the ws path never moved — the publisher then minted packs
-		// for a path the box does not serve.
-		if err := surgicalSetWSPath(doc, wsPath); err != nil {
-			return err
-		}
-	}
-	return s.commitSingboxDoc(path, doc)
-}
+// The per-recipient credential rotator and the cover-identity rotator both
+// live in rotate.go, which is also where the reasoning about their very
+// different blast radii is written down. What used to sit here —
+// rewriteSingboxCreds, and the surgicalSetUUIDs/surgicalSetRealityKey pair it
+// called — rotated EVERY recipient and the box REALITY keypair in one
+// unnamed, unconditional action. It had no callers, and no caller could have
+// used it safely: there was no way to ask it for a targeted revocation.
 
 // commitSingboxDoc writes doc to a sibling temp file, proves sing-box
 // will load it, and only then renames it over the live config. See
 // defaultSingboxCheck for why the validation step is not optional.
-func (s *server) commitSingboxDoc(path string, doc map[string]any) error {
+//
+// It returns a rollback closure that puts the PREVIOUS bytes back. The
+// caller must invoke it — through applyReload, normally — if the reload
+// that activates the new config fails, because otherwise the box is left
+// in the one state nothing recovers from on its own: a config on disk
+// that leads the running process. Nothing looks wrong at the time (the
+// old config is still being served, the caller reports a failure, the
+// publisher records "nothing was applied"), and then the NEXT reload
+// from any unrelated cause — most plausibly the operator adding a
+// recipient — silently activates the orphaned rotation hours later. For
+// /rotate-tls that means a cover host the publisher has never recorded,
+// i.e. a relay-wide outage of the primary tier attributable to nothing.
+func (s *server) commitSingboxDoc(path string, doc map[string]any) (rollback func(), err error) {
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.MkdirAll(dirOf(path), 0o755); err != nil {
-		return err
+		return nil, err
 	}
+	// Snapshot BEFORE the rename, from the file we are about to replace.
+	// A read failure is not fatal — a box with no pre-existing config has
+	// nothing to roll back to — but it does mean the rollback is a no-op,
+	// and applyReload says so in the error it returns.
+	prev, prevErr := os.ReadFile(path)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return err
+		return nil, err
 	}
 	if s.singboxCheck != nil {
 		if err := s.singboxCheck(tmp); err != nil {
 			_ = os.Remove(tmp)
-			return err
+			return nil, err
 		}
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, err
+	}
+	if prevErr != nil {
+		return func() {}, nil
+	}
+	return func() {
+		// Same write-temp-then-rename discipline: a rollback that
+		// truncates the live file mid-write is worse than the state it
+		// is undoing. No `sing-box check` — these bytes were loadable a
+		// moment ago, and refusing to restore them on a validator hiccup
+		// would strand the box on the config we are trying to undo.
+		back := path + ".rollback"
+		if err := os.WriteFile(back, prev, 0o644); err != nil {
+			return
+		}
+		if err := os.Rename(back, path); err != nil {
+			_ = os.Remove(back)
+		}
+	}, nil
+}
+
+// applyReload activates a freshly committed config and guarantees that
+// the on-disk config never survives a failed activation.
+//
+// The pairing is the whole point. `commitSingboxDoc` renames first and
+// the reload happens second, so between them the box holds a config it
+// is not running. If the reload fails — a systemd hiccup, an OOM, a
+// kick wrapper missing on an older cloud-init — the only safe move is to
+// put the previous bytes back and try once more to reload, so that
+// whatever the running process is doing, the file it would next load is
+// the pre-operation one. Reporting a 500 over an un-rolled-back config
+// is how "the operation failed" turns into an outage nobody can date.
+//
+// The second reload is best-effort by necessity (if reload is broken,
+// reload is broken); its failure is reported alongside the first so the
+// operator sees both. Note that on this box `reload` IS the kick wrapper
+// (see defaultSingboxControl), so a failure here means the wrapper
+// itself failed and the pre-rotation config is almost certainly still
+// the one in memory.
+func (s *server) applyReload(rollback func()) error {
+	err := s.singboxControl("reload")
+	if err == nil {
+		return nil
+	}
+	if rollback == nil {
+		return fmt.Errorf("%w (the rewritten config is already on disk and will take effect on the next reload)", err)
+	}
+	rollback()
+	if err2 := s.singboxControl("reload"); err2 != nil {
+		return fmt.Errorf("%w (config restored to its pre-operation contents, but reloading that failed too: %v — sing-box may be down)", err, err2)
+	}
+	return fmt.Errorf("%w (no change was applied: the config was restored to its pre-operation contents)", err)
 }
 
 // vlessFamilyInbounds returns every inbound whose `type` is "vless" —
@@ -846,89 +1095,6 @@ func vlessFamilyInbounds(doc map[string]any) []map[string]any {
 		}
 	}
 	return out
-}
-
-// surgicalSetUUIDs assigns a fresh UUID to every recipient across every
-// vless-family inbound, keeping one recipient's rows consistent with
-// each other (vless-in and ws-in must agree — the client uses one UUID
-// for both routes).
-//
-// Rows carrying no `name` are the pre-FRP-14 / bootstrap shape; each
-// gets its own UUID keyed by an inbound-scoped synthetic name so two
-// unnamed rows never collapse onto one credential.
-func surgicalSetUUIDs(doc map[string]any, mintUUID func() (string, error)) (map[string]string, []string, error) {
-	ins := vlessFamilyInbounds(doc)
-	if len(ins) == 0 {
-		return nil, nil, errors.New("singbox config has no vless inbounds")
-	}
-	assigned := map[string]string{}
-	order := []string{}
-	rows := 0
-	for _, in := range ins {
-		tag, _ := in["tag"].(string)
-		users, _ := in["users"].([]any)
-		for i, raw := range users {
-			u, _ := raw.(map[string]any)
-			if u == nil {
-				continue
-			}
-			rows++
-			key, _ := u["name"].(string)
-			if key == "" {
-				key = fmt.Sprintf("\x00unnamed:%s:%d", tag, i)
-			}
-			next, ok := assigned[key]
-			if !ok {
-				var err error
-				next, err = mintUUID()
-				if err != nil {
-					return nil, nil, err
-				}
-				assigned[key] = next
-				order = append(order, key)
-			}
-			u["uuid"] = next
-		}
-	}
-	if rows == 0 {
-		return nil, nil, errors.New("singbox config vless inbounds have no users")
-	}
-	return assigned, order, nil
-}
-
-// surgicalSetRealityKey sets the REALITY private key on every inbound
-// that has a reality block, not just inbounds[0] — the index is a
-// function of provisioning order, and if hy2-in ever lands first the
-// old code failed the whole rotation with "no reality block".
-//
-// The caller supplies the key already encoded the way sing-box wants
-// it. That is base64 (raw URL alphabet), the format
-// `sing-box generate reality-keypair` emits and cloud-init injects;
-// common/tls/reality_server.go decodes it with base64.RawURLEncoding
-// and FATALs "invalid private key" on anything else.
-func surgicalSetRealityKey(doc map[string]any, key string) error {
-	found := false
-	inbounds, _ := doc["inbounds"].([]any)
-	for _, raw := range inbounds {
-		in, _ := raw.(map[string]any)
-		if in == nil {
-			continue
-		}
-		tlsBlock, _ := in["tls"].(map[string]any)
-		if tlsBlock == nil {
-			continue
-		}
-		reality, _ := tlsBlock["reality"].(map[string]any)
-		if reality == nil {
-			continue
-		}
-		reality["private_key"] = key
-		found = true
-	}
-	if !found {
-		return errors.New("singbox config has no inbound with a reality block")
-	}
-	return nil
 }
 
 // surgicalSetSNI moves the box's whole cover identity atomically.

@@ -37,6 +37,8 @@ import type {
     OperatorSummary,
     PublisherCustodyStatus,
     RecipientSummary,
+    RotateCredentialsSummary,
+    RotateTlsSummary,
 } from './wizardCommands';
 import {
     Card,
@@ -107,6 +109,42 @@ function looksUnreachable(msg: string): boolean {
     );
 }
 
+/** What to call a recipient on screen. The operator's alias if they set
+ *  one, otherwise the box-side name, otherwise the row id — never an
+ *  empty string, because every rotation confirm interpolates it into a
+ *  sentence that has to name the one person being affected. */
+function recipientLabel(r: RecipientSummary): string {
+    return r.display_name || r.name || `#${r.id}`;
+}
+
+/** Anything the relay or the cloud plane said during a rotation, shown
+ *  verbatim.
+ *
+ *  Verbatim is the whole point. These strings are the only channel by
+ *  which a box reports a half-applied change — a config that reloaded
+ *  but a firewall rule that did not, a field an older mgmt binary could
+ *  not set — and paraphrasing them into a friendly summary is how a
+ *  partial rotation gets mistaken for a clean one. */
+function RotationWarnings({
+    t,
+    warnings,
+}: {
+    t: (k: string) => string;
+    warnings: string[];
+}) {
+    if (!warnings.length) return null;
+    return (
+        <div style={{ display: 'grid', gap: 4 }}>
+            <div style={LABEL}>{t('pub.rotate.warnings')}</div>
+            {warnings.map((w, i) => (
+                <div key={i} style={{ ...MONO, color: 'var(--red)' }}>
+                    {w}
+                </div>
+            ))}
+        </div>
+    );
+}
+
 interface ConfirmRevoke {
     recipient: RecipientSummary;
 }
@@ -168,6 +206,25 @@ export default function PublisherRecipientsPage({
      *  anyone already holding a shared pack — see onBuildShared. */
     const [confirmBuild, setConfirmBuild] = useState(false);
     const [artifactBusy, setArtifactBusy] = useState<string | null>(null);
+
+    // Wave 3 Step 7 — the two rotations, kept apart all the way down to
+    // their state. Per-recipient re-keying affects ONE person and lives
+    // on that person's row; moving the relay's disguise kills every file
+    // ever handed out and lives in the danger zone. Nothing here offers
+    // to do both at once.
+    const [confirmRotateCreds, setConfirmRotateCreds] =
+        useState<RecipientSummary | null>(null);
+    const [rotateCredsBusy, setRotateCredsBusy] = useState(false);
+    const [rotateCredsError, setRotateCredsError] = useState<string | null>(null);
+    const [rotateCredsDone, setRotateCredsDone] =
+        useState<RotateCredentialsSummary | null>(null);
+
+    const [confirmRotateTls, setConfirmRotateTls] = useState(false);
+    const [rotateTlsBusy, setRotateTlsBusy] = useState(false);
+    const [rotateTlsError, setRotateTlsError] = useState<string | null>(null);
+    const [rotateTlsDone, setRotateTlsDone] = useState<RotateTlsSummary | null>(
+        null,
+    );
 
     // Sync
     const [syncing, setSyncing] = useState(false);
@@ -264,6 +321,15 @@ export default function PublisherRecipientsPage({
 
     const title = operator ? relayTitle(operator) : `#${operatorId}`;
 
+    /** How many people are holding a working file from this relay. The
+     *  relay-level rotation confirm needs it to say "N people" instead
+     *  of "everyone", which is what turns an abstract warning into a
+     *  decision the operator can actually weigh. */
+    const liveRecipientCount = useMemo(
+        () => recipients.filter((r) => r.revoked_at_unix === 0).length,
+        [recipients],
+    );
+
     const commitRename = useCallback(async () => {
         try {
             await Wizard.setOperatorNickname(operatorId, draftName.trim());
@@ -298,6 +364,14 @@ export default function PublisherRecipientsPage({
                     setIpDraft(detected?.ip ?? '');
                     setIpRepair({ retry: () => runMgmt(fn, setErr) });
                     setErr(t('pub.helper_ip.stale'));
+                } else if (code === 'E_RELAY_TOO_OLD') {
+                    // Not the device, not the network, and NOT retryable:
+                    // the relay's management service is pinned at build
+                    // time and only a new release of Daal moves it. The
+                    // raw tail rides along under the explanation because
+                    // it names which half was refused — that is the bit a
+                    // maintainer needs and the bit a user can forward.
+                    setErr(`${t('pub.rotate.too_old')}\n\n${String(e)}`);
                 } else {
                     setErr(String(e));
                 }
@@ -529,6 +603,54 @@ export default function PublisherRecipientsPage({
         }
     }, [confirmRemove, operatorId, reloadArtifacts]);
 
+    // ---- Wave 3 Step 7: rotations ---------------------------------------
+
+    /** Re-key ONE recipient. The relay issues them a fresh credential
+     *  across every inbound and cancels the old one; the roster row and
+     *  their `.sbpx` are rebuilt in the same call.
+     *
+     *  Deliberately NOT the same control as "Change disguise" below.
+     *  This is a targeted revocation — one person's file dies and
+     *  everyone else is untouched — and the relay used to conflate it
+     *  with re-keying the whole box, which would have taken every
+     *  recipient down at once from a per-row button. */
+    const onRotateCredsConfirm = useCallback(async () => {
+        if (!confirmRotateCreds) return;
+        const target = confirmRotateCreds;
+        setRotateCredsBusy(true);
+        // Boxed because runMgmt's callback returns void; a bare `let`
+        // assigned inside it narrows to null for the compiler.
+        const out: { v: RotateCredentialsSummary | null } = { v: null };
+        const ok = await runMgmt(async () => {
+            out.v = await Wizard.rotateCredentials(operatorId, target.name);
+        }, setRotateCredsError);
+        setRotateCredsBusy(false);
+        if (ok && out.v) {
+            setConfirmRotateCreds(null);
+            setRotateCredsDone(out.v);
+            await Promise.all([reloadRecipients(), reloadArtifacts()]);
+        }
+    }, [confirmRotateCreds, operatorId, reloadArtifacts, reloadRecipients, runMgmt]);
+
+    /** Move the relay's cover hostname. Nobody's key changes — but every
+     *  file already handed out pins the old hostname, so all of them die
+     *  at once. Step 8 (remote pack replacement) does not exist, so the
+     *  result panel has to send the user back up this page to rebuild
+     *  and hand-deliver each file. */
+    const onRotateTlsConfirm = useCallback(async () => {
+        setRotateTlsBusy(true);
+        const out: { v: RotateTlsSummary | null } = { v: null };
+        const ok = await runMgmt(async () => {
+            out.v = await Wizard.rotateTls(operatorId);
+        }, setRotateTlsError);
+        setRotateTlsBusy(false);
+        if (ok && out.v) {
+            setConfirmRotateTls(false);
+            setRotateTlsDone(out.v);
+            await Promise.all([reloadOperator(), reloadArtifacts()]);
+        }
+    }, [operatorId, reloadArtifacts, reloadOperator, runMgmt]);
+
     // The Sync button was dead in the shipped build: it passed pin: ''
     // and validate_pin rejected it before the call ever left the app.
     // Dropping the parameter is what fixes it.
@@ -703,7 +825,17 @@ export default function PublisherRecipientsPage({
                 )}
 
                 {error && (
-                    <div style={{ color: 'var(--red)', fontSize: 12 }}>
+                    /* pre-line: the E_RELAY_TOO_OLD path deliberately
+                       renders an explanation and the relay's own words
+                       as two paragraphs. */
+                    <div
+                        style={{
+                            color: 'var(--red)',
+                            fontSize: 12,
+                            whiteSpace: 'pre-line',
+                            lineHeight: 1.5,
+                        }}
+                    >
                         {error}
                         {looksUnreachable(error) && (
                             <div
@@ -1039,10 +1171,33 @@ export default function PublisherRecipientsPage({
                                                 flexWrap: 'wrap',
                                             }}
                                         >
+                                            {/* Re-key this one person.
+                                                It belongs on their row
+                                                because that is its whole
+                                                blast radius — one file
+                                                dies, nobody else notices.
+                                                The relay-wide rotation
+                                                lives in the danger zone
+                                                and is never offered from
+                                                here. */}
+                                            {!revoked && (
+                                                <Button
+                                                    variant="secondary"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setConfirmRotateCreds(r);
+                                                        setRotateCredsError(null);
+                                                    }}
+                                                    disabled={rotateCredsBusy}
+                                                >
+                                                    {t('pub.recipients.rotate')}
+                                                </Button>
+                                            )}
                                             {!revoked && (
                                                 <Button
                                                     variant="danger"
-                                                    onClick={() => {
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
                                                         setConfirmRevoke({
                                                             recipient: r,
                                                         });
@@ -1058,7 +1213,8 @@ export default function PublisherRecipientsPage({
                                             {revoked && (
                                                 <Button
                                                     variant="secondary"
-                                                    onClick={() => {
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
                                                         setConfirmRemove({
                                                             recipient: r,
                                                         });
@@ -1094,6 +1250,30 @@ export default function PublisherRecipientsPage({
                                 disabled={dangerBusy}
                             >
                                 {t('pub.danger.recovery.action')}
+                            </Button>
+                        }
+                    />
+                    {/* Wave 3 Step 7 (L2). It is in the danger zone and
+                        not next to the per-recipient re-key because the
+                        two are not neighbours in consequence: this one
+                        invalidates every pack ever distributed, and with
+                        Step 8 unbuilt there is no redistribution path to
+                        soften it. The copy says so rather than implying
+                        a self-healing that does not exist. */}
+                    <ListRow
+                        title={t('pub.danger.rotate_tls.title')}
+                        subtitle={t('pub.danger.rotate_tls.body')}
+                        trailing={
+                            <Button
+                                variant="danger"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setRotateTlsError(null);
+                                    setConfirmRotateTls(true);
+                                }}
+                                disabled={dangerBusy || rotateTlsBusy}
+                            >
+                                {t('pub.danger.rotate_tls.action')}
                             </Button>
                         }
                     />
@@ -1374,6 +1554,314 @@ export default function PublisherRecipientsPage({
                                 {removeError}
                             </div>
                         )}
+                    </div>
+                </Sheet>
+            )}
+
+            {/* ---- Wave 3 Step 7: per-recipient re-key ---- */}
+
+            {confirmRotateCreds && (
+                <Sheet
+                    title={t('pub.recipients.rotate.title').replace(
+                        '{name}',
+                        recipientLabel(confirmRotateCreds),
+                    )}
+                    onClose={() => {
+                        if (!rotateCredsBusy) setConfirmRotateCreds(null);
+                    }}
+                    width={520}
+                    footer={
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                            <Button
+                                variant="ghost"
+                                onClick={() => setConfirmRotateCreds(null)}
+                                disabled={rotateCredsBusy}
+                            >
+                                {t('common.cancel')}
+                            </Button>
+                            <Button
+                                variant="danger"
+                                onClick={() => void onRotateCredsConfirm()}
+                                disabled={rotateCredsBusy}
+                            >
+                                {rotateCredsBusy
+                                    ? t('pub.recipients.rotating')
+                                    : t('pub.recipients.rotate.confirm').replace(
+                                          '{name}',
+                                          recipientLabel(confirmRotateCreds),
+                                      )}
+                            </Button>
+                        </span>
+                    }
+                >
+                    <div style={{ display: 'grid', gap: 10 }}>
+                        {/* The one sentence that has to land: this hits
+                            exactly one person. The relay-wide rotation is
+                            a different button in a different section. */}
+                        <div
+                            style={{
+                                fontSize: 13,
+                                color: 'var(--fg)',
+                                lineHeight: 1.55,
+                            }}
+                        >
+                            {t('pub.recipients.rotate.body').replace(
+                                /\{name\}/g,
+                                recipientLabel(confirmRotateCreds),
+                            )}
+                        </div>
+                        <div style={MONO}>
+                            {confirmRotateCreds.address_str}
+                        </div>
+                        {rotateCredsError && (
+                            <div
+                                style={{
+                                    color: 'var(--red)',
+                                    fontSize: 12,
+                                    whiteSpace: 'pre-line',
+                                    lineHeight: 1.5,
+                                }}
+                            >
+                                {rotateCredsError}
+                            </div>
+                        )}
+                    </div>
+                </Sheet>
+            )}
+
+            {rotateCredsDone && (
+                <Sheet
+                    title={t('pub.recipients.rotate.done.title').replace(
+                        '{name}',
+                        rotateCredsDone.display_name || rotateCredsDone.name,
+                    )}
+                    onClose={() => setRotateCredsDone(null)}
+                    width={520}
+                    footer={
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                            <Button
+                                variant="ghost"
+                                onClick={() => setRotateCredsDone(null)}
+                            >
+                                {t('common.close')}
+                            </Button>
+                            {/* The rotation is only half the job — the
+                                other half is getting the file into their
+                                hands, and nothing does that for them. */}
+                            {rotateCredsDone.sbpx_path && (
+                                <Button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        void onResendSbpx(
+                                            rotateCredsDone.sbpx_path,
+                                            rotateCredsDone.display_name ||
+                                                rotateCredsDone.name,
+                                        );
+                                    }}
+                                    disabled={artifactBusy !== null}
+                                >
+                                    {t('pub.recipients.rotate.done.send')}
+                                </Button>
+                            )}
+                        </span>
+                    }
+                >
+                    <div style={{ display: 'grid', gap: 10 }}>
+                        {/* The relay is supposed to touch this one
+                            recipient. If it reports that it replaced its
+                            own identity too, the blast radius silently
+                            became the whole roster — so that supersedes
+                            the ordinary "one person needs a new file"
+                            result rather than sitting below it. */}
+                        {rotateCredsDone.box_keys_rotated ? (
+                            <div
+                                style={{
+                                    fontSize: 13,
+                                    color: 'var(--red)',
+                                    lineHeight: 1.55,
+                                }}
+                            >
+                                {t('pub.recipients.rotate.done.box_keys').replace(
+                                    /\{name\}/g,
+                                    rotateCredsDone.display_name ||
+                                        rotateCredsDone.name,
+                                )}
+                            </div>
+                        ) : (
+                            <div
+                                style={{
+                                    fontSize: 13,
+                                    color: 'var(--fg)',
+                                    lineHeight: 1.55,
+                                }}
+                            >
+                                {t('pub.recipients.rotate.done.body').replace(
+                                    /\{name\}/g,
+                                    rotateCredsDone.display_name ||
+                                        rotateCredsDone.name,
+                                )}
+                            </div>
+                        )}
+                        {/* No inbound list means nothing confirmed the
+                            old key is gone everywhere. "We don't know"
+                            and "all of them" must not look alike. */}
+                        {rotateCredsDone.updated_inbounds.length === 0 && (
+                            <div style={{ color: 'var(--red)', fontSize: 12, lineHeight: 1.5 }}>
+                                {t('pub.recipients.rotate.done.unverified')}
+                            </div>
+                        )}
+                        {/* An empty path is NOT "nothing happened": the
+                            relay already moved, so their old file is dead
+                            either way. Say that, and point at Rebuild. */}
+                        {!rotateCredsDone.sbpx_path && (
+                            <div style={{ color: 'var(--red)', fontSize: 12, lineHeight: 1.5 }}>
+                                {t('pub.recipients.rotate.done.nofile').replace(
+                                    /\{name\}/g,
+                                    rotateCredsDone.display_name ||
+                                        rotateCredsDone.name,
+                                )}
+                            </div>
+                        )}
+                        <RotationWarnings t={t} warnings={rotateCredsDone.warnings} />
+                    </div>
+                </Sheet>
+            )}
+
+            {/* ---- Wave 3 Step 7: relay-level TLS rotation ---- */}
+
+            {confirmRotateTls && (
+                <Sheet
+                    title={t('pub.danger.rotate_tls.confirm.title').replace(
+                        '{relay}',
+                        title,
+                    )}
+                    onClose={() => {
+                        if (!rotateTlsBusy) setConfirmRotateTls(false);
+                    }}
+                    width={520}
+                    footer={
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                            <Button
+                                variant="ghost"
+                                onClick={() => setConfirmRotateTls(false)}
+                                disabled={rotateTlsBusy}
+                            >
+                                {t('common.cancel')}
+                            </Button>
+                            <Button
+                                variant="danger"
+                                onClick={() => void onRotateTlsConfirm()}
+                                disabled={rotateTlsBusy}
+                            >
+                                {rotateTlsBusy
+                                    ? t('pub.danger.rotate_tls.working')
+                                    : t('pub.danger.rotate_tls.confirm.action')}
+                            </Button>
+                        </span>
+                    }
+                >
+                    <div style={{ display: 'grid', gap: 10 }}>
+                        <div
+                            style={{
+                                fontSize: 13,
+                                color: 'var(--fg)',
+                                lineHeight: 1.55,
+                            }}
+                        >
+                            {t('pub.danger.rotate_tls.confirm.body')}
+                        </div>
+                        {/* Put a number on it. "Every file stops working"
+                            is abstract until it says how many people that
+                            is, and the roster already knows. */}
+                        <div style={{ fontSize: 13, color: 'var(--red)', lineHeight: 1.55 }}>
+                            {liveRecipientCount === 0
+                                ? t('pub.danger.rotate_tls.confirm.count_none')
+                                : t('pub.danger.rotate_tls.confirm.count').replace(
+                                      '{count}',
+                                      String(liveRecipientCount),
+                                  )}
+                        </div>
+                        {rotateTlsError && (
+                            <div
+                                style={{
+                                    color: 'var(--red)',
+                                    fontSize: 12,
+                                    whiteSpace: 'pre-line',
+                                    lineHeight: 1.5,
+                                }}
+                            >
+                                {rotateTlsError}
+                            </div>
+                        )}
+                    </div>
+                </Sheet>
+            )}
+
+            {rotateTlsDone && (
+                <Sheet
+                    title={t('pub.danger.rotate_tls.done.title')}
+                    onClose={() => setRotateTlsDone(null)}
+                    width={520}
+                    footer={
+                        <Button
+                            variant="ghost"
+                            onClick={() => setRotateTlsDone(null)}
+                        >
+                            {t('common.close')}
+                        </Button>
+                    }
+                >
+                    <div style={{ display: 'grid', gap: 10 }}>
+                        {/* Name the new host — it is what the packs built
+                            from here on will carry, so the operator has to
+                            see it. But when the relay would not ECHO what
+                            it applied, that name is what was REQUESTED and
+                            not what was checked, and the caveat rides with
+                            it rather than replacing it. Showing only the
+                            name would present an unverified value as fact;
+                            showing only the caveat would hide the value
+                            the packs actually use. */}
+                        {rotateTlsDone.cover_sni && (
+                            <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                                {t('pub.danger.rotate_tls.done.now').replace(
+                                    '{sni}',
+                                    rotateTlsDone.cover_sni,
+                                )}
+                            </div>
+                        )}
+                        {rotateTlsDone.cover_sni_unknown && (
+                            <div style={{ color: 'var(--red)', fontSize: 12, lineHeight: 1.5 }}>
+                                {t('pub.danger.rotate_tls.done.unknown')}
+                            </div>
+                        )}
+                        {rotateTlsDone.previous_cover_sni && (
+                            <div style={MONO}>
+                                {t('pub.danger.rotate_tls.done.was').replace(
+                                    '{sni}',
+                                    rotateTlsDone.previous_cover_sni,
+                                )}
+                            </div>
+                        )}
+                        <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                            {t('pub.danger.rotate_tls.done.next')}
+                        </div>
+                        {/* PAST tense, not the confirm sheet's string. By
+                            the time this panel renders the files are
+                            already dead; "a file that will stop working"
+                            reads as though there is still time to act,
+                            and the count_none variant ("right now this
+                            costs you nothing") is worse still as the
+                            outcome of an operation that already ran. */}
+                        <div style={{ fontSize: 13, color: 'var(--red)', lineHeight: 1.55 }}>
+                            {rotateTlsDone.live_recipients === 0 &&
+                            !rotateTlsDone.shared_pack_stale
+                                ? t('pub.danger.rotate_tls.done.count_none')
+                                : t('pub.danger.rotate_tls.done.count').replace(
+                                      '{count}',
+                                      String(rotateTlsDone.live_recipients),
+                                  )}
+                        </div>
+                        <RotationWarnings t={t} warnings={rotateTlsDone.warnings} />
                     </div>
                 </Sheet>
             )}
