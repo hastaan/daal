@@ -672,12 +672,21 @@ function CellRowView({
                                 }}
                             >
                                 {r.family}
+                                {r.familyMaturity === 'unsupported' &&
+                                    ` · ${t('network.family.unsupported')}`}
                                 {isActive && ` · ${t('network.connected')}`}
-                                {r.proven && typeof r.healthPct === 'number'
+                                {/* Presence, not truthiness: a missing
+                                    healthPct means "never measured" and
+                                    must not print as 0%. */}
+                                {typeof r.healthPct === 'number'
                                     ? ` · ${r.healthPct}%`
-                                    : ` · ${t('network.untested')}`}
-                                {r.inCooldown && ` · ${t('network.cooled')}`}
-                                {r.budgetExhausted && ` · ${t('network.budget_full')}`}
+                                    : ` · ${t('network.unmeasured')}`}
+                                {/* `=== true` on purpose: undefined here
+                                    means the path manager has not looked
+                                    at this route, which is not the same
+                                    as "not cooled" — so we claim neither. */}
+                                {r.inCooldown === true && ` · ${t('network.cooled')}`}
+                                {r.budgetExhausted === true && ` · ${t('network.budget_full')}`}
                             </div>
                         </div>
                         <Button
@@ -729,18 +738,42 @@ function FamilyChipView({
     chip: FamilyChip;
 }) {
     const cooled = chip.cooledCount > 0;
-    const exp = chip.experimental;
+    // Three grades now reach this chip, not one boolean:
+    //   unsupported — this build cannot dial the family at all
+    //   experimental — dialable, unproven, never soaked. NOT "gated":
+    //     the 3A experimental filter (pathmanager/family_filter.go) has
+    //     no production caller — nothing in core/abi ever invokes
+    //     ExperimentalFilter / RankWithExperimentalGate — so the
+    //     Settings toggle records a preference the selector does not
+    //     read. The chip text must not promise a gate that isn't wired.
+    //   stable / other — no badge
+    // The old code only knew "experimental", derived from a mirror that
+    // omitted the five families the Go table wrongly graded Stable, so
+    // tuic / shadowsocks / tor-bridge / wireguard / amneziawg rendered
+    // as ordinary supported families.
+    const unsupported = chip.maturity === 'unsupported';
+    const exp = chip.maturity === 'experimental';
     const bg = cooled
         ? 'rgba(200,85,61,0.10)'
+        : unsupported
+        ? 'rgba(140,140,150,0.12)'
         : exp
         ? 'rgba(193,158,80,0.10)'
         : 'var(--surface)';
     const border = cooled
         ? '1px solid rgba(200,85,61,0.40)'
+        : unsupported
+        ? '1px dashed var(--line)'
         : exp
         ? '1px solid rgba(193,158,80,0.40)'
         : '1px solid var(--line-soft)';
-    const fg = cooled ? 'var(--red)' : exp ? 'var(--gold-warm)' : 'var(--fg)';
+    const fg = cooled
+        ? 'var(--red)'
+        : unsupported
+        ? 'var(--muted)'
+        : exp
+        ? 'var(--gold-warm)'
+        : 'var(--fg)';
     return (
         <span
             title={
@@ -748,6 +781,10 @@ function FamilyChipView({
                     ? `${chip.family} · ${t('network.cooled')}${
                           chip.lastErrorTag ? ` · ${chip.lastErrorTag}` : ''
                       }`
+                    : unsupported
+                    ? `${chip.family} · ${t('network.family.unsupported.help')}`
+                    : exp
+                    ? `${chip.family} · ${t('network.family.experimental.help')}`
                     : chip.family
             }
             style={{
@@ -765,11 +802,14 @@ function FamilyChipView({
             }}
         >
             {cooled && '🚨 '}
+            {unsupported && !cooled && '⛔ '}
             {exp && !cooled && '⚡ '}
             {chip.family} · {chip.count}
-            {chip.proven && typeof chip.healthPct === 'number'
+            {unsupported
+                ? ` · ${t('network.family.unsupported')}`
+                : typeof chip.healthPct === 'number'
                 ? ` · ${chip.healthPct}%`
-                : ` · ${t('network.untested')}`}
+                : ` · ${t('network.unmeasured')}`}
         </span>
     );
 }

@@ -67,7 +67,7 @@ type Output struct {
 // and Apply are pure functions the caller invokes after the race.
 func Decide(in Input) Output {
 	if in.Phase == "" {
-		in.Phase = PhaseV15
+		in.Phase = CurrentPhase
 	}
 
 	// 1. Project. Drop rows that fail to parse (defensive — the

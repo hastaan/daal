@@ -13,8 +13,15 @@ import (
 	"time"
 
 	"daal/bundle-go/bundle"
+	"daal/bundle-go/phase"
 	bundlepublisher "daal/bundle-go/publisher"
 )
+
+// testPhase is the phase these CLI invocations pass to
+// `bind-and-sign`. It is the SHIPPED phase, not a pinned literal: the
+// whole class of bug this constant exists to prevent is a test that
+// proves the CLI works at a phase production does not use.
+var testPhase = string(phase.Current)
 
 // helper: provision a synthetic OperatorRecord on disk plus the
 // matching ed25519 keypair (pub-bytes match rec.PublisherPubKey).
@@ -64,7 +71,7 @@ func TestBindAndSign_HappyPath(t *testing.T) {
 		"--operator-record", recPath,
 		"--priv-key", privPath,
 		"--output", out,
-		"--phase", "V1.5",
+		"--phase", testPhase,
 		"--now-unix", "1746115200",
 	}, &stdout, &stderr)
 	if rc != 0 {
@@ -106,7 +113,7 @@ func TestBindAndSign_DeterministicWithNowUnix(t *testing.T) {
 			"--operator-record", recPath,
 			"--priv-key", privPath,
 			"--output", out,
-			"--phase", "V1.5",
+			"--phase", testPhase,
 			"--now-unix", "1746115200",
 		}
 	}
@@ -146,7 +153,7 @@ func TestBindAndSign_PrivKeyFromStdin(t *testing.T) {
 		"--operator-record", recPath,
 		"--priv-key", "-",
 		"--output", out,
-		"--phase", "V1.5",
+		"--phase", testPhase,
 		"--now-unix", "1746115200",
 	}, &stdout, &stderr)
 	if rc != 0 {
@@ -177,7 +184,7 @@ func TestBindAndSign_SubkeyCertFlag(t *testing.T) {
 		"--priv-key", sub.SubkeyPrivPath,
 		"--subkey-cert", sub.SubkeyCertPath,
 		"--output", out,
-		"--phase", "V1.5",
+		"--phase", testPhase,
 	}, &stdout, &stderr)
 	if rc != 0 {
 		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
@@ -216,7 +223,7 @@ func TestBindAndSign_RejectsBadPrivKey(t *testing.T) {
 		"--operator-record", recPath,
 		"--priv-key", bad,
 		"--output", out,
-		"--phase", "V1.5",
+		"--phase", testPhase,
 	}, &stdout, &stderr)
 	if rc != 1 {
 		t.Fatalf("rc=%d want 1 stderr=%s", rc, stderr.String())
@@ -234,7 +241,7 @@ func TestQRFountain_StreamsFrames(t *testing.T) {
 	if rc := Run([]string{
 		"bind-and-sign",
 		"--operator-record", recPath, "--priv-key", privPath,
-		"--output", out, "--phase", "V1.5", "--now-unix", "1746115200",
+		"--output", out, "--phase", testPhase, "--now-unix", "1746115200",
 	}, &stdout, &stderr); rc != 0 {
 		t.Fatalf("bind-and-sign rc=%d %s", rc, stderr.String())
 	}

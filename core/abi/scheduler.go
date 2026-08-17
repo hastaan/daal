@@ -3,7 +3,9 @@ package abi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"daal/core/bootstrap"
@@ -103,9 +105,16 @@ func StartScheduler(ctx context.Context, every time.Duration) error {
 	return nil
 }
 
+// tickInFlight serializes SchedulerTick against itself. See the
+// reentrancy note on SchedulerTick for why dropping (not queueing) is
+// the right backpressure here.
+var tickInFlight atomic.Bool
+
 // SchedulerTick is an exported helper that ensures the scheduler exists
 // and runs one Tick. Used by the soak driver's `--mode in-engine` flag
-// to drive the scheduler from outside the engine on simulated time.
+// to drive the scheduler from outside the engine on simulated time, by
+// the desktop shell's 60 s thread (src-tauri/src/lib.rs), and — since
+// this step — by the Android VpnService's tick pump.
 //
 // Phase 2G: every Tick also evaluates the auto-promotion detector.
 // If the verdict says promote AND the user hasn't manually overridden
@@ -113,11 +122,55 @@ func StartScheduler(ctx context.Context, every time.Duration) error {
 // into lifeline-strict via the auto-path. The flip happens BEFORE the
 // scheduler's own Tick so the new mode applies to any refreshes the
 // tick decides to dispatch.
-func SchedulerTick(now time.Time) error {
+//
+// Reentrancy. scheduler.Tick documents itself as safe to call
+// concurrently with itself "only if the executor is" — and ours is
+// not: refreshExecutor drives refresh.Refresher / RevocationRefresher
+// and stamps secrets_kv rows with no per-kind lock, so two overlapping
+// ticks can dispatch the same subscription refresh twice and race on
+// the last-good stamp. That used to be theoretical, because desktop
+// drove exactly one 60 s thread. It is not theoretical now: Android
+// drives a tick from the VpnService pump AND at tunnel-up, and a
+// single tick that fans out N subscription refreshes at 15 s apiece
+// can easily outlive the next 60 s deadline.
+//
+// We drop the overlapping tick rather than queue it. Every action
+// scheduler.Plan emits is cadence-gated on a persisted "last good"
+// stamp, so a dropped tick costs at most one cadence period, whereas
+// queueing would let a slow refresh accumulate an unbounded backlog
+// that then fires as a burst. A drop returns nil, not an error: it is
+// normal backpressure and a host pump must not log a failure for it.
+func SchedulerTick(now time.Time) (err error) {
+	// Check readiness BEFORE EvaluateAutoPromotion, which reaches the
+	// core through mustCore() and *panics* when the engine is not
+	// initialized. On desktop that could only happen through a coding
+	// error; on mobile the pump is owned by a service whose lifecycle
+	// is not the engine's, so "ticked after Shutdown" is an ordinary
+	// race. A panic crossing the JNI/gomobile boundary takes the whole
+	// app process with it, so it must not be reachable from here.
+	if loadedCore() == nil {
+		return errors.New("abi: not initialized")
+	}
+	if !tickInFlight.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer tickInFlight.Store(false)
+
+	// Same reasoning one level deeper: the readiness check above closes
+	// the common case but not the Shutdown-during-tick window, and the
+	// executor below runs live network code. A background pump that can
+	// kill the app is worse than a tick that fails, so convert any
+	// panic into an error the host can log and move on from.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("abi: scheduler tick panicked: %v", r)
+		}
+	}()
+
 	_ = EvaluateAutoPromotion(now)
-	s, err := ensureScheduler()
-	if err != nil {
-		return err
+	s, sErr := ensureScheduler()
+	if sErr != nil {
+		return sErr
 	}
 	s.Tick(now)
 	return nil

@@ -2216,10 +2216,15 @@ pub fn rotate_execute(
 
     // Re-sign the RelayPack using the same flow as FRP-4b's
     // sign_relaypack — it reads the publisher key from custody.
+    //
+    // The phase MUST be the same constant the initial sign used. It
+    // was literal "V1.5" here while the wizard's first sign was
+    // "V1.6", so every rotation silently downgraded the pack's phase
+    // and re-closed RP004 / RP021 on the recipient.
     let bind = sign_relaypack(
         ctx,
         operator_id,
-        "V1.5",
+        crate::phase::RELAYPACK_PHASE,
         &ctx.staging_dir,
         "Family Relay Publisher",
         on_progress,
@@ -4311,7 +4316,7 @@ mod tests {
         let res = sign_relaypack(
             &ctx,
             id,
-            "V1.5",
+            crate::phase::RELAYPACK_PHASE,
             &out_dir,
             "Family Relay",
             &mut on_prog,
@@ -4389,7 +4394,7 @@ mod tests {
         provision_run(&ctx_, id, "", &mut on_prog).unwrap();
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let _ = sign_relaypack(&ctx_, id, "V1.5", &out_dir, "", &mut on_prog).unwrap();
+        let _ = sign_relaypack(&ctx_, id, crate::phase::RELAYPACK_PHASE, &out_dir, "", &mut on_prog).unwrap();
 
         let captured = mock_ref.last_priv_key.lock().unwrap().clone();
         assert!(captured.is_some(), "mock did not receive priv-key");
@@ -4468,7 +4473,7 @@ mod tests {
 
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let _ = sign_relaypack(&ctx, id, "V1.5", &out_dir, "", &mut on_prog).unwrap();
+        let _ = sign_relaypack(&ctx, id, crate::phase::RELAYPACK_PHASE, &out_dir, "", &mut on_prog).unwrap();
 
         let captured = mock_ref.last_priv_key.lock().unwrap().clone().unwrap();
         assert_eq!(captured, sub_priv, "active sub-key must be sent to signer");
@@ -4510,7 +4515,7 @@ mod tests {
         provision_run(&ctx, id, "", &mut on_prog).unwrap();
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let _ = sign_relaypack(&ctx, id, "V1.5", &out_dir, "", &mut on_prog).unwrap();
+        let _ = sign_relaypack(&ctx, id, crate::phase::RELAYPACK_PHASE, &out_dir, "", &mut on_prog).unwrap();
 
         // qr_render reads from staging_dir/<id>.sbp; create a
         // synthetic file so the existence check passes.
@@ -4577,8 +4582,12 @@ mod tests {
             clock: ctx.clock.clone(),
             custody: ctx.custody.clone(),
         };
-        let exp = r#"{"pick":{"exposure_mode":"direct_vps"},"failures":[],"phase":"V1.5"}"#;
-        let r = rotate_recommend(&ctx2, id, RotateRecommendInput::Explanation(exp.into())).unwrap();
+        // A selector Explanation as the shipped phase emits it.
+        let exp = format!(
+            r#"{{"pick":{{"exposure_mode":"direct_vps"}},"failures":[],"phase":"{}"}}"#,
+            crate::phase::RELAYPACK_PHASE
+        );
+        let r = rotate_recommend(&ctx2, id, RotateRecommendInput::Explanation(exp)).unwrap();
         assert_eq!(r.level, "L3");
         assert_eq!(r.confidence, "high");
         assert_eq!(r.est_wallclock, "~10s");
@@ -4684,6 +4693,68 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert!(history[0].active);
         assert!(events.iter().any(|e| e.step == "rotate_provider_done"));
+    }
+
+    /// The gate this whole step exists to close, on the Rust side.
+    ///
+    /// `sign_relaypack` is called from two places: the wizard's build
+    /// flow (initial sign) and `rotate_execute` (re-sign). They used
+    /// to pass different literals — "V1.6" from the TS wizard, "V1.5"
+    /// hard-coded here — so rotating a relay silently downgraded the
+    /// pack's phase and re-shut RP004 / RP021 on every recipient. Both
+    /// calls succeed either way, so only the recorded `--phase`
+    /// transcript can catch it.
+    #[test]
+    fn rotate_resign_uses_the_same_phase_as_the_initial_sign() {
+        let pricing = Pricing {
+            provider: "hetzner".into(),
+            region: "fsn1".into(),
+            server_type: "cx22".into(),
+            hourly_eur: 0.005,
+            monthly_eur: 3.85,
+            included_traffic_tb_per_month: None,
+            overage_eur_per_gb: None,
+        };
+        let mock = Arc::new(MockRunner::new(pricing).with_provision_record(full_record_json()));
+        let (ctx, dir, mock) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        // 1. Initial sign, exactly as the wizard's build flow does it.
+        let out_dir = dir.path().join("out");
+        sign_relaypack(
+            &ctx,
+            id,
+            crate::phase::RELAYPACK_PHASE,
+            &out_dir,
+            "Family Relay Publisher",
+            &mut on_prog,
+        )
+        .unwrap();
+
+        // 2. Rotate, which re-signs through its own call site.
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                new_floating_ip_id: Some("fip-new".into()),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap();
+
+        let phases = mock.bind_phases.lock().unwrap().clone();
+        assert_eq!(phases.len(), 2, "expected an initial sign and a re-sign");
+        assert_eq!(
+            phases[0], phases[1],
+            "rotation re-signed at a different phase than the initial sign"
+        );
+        // And both are the one canonical value, not merely equal to
+        // each other at some third phase.
+        assert_eq!(phases[1], crate::phase::RELAYPACK_PHASE);
     }
 
     #[test]

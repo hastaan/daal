@@ -674,7 +674,7 @@ func TestRecommendThenRotate_E2E(t *testing.T) {
 		ActiveCooldowns: []ExplCooldown{
 			{Tag: "public_ip:198.51.100.10", Reason: "tcp_reset"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	rec := newRecord("fip-old")
 	r := FromExplanation(exp, rec)

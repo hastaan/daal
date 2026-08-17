@@ -224,14 +224,14 @@ func DiagnosticsExplain() (string, error) {
 	skipped, _ := json.Marshal(w.SkippedFamilies)
 	_ = c.store.PutDiagnosticsExplain(w.Bucket, w.WhyChoseRoute, string(skipped))
 
-	exp := selection.NewExplanation("diagnostics-"+w.Bucket, selection.PhaseV15)
+	exp := selection.NewExplanation("diagnostics-"+w.Bucket, selection.CurrentPhase)
 	exp.Reason = w.WhyChoseRoute
 	if w.ActiveRoute != "" {
 		if row, err := c.store.GetRoute(w.ActiveRoute); err == nil {
 			out := selection.Decide(selection.Input{
 				Routes:     []routestore.RouteRow{row},
 				Mode:       selection.ModeNormal,
-				Phase:      selection.PhaseV15,
+				Phase:      selection.CurrentPhase,
 				Now:        time.Now().UTC(),
 				DecisionID: "diagnostics-" + w.Bucket,
 			})

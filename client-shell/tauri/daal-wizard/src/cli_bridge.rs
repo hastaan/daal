@@ -1781,6 +1781,11 @@ pub struct MockRunner {
     /// FRP-7.5: recorded sub-key cert path supplied to
     /// bind-and-sign, if the wizard selected the active sub-key.
     pub last_subkey_cert_path: Mutex<Option<PathBuf>>,
+    /// Every `--phase` value bind-and-sign was called with, in call
+    /// order. The initial sign and a later rotation's re-sign must
+    /// agree; they did not, and only a recorded transcript catches
+    /// that (both calls succeed either way).
+    pub bind_phases: Mutex<Vec<String>>,
     /// FRP-7: optional canned rotation recommendation.
     pub rotation_recommendation: Mutex<Option<RotationRecommendation>>,
     /// FRP-7: recorded reprovision calls.
@@ -1903,6 +1908,7 @@ impl MockRunner {
             bind_result: Mutex::new(None),
             last_priv_key: Mutex::new(None),
             last_subkey_cert_path: Mutex::new(None),
+            bind_phases: Mutex::new(Vec::new()),
             rotation_recommendation: Mutex::new(None),
             reprovision_calls: Mutex::new(Vec::new()),
             assign_fip_calls: Mutex::new(Vec::new()),
@@ -2211,6 +2217,10 @@ impl CliRunner for MockRunner {
         *self.last_priv_key.lock().unwrap() = Some(priv_key.to_vec());
         *self.last_subkey_cert_path.lock().unwrap() =
             args.subkey_cert_path.map(|p| p.to_path_buf());
+        self.bind_phases
+            .lock()
+            .unwrap()
+            .push(args.phase.to_string());
         on_progress(ProgressEvent {
             step: "bind_done".into(),
             message: "signed".into(),

@@ -11,6 +11,7 @@ import type {
     BurnpressureVerdict,
     CellRow,
     FamilyChip,
+    FamilyMaturity,
     PublisherTreeRow,
     RouteDisplayRow,
     SkippedFamilyRow,
@@ -18,20 +19,56 @@ import type {
     SubscriptionRow,
 } from './D2Contract';
 
-// FRP-3D + 3A taxonomy mirror (kept here so the UI doesn't have to
-// fetch it). Keep in sync with core/routestore/family.go.
-const EXPERIMENTAL_FAMILIES = new Set<string>([
-    'webtunnel',
-    'snowflake',
-    'masque',
-    'psiphon',
-    'conjure',
-    'transport_module',
-    'lifeline_relay',
-]);
+// Taxonomy mirror of core/routestore/family.go's `familyMaturity` map.
+//
+// This mirrors the WHOLE map, not just one bucket of it. The previous
+// version listed only the experimental families and answered a boolean
+// question ("is this experimental?"). That made every family missing
+// from the list — including tuic, shadowsocks, tor-bridge, wireguard
+// and amneziawg, all of which the Go table then wrongly graded Stable —
+// render as a fully-supported family with no badge whatsoever. Three of
+// those five cannot be expressed in the config the engine builds at all.
+//
+// A family absent from this map is `unhandled`, matching
+// routestore.FamilyMaturity's default for an unknown key. Adding a
+// family here without adding it there (or vice versa) is a drift bug;
+// the Go side is the source of truth.
+const FAMILY_MATURITY: Record<string, FamilyMaturity> = {
+    // The four field-proven tiers: mintable by the publisher AND
+    // dialable by the shipped engine.
+    'vless-reality': 'stable',
+    naive: 'stable',
+    'websocket-tls': 'stable',
+    hysteria2: 'stable',
 
-function isExperimental(family: string): boolean {
-    return EXPERIMENTAL_FAMILIES.has(family);
+    // Dialable by the shipped sing-box and paste-importable, but no
+    // publisher path mints them and neither has been soaked.
+    tuic: 'experimental',
+    shadowsocks: 'experimental',
+
+    // THIS BUILD CANNOT DIAL THESE. tor-bridge emits a "tor-bridge"
+    // outbound type sing-box does not have; wireguard needs an
+    // `endpoints[]` slot core/engine/config.go does not have;
+    // amneziawg emits "amnezia-wg" → "unknown outbound type".
+    'tor-bridge': 'unsupported',
+    wireguard: 'unsupported',
+    amneziawg: 'unsupported',
+
+    // 3A–3G families, reserved at experimental.
+    webtunnel: 'experimental',
+    snowflake: 'experimental',
+    masque: 'experimental',
+    psiphon: 'experimental',
+    conjure: 'experimental',
+    transport_module: 'experimental',
+    lifeline_relay: 'experimental',
+
+    // V0 forward-compat slot.
+    other: 'unhandled',
+};
+
+function maturityOf(family: string): FamilyMaturity {
+    return FAMILY_MATURITY[family] ?? 'unhandled';
 }
 
 // Naming-only: pick a sourceKind from the raw RouteDisplayRow. Real
@@ -63,24 +100,35 @@ function chipFor(
     routes: RouteDisplayRow[],
     skipped: Map<string, SkippedFamilyRow>,
 ): FamilyChip {
-    // Only proven routes contribute a meaningful health number; averaging
-    // in the placeholder 50 of untested routes would fabricate a score.
-    const provenRoutes = routes.filter(
-        (r) => r.proven && typeof r.healthPct === 'number',
-    );
-    const totalPct = provenRoutes.reduce((acc, r) => acc + (r.healthPct ?? 0), 0);
-    const cooledCount = routes.filter((r) => r.inCooldown).length;
+    // Only measured routes contribute a health number. Averaging in a
+    // placeholder — or emitting 0 when there is nothing to average —
+    // would fabricate a score, so an all-unmeasured family gets
+    // `healthPct: undefined` and the chip renders "not measured yet".
+    const measured = routes.filter((r) => typeof r.healthPct === 'number');
+    const totalPct = measured.reduce((acc, r) => acc + (r.healthPct ?? 0), 0);
+    // `inCooldown` is itself measured-or-unknown: `undefined` must not
+    // be counted as "not cooled", but it cannot be counted as cooled
+    // either, so it simply does not contribute to the count.
+    const cooledCount = routes.filter((r) => r.inCooldown === true).length;
     const skip = skipped.get(family);
     return {
         family,
         count: routes.length,
         healthPct:
-            provenRoutes.length === 0
-                ? 0
-                : Math.round(totalPct / provenRoutes.length),
-        proven: provenRoutes.length > 0,
+            measured.length === 0
+                ? undefined
+                : Math.round(totalPct / measured.length),
+        proven: routes.some((r) => r.proven === true),
         cooledCount: skip ? Math.max(cooledCount, 1) : cooledCount,
-        experimental: isExperimental(family),
+        // The engine's per-route `family_maturity` wins when present.
+        // The table below is a MIRROR of the Go family table, and the
+        // Go table describes the family in principle; the engine can
+        // narrow it to what this artifact can actually dial (`naive`
+        // without libcronet.so → unsupported). Preferring the mirror
+        // would let a chip say "stable" over routes the row beneath it
+        // labels unsupported.
+        maturity: routes.find((r) => r.familyMaturity)?.familyMaturity
+            ?? maturityOf(family),
         lastErrorTag: skip?.reasonTag,
     };
 }
@@ -213,13 +261,31 @@ export function buildPublisherTree(
 const BURNPRESSURE_DISTINCT_MIN = 3;
 const BURNPRESSURE_STEP_MIN = 3;
 
-/** Pure-derivation burnpressure verdict from a skippedFamilies list. */
+/** The verdict for "we could not run the detector".
+ *
+ *  Not the same value as "the detector ran and found no pressure":
+ *  `evaluated:false` tells the UI to say nothing rather than to imply
+ *  the network is fine. */
+export const BURNPRESSURE_NOT_EVALUATED: BurnpressureVerdict = {
+    evaluated: false,
+    promote: false,
+    distinctFamilies: 0,
+    highestLadderStep: 0,
+};
+
+/** Pure-derivation burnpressure verdict from a skippedFamilies list.
+ *
+ *  Pass `null` when the engine could not supply a snapshot at all — the
+ *  detector's inputs are then unknown and an empty-list-shaped answer
+ *  would be indistinguishable from a genuinely quiet network. */
 export function deriveBurnpressureVerdict(
-    skipped: SkippedFamilyRow[],
+    skipped: SkippedFamilyRow[] | null,
 ): BurnpressureVerdict {
+    if (skipped === null) return BURNPRESSURE_NOT_EVALUATED;
     const highest = skipped.reduce((m, s) => Math.max(m, s.ladderStep), 0);
     const distinct = skipped.length;
     return {
+        evaluated: true,
         promote:
             distinct >= BURNPRESSURE_DISTINCT_MIN && highest >= BURNPRESSURE_STEP_MIN,
         distinctFamilies: distinct,

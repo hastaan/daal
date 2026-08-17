@@ -19,6 +19,7 @@ package org.daal.desktop.platform
  *   engine_register_protect_callback() ← DaalCoreBridge.registerProtectCallback
  *   engine_set_route(routeId)          ← DaalCoreBridge.setRoute
  *   engine_clear_route()               ← DaalCoreBridge.clearRoute
+ *   engine_scheduler_tick()            ← DaalCoreBridge.schedulerTick
  *
  * The Phase 45 spec requires these JNI methods to be wired before the
  * first upstream dial; the VpnService respects that ordering.
@@ -40,6 +41,24 @@ object DaalCoreBridge {
   external fun registerProtectCallback(): Int
   external fun setRoute(routeId: String): Int
   external fun clearRoute(): Int
+
+  /**
+   * One `scheduler.Tick` at the engine's wall clock. Returns 0 on
+   * success, -1 if the engine is not loaded/initialized or the tick
+   * failed — never throws, so a timer pump can call it blind.
+   *
+   * This is what makes anything *scheduled* happen: subscription
+   * refresh at each row's ProfileUpdateMin, revocation refresh,
+   * bootstrap refresh, the hour-rollover budget reset, and the Phase 2G
+   * burn-pressure auto-promotion into lifeline-strict. The engine gates
+   * every one of those on a persisted "last good" stamp, so calling
+   * this more often than needed is cheap and calling it late only costs
+   * lateness — which is why the pump in DaalVpnService can be inexact.
+   *
+   * MUST NOT be called from the main thread: a tick that finds work due
+   * dispatches network refreshes with 15 s timeouts inline.
+   */
+  external fun schedulerTick(): Int
 
   /**
    * Host-side protect implementation. Stored as a property so the

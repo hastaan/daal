@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"daal/bundle-go/phase"
 )
 
 // TestNewExplanation_HasNonNilSlices ensures JSON output never
@@ -29,12 +31,34 @@ func TestNewExplanation_HasNonNilSlices(t *testing.T) {
 }
 
 // TestPhaseConstants pins the 4 phase strings.
+//
+// PostV2 is spelled "PostV2", NOT "post-V2". This package used to own
+// its own `type Phase string` whose PostV2 was "post-V2" while
+// relaypackvalidate's was "PostV2"; the two were compared as strings
+// across the package boundary, so the mismatch compiled and would have
+// silently skipped a gate. Both are now aliases of one enum.
 func TestPhaseConstants(t *testing.T) {
 	got := []Phase{PhaseV15, PhaseV16, PhaseV2, PhasePostV2}
-	want := []string{"V1.5", "V1.6", "V2", "post-V2"}
+	want := []string{"V1.5", "V1.6", "V2", "PostV2"}
 	for i, p := range got {
 		if string(p) != want[i] {
 			t.Errorf("phase[%d] = %q want %q", i, p, want[i])
+		}
+	}
+}
+
+// TestPhaseIsTheCanonicalEnum proves the alias is real: these
+// constants are the same *values* as the validator's, not merely
+// strings that happen to match today. If someone re-declares
+// `type Phase string` here, this file stops compiling.
+func TestPhaseIsTheCanonicalEnum(t *testing.T) {
+	var p Phase = phase.Current
+	if p != CurrentPhase {
+		t.Errorf("CurrentPhase = %q; phase.Current = %q", CurrentPhase, phase.Current)
+	}
+	for _, c := range []Phase{PhaseV15, PhaseV16, PhaseV2, PhasePostV2} {
+		if !c.Known() {
+			t.Errorf("%q is not a member of the canonical enum", c)
 		}
 	}
 }

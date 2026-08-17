@@ -50,7 +50,7 @@ func TestCorpusReplay(t *testing.T) {
 				want := want
 				t.Run(want.Phase, func(t *testing.T) {
 					opts := ValidateOpts{Phase: Phase(want.Phase)}
-					if want.Phase == "PostV2" {
+					if opts.Phase == PhasePostV2 {
 						opts.AllowedModifierKinds = map[string]bool{
 							"client_desync": true,
 							"tls_fragment":  true,

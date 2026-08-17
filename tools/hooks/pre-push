@@ -83,7 +83,7 @@ step "tsc + vite build"         bash -c 'cd client-ui && npm run build --silent'
 # Static gates. Each exits non-zero on a real finding; check-hardcoded-strings
 # now also exits non-zero when its own dependency (ripgrep) is missing, rather
 # than printing OK and scanning nothing.
-for g in tools/check-hardcoded-strings.sh tools/check-diagnostics-redaction.sh tools/check-tokens.sh; do
+for g in tools/check-hardcoded-strings.sh tools/check-diagnostics-redaction.sh tools/check-tokens.sh tools/check-phase.sh; do
   [[ -x "$g" ]] && step "$(basename "$g")" "./$g"
 done
 [[ -f tools/check-plumbing.mjs ]] && step "check-plumbing.mjs" node tools/check-plumbing.mjs

@@ -31,6 +31,19 @@ const (
 	// handler.
 	MaturityUnhandled Maturity = iota
 
+	// MaturityUnsupported means: this build physically cannot dial
+	// the family. The value exists so the UI can say "this build
+	// cannot dial it" instead of the misleading "experimental",
+	// which invites the user to flip the experimental gate and
+	// watch every route of that family fail identically.
+	//
+	// The distinction from MaturityUnhandled is provenance, not
+	// behaviour: `Unhandled` is the forward-compat slot for a
+	// family value this build has never heard of; `Unsupported` is
+	// a family this build knows by name and has verified it cannot
+	// carry. Both are unselectable.
+	MaturityUnsupported
+
 	// MaturityExperimental is the entry maturity for every new
 	// V3+ family. Routes are filtered out of selection unless
 	// the per-engine experimental gate is enabled. Auto-promotion
@@ -55,6 +68,8 @@ func (m Maturity) String() string {
 	switch m {
 	case MaturityUnhandled:
 		return "unhandled"
+	case MaturityUnsupported:
+		return "unsupported"
 	case MaturityExperimental:
 		return "experimental"
 	case MaturityPromotionCandidate:
@@ -78,16 +93,51 @@ func (m Maturity) String() string {
 //  3. A widening of the bundle parser's validTransport list.
 //  4. A fresh soak run.
 var familyMaturity = map[string]Maturity{
-	// V1 baseline (1B). All stable.
+	// The four field-proven tiers. Each has a publisher-side client
+	// outbound renderer (`publisher/deploy/relaypack/client_outbound.go`
+	// has a `case` for exactly these four), a relay inbound, a port
+	// assignment, and has carried real traffic on-device.
 	"vless-reality": MaturityStable,
 	"naive":         MaturityStable,
 	"websocket-tls": MaturityStable,
 	"hysteria2":     MaturityStable,
-	"tuic":          MaturityStable,
-	"shadowsocks":   MaturityStable,
-	"tor-bridge":    MaturityStable,
-	"wireguard":     MaturityStable,
-	"amneziawg":     MaturityStable,
+
+	// Demoted from Stable in the Wave-1 honesty pass. The shipped
+	// sing-box 1.13.12 registers outbounds for both (verified against
+	// the strict parser), and both are paste-importable via
+	// `bundle/go/uri`, so a route CAN be dialled — but no publisher
+	// path mints them (no `client_outbound.go` renderer, no relay
+	// inbound) and neither has ever been soaked. "Stable" asserted a
+	// track record that does not exist; Experimental states the truth.
+	//
+	// NOTE what this does and does not change. It changes the badge the
+	// UI draws and the posture abi.go:368 selects. It does NOT stop the
+	// selector picking these routes: the 3A experimental filter
+	// (pathmanager/family_filter.go ExperimentalFilter /
+	// RankWithExperimentalGate) has no production caller — only tests —
+	// so `experimental_families_enabled` is a stored preference nothing
+	// consults at rank time. Wiring that is selection work; do not
+	// assume it happened.
+	"tuic":        MaturityExperimental,
+	"shadowsocks": MaturityExperimental,
+
+	// Cannot be dialled by THIS build. Verified against the shipped
+	// engine, not inferred:
+	//   - tor-bridge: `bundle/go/uri/tor_bridge.go:44` emits
+	//     `"type":"tor-bridge"`, which is not a sing-box outbound type
+	//     at all (sing-box has `tor`). The strict parser rejects it.
+	//   - wireguard:  sing-box models WireGuard as an `endpoints[]`
+	//     adapter and `core/engine/config.go`'s SingBoxConfig has no
+	//     Endpoints field, so the config we build cannot express it.
+	//   - amneziawg:  `bundle/go/uri/wireguard.go:87` emits
+	//     `"amnezia-wg"` → "unknown outbound type" from the shipped
+	//     engine.
+	// Marking these Experimental would tell the user "turn on the
+	// experimental gate and it might work"; it will not. They are
+	// unselectable and the UI says so.
+	"tor-bridge": MaturityUnsupported,
+	"wireguard":  MaturityUnsupported,
+	"amneziawg":  MaturityUnsupported,
 
 	// 3A — first V3 family.
 	"webtunnel": MaturityExperimental,
@@ -162,9 +212,19 @@ func IsExperimentalFamily(family string) bool {
 	return FamilyMaturity(family) == MaturityExperimental
 }
 
+// IsUnsupportedFamily reports whether this build knows the family
+// by name and has verified it cannot dial it. Distinct from
+// "unknown family" (MaturityUnhandled) so the UI can render a
+// definite "this build cannot dial it" rather than a hedged
+// "experimental" or a silent omission.
+func IsUnsupportedFamily(family string) bool {
+	return FamilyMaturity(family) == MaturityUnsupported
+}
+
 // IsSelectableFamily reports whether a family is even
 // in-principle selectable by the path manager, ignoring the
-// experimental gate. False for the V0 `other` slot and for any
+// experimental gate. False for the V0 `other` slot, for families
+// this build cannot dial (MaturityUnsupported), and for any
 // family the bundle parser has accepted but the engine doesn't
 // know about.
 func IsSelectableFamily(family string) bool {

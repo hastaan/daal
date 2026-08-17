@@ -4,13 +4,48 @@ import "testing"
 
 // Phase 3A.
 
+// Only the four field-proven tiers are Stable. The Wave-1 honesty
+// pass demoted the other five: a family is Stable only if the
+// publisher can mint it AND the shipped engine can dial it.
 func TestFamilyMaturity_V1BaselineIsStable(t *testing.T) {
 	for _, fam := range []string{
-		"vless-reality", "naive", "websocket-tls", "hysteria2", "tuic",
-		"shadowsocks", "tor-bridge", "wireguard", "amneziawg",
+		"vless-reality", "naive", "websocket-tls", "hysteria2",
 	} {
 		if FamilyMaturity(fam) != MaturityStable {
 			t.Errorf("expected %s to be stable, got %s", fam, FamilyMaturity(fam))
+		}
+	}
+}
+
+// Dialable by the shipped engine, never minted by a publisher and
+// never soaked. Experimental, therefore behind the gate.
+func TestFamilyMaturity_DialableButUnprovenAreExperimental(t *testing.T) {
+	for _, fam := range []string{"tuic", "shadowsocks"} {
+		if FamilyMaturity(fam) != MaturityExperimental {
+			t.Errorf("expected %s to be experimental, got %s", fam, FamilyMaturity(fam))
+		}
+		if !IsSelectableFamily(fam) {
+			t.Errorf("%s must stay in-principle selectable behind the gate", fam)
+		}
+	}
+}
+
+// Families this build physically cannot dial. They must NOT read as
+// "experimental" — that would invite the user to enable the gate and
+// watch every route fail identically — and must not be selectable.
+func TestFamilyMaturity_UndialableAreUnsupported(t *testing.T) {
+	for _, fam := range []string{"tor-bridge", "wireguard", "amneziawg"} {
+		if FamilyMaturity(fam) != MaturityUnsupported {
+			t.Errorf("expected %s to be unsupported, got %s", fam, FamilyMaturity(fam))
+		}
+		if !IsUnsupportedFamily(fam) {
+			t.Errorf("IsUnsupportedFamily(%q) must be true", fam)
+		}
+		if IsExperimentalFamily(fam) {
+			t.Errorf("%s must not read as experimental", fam)
+		}
+		if IsSelectableFamily(fam) {
+			t.Errorf("%s must not be selectable — this build cannot dial it", fam)
 		}
 	}
 }
@@ -61,6 +96,10 @@ func TestIsSelectableFamily(t *testing.T) {
 		"webtunnel":        true,  // experimental — selectable in principle
 		"snowflake":        true,  // experimental
 		"transport_module": true,  // experimental
+		"tuic":             true,  // experimental (demoted, still dialable)
+		"wireguard":        false, // unsupported — no Endpoints slot in the config
+		"amneziawg":        false, // unsupported — "unknown outbound type"
+		"tor-bridge":       false, // unsupported — "tor-bridge" is not a sing-box type
 		"other":            false, // unhandled
 		"future-family-X":  false, // unknown
 	}
@@ -81,9 +120,11 @@ func TestKnownFamilies_IsStableSorted(t *testing.T) {
 }
 
 func TestKnownFamilies_ContainsTaxonomyClosedList(t *testing.T) {
-	// 3A's locked closed list size = 9 stable + 7 experimental + 1 other = 17.
-	// If the count drifts, that is a roadmap-level change and the test
-	// must be updated alongside the spec.
+	// Locked closed-list size = 4 stable + 9 experimental
+	// + 3 unsupported + 1 other = 17. The Wave-1 honesty pass
+	// re-graded six families but added and removed none, so the size
+	// is unchanged. If the COUNT drifts, that is a roadmap-level
+	// change and the test must be updated alongside the spec.
 	want := 17
 	if got := len(KnownFamilies()); got != want {
 		t.Fatalf("taxonomy size drifted: got %d, want %d (update specs/transport-families-v1.md if intentional)", got, want)
@@ -93,6 +134,7 @@ func TestKnownFamilies_ContainsTaxonomyClosedList(t *testing.T) {
 func TestMaturityString(t *testing.T) {
 	cases := map[Maturity]string{
 		MaturityUnhandled:          "unhandled",
+		MaturityUnsupported:        "unsupported",
 		MaturityExperimental:       "experimental",
 		MaturityPromotionCandidate: "promotion-candidate",
 		MaturityStable:             "stable",

@@ -12,11 +12,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"daal/bundle-go/bundle"
 	"daal/bundle-go/importer"
+	"daal/bundle-go/phase"
+	relaypack "daal/bundle-go/relaypackvalidate"
 )
 
 // fakeState captures the inputs SaveImport receives so tests can
@@ -253,57 +256,191 @@ func TestImport_NoRelayPack_LegacyPath(t *testing.T) {
 	}
 }
 
-// TestImport_RelayPackV15_RejectsCDNFronted — RP004. Bundle with
-// cdn_fronted candidate at V1.5 is rejected; Verdict.Reason carries
-// the lint code.
-func TestImport_RelayPackV15_RejectsCDNFronted(t *testing.T) {
+// cdnRoute rewrites route rA into a cdn_fronted candidate. `att` is
+// merged into the same family_specific_config blob under
+// `_cdn_attestation`; pass nil to omit the attestation entirely.
+func cdnRoute(t *testing.T, m *bundle.Manifest, att *bundle.CDNAttestation) {
+	t.Helper()
+	entry := bundle.RelayPackEntry{
+		ExposureMode:     "cdn_fronted",
+		FamilyClass:      "vps-native",
+		ProbingRiskClass: "low",
+		PublicRiskTags:   []string{"cdn:cloudflare", "public_domain:test.example"},
+		OriginRiskTags:   []string{"origin_ip:10.0.0.1"},
+	}
+	blob := map[string]any{"_relaypack": entry}
+	if att != nil {
+		blob["_cdn_attestation"] = att
+	}
+	fc, err := json.Marshal(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Routes[0].FamilySpecificConfig = fc
+}
+
+// passingAttestation is a §11.7-conformant hardening attestation:
+// origin locked to a Cloudflare Origin CA chain, Authenticated Origin
+// Pulls on, an origin firewall rule ID, and no DNS-only A/AAAA record
+// leaking the origin IP.
+func passingAttestation() *bundle.CDNAttestation {
+	return &bundle.CDNAttestation{
+		OriginCAFingerprint: strings.Repeat("ab", 32),
+		AOPEnabled:          true,
+		FirewallID:          "fw-importer-test",
+		DNSOnlyPresent:      false,
+	}
+}
+
+// ---------------------------------------------------------------
+// PHASE GATE: the two rules FRP-8 lifted, proven through the REAL
+// importer entry points rather than a hand-built validator call.
+// ---------------------------------------------------------------
+
+// TestImport_CDNFronted_ImportsAtCurrentPhase — RP004 is GONE.
+//
+// The recipient import path used to validate at V1.5, where RP004
+// blanket-rejected every cdn_fronted candidate — including packs the
+// publisher wizard had just legitimately signed at V1.6. At
+// CurrentPhase the candidate imports and lands in State with its
+// exposure_mode intact.
+func TestImport_CDNFronted_ImportsAtCurrentPhase(t *testing.T) {
 	body := makeBundle(t, func(m *bundle.Manifest) {
 		addRelayPack(t, m)
-		// Override route rA's exposure_mode to cdn_fronted.
-		entry := bundle.RelayPackEntry{
-			ExposureMode:     "cdn_fronted",
-			FamilyClass:      "vps-native",
-			ProbingRiskClass: "low",
-			PublicRiskTags:   []string{"cdn:cloudflare", "public_domain:test.example"},
-			OriginRiskTags:   []string{"origin_ip:10.0.0.1"},
-		}
-		fc, _ := json.Marshal(map[string]any{"_relaypack": entry})
-		m.Routes[0].FamilySpecificConfig = fc
+		cdnRoute(t, m, passingAttestation())
 	})
 	st := newFakeState()
 	now := time.Now().UTC()
 
-	// AcceptTrustPrompt invokes apply() which runs the validator.
+	v, err := importer.AcceptTrustPrompt("trust", body, st, wordlists(), now)
+	if err != nil {
+		t.Fatalf("cdn_fronted must import at %s; got err=%v verdict=%+v",
+			relaypack.CurrentPhase, err, v)
+	}
+	if v.Kind != importer.VerdictImported {
+		t.Fatalf("expected VerdictImported; got %v (reason %q)", v.Kind, v.Reason)
+	}
+	if len(st.saved) != 1 {
+		t.Fatalf("expected one SaveImport; got %d", len(st.saved))
+	}
+	var modes []string
+	for _, ri := range st.saved[0] {
+		if ri.RelayPack == nil {
+			t.Fatalf("route %s lost its RelayPackMeta", ri.RouteID)
+		}
+		modes = append(modes, ri.RelayPack.ExposureMode)
+	}
+	if len(modes) != 2 || modes[0] != "cdn_fronted" || modes[1] != "direct_vps" {
+		t.Errorf("exposure modes = %v; want [cdn_fronted direct_vps]", modes)
+	}
+}
+
+// ---------------------------------------------------------------
+// SAFETY: opening the gate must NOT mean opening the door. RP004 was
+// a blanket rejection; it has been replaced by a real check, not by
+// nothing. These three prove the replacement fires.
+// ---------------------------------------------------------------
+
+// TestImport_CDNFrontedWithoutAttestation_RejectedRP022 — the exact
+// bundle that used to be rejected as RP004 is STILL rejected, now for
+// the substantive reason: it carries no §11.7 hardening attestation,
+// so nothing establishes that the origin is locked to the CDN.
+func TestImport_CDNFrontedWithoutAttestation_RejectedRP022(t *testing.T) {
+	body := makeBundle(t, func(m *bundle.Manifest) {
+		addRelayPack(t, m)
+		cdnRoute(t, m, nil)
+	})
+	st := newFakeState()
+	now := time.Now().UTC()
+
 	v, err := importer.AcceptTrustPrompt("trust", body, st, wordlists(), now)
 	if err == nil {
-		t.Fatalf("expected validator error at V1.5; got nil (verdict=%+v)", v)
+		t.Fatalf("unattested cdn_fronted must be rejected; got nil (verdict=%+v)", v)
 	}
 	if v.Kind != importer.VerdictRejected {
 		t.Fatalf("expected VerdictRejected; got %v", v.Kind)
 	}
-	if v.Reason != "relaypack_RP004" {
-		t.Errorf("Reason = %q want relaypack_RP004", v.Reason)
+	if v.Reason != "relaypack_RP022" {
+		t.Errorf("Reason = %q want relaypack_RP022", v.Reason)
 	}
 	if len(st.saved) != 0 {
 		t.Errorf("nothing must be saved on validator-reject; got %d save calls", len(st.saved))
 	}
 }
 
-// TestImportBytes_RelayPackV15RejectsBeforeTrustPrompt verifies that
-// invalid first-seen RelayPacks do not reach the trust-prompt surface.
-// FRP-6 relies on the initial import verdict carrying relaypack_RPxxx.
-func TestImportBytes_RelayPackV15RejectsBeforeTrustPrompt(t *testing.T) {
+// TestImport_CDNFrontedWithWeakAttestation_RejectedRP022 — a present
+// but unsound attestation is not a pass. Each mandatory §11.7
+// assertion is knocked out in turn; every one must still reject.
+func TestImport_CDNFrontedWithWeakAttestation_RejectedRP022(t *testing.T) {
+	cases := []struct {
+		name    string
+		breakIt func(*bundle.CDNAttestation)
+	}{
+		{"no origin CA fingerprint", func(a *bundle.CDNAttestation) { a.OriginCAFingerprint = "" }},
+		{"authenticated origin pulls off", func(a *bundle.CDNAttestation) { a.AOPEnabled = false }},
+		{"no origin firewall rule", func(a *bundle.CDNAttestation) { a.FirewallID = "" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			att := passingAttestation()
+			tc.breakIt(att)
+			body := makeBundle(t, func(m *bundle.Manifest) {
+				addRelayPack(t, m)
+				cdnRoute(t, m, att)
+			})
+			st := newFakeState()
+			v, err := importer.AcceptTrustPrompt("trust", body, st, wordlists(), time.Now().UTC())
+			if err == nil || v.Kind != importer.VerdictRejected {
+				t.Fatalf("expected VerdictRejected; got verdict=%+v err=%v", v, err)
+			}
+			if v.Reason != "relaypack_RP022" {
+				t.Errorf("Reason = %q want relaypack_RP022", v.Reason)
+			}
+			if len(st.saved) != 0 {
+				t.Errorf("nothing must be saved; got %d save calls", len(st.saved))
+			}
+		})
+	}
+}
+
+// TestImport_CDNFrontedWithDNSOnlyRecord_RejectedRP023 — the posture
+// failure that matters most in the field: a non-proxied A/AAAA record
+// on the fronted subdomain publishes the origin IP, which defeats the
+// entire point of fronting. RP023 rejects it even though the rest of
+// the attestation is perfect.
+func TestImport_CDNFrontedWithDNSOnlyRecord_RejectedRP023(t *testing.T) {
+	att := passingAttestation()
+	att.DNSOnlyPresent = true
 	body := makeBundle(t, func(m *bundle.Manifest) {
 		addRelayPack(t, m)
-		entry := bundle.RelayPackEntry{
-			ExposureMode:     "cdn_fronted",
-			FamilyClass:      "vps-native",
-			ProbingRiskClass: "low",
-			PublicRiskTags:   []string{"cdn:cloudflare", "public_domain:test.example"},
-			OriginRiskTags:   []string{"origin_ip:10.0.0.1"},
-		}
-		fc, _ := json.Marshal(map[string]any{"_relaypack": entry})
-		m.Routes[0].FamilySpecificConfig = fc
+		cdnRoute(t, m, att)
+	})
+	st := newFakeState()
+
+	v, err := importer.AcceptTrustPrompt("trust", body, st, wordlists(), time.Now().UTC())
+	if err == nil || v.Kind != importer.VerdictRejected {
+		t.Fatalf("expected VerdictRejected; got verdict=%+v err=%v", v, err)
+	}
+	if v.Reason != "relaypack_RP023" {
+		t.Errorf("Reason = %q want relaypack_RP023", v.Reason)
+	}
+	if len(st.saved) != 0 {
+		t.Errorf("nothing must be saved; got %d save calls", len(st.saved))
+	}
+}
+
+// TestImportBytes_RelayPackRejectsBeforeTrustPrompt verifies that
+// invalid first-seen RelayPacks do not reach the trust-prompt surface.
+// FRP-6 relies on the initial import verdict carrying relaypack_RPxxx.
+//
+// The fixture is an unattested cdn_fronted candidate: at V1.5 this was
+// RP004 (blanket), at CurrentPhase it is RP022 (attestation missing).
+// The point of the test is unchanged — the user is never asked to
+// trust a publisher whose pack the validator has already refused.
+func TestImportBytes_RelayPackRejectsBeforeTrustPrompt(t *testing.T) {
+	body := makeBundle(t, func(m *bundle.Manifest) {
+		addRelayPack(t, m)
+		cdnRoute(t, m, nil)
 	})
 	st := newFakeState()
 	now := time.Now().UTC()
@@ -312,8 +449,8 @@ func TestImportBytes_RelayPackV15RejectsBeforeTrustPrompt(t *testing.T) {
 	if err == nil || v.Kind != importer.VerdictRejected {
 		t.Fatalf("expected initial ImportBytes rejection; got verdict=%+v err=%v", v, err)
 	}
-	if v.Reason != "relaypack_RP004" {
-		t.Errorf("Reason = %q want relaypack_RP004", v.Reason)
+	if v.Reason != "relaypack_RP022" {
+		t.Errorf("Reason = %q want relaypack_RP022", v.Reason)
 	}
 	if st.saveCalls != 0 || len(st.saved) != 0 {
 		t.Errorf("invalid first-seen RelayPack must not be saved; saveCalls=%d saved=%d", st.saveCalls, len(st.saved))
@@ -383,22 +520,59 @@ func TestImport_RelayPackV15_RejectsModifiers(t *testing.T) {
 	}
 }
 
-// TestImport_RelayPackV15_RejectsFreshnessURL — RP021. Bundle with
-// non-empty freshness_url at V1.5 is rejected.
-func TestImport_RelayPackV15_RejectsFreshnessURL(t *testing.T) {
+// TestImport_FreshnessURL_ImportsAtCurrentPhase — RP021 is GONE.
+//
+// A non-empty freshness_url used to be rejected outright on the QR
+// import path, which meant remote pack replacement could never be
+// bootstrapped: the only door that accepted it (ApplyVerifiedRefresh)
+// refuses unpinned publishers, and the pack that would pin them was
+// rejected on the way in. The URL now survives the import and is
+// denormalised onto every candidate, which is what the freshness
+// fetcher reads.
+func TestImport_FreshnessURL_ImportsAtCurrentPhase(t *testing.T) {
+	const url = "https://frp.example/relaypack.json"
 	body := makeBundle(t, func(m *bundle.Manifest) {
 		addRelayPack(t, m)
-		m.RelayPack.FreshnessURL = "https://frp.example/relaypack.json"
+		m.RelayPack.FreshnessURL = url
 	})
 	st := newFakeState()
 	now := time.Now().UTC()
 
 	v, err := importer.AcceptTrustPrompt("trust", body, st, wordlists(), now)
-	if err == nil || v.Kind != importer.VerdictRejected {
-		t.Fatalf("expected VerdictRejected; got verdict=%+v err=%v", v, err)
+	if err != nil {
+		t.Fatalf("freshness_url must import at %s; got err=%v verdict=%+v",
+			relaypack.CurrentPhase, err, v)
 	}
-	if v.Reason != "relaypack_RP021" {
-		t.Errorf("Reason = %q want relaypack_RP021", v.Reason)
+	if v.Kind != importer.VerdictImported {
+		t.Fatalf("expected VerdictImported; got %v (reason %q)", v.Kind, v.Reason)
+	}
+	if len(st.saved) != 1 {
+		t.Fatalf("expected one SaveImport; got %d", len(st.saved))
+	}
+	for i, ri := range st.saved[0] {
+		if ri.RelayPack == nil || ri.RelayPack.FreshnessURL != url {
+			t.Errorf("route[%d] FreshnessURL = %+v; want %q", i, ri.RelayPack, url)
+		}
+	}
+}
+
+// TestImport_PhaseIsTheCanonicalConstant — the QR import path and the
+// freshness swap path must validate at the SAME phase. They did not:
+// importer.go said V1.5, refresh_apply.go said V1.6, and a pack the
+// freshness path accepted was one the QR path would have refused.
+// Both now read relaypack.CurrentPhase, so this asserts the shared
+// value rather than either call site.
+func TestImport_PhaseIsTheCanonicalConstant(t *testing.T) {
+	if relaypack.CurrentPhase != phase.Current {
+		t.Fatalf("relaypack.CurrentPhase = %q; phase.Current = %q",
+			relaypack.CurrentPhase, phase.Current)
+	}
+	if !relaypack.CurrentPhase.Known() {
+		t.Fatalf("CurrentPhase %q is not a member of the enum", relaypack.CurrentPhase)
+	}
+	// The two gates this step opened are only open at V1.6+.
+	if relaypack.CurrentPhase == relaypack.PhaseV15 {
+		t.Fatal("CurrentPhase is V1.5: RP004 and RP021 are still shut")
 	}
 }
 

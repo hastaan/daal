@@ -533,6 +533,18 @@ export default function SettingsPage({
                                 }
                             }}
                         />
+                        {/* The subtitle deliberately says this records a
+                            preference and nothing else. The 3A gate it
+                            was written for is unwired: nothing outside
+                            pathmanager's own tests calls
+                            ExperimentalFilter / RankWithExperimentalGate,
+                            so flipping this changes no route's
+                            selectability (see core/abi/abi.go's note on
+                            experimentalFamiliesEnabled). The demotion of
+                            tuic/shadowsocks to experimental made the ⚡
+                            badge appear on routes a user can actually
+                            connect on, which is what would send them
+                            here expecting the old promise to be true. */}
                         <ToggleRow
                             title={t('settings.advanced.experimental')}
                             subtitle={t('settings.advanced.experimental.help')}

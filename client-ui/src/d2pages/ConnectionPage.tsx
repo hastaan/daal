@@ -341,6 +341,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                             ? t('conn.network.wifi')
                             : undefined
                     }
+                    pointerSource={conn?.pointerSource}
                     pointerValidDays={conn?.pointerValidDays}
                 />
 

@@ -81,18 +81,19 @@ type RouteInput struct {
 // without a manifest-level join. Per-candidate fields are read from
 // `bundle.RelayPackEntry`.
 //
-// At V1.5 the on-device importer calls
-// `relaypackvalidate.Validate(b, ValidateOpts{Phase: PhaseV15})`
+// The on-device importer calls
+// `relaypackvalidate.Validate(b, ValidateOpts{Phase: CurrentPhase})`
 // before building this struct, so callers can rely on:
-//   - ExposureMode ∈ {direct_vps}
+//   - ExposureMode ∈ {direct_vps, cdn_fronted}  (RP003 still rejects
+//     serverless_external; RP007/RP022/RP023 gate every cdn_fronted
+//     candidate on the §11.7 hardening attestation)
 //   - FamilyClass ∈ {vps-native, vps-possible, external-ecosystem}
 //   - ProbingRiskClass ∈ {low, moderate, high}
-//   - ModifiersJSON == "" (RP013 hard-rejects non-empty)
-//   - FreshnessURL == "" (RP021 hard-rejects non-empty at V1.5)
+//   - ModifiersJSON == "" (RP013 hard-rejects non-empty at V1.5/V1.6)
 //
-// FRP-8 lifts cdn_fronted at V1.6 and FreshnessURL acceptance.
-// FRP-12 lifts non-empty modifiers post-V2. The struct shape itself
-// is forward-compatible.
+// FreshnessURL may now be non-empty: FRP-8 lifted RP021 at V1.6 and
+// CurrentPhase is V1.6. FRP-12 lifts non-empty modifiers post-V2. The
+// struct shape itself is forward-compatible.
 type RelayPackMeta struct {
 	ExposureMode     string
 	FamilyClass      string
@@ -213,7 +214,7 @@ func ImportBytes(body []byte, st State, wordlists bundle.Wordlists, now time.Tim
 
 	default:
 		// First-seen publisher. UI must confirm before any persistence.
-		if verdict, err := validateRelayPackV15(parsed, fp, rendered); err != nil {
+		if verdict, err := validateRelayPackCurrent(parsed, fp, rendered); err != nil {
 			return verdict, err
 		}
 		return Verdict{
@@ -291,13 +292,18 @@ func validateRelayPack(parsed *bundle.Bundle, fp bundle.Fingerprint, rendered bu
 	return Verdict{}, nil
 }
 
-func validateRelayPackV15(parsed *bundle.Bundle, fp bundle.Fingerprint, rendered bundle.RenderedFingerprint) (Verdict, error) {
-	return validateRelayPack(parsed, fp, rendered, relaypack.PhaseV15)
+// validateRelayPackCurrent validates at the phase THIS BUILD ships
+// (relaypack.CurrentPhase). It used to be pinned to V1.5 while the
+// publisher wizard signed at V1.6 — so the primary recipient import
+// path rejected, with RP004/RP021, packs the publisher had just
+// legitimately produced. The phase now comes from one constant.
+func validateRelayPackCurrent(parsed *bundle.Bundle, fp bundle.Fingerprint, rendered bundle.RenderedFingerprint) (Verdict, error) {
+	return validateRelayPack(parsed, fp, rendered, relaypack.CurrentPhase)
 }
 
 func apply(st State, parsed *bundle.Bundle, fp bundle.Fingerprint,
 	rendered bundle.RenderedFingerprint, bucket, trustLevel string, firstSeen bool) (Verdict, error) {
-	return applyWithRelayPackPhase(st, parsed, fp, rendered, bucket, trustLevel, firstSeen, relaypack.PhaseV15)
+	return applyWithRelayPackPhase(st, parsed, fp, rendered, bucket, trustLevel, firstSeen, relaypack.CurrentPhase)
 }
 
 func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerprint,

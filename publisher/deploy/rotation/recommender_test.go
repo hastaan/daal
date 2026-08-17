@@ -5,8 +5,17 @@ import (
 	"reflect"
 	"testing"
 
+	"daal/bundle-go/phase"
 	"daal/publisher/deploy/provider"
 )
+
+// currentPhase is what the recipient selector stamps on an Explanation
+// today. The recommender never reads Explanation.Phase — it decides
+// from Pick.ExposureMode, the failure classifications, and the record
+// — so this is fixture furniture; it is spelled from the canonical
+// constant rather than as a literal so tools/check-phase.sh stays able
+// to assert that no phase literal exists outside its declaration.
+var currentPhase = string(phase.Current)
 
 // fakeRecord returns an OperatorRecord that a unit test can mutate.
 // Default has FloatingIPID set so L3 is reachable.
@@ -35,7 +44,7 @@ func TestFromExplanation_TCPResetWithPublicIP_FastPathL3(t *testing.T) {
 		ActiveCooldowns: []ExplCooldown{
 			{Tag: "public_ip:198.51.100.10", Reason: "tcp_reset"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L3 {
@@ -55,7 +64,7 @@ func TestFromExplanation_TCPResetNoFloatingIP_FallbackL4(t *testing.T) {
 		Failures: []ExplFailure{
 			{Classification: "tcp_reset", Tag: "public_ip:198.51.100.10"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(false))
 	if got.Level != L4 {
@@ -72,7 +81,7 @@ func TestFromExplanation_PublicASNCooldown_L4(t *testing.T) {
 		ActiveCooldowns: []ExplCooldown{
 			{Tag: "public_asn:24940", Reason: "tcp_reset"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L4 {
@@ -89,7 +98,7 @@ func TestFromExplanation_PublicProviderCooldown_L4(t *testing.T) {
 		ActiveCooldowns: []ExplCooldown{
 			{Tag: "public_provider:hetzner", Reason: "origin_unhealthy"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L4 {
@@ -103,7 +112,7 @@ func TestFromExplanation_ProviderSuspended_L5(t *testing.T) {
 		Failures: []ExplFailure{
 			{Classification: "provider_suspended"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L5 {
@@ -120,7 +129,7 @@ func TestFromExplanation_SNIRst_L2(t *testing.T) {
 		Failures: []ExplFailure{
 			{Classification: "sni_rst", Tag: "sni:example.com"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L2 {
@@ -137,7 +146,7 @@ func TestFromExplanation_CredentialLeak_L1Medium(t *testing.T) {
 		Failures: []ExplFailure{
 			{Classification: "credential_leak"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L1 {
@@ -152,7 +161,7 @@ func TestFromExplanation_UDPCollapsed_L6(t *testing.T) {
 	exp := Explanation{
 		Pick:           ExplPicked{ExposureMode: "direct_vps"},
 		NetworkSignals: []string{"udp_collapsed"},
-		Phase:          "V1.5",
+		Phase:          currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L6 {
@@ -164,7 +173,7 @@ func TestFromExplanation_ProtocolWhitelistMode_L6(t *testing.T) {
 	exp := Explanation{
 		Pick:           ExplPicked{ExposureMode: "direct_vps"},
 		NetworkSignals: []string{"protocol_whitelist_mode"},
-		Phase:          "V1.5",
+		Phase:          currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L6 {
@@ -179,7 +188,7 @@ func TestFromExplanation_TwoFamilyClassesBurned_L6(t *testing.T) {
 			{Tag: "family:vless-reality"},
 			{Tag: "family:hysteria2"},
 		},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L6 {
@@ -190,7 +199,7 @@ func TestFromExplanation_TwoFamilyClassesBurned_L6(t *testing.T) {
 func TestFromExplanation_CDNFrontedAtV15_L3WithReason(t *testing.T) {
 	exp := Explanation{
 		Pick:  ExplPicked{ExposureMode: "cdn_fronted"},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L3 {
@@ -204,7 +213,7 @@ func TestFromExplanation_CDNFrontedAtV15_L3WithReason(t *testing.T) {
 func TestFromExplanation_EmptyExplanation_LowConfidenceL1(t *testing.T) {
 	exp := Explanation{
 		Pick:  ExplPicked{ExposureMode: "direct_vps"},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	if got.Level != L1 {
@@ -344,7 +353,7 @@ func TestSortedLevelsStable(t *testing.T) {
 func TestOverrideListsAreDeduped(t *testing.T) {
 	exp := Explanation{
 		Pick:  ExplPicked{ExposureMode: "direct_vps"},
-		Phase: "V1.5",
+		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(true))
 	seen := map[Level]bool{}

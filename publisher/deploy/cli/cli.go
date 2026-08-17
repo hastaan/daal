@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"daal/bundle-go/fountain"
+	"daal/bundle-go/phase"
 	"daal/bundle-go/relaypackvalidate"
 	"daal/publisher/deploy/cloudflare"
 	"daal/publisher/deploy/freshness"
@@ -1262,7 +1263,7 @@ func splitCSV(s string) []string {
 
 // runBindAndSign: daal-deploy bind-and-sign --operator-record path \
 //
-//	--priv-key <path|-> --output rp.sbp [--phase V1.6] [--now-unix N]
+//	--priv-key <path|-> --output rp.sbp [--phase <phase>] [--now-unix N]
 //	[--expiry-days 30] [--publisher-name "Family Relay Publisher"]
 //	[--subkey-cert trust/subkey-cert.json] [--progress-json]
 //
@@ -1280,7 +1281,11 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	recordFile := fs.String("operator-record", "", "OperatorRecord JSON path")
 	privKeyFlag := fs.String("priv-key", "", "publisher Ed25519 private key (path | '-' for stdin)")
 	outFile := fs.String("output", "", "write signed .sbp here (default: stdout)")
-	phase := fs.String("phase", "V1.6", "validator phase (V1.5 | V1.6 | PostV2)")
+	// Default = the one canonical constant. Nothing in this file may
+	// spell a phase literal; see bundle/go/phase.
+	phaseFlag := fs.String("phase", string(relaypackvalidate.CurrentPhase),
+		fmt.Sprintf("validator phase (%s | %s | %s)",
+			relaypackvalidate.PhaseV15, relaypackvalidate.PhaseV16, relaypackvalidate.PhasePostV2))
 	nowUnix := fs.Int64("now-unix", 0, "override CreatedAt to this unix time (deterministic builds; 0 = time.Now())")
 	expiryDays := fs.Int("expiry-days", 30, "bundle validity window in days")
 	publisherName := fs.String("publisher-name", "", "human-readable publisher name (default: Family Relay Publisher)")
@@ -1328,16 +1333,12 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 
 	emitProgress(*progressJSON, stderr, "bind_validate", "running RelayPack validator", nil)
 
-	var ph relaypackvalidate.Phase
-	switch *phase {
-	case "V1.5":
-		ph = relaypackvalidate.PhaseV15
-	case "V1.6":
-		ph = relaypackvalidate.PhaseV16
-	case "PostV2":
-		ph = relaypackvalidate.PhasePostV2
-	default:
-		fmt.Fprintf(stderr, "unknown --phase %q (want V1.5 | V1.6 | PostV2)\n", *phase)
+	// phase.Parse is the single parser: it maps "" to the shipped
+	// phase and rejects anything it does not recognise, so a typo in
+	// --phase can never silently select a different gate set.
+	ph, err := phase.Parse(*phaseFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
 		return 2
 	}
 

@@ -227,10 +227,18 @@ func TestImportRelayPackBundle_ReimportIdempotent(t *testing.T) {
 	}
 }
 
-// TestImportRelayPackBundle_V15_RejectsCDNFronted verifies the
-// validator's RP004 fires through the importer at V1.5 and the
-// importer surfaces the lint code in Verdict.Reason.
-func TestImportRelayPackBundle_V15_RejectsCDNFronted(t *testing.T) {
+// TestImportRelayPackBundle_CDNFrontedImportsAtCurrentPhase is the
+// end-to-end proof that the phase gate is open on the path that
+// actually matters: a REAL signed corpus bundle, through the real
+// importer, into the real SQLite route store.
+//
+// `cdn-fronted-minimal.sbp` is the corpus vector whose expected
+// outcomes are "V1.5 → RP004, V1.6 → pass". The recipient used to
+// validate at V1.5, so this bundle — which the publisher CLI signs at
+// V1.6 by default — was unimportable. It now imports, and the
+// cdn_fronted candidate reaches the store with its exposure_mode and
+// origin tags intact (the selector reads both).
+func TestImportRelayPackBundle_CDNFrontedImportsAtCurrentPhase(t *testing.T) {
 	if _, err := readFileOptional(filepath.Join(relayPackCorpusDir, "cdn-fronted-minimal.sbp")); err != nil {
 		t.Skipf("corpus fixture missing: %v", err)
 	}
@@ -239,18 +247,74 @@ func TestImportRelayPackBundle_V15_RejectsCDNFronted(t *testing.T) {
 	now := time.Now().UTC()
 
 	body := mustReadFile(t, filepath.Join(relayPackCorpusDir, "cdn-fronted-minimal.sbp"))
-	// First call hits trust prompt (publisher unpinned).
-	v, _ := importer.ImportBytes(body, a, wordlists(), now)
-	// AcceptTrustPrompt invokes apply() which runs the validator.
+	// First call hits the trust prompt (publisher unpinned) — and must
+	// reach it, rather than being rejected by the validator first.
+	v, err := importer.ImportBytes(body, a, wordlists(), now)
+	if err != nil {
+		t.Fatalf("ImportBytes: %v (verdict=%+v)", err, v)
+	}
+	if v.Kind != importer.VerdictTrustPromptNeeded {
+		t.Fatalf("expected VerdictTrustPromptNeeded; got %v (reason %q)", v.Kind, v.Reason)
+	}
 	v2, err := importer.AcceptTrustPrompt("trust", body, a, wordlists(), now)
-	if err == nil {
-		t.Errorf("expected validator error at V1.5; got nil")
+	if err != nil {
+		t.Fatalf("AcceptTrustPrompt: %v (verdict=%+v)", err, v2)
 	}
-	if v2.Kind != importer.VerdictRejected {
-		t.Errorf("expected VerdictRejected; got %v (first call: %v)", v2.Kind, v.Kind)
+	if v2.Kind != importer.VerdictImported {
+		t.Fatalf("expected VerdictImported; got %v (reason %q)", v2.Kind, v2.Reason)
 	}
-	if v2.Reason != "relaypack_RP004" {
-		t.Errorf("Reason = %q want relaypack_RP004", v2.Reason)
+
+	rows, err := s.ListRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cdn int
+	for _, r := range rows {
+		if r.ExposureMode == "cdn_fronted" {
+			cdn++
+			if len(r.OriginRiskTags) == 0 {
+				t.Errorf("cdn_fronted route %s lost its origin_* tags", r.RouteID)
+			}
+		}
+	}
+	if cdn == 0 {
+		t.Errorf("no cdn_fronted route reached the store; rows=%d", len(rows))
+	}
+}
+
+// TestImportRelayPackBundle_FreshnessURLImportsAtCurrentPhase is the
+// same proof for RP021, through the same real path. The corpus vector
+// is literally named "...-v15-rejected" because V1.5 is the only phase
+// that rejects it.
+func TestImportRelayPackBundle_FreshnessURLImportsAtCurrentPhase(t *testing.T) {
+	const fixture = "bundle-with-freshness-url-v15-rejected.sbp"
+	if _, err := readFileOptional(filepath.Join(relayPackCorpusDir, fixture)); err != nil {
+		t.Skipf("corpus fixture missing: %v", err)
+	}
+	s := openStore(t)
+	a := &trust.StoreAdapter{S: s}
+	now := time.Now().UTC()
+
+	body := mustReadFile(t, filepath.Join(relayPackCorpusDir, fixture))
+	v, err := importer.AcceptTrustPrompt("trust", body, a, wordlists(), now)
+	if err != nil {
+		t.Fatalf("AcceptTrustPrompt: %v (verdict=%+v)", err, v)
+	}
+	if v.Kind != importer.VerdictImported {
+		t.Fatalf("expected VerdictImported; got %v (reason %q)", v.Kind, v.Reason)
+	}
+
+	rows, err := s.ListRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("no routes imported")
+	}
+	for _, r := range rows {
+		if r.FreshnessURL == "" {
+			t.Errorf("route %s: freshness_url did not survive the import", r.RouteID)
+		}
 	}
 }
 

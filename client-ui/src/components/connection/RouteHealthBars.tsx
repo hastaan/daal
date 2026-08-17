@@ -19,10 +19,14 @@ export default function RouteHealthBars({ rows, locale, t }: Props) {
                 </div>
             )}
             {rows.map((r) =>
-                // Honest render: a route that has never succeeded has only a
-                // placeholder health number, so show "not tested yet" rather
-                // than a bar + % that looks measured.
-                r.proven === false ? (
+                // Honest render: with no measured percentage there is
+                // nothing to draw a bar from, so show "not tested yet"
+                // rather than a bar + % that looks measured. `pct` is
+                // now absent (rather than a fabricated 0) whenever the
+                // engine has recorded no outcome for the route, so the
+                // presence test is the primary branch and `proven`
+                // remains as the coarser backstop.
+                r.pct === undefined || r.proven === false ? (
                     <div className="d2-health-row" key={r.routeId}>
                         <span className="name">{r.label}</span>
                         <span

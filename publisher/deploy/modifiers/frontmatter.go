@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"daal/bundle-go/phase"
 )
 
 // Status is the pass_record.status enum.
@@ -19,16 +21,21 @@ const (
 	StatusDeprecated Status = "DEPRECATED"
 )
 
-// Phase is the min_phase enum. Mirrors relaypackvalidate.Phase
-// exactly; we duplicate the constants here so the modifiers package
-// can be consumed without pulling in the validator package (asymmetric
-// guard preserved).
-type Phase string
+// Phase is the min_phase enum. It is an ALIAS of the canonical
+// daal/bundle-go/phase.Phase, so it IS relaypackvalidate.Phase rather
+// than merely mirroring it — the constants used to be duplicated here
+// and compared across the boundary as strings, which is how the
+// "PostV2" / "post-V2" split survived.
+//
+// The asymmetric guard is preserved: daal/bundle-go/phase is a leaf
+// package with zero imports, so consuming it does NOT pull in the
+// validator.
+type Phase = phase.Phase
 
 const (
-	PhaseV15    Phase = "V1.5"
-	PhaseV16    Phase = "V1.6"
-	PhasePostV2 Phase = "PostV2"
+	PhaseV15    = phase.V15
+	PhaseV16    = phase.V16
+	PhasePostV2 = phase.PostV2
 )
 
 // phaseOrdinal returns the comparison ordinal for a phase. Higher

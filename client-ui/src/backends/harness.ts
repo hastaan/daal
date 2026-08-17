@@ -250,7 +250,12 @@ export class HarnessContract implements D2Contract {
     }
 
     async uriDetect(text: string): Promise<UriDetectResult> {
-        return { kind: 'sbp', payload: 'harness', raw: text };
+        return {
+            hits: [
+                { scheme: 'vless', uri: text, preview: 'vless://•••@relay.example:443' },
+            ],
+            raw: text,
+        };
     }
     async uriImport(text: string): Promise<UriImportResult> {
         return { fingerprintHex: 'aa'.repeat(16), bundleId: 'harness', raw: text };

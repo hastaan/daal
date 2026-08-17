@@ -397,10 +397,10 @@ validator code.
 | RP013 | error | A non-empty `modifiers[]` is rejected at V1.5 / V1.6. At PostV2, every modifier kind must appear in `ValidateOpts.AllowedModifierKinds`. |
 | RP014 | error | The bundle must contain ≥2 `vps-native` candidates. One-candidate RelayPacks defeat the purpose. |
 | RP015 | error | `family_class: external-ecosystem` is rejected for any candidate the FRP is self-hosting (these must come from partner-supplied bundles). |
-| RP016 | error | A non-empty `cell_scope` is rejected at V1.5 (cells require V2 / FRP-11; `cell_scope.policy: transitive` is rejected here). |
+| RP016 | error | A non-empty `cell_scope` is rejected at every pre-V2 phase — V1.5 **and V1.6** (cells require V2 / FRP-11; `cell_scope.policy: transitive` is rejected here). |
 | RP017 | error | A legacy flat `shared_risk_tags` array on `RouteManifestEntry` (pre-v2.3.4 schema) is rejected with explicit pointer to v2.3.5 schema. |
 | RP018 | error | `relay_pack.shared_risk_graph[].members` must reference candidate IDs that exist in `Manifest.routes[]`. |
-| RP021 | error | `relay_pack.freshness_url` is populated at V1.5. The slot is reserved at FRP-1; FRP-8 lifts acceptance at V1.6. |
+| RP021 | error | `relay_pack.freshness_url` is populated at V1.5. The slot is reserved at FRP-1; FRP-8 lifts acceptance at V1.6 — where the blanket rejection is **replaced by a shape check**, not removed: absolute `https://`, a fully-qualified host that is not an IP literal / loopback, no embedded credentials, ≤2048 bytes. |
 | RP022 | error | At `Phase: V16`, every `cdn_fronted` candidate's `_cdn_attestation` blob (additive sub-field inside the FRP-1 `_relaypack` opaque container — no `spec_version` bump) must carry `origin_ca_fingerprint`, `aop_enabled: true`, `firewall_id`. Validator does NOT call Cloudflare; live-posture re-verification is the wizard's "Verify CDN posture" job. |
 | RP023 | error | `_cdn_attestation.dns_only_present` is `true` (the wizard's deploy-time check found a DNS-only A/AAAA record on the chosen subdomain — §11.7 hard rule). Distinguishes "attestation missing" (RP022) from "attestation present but reports posture failure" (RP023). |
 | RP019 | warn  | All RelayPack candidates share every `public_risk_tag` (no diversity at all). UI nudge: add a CDN front, a second VPS, or a different provider. |

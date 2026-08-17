@@ -13,11 +13,14 @@
 //     SHA-256, otherwise we reject — defence in depth across the
 //     three modules that touch the swap.
 //
-// V1.6 closure semantics:
+// Phase closure semantics:
 //
-//   - We DO call into the V16 RelayPack validator (RP022/RP023/RP024
-//     gates fire here exactly as they fire on the QR-scan import
-//     path), so the freshness path can never relax §11.7 hardening.
+//   - We DO call into the RelayPack validator at relaypack.CurrentPhase
+//     — the SAME constant the QR-scan import path uses, so RP022/RP023/
+//     RP024 fire identically on both and the freshness path can never
+//     relax §11.7 hardening. This file used to hard-code V1.6 while
+//     importer.go hard-coded V1.5; that disagreement is what
+//     bundle/go/phase now makes impossible.
 //   - We DO upsert atomically via State.SaveImport, the same path
 //     ImportBytes uses. SaveImport's atomicity contract is the swap
 //     primitive.
@@ -84,9 +87,9 @@ func ApplyVerifiedRefresh(
 		return Verdict{Kind: VerdictRejected, Reason: classifyVerifyError(err)}, err
 	}
 
-	// V16 RelayPack validator — ensures §11.7 hardening attestation
-	// holds even on the freshness-driven swap path.
-	if _, vErr := relaypack.Validate(parsed, relaypack.ValidateOpts{Phase: relaypack.PhaseV16}); vErr != nil {
+	// RelayPack validator at the shipped phase — ensures the §11.7
+	// hardening attestation holds even on the freshness-driven swap path.
+	if _, vErr := relaypack.Validate(parsed, relaypack.ValidateOpts{Phase: relaypack.CurrentPhase}); vErr != nil {
 		var ve *relaypack.ValidationError
 		if errors.As(vErr, &ve) {
 			return Verdict{Kind: VerdictRejected, Reason: "relaypack_" + string(ve.Code)}, vErr
@@ -114,7 +117,7 @@ func ApplyVerifiedRefresh(
 				Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA},
 			errors.New("publisher revoked")
 	}
-	return applyWithRelayPackPhase(st, parsed, fp, rendered, bucket, pin.TrustLevel, false, relaypack.PhaseV16)
+	return applyWithRelayPackPhase(st, parsed, fp, rendered, bucket, pin.TrustLevel, false, relaypack.CurrentPhase)
 }
 
 // equalHex compares two hex strings case-insensitively.

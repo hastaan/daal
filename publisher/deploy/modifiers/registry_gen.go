@@ -12,7 +12,7 @@ func registryFromGen() map[string]Meta {
 		"client_desync": {
 			Kind:       "client_desync",
 			Status:     Status("PENDING"),
-			MinPhase:   Phase("PostV2"),
+			MinPhase:   PhasePostV2,
 			SingboxRef: "n/a (raw-socket modifier; below sing-box)",
 			Reviewer:   "",
 			Date:       "",
@@ -23,7 +23,7 @@ func registryFromGen() map[string]Meta {
 		"tls_fragment": {
 			Kind:       "tls_fragment",
 			Status:     Status("PENDING"),
-			MinPhase:   Phase("PostV2"),
+			MinPhase:   PhasePostV2,
 			SingboxRef: "TBD — finalised at censor-lab review.",
 			Reviewer:   "",
 			Date:       "",

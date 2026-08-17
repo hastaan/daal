@@ -38,6 +38,7 @@ import {
     type ServerTypeOption,
     type ExistingServer,
 } from './wizardCommands';
+import { RELAYPACK_PHASE } from './phase';
 import { ensureHelperIp, reAllowlist, detectPublicIp, isValidIp } from './helperIp';
 import { isHarnessActive } from '../harness/scenarios';
 import { isTauriRuntime } from '../backends';
@@ -685,7 +686,9 @@ export default function PublisherWizard({
                     live
                         ? Wizard.signRelaypack(
                               opId,
-                              'V1.6',
+                              // One constant, shared with the Go and
+                              // Rust sides; see ./phase.ts.
+                              RELAYPACK_PHASE,
                               '',
                               nickname.trim() || `daal-relay-${opId}`,
                           )

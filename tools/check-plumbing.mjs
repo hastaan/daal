@@ -140,13 +140,14 @@ const declaredNotRegistered = [...declared].filter((d) => !registered.has(d));
 const UNINVOKED_ALLOWLIST = new Map([
     [
         'scheduler_tick',
-        'Driven from Rust, not from the UI: src-tauri/src/lib.rs spawns a 60s ' +
-        'thread calling cmd::scheduler_tick, so this gate (which only scans ' +
-        'client-ui for invoke() targets) cannot see the caller. NOTE the real ' +
-        'gap this hides: core/abi/scheduler_gomobile.go exports only ' +
-        'SchedulerStatus, so ANDROID gets no scheduler at all — the platform ' +
-        'where all four transports are field-proven has no auto-promotion and ' +
-        'no scheduled refresh. Remove this entry once mobile exports a tick.',
+        'Driven from Rust and Kotlin, never from the UI: src-tauri/src/lib.rs ' +
+        'spawns a 60s thread calling cmd::scheduler_tick, and on Android ' +
+        'DaalVpnService.startSchedulerPump ticks through the JNI bridge while ' +
+        'the tunnel is up. This gate only scans client-ui for invoke() ' +
+        'targets, so it can see NEITHER caller. This entry is therefore ' +
+        'permanent, not a promise: do not delete it expecting a UI caller to ' +
+        'appear — a scheduler driven from the UI would stop the moment the ' +
+        'window closed, which is the bug, not the fix.',
     ],
 ]);
 

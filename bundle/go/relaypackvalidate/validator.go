@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 
 	"daal/bundle-go/bundle"
@@ -103,6 +105,23 @@ func Validate(b *bundle.Bundle, opts ValidateOpts) (LintReport, error) {
 			Message: "ValidateOpts.Phase is required",
 		}
 	}
+	// Fail closed on any phase this validator has no rule-set for.
+	//
+	// Every phase gate below is written as "reject at V15 (and V16)",
+	// so an unrecognised value — a typo, or the selector's reserved
+	// `V2` — would match none of them and land on the MOST PERMISSIVE
+	// branch: cdn_fronted, serverless_external, modifiers[] and
+	// cell_scope would all sail through unchecked. That is precisely
+	// backwards. Reject instead.
+	switch opts.Phase {
+	case PhaseV15, PhaseV16, PhasePostV2:
+	default:
+		return LintReport{}, &ValidationError{
+			Code: "RP000",
+			Message: fmt.Sprintf("unsupported ValidateOpts.Phase %q (want %s | %s | %s)",
+				opts.Phase, PhaseV15, PhaseV16, PhasePostV2),
+		}
+	}
 	matrix := opts.FamilyMatrix
 	if matrix == nil {
 		matrix = defaultFamilyMatrix()
@@ -158,11 +177,28 @@ func Validate(b *bundle.Bundle, opts ValidateOpts) (LintReport, error) {
 	// RP021: freshness_url is a reserved FRP-1 / V1.5 schema slot.
 	// FRP-8 lifts this at V1.6 when the signed freshness endpoint
 	// and key-binding flow exist.
-	if opts.Phase == PhaseV15 && b.Manifest.RelayPack != nil && b.Manifest.RelayPack.FreshnessURL != "" {
-		return LintReport{}, &ValidationError{
-			Code:    CodeRP021,
-			Pointer: "manifest.relay_pack.freshness_url",
-			Message: "freshness_url is reserved at V1.5 and accepted only at V1.6 / FRP-8",
+	//
+	// "Lifts" is not "stops checking". The blanket V1.5 rejection was
+	// the ONLY thing standing between an attacker-controlled bundle
+	// and a string the importer denormalises onto every RouteInput
+	// (importer.go) and the routestore writes to every route row —
+	// a URL this device will later poll on a cadence. Moving the
+	// phase to V1.6 without replacing the gate would accept
+	// `http://beacon.example/?id=…` or `https://10.0.0.1/…` as
+	// freely as the FRP-controlled endpoint the spec describes. So
+	// at V1.6+ the blanket rejection becomes a SHAPE check, under
+	// the same RP021 code so the importer's existing
+	// `relaypack_RP021` reason plumbing still renders.
+	if b.Manifest.RelayPack != nil && b.Manifest.RelayPack.FreshnessURL != "" {
+		if opts.Phase == PhaseV15 {
+			return LintReport{}, &ValidationError{
+				Code:    CodeRP021,
+				Pointer: "manifest.relay_pack.freshness_url",
+				Message: "freshness_url is reserved at V1.5 and accepted only at V1.6 / FRP-8",
+			}
+		}
+		if err := validateFreshnessURL(b.Manifest.RelayPack.FreshnessURL); err != nil {
+			return LintReport{}, err
 		}
 	}
 
@@ -253,6 +289,68 @@ func Validate(b *bundle.Bundle, opts ValidateOpts) (LintReport, error) {
 		report.Warnings = append(report.Warnings, *rp024)
 	}
 	return report, nil
+}
+
+// maxFreshnessURLLen bounds the freshness_url. The bundle is
+// attacker-controlled bytes and this string is persisted onto every
+// route row; 2048 is the conventional practical URL ceiling and is
+// three orders of magnitude more than any real endpoint needs.
+const maxFreshnessURLLen = 2048
+
+// validateFreshnessURL is the V1.6+ half of RP021. specs/relaypack-v1.md
+// §"Manifest.relay_pack.freshness_url" specifies "a non-empty
+// FRP-controlled `https://` URL"; before this, nothing anywhere
+// enforced the `https://` half — core/bootstrap/fetcher.go checks the
+// scheme at FETCH time, which is far too late to keep the value out of
+// the routestore and which turns a bad pack into a permanently broken
+// refresh rather than a rejected import.
+//
+// The rules are deliberately syntactic. The validator cannot know
+// which host an FRP controls, so it enforces only what is decidable
+// from the string: a parseable absolute https URL, a real hostname,
+// no embedded credentials, and not an address that points back at the
+// recipient's own machine or LAN.
+func validateFreshnessURL(raw string) error {
+	fail := func(msg string) error {
+		return &ValidationError{
+			Code:    CodeRP021,
+			Pointer: "manifest.relay_pack.freshness_url",
+			Message: msg,
+		}
+	}
+	if len(raw) > maxFreshnessURLLen {
+		return fail(fmt.Sprintf("freshness_url exceeds %d bytes", maxFreshnessURLLen))
+	}
+	if strings.TrimSpace(raw) != raw {
+		return fail("freshness_url must not carry leading/trailing whitespace")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fail("freshness_url is not a parseable URL")
+	}
+	if u.Scheme != "https" {
+		return fail(fmt.Sprintf("freshness_url scheme must be https (got %q)", u.Scheme))
+	}
+	if u.User != nil {
+		return fail("freshness_url must not carry embedded credentials")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fail("freshness_url must carry a host")
+	}
+	// A literal IP defeats the only authentication an https endpoint
+	// has (the certificate's name), and the loopback / private /
+	// link-local ranges make the recipient poll itself or its own LAN.
+	if ip := net.ParseIP(host); ip != nil {
+		return fail("freshness_url host must be a domain name, not an IP literal")
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return fail("freshness_url host must not be loopback")
+	}
+	if !strings.Contains(host, ".") {
+		return fail("freshness_url host must be a fully-qualified domain name")
+	}
+	return nil
 }
 
 // validateCDNAttestation enforces RP022 (presence + structural
@@ -401,22 +499,32 @@ func validateEntry(id string, e *bundle.RelayPackEntry, opts ValidateOpts, matri
 		}
 	}
 
-	// RP016: cell_scope.policy=transitive rejected at V15.
-	// CellScope is a struct, not a map; we check the V1.5 nullable-ness
+	// RP016: cell_scope rejected below V2.
+	// CellScope is a struct, not a map; we check the nullable-ness
 	// rule per supplement §12.2.5: cell_id and cell_join_fp are
-	// nullable for plain family-only RelayPacks at V1.5 — but if a
-	// cell_scope is present at V15 we currently reject any non-empty
-	// cell_id (cells require V2 / FRP-11). The "transitive" policy
-	// per phase-doc text is not a separate field on CellScope yet;
-	// FRP-11 introduces the policy field. At V1.5 we hard-reject
-	// any non-zero CellScope to be safe.
-	if opts.Phase == PhaseV15 && e.CellScope != nil {
+	// nullable for plain family-only RelayPacks — but if a cell_scope
+	// is present we reject any non-empty cell_id, because cells
+	// require V2 / FRP-11. The "transitive" policy per phase-doc text
+	// is not a separate field on CellScope yet; FRP-11 introduces the
+	// policy field. Below V2 we hard-reject any non-zero CellScope to
+	// be safe.
+	//
+	// THE PHASE LIST MATTERS. This used to read `== PhaseV15`, from
+	// the era when V1.5 was the only phase the device validated at.
+	// Moving the importer to V1.6 would then have switched the rule
+	// off silently — and nothing would have replaced it: RP016 is the
+	// only cell_scope check in the repo, and core/trust's
+	// VerifyCellChain (the FRP-11 chain walker that would actually
+	// validate a cell claim) has no production caller. The claim would
+	// be neither rejected nor verified. Written as an explicit
+	// pre-V2 list, exactly like RP003 and RP013 above.
+	if (opts.Phase == PhaseV15 || opts.Phase == PhaseV16) && e.CellScope != nil {
 		cs := *e.CellScope
 		if cs.CellID != "" || cs.CellJoinFP != "" || cs.CellMaxDepth != 0 {
 			return &ValidationError{
 				Code:    CodeRP016,
 				Pointer: id,
-				Message: "non-empty cell_scope rejected at V1.5 (cells require V2 / FRP-11; cell_scope.policy=transitive is rejected here)",
+				Message: "non-empty cell_scope rejected at V1.5 / V1.6 (cells require V2 / FRP-11; cell_scope.policy=transitive is rejected here)",
 			}
 		}
 	}

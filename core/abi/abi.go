@@ -19,6 +19,7 @@ import (
 	"daal/core/diagnostics"
 	"daal/core/engine"
 	"daal/core/pathmanager"
+	"daal/core/refresh"
 	"daal/core/routestore"
 	"daal/core/trust"
 )
@@ -86,13 +87,23 @@ type Core struct {
 	// 3A experimental-families gate. The flag is per-engine,
 	// default-OFF, persists across session epochs, and is
 	// cleared only by an explicit user toggle through
-	// engine_set_experimental_families_enabled. The pathmanager
-	// consults the flag through ExperimentalFamiliesEnabled() at
-	// the family_filter step BEFORE trust / budget / network-
-	// memory. The skip count below is the per-rank-pass tally
-	// surfaced as `experimental_routes_skipped` in diagnostics;
-	// it is reset by the pathmanager at the start of every rank
-	// pass (it is a snapshot, not a cumulative counter).
+	// engine_set_experimental_families_enabled.
+	//
+	// AS DESIGNED, the pathmanager consults the flag through
+	// ExperimentalFamiliesEnabled() at the family_filter step BEFORE
+	// trust / budget / network-memory. AS BUILT it does not: nothing
+	// outside pathmanager's own tests calls ExperimentalFilter or
+	// RankWithExperimentalGate, and nothing outside abi's tests calls
+	// SetExperimentalRoutesSkipped. So this flag is currently a
+	// persisted preference that no rank pass reads, and the skip count
+	// below is always 0 in production. Corrected in the Wave-1 honesty
+	// pass after the comment was found asserting wiring that does not
+	// exist; wiring it is selection work, not a comment fix.
+	//
+	// The skip count is meant to be the per-rank-pass tally surfaced as
+	// `experimental_routes_skipped` in diagnostics, reset by the
+	// pathmanager at the start of every rank pass (a snapshot, not a
+	// cumulative counter).
 	experimentalFamiliesEnabled bool
 	experimentalRoutesSkipped   int
 
@@ -340,6 +351,8 @@ func SetRoute(routeID string) error {
 	}
 	c.pm.Attempt(routeID, row.TransportFamily)
 	if err := c.driver.Start(context.Background(), body); err != nil {
+		// Start failed: no tunnel, so bootstrap/refresh may dial direct.
+		refresh.SetTunnelRequired(false)
 		c.pm.Failed(routeID, row.TransportFamily, diagnostics.Classify(err.Error()))
 		// Posture: a fresh attempt that fails from PostureNoRoute
 		// should advance to PostureRecovery if legal so the GUI can
@@ -349,6 +362,13 @@ func SetRoute(routeID string) error {
 		return err
 	}
 	c.pm.Connected()
+	// A tunnel is now up. From here until ClearRoute, any refresh that
+	// cannot ride it must FAIL rather than egress from the device's real
+	// address — see refresh.ErrTunnelRequired for the leak this closes.
+	// Note this deliberately fires even on platforms that have no
+	// tunnel-aware dialer yet: on those, scheduled refresh stops working
+	// while connected, which is the intended trade.
+	refresh.SetTunnelRequired(true)
 	// Posture axis (Phase-3-Soak): the legacy `state` field was
 	// removed from the diagnostics blob, and consumers MUST read
 	// `posture`. SetRoute previously advanced only the state axis,
@@ -381,6 +401,9 @@ func ClearRoute() error {
 	if err := c.driver.Stop(); err != nil {
 		return err
 	}
+	// No route: there is no tunnel to betray, so direct egress is
+	// permitted again (bootstrap has to start somewhere).
+	refresh.SetTunnelRequired(false)
 	c.pm.Disconnect()
 	// Posture axis: a user-initiated disconnect always returns to
 	// PostureNoRoute. The transition `EventDisconnected → NoRoute`
@@ -624,10 +647,19 @@ func ExportDiagnostics() (string, error) {
 		"auto_promotion_enabled": c.autoPromotionEnabled,
 		// Phase 3A: experimental-families gate. The
 		// `experimental_families_enabled` field is always present
-		// (default false). The `experimental_routes_skipped` field
-		// is the per-rank-pass tally of routes filtered by the
-		// gate; it is a snapshot, not a cumulative counter, and is
-		// 0 until the pathmanager has run at least one rank pass.
+		// (default false).
+		//
+		// `experimental_routes_skipped` is MEANT to be the
+		// per-rank-pass tally of routes the gate filtered — a
+		// snapshot, not a cumulative counter. Read it as 0 and
+		// nothing more: as built, no rank pass consults the gate
+		// (pathmanager's ExperimentalFilter / RankWithExperimentalGate
+		// have no production caller) and nothing outside abi's own
+		// tests calls SetExperimentalRoutesSkipped, so the value is 0
+		// in every install regardless of what selection did. A helper
+		// reading a shared diagnostics blob must NOT conclude from a
+		// 0 here that the gate ran and skipped nothing. See the
+		// matching note on Core.experimentalFamiliesEnabled.
 		"experimental_families_enabled": c.experimentalFamiliesEnabled,
 		"experimental_routes_skipped":   c.experimentalRoutesSkipped,
 		// Phase 3B. The rendezvous-priority override is the

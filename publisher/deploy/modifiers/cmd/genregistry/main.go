@@ -102,7 +102,7 @@ func registryFromGen() map[string]Meta {
 		{{ printf "%q" .Kind }}: {
 			Kind:       {{ printf "%q" .Kind }},
 			Status:     Status({{ printf "%q" .Status }}),
-			MinPhase:   Phase({{ printf "%q" .MinPhase }}),
+			MinPhase:   {{ phaseConst .MinPhase }},
 			SingboxRef: {{ printf "%q" .SingboxRef }},
 			Reviewer:   {{ printf "%q" .Reviewer }},
 			Date:       {{ printf "%q" .Date }},
@@ -117,8 +117,34 @@ func registryFromGen() map[string]Meta {
 }
 `
 
+// phaseConst maps a min_phase wire value from a spec's frontmatter
+// onto the Go IDENTIFIER for it, so the generated file references the
+// canonical enum instead of re-spelling the string.
+//
+// That is not cosmetic. A generated `Phase("PostV2")` is a phase
+// literal like any other: it is invisible to the compiler if the
+// spelling drifts (this repo shipped "PostV2" and "post-V2"
+// simultaneously for months), and it is invisible to
+// tools/check-phase.sh unless the file is allow-listed — an allow-list
+// entry being exactly how a stray literal survives review. An
+// unrecognised min_phase now fails the GENERATOR, which is the
+// earliest place it can fail.
+func phaseConst(v modifiers.Phase) (string, error) {
+	switch v {
+	case modifiers.PhaseV15:
+		return "PhaseV15", nil
+	case modifiers.PhaseV16:
+		return "PhaseV16", nil
+	case modifiers.PhasePostV2:
+		return "PhasePostV2", nil
+	}
+	return "", fmt.Errorf("unknown min_phase %q in modifier frontmatter", v)
+}
+
 func render(metas []modifiers.Meta) ([]byte, error) {
-	tpl, err := template.New("registry").Parse(tplText)
+	tpl, err := template.New("registry").
+		Funcs(template.FuncMap{"phaseConst": phaseConst}).
+		Parse(tplText)
 	if err != nil {
 		return nil, err
 	}

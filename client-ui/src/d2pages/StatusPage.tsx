@@ -117,19 +117,28 @@ export default function StatusPage({ t }: Props) {
     }, [contract]);
 
     // Roll-up health metrics from per-route status.
-    const healthyRoutes =
-        payload?.routeHealth.filter((r) => r.severity === 'ok').length ?? 0;
-    const warnRoutes =
-        payload?.routeHealth.filter((r) => r.severity === 'warn').length ?? 0;
-    const badRoutes =
-        payload?.routeHealth.filter((r) => r.severity === 'bad').length ?? 0;
+    //
+    // Only routes with a MEASURED percentage take part. A route the
+    // engine has never observed carries no severity and no pct, and
+    // averaging it in (or counting it as 'bad') would turn silence into
+    // a verdict — which is what this tile did before: every fresh
+    // install read "0% AVG HEALTH" on a red bar.
+    const measuredHealth = payload?.routeHealth.filter(
+        (r) => typeof r.pct === 'number',
+    ) ?? [];
+    const unmeasuredRoutes =
+        (payload?.routeHealth.length ?? 0) - measuredHealth.length;
+    const healthyRoutes = measuredHealth.filter((r) => r.severity === 'ok').length;
+    const warnRoutes = measuredHealth.filter((r) => r.severity === 'warn').length;
+    const badRoutes = measuredHealth.filter((r) => r.severity === 'bad').length;
+    // null, not 0 — "no route has ever been measured" is not a score.
     const avgHealthPct =
-        payload && payload.routeHealth.length > 0
+        measuredHealth.length > 0
             ? Math.round(
-                  payload.routeHealth.reduce((s, r) => s + r.pct, 0) /
-                      payload.routeHealth.length,
+                  measuredHealth.reduce((s, r) => s + (r.pct ?? 0), 0) /
+                      measuredHealth.length,
               )
-            : 0;
+            : null;
     const overallTone: 'good' | 'warn' | 'bad' | 'neutral' =
         connState === 'connected' && badRoutes === 0 && warnRoutes === 0
             ? 'good'
@@ -258,6 +267,14 @@ export default function StatusPage({ t }: Props) {
                             <span>
                                 <StatusLight tone="bad" size={6} /> {badRoutes}
                             </span>
+                            {unmeasuredRoutes > 0 && (
+                                <span style={{ color: 'var(--dim)' }}>
+                                    {t('status.routes.unmeasured').replace(
+                                        '{n}',
+                                        String(unmeasuredRoutes),
+                                    )}
+                                </span>
+                            )}
                         </span>
                     }
                 />
@@ -283,36 +300,53 @@ export default function StatusPage({ t }: Props) {
                     >
                         {t('status.tile.avg_health')}
                     </div>
-                    <div
-                        style={{
-                            fontFamily: 'var(--font-display)',
-                            fontSize: 26,
-                            color: 'var(--fg)',
-                            lineHeight: 1.1,
-                        }}
-                    >
-                        {avgHealthPct}
-                        <span
+                    {avgHealthPct === null ? (
+                        // No bar at all: a 0-width bar is still a bar,
+                        // and reads as a measured floor.
+                        <div
                             style={{
                                 fontFamily: 'var(--font-mono)',
                                 fontSize: 13,
                                 color: 'var(--muted)',
-                                marginInlineStart: 4,
+                                lineHeight: 1.4,
                             }}
                         >
-                            %
-                        </span>
-                    </div>
-                    <HealthBar
-                        pct={avgHealthPct}
-                        tone={
-                            avgHealthPct >= 70
-                                ? 'good'
-                                : avgHealthPct >= 40
-                                    ? 'warn'
-                                    : 'bad'
-                        }
-                    />
+                            {t('status.tile.avg_health.unmeasured')}
+                        </div>
+                    ) : (
+                        <>
+                            <div
+                                style={{
+                                    fontFamily: 'var(--font-display)',
+                                    fontSize: 26,
+                                    color: 'var(--fg)',
+                                    lineHeight: 1.1,
+                                }}
+                            >
+                                {avgHealthPct}
+                                <span
+                                    style={{
+                                        fontFamily: 'var(--font-mono)',
+                                        fontSize: 13,
+                                        color: 'var(--muted)',
+                                        marginInlineStart: 4,
+                                    }}
+                                >
+                                    %
+                                </span>
+                            </div>
+                            <HealthBar
+                                pct={avgHealthPct}
+                                tone={
+                                    avgHealthPct >= 70
+                                        ? 'good'
+                                        : avgHealthPct >= 40
+                                            ? 'warn'
+                                            : 'bad'
+                                }
+                            />
+                        </>
+                    )}
                 </div>
                 <div
                     style={{
@@ -401,12 +435,17 @@ export default function StatusPage({ t }: Props) {
                         }}
                     >
                         {payload.routeHealth.map((r) => {
+                            // 'neutral' for an unmeasured route — a green
+                            // light next to a route nobody has tried is
+                            // the same fabrication as a 0% bar.
                             const tone =
-                                r.severity === 'bad'
-                                    ? 'bad'
-                                    : r.severity === 'warn'
-                                        ? 'warn'
-                                        : 'good';
+                                r.severity === undefined
+                                    ? 'neutral'
+                                    : r.severity === 'bad'
+                                        ? 'bad'
+                                        : r.severity === 'warn'
+                                            ? 'warn'
+                                            : 'good';
                             return (
                                 <li
                                     key={r.routeId}
@@ -442,10 +481,14 @@ export default function StatusPage({ t }: Props) {
                                         >
                                             {r.routeId}
                                         </span>
-                                        <HealthBar pct={r.pct} tone={tone} />
+                                        {r.pct !== undefined && (
+                                            <HealthBar pct={r.pct} tone={tone} />
+                                        )}
                                     </div>
                                     <span style={{ color: 'var(--muted)' }}>
-                                        {r.pct}%
+                                        {r.pct === undefined
+                                            ? t('network.unmeasured')
+                                            : `${r.pct}%`}
                                     </span>
                                 </li>
                             );

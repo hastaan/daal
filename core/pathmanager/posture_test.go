@@ -88,8 +88,45 @@ func TestIsLegalFalseForUnknownTransition(t *testing.T) {
 	if IsLegal(PostureNoRoute, EventActiveFailed, PostureLifeline) {
 		t.Error("expected illegal: NoRoute --active_failed--> Lifeline")
 	}
-	if IsLegal(PostureExperimental, EventLifelineModeOn, PostureLifeline) {
-		t.Error("expected illegal: Experimental --lifeline_mode_on--> Lifeline")
+	if IsLegal(PostureBootstrapDiscovery, EventLifelineModeOn, PostureLifeline) {
+		t.Error("expected illegal: BootstrapDiscovery --lifeline_mode_on--> Lifeline")
+	}
+}
+
+// TestExperimentalHasTheSameExitsAsAnyActivePosture: PostureExperimental
+// became reachable on a live connection when tuic/shadowsocks were
+// demoted from Stable, so it must be able to LEAVE. A user who connects
+// on a tuic route and then picks a vless-reality one fires
+// `imported_selected`; burn-pressure auto-promotion fires
+// `lifeline_mode_on`. When either is illegal, abi swallows the error
+// (`_ =`), the posture sticks at Experimental while a stable route is
+// active, and Manager.SetPosture overwrites lastReason with the FSM
+// violation — which ExportDiagnostics then publishes as `why`.
+func TestExperimentalHasTheSameExitsAsAnyActivePosture(t *testing.T) {
+	for _, tc := range []struct {
+		event PostureEvent
+		to    Posture
+	}{
+		{EventImportedSelected, PostureImportedActive},
+		{EventSharedSelected, PostureSharedActive},
+		{EventLifelineModeOn, PostureLifeline},
+		{EventOfflineShareStart, PostureOfflineSharing},
+		{EventActiveFailed, PostureRecovery},
+		{EventDisconnected, PostureNoRoute},
+	} {
+		if !IsLegal(PostureExperimental, tc.event, tc.to) {
+			t.Errorf("Experimental --%s--> %s must be legal", tc.event, tc.to)
+		}
+		m := New()
+		if err := m.SetPosture(EventExperimentalSelected, PostureExperimental); err != nil {
+			t.Fatalf("entering Experimental: %v", err)
+		}
+		if err := m.SetPosture(tc.event, tc.to); err != nil {
+			t.Errorf("SetPosture(%s → %s) from Experimental: %v", tc.event, tc.to, err)
+		}
+		if got := m.Posture(); got != tc.to {
+			t.Errorf("posture stuck at %q after %s", got, tc.event)
+		}
 	}
 }
 

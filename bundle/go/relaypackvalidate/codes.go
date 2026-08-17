@@ -21,6 +21,8 @@
 // the 27 invariants this package must preserve.
 package relaypackvalidate
 
+import "daal/bundle-go/phase"
+
 // Code is a typed error / warning identifier from the locked
 // FRP-1 codebook. Errors are prefixed RP001..RP018/RP021 and
 // cause Validate to return a non-nil error; warnings RP019/RP020
@@ -151,24 +153,32 @@ const (
 )
 
 // Phase is the validator phase enum. The same validator binary is
-// used across V1.5 / V1.6 / post-V2; phase progression flips
+// used across V1.5 / V1.6 / PostV2; phase progression flips
 // constants, not validator code.
-type Phase string
+//
+// This is an ALIAS, not a definition. The enum itself lives in
+// daal/bundle-go/phase, which is also aliased by
+// core/internal/selection and publisher/deploy/modifiers — so all
+// four packages are the same type and the compiler, not a string
+// comparison, is what keeps them in agreement. See that package's
+// doc comment for the history this prevents repeating.
+type Phase = phase.Phase
 
 const (
 	// PhaseV15: direct_vps only. cdn_fronted and serverless_external
 	// rejected. Non-empty modifiers[] rejected.
-	PhaseV15 Phase = "V1.5"
+	PhaseV15 = phase.V15
 
 	// PhaseV16: direct_vps + cdn_fronted. serverless_external
 	// rejected. Non-empty modifiers[] rejected. FRP-8 lifts.
-	PhaseV16 Phase = "V1.6"
+	PhaseV16 = phase.V16
 
 	// PhasePostV2: direct_vps + cdn_fronted + serverless_external.
 	// Non-empty modifiers[] allowed iff each kind appears in
 	// ValidateOpts.AllowedModifierKinds. FRP-12 populates.
-	PhasePostV2 Phase = "PostV2"
-)
+	PhasePostV2 = phase.PostV2
 
-// String returns a human-readable phase label.
-func (p Phase) String() string { return string(p) }
+	// CurrentPhase is what this build ships. Every producer and every
+	// consumer reads it; nothing else may write a phase literal.
+	CurrentPhase = phase.Current
+)

@@ -36,6 +36,7 @@ pub mod keystore;
 // nothing: a guard that cannot fire is worse than no guard, because it
 // makes the suite look like it still covers a surface it does not.
 pub mod operator_db;
+pub mod phase;
 pub mod publisher_key;
 pub mod recipient_book;
 pub mod recipient_identity;

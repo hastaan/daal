@@ -18,4 +18,9 @@ import cronet "github.com/sagernet/cronet-go"
 // it surfaces its own error at connect. Cross-platform note: on
 // desktop/linux the .so ships beside the binary so LoadLibrary("") already
 // works, but the soname load is equally valid there.
-func loadCronet() { _ = cronet.LoadLibrary("libcronet.so") }
+//
+// The result is RECORDED (see cronet_state.go) rather than discarded.
+// It used to be `_ =`, which meant a build missing libcronet.so was
+// indistinguishable at runtime from a working one — and the UI went on
+// grading naive routes "stable" until the user pressed Connect.
+func loadCronet() { markCronet(cronet.LoadLibrary("libcronet.so") == nil) }

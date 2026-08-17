@@ -16,7 +16,9 @@ import type {
     D2Contract,
     DiagnosticsBlob,
     LifecycleToken,
+    FamilyMaturity,
     PointerRotationSummary,
+    PointerSource,
     PreviewedBundle,
     ProbeResult,
     PublisherTreeRow,
@@ -69,6 +71,9 @@ import {
 
 // ---- internal shapes (engine JSON, snake_case)
 
+// Mirrors core/abi.RouteSummaryDisplay. The three nullable fields are
+// the engine's measured/unmeasured seam: `null` means the engine has
+// observed nothing, and must never be coerced to false/0 on this side.
 interface RawRouteSummary {
     route_id: string;
     publisher_id: string;
@@ -76,11 +81,24 @@ interface RawRouteSummary {
     route_nickname: string;
     trust_class: string;
     family: string;
-    in_cooldown: boolean;
+    family_maturity?: string;
+    in_cooldown: boolean | null;
     cooldown_until_unix_ms?: number;
-    budget_exhausted: boolean;
-    health_pct?: number;
+    budget_exhausted: boolean | null;
+    health_pct: number | null;
     proven?: boolean;
+}
+
+// Mirrors core/bootstrap.PointerRotationStatus, field for field. Every
+// key here exists in the Go struct; nothing is invented.
+interface RawPointerRotationStatus {
+    have_persisted?: boolean;
+    primary_valid_until?: string;
+    fallback_valid_until?: string;
+    primary_source?: string;
+    fallback_source?: string;
+    embedded_primary_until?: string;
+    embedded_fallback_until?: string;
 }
 
 // ---- derivations
@@ -147,6 +165,21 @@ function toProbeResult(raw: number): ProbeResult {
     return { ok: raw >= 0, raw };
 }
 
+const MATURITIES: readonly FamilyMaturity[] = [
+    'stable',
+    'promotion-candidate',
+    'experimental',
+    'unsupported',
+    'unhandled',
+];
+
+function deriveMaturity(m: unknown): FamilyMaturity | undefined {
+    const s = String(m ?? '');
+    return (MATURITIES as readonly string[]).includes(s)
+        ? (s as FamilyMaturity)
+        : undefined;
+}
+
 function rawToRow(r: RawRouteSummary): RouteDisplayRow {
     return {
         routeId: r.route_id,
@@ -155,9 +188,13 @@ function rawToRow(r: RawRouteSummary): RouteDisplayRow {
         routeNickname: r.route_nickname,
         trustClass: deriveTrustClass(r.trust_class),
         family: r.family,
-        inCooldown: !!r.in_cooldown,
+        familyMaturity: deriveMaturity(r.family_maturity),
+        // `?? undefined` and NOT `!!` — a null from the engine means
+        // "never observed" and has to stay distinguishable from a
+        // measured false all the way to the renderer.
+        inCooldown: r.in_cooldown ?? undefined,
         cooldownUntilUnixMs: r.cooldown_until_unix_ms,
-        budgetExhausted: !!r.budget_exhausted,
+        budgetExhausted: r.budget_exhausted ?? undefined,
         healthPct: typeof r.health_pct === 'number' ? r.health_pct : undefined,
         proven: !!r.proven,
     };
@@ -184,6 +221,35 @@ async function rawAvailableRoutes(): Promise<RawRouteSummary[]> {
     } catch {
         return [];
     }
+}
+
+// ---- pointer rotation ------------------------------------------------
+
+function derivePointerSource(s: unknown): PointerSource | undefined {
+    return s === 'embedded' || s === 'persisted' ? s : undefined;
+}
+
+// Whole days from now until an RFC3339 instant. Returns undefined for
+// an absent or unparseable timestamp — the caller must then say
+// nothing, because 0 legitimately means "expires today".
+function daysUntil(rfc3339?: string): number | undefined {
+    if (!rfc3339) return undefined;
+    const t = Date.parse(rfc3339);
+    if (Number.isNaN(t)) return undefined;
+    return Math.floor((t - Date.now()) / 86_400_000);
+}
+
+function toPointerSummary(
+    raw: RawPointerRotationStatus,
+): PointerRotationSummary {
+    return {
+        havePersisted: raw.have_persisted === true,
+        primarySource: derivePointerSource(raw.primary_source),
+        fallbackSource: derivePointerSource(raw.fallback_source),
+        primaryValidUntil: raw.primary_valid_until || undefined,
+        fallbackValidUntil: raw.fallback_valid_until || undefined,
+        validForDays: daysUntil(raw.primary_valid_until),
+    };
 }
 
 async function rawThroughputSnapshot(): Promise<ThroughputSnapshot> {
@@ -220,12 +286,17 @@ export class TauriContract implements D2Contract {
             }
         } catch { /* ignore */ }
 
-        let pointerValidDays: number | undefined;
+        // The engine emits neither `valid_for_days` nor `valid_days` —
+        // reading them meant this was always undefined. Derive the day
+        // count from the RFC3339 horizon the engine DOES emit, and
+        // carry which pointer set is actually in play so the status
+        // line stops asserting "using rotated pointers" unconditionally.
+        let pointer: PointerRotationSummary | undefined;
         try {
-            const pr = await pointerRotationStatus();
-            const obj = pr as { valid_for_days?: number; valid_days?: number };
-            pointerValidDays = obj.valid_for_days ?? obj.valid_days;
-        } catch { /* ignore */ }
+            pointer = toPointerSummary(
+                (await pointerRotationStatus()) as RawPointerRotationStatus,
+            );
+        } catch { /* engine not up yet; claim nothing */ }
 
         return {
             state,
@@ -233,7 +304,8 @@ export class TauriContract implements D2Contract {
             connectedSinceUnixMs: undefined,
             activeRoute,
             networkLabel: deriveNetworkLabel(d.current_network_id),
-            pointerValidDays,
+            pointerSource: pointer?.primarySource,
+            pointerValidDays: pointer?.validForDays,
             netStatusLine: undefined,
         };
     }
@@ -244,21 +316,53 @@ export class TauriContract implements D2Contract {
             if (!exp) return null;
             const active = await rawRouteSummary(exp.pick.route_id);
             if (!active) return null;
-            const skipped: SkippedRouteEntry[] = [];
-            for (const f of exp.failures ?? []) {
-                const r = await rawRouteSummary(f.route_id);
-                if (r) {
-                    skipped.push({
-                        route: rawToRow(r),
-                        reason: f.classification,
-                        reasonToken: f.tag ?? f.classification,
-                    });
+
+            // Did the selector actually compare anything?
+            //
+            // core/abi/refresh.go's DiagnosticsExplain hands
+            // selection.Decide a ONE-ELEMENT Routes slice holding the
+            // already-active route. With nothing to reject,
+            // `exp.failures` comes back empty on every device — and an
+            // empty skipped[] rendered as "the engine weighed your
+            // other routes and skipped none", which is a claim no code
+            // ever evaluated. The shortlist is the honest witness: if
+            // it is smaller than the route set the device actually
+            // holds, the comparison did not happen and the answer is
+            // null ("not evaluated"), not [] ("nothing was skipped").
+            //
+            // This test is self-clearing: once Decide is fed the full
+            // route set (Wave 3, §5), the shortlist covers it and the
+            // real list starts rendering with no change here.
+            const known = await rawAvailableRoutes();
+            const shortlisted = exp.shortlist?.length ?? 0;
+            const comparisonRan = known.length > 1 && shortlisted >= known.length;
+
+            let skipped: SkippedRouteEntry[] | null = null;
+            if (comparisonRan) {
+                skipped = [];
+                for (const f of exp.failures ?? []) {
+                    const r = await rawRouteSummary(f.route_id);
+                    if (r) {
+                        skipped.push({
+                            route: rawToRow(r),
+                            reason: f.classification,
+                            reasonToken: f.tag ?? f.classification,
+                        });
+                    }
                 }
             }
+
+            // Family cooldowns, by contrast, ARE measured: the path
+            // manager writes them and export_diagnostics carries them.
+            // Surface them so the panel still has something true to say
+            // while the per-route comparison is unevaluated.
+            const skippedFamilies = await this.skippedFamilies();
+
             return {
                 active: rawToRow(active),
                 reasonText: exp.reason ?? '',
                 skipped,
+                skippedFamilies: skippedFamilies ?? undefined,
                 decisionId: exp.decision_id,
             };
         } catch {
@@ -266,18 +370,19 @@ export class TauriContract implements D2Contract {
         }
     }
 
+    // The old body read three keys the engine has never emitted and
+    // defaulted the most important one to success:
+    //   rotatedSuccessfully: pr.ok ?? true
+    // core/bootstrap/pointer_rotation.go's PointerRotationStatus has no
+    // `ok` field, no `last_rotated_unix_ms` and no `valid_for_days`, so
+    // every device rendered "Pointers rotated successfully. Valid for 0
+    // more days." — a success claim manufactured entirely from missing
+    // data. This version projects only keys the Go struct marshals.
     async pointerRotation(): Promise<PointerRotationSummary | null> {
         try {
-            const pr = (await pointerRotationStatus()) as {
-                last_rotated_unix_ms?: number;
-                valid_for_days?: number;
-                ok?: boolean;
-            };
-            return {
-                lastRotatedUnixMs: pr.last_rotated_unix_ms ?? 0,
-                validForDays: pr.valid_for_days ?? 0,
-                rotatedSuccessfully: pr.ok ?? true,
-            };
+            return toPointerSummary(
+                (await pointerRotationStatus()) as RawPointerRotationStatus,
+            );
         } catch {
             return null;
         }
@@ -292,14 +397,19 @@ export class TauriContract implements D2Contract {
                 ? `${summary.publisher_name} · ${summary.route_nickname}`
                 : r.route_id;
             // Honest value only — never fabricate a number the engine
-            // didn't produce. When health is absent, fall back to 0 and
-            // let `proven=false` drive a "not tested yet" render.
-            const pct = typeof summary?.health_pct === 'number' ? summary.health_pct : 0;
+            // didn't produce. The old fallback of 0 leaked into
+            // deriveSeverity() and painted a red "0%" bar on a route
+            // nobody had ever tried. Absent stays absent; the renderer
+            // shows "not measured yet" instead of a bar.
+            const pct =
+                typeof summary?.health_pct === 'number'
+                    ? summary.health_pct
+                    : undefined;
             out.push({
                 routeId: r.route_id,
                 label,
                 pct,
-                severity: deriveSeverity(pct),
+                severity: pct === undefined ? undefined : deriveSeverity(pct),
                 proven: !!summary?.proven,
             });
         }
@@ -581,13 +691,28 @@ export class TauriContract implements D2Contract {
         return invoke<string>('revocation_refresh_all', { timeoutMs });
     }
 
+    // engine_uri_detect returns `{"hits":[{Scheme,URI,Preview}]}` —
+    // core/abi/share.go:307 marshals a []share.ClipboardHit, and
+    // ClipboardHit carries no json tags, so the keys are Go field names.
+    // This used to be parsed as `{kind, payload}`, keys the engine has
+    // never emitted, so `kind` was always '' and the paste box reported
+    // "nothing recognised" for every valid URI a user pasted.
     async uriDetect(text: string): Promise<UriDetectResult> {
         const raw = await invoke<string>('uri_detect', { text });
         try {
-            const parsed = JSON.parse(raw) as { kind?: string; payload?: string };
-            return { kind: parsed.kind ?? '', payload: parsed.payload ?? '', raw };
+            const parsed = JSON.parse(raw) as {
+                hits?: Array<{ Scheme?: string; URI?: string; Preview?: string }>;
+            };
+            return {
+                hits: (parsed.hits ?? []).map((h) => ({
+                    scheme: h.Scheme ?? '',
+                    uri: h.URI ?? '',
+                    preview: h.Preview ?? '',
+                })),
+                raw,
+            };
         } catch {
-            return { kind: '', payload: '', raw };
+            return { hits: [], raw };
         }
     }
     async uriImport(rawUri: string): Promise<UriImportResult> {
@@ -629,31 +754,47 @@ export class TauriContract implements D2Contract {
         );
     }
 
+    // Real data, from the real producer.
+    //
+    // This used to invoke a `skipped_families` Tauri command that DOES
+    // NOT EXIST (there is no such #[tauri::command] anywhere in
+    // src-tauri), so every call threw and returned []. That silently
+    // meant: no family ever showed a cooled badge, and the burn-pressure
+    // detector below was fed an empty list forever.
+    //
+    // The path manager's snapshot has been in the diagnostics blob the
+    // whole time — core/abi/abi.go:603 emits `skipped_families` from
+    // `c.pm.SkippedFamilies()`. Read it there.
+    //
+    // Returns null (not []) when the blob carries no `skipped_families`
+    // key at all, which is the difference between "the engine says no
+    // family is cooled" and "the engine did not answer".
     async skippedFamilies(): Promise<SkippedFamilyRow[]> {
-        // The engine projection isn't wired in M1; try the optional
-        // command but fall back to an empty list. M4 ships the real
-        // pathmanager diagnostics surface.
+        return (await this.rawSkippedFamilies()) ?? [];
+    }
+
+    private async rawSkippedFamilies(): Promise<SkippedFamilyRow[] | null> {
         try {
-            const raw = await invoke<string>('skipped_families');
-            const parsed = JSON.parse(raw) as Array<{
-                family: string;
-                ladder_step: number;
-                until_unix_ms?: number;
-                reason_tag?: string;
-            }>;
-            return parsed.map((p) => ({
+            const d = await bridgeDiagnostics();
+            if (!Array.isArray(d.skipped_families)) return null;
+            return d.skipped_families.map((p) => ({
                 family: p.family,
-                ladderStep: p.ladder_step,
-                untilUnixMs: p.until_unix_ms,
-                reasonTag: p.reason_tag,
+                // pathmanager.SkippedFamily omits ladder_step when 0.
+                ladderStep: p.ladder_step ?? 0,
+                // Go marshals time.Time as RFC3339, not epoch ms.
+                untilUnixMs: p.until ? Date.parse(p.until) || undefined : undefined,
+                reasonTag: p.reason,
             }));
         } catch {
-            return [];
+            return null;
         }
     }
 
+    // Feeds the detector null when the engine did not answer, so the
+    // verdict comes back `evaluated:false` rather than a confident
+    // "no burn pressure" derived from an empty list nobody produced.
     async burnpressureVerdict(): Promise<BurnpressureVerdict> {
-        return deriveBurnpressureVerdict(await this.skippedFamilies());
+        return deriveBurnpressureVerdict(await this.rawSkippedFamilies());
     }
 
     async cellLabelGet(cellIdFpHex: string): Promise<string> {

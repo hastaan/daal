@@ -1,0 +1,31 @@
+# tools/phase-allowlist.txt — files permitted to contain a bare phase
+# string literal, read by tools/check-phase.sh.
+#
+# One path per line. Blank lines and lines starting with '#' are
+# comments. Matching is a plain substring match on the offending file's
+# path, so keep entries specific.
+#
+# THE BAR FOR AN ENTRY HERE IS HIGH. "It's only a test" is not a
+# reason: a test that hard-codes a phase is exactly how the repo ended
+# up validating at V1.5 in tests while shipping V1.6 in production, and
+# vice versa. A test that means "the current phase" must say
+# phase.Current / RELAYPACK_PHASE. A test that deliberately exercises a
+# NON-current phase must say phase.V15 (the enum), not "V1.5".
+#
+# The only admissible reason is: the file's job is to pin the wire
+# SPELLING of the enum itself, which cannot be done by referring to the
+# enum (that would be a tautology).
+
+# Pins the four phase wire strings, including that PostV2 is spelled
+# "PostV2" and not "post-V2" — the split that let this package's Phase
+# and relaypackvalidate's Phase disagree while compiling fine. Written
+# out longhand on purpose; comparing the constant to itself would
+# assert nothing.
+core/internal/selection/explain_test.go
+
+# Same reason, other side of the boundary: TestPhaseIsAliasOfCanonicalEnum
+# asserts that relaypackvalidate's PostV2 is still spelled "PostV2" on the
+# wire, and labels its sub-cases by the same name. Comparing the constant
+# to itself would assert nothing, which is the whole point of the entry
+# above.
+bundle/go/relaypackvalidate/phase_test.go

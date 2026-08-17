@@ -180,9 +180,19 @@ export default function Onboarding({
                                 setPasteStatus(null);
                                 if (v.length > 12) {
                                     try {
+                                        // engine_uri_detect returns
+                                        // {"hits":[…]}; the old `det.kind`
+                                        // read a key the engine never
+                                        // emits, so this branch never fired
+                                        // and a valid paste looked
+                                        // unrecognised.
                                         const det = await contract.uriDetect(v);
-                                        if (det.kind) {
-                                            setPasteStatus(`detected: ${det.kind}`);
+                                        if (det.hits.length > 0) {
+                                            setPasteStatus(
+                                                `detected: ${det.hits
+                                                    .map((h) => h.scheme)
+                                                    .join(', ')}`,
+                                            );
                                         }
                                     } catch { /* ignore */ }
                                 }

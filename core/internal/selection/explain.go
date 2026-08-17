@@ -1,17 +1,32 @@
 package selection
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"daal/bundle-go/phase"
+)
 
 // Phase is the spec-version cohort the decision was made under. Locked
 // at FRP-3. Used to gate cdn_fronted rules (no-op at V1.5; live at
 // V1.6+).
-type Phase string
+//
+// This is an ALIAS of daal/bundle-go/phase.Phase, not a second
+// declaration. It used to be its own `type Phase string` whose PostV2
+// constant was spelled "post-V2" while the validator's was spelled
+// "PostV2" — two types compared as strings, so nothing caught it. One
+// type, one spelling, and the compiler enforces both.
+type Phase = phase.Phase
 
 const (
-	PhaseV15    Phase = "V1.5"
-	PhaseV16    Phase = "V1.6"
-	PhaseV2     Phase = "V2"
-	PhasePostV2 Phase = "post-V2"
+	PhaseV15    = phase.V15
+	PhaseV16    = phase.V16
+	PhaseV2     = phase.V2
+	PhasePostV2 = phase.PostV2
+
+	// CurrentPhase is what this build ships — the same constant the
+	// importer validates with, so a decision can never be explained
+	// under a phase the routes were not admitted under.
+	CurrentPhase = phase.Current
 )
 
 // Explanation is the UI-binding contract. FRP-6 (recipient UX)
@@ -108,14 +123,14 @@ type MemoryHint struct {
 // NewExplanation returns a zero-valued Explanation with the given
 // decision identifier and phase. Slice fields are pre-allocated to
 // non-nil empty slices so JSON output never includes "null".
-func NewExplanation(decisionID string, phase Phase) *Explanation {
+func NewExplanation(decisionID string, p Phase) *Explanation {
 	return &Explanation{
 		Shortlist:       []ShortlistEntry{},
 		Failures:        []FailureRecord{},
 		ActiveCooldowns: []CooldownEntry{},
 		NetworkSignals:  []string{},
 		DecisionID:      decisionID,
-		Phase:           string(phase),
+		Phase:           string(p),
 	}
 }
 

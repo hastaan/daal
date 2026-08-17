@@ -2474,7 +2474,7 @@ pub fn run() {
 // Phase 45 — Android JNI bridge.
 //
 // The Kotlin object `org.daal.desktop.platform.DaalCoreBridge` declares
-// five `external` methods that the in-process engine ABI surfaces
+// six `external` methods that the in-process engine ABI surfaces
 // through libdaalcore.so:
 //
 //   setTunFd(fd: Int): Int
@@ -2482,6 +2482,7 @@ pub fn run() {
 //   registerProtectCallback(): Int
 //   setRoute(routeId: String): Int
 //   clearRoute(): Int
+//   schedulerTick(): Int
 //
 // We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
 // (Kotlin's class-mangling rule for object companions), reach the
@@ -2615,6 +2616,29 @@ mod jni_bridge {
     ) -> jint {
         let Some(eng) = engine() else { return -1 };
         match eng.clear_route() {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    /// `engine_scheduler_tick` — one scheduler.Tick at the engine's
+    /// wall clock, for the tick pump DaalVpnService runs while the
+    /// tunnel is up (see startSchedulerPump for why the pump lives on
+    /// the service and not on a bare thread).
+    ///
+    /// Called from a background executor thread, and the tick blocks
+    /// for as long as the refreshes it dispatches take, so this must
+    /// never be routed through the main thread. Returns -1 rather than
+    /// throwing when the engine is not yet loaded: the pump can outlive
+    /// or precede engine init, and a missed tick costs at most one
+    /// cadence period.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_schedulerTick<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        match eng.scheduler_tick() {
             Ok(_) => 0,
             Err(_) => -1,
         }

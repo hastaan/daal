@@ -3,6 +3,21 @@
 // backend (`client-ui/src/backends/tauri.ts`) and the harness backend
 // (`client-ui/src/backends/harness.ts`) MUST match these field names
 // and types. The UI never reaches into raw engine JSON.
+//
+// PROVENANCE: nothing imports this file — the shape the shipped UI
+// actually compiles against is `client-ui/src/contract/D2Contract.ts`,
+// which has since grown the whole D-2 Connections-page tree (publisher
+// rows, family chips, cooled families) that is absent here. Treat this
+// as a documentary mirror for a *second* platform implementer, and
+// read the client-ui copy when the two disagree. The measured/unmeasured
+// rule below is kept in sync deliberately: it is the one part of the
+// contract where getting it wrong makes the client state a falsehood.
+//
+// THE MEASURED/UNMEASURED RULE. A field describing something the engine
+// OBSERVES is optional (or nullable), and its absence means "not
+// measured yet" — never "measured zero". Renderers must branch on
+// presence, not on truthiness. A non-optional number here is a promise
+// that some Go code writes it; do not add one without a writer.
 
 export type ConnState  = 'disconnected' | 'connecting' | 'connected' | 'error';
 export type ConnMode   = 'lifeline' | 'lifeline-strict' | 'normal' | 'bulk';
@@ -19,10 +34,16 @@ export interface RouteDisplayRow {
   trustClass: TrustClass;
   /** Engine family token (e.g. "wg-pars"). */
   family: string;
-  inCooldown: boolean;
+  /** MEASURED. `undefined` = the path manager has not attempted this
+   *  route this session, so nothing is known either way. */
+  inCooldown?: boolean;
   cooldownUntilUnixMs?: number;
-  budgetExhausted: boolean;
-  /** 0..100, computed from engine route_health over the last hour. */
+  /** MEASURED. `undefined` = no budget accounting has run. */
+  budgetExhausted?: boolean;
+  /** MEASURED, 0..100, from engine route_health over the last hour.
+   *  `undefined` = no outcome has ever been recorded for this route.
+   *  Render "not measured yet"; do NOT substitute 0, which reads as a
+   *  measured failure. */
   healthPct?: number;
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
@@ -55,22 +76,49 @@ export interface WhyThisRouteSummary {
   active: RouteDisplayRow;
   /** Localized reason text. */
   reasonText: string;
-  skipped: SkippedRouteEntry[];
+  /** Per-route rejections from the selector. `null` means THE
+   *  COMPARISON NEVER RAN — not "nothing was skipped". An empty array
+   *  is a positive claim that the engine saw the full route set and
+   *  rejected none of it, which no backend may make until it actually
+   *  feeds the selector every route. */
+  skipped: SkippedRouteEntry[] | null;
   decisionId: string;
 }
 
+/** Projection of bootstrap.PointerRotationStatus.
+ *
+ *  There is deliberately no `rotatedSuccessfully` and no
+ *  `lastRotatedUnixMs`: core/bootstrap/pointer_rotation.go has never
+ *  emitted either, and defaulting them (`ok ?? true`, `?? 0`) turned
+ *  two absent fields into a banner that read "Pointers rotated
+ *  successfully" on a device that had never rotated anything. Every
+ *  field below maps 1:1 onto a key the Go struct marshals. */
 export interface PointerRotationSummary {
-  lastRotatedUnixMs: number;
-  validForDays: number;
-  rotatedSuccessfully: boolean;
+  /** True when a rotated pointer set exists in the secret store. */
+  havePersisted: boolean;
+  primarySource?: PointerSource;
+  fallbackSource?: PointerSource;
+  /** RFC3339 validity horizon of the pointer set that will be used. */
+  primaryValidUntil?: string;
+  fallbackValidUntil?: string;
+  /** Derived from `primaryValidUntil`. `undefined` when there is no
+   *  horizon to derive from; negative when already expired. Never
+   *  0-as-unknown: 0 legitimately means "expires today". */
+  validForDays?: number;
 }
+
+/** Which pointer set the engine will use on next boot. */
+export type PointerSource = 'embedded' | 'persisted';
 
 export interface RouteHealthDisplayRow {
   routeId: string;
   /** "Pars · Rescue 03" — ready to render. */
   label: string;
-  pct: number;
-  severity: Severity;
+  /** MEASURED, 0..100. `undefined` = never measured; render the
+   *  "not measured yet" state instead of a bar. */
+  pct?: number;
+  /** Present only when `pct` is. */
+  severity?: Severity;
 }
 
 export interface PublisherHandoffSummary {
@@ -187,9 +235,22 @@ export interface BootstrapStatus {
   json: string;
 }
 
+/** One recognised route URI found in pasted text. Mirrors
+ *  core/share.ClipboardHit, which marshals with Go field names (no
+ *  json tags): {"Scheme","URI","Preview"}. */
+export interface UriDetectHit {
+  scheme: string;
+  uri: string;
+  /** Userinfo-redacted preview — safe to display. */
+  preview: string;
+}
+
+/** Result of engine_uri_detect. The engine returns `{"hits":[…]}`
+ *  (core/abi/share.go). This used to declare `{kind, payload}`, which
+ *  the engine has never emitted, so the paste box reported "nothing
+ *  recognised" for every valid URI a user pasted. */
 export interface UriDetectResult {
-  kind: string;
-  payload: string;
+  hits: UriDetectHit[];
   raw: string;
 }
 

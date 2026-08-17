@@ -78,6 +78,12 @@ func SetTunnelSocks(host string, port int, username, password string) (string, e
 	refresh.SetGlobalDialer(func() (bootstrap.Dialer, bool, error) {
 		ep := currentTunnel()
 		if ep == nil {
+			// The endpoint was cleared underneath us. If a route is
+			// still active this must NOT become a direct dial — see
+			// refresh.ErrTunnelRequired.
+			if refresh.TunnelRequired() {
+				return nil, false, refresh.ErrTunnelRequired
+			}
 			return bootstrap.NewDirectDialer(15 * time.Second), false, nil
 		}
 		// Ignore username/password for now: Phase 1.5B's sing-box
@@ -86,9 +92,18 @@ func SetTunnelSocks(host string, port int, username, password string) (string, e
 		// per-process auth tokens).
 		_ = ep.username
 		_ = ep.password
+		// DirectFallback is deliberately nil while a route is active:
+		// TunnelDialer falls back to it whenever SocksAddress is empty,
+		// which would reintroduce the very leak this guard closes if the
+		// inlet ever went away mid-session. TunnelDialer already returns
+		// a clean error for a nil fallback.
+		var escape bootstrap.Dialer
+		if !refresh.TunnelRequired() {
+			escape = bootstrap.NewDirectDialer(15 * time.Second)
+		}
 		return &bootstrap.TunnelDialer{
 			SocksAddress:   net.JoinHostPort(ep.host, strconv.Itoa(ep.port)),
-			DirectFallback: bootstrap.NewDirectDialer(15 * time.Second),
+			DirectFallback: escape,
 			Timeout:        15 * time.Second,
 		}, true, nil
 	})

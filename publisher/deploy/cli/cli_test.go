@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"daal/bundle-go/phase"
 	"daal/publisher/deploy/provider"
 )
 
@@ -264,7 +265,7 @@ func TestRotateRecommend_FromExplanation_TCPReset_L3(t *testing.T) {
         "pick": {"exposure_mode":"direct_vps"},
         "failures":[{"classification":"tcp_reset","tag":"public_ip:198.51.100.10"}],
         "active_cooldowns":[{"tag":"public_ip:198.51.100.10","reason":"tcp_reset"}],
-        "phase":"V1.5"
+        "phase":"` + string(phase.Current) + `"
     }`)
 	var stdout, stderr bytes.Buffer
 	rc := runRotateRecommend([]string{"--record-file", recFile}, stdin, &stdout, &stderr)

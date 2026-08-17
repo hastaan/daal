@@ -74,6 +74,37 @@ const ROUTE_EMERGENCY_K3F: RouteDisplayRow = {
     sourceName: 'Emergency Bulletin',
 };
 
+// What a route ACTUALLY looks like on a fresh install after the Wave-1
+// honesty pass: the engine has observed nothing, so every measured
+// field is absent rather than zero. Keep this scenario — it is the one
+// that catches a regression back to fabricated defaults.
+const ROUTE_FRESH_UNMEASURED: RouteDisplayRow = {
+    routeId: 'fresh-import-01',
+    publisherId: 'pars-relays',
+    publisherName: 'Pars Relays',
+    routeNickname: 'Just imported',
+    trustClass: 'pinned',
+    family: 'vless-reality',
+    familyMaturity: 'stable',
+    // inCooldown / budgetExhausted / healthPct deliberately absent.
+    proven: false,
+    sourceName: 'Pars Relays',
+};
+
+// A family this build cannot dial. The chip must say so rather than
+// showing the ⚡ "experimental" badge, which would invite the user to
+// flip a gate that changes nothing.
+const ROUTE_UNSUPPORTED_WG: RouteDisplayRow = {
+    routeId: 'legacy-wg-01',
+    publisherId: 'pars-relays',
+    publisherName: 'Pars Relays',
+    routeNickname: 'Old WG',
+    trustClass: 'pinned',
+    family: 'wireguard',
+    familyMaturity: 'unsupported',
+    proven: false,
+};
+
 // ---- scenario type ----
 
 export type ScreenId =
@@ -135,16 +166,22 @@ const DEFAULT_AVAILABLE_ROUTES: RouteDisplayRow[] = [
     ROUTE_EMERGENCY_K3F,
 ];
 
+// A device that has taken a rotated pointer set.
 const POINTER_OK: PointerRotationSummary = {
-    lastRotatedUnixMs: Date.now() - 86400 * 1000,
+    havePersisted: true,
+    primarySource: 'persisted',
+    fallbackSource: 'persisted',
+    primaryValidUntil: new Date(Date.now() + 14 * 86400 * 1000).toISOString(),
     validForDays: 14,
-    rotatedSuccessfully: true,
 };
 
-const POINTER_FAILED: PointerRotationSummary = {
-    lastRotatedUnixMs: Date.now() - 86400 * 1000,
-    validForDays: 0,
-    rotatedSuccessfully: false,
+// A device still on the pointers compiled into the binary, with no
+// expiry reported. This is the common real-world case and it is the one
+// that used to render as "Pointers rotated successfully."
+const POINTER_EMBEDDED: PointerRotationSummary = {
+    havePersisted: false,
+    primarySource: 'embedded',
+    fallbackSource: 'embedded',
 };
 
 const WHY_CONNECTED: WhyThisRouteSummary = {
@@ -157,6 +194,17 @@ const WHY_CONNECTED: WhyThisRouteSummary = {
         { route: ROUTE_EMERGENCY_K3F,  reason: 'last-resort tier',   reasonToken: 'last_resort_tier' },
     ],
     decisionId: 'harness-decision-001',
+};
+
+// What the panel shows today on a real device: the selector was handed
+// a one-route slice, so there is no comparison to report. `null`, not
+// `[]` — the difference is the whole point of this scenario.
+const WHY_NOT_EVALUATED: WhyThisRouteSummary = {
+    active: ROUTE_FRESH_UNMEASURED,
+    reasonText: 'Tunnel up on fresh-import-01.',
+    skipped: null,
+    skippedFamilies: [{ family: 'hysteria2', ladderStep: 2, reasonTag: 'udp_unavailable' }],
+    decisionId: 'harness-decision-002',
 };
 
 const CONN_BASE: ConnectionSummary = {
@@ -209,7 +257,7 @@ export const SCENARIOS: Scenario[] = [
         screen: 'connection',
         state: 'error',
         connection: { ...CONN_BASE, state: 'error' },
-        pointer: POINTER_FAILED,
+        pointer: POINTER_EMBEDDED,
         availableRoutes: DEFAULT_AVAILABLE_ROUTES,
     },
     {
@@ -246,6 +294,24 @@ export const SCENARIOS: Scenario[] = [
         initialRoute: '/routes',
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
         availableRoutes: [ROUTE_PARS_RESCUE_03, ROUTE_PARS_RESCUE_01],
+    },
+    {
+        // The fresh-install truth: nothing measured, nothing claimed.
+        // Every row must read "not measured yet" and the unsupported
+        // family must read "unsupported", not "experimental".
+        id: 'routes-unmeasured',
+        title: 'Routes · nothing measured yet',
+        screen: 'network',
+        initialRoute: '/routes',
+        state: 'unmeasured',
+        connection: { ...CONN_BASE, state: 'disconnected', pointerValidDays: undefined },
+        availableRoutes: [ROUTE_FRESH_UNMEASURED, ROUTE_UNSUPPORTED_WG],
+        routeHealth: [
+            { routeId: ROUTE_FRESH_UNMEASURED.routeId, label: 'Pars · Just imported' },
+            { routeId: ROUTE_UNSUPPORTED_WG.routeId, label: 'Pars · Old WG' },
+        ],
+        pointer: POINTER_EMBEDDED,
+        why: WHY_NOT_EVALUATED,
     },
 
     // --- Sources ---
@@ -285,7 +351,7 @@ export const SCENARIOS: Scenario[] = [
         screen: 'status',
         initialRoute: '/status',
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_FRIEND_MAY6 },
-        pointer: POINTER_FAILED,
+        pointer: POINTER_EMBEDDED,
         routeHealth: [
             { routeId: ROUTE_FRIEND_MAY6.routeId, label: 'Friend · May 6', pct: 28, severity: 'bad' },
             { routeId: ROUTE_EMERGENCY_K3F.routeId, label: 'Emergency · K3F', pct: 50, severity: 'warn' },

@@ -9,6 +9,29 @@ export type ConnMode   = 'lifeline' | 'lifeline-strict' | 'normal' | 'bulk';
 export type TrustClass = 'trusted' | 'pinned' | 'lan' | 'unknown';
 export type Severity   = 'ok' | 'warn' | 'bad';
 
+/** routestore.Maturity, mirrored. `unsupported` is the honest state for
+ *  a family this build knows by name and has verified it CANNOT dial —
+ *  distinct from `experimental` (might work, unproven — note the 3A
+ *  experimental filter is declared but never called in production, so
+ *  the Settings toggle does not actually gate selection today) and from
+ *  `unhandled`
+ *  (a family value this build has never heard of). */
+export type FamilyMaturity =
+  | 'stable'
+  | 'promotion-candidate'
+  | 'experimental'
+  | 'unsupported'
+  | 'unhandled';
+
+/* ── THE MEASURED/UNMEASURED RULE ─────────────────────────────────────
+ * Fields describing something the engine OBSERVES are optional, and
+ * `undefined` means "not measured yet" — never "measured zero".
+ * Renderers must branch on presence, not on truthiness, wherever the
+ * distinction is visible to the user. A non-optional number here is a
+ * promise that some Go code wrote it; do not add one without a writer.
+ * The reference render is components/connection/RouteHealthBars.tsx.
+ * ─────────────────────────────────────────────────────────────────── */
+
 export interface RouteDisplayRow {
   /** Engine route_id (opaque). */
   routeId: string;
@@ -19,18 +42,21 @@ export interface RouteDisplayRow {
   /** Localizable: "Rescue 03". */
   routeNickname: string;
   trustClass: TrustClass;
-  /** Engine family token (e.g. "wg-pars"). */
+  /** Engine family token (e.g. "vless-reality"). */
   family: string;
-  inCooldown: boolean;
+  /** Taxonomy label from routestore.FamilyMaturity. */
+  familyMaturity?: FamilyMaturity;
+  /** MEASURED. `undefined` = the path manager has not attempted this
+   *  route this session, so nothing is known either way. */
+  inCooldown?: boolean;
   cooldownUntilUnixMs?: number;
-  budgetExhausted: boolean;
-  /** 0..100, computed from engine route_health over the last hour.
-   *  Only meaningful when `proven` is true; otherwise it is a placeholder
-   *  (the engine caps unproven routes at 50) and the UI must show
-   *  "not tested yet" rather than the number. */
+  /** MEASURED. `undefined` = no budget accounting has run. */
+  budgetExhausted?: boolean;
+  /** MEASURED, 0..100. `undefined` = no outcome has ever been recorded
+   *  for this route, so there is no score to show. Render "not measured
+   *  yet"; do NOT substitute 0, which reads as a measured failure. */
   healthPct?: number;
-  /** True once the route has recorded at least one success. Until then
-   *  `healthPct` is a placeholder — render an untested state, not a score. */
+  /** True once the route has recorded at least one success. */
   proven?: boolean;
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
@@ -45,7 +71,13 @@ export interface ConnectionSummary {
   activeRoute?: RouteDisplayRow;
   /** Pre-rendered "On Wi-Fi" / "On Cellular" / etc — derived from current_network_id. */
   networkLabel?: string;
-  /** From pointer_rotation_status. */
+  /** Which pointer set the next boot will use, from
+   *  bootstrap.PointerRotationStatus.primary_source. `undefined` when the
+   *  engine did not answer — the status line must then claim nothing. */
+  pointerSource?: PointerSource;
+  /** Whole days from now until the active pointer set expires.
+   *  `undefined` = the engine emitted no expiry. Never 0-as-unknown:
+   *  0 legitimately means "expires today". */
   pointerValidDays?: number;
   /** Pre-rendered fallback used when individual fragments aren't enough. */
   netStatusLine?: string;
@@ -63,24 +95,60 @@ export interface WhyThisRouteSummary {
   active: RouteDisplayRow;
   /** Localized reason text. */
   reasonText: string;
-  skipped: SkippedRouteEntry[];
+  /** Per-route rejections from the selector.
+   *
+   *  `null` means THE COMPARISON NEVER RAN — not "nothing was skipped".
+   *  Today the engine's only selection caller (core/abi/refresh.go:231)
+   *  passes `Decide` a one-element route slice containing the already-
+   *  active route, so the selector has no alternatives to reject and
+   *  `failures` comes back structurally empty for every device. An empty
+   *  array here therefore used to render as a confident "the engine
+   *  considered your other routes and skipped none of them", which is
+   *  the opposite of the truth. Backends MUST send null until they can
+   *  show the selector actually saw the full route set. */
+  skipped: SkippedRouteEntry[] | null;
+  /** Families the path manager is cooling right now. This IS real,
+   *  measured data (pathmanager.SkippedFamilies via the diagnostics
+   *  blob) and is unrelated to `skipped` above. */
+  skippedFamilies?: SkippedFamilyRow[];
   decisionId: string;
 }
 
+/** Which pointer set the engine will use on next boot. */
+export type PointerSource = 'embedded' | 'persisted';
+
+/** Projection of bootstrap.PointerRotationStatus.
+ *
+ *  There is deliberately no `rotatedSuccessfully` and no
+ *  `lastRotatedUnixMs`: the engine struct
+ *  (core/bootstrap/pointer_rotation.go) has never emitted either, and
+ *  the old defaults (`ok ?? true`, `?? 0`) turned two absent fields
+ *  into a banner that always read "Pointers rotated successfully." on a
+ *  device that had never rotated anything. Every field below maps 1:1
+ *  onto a key the Go struct actually marshals. */
 export interface PointerRotationSummary {
-  lastRotatedUnixMs: number;
-  validForDays: number;
-  rotatedSuccessfully: boolean;
+  /** True when a rotated pointer set exists in the secret store. */
+  havePersisted: boolean;
+  primarySource?: PointerSource;
+  fallbackSource?: PointerSource;
+  /** RFC3339 validity horizon of the pointer set that will be used. */
+  primaryValidUntil?: string;
+  fallbackValidUntil?: string;
+  /** Derived from `primaryValidUntil`. `undefined` when there is no
+   *  horizon to derive from; negative when already expired. */
+  validForDays?: number;
 }
 
 export interface RouteHealthDisplayRow {
   routeId: string;
   /** "Pars · Rescue 03" — ready to render. */
   label: string;
-  pct: number;
-  severity: Severity;
-  /** True once the route has recorded a success. When false, `pct` is a
-   *  placeholder and the UI should show "not tested yet". */
+  /** MEASURED, 0..100. `undefined` = never measured; render the
+   *  "not measured yet" state instead of a bar. */
+  pct?: number;
+  /** Present only when `pct` is. */
+  severity?: Severity;
+  /** True once the route has recorded a success. */
   proven?: boolean;
 }
 
@@ -143,11 +211,17 @@ export type SourceKind = 'sbpx' | 'sbp' | 'subscription' | 'pasted' | 'mixed';
 export interface FamilyChip {
   family: string;            // engine family token, e.g. "vless-reality"
   count: number;
-  healthPct: number;         // averaged across PROVEN family routes (0..100)
-  proven: boolean;           // at least one route in the family has succeeded;
-                             // when false, healthPct is a placeholder (render untested)
+  /** MEASURED, averaged across the family's routes that have a score.
+   *  `undefined` = no route in this family has ever been measured. */
+  healthPct?: number;
+  proven: boolean;           // at least one route in the family has succeeded
   cooledCount: number;       // how many of `count` are currently cooled
-  experimental: boolean;     // from routestore.FamilyMaturity
+  /** Full taxonomy label mirrored from routestore.FamilyMaturity. The
+   *  chip used to carry only `experimental: boolean`, derived from a
+   *  mirror that listed only the experimental families — so the five
+   *  wrongly-Stable families (tuic, shadowsocks, tor-bridge, wireguard,
+   *  amneziawg) got no badge at all and read as fully supported. */
+  maturity: FamilyMaturity;
   lastErrorTag?: string;     // engine token for "why cooled" (when cooled>0)
 }
 
@@ -190,8 +264,16 @@ export interface SkippedFamilyRow {
   reasonTag?: string;       // engine token, e.g. "udp_unavailable"
 }
 
-/** burnpressure.Verdict projection — drives the auto-promotion banner. */
+/** burnpressure.Verdict projection — drives the auto-promotion banner.
+ *
+ *  `evaluated: false` means the detector could not be run at all (the
+ *  engine exposed no skipped-family snapshot), and every other field is
+ *  meaningless. Callers must not render "no burn pressure" from an
+ *  unevaluated verdict: the client-side re-derivation used to return
+ *  `{promote:false, 0, 0}` unconditionally because its input
+ *  (`skippedFamilies()`) invoked a Tauri command that does not exist. */
 export interface BurnpressureVerdict {
+  evaluated: boolean;
   promote: boolean;
   distinctFamilies: number;
   highestLadderStep: number;
@@ -251,9 +333,25 @@ export interface BootstrapStatus {
   json: string;
 }
 
+/** One recognised route URI found in pasted text.
+ *  Mirrors core/share.ClipboardHit, which marshals with Go field names
+ *  (no json tags): {"Scheme","URI","Preview"}. */
+export interface UriDetectHit {
+  scheme: string;
+  uri: string;
+  /** Userinfo-redacted preview — safe to display. */
+  preview: string;
+}
+
+/** Result of engine_uri_detect.
+ *
+ *  The engine returns `{"hits":[…]}` (core/abi/share.go:307). This type
+ *  used to declare `{kind, payload}`, which the engine has never
+ *  emitted, so `kind` was always '' and the paste box silently never
+ *  reported a detection — a contract mismatch that read as "nothing
+ *  recognised" for every valid URI a user pasted. */
 export interface UriDetectResult {
-  kind: string;
-  payload: string;
+  hits: UriDetectHit[];
   raw: string;
 }
 

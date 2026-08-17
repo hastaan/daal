@@ -121,8 +121,26 @@ var LegalTransitions = []PostureTransition{
 	{PostureOfflineSharing, EventDisconnected, PostureNoRoute},
 
 	// From Experimental
+	//
+	// This block used to have only the two exits below, from when
+	// PostureExperimental was unreachable in practice: every family in
+	// routestore's table that a user could actually connect on was
+	// graded Stable, so nothing ever entered the state. The Wave-1
+	// maturity correction demoted tuic and shadowsocks — both dialable
+	// by the shipped sing-box, both paste-importable — so the state is
+	// now reachable on a live connection and needs the same exits any
+	// other active posture has. Without them abi.SetRoute's
+	// `imported_selected` and SetMode's `lifeline_mode_on` are illegal
+	// transitions: the posture sticks at Experimental while a stable
+	// route carries the traffic, and Manager.SetPosture overwrites
+	// lastReason with "illegal transition …", which is the string
+	// ExportDiagnostics publishes as `why`.
 	{PostureExperimental, EventActiveFailed, PostureRecovery},
 	{PostureExperimental, EventDisconnected, PostureNoRoute},
+	{PostureExperimental, EventImportedSelected, PostureImportedActive},
+	{PostureExperimental, EventSharedSelected, PostureSharedActive},
+	{PostureExperimental, EventLifelineModeOn, PostureLifeline},
+	{PostureExperimental, EventOfflineShareStart, PostureOfflineSharing},
 }
 
 // IsLegal reports whether (from, event) → to is in the table. Order

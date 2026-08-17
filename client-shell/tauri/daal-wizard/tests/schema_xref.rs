@@ -57,8 +57,17 @@ fn pre_provision_keys_equal_snapshot_union() {
     );
 }
 
+/// The key must always be *present* (the Go side has no `omitempty` on
+/// it, so an absent key is schema drift) and a freshly-constructed
+/// record must leave it *empty*.
+///
+/// This used to be named "…_at_v1_5" and read as a phase rule. It never
+/// was one: the emptiness here is the struct default, not a phase
+/// constraint. At the shipped phase (V1.6, `bundle/go/phase`) a
+/// non-empty freshness_url is legal — RP021 no longer rejects it — so a
+/// name asserting "empty at the current phase" would now be false.
 #[test]
-fn freshness_url_is_present_and_empty_at_v1_5() {
+fn freshness_url_key_is_present_and_defaults_empty() {
     let rec = PreProvisionRecord::new("hetzner", "fsn1", "cx22", "iran-default", vec![], "AAAA");
     let body = serde_json::to_value(&rec).unwrap();
     assert!(body.as_object().unwrap().contains_key("freshness_url"));

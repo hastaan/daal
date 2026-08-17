@@ -272,15 +272,20 @@ func TestDecide_MalformedRowsFilteredOut(t *testing.T) {
 	}
 }
 
-func TestDecide_DefaultPhaseIsV15(t *testing.T) {
+// TestDecide_DefaultPhaseIsCurrent — an Input with no Phase must
+// decide under the SAME phase the importer admitted the routes under.
+// The selector used to default to V1.5 while the importer (post-fix)
+// validates at CurrentPhase, so a cdn_fronted route could be in the
+// store and yet be explained under a phase in which it cannot exist.
+func TestDecide_DefaultPhaseIsCurrent(t *testing.T) {
 	rows := []routestore.RouteRow{
 		makeRow("rA", "vless-reality", "direct_vps", "public_ip:1.2.3.4"),
 	}
 	out := Decide(Input{
 		Routes: rows, Mode: ModeNormal, Now: time.Now(), DecisionID: "test-default-phase",
 	})
-	if out.Explanation.Phase != string(PhaseV15) {
-		t.Errorf("default phase must be V1.5; got %q", out.Explanation.Phase)
+	if out.Explanation.Phase != string(CurrentPhase) {
+		t.Errorf("default phase must be %s; got %q", CurrentPhase, out.Explanation.Phase)
 	}
 }
 
