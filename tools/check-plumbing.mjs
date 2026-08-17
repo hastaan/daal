@@ -140,9 +140,13 @@ const declaredNotRegistered = [...declared].filter((d) => !registered.has(d));
 const UNINVOKED_ALLOWLIST = new Map([
     [
         'scheduler_tick',
-        'FRP-3 selection brain: core/internal/selection is complete but has no ' +
-        'production caller yet (SetRoute still takes a route id verbatim). The ' +
-        'smart-route-selection phase wires it — remove this entry then.',
+        'Driven from Rust, not from the UI: src-tauri/src/lib.rs spawns a 60s ' +
+        'thread calling cmd::scheduler_tick, so this gate (which only scans ' +
+        'client-ui for invoke() targets) cannot see the caller. NOTE the real ' +
+        'gap this hides: core/abi/scheduler_gomobile.go exports only ' +
+        'SchedulerStatus, so ANDROID gets no scheduler at all — the platform ' +
+        'where all four transports are field-proven has no auto-promotion and ' +
+        'no scheduled refresh. Remove this entry once mobile exports a tick.',
     ],
 ]);
 
