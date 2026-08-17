@@ -18,15 +18,12 @@ package cloudinit
 // on one side and absent on the other for as long as the pin is stale,
 // and nothing in the build detects it. Two currently outstanding:
 //
-//   - COVER SNI (Wave 2 Step 4). daal-deploy writes a per-relay cover
-//     host into cloud-init today; the mgmt handler that echoes it back
-//     on /users/provision is in the source tree and NOT in the pinned
-//     artefact below. Mitigated, not fixed: the pack minter falls back
-//     to OperatorRecord.CoverSNI (`users-pack-sbp[x] --cover-sni`, which
-//     the wizard passes), so packs are correct even against an
-//     un-updated box. A raw CLI invocation that omits the flag still
-//     mints a pack advertising the legacy constant against a box serving
-//     a pool host, which kills the vless tier silently.
+//   - COVER SNI (Wave 2 Step 4). RESOLVED 2026-08-17: the pin below was
+//     bumped to an artefact built from this tree, so a freshly provisioned
+//     box echoes its own cover host on /users/provision. The record
+//     fallback (`users-pack-sbp[x] --cover-sni`) remains as defence in
+//     depth for boxes provisioned before this release — a raw CLI
+//     invocation against such a box still needs the flag.
 //
 //   - MULTIPLEX (Wave 2 Step 5). Fails safe by construction: the
 //     capability travels box→publisher (`mux_inbound`), so an
@@ -105,8 +102,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "7325b7231778dd2dcd514a784a4e31c31c124280f77af9adbc5d381941a6133a",
-			SigHex:    "8389e27b565bbb49e30ace32de4554dab3d6a18cb77b7f8a336fc24ecfa80db5cbef6c01b21c4f51af382977a959806161a070cb60a1d193b077c87d381b5f07",
+			Sha256:    "811db09894075349855b405f864822cfec675428595bcd831564645b00e05a72",
+			SigHex:    "cd81fe4dce1bba3d855a75481695ddd123b75460d0f8c20a3d88a34cce17805ff3c5b1f4ee3ec6779a169555e3adc1b072711dd0c95b6d52c8251aa7367a7303",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-mgmt-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
