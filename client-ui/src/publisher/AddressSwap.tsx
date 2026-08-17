@@ -78,6 +78,28 @@ interface Props {
     /** How many people are holding a file from this relay. */
     liveRecipients: number;
     disabled?: boolean;
+    /** The page's shared mgmt-call wrapper — the SAME one every other
+     *  box-touching action uses.
+     *
+     *  This sheet used to call `Wizard.rotateExecute` directly and
+     *  render `String(e)`, which was harmless while L3 was a pure
+     *  cloud-API rung. It is not one any more: since the guest-OS half
+     *  landed, an L3 opens an ephemeral firewall window for this
+     *  device's public IP and makes a signed call to the relay, so it
+     *  now fails in the two ways every other mgmt action fails —
+     *  E_HELPER_IP_MISSING / E_HELPER_IP_STALE (the operator's address
+     *  changed; re-detect and retry, which this wrapper offers) and
+     *  E_RELAY_TOO_OLD (the relay's pinned mgmt binary cannot bind an
+     *  address; not retryable, and the answer EVERY relay in the field
+     *  gives until the box artifact is re-released). Both need the
+     *  page's classification and translated copy rather than a raw
+     *  developer sentence in front of a Farsi-speaking operator.
+     *
+     *  Returns true when the call succeeded. */
+    runMgmt: (
+        fn: () => Promise<void>,
+        setErr: (s: string | null) => void,
+    ) => Promise<boolean>;
     /** Called after a successful swap so the parent can re-read the
      *  relay (the address it displays has just changed). */
     onDone: () => void;
@@ -98,6 +120,7 @@ export function AddressSwap({
     canReserve,
     mirrorsInPack,
     liveRecipients,
+    runMgmt,
     disabled,
     onDone,
 }: Props) {
@@ -127,9 +150,11 @@ export function AddressSwap({
 
     const run = async () => {
         setBusy(true);
-        setErr(null);
-        try {
-            const out = await Wizard.rotateExecute(
+        // Boxed because runMgmt's callback returns void; a bare `let`
+        // assigned inside it narrows to null for the compiler.
+        const out: { v: RotateExecuteOutput | null } = { v: null };
+        const ok = await runMgmt(async () => {
+            out.v = await Wizard.rotateExecute(
                 operatorId,
                 'L3',
                 reason.trim() || 'address blocked',
@@ -138,13 +163,12 @@ export function AddressSwap({
                 // the boundary explicit; the Rust side trims either way.
                 { newFloatingIpId: fipId.trim() },
             );
-            setDone(out);
+        }, setErr);
+        setBusy(false);
+        if (ok && out.v) {
+            setDone(out.v);
             setOpen(false);
             onDone();
-        } catch (e) {
-            setErr(String(e));
-        } finally {
-            setBusy(false);
         }
     };
 
@@ -271,6 +295,21 @@ export function AddressSwap({
                 >
                     <div style={{ display: 'grid', gap: 10 }}>
                         <div style={BODY}>{t('pub.danger.address.done.body')}</div>
+                        {/* The self_heal copy used to end "Nothing else
+                            to do." It was wrong, and wrong in the
+                            direction that costs a family their relay.
+                            Daal publishes the NOTE to the mirrors; it
+                            never uploads the .sbp to the download
+                            address the note points at (`pack_url`) —
+                            `freshness::publish` → `PublishAll` writes
+                            exactly one body, the document. The recipient
+                            then fetches doc.current_signed_url
+                            (relaypack_refresh.go:619) and, if the
+                            operator has not put the re-signed pack
+                            there, gets a 404 or a digest that does not
+                            match, refuses it, and stays on the burned
+                            address — while this screen had said the job
+                            was finished. The copy now names the step. */}
                         <div style={BODY}>
                             {mirrorsInPack > 0
                                 ? t('pub.danger.address.done.self_heal')

@@ -1315,6 +1315,13 @@ export default function PublisherRecipientsPage({
                         mirrorsInPack={mirrorsInPack}
                         liveRecipients={operator?.live_recipient_count ?? 0}
                         disabled={dangerBusy || rotateTlsBusy}
+                        // L3 is a mgmt-plane call now (it tells the
+                        // relay to configure the new address on its
+                        // interface), so it goes through the same
+                        // wrapper as every other box-touching action:
+                        // helper-IP repair on a stale allowlist, and
+                        // translated copy for a relay too old to bind.
+                        runMgmt={runMgmt}
                         onDone={() => {
                             void reloadOperator();
                             void reloadArtifacts();

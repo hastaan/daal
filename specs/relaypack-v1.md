@@ -305,7 +305,7 @@ CDN posture" button (`publisher/deploy/cloudflare/posture.go`),
 which re-fetches Origin CA fingerprint, AOP flag, firewall rule,
 and the proxied-DNS state from Cloudflare and surfaces drift.
 
-### Freshness JSON shape (sub-key-aware) — locked
+### Freshness JSON shape (sub-key-aware) — `daal/freshness-v2`
 
 Per FRP-8 §6: a publisher's freshness document is **either** root-
 signed (no active sub-key on the publisher) **or** sub-key-signed
@@ -313,25 +313,76 @@ with the FRP-7.5 cert embedded inline (active sub-key exists).
 Recipients walk the same `pub → cert → sub` chain they already
 walk for `.sbp` bundles.
 
+**This section previously described `daal/freshness-v1` and called
+the shape "locked". Wave 3 (Step 8) superseded it, and the change
+is not additive: `core/refresh` REFUSES a v1 document with
+`ErrFreshnessVersion` rather than reading it on a best-effort
+basis (`relaypack.go` `FreshnessKindV1`, test
+`TestVerifyFreshnessDocument_V1Refused`). The v1 shape below is
+therefore recorded as history, not as an accepted alternative.**
+
 ```jsonc
 {
-  "kind":                  "daal/freshness-v1",
+  "kind":                  "daal/freshness-v2",
   "relay_pack_id":         "<deterministic from BindAndSign>",
+  "supersedes":            ["<pack id this document ALSO governs>", "..."],
+  "sequence":              1747219200,
   "current_bundle_sha256": "<hex>",
   "current_signed_url":    "https://<frp-static-host>/<bundle-name>.sbp",
   "last_modified":         "2026-05-14T12:34:56Z",
+  "not_after":             "2026-05-17T12:34:56Z",
+  "mirrors":               [{"url": "https://..."}, ...],
   "publisher_pub_hex":     "<root publisher pub, hex>",
+  "pad":                   "<signed filler; key never omitted>",
   "subkey_cert":           {/* SubkeyCert JSON, omitted iff root-signed */},
   "signature_hex":         "<Ed25519 over canonical JSON above with signature_hex stripped>"
 }
 ```
+
+Every added field is inside the signed body. What each one is for,
+because each closes a hole that made the v1 channel either inert or
+attackable:
+
+- **`supersedes[]`** — the pack-id rule. `DeriveRelayPackID` hashes
+  `public_ip | server_id | region | provider | families`, and rungs
+  L3–L6 exist to change exactly those, so a rotation RENAMES the
+  pack. A recipient knows only the id stamped on its own route
+  rows, so a post-rotation document naming the new id is rejected
+  as `ErrFreshnessWrongPack` — every mirror, every device, while
+  the publisher's screen reports a successful publish. A document
+  satisfies `ExpectRelayPackID` by naming it as `relay_pack_id`
+  **or** by listing it here. The id derivation was deliberately NOT
+  changed to fix this: that id is already inside every distributed
+  manifest and keys the route rows, so re-deriving it would rename
+  every pack in the field at once.
+  Recipients that apply a superseding pack MUST re-key their
+  persisted freshness record onto the applied pack's id; without
+  that the new id starts at high-water 0 and opens a one-document
+  replay window.
+- **`sequence`** — monotonic per pack, persisted by the recipient as
+  a high-water mark (`MinSequence`). Rollback protection held only
+  in memory protects a process, not a device. A document AT the
+  high-water mark is accepted only while it names the bundle
+  already installed (`CurrentBundleSHA256`), because the counter's
+  granularity lets two same-second documents share a value.
+- **`not_after`** — signed expiry, so a captured document cannot
+  freeze a recipient indefinitely. Mirror documents are bounded by
+  the enclosing bundle's expiry.
+- **`mirrors[]`** — the endpoint set to poll on the NEXT cycle, so a
+  publisher can retire a burned freshness host without
+  re-delivering a pack. A degraded set (single provider, or
+  duplicates) is refused rather than partially trusted.
+- **`pad`** — signed filler quantising the document's size. The key
+  is never `omitempty`: an absent key is itself a signal.
 
 Signing rules + recipient verification chain locked verbatim in
 `38-phase-frp-8-v1-6-cdn-fronted.md` §6 — the recipient code
 lives at `core/refresh/relaypack.go` and consults
 `core/internal/selection/freshness.go` for the pure-policy
 "should we attempt a refresh now?" decision (no sockets in
-selection).
+selection). The publisher half is
+`publisher/deploy/freshness/document.go`, whose struct this one
+mirrors field for field.
 
 ### `Manifest.relay_pack.freshness_url` (lifted at V1.6)
 

@@ -164,6 +164,42 @@ type Executor struct {
 	// pack. Whatever is bound here must also fit inside
 	// [L3FastPathBudget] together with the bind and the store write.
 	VerifyReachable func(ctx context.Context, rec *provider.OperatorRecord) error
+
+	// BindAddress is the GUEST-OS half of an L3 swap, and without it an
+	// L3 cannot work at all.
+	//
+	// Attaching a floating IP routes packets to the server at the
+	// provider's network layer; the operating system does not reply on
+	// the address until it is configured on an interface. Measured on
+	// real hardware 2026-08-17: the API reported the address attached
+	// with both ownership labels while the box never answered on it.
+	// mgmt.BindAddressWithFW is what fills the gap.
+	//
+	// The signature carries BOTH addresses because at this point in the
+	// swap they differ and confusing them is unrecoverable: controlIP is
+	// the address the relay still ANSWERS on (the pre-swap one, the only
+	// route the request can travel), target is the address to bring up.
+	//
+	// It is a func field rather than a call, for the same reason
+	// VerifyReachable is: this package is I/O-free by design and
+	// delegates every network call to an injected seam (its own opsec
+	// test enforces it).
+	//
+	// Nil skips the bind — which is honest only for a relay that already
+	// holds the address. A production wiring must set it; leaving it nil
+	// reproduces exactly the bug this field exists to fix, and
+	// VerifyReachable is what will catch that.
+	BindAddress func(ctx context.Context, rec *provider.OperatorRecord, controlIP, target net.IP) error
+
+	// UnbindAddress is the inverse, used on two paths: rolling back a
+	// swap whose probe failed (the box must not keep an address the
+	// record no longer names), and giving the PREVIOUS address back
+	// after a committed swap — before it is released, never after,
+	// because a released address returns to the provider's pool and may
+	// be issued to another customer while this box still claims it.
+	//
+	// Nil skips it, with a warning on the outcome rather than silence.
+	UnbindAddress func(ctx context.Context, rec *provider.OperatorRecord, controlIP, target net.IP) error
 }
 
 // RotateRequest is the input to [Executor.Rotate].
@@ -477,6 +513,11 @@ type l3Swap struct {
 	// reservedHere: the executor minted newFIPID, so rollback may
 	// delete it. An address the operator supplied is never deleted.
 	reservedHere bool
+	// boundIP is the address the box was told to configure on its
+	// interface, "" if the bind was skipped or never ran. Rollback needs
+	// it: an address left on the interface of a relay whose record no
+	// longer names it is one the box will still source traffic from.
+	boundIP net.IP
 }
 
 // beginL3 performs the swap and leaves the record naming the new
@@ -486,8 +527,9 @@ type l3Swap struct {
 // THE SEQUENCE, and why it is this way round:
 //
 //	reserve (if needed) → attach NEW → provider reads it back →
-//	record adopts the new address → re-sign → store →
-//	release OLD (in Rotate, after the commit)
+//	record adopts the new address → BIND on the box → verify it answers →
+//	re-sign → store → unbind OLD → release OLD
+//	(the last two in Rotate/finish, after the commit)
 //
 // The old address is never detached first. A Hetzner server keeps its
 // own primary IPv4 and can hold two floating IPs at once, so between
@@ -510,9 +552,13 @@ type l3Swap struct {
 // between this being correct and this being proven. The provider adapter
 // reads the address back from the cloud API and refuses to claim an
 // attachment it cannot see, which proves the control plane accepted the
-// change. It does not prove a packet from Iran reaches port 443 on the
-// new address — that needs a dial from outside, which no unit test and
-// no offline publisher can do. VerifyReachable is the seam for it.
+// change. BindAddress adds the guest-OS half, and its response is the
+// box's own claim about what it did. Neither proves a packet from Iran
+// reaches port 443 on the new address — that needs a dial from outside,
+// which no unit test and no offline publisher can do. VerifyReachable is
+// the seam for it, and it stays MANDATORY in spirit even now that the
+// bind exists: the 2026-08-17 finding was precisely a case where every
+// layer that could report success did.
 func (e *Executor) beginL3(ctx context.Context, req *RotateRequest) (*l3Swap, error) {
 	rec := req.Record
 	st := &l3Swap{
@@ -561,6 +607,20 @@ func (e *Executor) beginL3(ctx context.Context, req *RotateRequest) (*l3Swap, er
 		return nil, err
 	}
 
+	// THE GUEST-OS STEP, and it goes HERE: after the provider has
+	// attached the address (there is nothing to bind before that) and
+	// before anything asks whether the address answers (the bind is what
+	// makes it answer). Delivered over the PRE-swap address, because the
+	// box does not yet reply on the new one — that is the request's
+	// whole purpose.
+	if e.BindAddress != nil {
+		if err := e.BindAddress(ctx, rec, st.priorIP, rec.PublicIP); err != nil {
+			st.rollback(ctx, e, rec)
+			return nil, fmt.Errorf("relay did not bind the new address: %w", err)
+		}
+		st.boundIP = append(net.IP(nil), rec.PublicIP...)
+	}
+
 	if e.VerifyReachable != nil {
 		if err := e.VerifyReachable(ctx, rec); err != nil {
 			st.rollback(ctx, e, rec)
@@ -583,6 +643,15 @@ func (e *Executor) beginL3(ctx context.Context, req *RotateRequest) (*l3Swap, er
 func (st *l3Swap) rollback(ctx context.Context, e *Executor, rec *provider.OperatorRecord) {
 	if st == nil || rec == nil {
 		return
+	}
+	// The box first, while the record still names the new address and
+	// the old one is still the one that works. An address left on the
+	// interface after a rolled-back swap is one the relay may keep
+	// choosing as a source address for its own traffic, on an address
+	// that is about to be handed back.
+	if len(st.boundIP) > 0 && e.UnbindAddress != nil {
+		_ = e.UnbindAddress(ctx, rec, st.priorIP, st.boundIP)
+		st.boundIP = nil
 	}
 	if len(st.priorIP) > 0 {
 		rec.PublicIP = st.priorIP
@@ -629,6 +698,46 @@ func (st *l3Swap) finish(ctx context.Context, e *Executor, rec *provider.Operato
 			st.priorFIPID))
 		return out
 	}
+
+	// UNBIND BEFORE RELEASE. A released address goes back to the
+	// provider's pool and may be issued to another customer's server; a
+	// box that still has it configured will keep choosing it as a source
+	// address for its own outbound traffic, from an address that is by
+	// then routed somewhere else. The control address is the NEW one,
+	// which the probe above has just proven answers.
+	//
+	// A failure here does not fail the rotation — the pack is signed and
+	// committed, and undoing that to tidy up an interface would be the
+	// wrong trade — but it does stop the release: an address that is
+	// still claimed by a live box is better left reserved (costing
+	// money, visibly) than handed to a stranger.
+	//
+	// An executor with NEITHER seam wired never bound anything and has
+	// no way to unbind, so there is nothing for it to undo and the
+	// release goes ahead. An executor with a bind seam and no unbind
+	// seam is asymmetrically configured — it can put addresses on a
+	// relay and not take them off — and that one stops, because it is
+	// the shape that quietly accumulates claimed-but-released addresses.
+	switch {
+	case len(st.priorIP) == 0:
+		// Nothing known to be on the interface.
+	case e.UnbindAddress != nil:
+		if err := e.UnbindAddress(ctx, rec, rec.PublicIP, st.priorIP); err != nil {
+			out.Warnings = append(out.Warnings, fmt.Sprintf(
+				"could not tell the relay to drop its previous address %s (%v), so floating IP %s was NOT released: "+
+					"handing it back while this relay still has it configured would give another customer an address this box still claims. "+
+					"It is still reserved and still billing",
+				st.priorIP, err, st.priorFIPID))
+			return out
+		}
+	case e.BindAddress != nil:
+		out.Warnings = append(out.Warnings, fmt.Sprintf(
+			"floating IP %s (%s) was NOT removed from the relay's interface — this executor can bind addresses but has no unbind seam wired — "+
+				"so it has not been released either; it is still reserved and still billing",
+			st.priorFIPID, st.priorIP))
+		return out
+	}
+
 	deleted, err := res.ReleaseFloatingIP(ctx, rec, st.priorFIPID)
 	switch {
 	case err != nil:

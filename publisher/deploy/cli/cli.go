@@ -14,11 +14,14 @@
 //	               report.
 //	pricing        fetch live per-hour cost for a record's server type.
 //	assign-fip     attach a floating IP to a record's server, reserving
-//	               a fresh one when --fip-id is omitted.
+//	               a fresh one when --fip-id is omitted, and tell the relay
+//	               to configure it on its interface (--priv-key/--helper-ip)
+//	               — the provider only ROUTES the address; the guest OS does
+//	               not answer on it until it is bound.
 //	floating-ip    assign | unassign | release a floating IP. unassign
 //	               detaches (the address stays reserved and billing);
-//	               release detaches AND gives the address back, but only
-//	               when daal-deploy reserved it.
+//	               release unbinds it on the relay, detaches, AND gives the
+//	               address back, but only when daal-deploy reserved it.
 //	verify         validate OperatorRecord JSON.
 //	bind-and-sign  bind an OperatorRecord into a signed RelayPack .sbp (FRP-4b).
 //	qr-fountain    stream LT-fountain frames for a .sbp as JSON lines (FRP-4b).
@@ -55,6 +58,7 @@ import (
 	"daal/publisher/deploy/freshness"
 	"daal/publisher/deploy/freshness/backends/ghpages"
 	"daal/publisher/deploy/freshness/backends/r2"
+	"daal/publisher/deploy/mgmt"
 	"daal/publisher/deploy/provider"
 	"daal/publisher/deploy/providers/hetzner"
 	"daal/publisher/deploy/providers/stark"
@@ -84,9 +88,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "pricing":
 		return runPricing(ctx, rest, stdout, stderr)
 	case "assign-fip":
-		return runAssignFIP(ctx, rest, stdout, stderr)
+		return runAssignFIP(ctx, rest, os.Stdin, stdout, stderr)
 	case "floating-ip":
-		return runFloatingIP(ctx, rest, stdout, stderr)
+		return runFloatingIP(ctx, rest, os.Stdin, stdout, stderr)
 	case "verify":
 		return runVerify(rest, stdout, stderr)
 	case "bind-and-sign":
@@ -166,8 +170,12 @@ Subcommands:
                 ssh_key_deleted / firewall_deleted / preserved / warnings).
                 Exit 1 means the billing server survived — keep the record.
   pricing       Print live per-hour cost for a record's server type.
-  assign-fip    Attach a floating IP to a record's server.
-  floating-ip   Assign or unassign a floating IP.
+  assign-fip    Attach a floating IP to a record's server AND bind it on the
+                relay so the box actually answers there. Needs --priv-key and
+                --helper-ip; refuses (exit 3) on a relay whose mgmt binary
+                cannot bind an address, before anything is reserved.
+  floating-ip   Assign, unassign or release a floating IP. release unbinds the
+                address on the relay before handing it back to the provider.
   verify        Validate OperatorRecord JSON.
   bind-and-sign Bind OperatorRecord -> signed RelayPack .sbp (FRP-4b).
                 --freshness-mirror provider=url (REPEAT, min 2, distinct
@@ -592,16 +600,94 @@ const (
 	l3ProbeTimeout = 8 * time.Second
 )
 
+// printUnbindWarnings renders the box's own words about a removal.
+//
+// The bind path already did this (it is how "persisted=false" reaches an
+// operator), and every unbind site threw the response away — including
+// the one that goes on to hand the address back to the provider. The
+// hard cases are errors now (mgmt.UnbindAddress refuses a 200 that says
+// the address is still configured), so what is left here is genuinely
+// advisory: a persistence record removed while the live half was already
+// gone, a stale record skipped, a delegated apply. All of it is about a
+// relay nobody can SSH into, so none of it is summarised.
+func printUnbindWarnings(stderr io.Writer, un *mgmt.UnbindAddressResp) {
+	if un == nil {
+		return
+	}
+	for _, w := range un.Warnings {
+		fmt.Fprintf(stderr, "warning: %s\n", w)
+	}
+}
+
 // l3AddressServes is the reachability post-condition, injectable so tests
 // can exercise both outcomes without waiting on a real network timeout —
 // and so a test cannot accidentally pass by dialling something real.
 var l3AddressServes = health.AddressServes
 
-func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// The three mgmt-plane seams the L3 verbs drive, injectable for the same
+// reason l3AddressServes is: each one opens a cloud firewall window and
+// dials a TLS-pinned box, so a test that did not stub them would either
+// hit the network or panic on a fake provider.
+var (
+	l3BoxCapabilities = mgmt.CapabilitiesWithFW
+	l3BindAddress     = mgmt.BindAddressWithFW
+	l3UnbindAddress   = mgmt.UnbindAddressWithFW
+)
+
+// THE ORDER OF AN L3 SWAP, AND WHY IT IS THIS ORDER.
+//
+//  0. ASK THE BOX WHAT IT CAN DO      — before anything is reserved or
+//     attached. A relay whose pinned
+//     mgmt binary cannot bind an
+//     address can never answer on a
+//     floating IP, so attaching one
+//     would produce a billing
+//     resource and a dead relay. The
+//     refusal costs nothing and
+//     changes nothing.
+//  1. RESERVE (if no --fip-id)        — failure: nothing to undo.
+//  2. ATTACH at the provider          — failure: give the reserved
+//     address back.
+//  3. RECORD POST-CONDITIONS          — the record's two copies of the
+//     dialled address moved and
+//     agree. Failure: give it back.
+//  4. BIND ON THE BOX                 — the guest OS puts the address
+//     on its interface. Delivered
+//     over the PRE-SWAP address,
+//     because that is the only one
+//     the box answers on yet.
+//     Failure: give it back.
+//  5. PROBE                           — health.AddressServes proves the
+//     bind actually worked. This is
+//     the difference between
+//     believing the box and knowing.
+//     Failure: unbind, then give it
+//     back.
+//  6. COMMIT                          — write the record. Only now does
+//     anything downstream re-sign a
+//     pack against the new address.
+//
+// Step 5 stays even though step 4 reports success. The box's answer is a
+// claim about a syscall; the probe is a connection from outside the box
+// to the port recipients dial. The 2026-08-17 finding was exactly a case
+// where every layer above reported success and the address was dead.
+//
+// On every failing path the record is NOT written, so nothing downstream
+// can persist or re-sign a half-applied swap.
+func runAssignFIP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("assign-fip", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file")
+	// REQUIRED SINCE THIS WAVE. The swap is not a pure cloud-API
+	// operation any more: the box has to be told to configure the
+	// address, and that call is Ed25519-signed and runs inside an
+	// ephemeral firewall window opened for this caller's IP. Without
+	// these two the verb cannot finish, and it says so before it
+	// reserves anything rather than after it has attached an address the
+	// box will never answer on.
+	privKeyFlag := fs.String("priv-key", "", "publisher Ed25519 private key (path | '-' for stdin) — required: the relay must be told to bind the new address")
+	helperIP := fs.String("helper-ip", "", "Helper's outbound public IP (firewall allowlist) — required, see --priv-key")
 	// OPTIONAL SINCE STEP 9. It used to be mandatory, which made the
 	// whole L3 rung reachable only by an operator who had reserved an
 	// address by hand in the provider console and knew its numeric id.
@@ -613,7 +699,11 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err := requireAll(stderr, map[string]string{
 		"--record-file": *recordFile,
 		"--token-file":  *tokenFile,
+		"--priv-key":    *privKeyFlag,
+		"--helper-ip":   *helperIP,
 	}); err != nil {
+		fmt.Fprintln(stderr, "assign-fip: attaching a floating IP is only half the swap — the relay has to configure the "+
+			"address on its interface or it will never answer on it, and that call is signed. Pass --priv-key and --helper-ip.")
 		return 2
 	}
 	rec, err := readRecord(*recordFile)
@@ -621,10 +711,35 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "read record-file: %v\n", err)
 		return 1
 	}
+	priv, err := readPrivKey(*privKeyFlag, stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "read priv-key: %v\n", err)
+		return 1
+	}
+	defer zeroBytes(priv)
 	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
 		return 1
+	}
+
+	// STEP 0. Never attach an address the box cannot answer on.
+	//
+	// This is the Step-7 interlock applied one operation earlier than
+	// usual. Everywhere else the capability probe fires inside the same
+	// firewall window as the call it guards; here it has to fire before
+	// the CLOUD is touched at all, because by the time the bind would
+	// refuse, an address has been reserved (billing) and attached
+	// (routing to a box that ignores it). The probe is non-mutating and
+	// costs one short window.
+	caps, err := l3BoxCapabilities(ctx, p, rec, *helperIP)
+	if err != nil {
+		fmt.Fprintf(stderr, "assign-fip: capability probe failed (refusing to swap the address of a relay whose software we cannot identify): %v\n", err)
+		return 1
+	}
+	if !caps.Has(mgmt.CapBindAddress) {
+		fmt.Fprintf(stderr, "assign-fip: %v\n", mgmt.UnsupportedCapabilityError(caps, mgmt.CapBindAddress))
+		return exitCapabilityUnsupported
 	}
 
 	id := *fipID
@@ -706,16 +821,85 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
 		return 1
 	}
-	// And prove the relay actually ANSWERS there. The two checks above ask
-	// whether the record moved; this asks whether the move worked. On real
-	// hardware (2026-08-17) an assign reported success, the API showed the
-	// address attached with both ownership labels, and the box never replied
-	// on it — a Hetzner floating IP is routed to the server but the guest OS
-	// does not answer until the address is configured on its interface, and
-	// nothing provisions that yet. Committing that swap would re-sign every
-	// pack onto a dead address: worse than the no-op this rung used to be.
-	if err := l3AddressServes(rec.PublicIP, l3ProbePort, l3ProbeTimeout); err != nil {
+	// STEP 4. THE GUEST-OS HALF. Everything above happened in the cloud
+	// API; a Hetzner floating IP is routed to the server there, but the
+	// box does not reply on it until the address is on its interface.
+	// This is the call that puts it there.
+	//
+	// It is delivered over priorIP — the address the relay is still
+	// answering on — and NOT over rec.PublicIP, which the adapter has
+	// already moved onto the new address. Dialling the new one would
+	// deadlock the swap on itself: the request that brings the address
+	// up cannot be delivered over the address it is bringing up.
+	if len(priorIP) == 0 {
 		giveBack()
+		fmt.Fprintln(stderr, "assign-fip: the record carries no current public IP, so there is no working address to deliver the bind over; "+
+			"repair the record (or reprovision) before swapping its address")
+		return 1
+	}
+	bound, err := l3BindAddress(ctx, p, rec, priv, *helperIP, priorIP, rec.PublicIP)
+	if err != nil {
+		giveBack()
+		fmt.Fprintf(stderr, "assign-fip: bind %s on the relay: %v\n", rec.PublicIP, err)
+		if errors.Is(err, mgmt.ErrCapabilityUnsupported) {
+			return exitCapabilityUnsupported
+		}
+		return 1
+	}
+	// The box's own words, verbatim and before the probe — a bind that
+	// worked but did not persist is a relay that comes back after its
+	// next reboot on an address no pack names, and the operator must see
+	// that even on the success path.
+	for _, w := range bound.Warnings {
+		fmt.Fprintf(stderr, "warning: %s\n", w)
+	}
+
+	// STEP 5. And prove the relay actually ANSWERS there. The record
+	// checks above ask whether the record moved; the bind above is the
+	// box's own claim about what it did; this asks whether the move
+	// WORKS, from outside, on the port recipients dial. On real hardware
+	// (2026-08-17) an assign reported success at every layer above this
+	// one and the box never replied. Committing that swap would re-sign
+	// every pack onto a dead address: worse than the no-op this rung
+	// used to be.
+	if err := l3AddressServes(rec.PublicIP, l3ProbePort, l3ProbeTimeout); err != nil {
+		// The bind DID happen, so undo it: leaving an address configured
+		// on a box that is not going to serve on it means the relay may
+		// source its own outbound traffic from an address the record no
+		// longer names.
+		//
+		// AND THE UNDO DECIDES WHETHER THE ADDRESS MAY BE HANDED BACK.
+		// giveBack() does not merely detach — it DELETES the reservation,
+		// putting the address into the provider's pool for another
+		// customer. Doing that while this relay may still hold it on its
+		// interface is the same harm the release path refuses to commit,
+		// so a failed unbind keeps the address reserved (costing money,
+		// visibly, with the id printed) instead of giving it away.
+		unbindFailed := false
+		if un, uerr := l3UnbindAddress(ctx, p, rec, priv, *helperIP, priorIP, rec.PublicIP); uerr != nil {
+			unbindFailed = true
+			fmt.Fprintf(stderr, "warning: could not unbind %s from the relay after the failed probe (%v); "+
+				"the address may still be configured on its interface\n", rec.PublicIP, uerr)
+		} else {
+			printUnbindWarnings(stderr, un)
+		}
+		switch {
+		case unbindFailed && reservedHere:
+			fmt.Fprintf(stderr, "floating IP %s (%s) was NOT released: handing it back to the provider pool while this relay "+
+				"may still have it configured would give another customer an address this box still claims. "+
+				"It is still reserved and still billing — release it with "+
+				"`daal-deploy floating-ip release --fip-id %s --fip-address %s` once the relay is reachable, "+
+				"or with --skip-unbind if the relay is gone\n", id, rec.PublicIP, id, rec.PublicIP)
+		case unbindFailed:
+			// Not ours to release (the operator supplied --fip-id), so
+			// there was never anything to give back — but the address
+			// is attached to this server AND may still be on its
+			// interface, and nothing else will say so.
+			fmt.Fprintf(stderr, "floating IP %s (%s) is still attached to this relay and may still be configured on its "+
+				"interface; detach it with `daal-deploy floating-ip unassign` once the relay is reachable\n", id, rec.PublicIP)
+		default:
+			giveBack()
+		}
 		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
 		return 1
 	}
@@ -726,9 +910,14 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	// because "the old one no longer serves" is what the wizard tells
 	// them and it is not true until someone releases it.
 	if priorFIPID != "" && priorFIPID != id {
+		// --fip-address is part of the instruction, not decoration: the
+		// record this verb just wrote names the NEW address, so by the
+		// time anyone runs the release the prior address exists nowhere
+		// the CLI can find it, and a release that cannot name the
+		// address cannot tell the relay to drop it.
 		fmt.Fprintf(stderr, "note: floating IP %s (%s) is still attached to this relay and still billing; "+
-			"release it with `daal-deploy floating-ip release --fip-id %s` once the new pack is signed and distributed\n",
-			priorFIPID, priorIP, priorFIPID)
+			"release it with `daal-deploy floating-ip release --fip-id %s --fip-address %s` once the new pack is signed and distributed\n",
+			priorFIPID, priorIP, priorFIPID, priorIP)
 	}
 	return emitRecord(rec, *recordFile, stdout, stderr)
 }
@@ -737,25 +926,98 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 // only detaches: an address that is merely detached is still reserved
 // and still billing, and until Step 9 there was no way at all to stop
 // paying for one from inside the app.
-func runReleaseFIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+//
+// THE ORDER, which is the mirror of the assign path's:
+//
+//  1. remember the ADDRESS   — the record carries an id and an address;
+//     after the detach the address is gone
+//     from the record, and the box needs the
+//     address, not the id. When the id being
+//     released is NOT the one the record
+//     names — which is every rotation, since
+//     the record has already been replaced
+//     with the swap's output — the caller
+//     supplies it with --fip-address, and a
+//     release that cannot resolve it REFUSES
+//     rather than proceeding unbound.
+//  2. DETACH at the provider — the record falls back to the server's own
+//     primary address, so the mgmt call in step
+//     3 has a working address to travel over.
+//  3. UNBIND on the box      — remove it from the interface and from the
+//     reboot-time config.
+//  4. RELEASE                — and only now hand it back to the provider.
+//
+// Steps 3 and 4 are in that order for a reason worth stating: a released
+// address goes back into the provider's pool and may be issued to
+// another customer's server tomorrow. A box that still has it configured
+// will keep choosing it as a source address for its own outbound
+// traffic, from an address that is now routed to somebody else. So an
+// unbind that FAILS stops the release rather than being logged and
+// stepped over — the address stays reserved (costing money) instead of
+// being handed away while a live box still claims it.
+func runReleaseFIP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("floating-ip release", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file")
 	fipID := fs.String("fip-id", "", "floating-IP ID to release; empty releases the one on the record")
+	// --fip-address exists because of the ONLY shipping L3 path.
+	//
+	// The provider speaks ids; the box speaks addresses. When the id
+	// being released is the one on the record, the record supplies the
+	// address. The rotation flow never has that shape: the wizard
+	// updates the stored record with the swap's OUTPUT (the new id and
+	// the new address) and only then releases the PRIOR id, so the id
+	// and the record disagree by construction, the address could not be
+	// resolved, and the release proceeded with a warning — unbinding
+	// nothing. Every second-and-later L3 therefore left the old address
+	// configured on eth0 with a live persistence record, re-asserted at
+	// every reboot, while the provider was free to issue it to someone
+	// else; four of those and `maxBoundAddresses` kills L3 on that relay
+	// for good.
+	fipAddress := fs.String("fip-address", "",
+		"the ADDRESS being released, for the relay's unbind, when it is not the one on the record (rotations release the PRIOR id)")
+	privKeyFlag := fs.String("priv-key", "", "publisher Ed25519 private key (path | '-' for stdin) — required unless --skip-unbind")
+	helperIP := fs.String("helper-ip", "", "Helper's outbound public IP (firewall allowlist) — required unless --skip-unbind")
+	// THE ESCAPE HATCH, and it is narrow. The unbind needs a box that
+	// answers; a relay that has already been destroyed cannot answer,
+	// and refusing to release its address would leave the operator
+	// paying for it with no way out of the app. --skip-unbind is that
+	// case and only that case: on a LIVE box it hands an address back to
+	// the provider pool while the box still claims it locally.
+	skipUnbind := fs.Bool("skip-unbind", false,
+		"release without telling the relay to drop the address; only for a relay that is already destroyed or permanently unreachable")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
-	if err := requireAll(stderr, map[string]string{
+	needed := map[string]string{
 		"--record-file": *recordFile,
 		"--token-file":  *tokenFile,
-	}); err != nil {
+	}
+	if !*skipUnbind {
+		needed["--priv-key"] = *privKeyFlag
+		needed["--helper-ip"] = *helperIP
+	}
+	if err := requireAll(stderr, needed); err != nil {
+		if !*skipUnbind {
+			fmt.Fprintln(stderr, "floating-ip release: the relay has to be told to drop the address before it goes back to the "+
+				"provider pool, and that call is signed. Pass --priv-key and --helper-ip, or --skip-unbind if the relay is already gone.")
+		}
 		return 2
 	}
 	rec, err := readRecord(*recordFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "read record-file: %v\n", err)
 		return 1
+	}
+	var priv ed25519.PrivateKey
+	if !*skipUnbind {
+		priv, err = readPrivKey(*privKeyFlag, stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "read priv-key: %v\n", err)
+			return 1
+		}
+		defer zeroBytes(priv)
 	}
 	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
 	if err != nil {
@@ -775,16 +1037,96 @@ func runReleaseFIP(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "floating-ip release: no --fip-id and the record carries none")
 		return 2
 	}
-	// Releasing the address the record is CURRENTLY on would leave the
-	// record naming an unrouted address, which is the exact failure the
-	// L3 work exists to prevent. Detach through the provider first so
-	// the record falls back to the server's own primary address.
+	// STEP 1. The box speaks addresses; the provider speaks ids. This is
+	// the only moment both are in hand, because the detach below clears
+	// the record's address.
+	//
+	// Two ways to learn the address, in this order of authority:
+	//
+	//	--fip-address   the caller knows it. This is what a rotation
+	//	                passes: it released the PRIOR id, whose address
+	//	                the stored record no longer names.
+	//	the record      when the id being released IS the record's
+	//	                current one.
+	//
+	// If neither answers, the address cannot be resolved from here (no
+	// adapter exposes id→address on the Provider interface) and the
+	// release REFUSES rather than proceeding unbound. Proceeding is what
+	// hands a live box's address to another customer, and a warning on
+	// stderr is not a control. --skip-unbind remains the way through for
+	// a relay that is genuinely gone.
+	var releasedAddr net.IP
+	switch {
+	case strings.TrimSpace(*fipAddress) != "":
+		releasedAddr = net.ParseIP(strings.TrimSpace(*fipAddress))
+		if releasedAddr == nil {
+			fmt.Fprintf(stderr, "floating-ip release: --fip-address %q is not an IP address\n", *fipAddress)
+			return 2
+		}
+		// A caller that supplies both must agree with the record, or one
+		// of the two is about to be acted on wrongly.
+		if id == rec.FloatingIPID && len(rec.PublicIP) > 0 && !rec.PublicIP.Equal(releasedAddr) {
+			fmt.Fprintf(stderr, "floating-ip release: --fip-address %s does not match the address the record gives for floating IP %s (%s); "+
+				"refusing to guess which one the relay is holding\n", releasedAddr, id, rec.PublicIP)
+			return 2
+		}
+	case id == rec.FloatingIPID:
+		releasedAddr = append(net.IP(nil), rec.PublicIP...)
+	}
+	if len(releasedAddr) == 0 && !*skipUnbind {
+		fmt.Fprintf(stderr, "floating-ip release: floating IP %s is not the address this record names, so its address is not "+
+			"known here and the relay cannot be told to drop it. Pass --fip-address <addr> (a rotation releasing the PRIOR "+
+			"address knows it), or --skip-unbind if that relay no longer exists. Releasing an address a live box still has "+
+			"configured hands another customer an address this relay still claims\n", id)
+		return 2
+	}
+
+	// STEP 2. Releasing the address the record is CURRENTLY on would
+	// leave the record naming an unrouted address, which is the exact
+	// failure the L3 work exists to prevent. Detach through the provider
+	// first so the record falls back to the server's own primary
+	// address — which is also what gives the unbind below a working
+	// address to travel over.
 	if id == rec.FloatingIPID {
 		if err := p.UnassignFloatingIP(ctx, rec); err != nil {
 			fmt.Fprintf(stderr, "floating-ip release: detach: %v\n", err)
 			return 1
 		}
 	}
+
+	// STEP 3.
+	switch {
+	case *skipUnbind:
+		fmt.Fprintf(stderr, "warning: --skip-unbind: the relay was not told to drop %s. "+
+			"If that box is still alive it will keep the address configured on its interface after the provider re-issues it to somebody else\n", id)
+	default:
+		// releasedAddr is non-empty here: the resolution above refuses
+		// the run outright when the address is unknown and --skip-unbind
+		// was not given, so there is no third branch that quietly
+		// releases without telling the relay.
+		un, err := l3UnbindAddress(ctx, p, rec, priv, *helperIP, rec.PublicIP, releasedAddr)
+		printUnbindWarnings(stderr, un)
+		switch {
+		case errors.Is(err, mgmt.ErrCapabilityUnsupported):
+			// A relay too old to bind never bound anything, so there is
+			// nothing to remove and the release is safe. Refusing here
+			// would strand an address on every pre-this-wave relay.
+			fmt.Fprintf(stderr, "note: this relay's software predates address binding, so it never configured %s itself; releasing\n", releasedAddr)
+		case err != nil:
+			// Detached but NOT released. The record is written so it
+			// matches the cloud (the address is off this server), and
+			// the address stays reserved rather than being handed to
+			// another customer while this box still claims it.
+			_ = emitRecord(rec, *recordFile, stdout, stderr)
+			fmt.Fprintf(stderr, "floating-ip release: unbind %s on the relay: %v\n", releasedAddr, err)
+			fmt.Fprintf(stderr, "the address is DETACHED but NOT released: it is still reserved and still billing. "+
+				"Releasing it now would hand an address back to the provider pool while this relay still has it configured, "+
+				"so fix the relay and re-run, or re-run with --skip-unbind if the relay is gone\n")
+			return 1
+		}
+	}
+
+	// STEP 4.
 	deleted, err := res.ReleaseFloatingIP(ctx, rec, id)
 	if err != nil {
 		fmt.Fprintf(stderr, "floating-ip release: %v\n", err)
@@ -796,7 +1138,7 @@ func runReleaseFIP(ctx context.Context, args []string, stdout, stderr io.Writer)
 	return emitRecord(rec, *recordFile, stdout, stderr)
 }
 
-func runFloatingIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func runFloatingIP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "missing floating-ip action: assign | unassign")
 		return 2
@@ -804,22 +1146,37 @@ func runFloatingIP(ctx context.Context, args []string, stdout, stderr io.Writer)
 	action := args[0]
 	switch action {
 	case "assign":
-		return runAssignFIP(ctx, args[1:], stdout, stderr)
+		return runAssignFIP(ctx, args[1:], stdin, stdout, stderr)
 	case "unassign":
-		return runUnassignFIP(ctx, args[1:], stdout, stderr)
+		return runUnassignFIP(ctx, args[1:], stdin, stdout, stderr)
 	case "release":
-		return runReleaseFIP(ctx, args[1:], stdout, stderr)
+		return runReleaseFIP(ctx, args[1:], stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown floating-ip action %q (want assign, unassign or release)\n", action)
 		return 2
 	}
 }
 
-func runUnassignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// runUnassignFIP detaches the address at the provider and leaves it
+// reserved.
+//
+// The box half is OPTIONAL here, unlike on release, and the difference
+// is the blast radius. Release hands the address back to the provider's
+// pool, where another customer may be issued it while this box still
+// claims it locally — so release refuses rather than proceed unbound.
+// Unassign leaves the address reserved to this operator, so nobody else
+// can receive it; the only cost of a leftover binding is that this relay
+// may keep choosing a no-longer-routed address as its outbound source.
+// That is worth fixing when the caller supplies the signing material and
+// worth SAYING when it does not — but not worth making a third verb
+// unusable without it.
+func runUnassignFIP(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("floating-ip unassign", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file")
+	privKeyFlag := fs.String("priv-key", "", "publisher Ed25519 private key (path | '-' for stdin); supply it to also drop the address on the relay")
+	helperIP := fs.String("helper-ip", "", "Helper's outbound public IP (firewall allowlist); needed with --priv-key")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -839,9 +1196,32 @@ func runUnassignFIP(ctx context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
 		return 1
 	}
+	// The address, captured before the detach clears it from the record.
+	detached := append(net.IP(nil), rec.PublicIP...)
+	hadFIP := rec.FloatingIPID != ""
 	if err := p.UnassignFloatingIP(ctx, rec); err != nil {
 		fmt.Fprintf(stderr, "floating-ip unassign: %v\n", err)
 		return 1
+	}
+	switch {
+	case !hadFIP || len(detached) == 0:
+		// Nothing was attached; nothing to drop.
+	case *privKeyFlag == "" || *helperIP == "":
+		fmt.Fprintf(stderr, "warning: %s is detached at the provider but the relay was not told to drop it, so it is still "+
+			"configured on the box's interface and may still be used as an outbound source address. "+
+			"Re-run with --priv-key and --helper-ip, or unbind it on the relay\n", detached)
+	default:
+		priv, err := readPrivKey(*privKeyFlag, stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "read priv-key: %v\n", err)
+			return 1
+		}
+		defer zeroBytes(priv)
+		un, err := l3UnbindAddress(ctx, p, rec, priv, *helperIP, rec.PublicIP, detached)
+		printUnbindWarnings(stderr, un)
+		if err != nil && !errors.Is(err, mgmt.ErrCapabilityUnsupported) {
+			fmt.Fprintf(stderr, "warning: could not tell the relay to drop %s (%v); it may still be configured on its interface\n", detached, err)
+		}
 	}
 	return emitRecord(rec, *recordFile, stdout, stderr)
 }
@@ -2025,7 +2405,7 @@ func runRotateRecommend(args []string, stdin io.Reader, stdout, stderr io.Writer
 	// `daal-deploy rotate-tls`/`rotate-credentials` do it themselves,
 	// and the wizard gets it from mgmt.CapabilitiesWithFW.
 	relayCaps := fs.String("relay-capabilities", "",
-		"comma list of in-place verbs this relay advertises (rotate-credentials,rotate-tls); "+
+		"comma list of verbs this relay advertises (rotate-credentials,rotate-tls,bind-address); "+
 			"passing the flag at all means 'probed', omitting it means 'unknown'")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -2042,6 +2422,10 @@ func runRotateRecommend(args []string, stdin io.Reader, stdout, stderr io.Writer
 				caps.RotateCredentialsInPlace = true
 			case "rotate-tls":
 				caps.RotateTLSInPlace = true
+			case mgmt.CapBindAddress:
+				// L3's rung depends on this one: a relay that cannot
+				// bind an address cannot be swapped onto one.
+				caps.BindAddress = true
 			}
 		}
 	})

@@ -210,7 +210,11 @@ func TestRecommendation_ActionJSONKeys(t *testing.T) {
 // record the id and stop. Reporting one answer for both would either
 // hide a working rung or offer a broken one.
 func TestActionForProvider_L3DiffersByAdapter(t *testing.T) {
-	ready := ActionForProvider(L3, RelayCapabilities{}, "hetzner")
+	// A relay probed and able to bind: the only combination that is
+	// genuinely ready. The adapter half and the box half both have to
+	// be known good — see TestActionForProvider_L3DependsOnTheBoxToo.
+	canBind := RelayCapabilities{Known: true, BindAddress: true}
+	ready := ActionForProvider(L3, canBind, "hetzner")
 	if ready.Availability != AvailabilityReady {
 		t.Errorf("hetzner L3 = %q, want ready", ready.Availability)
 	}
@@ -231,22 +235,46 @@ func TestActionForProvider_L3DiffersByAdapter(t *testing.T) {
 		}
 	}
 
-	if got := ActionForProvider(L3, RelayCapabilities{}, "  HETZNER  ").Availability; got != AvailabilityReady {
+	if got := ActionForProvider(L3, canBind, "  HETZNER  ").Availability; got != AvailabilityReady {
 		t.Errorf("provider name matching should be case- and space-insensitive; got %q", got)
 	}
-	if got := ActionForProvider(L3, RelayCapabilities{}, "digitalocean").Availability; got != AvailabilityUnknown {
+	if got := ActionForProvider(L3, canBind, "digitalocean").Availability; got != AvailabilityUnknown {
 		t.Errorf("unrecognised provider = %q, want unknown", got)
 	}
 }
 
-// The relay-capability probe says nothing about a cloud account, so it
-// must not move L3's answer in either direction.
-func TestActionForProvider_L3IgnoresRelayCapabilities(t *testing.T) {
-	probed := RelayCapabilities{Known: true, RotateCredentialsInPlace: true, RotateTLSInPlace: true}
-	if a := ActionForProvider(L3, probed, "vultr"); a.Availability != AvailabilityUnsupported {
-		t.Errorf("a fully-capable box does not make a Vultr address swap work: %q", a.Availability)
+// L3's availability USED to be a pure property of the cloud adapter, and
+// this test asserted that the box's capabilities could not move it. Real
+// hardware falsified that on 2026-08-17: a floating IP is routed to the
+// server by the provider and never answered by the guest OS until the
+// relay configures it on its interface, so a relay whose mgmt binary
+// predates the bind endpoint cannot complete an L3 at all.
+//
+// Both halves therefore have to be known good, and "not asked" must not
+// round up to "ready" — an operator who presses a one-tap button that
+// then refuses has been told something false about their relay.
+func TestActionForProvider_L3DependsOnTheBoxToo(t *testing.T) {
+	unprobed := ActionForProvider(L3, RelayCapabilities{}, "hetzner")
+	if unprobed.Availability != AvailabilityUnknown {
+		t.Errorf("unprobed hetzner L3 = %q, want unknown — the relay's ability to bind the address has not been asked about", unprobed.Availability)
 	}
-	if a := ActionForProvider(L3, RelayCapabilities{}, "hetzner"); a.Availability != AvailabilityReady {
-		t.Errorf("an unprobed box does not stop a Hetzner address swap from working: %q", a.Availability)
+	if !strings.Contains(unprobed.Note, "probe") && !strings.Contains(unprobed.Note, "Probe") {
+		t.Errorf("the unknown note must tell the caller to probe: %q", unprobed.Note)
+	}
+
+	tooOld := RelayCapabilities{Known: true, RotateCredentialsInPlace: true, RotateTLSInPlace: true}
+	old := ActionForProvider(L3, tooOld, "hetzner")
+	if old.Availability != AvailabilityUnsupported {
+		t.Errorf("a relay that cannot bind an address = %q, want unsupported", old.Availability)
+	}
+	if !strings.Contains(old.Note, "interface") {
+		t.Errorf("the refusal must name the guest-OS cause: %q", old.Note)
+	}
+
+	// The adapter's failure comes first: a box that can bind does not
+	// make an adapter that never moves the record work.
+	full := RelayCapabilities{Known: true, BindAddress: true, RotateCredentialsInPlace: true, RotateTLSInPlace: true}
+	if a := ActionForProvider(L3, full, "vultr"); a.Availability != AvailabilityUnsupported {
+		t.Errorf("a fully-capable box does not make a Vultr address swap work: %q", a.Availability)
 	}
 }

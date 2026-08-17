@@ -152,6 +152,33 @@ func (s storeSource) RelayPacks() []scheduler.RelayPackState {
 			RelayPackID:   st.RelayPackID,
 			LastSuccessAt: st.LastSuccessAt,
 			LastFailureAt: st.LastFailureAt,
+			// CARRY THE WHOLE STATE, NOT JUST THE TIMESTAMPS.
+			//
+			// These two used to be dropped here, and this adapter is
+			// the ONLY production path from the persisted record to
+			// the planner — so on every real device the planner ran
+			// on ConsecutiveFailures=0, JitterOffset=0 while
+			// core/refresh ran on the true values. That breaks the
+			// two-gates-must-agree invariant the design is built on
+			// (selection.FreshnessState.JitterOffset says so in as
+			// many words), with two visible consequences:
+			//
+			//   * scheduler.Status()/AllNextDues reported a
+			//     next-freshness-poll instant EARLIER than the one
+			//     the trigger policy will actually accept — a
+			//     diagnostics screen asserting a time that then
+			//     silently passes with nothing happening, which
+			//     reads as a stuck device;
+			//   * Plan() emitted a due KindFreshness action on every
+			//     tick through the whole escalated backoff window,
+			//     each one dispatched into RelayPackRefresher.Refresh
+			//     and immediately suppressed as rate-limited. Safe
+			//     (the refresher re-reads the real record, so no
+			//     endpoint was stormed) but the escalation and the
+			//     per-device jitter were inert wherever they were
+			//     supposed to be read.
+			ConsecutiveFailures: st.ConsecutiveFailures,
+			JitterOffset:        st.JitterOffset,
 		})
 	}
 	return out

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"daal/bundle-go/phase"
+	"daal/publisher/deploy/mgmt"
 	"daal/publisher/deploy/provider"
 )
 
@@ -363,6 +364,13 @@ func writeDecommissionFixture(t *testing.T) (recordFile, tokenFile string) {
 		ServerType:      "cx22",
 		Region:          "fsn1",
 		PublisherPubKey: pub,
+		// The L3 verbs need an address the relay currently ANSWERS on:
+		// the bind request has to travel over it, since the address it
+		// is bringing up is by definition not yet answering. A fixture
+		// without one exercised a path no real record can be in.
+		PublicIP:           net.ParseIP("198.51.100.7"),
+		MgmtPort:           8443,
+		MgmtTLSFingerprint: strings.Repeat("ab", 32),
 	}
 	body, _ := json.Marshal(rec)
 	recordFile = filepath.Join(tmp, "rec.json")
@@ -551,9 +559,23 @@ type fakeFIPProvider struct {
 	assignErr    error
 	newIP        string
 	idOnly       bool
+
+	// box, when set, makes this provider log its calls into the SAME
+	// sequence the box stubs use. The L3 ordering assertions are about
+	// cloud calls and box calls interleaved — "attach before bind",
+	// "unbind before release" — and two separate lists cannot express
+	// that.
+	box *fakeBox
+}
+
+func (f *fakeFIPProvider) log(s string) {
+	if f.box != nil {
+		f.box.calls = append(f.box.calls, s)
+	}
 }
 
 func (f *fakeFIPProvider) AssignFloatingIP(_ context.Context, rec *provider.OperatorRecord, fipID string) error {
+	f.log("attach " + fipID)
 	f.assigned = append(f.assigned, fipID)
 	if f.assignErr != nil {
 		return f.assignErr
@@ -578,16 +600,23 @@ func (f *fakeFIPProvider) AssignFloatingIP(_ context.Context, rec *provider.Oper
 }
 
 func (f *fakeFIPProvider) UnassignFloatingIP(_ context.Context, rec *provider.OperatorRecord) error {
+	f.log("detach")
 	rec.FloatingIPID = ""
+	// A real adapter puts the record back on the server's own primary
+	// address; without that the unbind below would have no working
+	// address to travel over.
+	rec.PublicIP = net.ParseIP("198.51.100.7")
 	return nil
 }
 
 func (f *fakeFIPProvider) CreateFloatingIP(_ context.Context, _ *provider.OperatorRecord) (string, net.IP, error) {
+	f.log("reserve")
 	f.created++
 	return "fip-reserved", net.ParseIP(f.newIP), nil
 }
 
 func (f *fakeFIPProvider) ReleaseFloatingIP(_ context.Context, _ *provider.OperatorRecord, id string) (bool, error) {
+	f.log("release " + id)
 	f.released = append(f.released, id)
 	return f.releaseOwned, nil
 }
@@ -596,13 +625,13 @@ func (f *fakeFIPProvider) ReleaseFloatingIP(_ context.Context, _ *provider.Opera
 // address the operator had to reserve by hand in the provider console
 // plus a numeric id no screen asks for.
 func TestAssignFIP_WithoutAnIDReservesOne(t *testing.T) {
-	withReachableL3Address(t)
+	withFakeBox(t, newFakeBox())
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true}
 	withFakeProvider(t, f)
-	recordFile, tokenFile := writeDecommissionFixture(t)
+	recordFile, tokenFile, keyFile := l3Fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr)
+	rc := Run(assignArgs(recordFile, tokenFile, keyFile), &stdout, &stderr)
 	if rc != 0 {
 		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
 	}
@@ -633,13 +662,13 @@ func TestAssignFIP_WithoutAnIDReservesOne(t *testing.T) {
 // An address minted seconds ago that could not be attached is a billing
 // resource with no purpose — the same leak class as an orphaned server.
 func TestAssignFIP_ReservedAddressIsReturnedWhenTheAttachFails(t *testing.T) {
-	withReachableL3Address(t)
+	withFakeBox(t, newFakeBox())
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, assignErr: errors.New("cloud says no")}
 	withFakeProvider(t, f)
-	recordFile, tokenFile := writeDecommissionFixture(t)
+	recordFile, tokenFile, keyFile := l3Fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	if rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr); rc == 0 {
+	if rc := Run(assignArgs(recordFile, tokenFile, keyFile), &stdout, &stderr); rc == 0 {
 		t.Fatal("a failed attach must not exit 0")
 	}
 	if len(f.released) != 1 || f.released[0] != "fip-reserved" {
@@ -651,12 +680,20 @@ func TestAssignFIP_ReservedAddressIsReturnedWhenTheAttachFails(t *testing.T) {
 // `release` gives it back — but only when daal-deploy created it, and
 // it says so out loud when it did not.
 func TestFloatingIPRelease_ReportsAnAddressItMayNotDelete(t *testing.T) {
+	withFakeBox(t, newFakeBox())
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: false}
 	withFakeProvider(t, f)
-	recordFile, tokenFile := writeDecommissionFixture(t)
+	recordFile, tokenFile, keyFile := l3Fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	rc := Run([]string{"floating-ip", "release", "--record-file", recordFile, "--token-file", tokenFile, "--fip-id", "fip-theirs"}, &stdout, &stderr)
+	// --fip-address is how an id the record does not name is resolved to
+	// something the BOX understands. Without it the release refuses (see
+	// TestFloatingIPRelease_RefusesWhenTheAddressCannotBeResolved),
+	// because releasing an address a live relay may still hold is how a
+	// stranger is issued an address this box still answers on.
+	rc := Run([]string{"floating-ip", "release", "--record-file", recordFile, "--token-file", tokenFile,
+		"--priv-key", keyFile, "--helper-ip", "1.2.3.4", "--fip-id", "fip-theirs",
+		"--fip-address", "203.0.113.77"}, &stdout, &stderr)
 	if rc != 0 {
 		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
 	}
@@ -679,18 +716,17 @@ func TestFloatingIPRelease_ReportsAnAddressItMayNotDelete(t *testing.T) {
 // pack aimed at the address the operator was rotating AWAY from,
 // published a freshness document about it, and reported success.
 func TestAssignFIP_RefusesWhenTheAddressDidNotMove(t *testing.T) {
-	withReachableL3Address(t)
+	withFakeBox(t, newFakeBox())
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, idOnly: true}
 	withFakeProvider(t, f)
-	recordFile, tokenFile := writeDecommissionFixture(t)
+	recordFile, tokenFile, keyFile := l3Fixture(t)
 	before, err := os.ReadFile(recordFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile,
-		"--token-file", tokenFile, "--fip-id", "fip-42"}, &stdout, &stderr)
+	rc := Run(assignArgs(recordFile, tokenFile, keyFile, "--fip-id", "fip-42"), &stdout, &stderr)
 	if rc == 0 {
 		t.Fatal("an adapter that attaches the address without moving the record onto it exited 0; " +
 			"the caller would now re-sign a pack pointing at the burned address")
@@ -712,14 +748,13 @@ func TestAssignFIP_RefusesWhenTheAddressDidNotMove(t *testing.T) {
 // An address minted for a swap that then fails its post-condition is
 // the same leak as one that failed to attach: give it back.
 func TestAssignFIP_ReservedAddressIsReturnedWhenThePostConditionFails(t *testing.T) {
-	withReachableL3Address(t)
+	withFakeBox(t, newFakeBox())
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, idOnly: true}
 	withFakeProvider(t, f)
-	recordFile, tokenFile := writeDecommissionFixture(t)
+	recordFile, tokenFile, keyFile := l3Fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	if rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile,
-		"--token-file", tokenFile}, &stdout, &stderr); rc == 0 {
+	if rc := Run(assignArgs(recordFile, tokenFile, keyFile), &stdout, &stderr); rc == 0 {
 		t.Fatal("expected a refusal")
 	}
 	if len(f.released) != 1 || f.released[0] != "fip-reserved" {
@@ -739,21 +774,123 @@ func withReachableL3Address(t *testing.T) {
 	t.Cleanup(func() { l3AddressServes = prev })
 }
 
+// --- the box half of an L3 swap -----------------------------------
+//
+// Since the guest-OS fix, assign-fip is not a pure cloud-API verb: it
+// probes what the relay can do, then tells it to configure the address
+// on its interface. Both calls open a cloud firewall window and dial a
+// TLS-pinned box, so every test stubs them — and the ordering they
+// record is what the new tests assert on.
+
+// fakeBox records what the CLI asked the relay to do, in order.
+type fakeBox struct {
+	caps      *mgmt.BoxCapabilities
+	capsErr   error
+	bindErr   error
+	unbindErr error
+
+	// calls is the sequence of box+probe operations, appended in the
+	// order the CLI performed them. "bind 203.0.113.5" etc.
+	calls []string
+	// bound/unbound are the (control, target) pairs, so a test can
+	// prove the request travelled over an address the box answers on.
+	bound   [][2]string
+	unbound [][2]string
+}
+
+func newFakeBox() *fakeBox {
+	return &fakeBox{caps: &mgmt.BoxCapabilities{
+		OK:             true,
+		MgmtAPIVersion: mgmt.MgmtAPIVersionAddressBinding,
+		Capabilities:   []string{mgmt.CapRotateCredentialsScoped, mgmt.CapRotateTLSScoped, mgmt.CapBindAddress},
+	}}
+}
+
+// withFakeBox installs the box stubs and returns the recorder. The
+// reachability probe is recorded through the same list so "bind before
+// probe" is one assertion on one slice rather than two clocks.
+func withFakeBox(t *testing.T, b *fakeBox) *fakeBox {
+	t.Helper()
+	prevCaps, prevBind, prevUnbind, prevServes := l3BoxCapabilities, l3BindAddress, l3UnbindAddress, l3AddressServes
+	l3BoxCapabilities = func(_ context.Context, _ provider.Provider, _ *provider.OperatorRecord, _ string) (*mgmt.BoxCapabilities, error) {
+		b.calls = append(b.calls, "capabilities")
+		return b.caps, b.capsErr
+	}
+	l3BindAddress = func(_ context.Context, _ provider.Provider, _ *provider.OperatorRecord, _ ed25519.PrivateKey, _ string, controlIP, target net.IP) (*mgmt.BindAddressResp, error) {
+		b.calls = append(b.calls, "bind "+target.String())
+		b.bound = append(b.bound, [2]string{controlIP.String(), target.String()})
+		if b.bindErr != nil {
+			return nil, b.bindErr
+		}
+		return &mgmt.BindAddressResp{IP: target.String(), Persisted: true, Interface: "eth0"}, nil
+	}
+	l3UnbindAddress = func(_ context.Context, _ provider.Provider, _ *provider.OperatorRecord, _ ed25519.PrivateKey, _ string, controlIP, target net.IP) (*mgmt.UnbindAddressResp, error) {
+		b.calls = append(b.calls, "unbind "+target.String())
+		b.unbound = append(b.unbound, [2]string{controlIP.String(), target.String()})
+		if b.unbindErr != nil {
+			return nil, b.unbindErr
+		}
+		return &mgmt.UnbindAddressResp{IP: target.String(), WasBound: true, Removed: true, PersistenceRemoved: true}, nil
+	}
+	l3AddressServes = func(ip net.IP, _ int, _ time.Duration) error {
+		b.calls = append(b.calls, "probe "+ip.String())
+		return nil
+	}
+	t.Cleanup(func() {
+		l3BoxCapabilities, l3BindAddress, l3UnbindAddress, l3AddressServes = prevCaps, prevBind, prevUnbind, prevServes
+	})
+	return b
+}
+
+// writePrivKeyFile drops a publisher private key next to the fixture.
+func writePrivKeyFile(t *testing.T, dir string) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "priv.key")
+	if err := os.WriteFile(path, priv, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// l3Fixture is writeDecommissionFixture plus the signing key the box
+// half needs.
+func l3Fixture(t *testing.T) (recordFile, tokenFile, keyFile string) {
+	t.Helper()
+	recordFile, tokenFile = writeDecommissionFixture(t)
+	return recordFile, tokenFile, writePrivKeyFile(t, filepath.Dir(recordFile))
+}
+
+// assignArgs is the flag set every assign-fip call now needs.
+func assignArgs(recordFile, tokenFile, keyFile string, extra ...string) []string {
+	return append([]string{"floating-ip", "assign",
+		"--record-file", recordFile,
+		"--token-file", tokenFile,
+		"--priv-key", keyFile,
+		"--helper-ip", "1.2.3.4",
+	}, extra...)
+}
+
 // The 2026-08-17 hardware finding: the provider reports the address
 // attached and the guest OS never answers on it. The swap must not be
 // committed in that state.
 func TestAssignFIP_RefusesAnAddressThatDoesNotServe(t *testing.T) {
+	box := withFakeBox(t, newFakeBox())
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true}
 	withFakeProvider(t, f)
 	prev := l3AddressServes
 	l3AddressServes = func(ip net.IP, _ int, _ time.Duration) error {
+		box.calls = append(box.calls, "probe "+ip.String())
 		return fmt.Errorf("%w: %s is dead", health.ErrAddressUnreachable, ip)
 	}
 	t.Cleanup(func() { l3AddressServes = prev })
-	recordFile, tokenFile := writeDecommissionFixture(t)
+	recordFile, tokenFile, keyFile := l3Fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr)
+	rc := Run(assignArgs(recordFile, tokenFile, keyFile), &stdout, &stderr)
 	if rc == 0 {
 		t.Fatalf("an unreachable address must not be committed; rc=0 stderr=%s", stderr.String())
 	}

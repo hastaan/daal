@@ -37,9 +37,24 @@
 //	                             allowlist can be verified against
 //	                             ground truth instead of a
 //	                             third-party echo service.
+//	POST /bind-address        — L3; configure a provider-routed
+//	                             floating IP on the primary interface,
+//	                             idempotently and persisted across
+//	                             reboot, so the guest OS actually
+//	                             answers on an address the provider
+//	                             has merely routed here. See
+//	                             address.go for why the API-layer
+//	                             attach alone leaves the box silent.
+//	POST /unbind-address      — L3; remove an address this service
+//	                             bound, live and persisted, so a relay
+//	                             never keeps claiming an address the
+//	                             provider has handed back to the pool.
 //
-// Adding an eighth route requires a supplement amendment; the
-// invariant is enforced by TestExactlyNRoutes (n=7) in main_test.go.
+// Adding a TENTH route requires a supplement amendment; the invariant
+// is enforced by TestExactlyNRoutes (n=9) in main_test.go. The two
+// address routes were added by the Wave-3c L3 work, which the pinned
+// contract requires; specs/daal-relay-mgmt-v1.md §4 needs the matching
+// amendment.
 //
 // Auth: every state-changing endpoint requires a per-request
 // Ed25519 signature in the Authorization: Daal-Mgmt-Token header,
@@ -67,6 +82,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -109,7 +125,34 @@ func defaultPaths() configPaths {
 	}
 }
 
+// defaultBoundAddrDir holds one file per operator-bound address. See
+// address.go for why persistence is a record set plus a systemd oneshot
+// rather than a netplan file.
+const defaultBoundAddrDir = "/etc/daal/bound-addresses"
+
 func main() {
+	// -reapply-addresses is the boot mode. daal-bound-addresses.service
+	// (written by address.go on the first successful bind) runs this
+	// binary with the flag after network-online.target, under a unit
+	// that carries CAP_NET_ADMIN ambiently — which is how the address
+	// comes back after a reboot even though the long-running service
+	// below is denied that capability.
+	//
+	// It is the SAME reconciliation code the live path uses, so a
+	// record that the API would reject cannot be applied by the reboot
+	// either, and there is no shell script to drift out of step.
+	reapply := flag.Bool("reapply-addresses", false,
+		"re-apply the persisted operator-bound addresses to the primary interface and exit (run by "+bootUnitName+")")
+	flag.Parse()
+	if *reapply {
+		if err := reapplyBoundAddresses(defaultBoundAddrDir, log.Printf); err != nil {
+			// Non-zero exit marks the unit failed, which is the only
+			// signal a human gets that this relay is not holding an
+			// address it is supposed to hold.
+			log.Fatalf("daal-relay-mgmt -reapply-addresses: %v", err)
+		}
+		return
+	}
 	if err := run(defaultPaths()); err != nil {
 		log.Fatalf("daal-relay-mgmt: %v", err)
 	}
@@ -134,6 +177,16 @@ func run(paths configPaths) error {
 		Addr:      ":" + strconv.Itoa(port),
 		Handler:   srv.routes(),
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
+	}
+	// State the address-binding verdict once, at startup, into the
+	// journal. /health carries it too, but the journal is the only
+	// record that survives a box the publisher cannot reach, and "this
+	// relay cannot do L3, here is why" is the single most useful line a
+	// human can find on a relay they have no SSH access to.
+	if srv.addrCapability != nil {
+		if _, note := srv.addrCapability(); note != "" {
+			log.Printf("daal-relay-mgmt: %s", note)
+		}
 	}
 	log.Printf("daal-relay-mgmt listening on :%d", port)
 	return httpSrv.ListenAndServeTLS("", "")
@@ -178,10 +231,117 @@ type server struct {
 	usersRevokeCnt atomic.Int64
 	usersListCnt   atomic.Int64
 	whoamiCnt      atomic.Int64
+	bindAddrCnt    atomic.Int64
+	unbindAddrCnt  atomic.Int64
 	now            func() time.Time
 	singboxControl func(action string) error // injectable for tests
 	singboxKick    func() error              // injectable for tests
 	singboxCheck   func(path string) error   // injectable for tests
+
+	// --- L3 address binding (address.go) ---
+
+	// addrMu serializes the record set and the interface work.
+	//
+	// Deliberately NOT cfgMu. /bind-address and /unbind-address do not
+	// read or write the sing-box config at all — every inbound already
+	// listens on 0.0.0.0, so a new address needs no config change — and
+	// funnelling address work through the config lock would queue it
+	// behind multi-second rotations for nothing. What does need
+	// serializing is different state: the count check, the record write
+	// and the apply must not interleave with a concurrent unbind of the
+	// same address.
+	addrMu       sync.Mutex
+	boundAddrDir string // /etc/daal/bound-addresses
+	// bootUnitPath / bootUnitWantsPath are the persistence artifacts.
+	// Fields rather than constants so tests exercise the real install
+	// code against a temp tree instead of /etc.
+	bootUnitPath      string
+	bootUnitWantsPath string
+	// Injectable seams. The list/add/del split matters: LIST needs no
+	// capability and is how every apply is VERIFIED, while add/del need
+	// CAP_NET_ADMIN and may have to be delegated.
+	addrList      func(iface string) ([]net.IP, error)
+	addrAdd       func(iface string, ip net.IP) error
+	addrDel       func(iface string, ip net.IP) error
+	primaryIface  func() (string, error)
+	systemdStart  func(unit string) error
+	systemdReload func() error
+	// addrCapability answers "can this box actually configure an
+	// address", which /health advertises and both handlers re-check.
+	// See probeAddressBinding for why it is a runtime probe and not a
+	// build-time constant.
+	addrCapability func() (bool, string)
+
+	// seenAddrNonces makes an address-verb token SINGLE USE. See
+	// consumeAddressNonce.
+	nonceMu        sync.Mutex
+	seenAddrNonces map[string]int64
+}
+
+// maxSeenAddrNonces bounds the replay cache.
+//
+// Entries are recorded only AFTER the signature verifies, so nothing an
+// unauthenticated caller sends can grow this map; and the accept window
+// is 360 seconds wide (verifyToken), which is pruned on every call. The
+// cap is therefore belt-and-braces against a caller stuck in a retry
+// loop rather than a defence, and eviction is oldest-first by
+// timestamp so the entries that survive are the ones still presentable.
+const maxSeenAddrNonces = 4096
+
+// consumeAddressNonce enforces SINGLE USE of a token for the two
+// address verbs, and returns false if this nonce has been seen before.
+//
+// WHY ONLY THESE TWO VERBS. The token signs `nonce:ts:op` and NOT the
+// request body, so one captured token authorises any number of calls to
+// its route for the rest of the ±window. That was tolerable when the
+// bodies named a recipient; it is weaker for a verb whose body chooses
+// which address this host configures, where the same token can be
+// replayed with a different "ip" each time until the 4-address cap is
+// reached — and each of those persists across a reboot. Making the
+// token single-use closes the repeat-use half of that without a wire
+// change (the publisher already mints a fresh 128-bit random nonce per
+// request: mgmt.MintToken).
+//
+// It is deliberately NOT applied to the other five verbs. GET
+// /users/list carries a token on a request net/http's transport is
+// allowed to retry on a reused-idle-connection race, and a retried GET
+// re-sends the same token; refusing it would turn a transport hiccup
+// into a failed rotation. POSTs are not replayable that way (a POST
+// with a body is not `isReplayable`), which is what makes it safe here:
+// both address verbs are POSTs.
+//
+// The proper fix — signing sha256(body) into the token — is a wire
+// change on both ends and is recorded in the spec (§4.8) as the next
+// step; this is the box-local half that needs no coordinated release.
+func (s *server) consumeAddressNonce(nonce string, ts int64) bool {
+	s.nonceMu.Lock()
+	defer s.nonceMu.Unlock()
+	if s.seenAddrNonces == nil {
+		s.seenAddrNonces = make(map[string]int64)
+	}
+	// Drop anything that can no longer be presented: a token older than
+	// the accept window is refused by the timestamp check anyway, so
+	// remembering it buys nothing.
+	cutoff := s.now().Unix() - 300
+	for k, v := range s.seenAddrNonces {
+		if v < cutoff {
+			delete(s.seenAddrNonces, k)
+		}
+	}
+	if _, dup := s.seenAddrNonces[nonce]; dup {
+		return false
+	}
+	if len(s.seenAddrNonces) >= maxSeenAddrNonces {
+		oldestK, oldestV := "", int64(0)
+		for k, v := range s.seenAddrNonces {
+			if oldestK == "" || v < oldestV {
+				oldestK, oldestV = k, v
+			}
+		}
+		delete(s.seenAddrNonces, oldestK)
+	}
+	s.seenAddrNonces[nonce] = ts
+	return true
 }
 
 func newServer(pubkey ed25519.PublicKey, singboxConfig string) *server {
@@ -195,6 +355,17 @@ func newServer(pubkey ed25519.PublicKey, singboxConfig string) *server {
 		singboxControl: defaultSingboxControl,
 		singboxKick:    defaultSingboxKick,
 		singboxCheck:   defaultSingboxCheck,
+
+		boundAddrDir:      defaultBoundAddrDir,
+		bootUnitPath:      "/etc/systemd/system/" + bootUnitName,
+		bootUnitWantsPath: "/etc/systemd/system/multi-user.target.wants/" + bootUnitName,
+		addrList:          defaultAddrList,
+		addrAdd:           defaultAddrAdd,
+		addrDel:           defaultAddrDel,
+		primaryIface:      detectPrimaryInterface,
+		systemdStart:      defaultSystemdStart,
+		systemdReload:     defaultSystemdReload,
+		addrCapability:    probeAddressBinding,
 	}
 }
 
@@ -294,11 +465,22 @@ func (s *server) routes() http.Handler {
 	// confirms a working IP so the client can store a verified value
 	// and stop re-detecting.
 	mux.HandleFunc("/whoami", s.requireAuth(s.handleWhoAmI))
+	// L3. Both are privileged network configuration driven by a remote
+	// request, so both sit behind the same per-request Ed25519
+	// signature as every other mutating verb, and address.go adds
+	// defence in depth on top of it (public-unicast validation, a bound
+	// on how many addresses may be held, argv-only shell-outs, and a
+	// record gate that makes it impossible to remove the box's own
+	// primary address). Neither touches the sing-box config: every
+	// inbound already listens on 0.0.0.0, so holding the address is the
+	// entire change.
+	mux.HandleFunc("/bind-address", s.requireAuth(s.handleBindAddress))
+	mux.HandleFunc("/unbind-address", s.requireAuth(s.handleUnbindAddress))
 	return mux
 }
 
 // routeNames returns the exact set of HTTP paths registered. Used
-// by main_test.go to enforce TestExactlyNRoutes (n=7).
+// by main_test.go to enforce TestExactlyNRoutes (n=9).
 func (s *server) routeNames() []string {
 	return []string{
 		"/health",
@@ -308,6 +490,8 @@ func (s *server) routeNames() []string {
 		"/users/revoke",
 		"/users/list",
 		"/whoami",
+		"/bind-address",
+		"/unbind-address",
 	}
 }
 
@@ -344,6 +528,14 @@ func opFromPath(p string) string {
 		return "users-list"
 	case "/whoami":
 		return "whoami"
+	// The op string is signed by the publisher and must match the path
+	// exactly; mgmt.addressVerb mints "bind-address"/"unbind-address"
+	// and POSTs to "/"+op, so path and op are the same word by
+	// construction on both ends.
+	case "/bind-address":
+		return "bind-address"
+	case "/unbind-address":
+		return "unbind-address"
 	default:
 		return ""
 	}
@@ -377,7 +569,17 @@ func (s *server) verifyToken(token, expectedOp string) error {
 	if !ed25519.Verify(s.pubkey, msg, sig) {
 		return errors.New("signature verification failed")
 	}
-	_ = nonce // server does not deduplicate (cloud-firewall narrows the window enough)
+	// The five older verbs do not deduplicate: the cloud-firewall
+	// window narrows replay enough for bodies that name a recipient,
+	// and GET /users/list is on a request the transport may legitimately
+	// retry with the same token. The two ADDRESS verbs do, because
+	// their body chooses which address this host configures and the
+	// signature does not cover it. See consumeAddressNonce.
+	if op == "bind-address" || op == "unbind-address" {
+		if !s.consumeAddressNonce(nonce, ts) {
+			return errors.New("token already used (address verbs are single-use; mint a fresh one)")
+		}
+	}
 	return nil
 }
 
@@ -456,21 +658,69 @@ const (
 // Extending an existing response with additive fields is compatible in
 // both directions: an old publisher reading a new box still sees
 // "ok":true and ignores the rest.
+// WHY capBindAddress IS CONDITIONAL AND mgmt_api_version DOES NOT MOVE.
+//
+// The two rotation tokens describe what this BINARY does, so the binary
+// can assert them unconditionally and mgmt_api_version=2 is a valid
+// second signal for them. Address binding is not like that: it needs
+// CAP_NET_ADMIN, which the SERVICE UNIT decides. Relays provisioned
+// before Wave 3c's cloud-init run this service with
+// `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and
+// `NoNewPrivileges=true`, so a box can be running this exact binary and
+// still be unable to configure an address.
+// Advertising the verb from the version number would make the
+// publisher's interlock assert a capability that does not exist and
+// move the failure to the middle of a swap, which is the one place the
+// whole fail-closed design exists to keep it out of.
+//
+// So the token is emitted only when probeAddressBinding says this
+// process holds the capability it needs for BOTH verbs — one token
+// covers bind and unbind, and only the in-process route can remove an
+// address — and mgmt_api_version stays at 2. That is not an oversight,
+// and the publisher agrees with it from its own side: BoxCapabilities.Has
+// gives CapBindAddress NO version fallback at all, so the token is the
+// only signal either end consults. publisher/deploy/mgmt still defines
+// MgmtAPIVersionAddressBinding=3, but purely as documentation of which
+// version the two routes belong to; nothing reads it as permission.
+//
+// DO NOT bump mgmtAPIVersion to 3 to "finish" the address work. Even
+// with no fallback to trip today, a version that implied the capability
+// would be a standing invitation to re-add one — and a relay running
+// this binary without CAP_NET_ADMIN would then claim a verb it cannot
+// perform, moving the failure into the middle of a swap.
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
 	s.healthCnt.Add(1)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped}
+	var notes []string
+	if s.addrCapability != nil {
+		ok, note := s.addrCapability()
+		if ok {
+			caps = append(caps, capBindAddress)
+		}
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	body := map[string]any{
 		"ok":               true,
 		"mgmt_api_version": mgmtAPIVersion,
-		"capabilities": []string{
-			capRotateCredentialsScoped,
-			capRotateTLSScoped,
-		},
-	})
+		"capabilities":     caps,
+	}
+	// capability_notes is diagnostic text for a human who cannot SSH
+	// into this box. "Binary too old" and "binary fine, launched
+	// without CAP_NET_ADMIN" both present as a missing token but have
+	// completely different remedies, and an unexplained absence sends
+	// the operator to the wrong one. Additive: a publisher that does
+	// not decode it is unaffected.
+	if len(notes) > 0 {
+		body["capability_notes"] = notes
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // rotateCredsReq names the ONE recipient whose credentials are to be

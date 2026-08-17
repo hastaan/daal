@@ -183,8 +183,29 @@ write_files:
       User=root
       Group=root
       NoNewPrivileges=true
-      AmbientCapabilities=CAP_NET_BIND_SERVICE
-      CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+      # CAP_NET_ADMIN is L3's guest-OS half (Wave 3c, supplement §4.8).
+      # A floating IP is ROUTED to this server by the provider, but the
+      # kernel drops packets for an address no interface holds, so
+      # /bind-address configures it — and /unbind-address removes it
+      # again before the address goes back to the provider's pool.
+      #
+      # The ADD direction could be delegated to the daal-bound-addresses
+      # oneshot (PID 1 grants it the capability). The REMOVE direction
+      # cannot: that unit only adds, because at boot the interface holds
+      # the primary address, which is not a record, and a reconcile that
+      # removed non-records would delete it. Without this line the
+      # service advertises one capability token for two verbs and can
+      # only perform one, so a failed swap cannot roll back and
+      # `floating-ip release` can never complete.
+      #
+      # It is not a widening of what this unit can already reach: it
+      # runs as root, writes /etc/systemd/system and asks PID 1 to start
+      # a unit it authored with AmbientCapabilities=CAP_NET_ADMIN, so
+      # the bounding set was never a boundary for it. sing-box.service
+      # on this same box already holds the same capability. Holding it
+      # directly makes the two verbs symmetric and the refusal honest.
+      AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+      CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
       [Install]
       WantedBy=multi-user.target
 

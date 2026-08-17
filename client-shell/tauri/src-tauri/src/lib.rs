@@ -1453,10 +1453,26 @@ fn wizard_rotate_credentials(
 /// Move the relay's cover hostname / TLS parameters.
 ///
 /// Touches no credentials and no REALITY keypair. It does invalidate
-/// every connection file already handed out, and since Step 8 (remote
+/// every connection file already handed out.
+///
+/// Written at Wave 3 Step 7, this comment said "since Step 8 (remote
 /// pack replacement) is not built, nothing repairs itself over the
-/// network — the summary carries the counts the UI needs to say that
-/// plainly instead of implying a self-healing that does not exist.
+/// network". Step 8 shipped at Wave 3b, so that is no longer true —
+/// but the correction is NOT "it heals itself now", and getting that
+/// wrong in either direction is what the counts exist to prevent:
+///
+///   * whether recipients can be repaired over the network is a
+///     property of the SIGNED PACK they already hold (does it carry
+///     freshness endpoints?), not of what the publisher has since
+///     configured. The UI branches on that, not on this comment.
+///   * this call does not publish anything either way. Unlike
+///     `rotate_execute`, which re-signs and re-publishes in one
+///     transaction, a TLS rotation leaves the operator to rebuild the
+///     packs and press Publish under Refresh addresses. The copy on
+///     the result sheet says exactly that.
+///
+/// The summary still carries the counts, for the same reason: the
+/// screen must be able to state the consequence rather than imply it.
 #[tauri::command]
 fn wizard_rotate_tls(
     wstate: State<'_, WizardStateMgr>,

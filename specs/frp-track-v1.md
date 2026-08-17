@@ -221,7 +221,7 @@ Updated by FRP-0 execution on 2026-05-02:
 |---|---|---|---|
 | 1 | `spec_version` target integer (current value? next value?) | locked by FRP-0 audit: current accepted/default value is 2; FRP-1 target is 3 | FRP-1 |
 | 2 | Exact `Manifest`-slot field name (`relay_pack`? `relaypack`? `relay_pack_v1`?) | locked in FRP-1 doc as `relay_pack` | FRP-1 |
-| 3 | Freshness JSON schema details (field names, signature format, max age) | resolved: `kind=daal/freshness-v1`, `relay_pack_id`, `current_bundle_sha256`, `current_signed_url`, `last_modified`, `publisher_pub_hex`, optional structured `subkey_cert`, `signature_hex`; see `specs/relaypack-v1.md` | FRP-8 |
+| 3 | Freshness JSON schema details (field names, signature format, max age) | resolved, then SUPERSEDED at Wave 3 / Step 8: `kind=daal/freshness-v2` (v1 is refused, not read best-effort), `relay_pack_id`, `supersedes[]`, `sequence`, `current_bundle_sha256`, `current_signed_url`, `last_modified`, `not_after`, `mirrors[]`, `publisher_pub_hex`, `pad`, optional structured `subkey_cert`, `signature_hex`; see `specs/relaypack-v1.md` | FRP-8, Wave 3 |
 | 4 | FRP-7 pilot recruitment count and selection criteria (5 FRPs minimum per supplement §22.1; concrete recruitment plan?) | open | FRP-7 |
 | 5 | First post-track modifier to lift validator-reject for (after FRP-12's framework-only ship; candidate kinds reserved as PENDING: `client_desync` Linux-desktop only, `tls_fragment`) | deferred; FRP-12 ships zero PASS records | post-FRP-12 follow-on phase (NOT in this track) |
 | 6 | FRP-13 directory gate criteria — verbatim from supplement §17.2 | open | FRP-13 |

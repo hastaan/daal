@@ -516,3 +516,86 @@ func plainHTTPFetch(ctx context.Context, rawURL string, dialer bootstrap.Dialer,
 	}
 	return raw[idx+4:], nil
 }
+
+// TestRelayPacksCarriesTheEscalationAndTheJitter is the regression test
+// for the seam that made both of those inert on every real device.
+//
+// storeSource.RelayPacks is the ONLY production path from the persisted
+// per-pack record to scheduler.Plan/AllNextDues. It used to project just
+// the two timestamps, so the planner evaluated the trigger policy with
+// ConsecutiveFailures=0 and JitterOffset=0 while core/refresh evaluated
+// the same policy with the true values — the exact disagreement the
+// design forbids in selection.FreshnessState's doc comment.
+//
+// Asserting the projection alone would not have caught it (a future
+// edit could carry the fields and still get the instant wrong), so this
+// also drives the planner: with an escalated backoff persisted, the
+// action must be SUPPRESSED at a moment the un-escalated gap would have
+// allowed, and AllNextDues must report the escalated instant.
+func TestRelayPacksCarriesTheEscalationAndTheJitter(t *testing.T) {
+	dir := t.TempDir()
+	if err := Init(dir, "warn"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { Shutdown() })
+
+	seedFreshnessPack(t, []string{
+		"https://freshness-a.invalid/f.json",
+		"https://freshness-b.invalid/f.json",
+	})
+
+	c := loadedCore()
+	// Three consecutive failures → base 5 min doubled twice = 20 min,
+	// plus a 90 s persisted jitter. Written as the record core/refresh
+	// itself persists, by key, so the test breaks if either side
+	// renames a field.
+	// Truncated: the record round-trips through RFC3339, which has no
+	// sub-second field, so a wall-clock instant would not compare equal
+	// to the one the planner reads back.
+	failedAt := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	rec := fmt.Sprintf(
+		`{"v":1,"last_failure_at":%q,"consecutive_failures":3,"jitter_ms":90000}`,
+		failedAt.Format(time.RFC3339),
+	)
+	if err := c.store.PutSecret("freshness:rp-1", []byte(rec)); err != nil {
+		t.Fatal(err)
+	}
+
+	src := storeSource{store: c.store, now: nowUTC}
+	packs := src.RelayPacks()
+	if len(packs) != 1 {
+		t.Fatalf("want exactly one pack, got %+v", packs)
+	}
+	if packs[0].ConsecutiveFailures != 3 {
+		t.Fatalf("ConsecutiveFailures dropped on the way to the planner: got %d, want 3",
+			packs[0].ConsecutiveFailures)
+	}
+	if packs[0].JitterOffset != 90*time.Second {
+		t.Fatalf("JitterOffset dropped on the way to the planner: got %v, want 90s",
+			packs[0].JitterOffset)
+	}
+
+	// 10 minutes after the failure: past the un-escalated 5 min base
+	// (which is what the planner used to see) and well inside the
+	// escalated 20 min + 90 s gap the refresher will actually enforce.
+	now := failedAt.Add(10 * time.Minute)
+	for _, a := range scheduler.Plan(src, scheduler.DefaultCadence(), now) {
+		if a.Kind == scheduler.KindFreshness {
+			t.Fatalf("planner dispatched a freshness action the trigger policy "+
+				"would refuse: %+v", a)
+		}
+	}
+
+	// And the instant the status screen renders must be the escalated,
+	// jittered one — not the base gap.
+	want := failedAt.Add(20*time.Minute + 90*time.Second)
+	var got time.Time
+	for _, a := range scheduler.AllNextDues(src, scheduler.DefaultCadence(), now) {
+		if a.Kind == scheduler.KindFreshness && a.Ref == "rp-1" {
+			got = a.NextDue
+		}
+	}
+	if !got.Equal(want) {
+		t.Fatalf("AllNextDues reported %v, want the escalated+jittered %v", got, want)
+	}
+}

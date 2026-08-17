@@ -298,13 +298,32 @@ pub trait CliRunner: Send + Sync {
     /// FRP-7: invoke `daal-deploy assign-fip`. This is the L3
     /// fast path and returns the updated OperatorRecord JSON read
     /// back from `args.record_path`.
-    fn run_assign_fip(&self, args: AssignFipArgs<'_>) -> Result<String>;
+    ///
+    /// TAKES THE SIGNING KEY SINCE WAVE 3c, and that is not a
+    /// convenience. Attaching a floating IP is only the cloud half of
+    /// an L3: a Hetzner address is routed to the server at the
+    /// provider's network layer, but the guest OS does not answer on
+    /// it until it is configured on the interface. `assign-fip` now
+    /// tells the relay to do that, over a signed request inside an
+    /// ephemeral firewall window — so it needs `--priv-key` and
+    /// `--helper-ip` exactly like `rotate-credentials` does, and
+    /// exits 2 without them rather than attaching an address nothing
+    /// will ever answer on.
+    fn run_assign_fip(&self, args: AssignFipArgs<'_>, priv_key: &[u8]) -> Result<String>;
 
     /// Give an address back. Never fails a rotation: the caller folds
     /// the outcome's warnings into its result instead, because the
     /// pack is already signed and committed and undoing that to tidy
     /// up a billing resource would be the wrong trade.
-    fn run_release_fip(&self, args: ReleaseFipArgs<'_>) -> Result<ReleaseFipOutcome>;
+    ///
+    /// Also signed since Wave 3c: the relay has to be told to drop the
+    /// address BEFORE it returns to the provider pool, or the box keeps
+    /// claiming an address another customer may be issued.
+    fn run_release_fip(
+        &self,
+        args: ReleaseFipArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<ReleaseFipOutcome>;
 
     /// Teardown: invoke `daal-deploy decommission` to destroy the
     /// cloud resources this record owns — the VPS, the ephemeral
@@ -910,9 +929,21 @@ pub struct PublishedMirror {
 }
 
 /// FRP-9 commit 4/8: result shape returned by
-/// `daal-deploy publish-freshness`. signed_doc_b64 always
-/// carries the bytes; published_url is empty until the live
-/// backend SDK (R2 / GH Pages) is wired in a follow-up.
+/// `daal-deploy publish-freshness`. `signed_doc_b64` always carries
+/// the bytes.
+///
+/// This comment used to end "published_url is empty until the live
+/// backend SDK (R2 / GH Pages) is wired in a follow-up". That
+/// follow-up landed at Wave 3b: both backends are real
+/// (`publisher/deploy/freshness/backends/r2` signs AWS SigV4,
+/// `.../ghpages` PUTs the contents API), and `cli.go` sets
+/// `published_url` to the first mirror that accepted the write.
+/// Reading `published_url == ""` as "not implemented yet" rather than
+/// as "every mirror refused" is exactly backwards, which is why the
+/// stale sentence is called out instead of just deleted.
+///
+/// `published_url` is still the WRONG field to render: it is only the
+/// first success and says nothing about the others. Use `published`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PublishFreshnessResult {
     pub signed_doc_b64: String,
@@ -962,6 +993,10 @@ pub struct ReprovisionArgs<'a> {
 pub struct AssignFipArgs<'a> {
     pub record_path: &'a Path,
     pub token: &'a str,
+    /// Helper's outbound public IP. Required: the bind leg opens a
+    /// per-caller firewall window on the relay's mgmt port, and there
+    /// is no window without an address to open it for.
+    pub helper_ip: &'a str,
     pub fip_id: &'a str,
 }
 
@@ -976,9 +1011,25 @@ pub struct AssignFipArgs<'a> {
 pub struct ReleaseFipArgs<'a> {
     pub record_path: &'a Path,
     pub token: &'a str,
+    /// Helper's outbound public IP — see [`AssignFipArgs::helper_ip`].
+    pub helper_ip: &'a str,
     /// The address to give back. Empty means "the one on the record",
     /// which is NOT what a rotation wants — it wants the PRIOR id.
     pub fip_id: &'a str,
+    /// The prior ADDRESS, for the relay's unbind.
+    ///
+    /// The provider speaks ids and the box speaks addresses. When
+    /// `fip_id` is the id the record names, the CLI resolves the
+    /// address from the record — but a rotation has already replaced
+    /// the record with the swap's OUTPUT (the new id, the new address)
+    /// before this leg runs, so the address being released appears
+    /// nowhere the CLI can look. Without it the CLI could not tell the
+    /// relay to drop the address and used to release anyway: the old
+    /// address stayed configured on eth0 with a persistence record
+    /// re-asserted at every reboot, while the provider was free to
+    /// issue it to another customer. It now REFUSES instead, so this
+    /// field is mandatory for the rotation shape.
+    pub fip_address: &'a str,
 }
 
 /// What `floating-ip release` did, in operator-facing terms.
@@ -1650,42 +1701,44 @@ impl CliRunner for SubprocessRunner {
         std::fs::read_to_string(args.record_path).map_err(BridgeError::Io)
     }
 
-    fn run_assign_fip(&self, args: AssignFipArgs<'_>) -> Result<String> {
+    fn run_assign_fip(&self, args: AssignFipArgs<'_>, priv_key: &[u8]) -> Result<String> {
         let tmp = tempfile_with_secret(args.token)?;
         let token_path = tmp.path().to_path_buf();
 
-        let out = Command::new(&self.binary)
-            .arg("assign-fip")
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("assign-fip")
             .arg("--record-file")
             .arg(args.record_path)
             .arg("--token-file")
             .arg(&token_path)
+            // The guest-OS half of the swap. Without these two the CLI
+            // exits 2 before it reserves anything — deliberately, since
+            // an address attached to a box that was never told to
+            // configure it is one nothing will ever answer on.
+            .arg("--helper-ip")
+            .arg(args.helper_ip)
+            .arg("--priv-key")
+            .arg("-")
             .arg("--fip-id")
-            .arg(args.fip_id)
-            .apply_env()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+            .arg(args.fip_id);
+        let out = run_with_piped_priv_key(cmd, priv_key);
         drop(tmp);
 
-        let out = match out {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(BridgeError::BinaryMissing);
-            }
-            Err(e) => return Err(BridgeError::Io(e)),
-        };
+        let out = out?;
         if !out.status.success() {
             return Err(BridgeError::SubprocessFailed {
                 rc: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                stderr: out.stderr,
             });
         }
         std::fs::read_to_string(args.record_path).map_err(BridgeError::Io)
     }
 
-    fn run_release_fip(&self, args: ReleaseFipArgs<'_>) -> Result<ReleaseFipOutcome> {
+    fn run_release_fip(
+        &self,
+        args: ReleaseFipArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<ReleaseFipOutcome> {
         let tmp = tempfile_with_secret(args.token)?;
         let token_path = tmp.path().to_path_buf();
 
@@ -1695,29 +1748,31 @@ impl CliRunner for SubprocessRunner {
             .arg("--record-file")
             .arg(args.record_path)
             .arg("--token-file")
-            .arg(&token_path);
+            .arg(&token_path)
+            // Signed since Wave 3c: the relay is told to drop the
+            // address before it goes back to the provider pool. A
+            // failure here STOPS the release (the CLI exits 1 and the
+            // address stays reserved and billing) rather than handing
+            // an address another customer may be issued to a box that
+            // still claims it.
+            .arg("--helper-ip")
+            .arg(args.helper_ip)
+            .arg("--priv-key")
+            .arg("-");
         if !args.fip_id.is_empty() {
             cmd.arg("--fip-id").arg(args.fip_id);
         }
-        let out = cmd
-            .apply_env()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+        if !args.fip_address.is_empty() {
+            cmd.arg("--fip-address").arg(args.fip_address);
+        }
+        let out = run_with_piped_priv_key(cmd, priv_key);
         drop(tmp);
 
-        let out = match out {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(BridgeError::BinaryMissing);
-            }
-            Err(e) => return Err(BridgeError::Io(e)),
-        };
+        let out = out?;
         if !out.status.success() {
             return Err(BridgeError::SubprocessFailed {
                 rc: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                stderr: out.stderr,
             });
         }
         // The CLI reports "detached but still reserved" and "could not
@@ -1726,8 +1781,8 @@ impl CliRunner for SubprocessRunner {
         // bill. Carry them up rather than dropping them: the rotation's
         // own copy says the old address no longer serves, and if it
         // still does the operator has to hear it here.
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let warnings: Vec<String> = stderr
+        let warnings: Vec<String> = out
+            .stderr
             .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty() && (l.contains("still billing") || l.contains("still reserved")))
@@ -2237,6 +2292,64 @@ impl CliRunner for SubprocessRunner {
     }
 }
 
+/// What [`run_with_piped_priv_key`] collected: the exit status plus both
+/// streams already decoded, so callers never hold the raw bytes of a run
+/// that had a secret on its stdin.
+struct PipedOutput {
+    status: std::process::ExitStatus,
+    #[allow(dead_code)]
+    stdout: String,
+    stderr: String,
+}
+
+/// Wave 3c: run a subcommand that reads the publisher signing key from
+/// stdin (`--priv-key -`) and returns both streams.
+///
+/// The key is written to a pipe and never to disk, and the buffer is a
+/// `Zeroizing` copy that is wiped when this frame ends — the same rule
+/// `run_users_subprocess` follows. It exists separately because the
+/// floating-IP verbs take a different flag set (`--fip-id`,
+/// `--skip-unbind`) and folding them into the users driver would mean a
+/// driver whose argv depends on which of six verbs it was handed.
+///
+/// stdout is drained on its own thread while stderr is read here: a
+/// child that fills one pipe's buffer while the parent is blocked
+/// reading the other deadlocks, and `assign-fip` writes an
+/// OperatorRecord to stdout and progress lines to stderr at the same
+/// time.
+fn run_with_piped_priv_key(mut cmd: Command, priv_key: &[u8]) -> Result<PipedOutput> {
+    let mut child = cmd
+        .apply_env()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+            _ => BridgeError::Io(e),
+        })?;
+    {
+        let mut stdin = child.stdin.take().expect("piped");
+        let buf = Zeroizing::new(priv_key.to_vec());
+        stdin.write_all(buf.as_slice())?;
+    }
+    let stdout_handle = child.stdout.take().expect("piped");
+    let stderr_handle = child.stderr.take().expect("piped");
+    let stdout_join = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = BufReader::new(stdout_handle).read_to_string(&mut buf);
+        buf
+    });
+    let mut stderr_text = String::new();
+    let _ = BufReader::new(stderr_handle).read_to_string(&mut stderr_text);
+    let status = child.wait().map_err(BridgeError::Io)?;
+    Ok(PipedOutput {
+        status,
+        stdout: stdout_join.join().unwrap_or_default(),
+        stderr: stderr_text,
+    })
+}
+
 // FRP-14: shared driver for every mgmt-plane subcommand that takes the
 // same four inputs — the three users-* verbs and, since Wave 3 Step 7,
 // rotate-credentials / rotate-tls. Pipes `priv_key` through stdin
@@ -2353,11 +2466,23 @@ pub struct MockRunner {
     pub reprovision_calls: Mutex<Vec<MockReprovisionCall>>,
     /// FRP-7: recorded floating-IP assign calls.
     pub assign_fip_calls: Mutex<Vec<MockAssignFipCall>>,
-    /// Floating-IP ids handed to `floating-ip release`, in order. The
-    /// rotation must release the PRIOR address after the history row
-    /// commits, and only then — before it, a failure strands every
-    /// distributed pack on an address that routes nowhere.
+    /// `"<fip_id> <fip_address>"` per `floating-ip release` call, in
+    /// order. The rotation must release the PRIOR address after the
+    /// history row commits, and only then — before it, a failure
+    /// strands every distributed pack on an address that routes
+    /// nowhere. The ADDRESS is recorded alongside the id because the
+    /// id alone is what the provider needs and the address is what the
+    /// RELAY needs: a release that cannot name the address cannot tell
+    /// the box to drop it, and the real CLI refuses rather than hand a
+    /// live box's address back to the provider pool.
     pub release_fip_calls: Mutex<Vec<String>>,
+    /// When set, `run_assign_fip` fails with this exit code and
+    /// stderr instead of swapping. Exit 3 is the rotation verbs'
+    /// reserved "this relay's software predates the operation" code,
+    /// which is the answer EVERY relay in the field gives for L3 until
+    /// the box artifact is re-released — so a test has to be able to
+    /// reach it.
+    pub assign_fip_error: Mutex<Option<(i32, String)>>,
     /// Teardown: recorded decommission calls.
     pub decommission_calls: Mutex<Vec<MockDecommissionCall>>,
     /// Teardown: optional canned result for `run_decommission`.
@@ -2487,6 +2612,12 @@ pub struct MockReprovisionCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MockAssignFipCall {
     pub fip_id: String,
+    /// Wave 3c: the two inputs the guest-OS half of the swap needs. The
+    /// real CLI exits 2 without them, before it reserves anything, so a
+    /// mock that did not record them could not tell a wired L3 from one
+    /// that will refuse on contact with a relay.
+    pub helper_ip: String,
+    pub priv_key_len: usize,
 }
 
 /// The record body is captured, not just its path: the staged file
@@ -2522,6 +2653,7 @@ impl MockRunner {
             release_fip_calls: Mutex::new(Vec::new()),
             decommission_calls: Mutex::new(Vec::new()),
             decommission_result: Mutex::new(None),
+            assign_fip_error: Mutex::new(None),
             decommission_error: Mutex::new(None),
             cdn_rotate_path_calls: Mutex::new(Vec::new()),
             cdn_rotate_hostname_calls: Mutex::new(Vec::new()),
@@ -2585,6 +2717,14 @@ impl MockRunner {
     /// Teardown: make `run_decommission` fail. The relay's local row
     /// and cloud token must survive that, so this is the switch the
     /// ordering test is built on.
+    /// Make `run_assign_fip` fail the way a real relay does. Exit 3 is
+    /// the capability refusal the UI must render as `pub.rotate.too_old`
+    /// in the operator's own language, not as a developer sentence.
+    pub fn with_assign_fip_error(self, rc: i32, stderr: impl Into<String>) -> Self {
+        *self.assign_fip_error.lock().unwrap() = Some((rc, stderr.into()));
+        self
+    }
+
     pub fn with_decommission_error(self, stderr: impl Into<String>) -> Self {
         *self.decommission_error.lock().unwrap() = Some(stderr.into());
         self
@@ -2855,12 +2995,28 @@ impl CliRunner for MockRunner {
     ///
     /// An empty fip_id means "reserve one", which the real CLI does and
     /// which the UI must be able to reach.
-    fn run_assign_fip(&self, args: AssignFipArgs<'_>) -> Result<String> {
+    fn run_assign_fip(&self, args: AssignFipArgs<'_>, priv_key: &[u8]) -> Result<String> {
+        // Mirror the CLI's own precondition: it refuses (exit 2) before
+        // reserving anything when either half of the signing material
+        // is missing, because an address attached to a box that was
+        // never told to configure it is one nothing answers on.
+        if args.helper_ip.trim().is_empty() || priv_key.is_empty() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 2,
+                stderr: "assign-fip: attaching a floating IP is only half the swap — pass --priv-key and --helper-ip"
+                    .into(),
+            });
+        }
+        if let Some((rc, stderr)) = self.assign_fip_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
         self.assign_fip_calls
             .lock()
             .unwrap()
             .push(MockAssignFipCall {
                 fip_id: args.fip_id.to_string(),
+                helper_ip: args.helper_ip.to_string(),
+                priv_key_len: priv_key.len(),
             });
         let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(args.record_path)?)?;
         let prior_ip = v["public_ip"].as_str().unwrap_or_default().to_string();
@@ -2897,11 +3053,38 @@ impl CliRunner for MockRunner {
         Ok(body)
     }
 
-    fn run_release_fip(&self, args: ReleaseFipArgs<'_>) -> Result<ReleaseFipOutcome> {
+    fn run_release_fip(
+        &self,
+        args: ReleaseFipArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<ReleaseFipOutcome> {
+        // Same precondition as the real verb: without the signing
+        // material it can only proceed by skipping the unbind, which
+        // hands a live box's address back to the provider pool.
+        if args.helper_ip.trim().is_empty() || priv_key.is_empty() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 2,
+                stderr: "floating-ip release: pass --priv-key and --helper-ip, or --skip-unbind".into(),
+            });
+        }
+        // The real verb refuses when it cannot resolve the address it
+        // is releasing to something the box understands, because
+        // releasing an address a live relay still holds hands another
+        // customer an address this box answers on. The mock has to
+        // refuse on the same condition or the rotation test would pass
+        // over the seam it exists to hold down.
+        if args.fip_address.trim().is_empty() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 2,
+                stderr: "floating-ip release: pass --fip-address <addr> (a rotation releasing the PRIOR address knows it), \
+                         or --skip-unbind if that relay no longer exists"
+                    .into(),
+            });
+        }
         self.release_fip_calls
             .lock()
             .unwrap()
-            .push(args.fip_id.to_string());
+            .push(format!("{} {}", args.fip_id, args.fip_address));
         Ok(ReleaseFipOutcome {
             record_json: std::fs::read_to_string(args.record_path).unwrap_or_default(),
             warnings: vec![],

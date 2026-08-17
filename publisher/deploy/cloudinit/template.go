@@ -5,6 +5,51 @@
 // The template is loaded from template.yaml.tmpl (Go text/template).
 // The verifier shim is loaded from shim.sh.tmpl and indented into
 // the YAML at render time.
+//
+// # Floating IPs: why nothing here configures one
+//
+// A Hetzner floating IP is ROUTED to the server at the provider's
+// network layer and never ANSWERED by the guest OS until the address is
+// configured on an interface (measured on real hardware 2026-08-17: the
+// API showed the address attached with both ownership labels while a TLS
+// probe to it timed out). Something has to do that step, and the
+// candidates were cloud-init or a mgmt endpoint. It is the mgmt
+// endpoint, deliberately. The four cases:
+//
+//  1. RELAY BORN WITHOUT A FLOATING IP — every relay today. Provision
+//     creates the server and attaches no floating IP; rec.PublicIP is
+//     the server's own primary address, which DHCP configures. There is
+//     nothing for cloud-init to write. HANDLED (by having nothing to do).
+//
+//  2. RELAY GAINS ONE LATER (the L3 rung) — `daal-deploy floating-ip
+//     assign` attaches the address and then calls POST /bind-address on
+//     the box, between the provider attach and the reachability probe.
+//     HANDLED. Cloud-init could not have helped here even in principle:
+//     the address does not exist when the template is rendered, and it
+//     changes on every subsequent swap, so anything baked in at birth is
+//     stale after the first rotation.
+//
+//  3. RELAY REBOOTS HOLDING A FLOATING IP — the bind must survive. That
+//     is the box's job and part of the pinned contract (/bind-address
+//     persists; the response's `persisted` field reports whether it did,
+//     and the publisher warns loudly when it says false). Cloud-init
+//     runs once, at first boot, so it cannot own a fact that changes
+//     later — and two writers of one interface config is the shape this
+//     tree has already paid for twice.
+//
+//  4. RELAY REBUILT BY REPROVISION WHILE ITS RECORD NAMES A FLOATING IP
+//     — NOT HANDLED, and stated rather than hidden. Reprovision deletes
+//     the server (the provider detaches the address as a side effect)
+//     and Provision builds a new one with a new primary address; the
+//     record keeps its floating_ip_id while nothing is attached to it.
+//     The operator's route back is to run `floating-ip assign` again
+//     against the rebuilt relay, which reserves/attaches and binds. A
+//     reprovision that re-attaches and re-binds automatically is its own
+//     piece of work.
+//
+// So: ONE writer of the guest's address configuration, and it is the box
+// endpoint the publisher can call at any time — not a template rendered
+// before the address exists.
 package cloudinit
 
 import (

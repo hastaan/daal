@@ -26,11 +26,28 @@
 //!
 //! ## What this module will not pretend
 //!
-//! Step 8 (remote pack replacement) is not built. Nothing repairs
-//! itself over the network. After either rotation the affected people
-//! need a new file delivered by hand, and both summaries below carry
-//! the numbers the UI needs to say so honestly rather than implying a
-//! self-healing that does not exist.
+//! This section was written at Step 7 and read: "Step 8 (remote pack
+//! replacement) is not built. Nothing repairs itself over the network.
+//! After either rotation the affected people need a new file delivered
+//! by hand." Step 8 landed at Wave 3b and that is now false. It is
+//! corrected rather than deleted because the replacement claim is
+//! narrower than "it heals itself now", and the narrowness is the
+//! whole point:
+//!
+//!   * Whether a recipient can be repaired over the network is a
+//!     property of the pack ALREADY IN THEIR HANDS — does it carry
+//!     freshness endpoints? — and not of what the publisher has
+//!     configured since. A pack minted before the publisher added any
+//!     endpoint still needs a courier, forever. The UI branches on the
+//!     signed pack (`mirrorsInPack`), never on configuration.
+//!   * Neither operation here publishes anything. `rotate_execute`
+//!     (commands.rs) re-signs and re-publishes the freshness document
+//!     inside one transaction; these two do not. After a TLS rotation
+//!     the operator must rebuild the packs and press Publish under
+//!     Refresh addresses, and the result copy says so.
+//!
+//! Both summaries below still carry the counts, because the screen has
+//! to be able to state the consequence rather than imply it.
 //!
 //! ## Version skew is the normal case
 //!

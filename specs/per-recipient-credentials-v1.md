@@ -18,7 +18,12 @@ same UUID/short_id/password. Consequences:
 
 * No per-recipient revocation. The only way to remove access was to
   rotate everything via L1 (`/rotate-credentials`), which kicks every
-  other user too.
+  other user too. **Historical only.** Wave 3 Step 7 re-scoped that
+  route: `/rotate-credentials` now names exactly one recipient,
+  a missing `name` is a `400` rather than "everyone", and the
+  box-wide REALITY keypair moved to a separate operation. See
+  `specs/daal-relay-mgmt-v1.md` §4.1 for the shape that ships, and
+  §4.1.1 for recognising a box that still implements the old one.
 * No accountability if a credentials leak happens — the operator
   cannot tell which recipient leaked.
 * No room for per-recipient TOS / quota / channel-specific UX in the

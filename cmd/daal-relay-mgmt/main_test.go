@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -70,8 +71,22 @@ func newTestServer(t *testing.T) (*server, ed25519.PublicKey, ed25519.PrivateKey
 	return srv, pub, priv, configPath
 }
 
+// mintCounter keeps test nonces unique across the whole package.
+var mintCounter atomic.Int64
+
+// mintToken mints a token the way the publisher does — including a
+// FRESH nonce per call.
+//
+// The nonce used to be the constant "test-nonce", which was harmless
+// until the two address verbs became single-use (consumeAddressNonce):
+// every test that called bind twice was then re-presenting one token,
+// which is exactly what the box now refuses. mgmt.MintToken has always
+// drawn 16 random bytes per call, so a per-call nonce is what the wire
+// actually carries; a fixture that reuses one is the thing that was
+// wrong. Tests that want to prove the replay refusal mint once and send
+// the same string twice — see TestAddressTokenIsSingleUse.
 func mintToken(priv ed25519.PrivateKey, op string, ts int64) string {
-	nonce := "test-nonce"
+	nonce := fmt.Sprintf("test-nonce-%d", mintCounter.Add(1))
 	tsStr := fmt.Sprintf("%d", ts)
 	msg := []byte(nonce + ":" + tsStr + ":" + op)
 	sig := ed25519.Sign(priv, msg)
@@ -82,9 +97,11 @@ func mintToken(priv ed25519.PrivateKey, op string, ts int64) string {
 // --- tests ---
 
 // TestExactlyNRoutes enforces FRP-14 invariant 1: the mgmt API
-// surface is exactly seven routes — the original three, the
-// per-recipient trio, and /whoami. Adding an eighth requires a
-// supplement amendment.
+// surface is exactly nine routes — the original three, the
+// per-recipient trio, /whoami, and the Wave-3c address pair that the
+// pinned L3 contract requires. Adding a TENTH requires a supplement
+// amendment, and specs/daal-relay-mgmt-v1.md §4 needs the amendment
+// for the two added here.
 func TestExactlyNRoutes(t *testing.T) {
 	srv, _, _, _ := newTestServer(t)
 	got := append([]string{}, srv.routeNames()...)
@@ -97,6 +114,8 @@ func TestExactlyNRoutes(t *testing.T) {
 		"/users/provision",
 		"/users/revoke",
 		"/whoami",
+		"/bind-address",
+		"/unbind-address",
 	}
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {

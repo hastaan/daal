@@ -595,7 +595,16 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 			ours = ownsFloatingIP(fip, rec)
 		}
 		if ours {
-			rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy reserved it, so run `daal-deploy floating-ip release --fip-id %s` to stop paying for it, or keep it for the next relay",
+			// --skip-unbind is named here and only here: this notice is
+			// printed by a DECOMMISSION, i.e. the server it was
+			// attached to has just been destroyed. `release` otherwise
+			// insists on telling the relay to drop the address first,
+			// and a destroyed box cannot answer — the operator would
+			// hit an unexplained refusal on the one path where skipping
+			// is exactly right.
+			rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy reserved it, so run "+
+				"`daal-deploy floating-ip release --fip-id %s --skip-unbind` (the relay it was on is gone, so there is nothing "+
+				"left to tell it to drop the address) to stop paying for it, or keep it for the next relay",
 				rec.FloatingIPID, rec.FloatingIPID)
 		} else {
 			rep.Warnf("floating IP %s stays reserved on your account and keeps billing — daal-deploy did not create it, so it is yours to release", rec.FloatingIPID)

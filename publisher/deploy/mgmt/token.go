@@ -39,7 +39,12 @@ func MintToken(privKey ed25519.PrivateKey, op string, ts time.Time) (string, err
 	}
 	switch op {
 	case "rotate-credentials", "rotate-tls",
-		"users-provision", "users-revoke", "users-list":
+		"users-provision", "users-revoke", "users-list",
+		// The box derives the expected op from the route
+		// (opFromPath) and refuses a token minted for a different
+		// one, so these two spellings are a wire contract with
+		// cmd/daal-relay-mgmt, not local naming.
+		"bind-address", "unbind-address":
 		// ok
 	default:
 		return "", fmt.Errorf("mgmt: unknown op %q", op)

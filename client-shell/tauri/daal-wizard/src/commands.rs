@@ -2066,6 +2066,25 @@ struct RotateCandidateForProvision {
 /// nothing downstream can recover it); and after, to know which one it
 /// landed on when the CLI reserved it for us and the caller never named
 /// an id.
+/// The public address a record names.
+///
+/// Needed for the same reason `record_floating_ip_id` is: an L3
+/// replaces the stored record with the swap's output, so the address
+/// the relay is moving OFF survives only if it is captured before the
+/// swap. The provider release takes an id; the RELAY takes an address,
+/// and without one it cannot be told to drop the address the provider
+/// is about to hand to somebody else.
+fn record_public_ip(record_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(record_json)
+        .ok()
+        .and_then(|v| {
+            v.get("public_ip")
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
+}
+
 fn record_floating_ip_id(record_json: &str) -> String {
     serde_json::from_str::<serde_json::Value>(record_json)
         .ok()
@@ -2167,6 +2186,22 @@ fn rotation_families(rec: &RotateRecordForProvision) -> Vec<String> {
 /// rig's `v1-5-l3-fast-path` scenario asserts the same number, so
 /// changing it here alone would put two green suites on opposite sides
 /// of one promise.
+///
+/// WHAT THE 15 SECONDS NOW HAS TO COVER. Before Wave 3c the measured
+/// subprocess was reserve → attach → record readback → TCP probe. It is
+/// now capability probe (one ephemeral firewall window: a provider
+/// read-modify-write of the rules, a TLS handshake, `GET /health`, then
+/// the blocking removal in a defer) → reserve → attach → readback →
+/// bind (a SECOND full window, plus its own capability re-check and a
+/// `POST /bind-address` whose handler configures the address and writes
+/// its persistence) → reachability probe → re-sign. The number was not
+/// moved for it: it is a product promise pinned in three places and the
+/// spec supplement, and a "fast path" that quietly grew to 30 seconds
+/// would be an outage the operator was not warned about. What changed
+/// instead is the overrun MESSAGE, which now names the address left
+/// attached and billing — see the check below, and the note in
+/// `docs/backlog-post-45.md` about measuring the real cost against
+/// hardware before anyone reasons about this number again.
 const L3_FAST_PATH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Split out from the call site so the budget rule is testable without
@@ -2378,6 +2413,15 @@ fn rotate_execute_inner(
     // old one no longer serves".
     let prior_record_json = row.operator_record_json.clone();
     let prior_floating_ip_id = record_floating_ip_id(&prior_record_json);
+    // The ADDRESS half of the same capture. The release leg hands
+    // `prior_floating_ip_id` to the provider, but the RELAY is told to
+    // drop an address, and by then the stored record names the new one.
+    // Without this the CLI could not resolve the address at all: it
+    // used to warn and release anyway, leaving the old address
+    // configured on the relay's interface — with a persistence record
+    // re-asserted at every reboot — while the provider was free to
+    // issue it to another customer.
+    let prior_public_ip = record_public_ip(&prior_record_json);
     let mut warnings: Vec<String> = Vec::new();
     let mut l3_new_fip_id = String::new();
 
@@ -2465,14 +2509,47 @@ fn rotate_execute_inner(
                     "this relay is already on floating IP {fip_id}; re-attaching it would change nothing a censor can see. Leave the field empty to reserve a NEW address, or supply a different id"
                 )));
             }
+            // THE GUEST-OS HALF (Wave 3c). An L3 is no longer a pure
+            // cloud-API operation: attaching a floating IP routes it to
+            // the server, but the box does not answer on it until the
+            // address is configured on its interface, and that call is
+            // Ed25519-signed and runs inside a firewall window opened
+            // for this device's address. Both inputs are resolved HERE,
+            // before the provider is touched, so a missing helper IP or
+            // an unreadable key fails free instead of after an address
+            // has been reserved and billed.
+            let helper_ip = match trimmed_opt(input.helper_ip.as_ref()) {
+                Some(s) => s.to_string(),
+                None => require_helper_ip(ctx, operator_id)?,
+            };
+            let priv_buf = custody_get(ctx, &row.publisher_priv_keystore_alias)?;
             let updated = ctx
                 .cli
-                .run_assign_fip(AssignFipArgs {
-                    record_path: &record_path,
-                    token: token.as_str(),
-                    fip_id,
-                })
-                .map_err(|e| WizardError::Pricing(e.to_string()))?;
+                .run_assign_fip(
+                    AssignFipArgs {
+                        record_path: &record_path,
+                        token: token.as_str(),
+                        helper_ip: &helper_ip,
+                        fip_id,
+                    },
+                    priv_buf.as_slice(),
+                )
+                // map_rotation_err, NOT a bare string. Since Wave 3c an
+                // L3 talks to the mgmt plane, so it can fail in the two
+                // ways every other mgmt verb can and the UI must be
+                // able to tell them apart: exit 3 is "this relay's
+                // software predates address binding" (E_RELAY_TOO_OLD —
+                // not retryable, fixed only by re-releasing the box
+                // artifact and reprovisioning), and a transport-shaped
+                // failure is a stale firewall allowlist
+                // (E_HELPER_IP_STALE — re-detect and retry). Mapping
+                // both onto an opaque Pricing string put a developer
+                // sentence in front of an operator whose UI is in
+                // Farsi, with no repair offered. EVERY relay in the
+                // field takes the exit-3 path until the human
+                // re-release step, so this is the common case, not an
+                // edge one.
+                .map_err(map_rotation_err)?;
             l3_new_fip_id = record_floating_ip_id(&updated);
             ctx.db.update_record_json(operator_id, &updated)?;
         }
@@ -2762,11 +2839,29 @@ fn rotate_execute_inner(
     // re-sign itself has already happened and cannot be unwound; that
     // is why the message says what state the operator is in rather than
     // pretending nothing changed.
+    //
+    // THE MESSAGE NAMES THE PRIOR ADDRESS, and that is not decoration.
+    // The swap has already landed: the stored record names the new
+    // address, the pack is signed, and the release leg below is never
+    // reached — so the OLD floating IP is still attached, still
+    // billing, and (deliberately) still serving, because the pack
+    // recipients hold still names it. An operator told only "the budget
+    // was exceeded" has no way to find the address they are paying for.
+    // Retrying reserves a THIRD address, so the id has to be in hand.
     if input.level == "L3" && l3_budget_exceeded(started.elapsed()) {
+        let still = if prior_floating_ip_id.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " The previous address (floating IP {prior_floating_ip_id}, {prior_public_ip}) is still attached, still billing and still serving — \
+                 deliberately, because the pack recipients hold still names it — and was NOT released."
+            )
+        };
         return Err(WizardError::Pricing(format!(
-            "the address swap took {}s, over the {}s budget the fast path promises — the new pack was signed but has NOT been made active; check the relay reachable on its new address before retrying",
+            "the address swap took {}s, over the {}s budget the fast path promises — the new pack was signed but has NOT been made active; check the relay reachable on its new address before retrying.{}",
             started.elapsed().as_secs(),
             L3_FAST_PATH_BUDGET.as_secs(),
+            still,
         )));
     }
 
@@ -2850,11 +2945,37 @@ fn rotate_execute_inner(
         let current = ctx.db.get(operator_id)?.operator_record_json;
         match std::fs::write(&release_path, current.as_bytes()) {
             Ok(()) => {
-                match ctx.cli.run_release_fip(crate::cli_bridge::ReleaseFipArgs {
-                    record_path: &release_path,
-                    token: token.as_str(),
-                    fip_id: &prior_floating_ip_id,
-                }) {
+                // Signed since Wave 3c, for the same reason the assign
+                // leg is: the relay has to be told to DROP the address
+                // before the provider may hand it to another customer.
+                // A failure to resolve either input becomes a warning
+                // rather than an error — the pack is already signed and
+                // committed at this point, and the cost of a missed
+                // release is a billing line, not connectivity.
+                let helper_ip = match trimmed_opt(input.helper_ip.as_ref()) {
+                    Some(s) => Ok(s.to_string()),
+                    None => require_helper_ip(ctx, operator_id),
+                };
+                let signing = helper_ip.and_then(|ip| {
+                    custody_get(ctx, &row.publisher_priv_keystore_alias).map(|k| (ip, k))
+                });
+                let released = match signing {
+                    Ok((helper_ip, priv_buf)) => ctx
+                        .cli
+                        .run_release_fip(
+                            crate::cli_bridge::ReleaseFipArgs {
+                                record_path: &release_path,
+                                token: token.as_str(),
+                                helper_ip: &helper_ip,
+                                fip_id: &prior_floating_ip_id,
+                                fip_address: &prior_public_ip,
+                            },
+                            priv_buf.as_slice(),
+                        )
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                match released {
                     Ok(outcome) => {
                         warnings.extend(outcome.warnings);
                         if !outcome.record_json.is_empty() {
@@ -5403,6 +5524,14 @@ mod tests {
         .unwrap();
         let _ = publisher_keygen(ctx, id).unwrap();
         let _ = finalize_pre_provision(ctx, id).unwrap();
+        // A provisioned relay always has a helper IP: it is the address
+        // the cloud firewall was opened for at provision time, and
+        // since Wave 3c the L3 arm needs it again to open the window
+        // for the bind call. A fixture without one models a state the
+        // app cannot reach.
+        ctx.db
+            .set_helper_ip(id, "1.2.3.4", "manual", 1_700_000_000)
+            .unwrap();
         // Mark provisioned so rotate_execute's sign_relaypack succeeds.
         ctx.db.mark_provisioned(id, 1_700_000_000).unwrap();
         id
@@ -5540,6 +5669,15 @@ mod tests {
         assert_eq!(out.bind_result, bind);
         assert_eq!(mock.assign_fip_calls.lock().unwrap().len(), 1);
         assert_eq!(mock.assign_fip_calls.lock().unwrap()[0].fip_id, "fip-new");
+        // WAVE 3c. The swap is not a pure cloud-API call any more: the
+        // relay has to be told to configure the address on its
+        // interface, over a signed request inside a firewall window
+        // opened for this device. `daal-deploy assign-fip` exits 2
+        // without both inputs, so an L3 that reached the CLI with
+        // either one missing could never complete against a real relay
+        // — and would fail AFTER the operator pressed go, not before.
+        assert_eq!(mock.assign_fip_calls.lock().unwrap()[0].helper_ip, "1.2.3.4");
+        assert_eq!(mock.assign_fip_calls.lock().unwrap()[0].priv_key_len, 64);
         assert_eq!(*mock.provision_calls.lock().unwrap(), 0);
         assert!(ctx
             .db
@@ -5615,6 +5753,13 @@ mod tests {
         let mut rec: serde_json::Value =
             serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
         rec["floating_ip_id"] = serde_json::Value::String("fip-old".into());
+        // A relay on a floating IP has that address in its record — the
+        // assign path refuses to swap one that does not. The fixture
+        // has to carry it because the release leg needs the ADDRESS,
+        // not just the id: the provider takes an id, the RELAY takes an
+        // address, and by the time the release runs the stored record
+        // has already been replaced with the new one.
+        rec["public_ip"] = serde_json::Value::String("203.0.113.9".into());
         ctx.db
             .update_record_json(id, &serde_json::to_string(&rec).unwrap())
             .unwrap();
@@ -5634,9 +5779,14 @@ mod tests {
         .unwrap();
         assert_eq!(out.level, "L3");
         let released = mock.release_fip_calls.lock().unwrap().clone();
+        // The id AND the address. The address is what the relay is told
+        // to drop; without it the CLI refuses the release outright,
+        // because handing an address back to the provider pool while a
+        // live box still has it configured is how another customer is
+        // issued an address this relay still answers on.
         assert_eq!(
             released,
-            vec!["fip-old".to_string()],
+            vec!["fip-old 203.0.113.9".to_string()],
             "the address the relay moved off was never given back — it keeps billing and keeps serving"
         );
         // And it happened after the commit: the history row exists.
@@ -5779,6 +5929,71 @@ mod tests {
                 .with_bind_result(bind),
         );
         ctx_with_mock(1_700_000_000, mock)
+    }
+
+    /// THE ANSWER EVERY RELAY IN THE FIELD GIVES, until the human
+    /// re-releases the box artifact and reprovisions.
+    ///
+    /// `assign-fip` refuses a relay whose mgmt binary cannot bind an
+    /// address, with the rotation verbs' reserved exit 3. That has to
+    /// arrive as E_RELAY_TOO_OLD: it is the code the UI turns into
+    /// `pub.rotate.too_old` in the operator's own language, and the one
+    /// that tells it NOT to offer a retry — the relay's management
+    /// service is pinned at build time and no amount of retrying moves
+    /// it. Mapped through a bare string (which is what it used to be),
+    /// a Farsi UI showed an English developer sentence about hash pins
+    /// and offered nothing to do about it.
+    #[test]
+    fn rotate_execute_l3_maps_an_old_relay_to_the_capability_code() {
+        let bind = BindResult {
+            sbp_path: "/tmp/rotated.sbp".into(),
+            sbp_sha256: "b".repeat(64),
+            relay_pack_id: "rp-rotated".into(),
+            fingerprint_hex: "e".repeat(64),
+            fingerprint_en: "alpha bravo charlie delta".into(),
+            fingerprint_fa: "یک دو سه چهار".into(),
+            lint_warnings: vec![],
+            shared_risk_edges: 2,
+        };
+        let mock = Arc::new(
+            MockRunner::new(Pricing {
+                provider: "hetzner".into(),
+                region: "fsn1".into(),
+                server_type: "cx22".into(),
+                hourly_eur: 0.005,
+                monthly_eur: 3.85,
+                included_traffic_tb_per_month: None,
+                overage_eur_per_gb: None,
+            })
+            .with_provision_record(full_record_json())
+            .with_bind_result(bind)
+            .with_assign_fip_error(
+                3,
+                "assign-fip: mgmt: capability unsupported: this relay does not advertise bind-address",
+            ),
+        );
+        let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        let mut on_prog = |_: ProgressEvent| {};
+
+        let err = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains(E_RELAY_TOO_OLD),
+            "an old relay must carry the capability code the UI can translate and must not offer a retry: {err:?}"
+        );
+        // And nothing was committed on the way out.
+        assert!(ctx.db.list_signed_sbps_history(id).unwrap().is_empty());
+        assert!(mock.release_fip_calls.lock().unwrap().is_empty());
     }
 
     // An L3 with no floating-IP id used to be rejected outright

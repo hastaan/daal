@@ -93,6 +93,22 @@ type BoxCapabilities struct {
 	MgmtAPIVersion int `json:"mgmt_api_version,omitempty"`
 	// Capabilities is the verb set. nil on a pre-Step-7 box.
 	Capabilities []string `json:"capabilities,omitempty"`
+
+	// CapabilityNotes is the box's own diagnostic text about a
+	// capability it is NOT advertising, and it must be declared here or
+	// it does not exist: encoding/json drops unknown keys silently, and
+	// this project has already shipped one inert feature exactly that
+	// way (cover_sni and mux_inbound were echoed by the box and
+	// swallowed by the struct in the middle).
+	//
+	// It earns its place because two completely different situations
+	// present identically as a missing token. "This binary is too old"
+	// is fixed by a re-release; "this binary is fine but was launched
+	// without CAP_NET_ADMIN" is fixed by a unit-file change and a
+	// reprovision. An operator who cannot SSH into the relay has no
+	// other way to tell them apart, and the generic remediation sends
+	// them to the wrong one. Rendered verbatim in the refusal.
+	CapabilityNotes []string `json:"capability_notes,omitempty"`
 }
 
 // Has reports whether the box advertises the named capability.
@@ -114,6 +130,10 @@ func (b *BoxCapabilities) Has(name string) bool {
 	case CapRotateCredentialsScoped, CapRotateTLSScoped:
 		return b.MgmtAPIVersion >= MgmtAPIVersionSplitRotation
 	}
+	// CapBindAddress deliberately has NO version fallback: it depends on
+	// the box's runtime privileges (CAP_NET_ADMIN), not only on which
+	// binary is installed, so only the box's own probe can answer it.
+	// See MgmtAPIVersionAddressBinding.
 	return false
 }
 
@@ -140,6 +160,47 @@ var ErrCapabilityUnsupported = errors.New("mgmt: relay software too old for this
 const remediation = "this relay's software is too old to rotate in place; " +
 	"reprovision the relay, or re-release daal-relay-mgmt (rebuild, re-sign, re-upload, " +
 	"bump the hash pin in publisher/deploy/cloudinit/artifacts.go) and reprovision"
+
+// bindRemediation is the same sentence for the address-binding verbs.
+// It has to differ, because "rotate in place" describes neither what the
+// operator asked for nor what they lose: an L3 on a relay this old
+// cannot work at all, since a floating IP that the guest OS never
+// configures is an address the box does not answer on. The operator must
+// know the swap was REFUSED rather than half-applied, and that the fix
+// is a human release step and not a retry.
+const bindRemediation = "this relay's software cannot configure a floating IP on its own interface, so an address " +
+	"swapped onto it would route to the server and never be answered; nothing was changed. " +
+	"Re-release daal-relay-mgmt (rebuild, re-sign, re-upload, bump the hash pin in " +
+	"publisher/deploy/cloudinit/artifacts.go — and rebuild libdaal_deploy.so with it) and reprovision this relay. " +
+	"BOTH halves are needed: the capability also depends on the service unit granting CAP_NET_ADMIN, which only a " +
+	"reprovision (new cloud-init) changes. Or use reprovision now: a rebuilt server gets a new address without needing this endpoint"
+
+// UnsupportedCapabilityError renders the standard refusal for a relay
+// that does not advertise the named capability.
+//
+// Exported because the refusal has to be issued from two places. The
+// interlock below fires INSIDE a firewall window, immediately before a
+// mutating call. The L3 assign path has to refuse EARLIER than that —
+// before it reserves an address or attaches anything — because attaching
+// an address the box can never answer on is the failure this whole wave
+// exists to prevent, and an operator should not be billed for a reserved
+// address to learn it. One renderer means both refusals read alike.
+func UnsupportedCapabilityError(caps *BoxCapabilities, name string) error {
+	fix := remediation
+	if name == CapBindAddress {
+		fix = bindRemediation
+	}
+	// The box's own account of WHY comes first, ahead of our generic
+	// remediation. It is the only thing that distinguishes "too old"
+	// from "right binary, wrong privileges", and those have different
+	// fixes.
+	said := ""
+	if caps != nil && len(caps.CapabilityNotes) > 0 {
+		said = " The relay says: " + strings.Join(caps.CapabilityNotes, "; ") + "."
+	}
+	return fmt.Errorf("%w: relay advertises %s (mgmt_api_version=%d) and not %q.%s %s",
+		ErrCapabilityUnsupported, caps.Advertised(), caps.MgmtAPIVersion, name, said, fix)
+}
 
 // Capabilities fetches GET /health and reads the box's advertisement.
 //
@@ -189,8 +250,7 @@ func requireCapability(ctx context.Context, cli *Client, rec *provider.OperatorR
 		return fmt.Errorf("mgmt: capability probe failed (refusing to rotate a box whose software we cannot identify): %w", err)
 	}
 	if !caps.Has(name) {
-		return fmt.Errorf("%w: relay advertises %s (mgmt_api_version=%d) and not %q — %s",
-			ErrCapabilityUnsupported, caps.Advertised(), caps.MgmtAPIVersion, name, remediation)
+		return UnsupportedCapabilityError(caps, name)
 	}
 	return nil
 }

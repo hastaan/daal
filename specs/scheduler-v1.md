@@ -58,6 +58,33 @@ to the existing `refresh.Refresher`, `RevocationRefresher`, and
 | Revocation | every 6 h per publisher with a revocation URL | `Cadence.Revocation` |
 | Bootstrap | every 24 h | `Cadence.Bootstrap` |
 | BudgetReset *(Phase 2A)* | every 1 h | `Cadence.BudgetReset` |
+| Freshness *(Wave 3 / Step 8)* | **not a duration** — the FRP-8 trigger policy | `Cadence.Freshness` (`selection.FreshnessPolicy`) |
+
+`Freshness` is the odd one out and deliberately so. Every other kind
+is "last + interval"; this one delegates to
+`core/internal/selection/freshness.go`
+(`MinInterval` 15 min floor, `MaxStaleness` 6 h ceiling that FORCES
+an attempt, `RetryBackoff` 5 min base **doubling per consecutive
+failure**, `MaxJitter` 4 min). Reusing that policy rather than
+adding a second cadence constant is a hard requirement: two policies
+that must agree and live in different files is how this codebase
+acquires code that exists and does nothing.
+
+Two consequences the planner MUST honour, because the policy is pure
+(Position B) and therefore cannot derive them itself:
+
+- `ConsecutiveFailures` and `JitterOffset` are PERSISTED per pack by
+  `core/refresh` and passed through `Source.RelayPacks()`
+  **verbatim**. The planner's projection and the policy's own
+  decision are two gates that must compute the same instant; a
+  `Source` that drops either makes the planner render a due time the
+  policy then refuses, which reads as a stuck device. (This is not
+  hypothetical — `core/abi`'s adapter dropped both, and
+  `TestRelayPacksCarriesTheEscalationAndTheJitter` now pins it.)
+- A pack with **no** freshness endpoint MUST NOT be returned by
+  `Source.RelayPacks()` at all. There is nothing to fetch, and
+  emitting it would make the status JSON promise remote replacement
+  to recipients of a publisher who never enabled it.
 
 The clamp on subscription cadence already lives in
 `routestore.clampInterval`; the planner re-applies it in case the
@@ -91,12 +118,15 @@ Returns:
 {
   "cadence": {
     "revocation_sec": 21600,
-    "bootstrap_sec":  86400
+    "bootstrap_sec":  86400,
+    "freshness_min_interval_sec":  900,
+    "freshness_max_staleness_sec": 21600
   },
   "last_tick": "2026-04-26T12:00:00Z",
   "ticks": 17,
   "next_due": [
     {"kind":"bootstrap",    "next_due":"2026-04-27T12:00:00Z"},
+    {"kind":"freshness","ref":"rp-abc123","next_due":"2026-04-26T12:15:00Z"},
     {"kind":"revocation","ref":"pub-A","next_due":"2026-04-26T18:00:00Z"},
     {"kind":"subscription","ref":"sub-A","next_due":"2026-04-26T13:00:00Z"}
   ]
@@ -104,16 +134,41 @@ Returns:
 ```
 
 The `kind` discriminator is
-`subscription | revocation | bootstrap | budget-reset` *(2A)*. `ref`
-carries the subscription_id (subscription) or publisher_id
-(revocation), or is omitted (bootstrap and budget-reset are
-process-global).
+`subscription | revocation | bootstrap | budget-reset` *(2A)*
+` | freshness` *(Wave 3)*. `ref`
+carries the subscription_id (subscription), the publisher_id
+(revocation) or the relay_pack_id (freshness), or is omitted
+(bootstrap and budget-reset are process-global).
+
+The two `freshness_*` cadence fields are the floor and the ceiling of
+the trigger policy, exported so a diagnostics screen can say "next
+freshness poll no sooner than X" without hard-coding the policy a
+second time. They are NOT the interval: the actual next-due instant
+per pack is in `next_due` and already includes the escalated backoff
+and the per-device jitter.
 
 `budget-reset` (Phase 2A) sweeps every route's hourly byte counter via
 `core/budget.Engine.HourRollover`. The executor binding lives in
 `core/abi/scheduler.go::refreshExecutor.RefreshBudgetReset` and stamps
 `secrets_kv["scheduler:last-budget-reset"]` so the next plan call
 gates on the cadence.
+
+`freshness` (Wave 3 / Step 8) polls one RelayPack's freshness
+endpoints and is what turns a publisher-side rotation into something
+recipients pick up over the network instead of by courier. The
+executor binding is
+`core/abi/refresh_freshness.go::refreshExecutor.RefreshFreshness`,
+driving `core/refresh.RelayPackRefresher`; the per-pack state
+(timestamps, consecutive failures, jitter) is persisted in
+`secrets_kv["freshness:<relay_pack_id>"]` so the floor survives the
+process being killed and relaunched, which on a phone is constant.
+
+It is dispatched on **both** platforms and neither driver is the UI:
+desktop ticks from a 60 s thread spawned in
+`client-shell/tauri/src-tauri/src/lib.rs`'s `setup()`, and Android
+additionally ticks from `DaalVpnService.startSchedulerPump` through
+`DaalCoreBridge.schedulerTick` while the tunnel is up. A
+UI-driven scheduler would stop the moment the window closed.
 
 ## Lifecycle
 
