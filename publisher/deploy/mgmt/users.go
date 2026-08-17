@@ -37,6 +37,28 @@ type UserCreds struct {
 	// client's trusted root (Cronet verifies against a root set, not an
 	// SPKI pin). Empty when the data-plane cert is absent.
 	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
+
+	// Wave 2. This struct is the TRANSPORT between the box and the pack
+	// minter, and a field missing here is silently dropped: encoding/json
+	// discards unknown keys on decode, so the box can send a value, this
+	// struct can omit it, and the re-encoded creds file loses it with no
+	// error anywhere. That is exactly what happened on the first real
+	// provision after Wave 2 — the box echoed both fields below and the
+	// publisher swallowed them. Anything the box learns and the minter
+	// needs MUST appear here.
+	//
+	// CoverSNI is the REALITY cover host this box actually serves, read
+	// from its live sing-box config. It is the authoritative value: the
+	// publisher's OperatorRecord is only a record of what was requested,
+	// while this is what is really on the wire. Empty on a pre-Wave-2 box,
+	// where the record fallback takes over.
+	CoverSNI string `json:"cover_sni,omitempty"`
+	// MuxInbound reports whether every vless-family inbound carries an
+	// enabled multiplex block. The pack must emit a mux outbound ONLY when
+	// this is true: a mux client against a mux-less inbound fails hard
+	// (measured: curl rc=56), while a mux inbound serves a non-mux client
+	// fine. Absent (false) on a pre-Wave-2 box, which is the safe default.
+	MuxInbound bool `json:"mux_inbound"`
 }
 
 // UserMeta is the lightweight per-user descriptor returned by
