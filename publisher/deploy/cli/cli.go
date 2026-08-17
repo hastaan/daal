@@ -36,6 +36,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"daal/publisher/deploy/health"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -582,6 +583,20 @@ type floatingIPReserver interface {
 	ReleaseFloatingIP(ctx context.Context, rec *provider.OperatorRecord, fipID string) (bool, error)
 }
 
+// l3ProbePort/l3ProbeTimeout bound the post-swap reachability probe. 443 is
+// the port every profile serves vless-reality on (relayports.For), and the
+// timeout is short because a working address answers immediately — a slow
+// answer here means something is wrong, not that we should wait longer.
+const (
+	l3ProbePort    = 443
+	l3ProbeTimeout = 8 * time.Second
+)
+
+// l3AddressServes is the reachability post-condition, injectable so tests
+// can exercise both outcomes without waiting on a real network timeout —
+// and so a test cannot accidentally pass by dialling something real.
+var l3AddressServes = health.AddressServes
+
 func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("assign-fip", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -687,6 +702,19 @@ func runAssignFIP(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	if err := rotation.CheckRecordAddressConsistent(rec); err != nil {
+		giveBack()
+		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
+		return 1
+	}
+	// And prove the relay actually ANSWERS there. The two checks above ask
+	// whether the record moved; this asks whether the move worked. On real
+	// hardware (2026-08-17) an assign reported success, the API showed the
+	// address attached with both ownership labels, and the box never replied
+	// on it — a Hetzner floating IP is routed to the server but the guest OS
+	// does not answer until the address is configured on its interface, and
+	// nothing provisions that yet. Committing that swap would re-sign every
+	// pack onto a dead address: worse than the no-op this rung used to be.
+	if err := l3AddressServes(rec.PublicIP, l3ProbePort, l3ProbeTimeout); err != nil {
 		giveBack()
 		fmt.Fprintf(stderr, "assign-fip: %v\n", err)
 		return 1

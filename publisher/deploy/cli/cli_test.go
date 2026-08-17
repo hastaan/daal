@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"daal/publisher/deploy/health"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"daal/bundle-go/phase"
 	"daal/publisher/deploy/provider"
@@ -593,6 +596,7 @@ func (f *fakeFIPProvider) ReleaseFloatingIP(_ context.Context, _ *provider.Opera
 // address the operator had to reserve by hand in the provider console
 // plus a numeric id no screen asks for.
 func TestAssignFIP_WithoutAnIDReservesOne(t *testing.T) {
+	withReachableL3Address(t)
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true}
 	withFakeProvider(t, f)
 	recordFile, tokenFile := writeDecommissionFixture(t)
@@ -629,6 +633,7 @@ func TestAssignFIP_WithoutAnIDReservesOne(t *testing.T) {
 // An address minted seconds ago that could not be attached is a billing
 // resource with no purpose — the same leak class as an orphaned server.
 func TestAssignFIP_ReservedAddressIsReturnedWhenTheAttachFails(t *testing.T) {
+	withReachableL3Address(t)
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, assignErr: errors.New("cloud says no")}
 	withFakeProvider(t, f)
 	recordFile, tokenFile := writeDecommissionFixture(t)
@@ -674,6 +679,7 @@ func TestFloatingIPRelease_ReportsAnAddressItMayNotDelete(t *testing.T) {
 // pack aimed at the address the operator was rotating AWAY from,
 // published a freshness document about it, and reported success.
 func TestAssignFIP_RefusesWhenTheAddressDidNotMove(t *testing.T) {
+	withReachableL3Address(t)
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, idOnly: true}
 	withFakeProvider(t, f)
 	recordFile, tokenFile := writeDecommissionFixture(t)
@@ -706,6 +712,7 @@ func TestAssignFIP_RefusesWhenTheAddressDidNotMove(t *testing.T) {
 // An address minted for a swap that then fails its post-condition is
 // the same leak as one that failed to attach: give it back.
 func TestAssignFIP_ReservedAddressIsReturnedWhenThePostConditionFails(t *testing.T) {
+	withReachableL3Address(t)
 	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true, idOnly: true}
 	withFakeProvider(t, f)
 	recordFile, tokenFile := writeDecommissionFixture(t)
@@ -717,5 +724,40 @@ func TestAssignFIP_ReservedAddressIsReturnedWhenThePostConditionFails(t *testing
 	}
 	if len(f.released) != 1 || f.released[0] != "fip-reserved" {
 		t.Errorf("released = %v, want the address we had just reserved", f.released)
+	}
+}
+
+// withReachableL3Address stubs the post-swap reachability probe. The fakes
+// hand back documentation addresses (203.0.113.0/24) that nothing answers
+// on, so without this every assign-fip test would sit through a real dial
+// timeout and then correctly fail. Tests that care about the UNREACHABLE
+// path stub it the other way — see TestAssignFIP_RefusesAnAddressThatDoesNotServe.
+func withReachableL3Address(t *testing.T) {
+	t.Helper()
+	prev := l3AddressServes
+	l3AddressServes = func(net.IP, int, time.Duration) error { return nil }
+	t.Cleanup(func() { l3AddressServes = prev })
+}
+
+// The 2026-08-17 hardware finding: the provider reports the address
+// attached and the guest OS never answers on it. The swap must not be
+// committed in that state.
+func TestAssignFIP_RefusesAnAddressThatDoesNotServe(t *testing.T) {
+	f := &fakeFIPProvider{newIP: "203.0.113.5", releaseOwned: true}
+	withFakeProvider(t, f)
+	prev := l3AddressServes
+	l3AddressServes = func(ip net.IP, _ int, _ time.Duration) error {
+		return fmt.Errorf("%w: %s is dead", health.ErrAddressUnreachable, ip)
+	}
+	t.Cleanup(func() { l3AddressServes = prev })
+	recordFile, tokenFile := writeDecommissionFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	rc := Run([]string{"floating-ip", "assign", "--record-file", recordFile, "--token-file", tokenFile}, &stdout, &stderr)
+	if rc == 0 {
+		t.Fatalf("an unreachable address must not be committed; rc=0 stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not serve") {
+		t.Errorf("stderr should name the reachability failure, got %q", stderr.String())
 	}
 }
