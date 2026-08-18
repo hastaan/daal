@@ -25,21 +25,28 @@ package cloudinit
 //     depth for boxes provisioned before this release — a raw CLI
 //     invocation against such a box still needs the flag.
 //
-//   - IN-PLACE ROTATION (Wave 3 Step 7). OUTSTANDING as of this commit.
-//     The box half — scoped `/rotate-credentials`, key-free
+//   - IN-PLACE ROTATION (Wave 3 Step 7). RESOLVED 2026-08-18: the pin
+//     below now carries the scoped `/rotate-credentials`, the key-free
 //     `/rotate-tls`, the `/health` capability advertisement, the
-//     rollback-on-failed-reload and the mutex that serializes the four
-//     mutating routes — is in this tree but NOT in the artefact pinned
-//     below, so every already-provisioned relay still runs the
-//     pre-Step-7 handler. That case fails CLOSED rather than
-//     dangerously: the publisher probes `/health` first
-//     (mgmt/capability.go) and refuses with E_RELAY_TOO_OLD before
-//     sending a mutating byte, because the old handler ignores `name`,
-//     rotates every recipient and re-keys the box. The rotation buttons
-//     therefore do nothing on any relay built before this pin moves —
-//     including one provisioned an hour ago. Bump the pin, then
-//     provision a NEW relay to exercise them; the binary cannot be
-//     patched in place.
+//     rollback-on-failed-reload and the mutex serializing the mutating
+//     routes. Relays provisioned before this pin still run the
+//     pre-Step-7 handler and still fail CLOSED: the publisher probes
+//     `/health` first (mgmt/capability.go) and refuses with
+//     E_RELAY_TOO_OLD before sending a mutating byte, because the old
+//     handler ignores `name`, rotates every recipient and re-keys the
+//     box. Such a relay cannot be upgraded in place — provision a new
+//     one.
+//
+//   - ADDRESS BINDING (Wave 3c). RESOLVED 2026-08-18, but with a
+//     COUPLING THIS FILE ALONE CANNOT CARRY. `/bind-address` needs
+//     CAP_NET_ADMIN, which is granted by `AmbientCapabilities` in
+//     v2.yaml.tmpl — a unit file written once, at first boot. So this
+//     feature is gated on the cloud-init template as well as on the
+//     hash below, and a relay handed only the new binary correctly
+//     reports `bind-address` unavailable (probeAddressBinding reads the
+//     effective capability set from /proc/self/status rather than
+//     assuming how it was started). L3 therefore requires a relay
+//     provisioned FRESH from this tree; there is no upgrade path.
 //
 //   - MULTIPLEX (Wave 2 Step 5). Fails safe by construction: the
 //     capability travels box→publisher (`mux_inbound`), so an
@@ -82,8 +89,8 @@ var V15Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "704d2e7f9415186c8d498e9f9f7ca1de51a18c1e2a3445c95b2a8bdc37353705",
-			SigHex:    "f77d9daafca95242c77fa2454283d6295195b68625956d2f4b7b19f59b32a41587ef1ad2c5b6130ae0766d1ab71653c345a21ee6e17bfb98a168c184a06a490c",
+			Sha256:    "2afc4c5bdfd88b75736c6b7673b33367f04ad769a67f23c5ed386bb1651ac01c",
+			SigHex:    "0a2b095d9dd81d63f4459b5cf69217e760de4a93970241cfd58625e59665c82b762349124a65764b1da94a78295d7c1da96efef8c623a064f81315646031430a",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
@@ -108,8 +115,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "704d2e7f9415186c8d498e9f9f7ca1de51a18c1e2a3445c95b2a8bdc37353705",
-			SigHex:    "f77d9daafca95242c77fa2454283d6295195b68625956d2f4b7b19f59b32a41587ef1ad2c5b6130ae0766d1ab71653c345a21ee6e17bfb98a168c184a06a490c",
+			Sha256:    "2afc4c5bdfd88b75736c6b7673b33367f04ad769a67f23c5ed386bb1651ac01c",
+			SigHex:    "0a2b095d9dd81d63f4459b5cf69217e760de4a93970241cfd58625e59665c82b762349124a65764b1da94a78295d7c1da96efef8c623a064f81315646031430a",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
@@ -118,8 +125,8 @@ var V2Artifacts = ArtifactManifest{
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "b6f10c0c141770874bab3374773d23f3842eab1e91b090f04ad73edf17a1794f",
-			SigHex:    "260e16356ba09ccd39663b997890cfbe829ecbe1664758edfa94c761ec6024592329cc387f5d776eeee35c3ee7c133cc3b6103ee1daac3b574861b3220e4860d",
+			Sha256:    "e8cb16e8ef021dd60d5d7aee60bd4b93e495e571d3d514a0b75c0695765df66b",
+			SigHex:    "de2e6fe16590aab97934831f8fbb6fbfdaf8dc0d293fe804a2049b61c295014c9db93d74a1d63cbcbf76988227008a90e7ce262f10220d1b8f230ce8155c1806",
 			Mirrors: []string{
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-mgmt-0.1.0-linux-amd64",
 				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",

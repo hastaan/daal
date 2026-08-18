@@ -214,7 +214,21 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	// FRP-14: re-pinned after shortening the data-plane cert validity
 	// to 90 days (Cronet/naive rejects longer certs, ERR_CERT_VALIDITY_
 	// TOO_LONG; see v2.yaml.tmpl).
-	const want = "a8f760c6c6e8e243ff335f0806c85e9bbee5d5071b6acb31399b98b7361c1035"
+	// Wave 3c (2026-08-18): re-pinned after the relay re-release that
+	// ships /bind-address. Render embeds the artefact manifest, so every
+	// pin bump in artifacts.go lands here — this drift is the release,
+	// not a template edit.
+	//
+	// daal-relay-health moved too, with no source change, because Go was
+	// stamping vcs.revision into every artefact: the commit changed, so
+	// the bytes changed. That stamp also made the hash depend on whether
+	// the working tree was dirty, which produced two different binaries
+	// from identical source in one afternoon and a pin that could never
+	// be stable (the commit carrying the pin necessarily differs from
+	// the commit stamped into the binary it pins). tools/release builds
+	// with -buildvcs=false now and refuses to ship a stamped artefact,
+	// so this value should only ever move on a real source change.
+	const want = "74ff9b5204b631db1038d3bbf4cc063dfb28da3fa979c57c28533b3b925954dc"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}
