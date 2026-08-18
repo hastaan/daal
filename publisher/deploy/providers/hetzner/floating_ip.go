@@ -39,10 +39,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 
 	"daal/publisher/deploy/provider"
-	"daal/publisher/deploy/sni"
 )
 
 // errFloatingIPNotFound is the "this address does not exist" answer,
@@ -53,8 +51,9 @@ var errFloatingIPNotFound = errors.New("floating ip not found")
 
 // publicIPTagPrefix is the candidate-tag vocabulary item that carries
 // the dialed address. The recommender keys its L3 recommendation off the
-// same prefix (rotation/recommender.go), so the two must not drift.
-const publicIPTagPrefix = "public_ip:"
+// same prefix (rotation/recommender.go), so the two must not drift — so
+// it is defined once, in the provider package, and read from there.
+const publicIPTagPrefix = provider.PublicIPTagPrefix
 
 // CreateFloatingIP reserves a fresh floating IP for this relay and
 // returns its id and address. It does NOT attach it — attachment is
@@ -300,50 +299,25 @@ func (p *Provider) UnassignFloatingIP(ctx context.Context, rec *provider.Operato
 
 // adoptPublicIP writes one address into every place the record claims a
 // dialed address: the PublicIP field the client outbound is built from,
-// and the public_ip:* tag on every candidate, which is what the risk
-// graph groups on and what the recommender reads back when deciding
-// whether an address is in cooldown.
+// and the public_ip:* tag on every candidate.
 //
 // Both, always. A record where they disagree produces a signed pack that
 // dials one address and declares another, so a burned-address cooldown
 // would keep firing against a relay that had already moved.
+//
+// The implementation moved to provider.AdoptPublicIP in Wave 6, when
+// Vultr became a real L5 target: an adapter-local copy of this fix is
+// how the second adapter silently ships without it, which is exactly
+// what the pre-Step-9 Vultr AssignFloatingIP did.
 func adoptPublicIP(rec *provider.OperatorRecord, ip net.IP) {
-	if rec == nil || len(ip) == 0 {
-		return
-	}
-	rec.PublicIP = ip
-	for i := range rec.Candidates {
-		rec.Candidates[i].PublicRiskTags = retagPublicIP(rec.Candidates[i].PublicRiskTags, ip)
-	}
+	provider.AdoptPublicIP(rec, ip)
 }
 
 // retagPublicIP replaces the public_ip:* tag in one candidate's tag
-// list, preserving the position and the order of everything else.
-//
-// Rewrite-in-place rather than append-and-move-on: the tags are a set
-// the recipient-side selector reasons over, and a candidate carrying two
-// public_ip:* tags is a candidate that is simultaneously in and out of
-// an address cooldown. Duplicates that were already there are collapsed
-// onto the first slot for the same reason.
+// list, preserving order and collapsing duplicates. See
+// provider.RetagPublicIP.
 func retagPublicIP(tags []string, ip net.IP) []string {
-	want := publicIPTagPrefix + ip.String()
-	out := make([]string, 0, len(tags)+1)
-	replaced := false
-	for _, t := range tags {
-		if !strings.HasPrefix(t, publicIPTagPrefix) {
-			out = append(out, t)
-			continue
-		}
-		if replaced {
-			continue // collapse pre-existing duplicates
-		}
-		out = append(out, want)
-		replaced = true
-	}
-	if !replaced {
-		out = append(out, want)
-	}
-	return out
+	return provider.RetagPublicIP(tags, ip)
 }
 
 // coverSNIPlausibleForAddress is the Wave-2 interaction, and the reason
@@ -387,17 +361,11 @@ func retagPublicIP(tags []string, ip net.IP) []string {
 // audit. Guessing in any of those cases would block rotations that are
 // fine.
 func coverSNIPlausibleForAddress(rec *provider.OperatorRecord, fip *FloatingIPInfo) error {
-	if rec == nil || fip == nil || rec.CoverSNI == "" || fip.HomeLocation == "" {
+	if fip == nil {
 		return nil
 	}
-	if !sni.ZoneMismatch(rec.CoverSNI, fip.HomeLocation) {
-		return nil
+	if err := provider.CoverSNIPlausibleForAddress(rec, fip.ID, fip.HomeLocation); err != nil {
+		return fmt.Errorf("hetzner: %w", err)
 	}
-	hostZone, _ := sni.ZoneOfHost(rec.CoverSNI)
-	return fmt.Errorf(
-		"hetzner: floating ip %s is homed in %s (%s) but this relay advertises cover host %q, which is a %s host: "+
-			"attaching it would leave the relay claiming a TLS destination that does not belong near its own address. "+
-			"Reserve an address in %s instead, or rotate the cover host (L2 rotate-tls) into %s first",
-		fip.ID, fip.HomeLocation, sni.ZoneFor(fip.HomeLocation), rec.CoverSNI, hostZone,
-		rec.Region, sni.ZoneFor(fip.HomeLocation))
+	return nil
 }

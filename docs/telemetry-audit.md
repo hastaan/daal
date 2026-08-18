@@ -185,6 +185,8 @@ not "is it wrong" — it is "could it be right".
 | burnpressure verdict | **MEASURED** | derived from real `SkippedFamilies`; returns `evaluated:false` rather than a confident "no pressure" when it has no input |
 | `proven` / `health_pct` | **MEASURED (as of this pass)** | was structurally always `false`/`null` — no writer existed for the three columns behind them |
 | `network_signals` in the diagnostics explanation | **MEASURED (as of this pass)** for the 5 error-derived signals; **ABSENT** for the other 4 | was always `[]` |
+| `failures[]` in the diagnostics explanation | **MEASURED (as of Wave 6)**; `failures[].tag` remains **ABSENT** | was always `[]` — `Decide` returns a race plan and has nothing to report. Now projected from the durable route columns; the tag is an attribution nothing produces and is left empty on purpose (§3.3) |
+| `active_cooldowns[]` in the diagnostics explanation | **ABSENT** | `PropagateCooldown` has no production caller. NOT filled from the per-route `cooldown_until` column: one route cooling down is not a shared risk tag being burned, and the rungs that read tags rebuild the server |
 | `budgets[].consumed_bytes` / `exhausted` | **INVENTED** — structurally 0 | `budget.Engine.Add`'s only caller `proxy.Pipe` has no production caller |
 | `current_network_id` | **INVENTED** — a constant | single caller passes `('unknown','','')`; no Android caller at all |
 | netmem `memory_hint` in an explanation | **INVENTED** — always nil | `RouteFamilyStats` has no writer |
@@ -290,6 +292,42 @@ and makes the ranking a pure function of `probing_risk_class`.
    document only ever claimed the value was *measured*, which is true and
    remains true; `docs/capability-matrix.md` §3 briefly claimed it was
    *visible*, which was false and is corrected there. Tracked as **CM-5**.
+
+   **Corrected in Wave 6 (the rotation ladder).** One consumer now reads
+   both this set and the failure list: the publisher's rotation
+   recommender, via `client-ui/src/publisher/RotationAdvice.tsx` →
+   `wizard_rotate_recommend` → `rotation.FromExplanation`. It renders the
+   signals it saw AND the four it could not, quoting the reason. CM-5 is
+   still open for the D-2 recipient surfaces — this is the publisher
+   surface only.
+
+   **`Explanation.Failures` has a producer too, as of Wave 6.** It did not before,
+   and the absence was invisible because the field is a non-nil empty
+   slice: `selection.Decide` returns a race PLAN, so no candidate has
+   failed at plan time and it never writes the field. Every diagnostics
+   blob this app has ever emitted carried `"failures": []`, and the
+   publisher's rotation recommender — whose whole job is to read that
+   field — therefore fell through its rule list and answered "L1,
+   confidence low" whatever was wrong.
+
+   `abi.activeRouteFailures` now projects the durable per-route columns
+   onto it: `(route_id, last_failure_category)`, same closed vocabulary
+   `FailureRecord.Classification` is specified in, same recovery
+   suppression as the signal set (they share one predicate,
+   `liveFailedRoutes`, so the two views cannot disagree about whether a
+   route is currently failing).
+
+   **`Tag` is deliberately left empty.** It means "the risk tag that drove
+   cooldown PROPAGATION", an attribution produced by
+   `selection.PropagateCooldown`, which still has no production caller. A
+   route carrying a `public_asn:*` tag and a cooldown is evidence that one
+   route failed, not that the ASN is burned — and the consumer that acts
+   on the tag answers "destroy this server and rebuild it in another
+   datacenter". `Explanation.ActiveCooldowns` stays structurally empty for
+   the same reason and is NOT filled from the per-route `cooldown_until`
+   column: a per-route cooldown is not a per-tag cooldown, and the
+   recommender's destructive rungs key off the second.
+
 3. **`netmem.Sweep` is scheduled.** New `scheduler.KindNetmemSweep` on a 24 h
    cadence, executor binding `refreshExecutor.SweepNetworkMemory`, stamped in
    `secrets_kv["scheduler:last-netmem-sweep"]`, visible in

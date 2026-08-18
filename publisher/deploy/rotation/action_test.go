@@ -205,34 +205,42 @@ func TestRecommendation_ActionJSONKeys(t *testing.T) {
 	}
 }
 
-// L3's availability now differs by cloud adapter, because the adapters
-// differ: Hetzner moves the record's dialled address, Vultr and Stark
-// record the id and stop. Reporting one answer for both would either
-// hide a working rung or offer a broken one.
+// L3's availability differs by cloud adapter, because the adapters
+// differ: Hetzner and (since Wave 6) Vultr move the record's dialled
+// address; Stark records the id and stops. Reporting one answer for all
+// of them would either hide a working rung or offer a broken one.
 func TestActionForProvider_L3DiffersByAdapter(t *testing.T) {
 	// A relay probed and able to bind: the only combination that is
 	// genuinely ready. The adapter half and the box half both have to
 	// be known good — see TestActionForProvider_L3DependsOnTheBoxToo.
 	canBind := RelayCapabilities{Known: true, BindAddress: true}
-	ready := ActionForProvider(L3, canBind, "hetzner")
-	if ready.Availability != AvailabilityReady {
-		t.Errorf("hetzner L3 = %q, want ready", ready.Availability)
+	for _, name := range []string{"hetzner", "vultr"} {
+		ready := ActionForProvider(L3, canBind, name)
+		if ready.Availability != AvailabilityReady {
+			t.Errorf("%s L3 = %q, want ready", name, ready.Availability)
+		}
+		if !ready.InPlace || ready.DestroysServer {
+			t.Errorf("%s L3 should keep the server: %+v", name, ready)
+		}
+		if !ready.InvalidatesEveryPack {
+			t.Errorf("%s: an address swap invalidates every distributed pack; the flag must say so", name)
+		}
 	}
-	if !ready.InPlace || ready.DestroysServer {
-		t.Errorf("hetzner L3 should keep the server: %+v", ready)
-	}
-	if !ready.InvalidatesEveryPack {
-		t.Error("an address swap invalidates every distributed pack; the flag must say so")
+	// The Vultr note must not read as though the swap were as proven as
+	// the Hetzner one: that path ran on live hardware, this one has only
+	// ever met a fake API.
+	if note := ActionForProvider(L3, canBind, "vultr").Note; !strings.Contains(note, "not yet against a live Vultr account") {
+		t.Errorf("vultr L3 note hides that it is unproven on hardware: %q", note)
 	}
 
-	for _, p := range []string{"vultr", "stark"} {
-		a := ActionForProvider(L3, RelayCapabilities{}, p)
-		if a.Availability != AvailabilityUnsupported {
-			t.Errorf("%s L3 = %q, want unsupported (the adapter attaches an address without moving the record onto it)", p, a.Availability)
-		}
-		if a.Note == "" {
-			t.Errorf("%s L3 carries no remediation note", p)
-		}
+	// Stark still cannot: its adapter attaches an address without
+	// moving the record onto it.
+	a := ActionForProvider(L3, RelayCapabilities{}, "stark")
+	if a.Availability != AvailabilityUnsupported {
+		t.Errorf("stark L3 = %q, want unsupported (the adapter attaches an address without moving the record onto it)", a.Availability)
+	}
+	if a.Note == "" {
+		t.Error("stark L3 carries no remediation note")
 	}
 
 	if got := ActionForProvider(L3, canBind, "  HETZNER  ").Availability; got != AvailabilityReady {
@@ -274,7 +282,12 @@ func TestActionForProvider_L3DependsOnTheBoxToo(t *testing.T) {
 	// The adapter's failure comes first: a box that can bind does not
 	// make an adapter that never moves the record work.
 	full := RelayCapabilities{Known: true, BindAddress: true, RotateCredentialsInPlace: true, RotateTLSInPlace: true}
-	if a := ActionForProvider(L3, full, "vultr"); a.Availability != AvailabilityUnsupported {
-		t.Errorf("a fully-capable box does not make a Vultr address swap work: %q", a.Availability)
+	if a := ActionForProvider(L3, full, "stark"); a.Availability != AvailabilityUnsupported {
+		t.Errorf("a fully-capable box does not make a Stark address swap work: %q", a.Availability)
+	}
+	// ...and the box's failure still comes first on an adapter that CAN
+	// swap: an unprobed Vultr relay is unknown, not ready.
+	if a := ActionForProvider(L3, RelayCapabilities{}, "vultr"); a.Availability != AvailabilityUnknown {
+		t.Errorf("unprobed vultr L3 = %q, want unknown", a.Availability)
 	}
 }

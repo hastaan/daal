@@ -6,6 +6,7 @@ import (
 	"daal/publisher/deploy/relayports"
 	"errors"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,19 @@ type fakeClient struct {
 	failSSHKeyList     error
 	failSSHKeyDelete   error
 	failFirewallDelete error
+
+	// Account-audit failure injection. The audit's central honesty
+	// property is that an unreadable list must never read as an
+	// empty one, so each list call needs its own way to fail.
+	failServerList     error
+	failFloatingIPList error
+	failFirewallList   error
+
+	// fwLabelSelectors lets a test plant a firewall applied by label
+	// selector rather than by server. Such a firewall protects
+	// whatever matches at any moment, so the audit must refuse to
+	// call it an orphan even when nothing is behind it right now.
+	fwLabelSelectors map[string][]string
 
 	// fips is the floating-IP table: id -> address + home location +
 	// current attachment, i.e. everything the L3 swap reads back.
@@ -160,6 +174,9 @@ func (f *fakeClient) ServerRebuild(ctx context.Context, id string, image string,
 func (f *fakeClient) ServerList(ctx context.Context) ([]*ServerInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failServerList != nil {
+		return nil, f.failServerList
+	}
 	var result []*ServerInfo
 	for _, s := range f.servers {
 		result = append(result, s)
@@ -1511,4 +1528,62 @@ func TestProvision_RollbackNeverDeletesTheCallersOwnServer(t *testing.T) {
 	if _, alive := f.servers[existing.ID]; !alive {
 		t.Fatalf("rollback destroyed the user's own server %s", existing.ID)
 	}
+}
+
+// --- account-audit enumeration (Wave 6) ---
+
+// ServerList is the call every orphan finding rests on, so it gets
+// its own failure injection: the audit must downgrade everything to
+// unproven when it cannot be read, not report a clean account.
+func (f *fakeClient) FloatingIPList(_ context.Context) ([]*FloatingIPInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failFloatingIPList != nil {
+		return nil, f.failFloatingIPList
+	}
+	out := make([]*FloatingIPInfo, 0, len(f.fips))
+	for _, fip := range f.fips {
+		cp := *fip
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// FirewallList reconstructs the per-server firewalls the fake has
+// ensured, using the same name the live client mints so the audit's
+// name parse is exercised for real.
+func (f *fakeClient) FirewallList(_ context.Context) ([]FirewallInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failFirewallList != nil {
+		return nil, f.failFirewallList
+	}
+	out := make([]FirewallInfo, 0, len(f.ensuredFirewalls))
+	for serverID, fwID := range f.ensuredFirewalls {
+		out = append(out, FirewallInfo{
+			ID:                 fwID,
+			Name:               firewallNameForServer(serverID),
+			AppliedToServerIDs: append([]string(nil), f.fwAppliedTo[fwID]...),
+			LabelSelectors:     append([]string(nil), f.fwLabelSelectors[fwID]...),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (f *fakeClient) FirewallDeleteByID(_ context.Context, firewallID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failFirewallDelete != nil {
+		return f.failFirewallDelete
+	}
+	for serverID, id := range f.ensuredFirewalls {
+		if id == firewallID {
+			delete(f.ensuredFirewalls, serverID)
+		}
+	}
+	delete(f.fwAppliedTo, firewallID)
+	delete(f.fwLabelSelectors, firewallID)
+	return nil
 }
