@@ -10,6 +10,7 @@
 import { useEffect, useState } from 'react';
 import AddSheet from '../components/AddSheet';
 import MyAddressSheet from '../components/MyAddressSheet';
+import ScanSheet from '../components/ScanSheet';
 import RouteBudgetModal from '../components/RouteBudgetModal';
 import { useContract } from '../contract/ContractProvider';
 import type {
@@ -54,6 +55,7 @@ export default function NetworkPage({ t }: Props) {
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [addOpen, setAddOpen] = useState(false);
     const [addrOpen, setAddrOpen] = useState(false);
+    const [scanOpen, setScanOpen] = useState(false);
     const [budgetFor, setBudgetFor] = useState<RouteDisplayRow | null>(null);
     // Which route the user just tapped Connect on. Used to render
     // per-row "Connecting…" feedback (disables the button + swaps the
@@ -169,6 +171,13 @@ export default function NetworkPage({ t }: Props) {
                         size="md"
                     >
                         {t('network.my_address')}
+                    </Button>
+                    <Button
+                        variant="secondary"
+                        onClick={() => setScanOpen(true)}
+                        size="md"
+                    >
+                        {t('scan.open')}
                     </Button>
                     <Button onClick={() => setAddOpen(true)} size="md">
                         + {t('network.add')}
@@ -354,6 +363,13 @@ export default function NetworkPage({ t }: Props) {
             )}
             {addrOpen && (
                 <MyAddressSheet t={t} onClose={() => setAddrOpen(false)} />
+            )}
+            {scanOpen && (
+                <ScanSheet
+                    t={t}
+                    onClose={() => setScanOpen(false)}
+                    onImported={() => void load()}
+                />
             )}
             {budgetFor && (
                 <RouteBudgetModal

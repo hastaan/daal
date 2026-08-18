@@ -16,6 +16,11 @@
 # this script is the durable source of truth — run it after
 # `tauri android init`, before `tauri android build`.
 #
+# Sibling patches that must also run after `tauri android init`:
+#   tools/patch-android-manifest.sh  (CAMERA permission — the QR-scan lane)
+#   tools/patch-android-icons.sh     (app icon)
+#   tools/patch-android-signing.sh   (release signingConfig)
+#
 # Idempotent: rewrites the files to the canonical content every run.
 
 set -euo pipefail

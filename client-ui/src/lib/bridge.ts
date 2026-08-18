@@ -32,6 +32,19 @@ export async function importSbp(path: string): Promise<string> {
     return invoke<string>('import_sbp', { path });
 }
 
+// Wave 4 Step 11 — the same import, taking pasted TEXT instead of a
+// path. `text` is whatever the user pasted: the Rust side is
+// deliberately liberal about newlines, spaces, quotes, a typed
+// `daal:` prefix, either base64 alphabet and any padding, and
+// deliberately strict about everything after that — same signature,
+// revocation and expiry verification as `import_sbp`, and a sealed
+// .sbpx still needs this phone's identity. Returns the same verdict
+// JSON, so the caller branches on it exactly as it does for a file.
+
+export async function importSbpBytes(text: string): Promise<string> {
+    return invoke<string>('import_sbp_bytes', { text });
+}
+
 export async function resolveTrustPrompt(
     fingerprint: string,
     decision: 0 | 1 | 2,

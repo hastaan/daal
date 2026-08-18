@@ -285,6 +285,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "base64",
+ "bundle-rs",
  "daal-recipient-addr",
  "dirs-next",
  "ed25519-dalek",

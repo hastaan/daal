@@ -32,7 +32,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  share-begin <route_id> [--lan] [--qr URI]")
 		fmt.Fprintln(os.Stderr, "  share-serve <route_id> [--qr URI]    (foreground; LAN on; Ctrl+C to end)")
 		fmt.Fprintln(os.Stderr, "  share-end <session_id>")
-		fmt.Fprintln(os.Stderr, "  share-pull <host> <port> <pin> <session_id>")
+		fmt.Fprintln(os.Stderr, "  share-pull <host> <port> <pin> <session_id> <spki_b64>")
 		fmt.Fprintln(os.Stderr, "  uri-detect <text>")
 		fmt.Fprintln(os.Stderr, "  uri-import <uri>")
 		fmt.Fprintln(os.Stderr, "  bootstrap-install")
@@ -199,7 +199,11 @@ func main() {
 		}
 		fmt.Println("ok")
 	case "share-pull":
-		if len(args) != 5 {
+		// <spki_b64> is mandatory: the receiver pins the sender's leaf
+		// certificate SPKI, and share.PullURL refuses to dial without it.
+		// Read it from the sender's `lan_spki` (share-begin output) or from
+		// the `#spki=` fragment of its daalshare:// URI.
+		if len(args) != 6 {
 			flag.Usage()
 			os.Exit(2)
 		}
@@ -208,7 +212,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "port:", err)
 			os.Exit(2)
 		}
-		body, err := abi.SharePull(args[1], port, args[3], args[4])
+		body, err := abi.SharePull(args[1], port, args[3], args[4], args[5])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "share-pull:", err)
 		}

@@ -462,6 +462,13 @@ export interface D2Contract {
   // ---- bundle / publisher trust flow
   previewBundle(path: string): Promise<PreviewedBundle>;
   importSbp(path: string): Promise<string>;
+  /** Wave 4 Step 11 — the offline path that survives a channel which
+   *  bans executables: the bundle arrives as base64 in a chat message.
+   *  `text` is the raw paste, wrapping and quotes and all; the engine
+   *  side normalises it and then runs the SAME verification importSbp
+   *  runs on a file, returning the same verdict JSON. A sealed .sbpx
+   *  still requires this device's recipient identity. */
+  importSbpBytes(text: string): Promise<string>;
   resolveTrustPrompt(fingerprintHex: string, decision: TrustDecision): Promise<string>;
   uriDetect(text: string): Promise<UriDetectResult>;
   uriImport(rawUri: string): Promise<UriImportResult>;

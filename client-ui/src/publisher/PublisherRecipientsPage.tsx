@@ -61,6 +61,9 @@ import { custodyLabelKey, fetchCustodyStatus } from './CustodyGate';
 import { FreshnessPanel } from './FreshnessPanel';
 import { AddressSwap } from './AddressSwap';
 import { RelayDestroySheet, relayTitle } from './RelayListPage';
+// Wave 4 Step 11. The one share affordance that needs no network at
+// all: the pack leaves this device as light, off the screen.
+import { QrSendSheet } from './QrSendSheet';
 
 interface Props {
     t: (k: string) => string;
@@ -219,6 +222,7 @@ export default function PublisherRecipientsPage({
     /** First-build confirm. Same command as rotate, same consequence for
      *  anyone already holding a shared pack — see onBuildShared. */
     const [confirmBuild, setConfirmBuild] = useState(false);
+    const [qrSend, setQrSend] = useState(false);
     const [artifactBusy, setArtifactBusy] = useState<string | null>(null);
 
     // Wave 3 Step 7 — the two rotations, kept apart all the way down to
@@ -452,6 +456,32 @@ export default function PublisherRecipientsPage({
             setArtifactBusy(null);
         }
     }, [friendlyName, operatorId, t]);
+
+    /** Copy the everyone pack as pasteable base64 text.
+     *
+     *  The other half of the base64-paste lane: AddSheet can already
+     *  IMPORT a pasted bundle, but until this button there was no way
+     *  inside any Daal app to PRODUCE one — the operator's only offline
+     *  options were a QR (needs both people in one room) or a file (the
+     *  thing the messenger bans). This is the affordance that still
+     *  works on the day file transfer stops.
+     *
+     *  'shared' is deliberate and matches the QR button: the everyone
+     *  pack is the only artifact that can connect anybody.
+     */
+    const onCopyPasteable = useCallback(async () => {
+        setArtifactBusy('copy');
+        setNotice(null);
+        try {
+            const text = await Wizard.copyPasteable(operatorId, 'shared');
+            await navigator.clipboard.writeText(text);
+            setNotice(t('pub.artifacts.copied'));
+        } catch (e) {
+            setError(String(e));
+        } finally {
+            setArtifactBusy(null);
+        }
+    }, [operatorId, t]);
 
     /** Build the shared pack when the staged file is missing.
      *
@@ -968,6 +998,35 @@ export default function PublisherRecipientsPage({
                                         disabled={artifactBusy !== null}
                                     >
                                         {t('pub.share.save')}
+                                    </Button>
+                                    {/* The offline lane. Sits with the
+                                        other ways of handing this file
+                                        over, because that is what it
+                                        is — the same pack, travelling
+                                        as light instead of as a file,
+                                        for the days when sending a
+                                        file is the thing that cannot
+                                        happen. */}
+                                    <Button
+                                        variant="secondary"
+                                        onClick={() => setQrSend(true)}
+                                        disabled={artifactBusy !== null}
+                                    >
+                                        {t('pub.artifacts.qr')}
+                                    </Button>
+                                    {/* The same pack again, as text.
+                                        A QR needs the other person in
+                                        the room; text goes down any
+                                        chat that still passes
+                                        messages. */}
+                                    <Button
+                                        variant="secondary"
+                                        onClick={() => void onCopyPasteable()}
+                                        disabled={artifactBusy !== null}
+                                    >
+                                        {artifactBusy === 'copy'
+                                            ? t('pub.artifacts.copying')
+                                            : t('pub.artifacts.copy')}
                                     </Button>
                                     <Button
                                         variant="secondary"
@@ -1927,6 +1986,15 @@ export default function PublisherRecipientsPage({
                         <RotationWarnings t={t} warnings={rotateTlsDone.warnings} />
                     </div>
                 </Sheet>
+            )}
+
+            {qrSend && (
+                <QrSendSheet
+                    t={t}
+                    operatorId={operatorId}
+                    relayName={title}
+                    onClose={() => setQrSend(false)}
+                />
             )}
 
             {confirmDestroy && (

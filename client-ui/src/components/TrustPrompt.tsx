@@ -5,11 +5,15 @@ import { useContract } from '../contract/ContractProvider';
 import type { PreviewedBundle, TrustDecision } from '../contract/D2Contract';
 import { useDensity } from '../design/DensityProvider';
 import { Button } from '../design/primitives';
+import { parseVerdict, type TrustResolution } from '../lib/importVerdict';
 
 interface Props {
     t: (k: string) => string;
     preview: PreviewedBundle;
-    onResolve: (decision: TrustDecision) => void;
+    /** Receives what the ENGINE said, not merely what the user tapped.
+     *  Callers must not report success without checking it — see
+     *  `trustFailure` in lib/importVerdict. */
+    onResolve: (r: TrustResolution) => void;
 }
 
 export default function TrustPrompt({ t, preview, onResolve }: Props) {
@@ -17,13 +21,21 @@ export default function TrustPrompt({ t, preview, onResolve }: Props) {
     const { density } = useDensity();
     const isPhone = density === 'phone';
     const choose = async (decision: TrustDecision) => {
+        // resolveTrustPrompt is the call that COMMITS the routes, and it
+        // re-verifies the pending bundle first, so it can legitimately
+        // refuse here — a revocation that landed while the word grid was
+        // on screen, an expiry, or a failed save. Both its return value
+        // and its exception are load-bearing; this used to discard both
+        // and report success either way.
+        let verdict = null;
+        let error: string | null = null;
         try {
-            await contract.resolveTrustPrompt(preview.fingerprintHex, decision);
-        } catch {
-            // Tolerate missing bridge during dev; the host still
-            // gets the user's decision.
+            const raw = await contract.resolveTrustPrompt(preview.fingerprintHex, decision);
+            verdict = parseVerdict(raw ?? '');
+        } catch (e) {
+            error = e instanceof Error ? e.message : String(e);
         }
-        onResolve(decision);
+        onResolve({ decision, verdict, error });
     };
 
     const enWords = preview.fingerprintEN.split(/\s+/);

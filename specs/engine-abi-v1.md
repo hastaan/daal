@@ -354,8 +354,9 @@ int engine_share_end(const char* session_id);
 int engine_share_browse(int timeout_ms, char* out, int out_len);
 int engine_share_pull(const char* host, int port,
                       const char* pin, const char* session_id,
+                      const char* expected_spki,
                       char* out, int out_len);
-int engine_share_pull_url(const char* https_url,
+int engine_share_pull_url(const char* share_uri,
                           const char* pin, const char* session_id,
                           char* out, int out_len);
 
@@ -375,6 +376,28 @@ phases will be appended at the end. The Phase 1C functions are documented
 in `specs/share-bundle-v1.md`, `specs/lan-share-v1.md`,
 `specs/qr-static-v1.md`, `specs/qr-fountain-v1.md`, and
 `specs/uri-import-v1.md`.
+
+**Amendment (Wave 4 Step 11) — `engine_share_pull` gained a parameter.**
+`expected_spki` is the sender's published `spki=` TXT value; the engine
+REFUSES the TLS handshake when it is empty, malformed, or does not match
+the presented certificate (see `specs/lan-share-v1.md`). Append-only
+applies to the function ORDER, which is unchanged; this is a signature
+change, taken deliberately because the alternative was an ABI whose
+default spelling connects to an unauthenticated peer. It was safe to make
+because the function had no caller in any language at the time: it was
+allowlisted out of `tools/check-plumbing.mjs`, never `dlsym`'d, and
+absent from the Kotlin/Swift/JNI bridges. Any future host that resolves
+this symbol must pass five arguments before the out-buffer pair.
+
+`engine_share_pull_url`'s parameter is renamed `share_uri` (the shape
+widened from a bare https URL to also accept `daalshare://lan?...`); its
+signature is unchanged. The pin travels inside the URI, so this call has
+no unpinned spelling either.
+
+Both now return `-1` on failure. They previously had identical
+`if err != nil` and success branches, which wrote an empty body and
+returned `0` — making a refused pull indistinguishable from a successful
+empty one to every host.
 
 ## Surface (Phase 1D — 3 additional functions, append-only)
 

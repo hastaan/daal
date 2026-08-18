@@ -159,6 +159,8 @@ func ShareBegin(routeIDsCSV string, includeLAN bool, staticQRURI string) (string
 		"session_id":          sess.ID,
 		"pin":                 sess.Pin,
 		"lan_urls":            sess.LANAddrs,
+		"lan_uris":            sess.LANURIs,
+		"lan_spki":            sess.LANSPKI,
 		"qr_static_png_b64":   base64.StdEncoding.EncodeToString(sess.StaticQRBytes),
 		"static_qr_uri":       sess.StaticQRURI,
 		"fountain_session_id": sess.ID,
@@ -208,19 +210,30 @@ func ShareBrowse(timeoutMs int) (string, error) {
 	return string(out), nil
 }
 
-// SharePull is engine_share_pull. Receives a bundle from a sender at host:port
-// using PIN; the bundle is then handed to the importer to produce a Verdict.
-func SharePull(host string, port int, pin, sessionID string) (string, error) {
-	body, err := share.PullURL(host, port, pin, sessionID, 15000)
+// SharePull is engine_share_pull. Receives a bundle from a sender at
+// host:port using PIN, then hands the bundle to the importer to produce a
+// Verdict.
+//
+// expectedSPKI is the `spki=` value from the sender's mDNS TXT record. It
+// is REQUIRED: an empty pin makes share.PullURL refuse the connection
+// rather than fall back to trusting whatever cert answers. A caller that
+// browsed a sender but did not read its TXT record has not found a sender
+// it can safely talk to, and must not pretend otherwise.
+func SharePull(host string, port int, pin, sessionID, expectedSPKI string) (string, error) {
+	body, err := share.PullURL(host, port, pin, sessionID, expectedSPKI, 15000)
 	if err != nil {
 		return "", err
 	}
 	return importBytesAndPersistPending(body)
 }
 
-// SharePullURL is engine_share_pull_url (the QR-encoded URL fallback).
-func SharePullURL(httpsURL, pin, sessionID string) (string, error) {
-	body, err := share.PullArbitraryURL(httpsURL, pin, sessionID, 15000)
+// SharePullURL is engine_share_pull_url (the QR-encoded fallback for
+// mDNS-filtered networks). The pin travels inside the URI — either as the
+// `p=` parameter of a `daalshare://lan?...` wrapper or as the `#spki=`
+// fragment of a bare https URL — so this path cannot be entered unpinned
+// either.
+func SharePullURL(shareURI, pin, sessionID string) (string, error) {
+	body, err := share.PullArbitraryURL(shareURI, pin, sessionID, 15000)
 	if err != nil {
 		return "", err
 	}

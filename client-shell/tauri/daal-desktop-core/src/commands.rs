@@ -85,6 +85,74 @@ pub fn fountain_feed_frame(state: &AppState, session_id: &str, frame_b64: &str) 
     state.engine.fountain_feed_frame(session_id, frame_b64)
 }
 
+// ---------------------------------------------------------------------
+// Offline share — LAN transport (Wave 4, Step 11)
+//
+// The desktop build is a real second peer for the LAN path, which is what
+// makes the feature testable by one person with one phone: run the app on
+// the laptop as sender and the phone as receiver, or the reverse.
+//
+// The security contract these commands must not soften: the receiver pins
+// the sender's certificate by SPKI hash and refuses the handshake on a
+// mismatch, on a blank pin, or on a malformed pin. So every receive-side
+// command below takes the pin as a REQUIRED argument or reads it out of a
+// URI that carries it; none of them has an "unpinned" mode.
+// ---------------------------------------------------------------------
+
+/// Start a share session. `route_ids_csv` names the on-device routes to
+/// package; `include_lan` also starts the private-address HTTPS listener.
+/// Returns the engine's session JSON verbatim (`session_id`, `pin`,
+/// `lan_urls`, `lan_uris`, `lan_spki`, `qr_static_png_b64`, …).
+pub fn share_begin(
+    state: &AppState,
+    route_ids_csv: &str,
+    include_lan: bool,
+    static_qr_uri: &str,
+) -> Result<String> {
+    state
+        .engine
+        .share_begin(route_ids_csv, include_lan, static_qr_uri)
+}
+
+/// Tear a share session down: listeners closed, advertisement withdrawn,
+/// bundle bytes / PIN / bearer token zeroed in the engine.
+pub fn share_end(state: &AppState, session_id: &str) -> Result<()> {
+    state.engine.share_end(session_id)
+}
+
+/// Receive a bundle from a sender found via mDNS. `expected_spki` is the
+/// sender's published TXT `spki=` value; passing it empty does not mean
+/// "trust anything", it means the engine refuses to connect.
+pub fn share_pull(
+    state: &AppState,
+    host: &str,
+    port: i32,
+    pin: &str,
+    session_id: &str,
+    expected_spki: &str,
+) -> Result<String> {
+    state
+        .engine
+        .share_pull(host, port, pin, session_id, expected_spki)
+}
+
+/// Receive a bundle from a scanned/pasted share URI. Used when mDNS is
+/// filtered, which on the networks this project targets is the normal
+/// case rather than the exception.
+pub fn share_pull_url(
+    state: &AppState,
+    share_uri: &str,
+    pin: &str,
+    session_id: &str,
+) -> Result<String> {
+    state.engine.share_pull_url(share_uri, pin, session_id)
+}
+
+/// Next animated-QR frame for a session started by `share_begin`.
+pub fn fountain_next_frame(state: &AppState, session_id: &str) -> Result<String> {
+    state.engine.fountain_next_frame(session_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectRequest {
     pub route_id: String,

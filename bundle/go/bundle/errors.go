@@ -13,6 +13,7 @@ var (
 	ErrExpiredRoute        = errors.New("route expired")
 	ErrMissingProfile      = errors.New("missing route profile")
 	ErrUnsafePath          = errors.New("unsafe archive path")
+	ErrBundleTooLarge      = errors.New("bundle archive exceeds size limits")
 	ErrInvalidEnum         = errors.New("invalid enum value")
 	ErrRevokedPublisher    = errors.New("publisher revoked")
 	ErrRevokedRoute        = errors.New("route revoked")

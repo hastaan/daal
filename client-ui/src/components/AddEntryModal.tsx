@@ -2,12 +2,25 @@
 // Four tabs: Paste / Scan-or-Drop / LAN / File. Shared component
 // scoped to a `mode` prop that swaps copy and the underlying engine
 // call between route-import and subscription-add.
+//
+// STATUS: NOT MOUNTED, AND DELIBERATELY SO.
+//
+// This is the older D-2 §5D sketch of the intake flow. The flow that
+// actually ships is `AddSheet` (mounted from NetworkPage), and this
+// file still carries an empty `onChooseFile` stub where AddSheet has a
+// real picker. Mounting it would put two disagreeing Add screens in
+// front of the user, so it stays unmounted as a design reference until
+// the two are reconciled.
+//
+// It used to be the ONLY caller of `RecipientImport`, which is how the
+// QR scanner ended up unreachable from the running app. That link is
+// now gone: the scanner is mounted for real by `ScanSheet`, from the
+// Network page header. See ScanSheet.tsx for the reasoning.
 
 import { useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type { PreviewedBundle } from '../contract/D2Contract';
 import TrustPrompt from './TrustPrompt';
-import RecipientImport from '../recipient/RecipientImport';
 import MyAddress from '../recipient/MyAddress';
 import { Sbpx } from '../recipient/recipientCommands';
 import { Sheet, Button } from '../design/primitives';
@@ -15,6 +28,7 @@ import {
     syntheticSubscriptionFingerprint,
     subscriptionDisplayName,
 } from '../lib/subscriptionIdentity';
+import { trustFailure } from '../lib/importVerdict';
 
 type Mode = 'route' | 'source';
 type Tab = 'paste' | 'scan' | 'lan' | 'file' | 'myaddr';
@@ -33,7 +47,6 @@ export default function AddEntryModal({ t, mode, onClose }: Props) {
     const [preview, setPreview] = useState<PreviewedBundle | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [qrOpen, setQrOpen] = useState(false);
     // FRP-14 Layer 3d: when the chosen file's first 6 bytes match
     // the `.sbpx` magic, we surface a PIN prompt and route through
     // recipient-side age-decrypt before previewing the inner bundle.
@@ -178,26 +191,8 @@ export default function AddEntryModal({ t, mode, onClose }: Props) {
                 )}
                 {tab === 'scan' && (
                     <div style={{ color: 'var(--paper-dim)', fontSize: 13 }}>
-                        Scan a QR fountain (camera / clipboard / file).
-                        <div style={{ marginTop: 10 }}>
-                            <button
-                                onClick={() => setQrOpen(true)}
-                                style={btnSecondary()}
-                            >
-                                Open QR fountain
-                            </button>
-                        </div>
+                        {t('scan.lede')}
                     </div>
-                )}
-                {qrOpen && (
-                    <RecipientImport
-                        t={t}
-                        onVerdict={() => {
-                            setQrOpen(false);
-                            onClose();
-                        }}
-                        onClose={() => setQrOpen(false)}
-                    />
                 )}
                 {tab === 'lan' && (
                     <div style={{ color: 'var(--paper-dim)', fontSize: 13 }}>
@@ -243,8 +238,17 @@ export default function AddEntryModal({ t, mode, onClose }: Props) {
                     <TrustPrompt
                         t={t}
                         preview={preview}
-                        onResolve={(decision) => {
-                            if (decision === 0) {
+                        onResolve={(r) => {
+                            // The engine's answer decides, not the tap:
+                            // resolveTrustPrompt re-verifies before it
+                            // commits and can refuse here.
+                            const failure = trustFailure(t, r);
+                            if (failure) {
+                                setError(failure);
+                                setPreview(null);
+                                return;
+                            }
+                            if (r.decision === 0) {
                                 onImport();
                             } else {
                                 setPreview(null);

@@ -37,6 +37,43 @@ const FreshnessMirrorsPath = "trust/freshness-mirrors.json"
 // storable is also readable.
 const MaxFreshnessMirrorsBytes = 256 * 1024
 
+// Ceilings on the archive itself, enforced during decompression.
+//
+// ParseSBP runs BEFORE VerifyBundle — it has to, because the signature it
+// would check lives inside the archive. So every byte here is decompressed
+// on the word of an unauthenticated stranger, and every offline intake
+// path leads here: the file picker, the base64 paste, the QR fountain, and
+// share.PullURL. The paste lane bounds its own input at 1 MiB, but that
+// bound stops applying the moment the bytes are handed over: a 509 KiB
+// deflate stream of zeros expands to 512 MiB, and measured against this
+// parser it cost 1223 MiB of heap before returning "missing manifest.json".
+// On a handset that is the app dying, delivered as a single chat message.
+//
+// The numbers are NOT chosen for how little a phone can bear — they are
+// derived from what a spec-legal bundle may actually contain, because a
+// parser that refuses a valid bundle is a worse failure than a slow one.
+// specs/wasm-transport-v1.md permits 4 MiB per transport module and 16 MiB
+// of modules per bundle, and those blobs travel base64-encoded INSIDE
+// manifest.json rather than as their own archive entries. So one legal
+// entry can approach 16 MiB × 4/3 ≈ 21.3 MiB, and the per-entry cap has to
+// clear that with room for the rest of the manifest.
+//
+// The win is bounding, not tightness: worst-case decompression drops from
+// unbounded to MaxArchiveTotalBytes. A route pack that carries no modules —
+// which is every pack the offline lanes in this wave actually move, at
+// 1.3–2.6 KB — is three orders of magnitude inside these limits.
+const (
+	// MaxArchiveEntryBytes bounds one decompressed entry. Sized for a
+	// manifest.json carrying the spec-maximum module payload.
+	MaxArchiveEntryBytes = 24 << 20
+	// MaxArchiveTotalBytes bounds the whole archive's decompressed size,
+	// so many entries cannot do what one entry cannot.
+	MaxArchiveTotalBytes = 32 << 20
+	// MaxArchiveEntries bounds the entry count, so a directory of tiny
+	// names cannot cost unbounded map growth.
+	MaxArchiveEntries = 256
+)
+
 // sha256BodyHex returns the hex-encoded SHA-256 of body. Used by
 // the 3E transport_modules[] hash-check.
 func sha256BodyHex(body []byte) string {
@@ -56,22 +93,44 @@ func ParseSBP(r io.ReaderAt, size int64) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(zr.File) > MaxArchiveEntries {
+		return nil, ErrBundleTooLarge
+	}
 	files := map[string][]byte{}
+	total := 0
 	for _, f := range zr.File {
 		if unsafeArchivePath(f.Name) {
 			return nil, ErrUnsafePath
+		}
+		// Refuse on the DECLARED size first, so a header advertising a
+		// gigabyte costs nothing to reject. The declared size is
+		// attacker-controlled and may lie, which is why the read below
+		// is independently bounded rather than trusting it.
+		if f.UncompressedSize64 > uint64(MaxArchiveEntryBytes) {
+			return nil, ErrBundleTooLarge
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return nil, err
 		}
-		data, readErr := io.ReadAll(rc)
+		// LimitReader is the actual defence: it bounds the decompressed
+		// stream regardless of what the zip header claimed. Reading one
+		// byte past the cap is how an over-long entry is detected
+		// without ever holding it.
+		data, readErr := io.ReadAll(io.LimitReader(rc, int64(MaxArchiveEntryBytes)+1))
 		closeErr := rc.Close()
 		if readErr != nil {
 			return nil, readErr
 		}
 		if closeErr != nil {
 			return nil, closeErr
+		}
+		if len(data) > MaxArchiveEntryBytes {
+			return nil, ErrBundleTooLarge
+		}
+		total += len(data)
+		if total > MaxArchiveTotalBytes {
+			return nil, ErrBundleTooLarge
 		}
 		files[f.Name] = data
 	}

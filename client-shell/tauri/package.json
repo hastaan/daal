@@ -8,8 +8,9 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "android:init": "tauri android init",
-    "android:dev": "tauri android dev",
-    "android:build": "tauri android build",
+    "android:dev": "npm run android:patch && tauri android dev",
+    "android:patch": "bash ../../tools/patch-android-manifest.sh && bash ../../tools/patch-android-mainactivity.sh && bash ../../tools/patch-android-icons.sh && bash ../../tools/patch-android-signing.sh",
+    "android:build": "npm run android:patch && tauri android build",
     "ios:init": "tauri ios init",
     "ios:dev": "tauri ios dev",
     "ios:build": "tauri ios build"

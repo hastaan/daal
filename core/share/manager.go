@@ -30,6 +30,8 @@ type Session struct {
 	StaticQRBytes []byte
 	StaticQRURI   string
 	LANAddrs      []string // https URLs (private addresses only)
+	LANURIs       []string // daalshare:// QR-fallback URIs, one per LANAddrs entry
+	LANSPKI       string   // base64url(sha256(SPKI)) of this session's TLS cert
 	LANToken      string   // HKDF(pin, session_id) base64; transport only
 	mDNSStop      func()
 	httpStop      func()
@@ -46,7 +48,7 @@ type Manager struct {
 
 	// Hooks, swapped out in tests.
 	encodeQR func(uri string, sizePx int) ([]byte, error)
-	listen   func(addrs []string, token string, body []byte) (urls []string, stop func(), err error)
+	listen   func(addrs []string, token string, body []byte) (urls []string, spki string, stop func(), err error)
 	advert   func(serviceName string, port int, txt map[string]string) (stop func(), err error)
 }
 
@@ -126,16 +128,34 @@ func (m *Manager) BeginShare(in BeginInput) (*Session, error) {
 		if err != nil {
 			return nil, fmt.Errorf("share: no private interfaces: %w", err)
 		}
-		urls, stopHTTP, err := m.listen(addrs, tok, body)
+		urls, spki, stopHTTP, err := m.listen(addrs, tok, body)
 		if err != nil {
 			return nil, fmt.Errorf("share: lan start: %w", err)
 		}
+		if spki == "" {
+			// A listener that cannot tell us its own SPKI would leave
+			// every receiver with nothing to pin, and the receiver would
+			// (correctly) refuse to connect. Fail here instead, where the
+			// error names the real cause.
+			stopHTTP()
+			return nil, errors.New("share: lan listener returned no SPKI pin")
+		}
 		sess.LANAddrs = urls
+		sess.LANSPKI = spki
+		for _, u := range urls {
+			sess.LANURIs = append(sess.LANURIs, ShareURI(u, spki, id))
+		}
 		sess.httpStop = stopHTTP
 		port := portFromURL(urls[0])
+		// The `spki` field is the receiver's entire basis for trusting
+		// the TLS cert it is about to be handed. specs/lan-share-v1.md
+		// has always listed it; until this wave it was computed and
+		// discarded, so the TXT record promised nothing and the receiver
+		// checked nothing.
 		stopAdv, err := m.advert(id, port, map[string]string{
 			"v":    "1",
 			"name": "share",
+			"spki": spki,
 		})
 		if err == nil {
 			sess.mDNSStop = stopAdv

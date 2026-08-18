@@ -27,6 +27,29 @@ const (
 	version   = 1
 )
 
+// Hard ceilings on what a decoder will accept from a frame header.
+//
+// These bound work and memory BEFORE any attacker-supplied number is used
+// to size an allocation or as a divisor. They are deliberately generous
+// relative to real traffic — the sender uses a 256-byte block size and a
+// shared route pack is single-digit KB — and deliberately far below what
+// a phone can absorb.
+//
+// MaxPayloadLen matches the base64-paste lane's MAX_DECODED_BYTES
+// (client-shell/tauri/daal-wizard/src/recipient_paste.rs) so that the two
+// offline intake paths agree on the largest bundle either will carry.
+const (
+	// MaxBlockSize caps one frame's body. A QR symbol tops out near 2953
+	// bytes of binary payload, so anything past this cannot have come off
+	// a camera at all.
+	MaxBlockSize = 4096
+	// MaxPayloadLen caps the reconstructed payload.
+	MaxPayloadLen = 1 << 20
+	// MaxBlocks caps k, which bounds both the `known` table and the
+	// per-frame degree-sampling weights in robustSolitonDegree.
+	MaxBlocks = 1 << 16
+)
+
 // Encoder produces an unbounded stream of fountain frames for a fixed
 // payload. Callers loop NextFrame() until the receiver indicates decode
 // complete.
@@ -123,6 +146,28 @@ func (d *Decoder) Add(frame []byte) ([]byte, bool, error) {
 	if frame[6] != version {
 		return nil, false, errors.New("fountain: bad version")
 	}
+	// The header is attacker-controlled: every frame arrives from a camera
+	// pointed at an arbitrary QR code, or from a pasted line. Validate it
+	// COMPLETELY before any value derived from it is used to divide or to
+	// size an allocation. Getting this order wrong is not a recoverable
+	// error in Go — `bs == 0` is an integer divide-by-zero panic, and an
+	// unbounded `pl` is `fatal error: out of memory`, which no recover()
+	// can catch and which kills the whole app on the handset.
+	if bs <= 0 || bs > MaxBlockSize {
+		return nil, false, errors.New("fountain: bad block size in header")
+	}
+	if pl <= 0 || pl > MaxPayloadLen {
+		return nil, false, errors.New("fountain: payload length out of range")
+	}
+	// Check the body length against THIS frame's header before trusting
+	// the header at all, so a lone oversized frame is rejected on arrival
+	// rather than after it has resized the decoder.
+	if len(frame) != headerLen+bs {
+		return nil, false, errors.New("fountain: bad block size")
+	}
+	if k := (pl + bs - 1) / bs; k > MaxBlocks {
+		return nil, false, errors.New("fountain: too many blocks")
+	}
 	if d.k == 0 {
 		d.payloadLen = pl
 		d.blockSize = bs
@@ -130,9 +175,6 @@ func (d *Decoder) Add(frame []byte) ([]byte, bool, error) {
 		d.known = make([][]byte, d.k)
 	} else if d.payloadLen != pl || d.blockSize != bs {
 		return nil, false, errors.New("fountain: header mismatch across frames")
-	}
-	if len(frame) != headerLen+d.blockSize {
-		return nil, false, errors.New("fountain: bad block size")
 	}
 	seed := binary.LittleEndian.Uint32(frame[8:12])
 	r := rand.New(rand.NewSource(int64(seed)))

@@ -44,6 +44,11 @@ pub mod phase;
 pub mod publisher_key;
 pub mod recipient_book;
 pub mod recipient_identity;
+// Wave 4 Step 11: the offline path that survives a channel which bans
+// executables and watches entropy — a bundle pasted as text. Sits
+// beside `recipient_sbpx` because it hands sealed pastes straight to
+// it, and takes the same verification afterwards.
+pub mod recipient_paste;
 pub mod recipient_sbpx;
 pub mod relay_rotation;
 pub mod staging;

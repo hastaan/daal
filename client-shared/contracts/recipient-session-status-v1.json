@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "CROSS-LANGUAGE CONTRACT FIXTURE — recipient_qr_* SessionStatus, v1.",
+    "",
+    "This file is the single written-down truth for the JSON that the",
+    "Tauri commands recipient_qr_feed_frame / recipient_qr_status return.",
+    "Two test suites assert against it and BOTH must be updated together:",
+    "",
+    "  Rust: client-shell/tauri/src-tauri/src/recipient.rs (mod tests)",
+    "        serializes SessionStatus and compares to `incomplete`/`complete`.",
+    "  TS:   client-ui/src/recipient/sessionStatus.test.ts",
+    "        parses them through parseSessionStatus() and asserts that the",
+    "        completion path fires.",
+    "",
+    "History: the TS mirror once declared {state, frames_in, bytes_decoded}",
+    "against Rust's {complete, received, total_frames}. Every field read by",
+    "the UI was undefined, so `state === 'complete'` could never be true and",
+    "a fully decoded scan hung forever. This fixture exists so that failure",
+    "mode is a red test in two languages instead of a silent hang."
+  ],
+  "incomplete": {
+    "session_id": "rs-1755400000-123456789",
+    "received": 2,
+    "total_frames": 7,
+    "bytes_decoded": 0,
+    "complete": false,
+    "verdict": null
+  },
+  "complete": {
+    "session_id": "rs-1755400000-123456789",
+    "received": 7,
+    "total_frames": 7,
+    "bytes_decoded": 1792,
+    "complete": true,
+    "verdict": {
+      "Kind": 1,
+      "Fingerprint": "9f2b7c1d4e6a8b0c2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c"
+    }
+  }
+}

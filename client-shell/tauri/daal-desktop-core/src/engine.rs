@@ -143,6 +143,31 @@ pub struct Engine {
     wasm_kill_switch_pubkey: extern "C" fn(*mut c_void, c_int) -> c_int,
     loaded_wasm_modules: extern "C" fn(*mut c_void, c_int) -> c_int,
 
+    // Wave 4 Step 11 — LAN / offline-share transport (Phase 1C exports
+    // that had never been dlsym'd). The desktop build is the second
+    // peer: it can be the SENDER (share_begin publishes a per-session
+    // self-signed cert + its SPKI pin and binds private addresses only)
+    // or the RECEIVER (share_pull / share_pull_url).
+    //
+    // `share_browse` is deliberately absent: core/abi/share.go's
+    // ShareBrowse is a hardcoded empty-list stub with no Go-side mDNS
+    // browser behind it, so resolving it here would manufacture a
+    // "search the network" capability that can only ever find nothing.
+    share_begin: extern "C" fn(*const c_char, c_int, *const c_char, *mut c_void, c_int) -> c_int,
+    share_end: extern "C" fn(*const c_char) -> c_int,
+    share_pull: extern "C" fn(
+        *const c_char,
+        c_int,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+        *mut c_void,
+        c_int,
+    ) -> c_int,
+    share_pull_url:
+        extern "C" fn(*const c_char, *const c_char, *const c_char, *mut c_void, c_int) -> c_int,
+    fountain_next_frame: extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int,
+
     // Phase 45 — TUN-fd handoff + protect() callback (release surface
     // 53 → 56). Takes ownership of fd on success; the caller must
     // NOT close(fd) after a successful set call.
@@ -371,6 +396,42 @@ impl Engine {
                     b"engine_loaded_wasm_modules",
                 )?;
 
+            // Wave 4 Step 11 — LAN / offline share.
+            let share_begin = *lookup::<
+                unsafe extern "C" fn(
+                    *const c_char,
+                    c_int,
+                    *const c_char,
+                    *mut c_void,
+                    c_int,
+                ) -> c_int,
+            >(&lib, b"engine_share_begin")?;
+            let share_end =
+                *lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(&lib, b"engine_share_end")?;
+            let share_pull = *lookup::<
+                unsafe extern "C" fn(
+                    *const c_char,
+                    c_int,
+                    *const c_char,
+                    *const c_char,
+                    *const c_char,
+                    *mut c_void,
+                    c_int,
+                ) -> c_int,
+            >(&lib, b"engine_share_pull")?;
+            let share_pull_url = *lookup::<
+                unsafe extern "C" fn(
+                    *const c_char,
+                    *const c_char,
+                    *const c_char,
+                    *mut c_void,
+                    c_int,
+                ) -> c_int,
+            >(&lib, b"engine_share_pull_url")?;
+            let fountain_next_frame = *lookup::<
+                unsafe extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int,
+            >(&lib, b"engine_fountain_next_frame")?;
+
             // Phase 45 — TUN-fd + protect callback.
             let set_tun_fd =
                 *lookup::<unsafe extern "C" fn(c_int, *mut c_void, c_int) -> c_int>(
@@ -445,6 +506,11 @@ impl Engine {
                 uri_import: std::mem::transmute(uri_import),
                 wasm_kill_switch_pubkey: std::mem::transmute(wasm_kill_switch_pubkey),
                 loaded_wasm_modules: std::mem::transmute(loaded_wasm_modules),
+                share_begin: std::mem::transmute(share_begin),
+                share_end: std::mem::transmute(share_end),
+                share_pull: std::mem::transmute(share_pull),
+                share_pull_url: std::mem::transmute(share_pull_url),
+                fountain_next_frame: std::mem::transmute(fountain_next_frame),
                 set_tun_fd: std::mem::transmute(set_tun_fd),
                 clear_tun_fd: std::mem::transmute(clear_tun_fd),
                 register_protect_callback: std::mem::transmute(register_protect_callback),
@@ -583,6 +649,102 @@ impl Engine {
         let f = CString::new(frame_b64)
             .map_err(|_| DesktopError::EngineSymbol("frame_b64 NUL".into()))?;
         call_buf(|buf, len| (self.fountain_feed_frame)(s.as_ptr(), f.as_ptr(), buf, len))
+    }
+
+    /// `engine_share_begin`. Builds a signed `.sbp` from the named
+    /// on-device routes and, when `include_lan` is set, starts the LAN
+    /// transport: an HTTPS listener bound to private addresses only, a
+    /// fresh per-session self-signed cert, and a 6-digit PIN.
+    ///
+    /// The returned JSON carries `lan_spki` (base64url SHA-256 of the
+    /// cert's SubjectPublicKeyInfo) and `lan_uris` (`daalshare://lan?...`
+    /// strings that already embed that pin). Whichever of those the UI
+    /// shows the friend, the receiver ends up with the pin — which is
+    /// mandatory on the other side, so a UI that drops it produces a
+    /// receiver that refuses to connect rather than one that connects
+    /// insecurely.
+    pub fn share_begin(
+        &self,
+        route_ids_csv: &str,
+        include_lan: bool,
+        static_qr_uri: &str,
+    ) -> Result<String> {
+        let ids = CString::new(route_ids_csv)
+            .map_err(|_| DesktopError::EngineSymbol("route_ids NUL".into()))?;
+        let qr = CString::new(static_qr_uri)
+            .map_err(|_| DesktopError::EngineSymbol("static_qr_uri NUL".into()))?;
+        let lan = if include_lan { 1 } else { 0 };
+        call_buf(|buf, len| (self.share_begin)(ids.as_ptr(), lan as c_int, qr.as_ptr(), buf, len))
+    }
+
+    /// `engine_share_end`. Stops the mDNS advertisement, closes every
+    /// listener opened for the session, and zeroes the bundle bytes, the
+    /// PIN and the bearer token in the engine's memory.
+    pub fn share_end(&self, session_id: &str) -> Result<()> {
+        let s = CString::new(session_id)
+            .map_err(|_| DesktopError::EngineSymbol("session_id NUL".into()))?;
+        let rc = (self.share_end)(s.as_ptr());
+        if rc != 0 {
+            return Err(DesktopError::EngineReturn(rc as i32));
+        }
+        Ok(())
+    }
+
+    /// `engine_share_pull` — the mDNS path. `expected_spki` is the
+    /// `spki=` field of the sender's TXT record and is REQUIRED: the
+    /// engine refuses the TLS handshake when it is empty or does not
+    /// match the presented certificate, so there is no "connect anyway"
+    /// spelling of this call to reach by accident.
+    pub fn share_pull(
+        &self,
+        host: &str,
+        port: i32,
+        pin: &str,
+        session_id: &str,
+        expected_spki: &str,
+    ) -> Result<String> {
+        let h = CString::new(host).map_err(|_| DesktopError::EngineSymbol("host NUL".into()))?;
+        let p = CString::new(pin).map_err(|_| DesktopError::EngineSymbol("pin NUL".into()))?;
+        let s = CString::new(session_id)
+            .map_err(|_| DesktopError::EngineSymbol("session_id NUL".into()))?;
+        let k = CString::new(expected_spki)
+            .map_err(|_| DesktopError::EngineSymbol("expected_spki NUL".into()))?;
+        call_buf(|buf, len| {
+            (self.share_pull)(
+                h.as_ptr(),
+                port as c_int,
+                p.as_ptr(),
+                s.as_ptr(),
+                k.as_ptr(),
+                buf,
+                len,
+            )
+        })
+    }
+
+    /// `engine_share_pull_url` — the QR / paste fallback for networks
+    /// that filter mDNS. `share_uri` is either
+    /// `daalshare://lan?u=..&p=..&s=..` or a bare
+    /// `https://<private-ip>:<port>/bundle.sbp#spki=..`; the SPKI pin
+    /// rides inside the URI, so this path is pinned by construction.
+    pub fn share_pull_url(&self, share_uri: &str, pin: &str, session_id: &str) -> Result<String> {
+        let u = CString::new(share_uri)
+            .map_err(|_| DesktopError::EngineSymbol("share_uri NUL".into()))?;
+        let p = CString::new(pin).map_err(|_| DesktopError::EngineSymbol("pin NUL".into()))?;
+        let s = CString::new(session_id)
+            .map_err(|_| DesktopError::EngineSymbol("session_id NUL".into()))?;
+        call_buf(|buf, len| (self.share_pull_url)(u.as_ptr(), p.as_ptr(), s.as_ptr(), buf, len))
+    }
+
+    /// `engine_fountain_next_frame`. Pulls the next LT-fountain frame for
+    /// a session opened by `share_begin`; the caller renders it as a QR.
+    /// The counterpart `fountain_feed_frame` was already wired, so this
+    /// completes the pair and lets a desktop screen be the sender for a
+    /// phone camera.
+    pub fn fountain_next_frame(&self, session_id: &str) -> Result<String> {
+        let s = CString::new(session_id)
+            .map_err(|_| DesktopError::EngineSymbol("session_id NUL".into()))?;
+        call_buf(|buf, len| (self.fountain_next_frame)(s.as_ptr(), buf, len))
     }
 
     pub fn subscription_add(

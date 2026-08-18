@@ -49,6 +49,32 @@ pub enum SbpxImportError {
     Bridge(String),
 }
 
+impl SbpxImportError {
+    /// Stable machine code, prefixed onto the message the UI receives so
+    /// `friendlyError` in client-ui can swap in translated copy.
+    ///
+    /// Without this the paste lane's `.sbpx` branch handed the UI a bare
+    /// `e.to_string()`. Three variants happened to be caught by
+    /// `friendlyError`'s substring fallbacks, but `Io` and `Bridge` were
+    /// not — so a Farsi user could be shown `bridge: <subprocess stderr>`
+    /// as the explanation, in English, on a brand-new D-2 surface.
+    ///
+    /// Note the codes are what travels; the Display text (which for
+    /// `EnvelopeCorrupt` embeds the daal-deploy stderr) stays available
+    /// after the colon for a bug report, but the UI now has a key to
+    /// translate on and no longer needs to read it.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SbpxImportError::NotEnvelope => "ErrNotEnvelope",
+            SbpxImportError::IdentityMissing => "ErrIdentityMissing",
+            SbpxImportError::Locked => "ErrCustodyLocked",
+            SbpxImportError::EnvelopeCorrupt(_) => "ErrEnvelopeCorrupt",
+            SbpxImportError::Io(_) => "ErrIo",
+            SbpxImportError::Bridge(_) => "ErrBridge",
+        }
+    }
+}
+
 /// Returns true iff `head` starts with the 6-byte sbpx magic.
 /// Safe to call on shorter inputs (returns false without panic).
 pub fn is_sbpx(head: &[u8]) -> bool {

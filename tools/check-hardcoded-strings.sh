@@ -45,9 +45,16 @@ SCAN_PATHS=(
     "client-ui/src/shell"
     "client-ui/src/onboarding"
     "client-ui/src/components/AddEntryModal.tsx"
+    "client-ui/src/components/ScanSheet.tsx"
+    "client-ui/src/recipient"
     "client-ui/src/components/PanicWipeDialog.tsx"
     "client-ui/src/components/RecoverySheet.tsx"
     "client-ui/src/components/TrustPrompt.tsx"
+    # Wave 4 Step 11's two other user-facing surfaces. Both are clean
+    # today; without them nothing keeps them that way, and the paste
+    # lane in AddSheet is the headline change of the wave.
+    "client-ui/src/components/AddSheet.tsx"
+    "client-ui/src/publisher/QrSendSheet.tsx"
 )
 # Pattern: a string literal of >= 12 ASCII letters (with spaces),
 # wrapped in double or single quotes. The search is conservative
@@ -74,22 +81,43 @@ for p in "${SCAN_PATHS[@]}"; do
         echo "$line"
         found=1
     done < <(
+        # `| grep -v` drops comment-only lines. The header has always
+        # claimed comments are skipped, but neither scanner branch
+        # actually did it, so every `// ...` sentence in a source file
+        # read as a user-visible string. That is why this gate could
+        # not be pointed at any file with prose comments in it.
+        # A line whose first non-space characters are `//`, `*` or
+        # `/*` renders nothing to anybody.
+        # --with-filename / -H force the `path:line:content` shape for
+        # BOTH scanners. Without it, ripgrep omits the filename when
+        # given a single FILE (verified: `rg -n X file.tsx` prints
+        # `16:// ...`), so the comment filter below — which assumed a
+        # leading path field — silently matched nothing for the
+        # single-file entries in SCAN_PATHS. This box happened to fall
+        # back to grep, which is why the discrepancy never surfaced.
         if [ "$SCANNER" = rg ]; then
-            rg -n -e "$PATTERN" "$p" \
+            rg -n --with-filename -e "$PATTERN" "$p" \
                 --glob '!**/*.json' \
                 --glob '!**/*.lproj/*' \
                 --glob '!**/test*/**' \
+                --glob '!**/*.test.ts' \
+                --glob '!**/*.test.tsx' \
                 --glob '!**/*.snap' || true
         else
             # Same exclusions as the ripgrep globs above.
-            grep -rnE -e "$PATTERN" "$p" \
+            grep -rnHE -e "$PATTERN" "$p" \
                 --exclude='*.json' \
                 --exclude='*.snap' \
+                --exclude='*.test.ts' \
+                --exclude='*.test.tsx' \
                 --exclude-dir='*.lproj' \
                 --exclude-dir='test' \
                 --exclude-dir='tests' \
                 --exclude-dir='__tests__' || true
-        fi
+        # Anchor on the line-number field rather than on "something,
+        # then a colon", so the filter works whether or not a path
+        # field is present.
+        fi | grep -vE "(^|:)[0-9]+:[[:space:]]*(//|\*|/\*)" || true
     )
 done
 

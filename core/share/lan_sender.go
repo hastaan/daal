@@ -4,11 +4,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -20,23 +18,48 @@ import (
 	"time"
 )
 
+// ErrPublicBindRefused is returned when defaultListen is handed an address
+// that is not a private/link-local IP literal.
+//
+// specs/lan-share-v1.md claims the private-only rule is "enforced by an
+// OPSEC source-grep test". A source grep can only see the string
+// "0.0.0.0" not appearing in this file; it cannot see what DetectPrivateAddrs
+// (or a future caller, or a test double) actually passes in. So the rule is
+// enforced HERE, at the bind, where it is a property of the running program
+// rather than of the source text — and TestSenderRefusesPublicBind proves it.
+var ErrPublicBindRefused = errors.New("share: refusing to bind a non-private address")
+
 // defaultListen binds an HTTPS server to each supplied private address on
 // a random high port. The server serves exactly one resource:
 //
 //	GET /bundle.sbp           Authorization: Bearer <token>
 //
 // All other requests get 404. Cert is freshly self-signed per session; the
-// receiver pins its SPKI hash from the mDNS TXT record.
+// receiver pins its SPKI hash, which this function returns so the manager
+// can publish it in the mDNS TXT record and in the QR fallback URI.
 //
-// The returned `urls` are full https://addr:port/<token-suffix> URLs that
-// are convenient to render as a fallback QR for mDNS-filtered networks.
-func defaultListen(addrs []string, token string, body []byte) ([]string, func(), error) {
+// The returned `urls` are full https://addr:port/bundle.sbp URLs that are
+// convenient to render as a fallback QR for mDNS-filtered networks.
+func defaultListen(addrs []string, token string, body []byte) ([]string, string, func(), error) {
 	if len(addrs) == 0 {
-		return nil, nil, errors.New("share: no addrs")
+		return nil, "", nil, errors.New("share: no addrs")
 	}
-	cert, _, err := generateSelfSignedCert(addrs)
+	// Refuse the whole session if ANY supplied address is off-limits. We
+	// do not silently skip it: a caller that thinks it is sharing on five
+	// interfaces and is actually sharing on four has a bug we want loud,
+	// and a caller that passed 0.0.0.0 has a bug we want louder.
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			return nil, "", nil, fmt.Errorf("%w: %q is not an IP literal", ErrPublicBindRefused, addr)
+		}
+		if ip.IsUnspecified() || ip.IsMulticast() || !isPrivateIP(ip) {
+			return nil, "", nil, fmt.Errorf("%w: %s", ErrPublicBindRefused, addr)
+		}
+	}
+	cert, spki, err := generateSelfSignedCert(addrs)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", nil, err
 	}
 
 	var (
@@ -65,7 +88,7 @@ func defaultListen(addrs []string, token string, body []byte) ([]string, func(),
 		urls = append(urls, fmt.Sprintf("https://%s/bundle.sbp", net.JoinHostPort(addr, strconv.Itoa(port))))
 	}
 	if len(urls) == 0 {
-		return nil, nil, errors.New("share: failed to bind any address")
+		return nil, "", nil, errors.New("share: failed to bind any address")
 	}
 	stop := func() {
 		mu.Lock()
@@ -75,16 +98,27 @@ func defaultListen(addrs []string, token string, body []byte) ([]string, func(),
 			s()
 		}
 	}
-	return urls, stop, nil
+	return urls, spki, stop, nil
 }
 
-// defaultAdvertise is the mDNS publisher. We emit a TXT record with the
-// SPKI hash so the receiver can pin the cert without trusting any CA.
+// defaultAdvertise is where the mDNS publisher WILL go. It is a no-op in
+// every build that exists today.
 //
-// Phase 1C ships a stub that doesn't publish anything (the manager treats
-// a nil mDNS as "the receiver must use the QR-encoded URL fallback"). The
-// real mDNS publisher lives in lan_sender_mdns.go behind the `mdns` build
-// tag and depends on golang.org/x/net/dns/dnsmessage.
+// The old comment here said the real publisher "lives in
+// lan_sender_mdns.go behind the `mdns` build tag". There is no such file
+// in the repository and no such build tag — that claim was wrong when it
+// was written and stayed wrong because nothing tested it. Stating it
+// plainly instead: on Go-side builds NOTHING is broadcast, so the `spki`
+// key the manager passes in `txt` is not on any wire yet.
+//
+// This does not leave receivers unpinned. The pin reaches them by the
+// path that actually works on the networks this project targets — where
+// mDNS is filtered anyway — as `lan_uris` from engine_share_begin: a
+// `daalshare://lan?u=..&p=..&s=..` string shown as a QR or read aloud,
+// which ParseShareTarget refuses to accept without a well-formed pin. The
+// TXT map is populated now so that whoever lands the publisher (or the
+// Android NsdManager side, which registers the service itself) has the
+// field to emit rather than having to rediscover that it was missing.
 func defaultAdvertise(serviceName string, port int, txt map[string]string) (func(), error) {
 	return func() {}, nil
 }
@@ -192,12 +226,16 @@ func generateSelfSignedCert(sans []string) (tls.Certificate, string, error) {
 		Certificate: [][]byte{der},
 		PrivateKey:  priv,
 	}
-	parsed, err := x509.ParseCertificate(der)
+	// One implementation of the hash, shared with the receiver-side pin
+	// check (spki.go). Two copies of this three-line computation is
+	// exactly how a sender and a receiver end up hashing different bytes
+	// and nobody notices, because the pin "just never matches" and the
+	// feature "just doesn't work on this network".
+	spki, err := SPKIHashFromDER(der)
 	if err != nil {
 		return tls.Certificate{}, "", err
 	}
-	spki := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
-	return cert, base64.RawURLEncoding.EncodeToString(spki[:]), nil
+	return cert, spki, nil
 }
 
 // DetectPrivateAddrs enumerates non-loopback private interfaces on the

@@ -66,6 +66,7 @@ import {
     subscriptionRefresh as bridgeSubRefresh,
     previewBundle as bridgePreviewBundle,
     importSbp as bridgeImportSbp,
+    importSbpBytes as bridgeImportSbpBytes,
     resolveTrustPrompt as bridgeResolveTrustPrompt,
 } from '../lib/bridge';
 
@@ -546,6 +547,12 @@ export class TauriContract implements D2Contract {
 
     async importSbp(path: string): Promise<string> {
         return bridgeImportSbp(path);
+    }
+
+    // Step 11: pasted text. Same verification, same verdict JSON —
+    // the only difference is how the bytes reached the phone.
+    async importSbpBytes(text: string): Promise<string> {
+        return bridgeImportSbpBytes(text);
     }
 
     async resolveTrustPrompt(fingerprintHex: string, decision: TrustDecision): Promise<string> {

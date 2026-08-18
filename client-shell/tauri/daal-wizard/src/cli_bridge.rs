@@ -2460,6 +2460,11 @@ pub struct MockRunner {
     /// thing that decides whether a rotation can heal itself, so a test
     /// has to be able to see exactly what was baked in.
     pub bind_freshness_mirrors: Mutex<Vec<Vec<String>>>,
+    /// Wave 4 Step 11: the `.sbp` path the last `run_qr_fountain` was
+    /// pointed at. The QR sender can only be wrong in one way that
+    /// nothing downstream notices — streaming the wrong file, flawlessly
+    /// — so a test has to be able to see which file it opened.
+    pub last_qr_fountain_path: Mutex<Option<PathBuf>>,
     /// FRP-7: optional canned rotation recommendation.
     pub rotation_recommendation: Mutex<Option<RotationRecommendation>>,
     /// FRP-7: recorded reprovision calls.
@@ -2646,6 +2651,7 @@ impl MockRunner {
             last_subkey_cert_path: Mutex::new(None),
             bind_phases: Mutex::new(Vec::new()),
             bind_freshness_mirrors: Mutex::new(Vec::new()),
+            last_qr_fountain_path: Mutex::new(None),
             rotation_recommendation: Mutex::new(None),
             reprovision_calls: Mutex::new(Vec::new()),
             publish_freshness_fail: Mutex::new(Vec::new()),
@@ -3158,12 +3164,13 @@ impl CliRunner for MockRunner {
 
     fn run_qr_fountain(
         &self,
-        _sbp_path: &Path,
+        sbp_path: &Path,
         _block_size: u32,
         max_frames: u32,
         _seed: i64,
         on_frame: &mut dyn FnMut(FountainFrame) -> bool,
     ) -> Result<()> {
+        *self.last_qr_fountain_path.lock().unwrap() = Some(sbp_path.to_path_buf());
         let n = if max_frames == 0 { 4 } else { max_frames };
         for i in 0..n {
             let frame = FountainFrame {
@@ -3517,11 +3524,46 @@ mod tests {
     /// Write an executable stand-in for `daal-deploy` and return its
     /// path. `script` is a `sh` body; `"$@"` is the real arg vector.
     #[cfg(unix)]
+    /// Write a stand-in `daal-deploy` and return a path that is
+    /// GUARANTEED to be exec-able by the time it is returned.
+    ///
+    /// The guarantee is the point. Without the preflight below these
+    /// tests fail intermittently with
+    /// `Io(Os { code: 26, kind: ExecutableFileBusy })`, and only under
+    /// load — which is exactly when the pre-push gate runs them.
+    ///
+    /// The cause is a Linux race that has nothing to do with the code
+    /// under test: `cargo test` runs tests on many threads in ONE
+    /// process, so while this thread still holds the write fd to the
+    /// script it just created, another test thread can `fork` for its
+    /// own subprocess and inherit that fd. The child now holds a
+    /// writable descriptor to our file, and `execve` on a file that is
+    /// open for writing returns ETXTBSY until that child exits.
+    ///
+    /// The condition is transient by construction, so the fix is to
+    /// wait it out here rather than to weaken any assertion: a test
+    /// that fails for a reason unrelated to its subject teaches the
+    /// reader to ignore a red gate, which is worse than a slow one.
     fn fake_deploy(dir: &std::path::Path, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("daal-deploy");
         std::fs::write(&p, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Preflight: run it (output discarded) until the kernel stops
+        // reporting ETXTBSY. These scripts only echo and exit, so an
+        // extra invocation has no side effect the caller can observe.
+        for attempt in 0..200 {
+            match std::process::Command::new(&p).output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    if attempt == 199 {
+                        panic!("fake_deploy: {} still ETXTBSY after 200 tries", p.display());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => break,
+            }
+        }
         p
     }
 

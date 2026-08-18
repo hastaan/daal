@@ -18,6 +18,12 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+// Type-only: the shape of a fountain frame belongs with the codec
+// constants that consume it, and importing it as a type keeps this
+// module free of the QR encoder at runtime.
+import type { FountainFrame as QrFountainFrame } from '../qr/fountainStream';
+
+export type { QrFountainFrame };
 
 export interface RecipientSummary {
     id: number;
@@ -693,17 +699,52 @@ export const Wizard = {
             publisherName: publisher_name,
         }),
 
+    /**
+     * Stream one bounded batch of animated-QR fountain frames for a
+     * relay's pack. Frames arrive on the `wizard://qr-frame` event (see
+     * `onQrFrame`), NOT as a return value; the promise resolves when the
+     * batch has finished emitting, which is also how the caller knows it
+     * may ask for the next one.
+     *
+     * `artifact` is `'shared'` for the everyone pack — the only one that
+     * can connect anybody — or `'raw'` for the credential-free build
+     * artifact. There is no default: streaming the wrong file produces a
+     * perfect transfer of a file the receiver cannot use, and nothing
+     * downstream can tell the difference.
+     */
     qrRender: (
         operator_id: number,
+        artifact: 'shared' | 'raw',
         block_size: number,
         max_frames: number,
         seed: number,
     ) =>
         invoke<void>('wizard_qr_render', {
             operatorId: operator_id,
+            artifact,
             blockSize: block_size,
             maxFrames: max_frames,
             seed,
+        }),
+
+    /**
+     * The same artifact `qrRender` streams, rendered as base64 text the
+     * operator can paste into a chat message.
+     *
+     * This is the SENDING half of the base64-paste lane. The recipient
+     * side (AddSheet's paste tab → `importSbpBytes`) shipped first, so
+     * for a while the app could eat a pasted bundle but no Daal app
+     * could produce one — the only way to make the text was to open a
+     * terminal and run `base64 -w0`. On the day the messenger bans
+     * files, this is the affordance that still works.
+     *
+     * `artifact` carries the same meaning, and the same absence of a
+     * default, as in `qrRender`.
+     */
+    copyPasteable: (operator_id: number, artifact: 'shared' | 'raw') =>
+        invoke<string>('wizard_copy_pasteable', {
+            operatorId: operator_id,
+            artifact,
         }),
 
     // ---- Relay identity, artifacts, helper IP ----
@@ -998,3 +1039,14 @@ export const onProvisionEvent = (cb: (ev: ProgressEvent) => void): Promise<Unlis
 
 export const onSignEvent = (cb: (ev: ProgressEvent) => void): Promise<UnlistenFn> =>
     listen<ProgressEvent>('wizard://sign-event', (e) => cb(e.payload));
+
+/**
+ * Animated-QR frames from `Wizard.qrRender`. The Rust side emits these
+ * as fast as the `daal-deploy qr-fountain` subprocess writes them —
+ * hundreds a second — so a subscriber MUST buffer rather than render on
+ * the event. `client-ui/src/qr/fountainStream.ts` is that buffer.
+ */
+export const onQrFrame = (
+    cb: (frame: QrFountainFrame) => void,
+): Promise<UnlistenFn> =>
+    listen<QrFountainFrame>('wizard://qr-frame', (e) => cb(e.payload));

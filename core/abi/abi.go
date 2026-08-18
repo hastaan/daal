@@ -287,6 +287,13 @@ func Init(stateDir, logLevel string) error {
 	// secrets KV. Missing / out-of-list values default to "no
 	// override" (auto cascade).
 	loadMasqueState(loadedCore())
+	// Step 11: reap abandoned trust prompts. Every
+	// VerdictTrustPromptNeeded writes the decoded bundle to
+	// stateDir/pending/<fp>.sbp so the decision survives a restart, and
+	// only ResolveTrustPrompt deletes it — so a prompt the user closes
+	// without answering keeps plaintext route credentials on disk
+	// indefinitely. Init is the safe moment: no prompt is mid-flight.
+	core.sweepPendingPrompts(PendingPromptTTL, nowUTC())
 	return nil
 }
 

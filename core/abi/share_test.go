@@ -38,6 +38,8 @@ func TestShareEndToEnd_LANRoundTrip(t *testing.T) {
 		SessionID string   `json:"session_id"`
 		Pin       string   `json:"pin"`
 		LANURLs   []string `json:"lan_urls"`
+		LANURIs   []string `json:"lan_uris"`
+		LANSPKI   string   `json:"lan_spki"`
 		QRPNG     string   `json:"qr_static_png_b64"`
 	}
 	if err := json.Unmarshal([]byte(resp), &begin); err != nil {
@@ -46,20 +48,46 @@ func TestShareEndToEnd_LANRoundTrip(t *testing.T) {
 	if len(begin.Pin) != 6 || len(begin.LANURLs) == 0 || begin.QRPNG == "" {
 		t.Fatalf("incomplete begin response: %+v", begin)
 	}
+	// The SPKI pin is the receiver's whole basis for trusting the TLS
+	// cert; a begin response without it is a session no one can safely
+	// join.
+	if begin.LANSPKI == "" {
+		t.Fatalf("begin response carries no lan_spki")
+	}
+	if len(begin.LANURIs) != len(begin.LANURLs) {
+		t.Fatalf("lan_uris %d != lan_urls %d", len(begin.LANURIs), len(begin.LANURLs))
+	}
 
 	// Receiver pulls. Wrong PIN must fail.
 	host, port := splitHostPort(t, begin.LANURLs[0])
-	if _, err := SharePull(host, port, "999999", begin.SessionID); err == nil {
+	if _, err := SharePull(host, port, "999999", begin.SessionID, begin.LANSPKI); err == nil {
 		t.Errorf("expected wrong-pin failure")
+	}
+	// A missing SPKI pin must fail too, and must fail for the RIGHT
+	// reason: without this the ABI's default spelling would connect to
+	// whatever answered.
+	if _, err := SharePull(host, port, begin.Pin, begin.SessionID, ""); err == nil {
+		t.Errorf("pull with no SPKI pin succeeded")
 	}
 	// Right PIN succeeds. Receiver re-imports its own bundle, so the
 	// importer treats the (already-pinned) publisher as known.
-	verdictJSON, err := SharePull(host, port, begin.Pin, begin.SessionID)
+	verdictJSON, err := SharePull(host, port, begin.Pin, begin.SessionID, begin.LANSPKI)
 	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	if verdictJSON == "" {
 		t.Errorf("empty verdict")
+	}
+
+	// The QR fallback shape reaches the same bundle: lan_uris[0] already
+	// embeds the pin and the session id, so the receiver needs only the
+	// PIN the user read aloud.
+	viaURI, err := SharePullURL(begin.LANURIs[0], begin.Pin, "")
+	if err != nil {
+		t.Fatalf("pull via daalshare URI: %v", err)
+	}
+	if viaURI == "" {
+		t.Errorf("empty verdict from URI pull")
 	}
 
 	if err := ShareEnd(begin.SessionID); err != nil {

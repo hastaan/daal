@@ -67,15 +67,21 @@ func TestSessionLifecycle(t *testing.T) {
 	if len(parsed.Manifest.Routes) != 1 {
 		t.Errorf("route count: %d", len(parsed.Manifest.Routes))
 	}
+	if sess.LANSPKI == "" {
+		t.Fatalf("session published no SPKI pin")
+	}
+	if len(sess.LANURIs) != len(sess.LANAddrs) {
+		t.Fatalf("LANURIs %d != LANAddrs %d", len(sess.LANURIs), len(sess.LANAddrs))
+	}
 	// Pull from the LAN endpoint with a wrong PIN — should fail.
 	addr := sess.LANAddrs[0]
 	host, port := splitHostPort(t, addr)
-	_, err = PullURL(host, port, "999999", sess.ID, 2000)
+	_, err = PullURL(host, port, "999999", sess.ID, sess.LANSPKI, 2000)
 	if err == nil {
 		t.Errorf("expected unauthorized with wrong PIN")
 	}
 	// Pull with correct PIN.
-	got, err := PullURL(host, port, sess.Pin, sess.ID, 2000)
+	got, err := PullURL(host, port, sess.Pin, sess.ID, sess.LANSPKI, 2000)
 	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}

@@ -185,6 +185,13 @@ export class HarnessContract implements D2Contract {
         return 'harness-imported';
     }
 
+    // Step 11: the harness has no decoder, so it answers the same way
+    // it answers for a file. The real acceptance rules live in Rust
+    // (`daal-wizard/src/recipient_paste.rs`) and are tested there.
+    async importSbpBytes(_text: string): Promise<string> {
+        return 'harness-imported';
+    }
+
     async resolveTrustPrompt(_fingerprintHex: string, _decision: TrustDecision): Promise<string> {
         return 'harness-trusted';
     }

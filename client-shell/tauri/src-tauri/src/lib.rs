@@ -354,6 +354,89 @@ fn import_sbp(state: State<'_, AppState>, path: String) -> Result<String, String
     cmd::import_sbp(&state, PathBuf::from(path)).map_err(|e| render_bundle_err(&e))
 }
 
+// -- Wave 4 Step 11 — a route that arrives as TEXT -------------------
+//
+// The offline channel the adversary leaves open bans executables and
+// watches entropy and packet size, so the bundle travels as base64 in
+// a chat message. `import_sbp` above takes a PATH; `import_sbp_bytes`
+// below takes the pasted text.
+//
+// It is NOT a second importer. All it does is turn text into the same
+// file the file picker would have produced and then call the very same
+// command, `cmd::import_sbp` — the engine importer, returning the same
+// verdict JSON, including the same first-seen-publisher trust prompt.
+// A sealed `.sbpx` goes through `recipient_sbpx::import_sbpx` first —
+// recipient identity and device custody — exactly as the picked-file
+// path does. There is no branch here that skips a check, and there
+// must never be one.
+//
+// The staged file is deleted the moment the call returns, including in
+// the trust-prompt case: `abi.ImportSBP` copies the bundle body into
+// the pending-prompt store (in memory and on disk) before returning,
+// so `resolve_trust_prompt` never reads the path again.
+
+/// Render a `PasteError` with its stable code prefix, the same shape
+/// `render_bundle_err` produces, so `AddSheet.friendlyError` can swap
+/// in `add.err.<code>` copy in the user's language.
+fn render_paste_err(e: &daal_wizard::recipient_paste::PasteError) -> String {
+    format!("{}: {}", e.code(), e)
+}
+
+/// Same convention for the `.sbpx` unwrap step, so the paste lane and the
+/// file-picker lane render identical copy for identical failures.
+fn render_sbpx_err(e: &daal_wizard::recipient_sbpx::SbpxImportError) -> String {
+    format!("{}: {}", e.code(), e)
+}
+
+/// Deletes its file on drop. Pasted bundles and unwrapped `.sbpx`
+/// plaintext are written to disk only because every verifier we own
+/// takes a path; they must not outlive the call that needed them.
+struct StagedTemp(PathBuf);
+
+impl Drop for StagedTemp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Decode + stage pasted text, unwrapping a sealed envelope if that is
+/// what arrived. Returns the path to verify plus the guards that erase
+/// the staged bytes when the caller returns.
+fn stage_pasted_for_import(
+    wstate: &State<'_, WizardStateMgr>,
+    text: &str,
+) -> Result<(PathBuf, StagedTemp, Option<StagedTemp>), String> {
+    use daal_wizard::recipient_paste::PastedKind;
+
+    let staged = daal_wizard::recipient_paste::stage_pasted_text(&wstate.0.staging_dir, text)
+        .map_err(|e| render_paste_err(&e))?;
+    let staged_guard = StagedTemp(staged.path.clone());
+    match staged.kind {
+        PastedKind::Sbp => Ok((staged.path, staged_guard, None)),
+        PastedKind::Sbpx => {
+            // Same gate as the picked-file path: the envelope is
+            // addressed to ONE phone, and arriving as a chat message
+            // does not change that.
+            let plain = daal_wizard::recipient_sbpx::import_sbpx(&wstate.0, &staged.path)
+                .map_err(|e| render_sbpx_err(&e))?;
+            let plain_guard = StagedTemp(plain.clone());
+            Ok((plain, staged_guard, Some(plain_guard)))
+        }
+    }
+}
+
+/// Import a pasted bundle. Returns the engine's verdict JSON,
+/// unchanged and identical in shape to `import_sbp`.
+#[tauri::command]
+fn import_sbp_bytes(
+    state: State<'_, AppState>,
+    wstate: State<'_, WizardStateMgr>,
+    text: String,
+) -> Result<String, String> {
+    let (path, _staged, _plain) = stage_pasted_for_import(&wstate, &text)?;
+    cmd::import_sbp(&state, path).map_err(|e| render_bundle_err(&e))
+}
+
 #[tauri::command]
 fn resolve_trust_prompt(
     state: State<'_, AppState>,
@@ -938,8 +1021,13 @@ async fn wizard_sign_relaypack(
 
 /// `wizard_qr_render`: streams animated-QR fountain frames to the
 /// frontend via `app.emit("wizard://qr-frame", FountainFrame)`.
-/// The frontend's QR canvas reads `frame_b64` (base64url), decodes,
-/// and renders via a JS QR encoder at the user-selected FPS.
+/// The frontend's QR canvas puts `frame_b64` (base64url) straight into
+/// a QR symbol — the receiver is fed that same string verbatim — and
+/// paces the animation itself.
+///
+/// `artifact` is `"shared"` (the connectable everyone pack) or `"raw"`
+/// (the credential-free build artifact). It is required rather than
+/// defaulted: see `wcmd::qr_render`.
 ///
 /// `max_frames` 0 is supported by the CLI for direct operator use,
 /// but the Tauri frontend deliberately requests finite batches so
@@ -949,6 +1037,7 @@ async fn wizard_qr_render(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
+    artifact: String,
     block_size: u32,
     max_frames: u32,
     seed: i64,
@@ -976,6 +1065,7 @@ async fn wizard_qr_render(
         wcmd::qr_render(
             &ctx,
             operator_id,
+            &artifact,
             block_size,
             max_frames,
             seed,
@@ -985,6 +1075,34 @@ async fn wizard_qr_render(
     })
     .await
     .map_err(|e| format!("join: {e}"))?
+}
+
+/// `wizard_copy_pasteable`: the SENDING half of the base64-paste lane.
+///
+/// Returns the signed artifact as base64 text the operator can paste
+/// into a chat message. `artifact` takes the same values as
+/// `wizard_qr_render` ("shared" for the connectable everyone pack,
+/// "raw" for the credential-free build artifact) and is likewise
+/// required, so the two offline send paths cannot disagree about which
+/// bytes they hand out.
+///
+/// Without this the paste lane shipped one-directional: the recipient
+/// could import a pasted bundle, but no Daal app could produce one.
+#[tauri::command]
+fn wizard_copy_pasteable(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    artifact: String,
+) -> Result<String, String> {
+    let ctx = wcmd::WizardCtx {
+        db: wstate.0.db.clone(),
+        keystore: wstate.0.keystore.clone(),
+        staging_dir: wstate.0.staging_dir.clone(),
+        cli: wstate.0.cli.clone(),
+        clock: wstate.0.clock.clone(),
+        custody: wstate.0.custody.clone(),
+    };
+    wcmd::copy_pasteable(&ctx, operator_id, &artifact).map_err(|e| e.to_string())
 }
 
 // ---- FRP-8 CDN-front command shims --------------------------------
@@ -1821,7 +1939,9 @@ fn recipient_import_sbpx(
     let p = std::path::PathBuf::from(&path);
     daal_wizard::recipient_sbpx::import_sbpx(&wstate.0, &p)
         .map(|out| out.to_string_lossy().to_string())
-        .map_err(|e| e.to_string())
+        // Same code-prefixed rendering as the paste lane, so the two
+        // ways into the same unwrap produce the same translated copy.
+        .map_err(|e| render_sbpx_err(&e))
 }
 
 // ---- FRP-6 recipient command shims ---------------------------------
@@ -2405,6 +2525,8 @@ pub fn run() {
             version_info,
             preview_bundle,
             import_sbp,
+            // Wave 4 Step 11: the same import, taking pasted text.
+            import_sbp_bytes,
             resolve_trust_prompt,
             connect,
             disconnect,
@@ -2440,6 +2562,7 @@ pub fn run() {
             wizard_provision_run,
             wizard_sign_relaypack,
             wizard_qr_render,
+            wizard_copy_pasteable,
             // FRP-8 CDN-front surface
             wizard_store_cloudflare_token,
             wizard_provision_cdn_front,
@@ -2545,6 +2668,24 @@ pub fn run() {
             // swallowed; the user can retry from Subscriptions.
             let state: State<AppState> = app.state();
             let _ = cmd::start_sidecar(&state);
+
+            // Reap plaintext left in staging by a crash mid-import.
+            // `recipient_sbpx::sweep_stale` has claimed since FRP-14
+            // that it is "called at app launch"; nothing called it, so
+            // an interrupted `.sbpx` import left a decrypted bundle on
+            // disk indefinitely. Step 11 adds a second such directory
+            // (`<staging>/paste/`), so both are swept here — 10
+            // minutes, the window the sbpx doc already specified.
+            {
+                let wstate: State<WizardStateMgr> = app.state();
+                let now = (wstate.0.clock)();
+                let _ = daal_wizard::recipient_sbpx::sweep_stale(&wstate.0, 600);
+                let _ = daal_wizard::recipient_paste::sweep_stale_pastes(
+                    &wstate.0.staging_dir,
+                    now,
+                    600,
+                );
+            }
 
             // Gap 4-recipient: drive scheduler.Tick on a ~60 s
             // background timer so per-row ProfileUpdateMin cadence

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"daal/bundle-go/bundle"
+	"daal/bundle-go/fountain"
 	"daal/bundle-go/phase"
 	bundlepublisher "daal/bundle-go/publisher"
 )
@@ -270,6 +271,86 @@ func TestQRFountain_StreamsFrames(t *testing.T) {
 			t.Fatalf("frame %d frame_b64 not valid base64url: %v", i, err)
 		}
 	}
+}
+
+// Wave 4 Step 11 cross-check: the frames this CLI prints are the ones
+// the RECEIVER decodes, and they must come back as the identical .sbp.
+//
+// The sender lane is `daal-deploy qr-fountain --block-size 96` (what
+// `wcmd::qr_render` spawns for the animated-QR screen); the receiver
+// lane is base64url-decode then `fountain.Decoder`, which is exactly
+// what `core/abi.FountainFeedFrame` does with the string the recipient
+// UI forwards. Nothing here is a mock, and no camera is involved.
+//
+// TestQRFountain_StreamsFrames above only checks that each frame is
+// *valid base64url*. That would still pass if the two halves disagreed
+// about the alphabet, the block size or the header — which is the class
+// of bug this asserts against.
+func TestQRFountain_FramesDecodeBackToTheIdenticalBundle(t *testing.T) {
+	recPath, privPath, _, _ := mkBindFixture(t)
+	out := filepath.Join(t.TempDir(), "rp.sbp")
+	var stdout, stderr bytes.Buffer
+	if rc := Run([]string{
+		"bind-and-sign",
+		"--operator-record", recPath, "--priv-key", privPath,
+		"--output", out, "--phase", testPhase, "--now-unix", "1746115200",
+	}, &stdout, &stderr); rc != 0 {
+		t.Fatalf("bind-and-sign rc=%d %s", rc, stderr.String())
+	}
+	want, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	// 96 bytes is the block size the QR screen pins: it is what makes
+	// every frame exactly 144 base64url characters and therefore one
+	// fixed QR geometry the camera acquires once.
+	if rc := Run([]string{
+		"qr-fountain", "--sbp", out, "--block-size", "96",
+		"--frames", "600", "--seed", "11",
+	}, &stdout, &stderr); rc != 0 {
+		t.Fatalf("qr-fountain rc=%d %s", rc, stderr.String())
+	}
+
+	dec := fountain.NewDecoder()
+	var got []byte
+	used := 0
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		var frame struct {
+			FrameB64 string `json:"frame_b64"`
+		}
+		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+			t.Fatalf("frame %d not JSON: %v", used, err)
+		}
+		if len(frame.FrameB64) != 144 {
+			t.Fatalf("frame %d is %d chars, not the 144 the QR geometry is pinned to",
+				used, len(frame.FrameB64))
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(frame.FrameB64)
+		if err != nil {
+			t.Fatalf("frame %d is not RawURLEncoding, which is what the engine decodes with: %v",
+				used, err)
+		}
+		used++
+		payload, done, err := dec.Add(raw)
+		if err != nil {
+			t.Fatalf("frame %d rejected by the decoder: %v", used, err)
+		}
+		if done {
+			got = payload
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("the receiver never completed after %d frames", used)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded %d bytes, want %d — the sender and receiver disagree",
+			len(got), len(want))
+	}
+	t.Logf("%d B bundle recovered byte-identically from %d frames", len(want), used)
 }
 
 func TestFRP4bSubcommandHelpExitsZero(t *testing.T) {

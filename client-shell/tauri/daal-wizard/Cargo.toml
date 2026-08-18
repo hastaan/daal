@@ -43,6 +43,11 @@ daal-recipient-addr = { path = "../daal-recipient-addr" }
 x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "getrandom"] }
 
 [dev-dependencies]
+# Step 11 (`tests/paste_verification.rs`) only. The pasted-text path
+# must be provably no weaker than the file path, which means running
+# the real verifier over the real signed corpus in
+# `bundle-rs/tests/fixtures/`. Test-only: nothing in `src/` links it.
+bundle-rs = { path = "../bundle-rs" }
 
 [features]
 default = []

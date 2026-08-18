@@ -2,34 +2,39 @@
 // Tauri commands.
 
 import { invoke } from '@tauri-apps/api/core';
+import { parseSessionStatus, type SessionStatus } from './sessionStatus';
 
-export interface SessionStatus {
-    session_id: string;
-    state: string;
-    frames_in: number;
-    bytes_decoded: number;
-    /** When non-empty, the engine has produced an importer verdict. */
-    verdict?: string;
-}
+export type { SessionStatus } from './sessionStatus';
 
+// Every status the shell returns is validated against the contract in
+// client-shared/contracts/recipient-session-status-v1.json before the
+// UI is allowed to look at it. See sessionStatus.ts for why a plain
+// `interface` was not enough.
 export const Recipient = {
     newSession: (): Promise<string> => invoke<string>('recipient_qr_session_new'),
-    feedFrame: (
+    feedFrame: async (
         session_id: string,
         index: number,
         total_frames: number,
         data_b64: string,
     ): Promise<SessionStatus> =>
-        invoke<SessionStatus>('recipient_qr_feed_frame', {
-            sessionId: session_id,
-            index,
-            totalFrames: total_frames,
-            dataB64: data_b64,
-        }),
-    status: (session_id: string): Promise<SessionStatus> =>
-        invoke<SessionStatus>('recipient_qr_status', { sessionId: session_id }),
+        parseSessionStatus(
+            await invoke<unknown>('recipient_qr_feed_frame', {
+                sessionId: session_id,
+                index,
+                totalFrames: total_frames,
+                dataB64: data_b64,
+            }),
+        ),
+    status: async (session_id: string): Promise<SessionStatus> =>
+        parseSessionStatus(
+            await invoke<unknown>('recipient_qr_status', { sessionId: session_id }),
+        ),
     cancel: (session_id: string): Promise<void> =>
         invoke<void>('recipient_qr_cancel', { sessionId: session_id }),
+    /** Consume a COMPLETE session and return the importer verdict JSON.
+     *  Calling this early is safe: the shell refuses and keeps every
+     *  block decoded so far. */
     finalize: (session_id: string): Promise<string> =>
         invoke<string>('recipient_qr_finalize', { sessionId: session_id }),
 };

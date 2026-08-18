@@ -12,59 +12,40 @@
 //
 // Everything is wired end-to-end:
 //   • previewBundle / importSbp for plain .sbp
-//   • Sbpx.sniff / Sbpx.import (PIN decrypt) → importSbp for .sbpx
+//   • Sbpx.sniff / Sbpx.import (device-key decrypt) → importSbp for .sbpx
+//   • importSbpBytes for a .sbp or .sbpx pasted as
+//     base64 text — the offline path for a channel that bans files
+//     (Wave 4 Step 11). Same verification as the file path; the only
+//     difference is how the bytes arrived.
 //   • uri_detect / uri_import for one-off vless/vmess/etc URIs
 //   • subscriptionAdd for http(s) URLs
 
 import { useEffect, useMemo, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useContract } from '../contract/ContractProvider';
-import type { PreviewedBundle, TrustDecision } from '../contract/D2Contract';
+import type { PreviewedBundle } from '../contract/D2Contract';
 import { PickedFile, Sbpx } from '../recipient/recipientCommands';
+import { detectPastedContainer } from '../lib/pastedBundle';
 import { Sheet, Button } from '../design/primitives';
 import TrustPrompt from './TrustPrompt';
 import {
     syntheticSubscriptionFingerprint,
     subscriptionDisplayName,
 } from '../lib/subscriptionIdentity';
+import {
+    KIND_REJECTED,
+    KIND_TRUST_PROMPT_NEEDED,
+    friendlyError,
+    friendlyReason,
+    parseVerdict,
+    trustFailure,
+    trustFromVerdict,
+} from '../lib/importVerdict';
+import type { ImportVerdict, TrustResolution } from '../lib/importVerdict';
 
-/** Verdict shape returned by the engine's `import_sbp` ABI. Mirrors
- *  `bundle/go/importer.Verdict` — we only need `Kind` here to branch
- *  between the silent-import and trust-prompt flows. */
-interface ImportVerdict {
-    Kind: number; // 0=Imported, 1=TrustPromptNeeded, 2=RotationAccepted, 3=Rejected
-    Fingerprint?: string;
-    Reason?: string;
-}
 
-/** Engine VerdictKind enum (mirrors bundle/go/importer.VerdictKind):
- *  0 = Imported (silent), 1 = TrustPromptNeeded, 2 = RotationAccepted
- *  (silent), 3 = Rejected. Only the two non-silent kinds need
- *  branching logic. */
-const KIND_TRUST_PROMPT_NEEDED = 1;
-const KIND_REJECTED = 3;
 
-/** Map a raw error message from the Tauri bridge into friendly copy.
- *  The Rust side now prefixes bundle-rs errors with their stable
- *  `code()` (e.g. `ErrInvalidSignature: invalid bundle signature`)
- *  so we can intercept and replace the user-facing text. Anything
- *  not recognised falls through unchanged. */
-function friendlyError(t: (k: string) => string, raw: string): string {
-    if (!raw) return raw;
-    const m = raw.match(/^(Err[A-Z][A-Za-z]+):\s*/);
-    if (m) {
-        const key = `add.err.${m[1]}`;
-        const copy = t(key);
-        if (copy && copy !== key) return copy;
-    }
-    if (/alias not found/i.test(raw)) return t('add.err.identity_missing');
-    if (/identity not yet created/i.test(raw)) return t('add.err.identity_missing');
-    if (/device custody is locked/i.test(raw)) return t('add.err.custody_locked');
-    if (/not an \.sbpx file/i.test(raw)) return t('add.err.not_envelope');
-    if (/envelope corrupt or not addressed/i.test(raw))
-        return t('add.err.envelope_corrupt');
-    return raw;
-}
+
 
 interface Props {
     t: (k: string) => string;
@@ -87,14 +68,20 @@ function classifyPaste(s: string): PasteKind {
             trimmed,
         ))
         return 'uri';
-    // The serialized .sbp/.sbpx files start with the ASCII magic "DSBP"
-    // in their first six bytes; in base64 that's "RFNCU…".
-    if (/^RFNCU/.test(trimmed)) {
-        // Heuristic only — bundles vs envelopes both begin DSBP. The
-        // engine determines the real kind. We use a slightly different
-        // tag because the public DSBPX magic differs at byte 4.
-        return trimmed.length > 200 ? 'sbpx-b64' : 'sbp-b64';
-    }
+    // A pasted bundle is located by the base64 spelling of its
+    // container magic, after the joiners a messenger inserts are
+    // dropped — see lib/pastedBundle.ts.
+    //
+    // The previous rule here was `/^RFNCU/` plus "longer than 200
+    // chars means sealed", which was wrong twice over: RFNCU is the
+    // .sbpx envelope magic, so a plain .sbp (a zip — "UEsDB…") never
+    // matched at all and the Import button stayed dead for it, and a
+    // short .sbpx was mislabelled a bundle. Neither mattered while
+    // both were handed to uriImport, which cannot parse base64
+    // anyway; both matter now that the paste actually imports.
+    const container = detectPastedContainer(trimmed);
+    if (container === 'sbpx') return 'sbpx-b64';
+    if (container === 'sbp') return 'sbp-b64';
     return 'unknown';
 }
 
@@ -192,23 +179,21 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
             // call resolveTrustPrompt before the routes commit),
             // 2=RotationAccepted (silent, accepted via valid
             // rotation chain), 3=Rejected (Reason populated).
-            let v: ImportVerdict | null = null;
-            try {
-                v = JSON.parse(verdictJson) as ImportVerdict;
-            } catch {
-                // Engine returned a non-JSON string (older ABI or
-                // error path). Fall through to silent-success
-                // behaviour so we don't regress the desktop scenario.
-            }
+            // A non-JSON response (older ABI or an error path) parses
+            // to null and falls through to silent success, so the
+            // desktop scenario does not regress.
+            const v: ImportVerdict | null = parseVerdict(verdictJson);
             if (v && v.Kind === KIND_TRUST_PROMPT_NEEDED) {
-                // Hold the modal open with the trust prompt. The
-                // preview already contains the rendered EN+FA word
-                // grid so we can pass it straight through.
+                // Hold the modal open with the trust prompt, showing
+                // the engine's word grid over the preview's (the
+                // preview renders placeholder words — see
+                // trustFromVerdict).
+                setPreview(trustFromVerdict(preview, v));
                 setAwaitingTrust(true);
                 return;
             }
             if (v && v.Kind === KIND_REJECTED) {
-                setError(v.Reason || t('add.err.rejected'));
+                setError(friendlyReason(t, v.Reason || ''));
                 return;
             }
             // KIND_IMPORTED, KIND_ROTATION_ACCEPTED, or unknown-but-no-error
@@ -221,13 +206,20 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
         }
     };
 
-    /** Called by TrustPrompt after the user confirms. The engine has
-     *  already committed the routes via resolveTrustPrompt; we just
-     *  close the sheet and refresh the parent. */
-    const onTrustResolved = (decision: TrustDecision) => {
+    /** Called by TrustPrompt with what the ENGINE said, not with what
+     *  the user tapped. resolveTrustPrompt re-verifies the pending
+     *  bundle before committing, so it can refuse at this point; this
+     *  used to set `done`, which renders the full-sheet "added"
+     *  confirmation, no matter what came back. */
+    const onTrustResolved = (r: TrustResolution) => {
         setAwaitingTrust(false);
-        if (decision === 2) {
-            // user cancelled — nothing to refresh
+        if (r.decision === 2) {
+            // user cancelled — nothing to refresh, nothing to report
+            return;
+        }
+        const failure = trustFailure(t, r);
+        if (failure) {
+            setError(failure);
             return;
         }
         setDone(true);
@@ -250,6 +242,34 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                     url,
                     displayName: subscriptionDisplayName(url),
                 });
+            } else if (kind === 'sbp-b64' || kind === 'sbpx-b64') {
+                // Wave 4 Step 11. This is the whole point of the paste
+                // box: a bundle that travelled as text because the
+                // channel bans files. It used to be handed to
+                // uriImport, which cannot parse base64 — the UI said
+                // it recognised the blob and then failed.
+                //
+                // importSbpBytes runs the same signature, revocation
+                // and expiry checks the file picker runs, and a sealed
+                // .sbpx still needs this phone's Daal address.
+                const verdictJson = await contract.importSbpBytes(pasted);
+                // Non-JSON response (older ABI) parses to null and is
+                // treated as success, matching the picked-file path.
+                const v: ImportVerdict | null = parseVerdict(verdictJson);
+                if (v && v.Kind === KIND_TRUST_PROMPT_NEEDED) {
+                    // First time we've seen this publisher. Same
+                    // EN+FA word grid as the file path — a pasted
+                    // route does not get a quieter trust decision.
+                    // The words come off the verdict, so nothing has
+                    // to be decoded or decrypted a second time.
+                    setPreview(trustFromVerdict(null, v));
+                    setAwaitingTrust(true);
+                    return;
+                }
+                if (v && v.Kind === KIND_REJECTED) {
+                    setError(friendlyReason(t, v.Reason || ''));
+                    return;
+                }
             } else if (kind === 'uri') {
                 const res = await contract.uriImport(pasted.trim());
                 if (res.error) throw new Error(res.error);
@@ -302,17 +322,17 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                     <Button variant="ghost" onClick={onClose}>
                         {t('common.cancel')}
                     </Button>
-                    {tab === 'paste' ? (
+                    {awaitingTrust ? (
+                        // TrustPrompt provides its own Trust / Once /
+                        // Cancel buttons; no footer action needed.
+                        null
+                    ) : tab === 'paste' ? (
                         <Button
                             onClick={importPasted}
                             disabled={busy || kind === 'empty' || kind === 'unknown'}
                         >
                             {busy ? '…' : t('add.import')}
                         </Button>
-                    ) : awaitingTrust ? (
-                        // TrustPrompt provides its own Trust / Once /
-                        // Cancel buttons; no footer action needed.
-                        null
                     ) : preview ? (
                         <Button onClick={importPickedFile} disabled={busy}>
                             {busy ? '…' : t('add.confirm_import')}
@@ -353,6 +373,13 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                         style={inputStyle()}
                     />
                     <DetectPill t={t} kind={kind} />
+                    {awaitingTrust && preview && (
+                        <TrustPrompt
+                            t={t}
+                            preview={preview}
+                            onResolve={onTrustResolved}
+                        />
+                    )}
                 </div>
             )}
 

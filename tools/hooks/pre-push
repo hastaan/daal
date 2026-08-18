@@ -80,6 +80,13 @@ step "go vet (all modules)" vet_all
 step "cargo test (daal-wizard)" bash -c 'cd client-shell/tauri/daal-wizard && cargo test --quiet'
 step "tsc + vite build"         bash -c 'cd client-ui && npm run build --silent'
 
+# The TS unit suite. `./daal test` builds client-ui but never runs
+# vitest, so until Wave 4 Step 11 the ~80 tests under client-ui/src —
+# including the QR frame-format and session-contract regressions that
+# exist precisely because those seams broke silently — ran only when a
+# human remembered to. A test nothing runs is a comment.
+step "vitest (client-ui)"       bash -c 'cd client-ui && npm test --silent'
+
 # Static gates. Each exits non-zero on a real finding; check-hardcoded-strings
 # now also exits non-zero when its own dependency (ripgrep) is missing, rather
 # than printing OK and scanning nothing.
@@ -87,6 +94,15 @@ for g in tools/check-hardcoded-strings.sh tools/check-diagnostics-redaction.sh t
   [[ -x "$g" ]] && step "$(basename "$g")" "./$g"
 done
 [[ -f tools/check-plumbing.mjs ]] && step "check-plumbing.mjs" node tools/check-plumbing.mjs
+
+# The QR sender has no camera in CI, so this gate tests everything up to
+# the glass: the vendored QR encoder against an independent one
+# (skip2/go-qrcode), the rendered symbols against a real scanner (jsQR),
+# and the frame sequencing against the real Go fountain codec — feeding
+# what the screen would display, with frames dropped, back into the real
+# decoder. It needs go + client-ui/node_modules and exits 2 rather than
+# passing quietly if either is missing.
+[[ -f tools/check-qr-send.mjs ]] && step "check-qr-send.mjs" node tools/check-qr-send.mjs
 
 if (( fail )); then
   printf '\n\033[31mpre-push: FAILED — push aborted.\033[0m\n'
