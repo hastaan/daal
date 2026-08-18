@@ -192,11 +192,19 @@ Phase 3D additions:
 `engine_export_diagnostics` widens additively at 3D with **five
 new fields**, always present:
 
-- `psiphon_compiled_in: bool` — `false` when the running binary
-  was built with `-tags no_psiphon` (GPLv3 isolation); release
-  builds for the unconstrained distribution path report `true`.
-- `conjure_compiled_in: bool` — reserved for future build-tag
-  conditioning; constant `true` at 3D.
+- `psiphon_compiled_in: bool` — **constant `false` since Wave 5.**
+  Both this flag and the one below claimed a vendored tree was
+  linked into the running binary; neither psiphon-tunnel-core nor
+  gotapdance has ever been in `core/go.mod`, and no build script
+  ever passed the `-tags no_psiphon` that nominally flipped this
+  one. The build-tag pair is deleted; see
+  `core/abi/refraction_compiled.go` and
+  `docs/transport-family-inventory.md`.
+- `conjure_compiled_in: bool` — **constant `false` since Wave 5**,
+  for the same reason. Both families are `unsupported` and their
+  recorders refuse a non-empty route ID, so
+  `psiphon_active_route`, `conjure_active_route` and
+  `conjure_phantom_in_use` are permanently `""`.
 - `psiphon_active_route: string` — most recently activated
   psiphon route ID this session; `""` when no activation.
 - `conjure_active_route: string` — most recently activated

@@ -22,7 +22,7 @@ number measured"*; `docs/backlog-post-45.md` for *"what is still owed and what
 it costs"*. Where any of them disagrees with the tree, **the tree is right** —
 that is the failure mode this whole wave exists to catch.
 
-**Headline: 55 SHIPPED · 17 UNREACHABLE or CLI-ONLY · 7 PARTIAL · 3 INERT ·
+**Headline: 55 SHIPPED · 17 UNREACHABLE or CLI-ONLY · 7 PARTIAL · 3 INERT (plus CM-8, inert copy) ·
 2 NOT MEASURED.**
 
 The first draft of this table said "nothing is *missing a backend*" and
@@ -211,9 +211,44 @@ test, the same method §1 uses.
 
 | Capability | Screen | The chain, as far as it goes | The dead link | Cost to the user |
 |---|---|---|---|---|
-| **MASQUE sub-mode override** | `SettingsPage.tsx:564-572` (auto / h3 / h2 / h1 dropdown) | `set_masque_submode_override` → `abi.SetMasqueSubmodeOverride` (`core/abi/masque.go:42`) validates the sub-mode and persists it into `secrets_kv` | **`abi.MasqueSubmodeOverride()` (`masque.go:62`) has zero production callers.** The only other mention in the tree is a doc comment on `masque.WithOverrideFn` (`core/transports/masque/masque.go:192`) describing a closure nobody writes — and `masque.NewHandler` (`:211`) itself has zero production callers. | A user pins `h2` to get out from under a QUIC block. The dropdown holds the value across restarts. The engine never asks. New item **CM-6**. |
+| **MASQUE sub-mode override** (see the Wave-5 note under this table before "fixing" it) | `SettingsPage.tsx:564-572` (auto / h3 / h2 / h1 dropdown) | `set_masque_submode_override` → `abi.SetMasqueSubmodeOverride` (`core/abi/masque.go:42`) validates the sub-mode and persists it into `secrets_kv` | **`abi.MasqueSubmodeOverride()` (`masque.go:62`) has zero production callers.** The only other mention in the tree is a doc comment on `masque.WithOverrideFn` (`core/transports/masque/masque.go:192`) describing a closure nobody writes — and `masque.NewHandler` (`:211`) itself has zero production callers. | A user pins `h2` to get out from under a QUIC block. The dropdown holds the value across restarts. The engine never asks. New item **CM-6**. |
 | **Experimental families** | `SettingsPage` toggle | `engine_set_experimental_families_enabled` → `abi` → persisted | **`pathmanager.RankWithExperimentalGate` (`family_filter.go:80`) has no production caller** — only tests. `core/abi/abi.go:96` and `core/routestore/family.go:117` both already say so *in code*, which is how this one hid: the truth was written down next to the gap and not carried into the table. | The toggle cannot widen or narrow the family set. New item **CM-7**. |
 | **Per-route data cap** | `RouteBudgetModal` — `routes.budget.title` = "Data cap" / "سقف داده" | `abi.SetRouteBudget` (`core/abi/budget.go:83`) returns `{"applied":true,"hourly_cap_bytes":<n>}` and the cap is stored; `budgetEngineIfPresent()` really is consulted on several paths | **`budget.Engine.Add` — the only thing that accrues bytes against a cap — has exactly one caller, `proxy.Pipe`, and `proxy.Pipe` has no production caller either** (`grep -rn 'Pipe(' core/` outside `core/proxy/` returns only `os.Pipe` in tests). So usage never accumulates and the cap can never trip. | A user on metered cellular sets 50 MB, is told **"applied"**, and is not capped. Same root cause as **CM-1** (nothing counts bytes anywhere) and the same fix unblocks both; tracked as **B4**, cross-referenced here. |
+
+**CM-8 — the Tor bridge-import copy, written and unreachable.** The
+Wave-5 tor lane wrote eight user-visible strings for a bridge-import
+screen (`import.tor_bridge.title`, `.body`, `.placeholder`,
+`.added_one`, `.added_other`, `.skipped_one`, `.skipped_other`,
+`.none`) in en and fa. **No screen renders any of them**: a grep for
+`import.tor_bridge` across `.ts`, `.tsx` and `.rs` returns nothing but
+the JSON files themselves. Two display labels are in the same state —
+`network.family.anytls` and `network.family.tor_bridge` — because
+`FamilyChipView` prints the raw family string and reaches only the
+dynamic `network.family.<f>.help` key.
+
+This is inert COPY rather than an inert control, so it takes nothing
+from the user today; it is recorded here because the alternative is a
+translated string sitting in the repo for a year while everyone assumes
+it is on a screen. Delete it or wire it; do not leave it undeclared.
+
+The ninth string of that set, `network.family.tor_bridge.unpackaged`
+("this build does not include the Tor software"), was the one that
+mattered — it was the only place the packaging gap was disclosed, and
+it had no reader either, which is why the premature `experimental`
+label on `tor-bridge` was silent as well as wrong. The repair pass
+**deleted the key and folded its sentence into
+`network.family.tor_bridge.help`**, which the chip really does read.
+
+**Wave 5 note on CM-6.** The MASQUE sub-mode override is inert, and the
+obvious fix — wire a reader — is the wrong one. `masque` is now labelled
+`unsupported`: sing-box 1.13.12 registers no masque outbound, and a
+self-hosted MASQUE proxy would have none of the provider-anonymity-set
+value that motivates RFC 9298, so the family cannot be dialled and could
+not be served either. Giving the setting a reader would connect a user
+preference to a family that cannot carry a byte. **CM-6 stays open and
+stays unfixed while `masque` is unsupported**; what changed instead is
+the help text, which now says in en and fa that nothing reads the
+setting. See `docs/transport-family-inventory.md`.
 
 `docs/telemetry-audit.md` §1.5 and §1.8 already carried the budget and
 experimental-family findings when this table was written. The failure was

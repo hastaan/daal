@@ -17,6 +17,8 @@ package relaypack
 //     handshake to server_name); works on a bare-IP VPS.
 //   - websocket-tls / hysteria2 / naive: TLS to a self-signed leaf on
 //     a bare IP; pinned client-side via TLSCertSHA256, never insecure.
+//   - shadowsocks (Wave 5): no TLS at all — no cert, no pin, no
+//     handshake. That is the point of it; see the case below.
 
 import (
 	"encoding/json"
@@ -57,6 +59,45 @@ type ClientConnParams struct {
 	WSPath           string // "/r<id>/<hex>"
 	TLSCertSHA256    string // base64 SHA-256 of the leaf SPKI, for ws/hy2 pinning
 	TLSCertPEM       string // full leaf cert PEM, naive's trusted root (Cronet)
+
+	// TUICUUID / TUICPassword are the tuic tier's credential pair.
+	// tuic authenticates on BOTH, so both are required and neither has
+	// a default; empty means this relay does not serve tuic (or its
+	// mgmt binary is too old to know it does), and the renderer refuses
+	// rather than emitting a route that cannot authenticate.
+	TUICUUID     string
+	TUICPassword string
+
+	// SSPassword / SSMethod are the shadowsocks-2022 pair, and
+	// SSPassword is NOT a secret this side assembles: it arrives from
+	// the box already in the exact form the outbound needs,
+	// "<box iPSK>:<recipient uPSK>". SS-2022 multi-user carries a
+	// two-level key — one box-wide iPSK that says "this relay", one
+	// per-recipient uPSK that says "this recipient" — and the client
+	// presents both, colon-joined, in one field. Splitting the
+	// concatenation across two processes is how the halves get swapped
+	// or the separator gets lost, so exactly one place knows the rule:
+	// the box (cmd/daal-relay-mgmt ssClientPassword).
+	//
+	// Both empty means this relay does not serve the family. The
+	// renderer refuses rather than guessing — an SS route minted
+	// without a key is a route the recipient will select and lose.
+	SSPassword string
+	SSMethod   string
+
+	// AnyTLSPassword is the anytls tier's per-recipient password, from
+	// the box's live anytls-in inbound. Empty means this relay does not
+	// serve anytls — its mgmt binary predates the family, or the inbound
+	// is absent — and the renderer refuses rather than minting a route
+	// that cannot authenticate.
+	//
+	// There is deliberately no padding-scheme parameter beside it: the
+	// scheme is per-relay and the client LEARNS it in band on its first
+	// session (sing-anytls session/session.go:264-278). The client
+	// outbound has no `padding_scheme` option at all — see
+	// option.AnyTLSOutboundOptions, which carries only password, the
+	// idle-session knobs, and the usual dialer/server/TLS containers.
+	AnyTLSPassword string
 
 	// CoverSNI is THIS relay's REALITY cover host — the name its
 	// vless-in inbound borrows a handshake from, chosen per relay by the
@@ -161,6 +202,204 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			// uTLS block ("unsupported usage for uTLS"), so pin without it.
 			"tls": pinnedTLSNoUTLS(p.Server, p.TLSCertSHA256),
 		}
+	case "tuic":
+		// TUIC IS DIVERSITY, NOT A LIFELINE — and the label, the copy
+		// and this comment must all keep saying so. It rides UDP on
+		// 8443, and in the primary target country neither half survives:
+		// 8443 is outside the 53/80/443 egress whitelist, and the
+		// adversary document states the intent as complete and permanent
+		// blocking of outbound IPv6, UDP and ICMP. Daal already ships one
+		// UDP tier (hysteria2); a second one falls to the same rule at the
+		// same moment. What tuic buys is a differently-shaped QUIC
+		// handshake on networks where UDP still works, i.e. correlation
+		// breaking elsewhere — never a new way through the whitelist.
+		//
+		// Requires the recipient engine to be built with `with_quic`
+		// (tools/build-engine-android.sh has it), same as hysteria2.
+		if p.TUICUUID == "" || p.TUICPassword == "" {
+			return nil, fmt.Errorf("tuic needs tuic_uuid and tuic_password: this relay did not " +
+				"report them, which means either its toolbox profile does not enable tuic or its " +
+				"daal-relay-mgmt binary predates the family (rebuild, re-sign, re-upload, bump the " +
+				"hash pin in publisher/deploy/cloudinit/artifacts.go, and reprovision)")
+		}
+		ob = map[string]any{
+			"type":        "tuic",
+			"tag":         "active",
+			"server":      p.Server,
+			"server_port": port,
+			"uuid":        p.TUICUUID,
+			"password":    p.TUICPassword,
+			// bbr matches what the box's inbound is configured with;
+			// congestion control must agree end to end or the session
+			// stalls rather than fails, which is the worse failure.
+			"congestion_control": "bbr",
+			// No `multiplex`, for the same two reasons as hysteria2:
+			// option/tuic.go's TUICOutboundOptions has no Multiplex
+			// field at all (the strict parser would reject the outbound
+			// outright), and smux over a QUIC-native transport re-adds
+			// the head-of-line blocking QUIC exists to remove.
+			//
+			// QUIC brings its own TLS stack, so pin without uTLS —
+			// hysteria2 rejects a uTLS block outright and tuic has no
+			// use for one either.
+			//
+			// ALPN IS MANDATORY HERE, unlike hysteria2, and that is a
+			// difference between two families that otherwise look alike.
+			// sing-quic's hysteria2 client and service both default
+			// NextProtos to "h3" when the config leaves it empty
+			// (hysteria2/client.go:83, service.go:88). Its tuic client
+			// and service never touch NextProtos at all, and quic-go
+			// requires the TLS config to define an application protocol
+			// on both ends. So a tuic route with no `alpn` does not
+			// degrade — it fails the QUIC handshake outright. tuicTLS
+			// sets ["h3"], which must stay equal to the box inbound's.
+			"tls": tuicTLS(p.Server, p.TLSCertSHA256),
+		}
+	case "shadowsocks":
+		// SHADOWSOCKS-2022 IS CORRELATION-BREAKING DIVERSITY, AND IT IS
+		// WEAK ALONE. Both halves, every time this family is described.
+		//
+		// The first half is why it is worth the port. vless-reality,
+		// websocket-tls and naive all open with a TLS handshake, so the
+		// Xue et al. (USENIX Security 2024) nested-TLS classifier —
+		// >70% TPR at 0.054% FPR, REALITY+Vision included — threatens
+		// all three SIMULTANEOUSLY: they are three draws from one urn,
+		// not three independent bets. Shadowsocks-2022 has no TLS
+		// handshake anywhere in it; its first bytes are an
+		// AEAD-encrypted, uniformly random header. That classifier
+		// cannot reach it, structurally, and no amount of retraining
+		// changes that. It is the only tier Daal ships whose failure is
+		// uncorrelated with the other three.
+		//
+		// The second half is why it is not a promotion. Shadowsocks is
+		// the most-studied protocol in the entropy and flow-shape
+		// literature, and the GFW has publicly demonstrated both active
+		// probing and packet-length classification against it. The 2022
+		// construction closes the replay and redirect probes the older
+		// AEAD ciphers fell to, but "high-entropy payload from byte
+		// one" is still exactly the signature entropy classifiers key
+		// on, and a fixed port makes the flow easy to isolate first.
+		// This route's job is to fail at a DIFFERENT time and for a
+		// DIFFERENT reason than the TLS tiers. It is not a stronger
+		// tier and must never be labelled as one.
+		//
+		// Two more caveats that belong with it, not buried elsewhere:
+		// 8446 is outside the target country's 53/80/443 egress
+		// whitelist, so this route is worth zero inside Iran (see
+		// relayports.go); and it is the third member of a fleet-wide
+		// constant port set that one `drop tcp dport 8444,8445,8446`
+		// takes down at once.
+		if p.SSPassword == "" || p.SSMethod == "" {
+			return nil, fmt.Errorf("shadowsocks needs ss_password and ss_method: this relay did " +
+				"not report them, which means its daal-relay-mgmt binary predates the family " +
+				"(rebuild, re-sign, re-upload, bump the hash pin in " +
+				"publisher/deploy/cloudinit/artifacts.go, and reprovision)")
+		}
+		ob = map[string]any{
+			"type":        "shadowsocks",
+			"tag":         "active",
+			"server":      p.Server,
+			"server_port": port,
+			// The METHOD the box reported, never a constant assumed
+			// here: the PSK length follows from it (16 bytes for
+			// 2022-blake3-aes-128-gcm) and a mismatch is not a slow
+			// route, it is an outbound sing-box refuses to construct.
+			"method": p.SSMethod,
+			// Already "<iPSK>:<uPSK>". sing-shadowsocks2's
+			// shadowaead_2022 method splits this on ":" and
+			// base64.StdEncoding-decodes each half, so neither the
+			// separator nor the padding is cosmetic.
+			"password": p.SSPassword,
+			// UDP OVER TCP, AND WHY IT COSTS THE MULTIPLEX BLOCK.
+			//
+			// The box's ss-in inbound is `"network":"tcp"` on a single
+			// opened port (relayports.ExtraFirewallPorts opens 8446/tcp
+			// and no UDP), so without this the route carries no UDP at
+			// all — no DNS, no QUIC. UoT v2 tunnels it over the same
+			// TCP connection and sing-box's shadowsocks inbound handles
+			// the magic UoT destination unconditionally
+			// (protocol/shadowsocks wraps its router in uot.NewRouter),
+			// so no box-side switch is needed.
+			//
+			// The cost is exact and is the reason familyCarriesMultiplex
+			// says no for this family: the sing-box shadowsocks outbound
+			// builds a UoT client OR a mux client and never both
+			// (protocol/shadowsocks/outbound.go — the mux dialer is
+			// constructed only `if !uotOptions.Enabled`). A `multiplex`
+			// object here would not be rejected; it would be silently
+			// IGNORED, which is the worse failure, because the pack
+			// would claim a mitigation it is not applying.
+			"udp_over_tcp": map[string]any{"enabled": true, "version": 2},
+			// NO `tls` block, and that absence is the feature. There is
+			// nothing to pin because there is no certificate and no
+			// handshake — which is precisely why this family survives a
+			// classifier the other three do not.
+		}
+	case "anytls":
+		// ANYTLS IS THE PADDING TIER, and that is the only thing it is
+		// better at — the label and the copy must both keep saying so.
+		//
+		// What it genuinely has that no other family here has: length
+		// padding and session reuse INSIDE the protocol rather than
+		// bolted on. What it does not have: any advantage against the
+		// nested-TLS classifier. Its handshake is an ordinary TLS
+		// handshake to a hosting-provider address, so Xue et al. reaches
+		// it exactly as it reaches vless-reality and websocket-tls; the
+		// padding changes what the tunnel's records look like, not
+		// whether a tunnel is visible. It is also young, with nothing
+		// like REALITY's or shadowsocks' deployment history.
+		//
+		// And the caveat that belongs with it rather than buried
+		// elsewhere: 8447 is outside the target country's 53/80/443
+		// egress whitelist, so this route is worth zero inside Iran
+		// (see relayports.go), and it is the fourth member of a
+		// fleet-wide constant port set that one
+		// `drop tcp dport 8444,8445,8446,8447` takes down at once.
+		if p.AnyTLSPassword == "" {
+			return nil, fmt.Errorf("anytls needs anytls_password: this relay did not report one, " +
+				"which means its daal-relay-mgmt binary predates the family (rebuild, re-sign, " +
+				"re-upload, bump the hash pin in publisher/deploy/cloudinit/artifacts.go, and " +
+				"reprovision)")
+		}
+		ob = map[string]any{
+			"type":        "anytls",
+			"tag":         "active",
+			"server":      p.Server,
+			"server_port": port,
+			"password":    p.AnyTLSPassword,
+			// NATIVE SESSION REUSE — the outbound half of what makes
+			// this family worth adding, and the reason it must never
+			// also carry a `multiplex` block (familyCarriesMultiplex
+			// says no). anytls keeps idle sessions alive and runs new
+			// streams over them, so a request does not begin with a
+			// fresh TCP+TLS handshake; that both removes the per-request
+			// handshake shape a classifier can count and is the layer
+			// the padding scheme is applied over. Stacking sing-mux on
+			// top would be two multiplexers deep over one connection.
+			//
+			// The three knobs are exactly option.AnyTLSOutboundOptions'
+			// (badoption.Duration decodes these strings). One idle
+			// session held open is enough to remove the cold-start
+			// handshake without keeping a conspicuous bundle of
+			// connections parked against the relay; 30s/30s matches the
+			// library's own documented defaults closely enough to avoid
+			// being a distinguishing value in itself.
+			"min_idle_session":            1,
+			"idle_session_check_interval": "30s",
+			"idle_session_timeout":        "30s",
+			// Ordinary TLS to the box's self-signed leaf on a bare IP,
+			// pinned by SPKI SHA-256 exactly like websocket-tls. anytls
+			// uses sing-box's standard TLS stack
+			// (OutboundTLSOptionsContainer), so uTLS applies here —
+			// unlike hysteria2, whose QUIC stack rejects it.
+			"tls": pinnedTLS(p.Server, p.TLSCertSHA256),
+			// NO `padding_scheme` key here. It is not that we chose not
+			// to set it: option.AnyTLSOutboundOptions has no such field,
+			// because the scheme is the SERVER's to choose and the
+			// client adopts it over the wire. The per-relay scheme the
+			// box generates therefore reaches this client with nothing
+			// carried in the pack. See cmd/daal-relay-mgmt/singbox_anytls.go.
+		}
 	case "naive":
 		if p.NaivePassword == "" || p.Name == "" {
 			return nil, fmt.Errorf("naive needs naive_password and name")
@@ -220,6 +459,15 @@ func pinnedTLS(server, certSHA256 string) map[string]any {
 // transports whose TLS stack rejects it (hysteria2/QUIC).
 func pinnedTLSNoUTLS(server, certSHA256 string) map[string]any {
 	return pinnedTLSOpts(server, certSHA256, false)
+}
+
+// tuicTLS is pinnedTLSNoUTLS plus the mandatory ALPN. See the comment at
+// the tuic case for why the list cannot be omitted and why it must equal
+// the box inbound's.
+func tuicTLS(server, certSHA256 string) map[string]any {
+	tls := pinnedTLSNoUTLS(server, certSHA256)
+	tls["alpn"] = []string{"h3"}
+	return tls
 }
 
 // KNOWN, UNFIXED, RECORDED SO THE NEXT WAVE DOES NOT ASSUME IT WAS

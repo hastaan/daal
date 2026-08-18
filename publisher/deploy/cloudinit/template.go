@@ -60,6 +60,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"daal/publisher/deploy/relayports"
 )
 
 //go:embed template.yaml.tmpl
@@ -116,6 +118,21 @@ type RenderInput struct {
 	// /etc/daal/cdn/aop_client.pem (mode 0600). Empty for
 	// non-CDN.
 	AOPClientCertPEM string
+
+	// DataPlanePorts are the non-baseline data-plane ports this relay's
+	// box-side ufw must open, beyond 443/tcp + 443/udp + 80/tcp. Nil
+	// means "the fleet baseline", i.e. relayports.ExtraFirewallPorts().
+	//
+	// It is a field rather than a constant in the template because the
+	// set is no longer the same on every relay: a family the toolbox
+	// profile can switch off (tuic, 8443/udp) must not leave its port
+	// open on the relays that do not serve it, and a family that mints
+	// against a shut port is a route the recipient selects and loses.
+	// Both firewalls have to agree — the cloud-provider one and this —
+	// and both are written once at provision time, so turning such a
+	// family on for an existing relay means reprovisioning it. There is
+	// no upgrade path for cloud-init.
+	DataPlanePorts []relayports.Endpoint
 }
 
 // templateData is what reaches the text/template engine. Built from
@@ -136,6 +153,30 @@ type templateData struct {
 	OriginCACertPEM  string
 	OriginCAPrivPEM  string
 	AOPClientCertPEM string
+
+	// UFWDataPlaneRules is the rendered "<port>/<proto>" list the
+	// template turns into `ufw allow` lines, derived from
+	// RenderInput.DataPlanePorts so relayports stays the one place a
+	// port number is decided.
+	UFWDataPlaneRules []string
+}
+
+// ufwDataPlaneRules renders the data-plane port list as ufw arguments.
+// Nil input means the fleet baseline; the order is relayports' order, so
+// the same family set always renders byte-identical cloud-init.
+func ufwDataPlaneRules(ports []relayports.Endpoint) []string {
+	if ports == nil {
+		ports = relayports.ExtraFirewallPorts()
+	}
+	out := make([]string, 0, len(ports))
+	for _, ep := range ports {
+		proto := "tcp"
+		if ep.UDP {
+			proto = "udp"
+		}
+		out = append(out, fmt.Sprintf("%d/%s", ep.Port, proto))
+	}
+	return out
 }
 
 // Render produces the rendered cloud-init YAML for the given input.
@@ -168,6 +209,7 @@ func Render(in RenderInput) ([]byte, error) {
 		OriginCACertPEM:        in.OriginCACertPEM,
 		OriginCAPrivPEM:        in.OriginCAPrivPEM,
 		AOPClientCertPEM:       in.AOPClientCertPEM,
+		UFWDataPlaneRules:      ufwDataPlaneRules(in.DataPlanePorts),
 	}
 	tmpl, err := template.New("cloudinit").Funcs(template.FuncMap{
 		"indent": indent,
@@ -372,6 +414,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		MgmtPubKeyHex          string
 		MgmtPort               int
 		CoverSNI               string
+		UFWDataPlaneRules      []string
 	}{
 		EphemeralSSHPublicKey:  in.EphemeralSSHPublicKey,
 		ProvisioningClientIP:   in.ProvisioningClientIP,
@@ -387,6 +430,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		MgmtPubKeyHex:          in.MgmtPubKeyHex,
 		MgmtPort:               in.MgmtPort,
 		CoverSNI:               in.CoverSNI,
+		UFWDataPlaneRules:      ufwDataPlaneRules(in.DataPlanePorts),
 	}
 	tmpl, err := template.New("cloudinit-v2").Funcs(template.FuncMap{
 		"indent": indent,

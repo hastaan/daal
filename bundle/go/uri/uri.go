@@ -31,6 +31,20 @@ type Provenance struct {
 	HadReality   bool     // Reality-flavored vless extension
 	BareSchemes  []string // for base64 envelopes: list of inner schemes
 	WarningCount int
+
+	// DroppedParams names vendor extensions that were recognised and
+	// then NOT carried into the sing-box config because the shipped
+	// engine has no field for them. Today this is only AmneziaWG's
+	// obfuscation knobs; see parseWireGuard.
+	DroppedParams []string
+
+	// Downgrade is a sentence an importer may show verbatim when the
+	// parsed route is weaker than what the user handed over. It exists
+	// because "we imported your config" and "we imported a
+	// strictly-less-resistant version of your config" must not look the
+	// same to someone choosing a route under censorship. Empty when
+	// nothing was lost.
+	Downgrade string
 }
 
 // ErrNoMatch means the caller's input doesn't look like any known format.
@@ -102,7 +116,7 @@ func ParseAny(body []byte, hint string) ([]Profile, Provenance, error) {
 		}
 	case strings.HasPrefix(text, "proxies:"), strings.Contains(text, "\nproxies:"):
 		return parseClashYAML(body)
-	case strings.HasPrefix(text, "Bridge ") || strings.HasPrefix(text, "obfs4 ") || strings.HasPrefix(text, "webtunnel "):
+	case looksLikeTorBridges(text):
 		return parseTorBridges(body)
 	}
 

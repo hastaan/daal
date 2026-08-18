@@ -16,12 +16,44 @@
     "expect_verify": "ok"
   },
   {
-    "vector": "invalid-spec-v5",
-    "description": "spec_version=5 is beyond the supported range and must be rejected",
-    "sbp_file": "invalid-spec-v5.sbp",
+    "vector": "invalid-spec-v6",
+    "description": "spec_version=6 is beyond the supported range and must be rejected",
+    "sbp_file": "invalid-spec-v6.sbp",
     "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
     "expect_parse": "ok",
     "expect_verify": "ErrUnsupportedSpec"
+  },
+  {
+    "vector": "v5-unknown-transport-degrades",
+    "description": "spec_version=5: an unknown transport_family drops that route, the pack still verifies",
+    "sbp_file": "v5-unknown-transport-degrades.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ok"
+  },
+  {
+    "vector": "v5-all-unknown-transports",
+    "description": "spec_version=5: every route unknown is ErrNoUsableRoutes, not a silent empty import",
+    "sbp_file": "v5-all-unknown-transports.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrNoUsableRoutes"
+  },
+  {
+    "vector": "anytls-on-spec-v4",
+    "description": "transport_family=anytls at spec_version=4 must be refused",
+    "sbp_file": "anytls-on-spec-v4.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ErrAnyTLSSpecVersionTooOld"
+  },
+  {
+    "vector": "anytls-on-spec-v5",
+    "description": "transport_family=anytls at spec_version=5 verifies",
+    "sbp_file": "anytls-on-spec-v5.sbp",
+    "publisher_pub_hex": "a1b30eb5f2a00fcc97b2c3b3211e3f7bca55127f4b55b4bb62b7c99586d0f033",
+    "expect_parse": "ok",
+    "expect_verify": "ok"
   },
   {
     "vector": "invalid-signature",

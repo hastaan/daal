@@ -25,29 +25,236 @@ const (
 	ScarcityExperimental ScarcityClass = "experimental"
 	ScarcityLifelineOnly ScarcityClass = "lifeline-only"
 
+	// TransportFamily is the RECIPIENT-SIDE VOCABULARY: the set of
+	// values a pack is allowed to DECLARE. It is not a list of what
+	// Daal can serve, and it is not a list of what Daal can dial.
+	// Those three sets are different and the canonical
+	// family-by-family reconciliation of them is
+	// `docs/transport-family-inventory.md`; the machine-readable
+	// answer to "can this build dial it" is
+	// `core/routestore/family.go`'s maturity table.
+	//
+	// Every value below is permanent. Removing one is a wire break
+	// for older clients (the parser rejects unknown values with
+	// `bundle_corrupted`) and buys nothing, so the values marked
+	// STRUCTURALLY UNAVAILABLE below stay reserved forever.
+
 	TransportVLESSReality TransportFamily = "vless-reality"
 	TransportNaive        TransportFamily = "naive"
 	TransportWebSocketTLS TransportFamily = "websocket-tls"
 	TransportHysteria2    TransportFamily = "hysteria2"
 	TransportTUIC         TransportFamily = "tuic"
-	TransportSnowflake    TransportFamily = "snowflake"
-	TransportWebTunnel    TransportFamily = "webtunnel"
-	TransportMASQUE       TransportFamily = "masque"
-	TransportShadowsocks  TransportFamily = "shadowsocks"
-	TransportTorBridge    TransportFamily = "tor-bridge"
-	TransportWireGuard    TransportFamily = "wireguard"
-	TransportAmneziaWG    TransportFamily = "amneziawg"
-	// Phase 3A widens the parser-accepted family enum with the
-	// V3 reserved values per specs/transport-families-v1.md.
-	// Only `webtunnel` ships an engine handler at 3A; the rest
-	// are reserved here so the parser accepts forward-compatible
-	// bundles without bumping the spec version.
-	TransportPsiphon         TransportFamily = "psiphon"
-	TransportConjure         TransportFamily = "conjure"
+
+	// TransportSnowflake — RE-SCOPED, not impossible.
+	// Snowflake is reachable, but ONLY as a Tor pluggable
+	// transport driven by the `tor` outbound (sing-box 1.13.12
+	// registers `tor`; it does not register `snowflake`). It is
+	// NOT reachable by vendoring `pion/webrtc` into core/go.mod.
+	// Phase 3B wrote a Handler + WebRTCDialer state machine for
+	// that path; Wave 5 deleted it (`core/transports/snowflake`,
+	// zero references outside its own tests) because the path is
+	// not being taken: it drags a WebRTC/DTLS/SCTP stack and a
+	// broker rendezvous into the engine for a transport the `tor`
+	// outbound can already carry through torrc. The rendezvous
+	// machinery it used (`core/rendezvous`) stays — that is used
+	// by the ABI.
+	TransportSnowflake TransportFamily = "snowflake"
+
+	// TransportWebTunnel — RE-SCOPED, and re-scoped downward.
+	// WebTunnel is a Tor pluggable transport; like snowflake it
+	// arrives free through the `tor` outbound and has no outbound
+	// of its own in sing-box 1.13.12. Two facts about it are
+	// routinely stated the wrong way round in this repo's older
+	// prose: it is field-effective in CHINA and it FAILS in IRAN,
+	// which is our stated primary target. Do not present it to an
+	// Iranian user as a recommended family.
+	TransportWebTunnel TransportFamily = "webtunnel"
+
+	// TransportMASQUE — STRUCTURALLY UNAVAILABLE at this
+	// engine version, and dormant rather than deleted.
+	// sing-box 1.13.12 registers NO masque outbound (see
+	// `include/registry.go`: direct, block, selector, urltest,
+	// socks, http, shadowsocks, vmess, trojan, naive, tor, ssh,
+	// shadowtls, vless, anytls, + the with_quic set). There is
+	// therefore nothing to dial with, and separately nothing to
+	// serve with: MASQUE's value is riding a large provider's
+	// existing CONNECT-UDP infrastructure, which a self-hosted
+	// publisher does not have — a self-hosted MASQUE proxy is a
+	// single-tenant QUIC endpoint with none of the anonymity-set
+	// benefit that motivates RFC 9298 in the first place.
+	// What would have to become true: an upstream sing-box
+	// release registering a masque outbound, or a provider
+	// relationship. Neither is a code change here.
+	TransportMASQUE TransportFamily = "masque"
+
+	// TransportShadowsocks means SHADOWSOCKS-2022 and nothing else.
+	// Daal's publisher mints exactly one method under this name,
+	// 2022-blake3-aes-128-gcm; it never serves a legacy AEAD cipher
+	// (no replay protection, defeated by active probing) or a stream
+	// cipher. The family string stays "shadowsocks" deliberately: it
+	// is already in every shipped client's accepted enum, and a new
+	// "shadowsocks-2022" value would be wire-breaking for packs that
+	// older builds must keep importing.
+	//
+	// It is the only family Daal serves with NO TLS handshake in it,
+	// which is its entire reason for existing — the Xue et al. (USENIX
+	// Security 2024) nested-TLS classifier threatens vless-reality,
+	// websocket-tls and naive simultaneously, and cannot see this one.
+	// It is correlation-breaking diversity and NOT a stronger tier:
+	// shadowsocks is the best-studied target of entropy and
+	// packet-length classifiers, so it is weak on its own.
+	TransportShadowsocks TransportFamily = "shadowsocks"
+	TransportTorBridge   TransportFamily = "tor-bridge"
+
+	// TransportWireGuard — DIALABLE SINCE WAVE 5, and this comment
+	// carried the pre-Wave-5 reason for a wave after the reason stopped
+	// being true. Corrected in the repair pass, because this file is
+	// the one the next engineer opens.
+	//
+	// What is now true: sing-box models WireGuard as an `endpoints[]`
+	// adapter, not an outbound, and `core/engine/config.go` grew the
+	// `Endpoints []map[string]any` slot for it; `bundle/go/uri/
+	// wireguard.go` emits a real WireGuardEndpointOptions object with
+	// `"type":"wireguard"` (it emitted `"amnezia-wg"` before, which is
+	// registered nowhere); and the Android engine is built with
+	// `with_wireguard`, so the endpoint is registered rather than
+	// stubbed. It is MaturityExperimental in
+	// `core/routestore/family.go`.
+	//
+	// WHAT THE LABEL MUST NOT BORROW. AmneziaWG — WireGuard plus
+	// obfuscation — is the most resilient transport measured in Iran.
+	// PLAIN WireGuard, which is all this build can dial, is a named
+	// immediate-block target there and is UDP, which the adversary
+	// document states the intent to block completely and permanently.
+	// A WireGuard route is worth having where WireGuard is allowed and
+	// is among the first things to die where it is not. No copy may
+	// borrow AmneziaWG's track record for it.
+	//
+	// Daal does not SERVE this family: no relay inbound, no
+	// per-recipient credential, no firewall rule. Paste/import only.
+	TransportWireGuard TransportFamily = "wireguard"
+
+	// TransportAmneziaWG — STILL cannot be EXPRESSED, and the reason is
+	// the protocol rather than the plumbing. sing-box 1.13.12 contains
+	// no AmneziaWG code whatsoever (`grep -ri amnezia` over the module
+	// returns nothing), so there is nowhere to put the Jc/Jmin/Jmax/
+	// S1/S2/H1..H4 parameters that ARE the family. An AmneziaWG conf
+	// imports as a DOWNGRADED plain-wireguard route, labelled
+	// `wireguard`, because WireGuard is what goes on the wire.
+	// MaturityUnsupported in `core/routestore/family.go` — NOT
+	// "experimental", because experimental invites the user to flip the
+	// experimental gate and watch every route fail identically.
+	// Promoting it requires an engine that implements AmneziaWG, not a
+	// relabelling.
+	TransportAmneziaWG TransportFamily = "amneziawg"
+
+	// Phase 3A widened the parser-accepted family enum with the
+	// V3 reserved values per specs/transport-families-v1.md, on
+	// the assumption that each would later grow a handler. Two of
+	// them cannot, for reasons that are properties of the
+	// protocols and not of this codebase. They are recorded here
+	// so the question is not re-opened every six months.
+
+	// TransportPsiphon — STRUCTURALLY UNAVAILABLE to a
+	// self-hosted publisher. Psiphon is a third party's
+	// proprietary network operated by Psiphon Inc.; you can hand
+	// a client OFF to it, you cannot HOST it. There is no server
+	// side for a Daal publisher to run, so a "psiphon route" can
+	// never be something this project mints — at most it is a
+	// pointer to somebody else's infrastructure, carried under
+	// their terms and their GPLv3 client. `core/go.mod` does not
+	// require psiphon-tunnel-core and never has; the
+	// `psiphon_compiled_in` diagnostic said `true` for that
+	// non-existent tree until Wave 5 corrected it, and Wave 5
+	// deleted the zero-reference `core/transports/psiphon`
+	// skeleton that documented how the absent tree would be
+	// wired.
+	// What would have to become true: a vendored GPLv3 client
+	// tree AND an accepted relationship with Psiphon Inc. Neither
+	// is a transport-family decision.
+	TransportPsiphon TransportFamily = "psiphon"
+
+	// TransportConjure — STRUCTURALLY UNAVAILABLE to anyone
+	// self-hosting, by design of the technique. Conjure is
+	// refraction networking: it works because a COOPERATING ISP
+	// runs a refraction station in the middle of the network,
+	// tapping a transit link and answering for unused ("phantom")
+	// addresses inside that ISP's own space. The station is the
+	// product; the client half is worthless without it. A Daal
+	// publisher renting a VPS has no transit link to tap and no
+	// address space to phantom into, so there is nothing to
+	// deploy. `core/go.mod` does not require gotapdance and never
+	// has; `conjure_compiled_in` claimed an "Apache-2.0 vendored
+	// tree ships unconditionally" that is not in the module graph.
+	// What would have to become true: a partnership with a
+	// network operator running a station. Not a code change.
+	TransportConjure TransportFamily = "conjure"
+
 	TransportTransportModule TransportFamily = "transport_module"
 	TransportLifelineRelay   TransportFamily = "lifeline_relay"
 	TransportOther           TransportFamily = "other"
+
+	// Wave 5. anytls — the one family whose padding and native
+	// session reuse are IN the protocol rather than bolted on
+	// (option/anytls.go: PaddingScheme on the inbound;
+	// MinIdleSession / IdleSessionTimeout on the outbound). The
+	// shipped engine already registers the outbound
+	// (include/registry.go:92), so the client half costs no new
+	// dependency.
+	//
+	// THIS VALUE IS WIRE-BREAKING AND THE BREAK IS AT PACK
+	// GRANULARITY, NOT ROUTE GRANULARITY. Every client shipped
+	// before Wave 5 — Go and Rust alike — rejects the ENTIRE
+	// bundle when any single route names a family it does not
+	// know:
+	//
+	//	sbp.go      for _, route := range b.Manifest.Routes {
+	//	                if err := validateRoute(...); err != nil { return err }
+	//	            }
+	//	sbp.go      validateRoute -> !validTransport(...) -> ErrInvalidEnum
+	//	sbp.rs:180  !TRANSPORT_FAMILIES.contains(...) -> Error::InvalidEnum
+	//	importer    classifyVerifyError(ErrInvalidEnum) -> "bundle_corrupted"
+	//
+	// So an old recipient handed a pack containing ONE anytls
+	// route loses the other three working routes too, and is told
+	// the pack is corrupt — a diagnosis that sends them looking
+	// for a transfer error that did not happen.
+	//
+	// That is why anytls is gated on SpecVersionAnyTLS. A pack
+	// carrying an anytls route MUST declare spec_version >= 5
+	// (enforced in validateRoute); an old verifier then stops at
+	// the spec gate, BEFORE the route loop, and says "unsupported
+	// spec version" — which is true, actionable, and does not
+	// accuse the sender of shipping a broken file. A pack with no
+	// anytls route keeps its old spec_version and imports on old
+	// clients completely unchanged.
+	//
+	// From spec_version 5 onward the blast radius is one route:
+	// see the errUnknownFamily branch in verifyBundleCore. That
+	// rule cannot be backported into binaries already in the
+	// field, which is the whole cost of this value.
+	TransportAnyTLS TransportFamily = "anytls"
 )
+
+// SpecVersionAnyTLS is the manifest spec_version at which two things
+// become true at once, and they are deliberately coupled:
+//
+//  1. `anytls` is a legal transport_family.
+//  2. An UNKNOWN transport_family stops being fatal to the pack. The
+//     offending route is dropped from the usable set and every other
+//     route imports normally (verifyBundleCore / UsableRoutes).
+//
+// Coupling them is the point. Rule 2 is what makes the NEXT family
+// cheap; rule 1 is the family that had to pay full price to establish
+// it. A spec_version-5 recipient can be handed a spec_version-6 pack
+// naming families it has never heard of and will still come away with
+// every route it does understand.
+//
+// Anything at or below spec_version 4 keeps the historical behaviour
+// byte for byte — unknown family rejects the bundle with
+// ErrInvalidEnum — so already-distributed packs and the cross-language
+// fixture corpus are untouched.
+const SpecVersionAnyTLS = 5
 
 type Manifest struct {
 	SpecVersion int                  `json:"spec_version"`

@@ -252,3 +252,114 @@ func TestCandidatesForProfile_HappyPathStillWorks(t *testing.T) {
 		}
 	}
 }
+
+// TestSingBoxConfigServesTUICOnlyWhenSelected pins the provision-time
+// half of the tuic decision: the inbound exists iff the relay's family
+// set names it, and when it does exist it agrees with relayports.
+//
+// Conditional, not created-on-first-use like naive/ws, because binding
+// 8443/udp is a permanent, externally visible property of the relay and
+// the ufw rule that has to accompany it is baked by cloud-init at first
+// boot with no upgrade path. The inbound, both firewalls and the minted
+// pack can only agree if the family set is decided once, here.
+func TestSingBoxConfigServesTUICOnlyWhenSelected(t *testing.T) {
+	inboundsByTag := func(body string) map[string]map[string]any {
+		t.Helper()
+		var doc struct {
+			Inbounds []map[string]any `json:"inbounds"`
+		}
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("config is not valid JSON: %v\n%s", err, body)
+		}
+		out := map[string]map[string]any{}
+		for _, in := range doc.Inbounds {
+			tag, _ := in["tag"].(string)
+			out[tag] = in
+		}
+		return out
+	}
+
+	// Not selected: no tuic-in at all. A relay that does not serve the
+	// family must look exactly as it did before this wave.
+	off := inboundsByTag(singBoxConfigForFamilies("cdn.example-host.net",
+		[]string{"vless-reality", "hysteria2", "naive", "websocket-tls"}))
+	if _, present := off["tuic-in"]; present {
+		t.Error("tuic-in must not exist on a relay whose profile did not enable tuic")
+	}
+	// The two unconditional inbounds are untouched either way.
+	for _, tag := range []string{"vless-in", "hy2-in"} {
+		if _, ok := off[tag]; !ok {
+			t.Errorf("%s must always be present", tag)
+		}
+	}
+
+	on := inboundsByTag(singBoxConfigForFamilies("cdn.example-host.net",
+		[]string{"vless-reality", "hysteria2", "tuic"}))
+	in, ok := on["tuic-in"]
+	if !ok {
+		t.Fatalf("tuic-in missing from a relay that serves tuic: %v", on)
+	}
+	if in["type"] != "tuic" {
+		t.Errorf("tuic-in type = %v", in["type"])
+	}
+	ep := relayports.For("tuic")
+	if got := int(in["listen_port"].(float64)); got != ep.Port {
+		t.Errorf("tuic-in listen_port = %d, want relayports' %d", got, ep.Port)
+	}
+	// Empty users[] is correct and must stay: sing-box's tuic inbound
+	// has no "missing users" fatal (unlike naive), so the inbound can
+	// exist from first boot and the mgmt service fills it per recipient.
+	if users, ok := in["users"].([]any); !ok || len(users) != 0 {
+		t.Errorf("tuic-in users = %v, want an empty list", in["users"])
+	}
+	if in["congestion_control"] != "bbr" {
+		t.Errorf("congestion_control = %v; a mismatch with the client stalls the session rather than failing it", in["congestion_control"])
+	}
+	tls, _ := in["tls"].(map[string]any)
+	if tls == nil || tls["enabled"] != true {
+		t.Fatalf("tuic requires TLS (protocol/tuic/inbound.go returns ErrTLSRequired): %v", in)
+	}
+	alpn, _ := tls["alpn"].([]any)
+	if len(alpn) != 1 || alpn[0] != "h3" {
+		t.Errorf("tls.alpn = %v, want [h3]: sing-quic's tuic sets no default NextProtos and quic-go refuses a TLS config without one", tls["alpn"])
+	}
+	if tls["certificate_path"] != "/etc/daal/tls-cert.pem" {
+		t.Errorf("tuic-in must use the box's data-plane leaf: %v", tls)
+	}
+}
+
+// TestServedFamiliesDrivesFirewallPorts checks the other consumer of the
+// same resolution: the port list handed to both firewalls.
+func TestServedFamiliesDrivesFirewallPorts(t *testing.T) {
+	fams, err := servedFamilies("iran-default", []string{"vless-reality", "tuic"})
+	if err != nil {
+		t.Fatalf("servedFamilies: %v", err)
+	}
+	got := relayports.ExtraFirewallPortsFor(fams)
+	want := relayports.For("tuic")
+	found := false
+	for _, ep := range got {
+		if ep == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("firewall ports %+v do not open tuic's %+v", got, want)
+	}
+
+	// Default family set (no override) does not enable tuic, so the
+	// port stays shut — the profile ships it default_enabled:false.
+	def, err := servedFamilies("iran-default", nil)
+	if err != nil {
+		t.Fatalf("servedFamilies: %v", err)
+	}
+	for _, ep := range relayports.ExtraFirewallPortsFor(def) {
+		if ep == want {
+			t.Errorf("default relay must not open tuic's %+v", want)
+		}
+	}
+	// And the sing-box config agrees with the firewall about it.
+	if strings.Contains(singBoxConfigForFamilies("x.example.net", def), `"tuic-in"`) {
+		t.Error("default relay must not bind a tuic inbound either")
+	}
+}

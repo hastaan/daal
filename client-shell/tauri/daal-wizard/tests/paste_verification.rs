@@ -138,7 +138,7 @@ fn other_corpus_refusals_survive_the_paste_path() {
     // Nothing about arriving as text softens any other check.
     for (vector, want) in [
         ("fingerprint-mismatch.sbp", "ErrFingerprintMismatch"),
-        ("invalid-spec-v5.sbp", "ErrUnsupportedSpec"),
+        ("invalid-spec-v6.sbp", "ErrUnsupportedSpec"),
         ("expired-route.sbp", "ErrExpiredRoute"),
         ("missing-profile.sbp", "ErrMissingProfile"),
         ("unknown-scarcity.sbp", "ErrInvalidEnum"),

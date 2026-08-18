@@ -100,7 +100,7 @@
     "settings.advanced.experimental": "خانواده‌های آزمایشی",
     "settings.advanced.experimental.help": "فقط ترجیح شما را ثبت می‌کند. انتخاب مسیر هنوز آن را در نظر نمی‌گیرد و مسیرهای آزمایشی از همین حالا قابل انتخاب‌اند.",
     "settings.advanced.masque": "زیرحالت MASQUE",
-    "settings.advanced.masque.help": "نسخهٔ مشخصی از HTTP را برای تونل‌های MASQUE اجباری کن.",
+    "settings.advanced.masque.help": "فقط ترجیح شما را ثبت می‌کند. دال اصلاً نمی‌تواند MASQUE را برقرار کند — موتوری که با برنامه عرضه می‌شود هیچ پشتیبانی‌ای از MASQUE ندارد — پس هیچ بخشی این تنظیم را نمی‌خواند.",
     "settings.masque.auto": "خودکار",
     "settings.emergency.body": "از سپر اضطراری حتی وقتی صندوقچه قفل است در دسترس است. فعال‌سازی از آنجا هیچ اثر محلی از دال جز پروندهٔ رمزنگاری‌شده باقی نمی‌گذارد.",
     "settings.diagnostics": "تشخیص",

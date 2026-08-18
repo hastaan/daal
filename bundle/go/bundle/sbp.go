@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/url"
 	"path"
@@ -288,11 +289,23 @@ func verifyBundleCore(b *Bundle, recipientPub []byte, now time.Time) error {
 	// Phase 1.5A: spec_version 1 (legacy) and 2 (3A-3F) are accepted.
 	// FRP-1: spec_version 3 (RelayPack) is also accepted.
 	// FRP-7.5: spec_version 4 (sub-key cert chain) is also accepted.
+	// Wave 5: spec_version 5 (anytls + per-route unknown-family
+	// degradation) is also accepted; see SpecVersionAnyTLS.
 	// Setting Manifest.RelayPack requires spec_version >= 3; carrying
-	// trust/subkey-cert.json requires spec_version >= 4. Pre-bump
-	// verifiers reject either via this gate.
+	// trust/subkey-cert.json requires spec_version >= 4; naming
+	// transport_family=anytls requires spec_version >= 5. Pre-bump
+	// verifiers reject each via this gate.
+	//
+	// THIS GATE IS THE WHOLE WIRE-COMPATIBILITY STORY FOR A NEW FAMILY,
+	// because it runs BEFORE the route loop. An old binary handed a
+	// spec-5 pack stops here with ErrUnsupportedSpec ("this build is too
+	// old") instead of reaching validateRoute and returning
+	// ErrInvalidEnum, which the importer renders as "bundle corrupted"
+	// — an accusation against a file that is perfectly well formed.
+	// Neither error lets the old build use the pack; only one of them
+	// tells its user something true.
 	switch b.Manifest.SpecVersion {
-	case 1, 2, 3, 4:
+	case 1, 2, 3, 4, SpecVersionAnyTLS:
 	default:
 		return ErrUnsupportedSpec
 	}
@@ -330,10 +343,41 @@ func verifyBundleCore(b *Bundle, recipientPub []byte, now time.Time) error {
 			}
 		}
 	}
+	// Route loop. Two failure shapes, and keeping them apart is the
+	// point of this block.
+	//
+	// An unknown transport_family means "this pack offers something we
+	// cannot use". Every other route failure — unsafe archive path,
+	// missing profile, expired, revoked, malformed family-specific
+	// fields — means "this pack is wrong", and those stay fatal exactly
+	// as they have always been. Nothing here softens a signature, an
+	// expiry or a revocation check; validateRoute runs all of them
+	// BEFORE it looks at the family, so a route that is dropped for an
+	// unknown family has already had to survive every one.
+	//
+	// At spec_version <= 4 the unknown family is still fatal and still
+	// surfaces as ErrInvalidEnum, byte for byte what every shipped
+	// client and the cross-language fixture corpus expect.
+	usable := 0
 	for _, route := range b.Manifest.Routes {
-		if err := validateRoute(route, b, now); err != nil {
+		err := validateRoute(route, b, now)
+		if errors.Is(err, errUnknownFamily) {
+			if b.Manifest.SpecVersion >= SpecVersionAnyTLS {
+				continue // blast radius: this route, not the pack.
+			}
+			return ErrInvalidEnum
+		}
+		if err != nil {
 			return err
 		}
+		usable++
+	}
+	// A pack whose every route was dropped is not a successful import
+	// with an empty list; it is a pack this build cannot use, and the
+	// recipient deserves to be told that rather than shown an empty
+	// screen. Only reachable at spec_version >= 5.
+	if len(b.Manifest.Routes) > 0 && usable == 0 {
+		return ErrNoUsableRoutes
 	}
 	// Phase 3B: top-level rendezvous_hints[] signature verification.
 	if err := validate3BManifestFields(b); err != nil {
@@ -377,8 +421,24 @@ func verifyBundleCore(b *Bundle, recipientPub []byte, now time.Time) error {
 	return nil
 }
 
+// validateRoute checks one route.
+//
+// ORDER IS LOAD-BEARING. The transport_family check is LAST, after
+// every structural, safety, freshness and revocation check has already
+// passed, because it is the only check whose failure the caller is
+// allowed to downgrade from "reject the pack" to "drop the route"
+// (spec_version >= 5). Putting it first — where it used to be — would
+// mean a route with an unknown family skipped its own unsafe-path and
+// revocation checks on the way out, so a future family name would
+// double as a way to smuggle a zip-slip config path or a revoked route
+// ID past the verifier. It does not, and this ordering is why.
 func validateRoute(route RouteManifestEntry, b *Bundle, now time.Time) error {
-	if !validScarcity(route.ScarcityClass) || !validTransport(route.TransportFamily) {
+	// Scarcity stays hard-fatal and ungated. It is a fixed operational
+	// vocabulary that governs how a route may be USED (modes, caps,
+	// auto-promotion), not what it speaks; there is no forward-compat
+	// story in which a recipient meaningfully carries a route whose
+	// scarcity class it cannot interpret.
+	if !validScarcity(route.ScarcityClass) {
 		return ErrInvalidEnum
 	}
 	if unsafeArchivePath(route.ConfigPath) {
@@ -427,7 +487,63 @@ func validateRoute(route RouteManifestEntry, b *Bundle, now time.Time) error {
 	if err := validate3FRouteFields(route); err != nil {
 		return err
 	}
+	// Wave 5, and LAST on purpose — see this function's doc comment.
+	//
+	// A pack may not name anytls while claiming an older spec_version.
+	// This check exists to stop the PUBLISHER, not the recipient: a
+	// spec-4 pack carrying an anytls route is a pack that every
+	// already-shipped client rejects whole, and reports as corrupted.
+	// Refusing to verify it here means such a pack fails at mint time,
+	// on the publisher's own machine, instead of in a recipient's hands
+	// under blackout.
+	if route.TransportFamily == string(TransportAnyTLS) &&
+		b.Manifest.SpecVersion < SpecVersionAnyTLS {
+		return ErrAnyTLSSpecVersionTooOld
+	}
+	if !validTransport(route.TransportFamily) {
+		// Internal sentinel; the caller turns this into either
+		// ErrInvalidEnum (spec <= 4, historical behaviour) or a dropped
+		// route (spec >= 5). It never reaches a caller as-is.
+		return errUnknownFamily
+	}
 	return nil
+}
+
+// RouteUsable reports whether one route of a VERIFIED bundle names a
+// transport family this build understands.
+//
+// Meaningful only after VerifyBundle has returned nil: at
+// spec_version <= 4 an unusable route would have failed the whole
+// bundle, so this can only ever answer false for a spec_version >= 5
+// pack carrying a family from a later build.
+func RouteUsable(route RouteManifestEntry) bool {
+	return validTransport(route.TransportFamily)
+}
+
+// UsableRoutes returns the subset of a VERIFIED bundle's routes that
+// this build can actually represent.
+//
+// Every consumer that turns a manifest into stored routes must iterate
+// THIS rather than b.Manifest.Routes. Verification has already decided
+// that an unknown-family route is droppable rather than fatal; a
+// consumer that then walked the raw list would undo that decision and
+// persist a route with a family string nothing downstream can dial —
+// which is the "mints but cannot be dialled" failure, arrived at from
+// the recipient side instead of the publisher side.
+//
+// Returns a nil slice for a nil bundle. The result aliases the
+// manifest's entries; callers must not mutate them.
+func UsableRoutes(b *Bundle) []RouteManifestEntry {
+	if b == nil {
+		return nil
+	}
+	out := make([]RouteManifestEntry, 0, len(b.Manifest.Routes))
+	for _, r := range b.Manifest.Routes {
+		if RouteUsable(r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // rendezvousChannelV1 is the closed list of v1 rendezvous
@@ -1076,6 +1192,23 @@ func validate3FManifestFields(b *Bundle) error {
 	return nil
 }
 
+// ValidTransportFamily reports whether `value` is a member of the
+// closed TransportFamily enum. EXPORTED IN THE WAVE-5 REPAIR PASS so
+// there is exactly ONE family list in the tree.
+//
+// There used to be a second, hand-kept copy in
+// publisher/deploy/relaypack.validTransport. It was never given
+// `anytls`, so `renderCandidates` rejected an anytls candidate with
+// `unknown transport_family "anytls"` and `BuildOperatorPack` failed
+// OUTRIGHT — the operator got no pack at all, not even the four
+// families that do work. A publisher-side list that is a subset of the
+// recipient-side list does not fail closed on the route; it fails
+// closed on the whole bundle.
+//
+// Anything that needs to know "is this a family name we understand"
+// calls this. Do not copy the switch.
+func ValidTransportFamily(value string) bool { return validTransport(value) }
+
 func validTransport(value string) bool {
 	switch TransportFamily(value) {
 	case TransportVLESSReality, TransportNaive, TransportWebSocketTLS,
@@ -1086,6 +1219,11 @@ func validTransport(value string) bool {
 		// specs/transport-families-v1.md.
 		TransportPsiphon, TransportConjure, TransportTransportModule,
 		TransportLifelineRelay,
+		// Wave 5 widens the closed list. Legal only at
+		// spec_version >= SpecVersionAnyTLS; validateRoute enforces
+		// that separately, because this predicate is also what
+		// UsableRoutes consults after verification.
+		TransportAnyTLS,
 		TransportOther:
 		return true
 	default:

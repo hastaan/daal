@@ -1,10 +1,12 @@
 {
   "name": "iran-tcp443",
-  "description": "TCP/443-only mix for networks where UDP is throttled, blocked or rate-limited, and where a QUIC-shaped flow is itself the signal. Drops every udp_gated family; keeps the multiplexed TLS ones.",
+  "description": "NO-UDP mix for networks where UDP is throttled, blocked or rate-limited, and where a QUIC-shaped flow is itself the signal. Drops every udp_gated family. NOT a 443-only mix, despite the profile name: only vless-reality lands on 443. naive is on 8444, websocket-tls on 8445, and the two opt-in families on 8446 (shadowsocks) and 8447 (anytls). On a strict 53/80/443 whitelist — Iran's stated posture — everything but vless-reality is dropped before any classifier runs.",
   "spec_version": 1,
   "candidates": [
     {"family": "vless-reality", "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
     {"family": "websocket-tls", "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
-    {"family": "naive",         "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false}
+    {"family": "naive",         "default_enabled": true,  "probing_risk_class": "low", "udp_gated": false},
+    {"family": "shadowsocks",   "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": false, "multiplex": {"enabled": false}},
+    {"family": "anytls",        "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": false, "multiplex": {"enabled": false}}
   ]
 }

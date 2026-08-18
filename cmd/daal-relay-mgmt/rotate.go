@@ -109,6 +109,13 @@ func (c *credRotation) retire(v string) {
 //	naive      → users[].password, matched on users[].username. Note the
 //	             different key: naive rows spell it `username`, and
 //	             matching on `name` there silently rotates nobody.
+//	tuic       → users[].uuid AND users[].password, matched on
+//	             users[].name. Both halves move together because tuic
+//	             authenticates on the pair: rotating the password while
+//	             leaving the uuid would keep half of a leaked credential
+//	             live, and the uuid is the half that is also the
+//	             recipient's stable identifier on this tier. Only
+//	             present on a relay provisioned to serve the family.
 //
 // Explicitly NOT touched:
 //
@@ -131,6 +138,36 @@ func rotateRecipientCreds(doc map[string]any, name string, fresh userCreds) (*cr
 	// addUserToSingbox's effectiveWSPath return exists for.
 	res.Creds.WSPath = wsInboundPath(doc)
 	res.Creds.RealityShortID = ""
+	// Same fail-closed contract as /users/provision: the tuic pair is
+	// echoed only if this box really rotated a tuic row. A relay whose
+	// profile did not enable the family must not hand back credentials
+	// the publisher would mint into an undialable route.
+	res.Creds.TUICUUID, res.Creds.TUICPassword = "", ""
+	// Same for shadowsocks, with one extra rule that is easy to get
+	// backwards: the rotation replaces the recipient's uPSK and NEVER the
+	// box-wide iPSK. The iPSK is the first half of the password in every
+	// pack this relay has ever minted, so re-minting it to revoke one
+	// person would take the shadowsocks tier away from everybody — the
+	// same reason the shared ws path is left alone. The echoed
+	// SSPassword is therefore the LIVE iPSK joined to the FRESH uPSK,
+	// assembled from the rewritten document below.
+	res.Creds.SSPassword, res.Creds.SSMethod = "", ""
+	// Same for anytls, and this is the field that proved the rule
+	// necessary rather than tidy. Before the Wave-5 repair pass there
+	// was no `case "anytls"` below AND no blanking here, so
+	// `res := &credRotation{Creds: fresh}` echoed a password
+	// mintCreds had just generated and the box had never stored: the
+	// publisher minted a route authenticating with a secret nothing
+	// on 8447 would accept, and the SEIZED password stayed live
+	// forever because nothing retired it. A rotation that reports
+	// success, breaks the route and revokes nothing is strictly worse
+	// than one that fails.
+	//
+	// THE BLANKING IS THE LOAD-BEARING HALF. Every future field added
+	// to userCreds repeats this bug unless it is blanked here and set
+	// only by the case that really rewrote a row. Blank first, set on
+	// success.
+	res.Creds.AnyTLSPassword = ""
 
 	for _, raw := range asSlice(doc["inbounds"]) {
 		in, _ := raw.(map[string]any)
@@ -173,6 +210,71 @@ func rotateRecipientCreds(doc map[string]any, name string, fresh userCreds) (*cr
 				res.retire(old)
 				u["password"] = fresh.Hy2Password
 			}
+			res.Inbounds = append(res.Inbounds, tag)
+		case "tuic":
+			idxs := matchUserRows(users, "name", name)
+			if len(idxs) == 0 {
+				continue
+			}
+			for _, i := range idxs {
+				u, _ := users[i].(map[string]any)
+				oldUUID, _ := u["uuid"].(string)
+				oldPW, _ := u["password"].(string)
+				res.retire(oldUUID)
+				res.retire(oldPW)
+				u["uuid"] = fresh.TUICUUID
+				u["password"] = fresh.TUICPassword
+			}
+			res.Creds.TUICUUID, res.Creds.TUICPassword = fresh.TUICUUID, fresh.TUICPassword
+			res.Inbounds = append(res.Inbounds, tag)
+		case "shadowsocks":
+			// One row per recipient on the single shared ss-in inbound,
+			// matched on `name` (SS rows spell it `name`, unlike naive's
+			// `username` below). Only users[].password — the uPSK — moves;
+			// inbound.password — the iPSK — is deliberately untouched.
+			idxs := matchUserRows(users, "name", name)
+			if len(idxs) == 0 {
+				continue
+			}
+			for _, i := range idxs {
+				u, _ := users[i].(map[string]any)
+				old, _ := u["password"].(string)
+				res.retire(old)
+				u["password"] = fresh.SSUserPSK
+			}
+			// Assembled from THIS document after the write, so the echoed
+			// value is the live iPSK and not something remembered.
+			if pw := ssClientPassword(doc, name); pw != "" {
+				res.Creds.SSPassword, res.Creds.SSMethod = pw, ssMethod
+			}
+			res.Inbounds = append(res.Inbounds, tag)
+		case "anytls":
+			// One row per recipient on the single shared anytls-in
+			// inbound, matched on `name` (anytls rows spell it `name`,
+			// like SS and unlike naive's `username` below). The
+			// password is the whole credential — anytls hashes it into
+			// the session key, there is no second half — so replacing
+			// it is the entire rotation for this family, and the old
+			// value must be retired or the seized credential keeps
+			// working on 8447.
+			//
+			// The inbound's `padding_scheme` is deliberately NOT
+			// touched: it is per-relay, adopted by the client over the
+			// wire, and shared by every recipient. Re-generating it to
+			// revoke one person would re-shape the traffic of everyone
+			// on this relay, the same reason the shared ws path is left
+			// alone.
+			idxs := matchUserRows(users, "name", name)
+			if len(idxs) == 0 {
+				continue
+			}
+			for _, i := range idxs {
+				u, _ := users[i].(map[string]any)
+				old, _ := u["password"].(string)
+				res.retire(old)
+				u["password"] = fresh.AnyTLSPassword
+			}
+			res.Creds.AnyTLSPassword = fresh.AnyTLSPassword
 			res.Inbounds = append(res.Inbounds, tag)
 		case "naive":
 			// `username`, not `name`. sing-box's naive inbound uses a
@@ -353,6 +455,7 @@ type tlsRotation struct {
 //	body empty    → rotate what the box owns: mint a new shared ws path, and
 //	                repair any drift between server_name and
 //	                reality.handshake.server. The cover host is left alone.
+//
 // The returned rollback closure restores the pre-rotation config; the
 // caller must hand it to applyReload so a failed activation cannot leave
 // a cover identity on disk that nothing outside the box knows about.

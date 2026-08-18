@@ -381,8 +381,17 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 		}
 	}
 
+	// UsableRoutes, NOT parsed.Manifest.Routes. Verification has already
+	// decided that a route naming a transport family this build does not
+	// know is droppable rather than fatal (spec_version >= 5); walking
+	// the raw list here would quietly undo that decision and persist a
+	// route whose family nothing downstream can dial — the "mints but
+	// cannot be dialled" failure, reached from the recipient side.
+	//
+	// At spec_version <= 4 this is a no-op: an unknown family there
+	// fails the whole bundle before this line is reached.
 	var routes []RouteInput
-	for _, r := range parsed.Manifest.Routes {
+	for _, r := range bundle.UsableRoutes(parsed) {
 		profile := parsed.Profiles[r.ConfigPath]
 		ri := RouteInput{
 			RouteID:         r.ID,
@@ -434,10 +443,15 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 			Fingerprint: fp.Hex}, err
 	}
 
+	// RouteCount is what the user is shown ("imported N routes"), so it
+	// counts the routes actually stored, not the routes the manifest
+	// listed. Those differ only when a spec_version >= 5 pack carried a
+	// family from a newer build; reporting the manifest's number there
+	// would promise routes that are not in the route list.
 	v := Verdict{
 		Kind:        VerdictImported,
 		Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA,
-		BundleID: parsed.Manifest.Bundle.ID, RouteCount: len(parsed.Manifest.Routes),
+		BundleID: parsed.Manifest.Bundle.ID, RouteCount: len(routes),
 	}
 	_ = firstSeen
 	return v, nil

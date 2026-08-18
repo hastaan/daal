@@ -35,25 +35,44 @@ the path manager (it carries no engine-side handler). It exists
 solely so a future spec revision can introduce a family without
 older clients producing `bundle_corrupted` on the spot.
 
+**This table is a MIRROR.** The authority is
+`core/routestore/family.go`'s `familyMaturity` map, reconciled
+family-by-family — with the evidence for each verdict — in
+`docs/transport-family-inventory.md`. Wave 5 corrected the table
+below; before that correction it graded nine families higher than
+the code did, including `wireguard`, `amneziawg` and `tor-bridge`
+as *stable* when the engine could not express any of the three
+(two of those three were repaired by other Wave-5 lanes; the
+`amneziawg` claim was simply false).
+
 | Family | Phase | Engine handler | Maturity | Notes |
 |---|---|---|---|---|
 | `vless-reality` | 1B | sing-box | stable | V1 baseline TCP/443 family |
 | `naive` | 1B | sing-box | stable | V1 baseline; treated as TCP/443 |
 | `websocket-tls` | 1B | sing-box | stable | V1 baseline; TCP/443 |
 | `hysteria2` | 1B | sing-box | stable | UDP family; UDP probe gates |
-| `tuic` | 1B | sing-box | stable | UDP family; UDP probe gates |
-| `shadowsocks` | 1B | sing-box | stable | TCP/443 |
-| `tor-bridge` | 1B | sing-box | stable | obfs4 / meek; TCP/443 |
-| `wireguard` | 1B | sing-box; iOS uses 2E sub-engine | stable | UDP family |
-| `amneziawg` | 1B | sing-box | stable | UDP family |
-| **`webtunnel`** | **3A** | sing-box (WebTunnel PT) | **experimental** | **TCP/443 WebSocket-Upgrade; first 3A family** |
-| `snowflake` | 3B | snowflake/client vendored | experimental | WebRTC/DTLS/SCTP; multi-channel rendezvous per `specs/rendezvous-channels-v1.md` |
-| **`masque`** | **3C** | engine-native (3 sub-modes) | **experimental** | **RFC 9298 / 9484; H3 → H2 → Lifeline cascade per `specs/masque-ladder-v1.md`** |
-| **`psiphon`** | **3D** | psiphon-tunnel-core vendored | **experimental** | **Opaque-blob carriage; GPLv3 isolation behind `-tags no_psiphon`; NOT opportunistic. See `specs/psiphon-route-v1.md`** |
-| **`conjure`** | **3D** | gotapdance vendored | **experimental** | **Phantom-pool floors `/24` IPv4 + `/32` IPv6; phantom IP HASHED in diagnostics; opportunistic. See `specs/conjure-route-v1.md`** |
-| **`transport_module`** | **3E** | core/wasm + wazero runtime | **experimental** | **WATER v1 ABI; sandboxed; project-controlled kill-switch; resource caps (16 MiB / 1e9 fuel / 5 s); excludable via `-tags no_wasm`. See `specs/wasm-transport-v1.md`** |
-| `lifeline_relay` | 3G (conditional) | core/lifelinerelay | experimental | Partner-operated only |
+| `tuic` | 1B / Wave 5 | sing-box (`with_quic`) | **experimental** | Whole chain exists after Wave 5: opt-in `tuic-in` on the box (uuid+password per recipient, mandatory `alpn:["h3"]` — sing-quic sets no default for tuic and quic-go refuses a TLS config without one), 8443/udp opened in both firewalls **only on relays that serve it**, client outbound, rotation. **Never soaked.** The one family a relay can be provisioned WITHOUT, so its port never joins the fleet-wide constant. `relayports` puts it on 8443/udp because hysteria2 owns 443/udp (BUG-14). **Copy constraint:** 8443 is outside the target country's 53/80/443 egress whitelist AND it is UDP, which the adversary states the intent to block completely — Daal already ships one UDP tier, so this is diversity on other networks, never a second lifeline there |
+| `shadowsocks` | 1B | sing-box | **experimental** | Dialable and paste-importable; never soaked. Demoted from stable in Wave 1 |
+| `anytls` | Wave 5 | sing-box | **experimental** | Padding scheme + native session reuse are protocol features. Whole chain exists (publisher mints, box serves, port assigned); missing only a device soak. Requires `spec_version >= 5` |
+| `tor-bridge` | 1B / Wave 5 | sing-box `tor` outbound | **experimental** | Carries obfs4, meek_lite, **webtunnel and snowflake** as bridge lines. Publisher-independent — the only route Daal offers with no Daal relay in existence. Experimental because the outbound execs a tor binary the release has to package |
+| `wireguard` | 1B / Wave 5 | sing-box `endpoints[]` (`with_wireguard`) | **experimental** | Was unsupported; the Wave-5 wireguard lane added the `endpoints[]` slot to `SingBoxConfig` and a real endpoint object to the importer. Daal does not SERVE it — paste/import only. **Copy constraint:** plain WireGuard is a named immediate-block target in Iran and must not borrow AmneziaWG's track record |
+| `amneziawg` | 1B | **none** | **unsupported** | sing-box 1.13.12 contains no AmneziaWG code at all, so the `Jc/S1/H1..H4` obfuscation that IS the family has nowhere to live. An AmneziaWG conf imports as a **downgraded plain-wireguard** route, labelled `wireguard` |
+| `webtunnel` | 3A | **none as a family** | **unsupported** | A Tor PLUGGABLE TRANSPORT, not a protocol. Reachable in this build only as `Bridge webtunnel …` inside a `tor-bridge` route. **Effective in China; FAILS in Iran**, our primary target |
+| `snowflake` | 3B | **none as a family** | **unsupported** | Also a Tor PT — reachable as `Bridge snowflake …` under `tor-bridge`. The Phase 3B WebRTC handler was deleted in Wave 5; `pion/webrtc` is not being vendored into `core/go.mod` |
+| `masque` | 3C | **none** | **unsupported** | No masque outbound exists in sing-box 1.13.12, and a self-hosted MASQUE proxy has none of the provider-anonymity-set value that motivates RFC 9298. Dormant, not deferred |
+| `psiphon` | 3D | **none, ever** | **unsupported** | A third party's proprietary NETWORK. A client can hand off to it; a publisher cannot host it. psiphon-tunnel-core has never been in `core/go.mod` |
+| `conjure` | 3D | **none, ever** | **unsupported** | Refraction requires a COOPERATING ISP running a station on a transit link. A rented VPS has neither. gotapdance has never been in `core/go.mod` |
+| `transport_module` | 3E | core/wasm + wazero | **unsupported** | The runtime is real and compiled in; `core/wasm.Dial` has no production caller and nothing turns a module into a sing-box outbound. The one entry here that is a genuine "not yet" |
+| `lifeline_relay` | 3G (conditional) | **none** | **unsupported** | `core/lifelinerelay` does not exist |
 | `other` | 1B | none — parser-only forward-compat | n/a | Never selected by path manager |
+
+**Three of these are STRUCTURALLY unavailable**, not deferred:
+`psiphon`, `conjure` and `masque` cannot be served by anyone
+self-hosting, for reasons that are properties of the protocols.
+The reasons are written onto the enum values themselves in
+`bundle/go/bundle/types.go` so the question is not re-opened. The
+enum values stay reserved forever — removing one is a wire break
+for older clients and buys nothing.
 
 ## Maturity ladder
 
@@ -75,11 +94,24 @@ A family transitions through three maturity levels:
    build with the appropriate transport-family handler compiled
    in.
 
-3A locks `webtunnel` at experimental. Promotion to either of
-the higher levels requires a roadmap-level decision and a fresh
-soak run. The V1 baseline families above are at stable;
-moving any of them DOWN the ladder would be a breaking change
-(it isn't planned for V3).
+Two further levels exist in the code and are not on this ladder,
+because they are not stages a family passes through:
+`MaturityUnhandled` (the V0 `other` forward-compat slot) and
+`MaturityUnsupported` — "this build knows the family by name and
+has verified it cannot carry it". Unsupported is deliberately
+NOT Experimental: Experimental invites the user to enable the
+experimental gate and try, and for these families there is
+nothing behind the gate to enable. Eight of the eighteen values
+sit at Unsupported after Wave 5.
+
+3A locked `webtunnel` at experimental; **Wave 5 moved it to
+unsupported** along with every other V3 family — see the table.
+Promotion up the ladder requires a roadmap-level decision and a
+fresh soak run. Moving a family DOWN the ladder is not a breaking
+change and has now happened twice (Wave 1: wireguard, amneziawg,
+tor-bridge, tuic, shadowsocks; Wave 5: the V3 set). A label that
+overstates what a route can do costs the user a failed connection
+at the moment they need it; correcting it costs nothing.
 
 ## Experimental gate
 
@@ -328,13 +360,26 @@ Locked at 3D:
   opportunistic (the 3C invariant is now expressed via the
   registry rather than as a special-case in the auto-promotion
   detector).
-- `psiphon` ships with the vendored `psiphon-tunnel-core` tree
+- ~~`psiphon` ships with the vendored `psiphon-tunnel-core` tree
   under GPLv3, isolated behind the `-tags no_psiphon` build
   excluder. `psiphon_compiled_in` (diagnostic) flips to `false`
   under that tag and the engine refuses psiphon-route activation.
   `conjure` (Apache-2.0) ships unconditionally; the
   `conjure_compiled_in` flag is reserved for future build-tag
-  conditioning but is constant `true` at 3D.
+  conditioning but is constant `true` at 3D.~~
+
+  > **SUPERSEDED — WAVE 5.** This paragraph described a build that
+  > never existed. Neither `psiphon-tunnel-core` nor `gotapdance` has
+  > ever been in `core/go.mod`, and no build script has ever passed
+  > `-tags no_psiphon`. Both `psiphon_compiled_in` and
+  > `conjure_compiled_in` are now constant `false`, and the
+  > corresponding recorders refuse rather than record. Both families
+  > are `unsupported` in `core/routestore/family.go` for structural
+  > reasons — psiphon is a third party's network you hand off to
+  > rather than host; conjure needs a cooperating ISP running a
+  > refraction station on a transit link it owns. See
+  > `core/abi/refraction_compiled.go`, `specs/psiphon-route-v1.md`
+  > and `specs/conjure-route-v1.md`.
 - Four new optional `routes[]` fields (`psiphon_bundle_blob_b64`,
   `conjure_phantom_subnets`, `conjure_station_pubkey`,
   `conjure_decoy_pool`); see `specs/sbp-v1.md` "Phase 3D

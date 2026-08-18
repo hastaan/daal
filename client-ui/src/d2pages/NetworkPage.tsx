@@ -797,6 +797,7 @@ function FamilyChipView({
     t: (k: string) => string;
     chip: FamilyChip;
 }) {
+    const [open, setOpen] = useState(false);
     const cooled = chip.cooledCount > 0;
     // Three grades now reach this chip, not one boolean:
     //   unsupported — this build cannot dial the family at all
@@ -813,6 +814,19 @@ function FamilyChipView({
     // as ordinary supported families.
     const unsupported = chip.maturity === 'unsupported';
     const exp = chip.maturity === 'experimental';
+    // A per-family help line, when one exists, beats the generic grade
+    // line. The grade says how PROVEN a transport is; it cannot say what
+    // a transport is FOR, and for some families that difference is the
+    // whole point. shadowsocks is the case that forced this: it is the
+    // only family Daal serves with no TLS handshake, so it survives a
+    // classifier that threatens the other three at once — and it is also
+    // the best-studied target of entropy classifiers, so it is weak on
+    // its own. "Experimental transport — unproven in the field" is true
+    // and tells the user neither half. translate() returns the key
+    // unchanged when there is no string, which is the miss signal.
+    const famHelpKey = `network.family.${chip.family.replace(/-/g, '_')}.help`;
+    const famHelpRaw = t(famHelpKey);
+    const famHelp = famHelpRaw === famHelpKey ? '' : famHelpRaw;
     const bg = cooled
         ? 'rgba(200,85,61,0.10)'
         : unsupported
@@ -834,19 +848,43 @@ function FamilyChipView({
         : exp
         ? 'var(--gold-warm)'
         : 'var(--fg)';
+    // The generic "this build cannot dial it" first, because that is the
+    // part that decides whether the route can be used at all — then the
+    // family's own explanation when there is one. amneziawg needs both:
+    // a route so labelled cannot be dialled AND an AmneziaWG config the
+    // user pastes becomes an ordinary WireGuard route, which is a
+    // different fact and the one they will otherwise be surprised by.
+    const detail = cooled
+        ? `${t('network.cooled')}${chip.lastErrorTag ? ` · ${chip.lastErrorTag}` : ''}`
+        : unsupported
+        ? `${t('network.family.unsupported.help')}${famHelp ? ` ${famHelp}` : ''}`
+        : exp
+        ? famHelp || t('network.family.experimental.help')
+        : famHelp;
+
+    // TAP TO REVEAL, NOT HOVER TO REVEAL.
+    //
+    // Every per-family value claim on this page used to be delivered
+    // ONLY through `title=`, which is a hover tooltip. Android is the
+    // primary target platform and the only hardware this project has;
+    // a mobile WebView has no hover, so `title` never fires and the
+    // whole sentence — tuic's "this is not a new way in", wireguard's
+    // "one of the first shapes Iranian operators block on sight",
+    // shadowsocks' "not a stronger route" — was unreachable on the one
+    // device that matters. The badge word alone ("experimental") says
+    // none of it.
+    //
+    // So the chip is a button: `title` still serves desktop hover, and
+    // a tap expands the same text inline. flexBasis 100% makes the
+    // expanded line take its own row inside the wrapping flex
+    // container rather than squeezing the chips.
     return (
-        <span
-            title={
-                cooled
-                    ? `${chip.family} · ${t('network.cooled')}${
-                          chip.lastErrorTag ? ` · ${chip.lastErrorTag}` : ''
-                      }`
-                    : unsupported
-                    ? `${chip.family} · ${t('network.family.unsupported.help')}`
-                    : exp
-                    ? `${chip.family} · ${t('network.family.experimental.help')}`
-                    : chip.family
-            }
+        <>
+        <button
+            type="button"
+            onClick={detail ? () => setOpen((v) => !v) : undefined}
+            aria-expanded={detail ? open : undefined}
+            title={detail ? `${chip.family} · ${detail}` : chip.family}
             style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -859,6 +897,8 @@ function FamilyChipView({
                 padding: '2px 8px',
                 borderRadius: 999,
                 letterSpacing: '0.04em',
+                cursor: detail ? 'pointer' : 'default',
+                textAlign: 'start',
             }}
         >
             {cooled && '🚨 '}
@@ -870,7 +910,25 @@ function FamilyChipView({
                 : typeof chip.healthPct === 'number'
                 ? ` · ${chip.healthPct}%`
                 : ` · ${t('network.unmeasured')}`}
-        </span>
+            {detail && (open ? ' ▴' : ' ▾')}
+        </button>
+        {detail && open && (
+            <div
+                style={{
+                    flexBasis: '100%',
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    color: 'var(--muted)',
+                    background: bg,
+                    border,
+                    borderRadius: 'var(--r-card)',
+                    padding: '6px 10px',
+                }}
+            >
+                {detail}
+            </div>
+        )}
+        </>
     );
 }
 

@@ -95,6 +95,20 @@ for g in tools/check-hardcoded-strings.sh tools/check-diagnostics-redaction.sh t
 done
 [[ -f tools/check-plumbing.mjs ]] && step "check-plumbing.mjs" node tools/check-plumbing.mjs
 
+# One transport family lives in three tables in two languages with no
+# import edge between them (the pack vocabulary, the dial-capability
+# table, and the badge the user reads). The TS mirror drifted twice in
+# Wave 5 alone, and a family missing from it renders as "unhandled"
+# rather than failing, so nothing else notices.
+[[ -f tools/check-family-maturity.mjs ]] && step "check-family-maturity.mjs" node tools/check-family-maturity.mjs
+
+# The box→publisher credential struct is declared three times in two
+# languages with no import edge. Three separate fields have now been
+# silently dropped on that hop (mux_inbound in Wave 2, anytls_password in
+# Wave 5), each costing a whole wave, each invisible because serde and
+# encoding/json both ignore unknown keys. Nothing else can see this seam.
+[[ -f tools/check-creds-mirror.mjs ]] && step "check-creds-mirror.mjs" node tools/check-creds-mirror.mjs
+
 # The QR sender has no camera in CI, so this gate tests everything up to
 # the glass: the vendored QR encoder against an independent one
 # (skip2/go-qrcode), the rendered symbols against a real scanner (jsQR),

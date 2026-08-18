@@ -65,9 +65,12 @@ func buildStubPack(t *testing.T, families []string) []byte {
 func TestRewriteProfiles_KeepsSignatureAndInjectsOutbounds(t *testing.T) {
 	sbp := buildStubPack(t, []string{"vless-reality", "websocket-tls"})
 
-	rewritten, err := RewriteProfilesForRecipient(sbp, fullParams())
+	rewritten, skipped, err := RewriteProfilesForRecipient(sbp, fullParams())
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("nothing should have been skipped here: %v", skipped)
 	}
 
 	// 1. The rewritten pack still verifies (signature intact).
@@ -98,13 +101,66 @@ func TestRewriteProfiles_KeepsSignatureAndInjectsOutbounds(t *testing.T) {
 	}
 }
 
-func TestRewriteProfiles_FailsClosedOnUnserviceableFamily(t *testing.T) {
-	// hysteria2 with no hy2 password → the whole rewrite must error,
-	// never ship a route that can't connect.
+func TestRewriteProfiles_FailsClosedWhenNoRouteRenders(t *testing.T) {
+	// A pack whose ONLY route cannot be rendered is still a hard error:
+	// an .sbp with no connectable route is not a pack.
 	sbp := buildStubPack(t, []string{"hysteria2"})
 	p := fullParams()
 	p.Hy2Password = ""
-	if _, err := RewriteProfilesForRecipient(sbp, p); err == nil {
-		t.Fatal("expected rewrite to fail closed on missing hy2 password")
+	if _, _, err := RewriteProfilesForRecipient(sbp, p); err == nil {
+		t.Fatal("expected rewrite to fail closed when not one route renders")
+	}
+}
+
+// WAVE-5 REPAIR REGRESSION. One family's missing credential used to
+// abort the whole rewrite, so a relay running an mgmt artifact that
+// predates (say) tuic could not have ANY recipient added to it — the
+// four working families died with the one that was missing. The blast
+// radius of the old fail-closed was strictly larger than the problem.
+func TestRewriteProfiles_DegradesPerRouteRatherThanKillingThePack(t *testing.T) {
+	sbp := buildStubPack(t, []string{"vless-reality", "hysteria2", "websocket-tls"})
+	p := fullParams()
+	p.Hy2Password = "" // the relay reported no hysteria2 credential
+
+	rewritten, skipped, err := RewriteProfilesForRecipient(sbp, p)
+	if err != nil {
+		t.Fatalf("rewrite must survive one unrenderable route: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0].Family != "hysteria2" {
+		t.Fatalf("skipped = %+v, want exactly the hysteria2 route", skipped)
+	}
+	if skipped[0].Reason == "" {
+		t.Error("a skipped route with no reason tells the operator nothing")
+	}
+
+	parsed, err := bundle.ParseSBP(bytes.NewReader(rewritten), int64(len(rewritten)))
+	if err != nil {
+		t.Fatalf("parse rewritten: %v", err)
+	}
+	if err := bundle.VerifyBundle(parsed); err != nil {
+		t.Fatalf("degraded pack failed verification: %v", err)
+	}
+	for _, route := range parsed.Manifest.Routes {
+		var ob map[string]any
+		if err := json.Unmarshal(parsed.Profiles[route.ConfigPath], &ob); err != nil {
+			t.Fatalf("route %s profile not JSON: %v", route.ID, err)
+		}
+		if route.TransportFamily == "hysteria2" {
+			// The route survives in the SIGNED manifest — it cannot be
+			// removed without breaking the signature — so what matters
+			// is that its profile has no outbound type and says why.
+			if ob["type"] != nil {
+				t.Errorf("skipped route %s still carries an outbound type %v; it would be dialled",
+					route.ID, ob["type"])
+			}
+			if ob[unavailableMarkerKey] == nil {
+				t.Errorf("skipped route %s carries no %s marker", route.ID, unavailableMarkerKey)
+			}
+			continue
+		}
+		if ob["type"] == nil || ob["type"] == "" {
+			t.Errorf("route %s (%s) should have rendered but has no type",
+				route.ID, route.TransportFamily)
+		}
 	}
 }

@@ -8,6 +8,7 @@ package hetzner
 
 import (
 	"context"
+	"daal/publisher/deploy/relayports"
 	"net"
 	"time"
 )
@@ -119,7 +120,13 @@ type hcloudClient interface {
 	// teardown is straightforward. Returns the firewall ID; safe
 	// to call multiple times for the same server (returns the
 	// existing firewall ID without re-attaching).
-	FirewallEnsureForServer(ctx context.Context, serverID string) (firewallID string, err error)
+	// extraPorts are the non-baseline data-plane ports this relay
+	// serves, from relayports.ExtraFirewallPortsFor(<its families>).
+	// It is a parameter and not a package constant because the set is
+	// no longer identical on every relay: a family the toolbox profile
+	// can switch off must not leave its port open on relays that do not
+	// serve it, and must not be shut on the ones that do.
+	FirewallEnsureForServer(ctx context.Context, serverID string, extraPorts []relayports.Endpoint) (firewallID string, err error)
 
 	// FirewallDeleteForServer detaches and deletes the per-server
 	// firewall created by FirewallEnsureForServer. Idempotent:

@@ -6,12 +6,45 @@ import (
 	"daal/core/transports/conjure"
 )
 
+// DORMANT (Wave 5) — this file records activations that cannot
+// happen, and it is kept, not deleted, so the reason survives.
+//
 // Phase 3D. Refraction-family (psiphon + conjure) per-session
 // recording helpers. NO new release-surface ABI symbols are
 // added at 3D; all of these functions are Go-package-internal,
 // invoked by the transport handlers as they activate routes.
 // The diagnostics renderer in `ExportDiagnostics` reads the
 // recorded state through the in-memory Core fields.
+//
+// WHY DORMANT. There are no such transport handlers, and there
+// cannot be. Neither family has a dialer in this build and
+// neither can be served by a self-hosted publisher: psiphon is a
+// third party's proprietary network (hand-off only, never
+// hosting) and conjure needs a cooperating ISP running a
+// refraction station. The full reasons are on the enum values in
+// `bundle/go/bundle/types.go`; the vendor-tree audit is in
+// `refraction_compiled.go`. `core/transports/conjure` — the only
+// thing this file imports — is itself dormant for the same
+// reason.
+//
+// So both recorders below now REFUSE a non-empty route ID, and
+// the three diagnostics fields they feed
+// (`psiphon_active_route`, `conjure_active_route`,
+// `conjure_phantom_in_use`) are permanently empty strings. That
+// is the honest reading: nothing activated, because nothing can.
+// Refusing loudly is deliberate — the alternative is a
+// diagnostics blob that names an active route on a family the
+// engine has no way to dial, which is the exact shape of failure
+// this wave exists to remove.
+//
+// KEPT rather than deleted because: `ExportDiagnostics` emits
+// the fields (a documented shape), `HashPhantom` is the only
+// implementation of the no-raw-IP redaction invariant that
+// `test-rigs/distribution-failure`'s
+// `ruleNoRawPhantomIPLeakInDiagnostics` asserts against, and the
+// two 3D soak scenarios are registered in the rig's driver. The
+// two scenarios now exercise a refusal instead of a fiction;
+// retiring them belongs to the rig lane, not here.
 //
 // Locked invariants (this phase):
 //   - Recordings are session-scoped snapshots, not cumulative
@@ -24,13 +57,20 @@ import (
 //     the hash from the raw IP rather than trusting the caller
 //     to pre-hash, which keeps the boundary explicit and makes
 //     the redaction invariant easy to audit.
-//   - Psiphon recordings are rejected when
-//     `psiphon_compiled_in` is false (`-tags no_psiphon`
-//     builds): the engine must not advertise an active psiphon
-//     route when the vendor tree is excluded.
-//   - Conjure recordings are not gated on a compile-in flag —
-//     the conjure tree is Apache-2.0 and ships unconditionally
-//     at 3D.
+//   - Psiphon AND conjure recordings are rejected whenever the
+//     matching compile-in flag is false: the engine must not
+//     advertise an active route on a family whose implementation
+//     is not in the binary. Both flags are constant false (see
+//     refraction_compiled.go), so in every shipped build both
+//     recorders refuse any non-empty route ID. Clearing (empty
+//     route ID) always succeeds, so a caller can still reset
+//     state without special-casing.
+//
+//     The conjure gate is new in Wave 5. Phase 3D left conjure
+//     ungated on the stated grounds that "the conjure tree is
+//     Apache-2.0 and ships unconditionally" — the tree does not
+//     ship at all and is not in `core/go.mod`, so the asymmetry
+//     was resting on a false premise.
 //
 // See specs/psiphon-route-v1.md "Diagnostics" and
 // specs/conjure-route-v1.md "Diagnostics".
@@ -46,7 +86,7 @@ func RecordPsiphonActiveRoute(routeID string) error {
 		return errors.New("abi: not initialised")
 	}
 	if !psiphonCompiledIn && routeID != "" {
-		return errors.New("abi: psiphon vendor tree excluded; cannot record active route")
+		return errors.New("abi: psiphon has no implementation in this build; cannot record an active route")
 	}
 	c := loadedCore()
 	c.mu.Lock()
@@ -81,6 +121,9 @@ func PsiphonActiveRoute() string {
 func RecordConjureActivation(routeID, rawPhantomIP string) error {
 	if loadedCore() == nil {
 		return errors.New("abi: not initialised")
+	}
+	if !conjureCompiledIn && (routeID != "" || rawPhantomIP != "") {
+		return errors.New("abi: conjure has no implementation in this build; cannot record an active route")
 	}
 	c := loadedCore()
 	c.mu.Lock()

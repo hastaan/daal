@@ -228,7 +228,30 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	// the commit stamped into the binary it pins). tools/release builds
 	// with -buildvcs=false now and refuses to ship a stamped artefact,
 	// so this value should only ever move on a real source change.
-	const want = "74ff9b5204b631db1038d3bbf4cc063dfb28da3fa979c57c28533b3b925954dc"
+	// Wave 5 (tuic): re-pinned after the box-side ufw data-plane rules
+	// became a rendered list instead of a constant. The V1.5 template
+	// had NO data-plane rules at all (naive/8444 and websocket-tls/8445
+	// were opened only in the V2 template), so this render gains them —
+	// which is the latent gap the shared source of truth closes, not a
+	// cosmetic edit. The list comes from
+	// relayports.ExtraFirewallPortsFor(<this relay's families>), so this
+	// pin now moves whenever a served family's port set moves.
+	// Wave 5 (shadowsocks-2022, anytls): re-pinned again as those
+	// families joined relayports.ExtraFirewallPorts — 8446/tcp and
+	// 8447/tcp are now baseline ufw rules on every relay, because the
+	// box creates both inbounds for every recipient it provisions and a
+	// served family behind a shut port is a route that mints and cannot
+	// be dialled. This pin moves with the port set BY DESIGN: it is the
+	// tripwire that makes "one more open port on the whole fleet" a
+	// visible decision rather than a diff nobody reads.
+	// 2026-08-18: re-pinned after 8446 (shadowsocks) and 8447 (anytls)
+	// moved out of the fleet-wide baseline into ExtraFirewallPortsFor.
+	// Both families are default_enabled:false in every shipped profile,
+	// so keeping their ports baseline opened two constant, unadvertised
+	// ports on every relay — a free fingerprint for a tool whose premise
+	// is not looking like a proxy. The rendered ufw rules are part of
+	// this golden, so the drift IS that change.
+	const want = "791c931a931c1f300a0764967d3177d6781bcd0f2c18462d443ce64845aed9e8"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}

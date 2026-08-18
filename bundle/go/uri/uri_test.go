@@ -2,6 +2,7 @@ package uri
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -214,8 +215,37 @@ AllowedIPs = 0.0.0.0/0
 	if p.TransportFamily != "wireguard" {
 		t.Errorf("family: %s", p.TransportFamily)
 	}
-	if p.Outbound["server"] != "vpn.example.com" || p.Outbound["server_port"] != 51820 {
-		t.Errorf("endpoint: %v", p.Outbound)
+	// sing-box 1.13 models WireGuard as an endpoint, not an outbound:
+	// the peer lives in peers[] with address/port, and there are no
+	// flat server/server_port keys. See parseWireGuard.
+	if p.Outbound["type"] != "wireguard" {
+		t.Errorf("type: %v", p.Outbound["type"])
+	}
+	peers, _ := p.Outbound["peers"].([]any)
+	if len(peers) != 1 {
+		t.Fatalf("peers: %v", p.Outbound["peers"])
+	}
+	pr := peers[0].(map[string]any)
+	if pr["address"] != "vpn.example.com" || pr["port"] != 51820 {
+		t.Errorf("peer endpoint: %v", pr)
+	}
+	if pr["public_key"] != "bbbb" {
+		t.Errorf("peer public_key: %v", pr)
+	}
+	// AllowedIPs is the routing table and must land in allowed_ips.
+	// It used to be written into `reserved`, which is the three-byte
+	// WARP header — a different wire field entirely.
+	if fmt.Sprint(pr["allowed_ips"]) != "[0.0.0.0/0]" {
+		t.Errorf("allowed_ips: %v", pr["allowed_ips"])
+	}
+	if _, bad := pr["reserved"]; bad {
+		t.Errorf("allowed_ips must not be written into reserved: %v", pr)
+	}
+	if fmt.Sprint(p.Outbound["address"]) != "[10.0.0.2/32]" {
+		t.Errorf("address: %v", p.Outbound["address"])
+	}
+	if _, bad := p.Outbound["local_address"]; bad {
+		t.Errorf("local_address is the removed 1.x outbound field: %v", p.Outbound)
 	}
 }
 
@@ -244,12 +274,33 @@ Endpoint = vpn.example.com:51820
 	if !prov.HadAmnezia {
 		t.Errorf("expected amnezia flag")
 	}
-	if profs[0].TransportFamily != "amneziawg" {
+	// The engine in this build has no AmneziaWG support at all, so the
+	// route that actually dials is plain WireGuard and the family says
+	// so. Naming it "amneziawg" would put an AmneziaWG badge on a
+	// WireGuard-shaped flow — the one thing the adversary blocks on
+	// sight — which is a promise this build cannot keep.
+	if profs[0].TransportFamily != "wireguard" {
 		t.Errorf("family: %s", profs[0].TransportFamily)
 	}
-	a := profs[0].Outbound["amnezia"].(map[string]any)
-	if a["jc"] != 7 || a["h1"] != 1 {
-		t.Errorf("amnezia fields: %v", a)
+	if _, bad := profs[0].Outbound["amnezia"]; bad {
+		t.Errorf("sing-box 1.13.12 has no amnezia field; emitting one is an unknown-field reject: %v", profs[0].Outbound)
+	}
+	if profs[0].Outbound["type"] != "wireguard" {
+		t.Errorf("type: %v (there is no \"amnezia-wg\" type in sing-box 1.13.12)", profs[0].Outbound["type"])
+	}
+	// The loss must be reported, not swallowed: every Amnezia knob that
+	// was present is named, and there is a sentence an importer can show.
+	if prov.Scheme != "amneziawg" {
+		t.Errorf("provenance scheme: %s", prov.Scheme)
+	}
+	if len(prov.DroppedParams) != 9 {
+		t.Errorf("DroppedParams = %v, want all nine Amnezia knobs", prov.DroppedParams)
+	}
+	if prov.Downgrade == "" {
+		t.Error("an AmneziaWG conf imported as plain WireGuard must carry a Downgrade notice")
+	}
+	if prov.WarningCount == 0 {
+		t.Error("downgrade must count as a warning")
 	}
 }
 
@@ -264,7 +315,20 @@ webtunnel 5.6.7.8:443 1111111111111111111111111111111111111111 url=https://x.exa
 	if len(profs) != 2 {
 		t.Fatalf("got %d", len(profs))
 	}
-	if profs[0].Outbound["transport"] != "obfs4" {
-		t.Errorf("transport: %v", profs[0].Outbound)
+	// The outbound must be sing-box's REAL type. "tor-bridge" is not a
+	// sing-box outbound type and the strict decoder rejects it; that
+	// single word is why this family was ungradable before Wave 5.
+	if profs[0].Outbound["type"] != "tor" {
+		t.Errorf("type: got %v, want \"tor\"", profs[0].Outbound["type"])
+	}
+	args, _ := profs[0].Outbound["extra_args"].([]string)
+	want := []string{"--UseBridges", "1", "--Bridge", "obfs4 1.2.3.4:443 ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD cert=zZ iat-mode=0"}
+	if len(args) != len(want) {
+		t.Fatalf("extra_args: got %q", args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("extra_args[%d]: got %q want %q", i, args[i], want[i])
+		}
 	}
 }

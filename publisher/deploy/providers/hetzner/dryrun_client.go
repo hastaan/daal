@@ -2,6 +2,7 @@ package hetzner
 
 import (
 	"context"
+	"daal/publisher/deploy/relayports"
 	"errors"
 	"net"
 	"time"
@@ -90,7 +91,7 @@ func (dryRunClient) FirewallRemoveEphemeralRule(_ context.Context, _ string) err
 	return errors.New("hetzner: dry-run client cannot FirewallRemoveEphemeralRule")
 }
 
-func (dryRunClient) FirewallEnsureForServer(_ context.Context, _ string) (string, error) {
+func (dryRunClient) FirewallEnsureForServer(_ context.Context, _ string, _ []relayports.Endpoint) (string, error) {
 	return "", errors.New("hetzner: dry-run client cannot FirewallEnsureForServer")
 }
 

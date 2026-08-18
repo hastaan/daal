@@ -61,6 +61,19 @@ func runUsersProvision(ctx context.Context, args []string, stdin io.Reader, stdo
 		fmt.Fprintf(stderr, "users/provision: %v\n", err)
 		return 1
 	}
+	// The early warning the capability tokens promised and nothing
+	// delivered. A family this relay was provisioned to OFFER, whose
+	// credential came back empty, is a route the operator is about to
+	// discover missing at pack time — or, before the repair pass, a
+	// route that killed the whole pack. Say it here, once, next to the
+	// action that fixes it. STDERR: stdout is the creds JSON.
+	if missing := mgmt.MissingFamilyCredentials(rec, creds); len(missing) > 0 {
+		for _, f := range missing {
+			fmt.Fprintf(stderr,
+				"warning: this relay offers %q but reported no credential for it — %s\n",
+				f, mgmt.StaleArtifactHint)
+		}
+	}
 	if err := json.NewEncoder(stdout).Encode(creds); err != nil {
 		fmt.Fprintf(stderr, "encode: %v\n", err)
 		return 1

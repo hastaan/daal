@@ -73,6 +73,68 @@ const (
 	// parameters only, leaving REALITY keypairs and user credentials
 	// alone, and echoes what it applied.
 	CapRotateTLSScoped = "rotate-tls-scoped"
+
+	// CapShadowsocks2022: this relay's mgmt binary creates the ss-in
+	// inbound (shadowsocks, 2022-blake3-aes-128-gcm, per-recipient uPSKs
+	// on one shared box iPSK) when it provisions a recipient, and echoes
+	// the assembled client password on /users/provision.
+	//
+	// WHAT CONSULTS THIS, stated plainly because it used to claim more
+	// than it delivered. Nothing in the provision or pack path calls
+	// Has() for this token; the two things that actually protect the
+	// operator are (a) UserCreds.SSPassword arriving empty, which is
+	// the safety interlock that makes the pack renderer refuse the
+	// route, and (b) MissingFamilyCredentials at the bottom of this
+	// file, which turns that empty value into a warning at provision
+	// time. This token is for a PRE-PURCHASE probe: GET /health answers
+	// it without provisioning anything, so an operator can learn before
+	// renting a server that the artifact pin in cloudinit/artifacts.go
+	// still points at a binary with no shadowsocks in it.
+	//
+	// Deliberately NO version fallback in Has(): the capability rides
+	// the pinned artifact, and inferring it from mgmt_api_version is
+	// how a box comes to claim a family it does not serve.
+	CapShadowsocks2022 = "shadowsocks-2022"
+
+	// CapAnyTLSInbound: this relay's mgmt binary creates the anytls-in
+	// inbound (per-recipient passwords, per-relay padding scheme) when
+	// it provisions a recipient, and echoes that recipient's password on
+	// /users/provision.
+	//
+	// Same division of labour as CapShadowsocks2022, including what
+	// does and does not consult it: this token serves a pre-purchase
+	// /health probe, UserCreds.AnyTLSPassword arriving empty is the
+	// safety interlock, and MissingFamilyCredentials is what turns that
+	// into a warning the operator actually sees.
+	//
+	// Deliberately NO version fallback in Has(): the capability rides
+	// the pinned artifact, and inferring it from mgmt_api_version is
+	// exactly how a box comes to claim a family it does not serve.
+	CapAnyTLSInbound = "anytls-inbound"
+
+	// CapTUICUsers: this relay's mgmt binary knows how to add, rotate
+	// and remove tuic users, and echoes the recipient's uuid+password
+	// pair on /users/provision when the box really carries a tuic-in
+	// row for them.
+	//
+	// READ THE VERB, NOT THE FAMILY. Unlike shadowsocks and anytls, this
+	// token does NOT mean "this relay serves tuic". tuic is the first
+	// opt-in family: the inbound is written by cloud-init only when the
+	// toolbox profile selected it, and 8443/udp is opened in both
+	// firewalls only for those relays. So the two facts are independent,
+	// and the failure they guard against is the combination — a FRESH
+	// relay whose cloud-init has the tuic-in inbound and whose pinned
+	// mgmt artifact predates the family. That binary answers
+	// /users/provision with a 200 and adds no tuic row.
+	//
+	// Same division of labour as the two tokens above: this one serves
+	// a pre-purchase /health probe (the artifact pin in
+	// cloudinit/artifacts.go is stale), UserCreds.TUICUUID/TUICPassword
+	// arriving empty is the safety interlock, and
+	// MissingFamilyCredentials is the provision-time warning.
+	// Deliberately NO version fallback in Has(): the capability rides
+	// the pinned artifact.
+	CapTUICUsers = "tuic-users"
 )
 
 // MgmtAPIVersionSplitRotation is the /health `mgmt_api_version` at
@@ -254,3 +316,60 @@ func requireCapability(ctx context.Context, cli *Client, rec *provider.OperatorR
 	}
 	return nil
 }
+
+// MissingFamilyCredentials reports which of the relay's OWN candidate
+// families came back from /users/provision (or /rotate-credentials)
+// with no credential.
+//
+// WHY THIS EXISTS, AND WHY IT IS NOT THE CAPABILITY TOKENS.
+//
+// CapShadowsocks2022, CapAnyTLSInbound and CapTUICUsers are asserted by
+// the box on GET /health. Their doc comments used to promise an "early
+// warning before you rent a server" — and nothing consulted them, so
+// the warning did not exist and the operator's first notice was a
+// missing route at pack time. This function is the warning made real,
+// from data the provision call already has in hand: no extra request,
+// no second firewall window, and it compares against the relay's actual
+// candidate set rather than a version number.
+//
+// The tokens remain the right instrument for a PRE-PURCHASE probe (they
+// answer "is the pinned artifact current?" without provisioning
+// anything), and the empty credential remains the safety interlock that
+// makes the pack renderer refuse the route. Three instruments, three
+// jobs; the one that was missing was this one.
+//
+// Returns family names in candidate order. Empty means every family
+// this relay offers reported a credential.
+func MissingFamilyCredentials(rec *provider.OperatorRecord, creds *UserCreds) []string {
+	if rec == nil || creds == nil {
+		return nil
+	}
+	var out []string
+	for _, c := range rec.Candidates {
+		switch c.Family {
+		case "shadowsocks":
+			if creds.SSPassword == "" {
+				out = append(out, c.Family)
+			}
+		case "anytls":
+			if creds.AnyTLSPassword == "" {
+				out = append(out, c.Family)
+			}
+		case "tuic":
+			if creds.TUICUUID == "" || creds.TUICPassword == "" {
+				out = append(out, c.Family)
+			}
+		}
+	}
+	return out
+}
+
+// StaleArtifactHint is the sentence to print beside
+// MissingFamilyCredentials. It names the one action that fixes it,
+// because "the relay does not serve X" is not actionable on its own and
+// the fix is genuinely non-obvious: the mgmt binary is a hash-pinned
+// artifact and cloud-init has no upgrade path.
+const StaleArtifactHint = "the relay's daal-relay-mgmt binary predates the family: " +
+	"rebuild, re-sign, re-upload, bump the hash pin in " +
+	"publisher/deploy/cloudinit/artifacts.go, and provision a FRESH relay " +
+	"(there is no in-place upgrade for cloud-init)"

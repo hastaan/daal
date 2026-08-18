@@ -63,8 +63,19 @@ const TRANSPORT_FAMILIES: &[&str] = &[
     "tor-bridge",
     "wireguard",
     "amneziawg",
+    // Wave 5. Legal only at spec_version >= SPEC_VERSION_ANYTLS;
+    // `validate_route` enforces that separately, because this list is
+    // also what `usable_routes` consults after verification.
+    "anytls",
     "other",
 ];
+
+/// The manifest `spec_version` at which `anytls` becomes a legal
+/// transport family AND an unknown transport family stops being fatal
+/// to the whole pack. Twin of Go's `bundle.SpecVersionAnyTLS`; the two
+/// numbers must move together or the Rust and Go clients disagree about
+/// the same file.
+pub const SPEC_VERSION_ANYTLS: i32 = 5;
 
 /// Parses the bytes of a `.sbp` file into its component members.
 ///
@@ -136,8 +147,15 @@ pub fn verify_bundle_at(b: &Sbp, now: time::OffsetDateTime) -> Result<(), Error>
     // Accepted spec versions mirror the Go canonical verifier
     // (bundle/go/bundle/sbp.go::verifyBundleCore): 1 (legacy),
     // 2 (3A-3F), 3 (RelayPack), 4 (sub-key cert chain / cell
-    // aggregator). Anything outside that window is rejected.
-    if !matches!(b.manifest.spec_version, 1 | 2 | 3 | 4) {
+    // aggregator), 5 (anytls + per-route unknown-family degradation).
+    // Anything outside that window is rejected.
+    //
+    // This gate runs BEFORE the route loop, which is what makes a
+    // spec bump the right carrier for a new family: a build older than
+    // this one stops here and reports "unsupported spec version"
+    // rather than reaching the route loop and reporting the pack as
+    // corrupt.
+    if !matches!(b.manifest.spec_version, 1 | 2 | 3 | 4 | 5) {
         return Err(Error::UnsupportedSpec);
     }
     // Verify the ed25519 signature against the **raw** manifest.json
@@ -165,20 +183,61 @@ pub fn verify_bundle_at(b: &Sbp, now: time::OffsetDateTime) -> Result<(), Error>
         }
     }
 
+    // Route loop. Mirrors the Go twin exactly, including which failure
+    // is downgradable and which is not: an unknown transport family
+    // costs one route at spec_version >= 5, everything else still
+    // costs the pack. See `validate_route` for why the family check is
+    // last.
+    let mut usable = 0usize;
     for route in &b.manifest.routes {
-        validate_route(route, b, now)?;
+        match validate_route(route, b, now) {
+            Err(Error::UnknownFamily) => {
+                if b.manifest.spec_version >= SPEC_VERSION_ANYTLS {
+                    continue; // blast radius: this route, not the pack.
+                }
+                return Err(Error::InvalidEnum);
+            }
+            Err(e) => return Err(e),
+            Ok(()) => usable += 1,
+        }
+    }
+    if !b.manifest.routes.is_empty() && usable == 0 {
+        return Err(Error::NoUsableRoutes);
     }
     Ok(())
 }
 
+/// Reports whether one route of a VERIFIED bundle names a transport
+/// family this build understands. Twin of Go's `bundle.RouteUsable`.
+pub fn route_usable(route: &crate::manifest::RouteManifestEntry) -> bool {
+    TRANSPORT_FAMILIES.contains(&route.transport_family.as_str())
+}
+
+/// Returns the subset of a VERIFIED bundle's routes this build can
+/// represent. Twin of Go's `bundle.UsableRoutes`.
+///
+/// Every consumer that turns a manifest into stored routes must use
+/// this rather than walking `manifest.routes` directly, or it will
+/// persist a route whose family nothing downstream can dial.
+pub fn usable_routes(b: &Sbp) -> Vec<&crate::manifest::RouteManifestEntry> {
+    b.manifest.routes.iter().filter(|r| route_usable(r)).collect()
+}
+
+/// Validates one route.
+///
+/// ORDER IS LOAD-BEARING, exactly as in the Go twin: the
+/// transport_family check comes LAST, after every safety, freshness and
+/// revocation check has passed, because it is the only failure the
+/// caller may downgrade from "reject the pack" to "drop the route". If
+/// it came first, an unknown family name would double as a way to skip
+/// this route's own unsafe-path and revocation checks.
 fn validate_route(
     route: &crate::manifest::RouteManifestEntry,
     b: &Sbp,
     now: time::OffsetDateTime,
 ) -> Result<(), Error> {
-    if !SCARCITY_CLASSES.contains(&route.scarcity_class.as_str())
-        || !TRANSPORT_FAMILIES.contains(&route.transport_family.as_str())
-    {
+    // Scarcity stays hard-fatal and ungated; see the Go twin.
+    if !SCARCITY_CLASSES.contains(&route.scarcity_class.as_str()) {
         return Err(Error::InvalidEnum);
     }
     if unsafe_archive_path(&route.config_path) {
@@ -196,6 +255,21 @@ fn validate_route(
                 return Err(Error::RevokedRoute);
             }
         }
+    }
+    // Wave 5, and LAST on purpose — see this function's doc comment.
+    //
+    // A pack may not name anytls while claiming an older spec_version:
+    // such a pack is rejected WHOLE by every client shipped before
+    // Wave 5, and reported as corrupted. Refusing it here means it
+    // fails at mint time rather than in a recipient's hands.
+    if route.transport_family == "anytls" && b.manifest.spec_version < SPEC_VERSION_ANYTLS {
+        return Err(Error::AnyTlsSpecVersionTooOld);
+    }
+    if !TRANSPORT_FAMILIES.contains(&route.transport_family.as_str()) {
+        // Internal sentinel; the caller turns this into either
+        // InvalidEnum (spec <= 4, historical behaviour) or a dropped
+        // route (spec >= 5). It never reaches an external caller.
+        return Err(Error::UnknownFamily);
     }
     Ok(())
 }

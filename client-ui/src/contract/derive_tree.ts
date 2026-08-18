@@ -41,27 +41,97 @@ const FAMILY_MATURITY: Record<string, FamilyMaturity> = {
     'websocket-tls': 'stable',
     hysteria2: 'stable',
 
-    // Dialable by the shipped sing-box and paste-importable, but no
-    // publisher path mints them and neither has been soaked.
+    // Wave 5 built the whole tuic chain: an opt-in tuic-in inbound on
+    // the box, per-recipient uuid+password, 8443/udp in both firewalls
+    // on relays that serve it, a client outbound the strict parser
+    // accepts, rotation. So "no publisher path mints it" — the reason
+    // this entry used to give — is no longer true.
+    //
+    // It stays experimental, and in Iran it is worth approximately
+    // nothing: 8443 is outside the 53/80/443 egress whitelist, and it
+    // is UDP, which the adversary document names for complete and
+    // permanent blocking — the same rule that takes hysteria2. What it
+    // buys is a differently-shaped QUIC handshake on networks where UDP
+    // still works. Nothing user-visible may imply a new way through.
     tuic: 'experimental',
+
+    // Wave 5: shadowsocks (2022-blake3-aes-128-gcm only). The whole
+    // chain exists now — box inbound with per-recipient uPSKs, both
+    // firewalls, a client outbound the engine accepts, rotation — so
+    // the old "nothing mints it" reason no longer applies.
+    //
+    // Still experimental, and the badge must not be read as a ranking.
+    // It has carried no real traffic, and its value is not strength: it
+    // is the only family with no TLS handshake, so it fails
+    // INDEPENDENTLY of vless-reality / websocket-tls / naive when a
+    // nested-TLS classifier comes for them. On its own it is the
+    // best-studied target of entropy classifiers. See
+    // network.family.shadowsocks.help, which is what the user reads.
     shadowsocks: 'experimental',
 
-    // THIS BUILD CANNOT DIAL THESE. tor-bridge emits a "tor-bridge"
-    // outbound type sing-box does not have; wireguard needs an
-    // `endpoints[]` slot core/engine/config.go does not have;
-    // amneziawg emits "amnezia-wg" → "unknown outbound type".
-    'tor-bridge': 'unsupported',
-    wireguard: 'unsupported',
+    // Wave 5: anytls. Whole chain exists — the engine registers the
+    // outbound unconditionally, the publisher mints per-recipient
+    // credentials, the box serves an anytls-in inbound, relayports
+    // assigns it a port. Experimental only because nothing has dialled
+    // one on a device yet.
+    anytls: 'experimental',
+
+    // Wave 5: wireguard became expressible. core/engine/config.go grew
+    // the `endpoints[]` slot sing-box needs and the importer emits a
+    // real endpoint object instead of the 1.x outbound shape sing-box
+    // removed. Experimental, and the badge must not borrow AmneziaWG's
+    // Iran track record: plain WireGuard is a named immediate-block
+    // target there, and it is all this build can dial.
+    wireguard: 'experimental',
+
+    // amneziawg STAYS unsupported. sing-box 1.13.12 contains no
+    // AmneziaWG code at all, so there is nowhere to put the Jc/S1/H1..H4
+    // obfuscation parameters that ARE the family; an amneziawg conf is
+    // imported as a DOWNGRADED plain-wireguard route and labelled
+    // `wireguard`, because WireGuard is what goes on the wire.
     amneziawg: 'unsupported',
 
-    // 3A–3G families, reserved at experimental.
-    webtunnel: 'experimental',
-    snowflake: 'experimental',
-    masque: 'experimental',
-    psiphon: 'experimental',
-    conjure: 'experimental',
-    transport_module: 'experimental',
-    lifeline_relay: 'experimental',
+    // tor-bridge: the CODE is dialable, the ARTIFACT is not, and the
+    // badge is a claim about the artifact. Wave 5 made the importer
+    // emit sing-box's real `tor` outbound (it emitted a nonexistent
+    // "tor-bridge" type before) — but that outbound EXECS a tor binary,
+    // and no build this repo can produce contains one: jniLibs carries
+    // no libtor.so for any ABI and tools/build-tor-android.sh has never
+    // been run. Every tor route therefore fails at config time on every
+    // installable build, which is exactly `unsupported`.
+    //
+    // Flip to 'experimental' in the same commit that packages the
+    // binaries, and flip core/routestore/family.go in that same commit
+    // — check-family-maturity.mjs compares the two.
+    'tor-bridge': 'unsupported',
+
+    // Wave 5: the V3 families, all demoted experimental →
+    // unsupported. sing-box 1.13.12 registers no outbound for any of
+    // them, so "experimental" ("unproven, may fail") was the wrong
+    // promise — the badge now says this build cannot dial it, which
+    // is what `network.family.unsupported.help` tells the user.
+    //
+    // webtunnel and snowflake are Tor pluggable transports. The
+    // capability IS reachable in this build — as a bridge line inside
+    // a `tor-bridge` route — but the family VALUE has no dialer, so a
+    // pack declaring transport_family "webtunnel" loses where the same
+    // bridge declared as "tor-bridge" connects.
+    //
+    // masque, psiphon and conjure are structural: no masque server
+    // exists in sing-box 1.13.12; psiphon is a third party's
+    // proprietary network you hand off to rather than host; conjure
+    // needs a cooperating ISP running a refraction station. See the
+    // enum doc comments in bundle/go/bundle/types.go.
+    //
+    // transport_module has a real wazero runtime and no production
+    // caller for core/wasm.Dial; lifeline_relay has no package at all.
+    webtunnel: 'unsupported',
+    snowflake: 'unsupported',
+    masque: 'unsupported',
+    psiphon: 'unsupported',
+    conjure: 'unsupported',
+    transport_module: 'unsupported',
+    lifeline_relay: 'unsupported',
 
     // V0 forward-compat slot.
     other: 'unhandled',

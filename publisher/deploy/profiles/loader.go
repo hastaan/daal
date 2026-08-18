@@ -41,6 +41,31 @@ var IranDefaultJSON []byte
 //go:embed iran-tcp443.json
 var IranTCP443JSON []byte
 
+// WHY shadowsocks IS IN BOTH PROFILES AND default_enabled IS false.
+//
+// The family is fully built end to end — box inbound, firewall port,
+// client outbound renderer, rotation — but it is NOT on by default, and
+// the reason is release coupling rather than doubt about the transport.
+//
+// cmd/daal-relay-mgmt ships as a hash-pinned artifact
+// (publisher/deploy/cloudinit/artifacts.go). Until a human rebuilds it,
+// re-signs it, re-uploads it and bumps that pin, a relay provisioned by
+// this publisher still boots the OLD binary, which creates no ss-in
+// inbound. Turning the family on by default would then put a
+// shadowsocks route in every new relay's signed manifest while the box
+// serves nothing on 8446 — and because RewriteProfilesForRecipient
+// fails closed on a route it cannot make connectable, the result is not
+// one dead tier, it is NO PACK AT ALL for that relay. Every recipient
+// blocked, for a family nobody asked for.
+//
+// Present-but-off is the honest middle: an operator who has updated
+// their relays can name the family explicitly (enabled_families) and
+// get it, and one who has not gets the renderer's specific refusal
+// naming the artifact pin instead of a silent dead route.
+//
+// FLIP BOTH TO true IN THE SAME COMMIT THAT BUMPS THE ARTIFACT PIN.
+// That is the whole to-do; nothing else about the family is pending.
+
 // Profile is one toolbox profile parsed from JSON.
 type Profile struct {
 	Name        string             `json:"name"`

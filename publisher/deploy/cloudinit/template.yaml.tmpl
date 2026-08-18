@@ -118,6 +118,13 @@ runcmd:
   - ufw default allow outgoing
   - ufw allow 443/tcp
   - ufw allow 443/udp
+  # Data-plane ports for the families that cannot share 443 with
+  # REALITY, from relayports via RenderInput.DataPlanePorts. Rendered
+  # from the same list the V2 template and the cloud-provider firewall
+  # use, so the three cannot drift.
+{{- range .UFWDataPlaneRules }}
+  - ufw allow {{ . }}
+{{- end }}
   - ufw allow from {{ .ProvisioningClientIP }} to any port 22 proto tcp
   - ufw allow from {{ .ProvisioningClientIP }} to any port 9876 proto tcp
   - ufw --force enable

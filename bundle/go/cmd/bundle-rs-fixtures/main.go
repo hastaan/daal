@@ -98,18 +98,60 @@ func main() {
 		{name: "valid-v1", desc: "spec_version=1 (legacy), valid signature",
 			mutateManifest: func(m *bundle.Manifest) { m.SpecVersion = 1 },
 			expectParse:    "ok", expectVerify: "ok"},
-		// spec_version 3 (RelayPack) and 4 (sub-key cert chain) ARE accepted
-		// by bundle.VerifyBundle — see sbp.go's `case 1, 2, 3, 4`. This vector
-		// used to assert v3 was rejected, which stopped being true when
-		// FRP-7.5 widened the gate; because nothing on the Go side checks the
-		// generator's expectations against Go's own verifier, and the
-		// committed fixtures were never regenerated, the contradiction stayed
-		// invisible until a parity run in 2026-08. Use the lowest genuinely
-		// unsupported version instead — matching bundle/v2_test.go, which
-		// already expects ErrUnsupportedSpec for spec_version=5.
-		{name: "invalid-spec-v5", desc: "spec_version=5 is beyond the supported range and must be rejected",
-			mutateManifest: func(m *bundle.Manifest) { m.SpecVersion = 5 },
+		// spec_version 3 (RelayPack), 4 (sub-key cert chain) and 5 (anytls)
+		// ARE accepted by bundle.VerifyBundle — see sbp.go's
+		// `case 1, 2, 3, 4, SpecVersionAnyTLS`. This vector used to assert v3
+		// was rejected, which stopped being true when FRP-7.5 widened the
+		// gate; because nothing on the Go side checks the generator's
+		// expectations against Go's own verifier, and the committed fixtures
+		// were never regenerated, the contradiction stayed invisible until a
+		// parity run in 2026-08. It then became "v5 is rejected", which Wave 5
+		// spent on anytls. Always use the LOWEST genuinely unsupported
+		// version — matching bundle/v2_test.go's TestSpecV6Rejected — and
+		// move it in the same commit that widens the gate.
+		{name: "invalid-spec-v6", desc: "spec_version=6 is beyond the supported range and must be rejected",
+			mutateManifest: func(m *bundle.Manifest) { m.SpecVersion = 6 },
 			expectParse:    "ok", expectVerify: "ErrUnsupportedSpec"},
+		// WAVE 5 — the wire-compatibility contract for a new family, pinned
+		// in the corpus BOTH parsers are checked against.
+		//
+		// An unknown family at spec_version <= 4 still rejects the whole
+		// bundle with ErrInvalidEnum: that is what every already-distributed
+		// client does, and the "unknown-transport" vector below covers it.
+		// From spec_version 5 the same route is DROPPED and the pack still
+		// verifies, so a recipient keeps the routes it does understand.
+		{name: "v5-unknown-transport-degrades", desc: "spec_version=5: an unknown transport_family drops that route, the pack still verifies",
+			mutateManifest: func(m *bundle.Manifest) {
+				m.SpecVersion = 5
+				extra := m.Routes[0]
+				extra.ID = "route-from-the-future"
+				extra.TransportFamily = "family-from-a-later-build"
+				m.Routes = append(m.Routes, extra)
+			},
+			expectParse: "ok", expectVerify: "ok"},
+		// Degradation is not a licence to import nothing. A pack whose every
+		// route is unknown has failed at the only job a pack has, and says so.
+		{name: "v5-all-unknown-transports", desc: "spec_version=5: every route unknown is ErrNoUsableRoutes, not a silent empty import",
+			mutateManifest: func(m *bundle.Manifest) {
+				m.SpecVersion = 5
+				m.Routes[0].TransportFamily = "family-from-a-later-build"
+			},
+			expectParse: "ok", expectVerify: "ErrNoUsableRoutes"},
+		// anytls may not ride an older spec_version: such a pack is rejected
+		// WHOLE by every pre-Wave-5 client and reported as corrupted, so the
+		// publisher is stopped here instead.
+		{name: "anytls-on-spec-v4", desc: "transport_family=anytls at spec_version=4 must be refused",
+			mutateManifest: func(m *bundle.Manifest) {
+				m.SpecVersion = 4
+				m.Routes[0].TransportFamily = "anytls"
+			},
+			expectParse: "ok", expectVerify: "ErrAnyTLSSpecVersionTooOld"},
+		{name: "anytls-on-spec-v5", desc: "transport_family=anytls at spec_version=5 verifies",
+			mutateManifest: func(m *bundle.Manifest) {
+				m.SpecVersion = 5
+				m.Routes[0].TransportFamily = "anytls"
+			},
+			expectParse: "ok", expectVerify: "ok"},
 		{name: "invalid-signature", desc: "manifest.sig flipped",
 			mutateManifest:   func(m *bundle.Manifest) {},
 			corruptSignature: true, expectParse: "ok", expectVerify: "ErrInvalidSignature"},

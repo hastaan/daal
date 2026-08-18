@@ -643,6 +643,16 @@ const (
 	// echoes what it applied.
 	capRotateTLSScoped = "rotate-tls-scoped"
 
+	// capTUICUsers: this binary knows how to add, rotate and remove
+	// tuic users. It says nothing about whether THIS relay serves the
+	// family — tuic is opt-in per toolbox profile and its inbound comes
+	// from cloud-init, which is a separately pinned artifact. The pair
+	// that fails silently without this token is a fresh relay carrying
+	// a tuic-in inbound and an older mgmt binary; asserted here so the
+	// publisher can warn before it provisions rather than after.
+	// Mirrors mgmt.CapTUICUsers.
+	capTUICUsers = "tuic-users"
+
 	// mgmtAPIVersion is the second signal, sufficient on its own so a
 	// box that reports a version but not a verb list is still usable.
 	// v2 == the Step-7 split-rotation contract.
@@ -694,7 +704,7 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.healthCnt.Add(1)
-	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped}
+	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped, capShadowsocks2022, capAnyTLSInbound, capTUICUsers}
 	var notes []string
 	if s.addrCapability != nil {
 		ok, note := s.addrCapability()

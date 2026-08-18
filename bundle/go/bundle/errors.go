@@ -105,4 +105,41 @@ var (
 	// FRP-14. Returned by VerifyBundleFor when the supplied
 	// local identity is malformed (must be exactly 32 bytes).
 	ErrRecipientIdentityMalformed = errors.New("local recipient identity must be 32 bytes")
+
+	// Wave 5. A route names transport_family=anytls but the manifest
+	// declares spec_version < SpecVersionAnyTLS.
+	//
+	// This fires on the PUBLISHER far more often than on a recipient,
+	// and that is its job. Minting an anytls route into a spec-4 pack
+	// would hand every already-shipped client a pack it rejects whole
+	// with ErrInvalidEnum, which the importer renders as "bundle
+	// corrupted" — the sender is then debugging a transfer that was
+	// never broken. Declaring spec_version 5 makes the same old client
+	// stop at the spec gate instead and say "unsupported spec version",
+	// which is the truth and points at the fix.
+	ErrAnyTLSSpecVersionTooOld = errors.New("transport_family=anytls requires spec_version >= 5")
+
+	// Wave 5. Every route in the manifest was dropped as an unknown
+	// transport_family (only reachable at spec_version >= 5, where an
+	// unknown family degrades the route instead of the pack).
+	//
+	// This is an error rather than "imported, 0 routes" on purpose. A
+	// pack that yields nothing dialable has failed at the only thing a
+	// pack is for, and reporting success would leave the recipient
+	// staring at an empty route list with no explanation and no
+	// suggestion that a newer build would help.
+	ErrNoUsableRoutes = errors.New("no route in this pack names a transport family this build understands")
 )
+
+// errUnknownFamily is INTERNAL and never escapes the package. It is the
+// single signal that separates "this route names a family we do not
+// know" from every other route-validation failure, so verifyBundleCore
+// can apply the spec_version-gated degradation rule to that one case
+// and to nothing else.
+//
+// It must never be returned to a caller: at spec_version <= 4 the loop
+// translates it back into the historical ErrInvalidEnum (which the
+// importer classifies, the Rust twin mirrors, and the cross-language
+// fixture corpus pins), and at spec_version >= 5 it is swallowed
+// entirely in favour of dropping the route.
+var errUnknownFamily = errors.New("unknown transport family")

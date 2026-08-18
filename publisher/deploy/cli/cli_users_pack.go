@@ -193,6 +193,27 @@ func clientParamsFromCredsFile(path, server, recordCoverSNI string) (relaypack.C
 		// is why the box may enable it unilaterally and the client may
 		// not.
 		MuxInbound bool `json:"mux_inbound"`
+		// TUICUUID / TUICPassword arrive only from a relay that really
+		// serves tuic (see mgmt.UserCreds). Empty is the normal case
+		// and is not an error here — the renderer decides, and it only
+		// asks for them when the pack actually carries a tuic route.
+		TUICUUID     string `json:"tuic_uuid"`
+		TUICPassword string `json:"tuic_password"`
+		// SSPassword / SSMethod arrive only from a relay whose mgmt
+		// binary creates the ss-in inbound. SSPassword is already the
+		// colon-joined "<box iPSK>:<recipient uPSK>" the outbound wants
+		// — this side never assembles it. Both empty is the box saying
+		// "I do not serve shadowsocks", and the renderer refuses the
+		// route rather than minting one that cannot authenticate.
+		SSPassword string `json:"ss_password"`
+		SSMethod   string `json:"ss_method"`
+		// AnyTLSPassword arrives only from a relay whose mgmt binary
+		// creates the anytls-in inbound. Empty is the box saying "I do
+		// not serve anytls", and the renderer refuses that route rather
+		// than minting one that cannot authenticate. No padding-scheme
+		// field belongs beside it: anytls negotiates the scheme in
+		// band, so the pack never carries it.
+		AnyTLSPassword string `json:"anytls_password"`
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
 		return relaypack.ClientConnParams{}, fmt.Errorf("parse: %w", err)
@@ -226,6 +247,11 @@ func clientParamsFromCredsFile(path, server, recordCoverSNI string) (relaypack.C
 		TLSCertPEM:       c.TLSCertPEM,
 		CoverSNI:         coverSNI,
 		Multiplex:        mux,
+		TUICUUID:         c.TUICUUID,
+		TUICPassword:     c.TUICPassword,
+		SSPassword:       c.SSPassword,
+		SSMethod:         c.SSMethod,
+		AnyTLSPassword:   c.AnyTLSPassword,
 	}, nil
 }
 
@@ -267,13 +293,18 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "creds-file: %v\n", err)
 		return 2
 	}
-	// Fails closed if any route can't be made connectable — a shared pack
-	// must not ship a dead route.
-	rewritten, err := relaypack.RewriteProfilesForRecipient(plaintext, params)
+	// Degrades per route and fails only when NOTHING renders. A route
+	// whose credential the relay did not report is dropped from the
+	// usable set and reported here; the tiers that do work still ship.
+	// The old behaviour — first error kills the pack — meant a stale
+	// daal-relay-mgmt artifact pin cost the recipient every family,
+	// including the four that were fine.
+	rewritten, skipped, err := relaypack.RewriteProfilesForRecipient(plaintext, params)
 	if err != nil {
 		fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
 		return 1
 	}
+	warnSkippedRoutes(stderr, skipped)
 	if err := os.WriteFile(*outPath, rewritten, 0o644); err != nil {
 		fmt.Fprintf(stderr, "write output: %v\n", err)
 		return 1
@@ -282,6 +313,9 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		"sbp_path": *outPath,
 		"sbp_size": len(rewritten),
 		"shared":   true,
+		// Always present (possibly empty) so a caller that reads it
+		// cannot mistake "no field" for "nothing was dropped".
+		"skipped_families": skippedFamilyNames(skipped),
 	}); err != nil {
 		fmt.Fprintf(stderr, "encode: %v\n", err)
 		return 1
@@ -337,6 +371,7 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 	// FRP-14 Tier-2: rewrite the inner .sbp's profiles with real client
 	// outbounds for this recipient before enveloping. Fails closed if a
 	// route can't be made connectable — a pack must not ship a dead route.
+	skippedFamilies := []string{}
 	if *credsFile != "" {
 		if *server == "" {
 			fmt.Fprintln(stderr, "--server is required with --creds-file")
@@ -347,11 +382,14 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 			fmt.Fprintf(stderr, "creds-file: %v\n", err)
 			return 2
 		}
-		plaintext, err = relaypack.RewriteProfilesForRecipient(plaintext, params)
+		var skipped []relaypack.SkippedRoute
+		plaintext, skipped, err = relaypack.RewriteProfilesForRecipient(plaintext, params)
 		if err != nil {
 			fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
 			return 1
 		}
+		warnSkippedRoutes(stderr, skipped)
+		skippedFamilies = skippedFamilyNames(skipped)
 	}
 
 	if len(plaintext) > envelope.MaxCiphertextBytes {
@@ -376,9 +414,43 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 		"sbpx_path":      *outPath,
 		"plaintext_size": len(plaintext),
 		"sbpx_size":      len(wrapped),
+		// See runUsersPackSbp: always present, possibly empty.
+		"skipped_families": skippedFamilies,
 	}); err != nil {
 		fmt.Fprintf(stderr, "encode: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// warnSkippedRoutes prints every route the rewrite could not make
+// connectable. It goes to STDERR, not stdout: stdout is the JSON the
+// wizard parses, and a warning that changes the shape of that object
+// would be a different kind of breakage.
+//
+// This is the operator's only notice that the pack they are about to
+// hand somebody is one or more tiers smaller than the manifest lists.
+// Silence here would recreate, one layer up, exactly the silent-shrink
+// failure the per-route degradation was introduced to avoid.
+func warnSkippedRoutes(stderr io.Writer, skipped []relaypack.SkippedRoute) {
+	for _, s := range skipped {
+		fmt.Fprintf(stderr,
+			"warning: route %s (%s) is NOT connectable in this pack and was dropped: %s\n",
+			s.RouteID, s.Family, s.Reason)
+	}
+}
+
+// skippedFamilyNames returns the deduplicated family names, in first-seen
+// order, for the machine-readable half of the same notice.
+func skippedFamilyNames(skipped []relaypack.SkippedRoute) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, s := range skipped {
+		if seen[s.Family] {
+			continue
+		}
+		seen[s.Family] = true
+		out = append(out, s.Family)
+	}
+	return out
 }

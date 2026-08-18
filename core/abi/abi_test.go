@@ -415,8 +415,16 @@ func TestModeChangeDoesNotResetSession(t *testing.T) {
 // === Gap 5: posture FSM tightening — wire dead producers ===
 
 // seedExperimentalRoute inserts a publisher + a route on an
-// experimental-maturity family (webtunnel) plus its sing-box outbound
-// profile blob so SetRoute can drive Start through the stub.
+// experimental-maturity family plus its sing-box outbound profile blob
+// so SetRoute can drive Start through the stub.
+//
+// The exemplar is `tuic`. It was `webtunnel` until Wave 5 demoted every
+// V3 family to Unsupported — webtunnel is a Tor pluggable transport
+// with no outbound of its own, so it stopped being an example of
+// "experimental" and became an example of "cannot be dialled". `tuic`
+// is genuinely experimental: sing-box registers the outbound under
+// `with_quic`, nothing publisher-side mints it, and it has never been
+// soaked.
 func seedExperimentalRoute(t *testing.T, c *Core, routeID string) {
 	t.Helper()
 	if err := c.store.UpsertPublisher(routestore.PublisherRow{
@@ -431,7 +439,7 @@ func seedExperimentalRoute(t *testing.T, c *Core, routeID string) {
 	}
 	if err := c.store.UpsertRoute(routestore.RouteRow{
 		RouteID:         routeID,
-		TransportFamily: "webtunnel",
+		TransportFamily: "tuic",
 		Engine:          "sing-box",
 		SourceType:      "imported",
 		PublisherID:     "pub-exp",

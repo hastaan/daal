@@ -165,3 +165,45 @@ func TestMintToken_AcceptsUsersOps(t *testing.T) {
 		}
 	}
 }
+
+// TestTUICCredsWireContract pins both halves of the tuic hop across the
+// box→publisher boundary: the JSON key names (the box writes them, this
+// struct reads them, and encoding/json drops what is not declared) and
+// the capability token literal.
+//
+// This project has shipped an inert feature exactly this way once
+// already — cover_sni and mux_inbound were echoed by the box and
+// swallowed here — so the keys are asserted from raw JSON rather than
+// from a round trip through the same struct, which would pass even if
+// both sides were wrong together.
+func TestTUICCredsWireContract(t *testing.T) {
+	raw := []byte(`{"name":"r1","vless_uuid":"v","reality_short_id":"s",
+	  "hy2_password":"h","naive_password":"n","ws_path":"/r1/ab","provisioned_at_unix":7,
+	  "tuic_uuid":"99999999-8888-7777-6666-555555555555","tuic_password":"tuicpw"}`)
+	var got UserCreds
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TUICUUID != "99999999-8888-7777-6666-555555555555" {
+		t.Errorf("tuic_uuid did not survive the hop: %+v", got)
+	}
+	if got.TUICPassword != "tuicpw" {
+		t.Errorf("tuic_password did not survive the hop: %+v", got)
+	}
+	// A relay that does not serve the family sends neither key. That
+	// absence — not an error, not a flag — is what makes the pack
+	// renderer refuse, so it must decode cleanly to empty.
+	var silent UserCreds
+	if err := json.Unmarshal([]byte(`{"name":"r1"}`), &silent); err != nil {
+		t.Fatalf("a box that says nothing about tuic must still decode: %v", err)
+	}
+	if silent.TUICUUID != "" || silent.TUICPassword != "" {
+		t.Errorf("expected empty tuic creds, got %+v", silent)
+	}
+
+	// Wire contract with cmd/daal-relay-mgmt's capTUICUsers, which is in
+	// a different module and cannot be imported here.
+	if CapTUICUsers != "tuic-users" {
+		t.Fatalf("token = %q, want tuic-users", CapTUICUsers)
+	}
+}
