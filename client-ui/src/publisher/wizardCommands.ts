@@ -490,6 +490,15 @@ export interface RotateExecuteOutput {
      *  longer serves; when the release leg could not make that true,
      *  it says so here instead of the UI quietly asserting it. */
     warnings?: string[];
+    /** The address the relay moved OFF, when it keeps answering after
+     *  the swap; absent when it was released and is genuinely gone.
+     *
+     *  Set on a relay's FIRST L3, which moves off the server's own
+     *  primary address — a provider will not release that to anyone,
+     *  and the release leg is gated on a prior floating IP existing, so
+     *  nothing is attempted. Verified on hardware 2026-08-18: the
+     *  primary and the new floating IP both answered TLS afterwards. */
+    prior_address_still_serves?: string | null;
 }
 
 /**

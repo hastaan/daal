@@ -2028,6 +2028,24 @@ pub struct RotateExecuteOutput {
     /// be the wrong trade.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The address the relay just moved OFF, when Daal knows it keeps
+    /// answering afterwards. `None` means it was released and is gone.
+    ///
+    /// This exists because the success copy used to assert "the old one
+    /// no longer serves" unconditionally, and on the FIRST L3 that is
+    /// false: a relay that has never had a floating IP is moving off the
+    /// server's own primary address, which the provider will not let
+    /// anyone release. The release leg below is gated on a prior
+    /// floating IP existing, so on that path nothing is even attempted.
+    ///
+    /// Measured on real hardware 2026-08-18: after a first L3, both
+    /// 91.98.92.73 (primary) and 88.198.109.35 (the new floating IP)
+    /// answered TLS on 443. Getting this wrong is not cosmetic — an
+    /// operator rotates BECAUSE an address was blocked, and telling them
+    /// the burned address is dead when it is still reachable is the
+    /// dangerous direction to be wrong in.
+    #[serde(default)]
+    pub prior_address_still_serves: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2782,6 +2800,8 @@ fn rotate_execute_inner(
                 bind_result: crate::cli_bridge::BindResult::default(),
                 signed_at_unix: now,
                 warnings,
+                // L9 re-points a CDN origin; no address is vacated.
+                prior_address_still_serves: None,
             });
         }
         other => {
@@ -2982,8 +3002,15 @@ fn rotate_execute_inner(
                             let _ = ctx.db.update_record_json(operator_id, &outcome.record_json);
                         }
                     }
+                    // NOT "still attached": by this point the unassign
+                    // has usually succeeded and only the delete failed,
+                    // so the address is detached but still RESERVED —
+                    // which is the half that bills. Saying "attached"
+                    // sends the operator looking at the server, where
+                    // they find nothing wrong. Observed on hardware
+                    // 2026-08-18.
                     Err(e) => warnings.push(format!(
-                        "the previous address (floating IP {prior_floating_ip_id}) is still attached and still billing — releasing it failed: {e}"
+                        "the previous address (floating IP {prior_floating_ip_id}) was NOT released — it is still reserved and still billing, whether or not it is still attached: {e}"
                     )),
                 }
                 let _ = std::fs::remove_file(&release_path);
@@ -3001,12 +3028,24 @@ fn rotate_execute_inner(
         extra: Default::default(),
     });
 
+    // An L3 that moved off the server's own primary address leaves that
+    // address answering forever: the release leg above never runs, and
+    // the provider does not allow releasing a primary IP at all. Say so,
+    // rather than let the success copy claim it stopped serving.
+    let prior_address_still_serves =
+        if input.level == "L3" && prior_floating_ip_id.is_empty() && !prior_public_ip.is_empty() {
+            Some(prior_public_ip.clone())
+        } else {
+            None
+        };
+
     Ok(RotateExecuteOutput {
         level: input.level,
         signed_sbp_id: new_sbp_id,
         bind_result: bind,
         signed_at_unix: now,
         warnings,
+        prior_address_still_serves,
     })
 }
 
@@ -6003,6 +6042,83 @@ mod tests {
     // wizard has no field to type one into. The empty id now reaches
     // `daal-deploy assign-fip`, which reserves one.
     #[test]
+    /// The success sheet used to promise, unconditionally, that "the
+    /// old one no longer serves". On a relay's FIRST L3 that is a lie:
+    /// there is no prior floating IP, so the release leg never runs, and
+    /// the address being vacated is the server's own primary — which no
+    /// provider will release to anyone. Measured on hardware
+    /// 2026-08-18: after the swap, the primary AND the new floating IP
+    /// both answered TLS on 443.
+    ///
+    /// It is the dangerous direction to be wrong in. Operators reach for
+    /// L3 precisely because an address got blocked; telling them the
+    /// burned address is dead, when a censor probing it still gets an
+    /// answer, is worse than saying nothing.
+    #[test]
+    fn rotate_execute_l3_off_the_primary_admits_the_old_address_still_serves() {
+        let (ctx, _dir, _mock) = ctx_with_mock(
+            1_700_000_000,
+            Arc::new(
+                MockRunner::new(Pricing {
+                    provider: "hetzner".into(),
+                    region: "fsn1".into(),
+                    server_type: "cx22".into(),
+                    hourly_eur: 0.005,
+                    monthly_eur: 3.85,
+                    included_traffic_tb_per_month: None,
+                    overage_eur_per_gb: None,
+                })
+                .with_provision_record(full_record_json())
+                .with_bind_result(BindResult {
+                    sbp_path: "/tmp/rotated-l3-primary.sbp".into(),
+                    sbp_sha256: "a".repeat(64),
+                    relay_pack_id: "rp-rotated-l3-primary".into(),
+                    fingerprint_hex: "b".repeat(64),
+                    fingerprint_en: "alpha bravo charlie delta".into(),
+                    fingerprint_fa: "یک دو سه چهار".into(),
+                    lint_warnings: vec![],
+                    shared_risk_edges: 2,
+                }),
+            ),
+        );
+        // make_provisioned_op has no floating IP, which IS the first-L3
+        // shape: the relay is still on the address it was born with.
+        let id = make_provisioned_op(&ctx);
+        // A provisioned relay always knows its own address — that is
+        // what recipients dial. The bare fixture omits it, so set it
+        // here rather than weaken the production condition to match a
+        // state the app cannot actually be in.
+        {
+            let cur = ctx.db.get(id).unwrap().operator_record_json;
+            let mut v: serde_json::Value = serde_json::from_str(&cur).unwrap();
+            v["public_ip"] = serde_json::Value::String("91.98.92.73".into());
+            ctx.db
+                .update_record_json(id, &serde_json::to_string(&v).unwrap())
+                .unwrap();
+        }
+        let mut on_prog = |_e: ProgressEvent| {};
+
+        let out = rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                ..Default::default()
+            },
+            &mut on_prog,
+        )
+        .expect("a first L3 must succeed");
+
+        let still = out.prior_address_still_serves.expect(
+            "moving off the server's own address must report that the old address keeps serving",
+        );
+        assert_eq!(
+            still, "91.98.92.73",
+            "the surviving address has to be NAMED — an operator cannot act on \"some old address\""
+        );
+    }
+
     fn rotate_execute_l3_without_an_id_reserves_an_address() {
         let (ctx, _dir, mock) = ctx_with_mock(
             1_700_000_000,

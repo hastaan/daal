@@ -291,13 +291,49 @@ func (l *liveClient) FloatingIPAssign(ctx context.Context, fipID, serverID strin
 	return err
 }
 
+// floatingIPActionSettleTimeout bounds the wait for a floating-IP
+// action to finish. An unassign completes in about a second; this is
+// generous because overrunning it costs only the release leg, which is
+// deliberately non-fatal, while not waiting at all costs a reserved
+// address that bills forever.
+const floatingIPActionSettleTimeout = 60 * time.Second
+
 func (l *liveClient) FloatingIPUnassign(ctx context.Context, fipID string) error {
 	fipInt, err := strconv.ParseInt(fipID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid floating-ip id %q: %w", fipID, err)
 	}
-	_, _, err = l.c.FloatingIP.Unassign(ctx, &hcloud.FloatingIP{ID: fipInt})
-	return err
+	action, _, err := l.c.FloatingIP.Unassign(ctx, &hcloud.FloatingIP{ID: fipInt})
+	if err != nil {
+		return err
+	}
+	// WAIT FOR THE ACTION, do not just fire it.
+	//
+	// Hetzner LOCKS a floating IP while an action against it is running,
+	// and this call's only caller deletes the address immediately
+	// afterwards. Returning as soon as the API accepted the request made
+	// that delete lose the race on real hardware (2026-08-18, second L3
+	// on a live relay):
+	//
+	//   delete floating ip 145379191: cannot perform operation because
+	//   floating_ip is locked (locked, 5a92716...)
+	//
+	// The rotation still succeeded and the warning surfaced honestly,
+	// but the address stayed reserved and BILLING after every swap —
+	// a slow money leak that nothing else would have collected.
+	//
+	// Waiting is what makes "release" release. The bound is generous
+	// because an unassign is quick and a stall here costs only the
+	// release leg, which is already non-fatal to the rotation.
+	if action == nil {
+		return nil
+	}
+	wctx, cancel := context.WithTimeout(ctx, floatingIPActionSettleTimeout)
+	defer cancel()
+	if err := l.c.Action.WaitFor(wctx, action); err != nil {
+		return fmt.Errorf("waiting for floating ip %s to detach: %w", fipID, err)
+	}
+	return nil
 }
 
 // FirewallApplyCloudflareRule creates or updates a Hetzner Cloud

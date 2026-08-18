@@ -252,7 +252,18 @@ export function AddressSwap({
                                   )}
                         </div>
 
-                        <div style={BODY}>{t('pub.danger.address.confirm.old_ip')}</div>
+                        {/* Which promise is true depends on whether
+                            there is anything to release. With no
+                            floating IP yet, the relay sits on the
+                            server's own primary address and the move
+                            ADDS a way in rather than closing the old
+                            one — which matters most in exactly the case
+                            people rotate for, a blocked address. */}
+                        <div style={BODY}>
+                            {currentFloatingIpId
+                                ? t('pub.danger.address.confirm.old_ip')
+                                : t('pub.danger.address.confirm.old_ip_primary')}
+                        </div>
 
                         <label style={LABEL}>{t('pub.danger.address.field.fip')}</label>
                         <Input
@@ -294,7 +305,27 @@ export function AddressSwap({
                     }
                 >
                     <div style={{ display: 'grid', gap: 10 }}>
-                        <div style={BODY}>{t('pub.danger.address.done.body')}</div>
+                        {/* The old address is only gone if it was
+                            RELEASED. On a relay's first L3 it never is:
+                            the relay is moving off the server's own
+                            primary address, which the provider will not
+                            release to anyone, and the release leg is
+                            gated on a prior floating IP existing so it
+                            does not even run. Confirmed on hardware
+                            2026-08-18 — both the primary and the new
+                            floating IP answered TLS afterwards. Since
+                            the reason to rotate is usually "this address
+                            got blocked", claiming the burned address is
+                            dead when it still answers is the dangerous
+                            way to be wrong. */}
+                        <div style={BODY}>
+                            {done.prior_address_still_serves
+                                ? t('pub.danger.address.done.body_kept').replace(
+                                      '{ip}',
+                                      done.prior_address_still_serves,
+                                  )
+                                : t('pub.danger.address.done.body')}
+                        </div>
                         {/* The self_heal copy used to end "Nothing else
                             to do." It was wrong, and wrong in the
                             direction that costs a family their relay.

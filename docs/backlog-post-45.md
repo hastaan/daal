@@ -226,6 +226,32 @@ Ordering: recovery-path correctness first, then reachability, then hygiene.
   disagreement `selection.FreshnessState`'s doc comment forbids. Pinned by
   `TestRelayPacksCarriesTheEscalationAndTheJitter`.
 
+- [ ] **W3-12.** A reused server keeps a name that no longer identifies it.
+  Observed on live hardware 2026-08-18. The wizard's "choose an existing
+  server" path rebuilds in place and keeps the server's original name, but
+  Hetzner server names are DERIVED from (publisher pubkey, region)
+  (`derivedServerName`, provider.go:799) — and a rebuild issues a fresh
+  publisher key. The account then reads:
+
+      server        daal-fsn1-e2fa3e6040ce2d1e        <- from the OLD key
+      floating ips  daal-fsn1-8c2cd5d99f9aa421-fip-*  <- from the NEW key
+
+  Floating-IP ownership stays self-consistent (the labels and
+  `ownsFloatingIP` both derive from the current key), so nothing is
+  mislabelled and no delete guard is weakened. The gap is in NAME-based
+  lookups. `serverIDForRecord` (provider.go:640) is safe only because it
+  short-circuits on `rec.ServerID` and never reaches the name lookup. But
+  `sweepEphemeralKeys` (provider.go:669) uses `ServerByName(derived)` as a
+  LIVENESS PROOF — "if a server still carries that name, that relay is alive
+  and its provisioning key is not ours to remove" — and on a reused server
+  that proof answers "not alive" for a relay that is very much alive, so the
+  protection it exists to provide is inert. Low severity (the consequence is
+  deleting a one-shot provisioning key, which does not break a running box)
+  but it is a guard that silently stopped guarding, and the next name-based
+  lookup somebody adds inherits the bug. Either rename the server on rebuild,
+  or stop treating the derived name as an identity and key liveness off
+  ServerID.
+
 ## Workstream B — Smart routing (root cause behind fake health)
 - [ ] **B1.** The FRP-3 selection engine (`core/internal/selection/*`: `Decide`
   pipeline.go:69, `PlanRace` race.go:37, `Shortlist` shortlist.go:28) is fully
