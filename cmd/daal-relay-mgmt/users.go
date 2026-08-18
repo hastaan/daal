@@ -99,6 +99,82 @@ type userCreds struct {
 	//     to write, so an operator who hand-edited the block out is
 	//     believed.
 	MuxInbound bool `json:"mux_inbound"`
+
+	//   TUICUUID / TUICPassword — the per-recipient TUIC credential
+	//     pair, and the box's POSITIVE SIGNAL that this relay actually
+	//     serves the family. Both are non-empty iff a tuic-in row for
+	//     this recipient exists in the live config after the write; both
+	//     are blanked otherwise, and the publisher refuses to mint a
+	//     tuic route without them.
+	//
+	//     That indirection is not decoration. cloud-init and this binary
+	//     are pinned as separate artifacts, so a relay can boot with a
+	//     tuic-in inbound in its sing-box config and an older mgmt
+	//     binary that has never heard of tuic. The old binary answers
+	//     /users/provision with a 200 and adds no tuic row; the pack
+	//     would then carry a tuic route with nobody to authenticate it.
+	//     A missing value is the reliable signal — the same rule
+	//     cover_sni and mux_inbound are here for.
+	//
+	//     The uuid is minted independently of VLESSUUID rather than
+	//     reused: sharing one identifier across tiers means a single
+	//     leaked pack links the recipient's tuic and REALITY rows, and
+	//     rotating one without the other leaves the leak live.
+	TUICUUID     string `json:"tuic_uuid,omitempty"`
+	TUICPassword string `json:"tuic_password,omitempty"`
+
+	//   SSUserPSK — the recipient's shadowsocks-2022 uPSK ALONE, and it
+	//     never leaves this process: `json:"-"`. It is one half of a
+	//     two-part key and is useless to a client on its own, while
+	//     shipping it separately would invite the publisher to
+	//     re-derive the concatenation itself and get it wrong. The box
+	//     assembles the client-facing value; see SSPassword.
+	SSUserPSK string `json:"-"`
+
+	//   SSPassword / SSMethod — the shadowsocks-2022 credential the
+	//     client outbound needs, and this relay's POSITIVE SIGNAL that
+	//     it serves the family (same rule as the tuic pair above: a
+	//     value the box does not send is the reliable signal, never an
+	//     inference from one it does).
+	//
+	//     SSPassword is LITERALLY what goes in the outbound's
+	//     `password` field: "<iPSK>:<uPSK>", both halves base64-STD.
+	//     SS-2022 multi-user is two-level — the box-wide iPSK
+	//     authenticates the relay, the per-recipient uPSK identifies
+	//     who is calling (EIH) — and the client passes both, colon
+	//     separated, in one string (sing-shadowsocks2
+	//     shadowaead_2022/method.go splits on ":"). Both are filled
+	//     from the LIVE config after the write, never from what
+	//     mintCreds intended: the iPSK belongs to the box, not to this
+	//     provision, and the first recipient is the one who mints it.
+	//
+	//     SSMethod is echoed rather than assumed because the key length
+	//     follows from it (16 bytes for 2022-blake3-aes-128-gcm) and a
+	//     publisher that guessed a different method would mint a route
+	//     whose keys are the wrong size — a config sing-box refuses at
+	//     start, which on the client is a dead tier and on the box is a
+	//     relay that does not boot.
+	SSPassword string `json:"ss_password,omitempty"`
+	SSMethod   string `json:"ss_method,omitempty"`
+
+	//   AnyTLSPassword — this recipient's row in the box's anytls-in
+	//     inbound. anytls treats the password as an opaque string, so
+	//     unlike the SS pair there is no encoding contract to honour and
+	//     no box-wide half to join it to; what is minted here is what
+	//     the client presents.
+	//
+	//     Read back from the live config before it is returned (see the
+	//     provision handler), so an empty value means the family really
+	//     is not served here — this binary predates it, or the inbound
+	//     was removed — rather than meaning the write was attempted. The
+	//     publisher's renderer refuses to mint an anytls route on an
+	//     empty value, which is what keeps a route that cannot be
+	//     dialled out of a pack.
+	//
+	//     There is no padding-scheme field beside it on purpose: anytls
+	//     negotiates the scheme in band, so the client never has to be
+	//     told. See singbox_anytls.go.
+	AnyTLSPassword string `json:"anytls_password,omitempty"`
 }
 
 type userMeta struct {
@@ -187,6 +263,27 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 	creds.TLSCertPEM = s.readTLSCertPEM()
 	creds.CoverSNI = readCoverSNI(s.singboxConfig)
 	creds.MuxInbound = readMuxInbound(s.singboxConfig)
+	// Blank the tuic pair unless the live config really carries the row.
+	// This is the only signal the publisher gets that the family is
+	// served here, and it is read back from disk rather than inferred
+	// from what addUserToSingbox intended to do.
+	if !tuicUserPresent(s.singboxConfig, creds.Name) {
+		creds.TUICUUID, creds.TUICPassword = "", ""
+	}
+	// shadowsocks-2022: assemble "<iPSK>:<uPSK>" from what is actually
+	// on disk. Empty when this binary/config pair does not serve the
+	// family, and the method is blanked with it so the publisher never
+	// sees a method without a key or a key without a method.
+	creds.SSPassword = readSSClientPassword(s.singboxConfig, creds.Name)
+	if creds.SSPassword != "" {
+		creds.SSMethod = ssMethod
+	}
+	// anytls: echo the password that is actually in the live anytls-in
+	// inbound, which is "" when this binary/config pair does not serve
+	// the family. Overwriting the minted value with the on-disk one is
+	// the point — the publisher must never be told a credential exists
+	// on a box that has no inbound to check it against.
+	creds.AnyTLSPassword = readAnyTLSPassword(s.singboxConfig, creds.Name)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(creds)
 }
@@ -324,7 +421,7 @@ func mintCreds(name string, nowUnix int64) (userCreds, error) {
 	if _, err := rand.Read(shortID[:]); err != nil {
 		return userCreds{}, err
 	}
-	var hy2Raw, naiveRaw, wsPathRaw [16]byte
+	var hy2Raw, naiveRaw, wsPathRaw, tuicRaw [16]byte
 	if _, err := rand.Read(hy2Raw[:]); err != nil {
 		return userCreds{}, err
 	}
@@ -332,6 +429,33 @@ func mintCreds(name string, nowUnix int64) (userCreds, error) {
 		return userCreds{}, err
 	}
 	if _, err := rand.Read(wsPathRaw[:]); err != nil {
+		return userCreds{}, err
+	}
+	if _, err := rand.Read(tuicRaw[:]); err != nil {
+		return userCreds{}, err
+	}
+	// A second, independent uuid for tuic. See the TUICUUID comment on
+	// userCreds for why this is not VLESSUUID reused.
+	tuicUUID, err := genUUID()
+	if err != nil {
+		return userCreds{}, err
+	}
+	// shadowsocks-2022 uPSK. NOT base64.RawURLEncoding like the two
+	// passwords above: sing-shadowsocks decodes user PSKs with
+	// base64.StdEncoding (service_multi.go:109), which rejects the
+	// URL-safe alphabet and the missing padding, and a PSK that does
+	// not decode is a FATAL at sing-box start. Exactly ssKeyBytes of
+	// entropy — the method fixes the length and any other length is
+	// refused with "bad key length".
+	ssUserPSK, err := genSSKey()
+	if err != nil {
+		return userCreds{}, err
+	}
+	// anytls password. Opaque to the protocol, so it uses this binary's
+	// ordinary RawURLEncoding idiom rather than the StdEncoding the
+	// shadowsocks PSK above is forced into.
+	anytlsPassword, err := newAnyTLSPassword()
+	if err != nil {
 		return userCreds{}, err
 	}
 	// WS path uses 4 random bytes hex-encoded (8 chars), so it
@@ -343,6 +467,10 @@ func mintCreds(name string, nowUnix int64) (userCreds, error) {
 		Hy2Password:       base64.RawURLEncoding.EncodeToString(hy2Raw[:]),
 		NaivePassword:     base64.RawURLEncoding.EncodeToString(naiveRaw[:]),
 		WSPath:            fmt.Sprintf("/%s/%s", name, hex.EncodeToString(wsPathRaw[:4])),
+		TUICUUID:          tuicUUID,
+		TUICPassword:      base64.RawURLEncoding.EncodeToString(tuicRaw[:]),
+		SSUserPSK:         ssUserPSK,
+		AnyTLSPassword:    anytlsPassword,
 		ProvisionedAtUnix: nowUnix,
 	}, nil
 }

@@ -511,6 +511,29 @@ pub struct RotateCredentialsResult {
     pub cover_sni: String,
     #[serde(default)]
     pub mux_inbound: bool,
+    /// Wave 5 — shadowsocks-2022, echoed after a rotation exactly as on
+    /// provision. The rotation replaces the recipient's uPSK only, so
+    /// this is the LIVE box iPSK joined to the FRESH uPSK; the box
+    /// assembles it, this side only carries it.
+    #[serde(default)]
+    pub ss_password: String,
+    #[serde(default)]
+    pub ss_method: String,
+    /// Wave 5 — tuic, echoed after a rotation exactly as on provision.
+    /// Empty when this relay does not serve the family, which is the
+    /// same fail-closed signal the provision path uses: a rotation must
+    /// not hand back credentials the minter would turn into a route
+    /// nobody can dial.
+    #[serde(default)]
+    pub tuic_uuid: String,
+    #[serde(default)]
+    pub tuic_password: String,
+    /// Wave 5 — anytls, echoed after a rotation exactly as on provision.
+    /// Empty when this relay did not rotate an anytls row, which is the
+    /// fail-closed signal: a rotation must never hand back a freshly
+    /// minted password the box did not actually store.
+    #[serde(default)]
+    pub anytls_password: String,
 
     /// The box's own clock at the moment the rewritten config went live,
     /// so "when did this recipient's old UUID stop working?" has an
@@ -640,6 +663,63 @@ pub struct UserCredsResult {
     /// serves a plain client fine. False is the safe default.
     #[serde(default)]
     pub mux_inbound: bool,
+
+    // Wave 5 — shadowsocks-2022. Declared here for the same reason the
+    // two fields above are, and it is not a theoretical risk: this
+    // struct is what `recipient_book.rs` runs through
+    // `serde_json::to_value` to produce the creds file the pack step
+    // reads, so a field omitted here never reaches the minter. That is
+    // exactly how `mux_inbound` came to be inert for an entire wave.
+    /// The shadowsocks outbound's `password` VERBATIM: the box has
+    /// already joined its box-wide iPSK to this recipient's uPSK with a
+    /// colon. Do not split, re-join or re-encode it — SS-2022 decodes
+    /// each half with padded base64-std and the separator is part of
+    /// the wire format. Empty means this relay does not serve the
+    /// family (its mgmt binary predates it), and the minter refuses the
+    /// route rather than shipping one that cannot authenticate.
+    #[serde(default)]
+    pub ss_password: String,
+    /// The method the box actually serves, today always
+    /// `2022-blake3-aes-128-gcm`. Echoed rather than assumed because
+    /// the PSK length follows from it.
+    #[serde(default)]
+    pub ss_method: String,
+    /// Wave 5 — tuic. Same transport-struct rule as the fields above:
+    /// omitted here, dropped from the creds file, invisible everywhere.
+    ///
+    /// tuic authenticates on the PAIR, so both halves are required and
+    /// neither has a default. Their ABSENCE is the load-bearing signal:
+    /// the box sends them only when its live config really carries a
+    /// tuic-in row for this recipient, which is false both on a relay
+    /// whose toolbox profile did not enable the family and on a relay
+    /// running an mgmt binary that predates it — a real state, because
+    /// cloud-init and `daal-relay-mgmt` are pinned as separate
+    /// artifacts. The minter refuses the route without them rather than
+    /// shipping a tier nobody can authenticate against.
+    ///
+    /// The uuid is NOT the VLESS uuid: a shared identifier would link
+    /// the recipient across two tiers in one leaked pack, and rotating
+    /// one would leave the leak live on the other.
+    #[serde(default)]
+    pub tuic_uuid: String,
+    #[serde(default)]
+    pub tuic_password: String,
+    /// Wave 5 — anytls. THE SAME RULE AS EVERY FIELD ABOVE, and it was
+    /// broken again here: this struct is what `recipient_book.rs` runs
+    /// through `serde_json::to_value` to write the creds file
+    /// `users-pack-sbp` reads, so a field the box echoes and this
+    /// struct omits is discarded with no error anywhere. The box has
+    /// echoed `anytls_password` since the family landed; without this
+    /// declaration the minter read `""`, `ClientOutboundForFamily`
+    /// refused the anytls route, and `RewriteProfilesForRecipient`
+    /// failed the WHOLE pack on it — the recipient got nothing, not a
+    /// pack missing one route.
+    ///
+    /// Empty means this relay does not serve anytls (its
+    /// `daal-relay-mgmt` binary predates the family). The minter now
+    /// drops just that route and reports it.
+    #[serde(default)]
+    pub anytls_password: String,
 }
 
 /// FRP-14: JSON returned by `daal-deploy users-revoke`.
@@ -3241,6 +3321,22 @@ impl CliRunner for MockRunner {
             tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
             cover_sni: "ftp.plusline.net".into(),
             mux_inbound: true,
+            // A box that DOES serve shadowsocks-2022: the password is
+            // already the colon-joined "<iPSK>:<uPSK>" the outbound
+            // wants, both halves padded base64-std of 16 bytes, which is
+            // what the method requires.
+            ss_password: "bW9jay1ib3gtaXBzay0xNg==:bW9jay11c2VyLXVwc2sxNg==".into(),
+            ss_method: "2022-blake3-aes-128-gcm".into(),
+            // A box that DOES serve tuic. A relay whose profile left the
+            // family off sends both of these empty, and the minter then
+            // refuses the route — see the field docs.
+            tuic_uuid: "33333333-3333-3333-3333-333333333333".into(),
+            tuic_password: "mocktuicpassword000000".into(),
+            // A box that serves anytls. The password is opaque to the
+            // protocol (hashed into the session key), so any non-empty
+            // string is a faithful mock; empty would mean "this relay
+            // does not serve the family".
+            anytls_password: "mockanytlspassword0000".into(),
         })
     }
 
@@ -3289,6 +3385,20 @@ impl CliRunner for MockRunner {
             tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
             cover_sni: "ftp.plusline.net".into(),
             mux_inbound: true,
+            // Rotation replaces the recipient's uPSK only; the box iPSK
+            // (the first half) is the same string the provision mock
+            // returns, because re-minting it would break every other
+            // recipient's shadowsocks route.
+            ss_password: "bW9jay1ib3gtaXBzay0xNg==:cm90LXVzZXItdXBzay0xNg==".into(),
+            ss_method: "2022-blake3-aes-128-gcm".into(),
+            // Both halves move on a rotation: tuic authenticates on the
+            // pair, so leaving the uuid behind keeps half a leaked
+            // credential live.
+            tuic_uuid: "22222222-2222-2222-2222-222222222222".into(),
+            tuic_password: "rotatedtuicpassword000".into(),
+            // A fresh anytls password, distinct from the provision mock:
+            // the box replaces the row and echoes what it stored.
+            anytls_password: "rotatedanytlspassword0".into(),
             rotated_at_unix: 1_700_000_600,
             generated_at_unix: 1_700_000_600,
             updated_inbounds: vec![
@@ -3704,6 +3814,64 @@ echo decommissioned"#,
                 assert!(stderr.contains("503 service unavailable"), "{stderr}");
             }
             e => panic!("wanted SubprocessFailed, got {e:?}"),
+        }
+    }
+
+    /// WAVE-5 REPAIR REGRESSION — the serde hop that has now dropped a
+    /// field twice.
+    ///
+    /// `recipient_book::merge_and_pack_sbpx` produces the creds file
+    /// `users-pack-sbp[x]` reads by calling `serde_json::to_value` on
+    /// these structs. A field the box sends and the struct omits is
+    /// discarded there, silently, with no error at any layer — that is
+    /// how `mux_inbound` was inert for a wave and how `anytls_password`
+    /// would have made every wizard-minted pack for an anytls relay
+    /// fail to build.
+    ///
+    /// This asserts the OUTPUT of that exact call, not the struct
+    /// definition, so it fails for a `skip_serializing_if` as well as
+    /// for a missing field. `tools/check-creds-mirror.mjs` is the
+    /// static half; this is the runtime half.
+    #[test]
+    fn creds_serialise_every_field_the_minter_reads() {
+        // The wire names publisher/deploy/mgmt.UserCreds declares.
+        // Keep in step with that struct — the gate script enforces it.
+        const WIRE: &[&str] = &[
+            "name",
+            "vless_uuid",
+            "reality_short_id",
+            "hy2_password",
+            "naive_password",
+            "ws_path",
+            "provisioned_at_unix",
+            "reality_public_key",
+            "tls_cert_sha256",
+            "tls_cert_pem",
+            "cover_sni",
+            "mux_inbound",
+            "tuic_uuid",
+            "tuic_password",
+            "ss_password",
+            "ss_method",
+            "anytls_password",
+        ];
+
+        let prov = serde_json::to_value(UserCredsResult::default()).unwrap();
+        for k in WIRE {
+            assert!(
+                prov.get(k).is_some(),
+                "UserCredsResult serialises without {k:?}; the creds file the pack step \
+                 reads would not carry it and the route would be refused or minted dead"
+            );
+        }
+
+        let rot = serde_json::to_value(RotateCredentialsResult::default()).unwrap();
+        for k in WIRE {
+            assert!(
+                rot.get(k).is_some(),
+                "RotateCredentialsResult serialises without {k:?}; a rotation would hand \
+                 the minter a pack missing that family"
+            );
         }
     }
 }

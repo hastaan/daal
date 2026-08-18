@@ -399,7 +399,7 @@ func TestCapabilities_AcceptsRealBoxHealthBody(t *testing.T) {
 	// Byte-for-byte what cmd/daal-relay-mgmt's handleHealth writes,
 	// trailing newline included — it uses json.Encoder, which appends
 	// one, and a decoder that choked on it would fail only in the field.
-	const boxHealthBody = `{"capabilities":["rotate-credentials-scoped","rotate-tls-scoped"],"mgmt_api_version":2,"ok":true}` + "\n"
+	const boxHealthBody = `{"capabilities":["rotate-credentials-scoped","rotate-tls-scoped","shadowsocks-2022"],"mgmt_api_version":2,"ok":true}` + "\n"
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -415,6 +415,13 @@ func TestCapabilities_AcceptsRealBoxHealthBody(t *testing.T) {
 	caps, err := cli.Capabilities(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("real box /health must decode: %v", err)
+	}
+	// Wave 5 rides the same advertisement. It is the EARLY half of the
+	// shadowsocks interlock — the late half is an empty ss_password in
+	// the provision response — and it lets an operator find out before
+	// renting a server that the pinned mgmt artifact has no ss-in in it.
+	if !caps.Has(CapShadowsocks2022) {
+		t.Errorf("real box read as not serving %q, so an operator would be told to skip a family the relay does in fact serve", CapShadowsocks2022)
 	}
 	if !caps.Has(CapRotateCredentialsScoped) {
 		t.Errorf("real box read as incapable of %q — in-place rotation would be refused against a correct relay", CapRotateCredentialsScoped)

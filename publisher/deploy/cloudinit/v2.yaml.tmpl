@@ -227,11 +227,17 @@ runcmd:
     run ufw default allow outgoing
     run ufw allow 443/tcp
     run ufw allow 443/udp
-    # FRP-14: data-plane ports for the TLS families that can't share
-    # 443/tcp with REALITY (naive=8444, websocket-tls=8445). Keep in
-    # sync with relayports.ExtraFirewallPorts().
-    run ufw allow 8444/tcp
-    run ufw allow 8445/tcp
+    # Data-plane ports for the families that cannot share 443 with
+    # REALITY. NOT a constant list any more: it comes from
+    # relayports.ExtraFirewallPortsFor(<this relay's families>) via
+    # RenderInput.DataPlanePorts, so a family the toolbox profile can
+    # switch off (tuic, 8443/udp) leaves no open port on relays that do
+    # not serve it. This runs ONCE, at first boot — there is no upgrade
+    # path for cloud-init, so changing a relay's family set means
+    # reprovisioning it, not editing a rule.
+{{- range .UFWDataPlaneRules }}
+    run ufw allow {{ . }}
+{{- end }}
     run ufw allow from {{ .ProvisioningClientIP }} to any port 22 proto tcp
     run ufw allow from {{ .ProvisioningClientIP }} to any port 9876 proto tcp
     # FRP-14 fix: open the V2 mgmt port at the box-side firewall too.

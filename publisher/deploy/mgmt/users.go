@@ -59,6 +59,66 @@ type UserCreds struct {
 	// (measured: curl rc=56), while a mux inbound serves a non-mux client
 	// fine. Absent (false) on a pre-Wave-2 box, which is the safe default.
 	MuxInbound bool `json:"mux_inbound"`
+
+	// TUICUUID / TUICPassword are the per-recipient tuic credential
+	// pair, and their ABSENCE is the load-bearing signal: the box sends
+	// them only when its live config really carries a tuic-in row for
+	// this recipient. A relay whose toolbox profile did not enable tuic
+	// sends nothing here, and so does a relay running an mgmt binary
+	// that predates the family — which is a real state, because
+	// cloud-init and cmd/daal-relay-mgmt are pinned as separate
+	// artifacts and a fresh box can have the new inbound with the old
+	// binary. The pack minter refuses to render a tuic route without
+	// both, so that combination fails closed instead of shipping a
+	// route nobody can authenticate against.
+	TUICUUID     string `json:"tuic_uuid,omitempty"`
+	TUICPassword string `json:"tuic_password,omitempty"`
+
+	// WAVE 5 — shadowsocks-2022, the only family Daal serves with no TLS
+	// handshake in it. Both fields are subject to the warning at the top
+	// of this block: omit them here and the box's values are dropped on
+	// decode with no error anywhere, and the family is inert on arrival.
+	//
+	// SSPassword is the CLIENT outbound's `password` verbatim:
+	// "<box iPSK>:<recipient uPSK>", both halves base64-STD. SS-2022
+	// multi-user is a two-level key and the client passes both halves in
+	// one colon-joined string; the box assembles it from its own live
+	// config so this side never has to know the rule. Empty means this
+	// relay does not serve the family — either its mgmt binary predates
+	// it, or its ss-in inbound is absent — and the renderer refuses to
+	// mint the route rather than shipping one that cannot authenticate.
+	//
+	// SSMethod is what the box actually serves (today, always
+	// "2022-blake3-aes-128-gcm"). It is echoed rather than hard-coded
+	// here because the PSK length follows from the method: a client that
+	// assumed a different one would present 16-byte keys to a 32-byte
+	// cipher and sing-box would refuse the outbound at start.
+	SSPassword string `json:"ss_password,omitempty"`
+	SSMethod   string `json:"ss_method,omitempty"`
+
+	// WAVE 5 — anytls. Subject to the same warning at the top of this
+	// block: omit this field and the box's value is dropped on decode
+	// with no error anywhere, and the family is inert on arrival.
+	//
+	// AnyTLSPassword is this recipient's row in the box's anytls-in
+	// `users[]`. Empty means the relay does not serve anytls — either
+	// its mgmt binary predates the family, or its anytls-in inbound is
+	// absent — and the renderer refuses to mint the route rather than
+	// shipping one that cannot authenticate. That refusal is the safety
+	// interlock; mgmt.CapAnyTLSInbound on /health is only the early
+	// warning.
+	//
+	// NOTE WHAT IS DELIBERATELY *NOT* HERE: the padding scheme. anytls
+	// negotiates it in-band — the client opens with the library default,
+	// announces `padding-md5` in its settings frame, and the server
+	// answers with cmdUpdatePaddingScheme carrying the raw scheme when
+	// the hashes differ (sing-anytls session/session.go:89,264-278).
+	// So unlike CoverSNI, which MUST match on both ends or REALITY
+	// fails, a per-relay padding scheme needs no plumbing at all: the
+	// box can change it whenever it likes and every client adapts on its
+	// next session. Carrying it here would put a per-relay fingerprint
+	// into a file that travels, for no benefit.
+	AnyTLSPassword string `json:"anytls_password,omitempty"`
 }
 
 // UserMeta is the lightweight per-user descriptor returned by

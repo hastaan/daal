@@ -438,6 +438,22 @@ func cmdWebTunnelBridge(args []string) int {
 	}
 	fmt.Printf("WebTunnel route stub written: %s\n", *out)
 	fmt.Printf("  route_id: %s\n  host:     %s\n", stub.ID, host)
+	// Wave 5: say the two things an operator cannot learn from
+	// the file itself. See bundle/go/publisher/webtunnel.go.
+	fmt.Fprintln(os.Stderr,
+		"warning: no shipped Daal engine can dial a webtunnel route.")
+	fmt.Fprintln(os.Stderr,
+		"         sing-box 1.13.12 registers no webtunnel outbound; WebTunnel is a Tor")
+	fmt.Fprintln(os.Stderr,
+		"         pluggable transport, so it arrives via the tor outbound and a torrc")
+	fmt.Fprintln(os.Stderr,
+		"         'Bridge webtunnel ...' line, not as a route stub. A recipient given")
+	fmt.Fprintln(os.Stderr,
+		"         this stub sees a route that imports and never connects.")
+	fmt.Fprintln(os.Stderr,
+		"         WebTunnel is also effective in China and NOT in Iran; set")
+	fmt.Fprintln(os.Stderr,
+		"         --caveat-fa-ir if this pack may reach Iranian recipients.")
 	return 0
 }
 

@@ -132,28 +132,18 @@ func normaliseFamily(family string) string {
 	}
 }
 
+// validTransport delegates to the bundle package's own predicate.
+//
+// WAVE-5 REPAIR. This used to be a second hand-kept switch listing the
+// families by name, and it had gone stale: `anytls` was added to the
+// enum without being added here, so `renderCandidates` refused an
+// anytls candidate as an "unknown transport_family" and
+// BuildOperatorPack failed for the WHOLE pack — no routes at all, not
+// even the four that work. There is now one list
+// (bundle.ValidTransportFamily) and this is a thin call into it. Do
+// not re-inline the switch.
 func validTransport(family string) bool {
-	switch bundle.TransportFamily(family) {
-	case bundle.TransportVLESSReality,
-		bundle.TransportNaive,
-		bundle.TransportWebSocketTLS,
-		bundle.TransportHysteria2,
-		bundle.TransportTUIC,
-		bundle.TransportSnowflake,
-		bundle.TransportWebTunnel,
-		bundle.TransportMASQUE,
-		bundle.TransportShadowsocks,
-		bundle.TransportTorBridge,
-		bundle.TransportWireGuard,
-		bundle.TransportAmneziaWG,
-		bundle.TransportPsiphon,
-		bundle.TransportConjure,
-		bundle.TransportTransportModule,
-		bundle.TransportLifelineRelay,
-		bundle.TransportOther:
-		return true
-	}
-	return false
+	return bundle.ValidTransportFamily(family)
 }
 
 // udpGatedForFamily mirrors the FRP-4a profile_render.portProto rule.
@@ -164,6 +154,19 @@ func udpGatedForFamily(family string) bool {
 		string(bundle.TransportWireGuard),
 		string(bundle.TransportAmneziaWG):
 		return true
+	}
+	return false
+}
+
+// anyFamily reports whether any rendered route names the given
+// transport family. Used by the binder to decide the manifest's
+// spec_version from the pack's actual CONTENT rather than from the
+// build that produced it — see the SpecVersionAnyTLS block there.
+func anyFamily(routes []bundle.RouteManifestEntry, family string) bool {
+	for _, r := range routes {
+		if r.TransportFamily == family {
+			return true
+		}
 	}
 	return false
 }

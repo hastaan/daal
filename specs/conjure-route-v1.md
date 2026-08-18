@@ -1,7 +1,16 @@
 # conjure-route-v1
 
 **Phase:** 3D
-**Status:** Locked at 3D. Experimental.
+**Status:** **SUPERSEDED at Wave 5 — the family is `unsupported`,
+not experimental, and cannot become otherwise without a network
+operator.** Conjure is refraction networking: it requires a
+COOPERATING ISP running a station on a transit link it owns,
+answering for unused addresses in its own space. A publisher
+renting a VPS has neither, so there is nothing to deploy.
+gotapdance has never been in `core/go.mod`. `conjure_compiled_in`
+is now constant `false` and `RecordConjureActivation` refuses a
+non-empty route ID. Kept as the record of a decision, not a plan.
+See `docs/transport-family-inventory.md`.
 **Roadmap line:** V3.4 — "Refraction-family hooks (Psiphon + Conjure)."
 **Engine version:** `daal-core 0.7.3+v3-transport`.
 **ABI release surface:** 45 → **45** (no new symbols; append-only invariant preserved).
@@ -96,7 +105,7 @@ Per-field error vocabulary at parse time:
 
 | Field                    | Type   | Default | Notes                                                                   |
 |--------------------------|--------|---------|-------------------------------------------------------------------------|
-| `conjure_compiled_in`    | bool   | `true`  | Reserved for future build-tag conditioning; never carries a URL or IP. |
+| `conjure_compiled_in`    | bool   | **`false`** | **Wave 5: constant `false`.** It claimed an "Apache-2.0 vendored tree that ships unconditionally"; gotapdance is not in the module graph, directly or indirectly. Never carries a URL or IP. |
 | `conjure_active_route`   | string | `""`    | Most recently activated conjure route ID this session.                 |
 | `conjure_phantom_in_use` | string | `""`    | 8-byte-SHA-256-hex of the raw phantom IP. Raw IP NEVER appears.        |
 

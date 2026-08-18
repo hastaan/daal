@@ -520,14 +520,15 @@ func stringPtr(s string) *string { return &s }
 //   - 443/tcp from 0.0.0.0/0 + ::/0 (VLESS / HTTPS)
 //   - 443/udp from 0.0.0.0/0 + ::/0 (Hysteria2 / QUIC)
 //   - 80/tcp  from 0.0.0.0/0 + ::/0 (ACME http-01 future-proofing)
-//   - plus relayports.ExtraFirewallPorts() (naive=8444/tcp,
-//     websocket-tls=8445/tcp) — the TLS families that can't share
-//     443/tcp with REALITY.
+//   - plus the caller's extraPorts — the families that can't share
+//     443/tcp with REALITY, resolved from this relay's own family set
+//     by relayports.ExtraFirewallPortsFor. nil means the fleet
+//     baseline.
 //
 // Hetzner closes everything else when any inbound rule is present,
 // so the random V2 mgmt port stays sealed until the wizard's
 // FirewallAddEphemeralRule punches a (helperIP, port) hole.
-func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID string) (string, error) {
+func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID string, extraPorts []relayports.Endpoint) (string, error) {
 	srvInt, err := strconv.ParseInt(serverID, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid server id %q: %w", serverID, err)
@@ -555,11 +556,15 @@ func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID strin
 		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolUDP, Port: &port443, SourceIPs: srcAny},
 		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP, Port: &port80, SourceIPs: srcAny},
 	}
-	// Data-plane ports for the TLS families that can't share 443/tcp
-	// with REALITY (naive=8444/tcp, websocket-tls=8445/tcp). Derived
-	// from relayports so the firewall never drifts from the sing-box
-	// inbound generator.
-	for _, ep := range relayports.ExtraFirewallPorts() {
+	// Data-plane ports for the families that can't share 443/tcp with
+	// REALITY. Derived from relayports so the firewall never drifts
+	// from the sing-box inbound generator or the box-side ufw rules,
+	// and per-relay rather than fleet-wide so an opt-in family's port
+	// is open exactly on the relays that serve it.
+	if extraPorts == nil {
+		extraPorts = relayports.ExtraFirewallPorts()
+	}
+	for _, ep := range extraPorts {
 		portStr := strconv.Itoa(ep.Port)
 		proto := hcloud.FirewallRuleProtocolTCP
 		if ep.UDP {

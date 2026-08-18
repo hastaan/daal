@@ -1,5 +1,39 @@
 package publisher
 
+// DORMANT (Wave 5) — a route-stub emitter with no dialer behind
+// it, and re-scoped downward besides. Kept, not deleted, because
+// `bundle/go/cmd/daal-publish` still registers the
+// `webtunnel-bridge` verb; that verb now prints the caveat below
+// so the operator learns it at the point of use rather than from
+// a spec.
+//
+// NOTHING DIALS THE STUB THIS EMITS. The route it writes declares
+// `transport_family: "webtunnel"`. sing-box 1.13.12 registers no
+// webtunnel outbound (its outbound registry is direct, block,
+// selector, urltest, socks, http, shadowsocks, vmess, trojan,
+// naive, tor, ssh, shadowtls, vless, anytls, plus the with_quic
+// set), so a recipient importing this stub gets a route that
+// imports cleanly, renders in the route list, and cannot connect.
+// A family that mints but cannot be dialled is worse than no
+// family — it is a route the user selects and loses.
+//
+// WHERE WEBTUNNEL ACTUALLY LIVES. It is a Tor pluggable
+// transport. The reachable path is the `tor` outbound plus a
+// torrc `Bridge webtunnel ...` line, not a first-class family
+// with its own dialer; sing-box's `option/tor.go` takes
+// `extra_args`, which is how multiple Bridge lines get expressed.
+// Nothing publisher-side needs to mint it in that world — the
+// bridge line is the artefact.
+//
+// AND IT IS THE WRONG COUNTRY. WebTunnel is field-effective in
+// China and FAILS in Iran, which is this project's stated primary
+// target. Older prose in this repo has it the other way round.
+// Do not present webtunnel to an Iranian user as a recommended
+// family; `caveat_fa_ir` exists on the stub for exactly this and
+// is empty by default.
+//
+// ---- Original Phase 3A doc, retained verbatim ----
+//
 // Phase 3A. Helpers for the `daal-publish webtunnel-bridge`
 // subcommand. The CLI surface is documented in
 // specs/publisher-cli-v1.md and specs/webtunnel-route-v1.md.

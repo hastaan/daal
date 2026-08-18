@@ -121,6 +121,41 @@ func familyCarriesMultiplex(family string) bool {
 		// naive rides Cronet (HTTP/2 CONNECT through its own stack);
 		// sing-mux is not in that path.
 		return false
+	case "anytls":
+		// anytls has its OWN session layer — the one its padding scheme
+		// is applied over (min_idle_session / idle_session_timeout on
+		// the outbound). Adding sing-mux would stack a second
+		// multiplexer on top of the first over one connection, and
+		// option.AnyTLSOutboundOptions has no Multiplex field anyway, so
+		// the strict parser would reject the outbound outright. The
+		// family already provides what mux was added to buy.
+		return false
+	case "shadowsocks":
+		// NO — and unlike hysteria2/tuic this is NOT because the option
+		// is missing. option/shadowsocks.go carries Multiplex on BOTH
+		// ShadowsocksInboundOptions and ShadowsocksOutboundOptions, so a
+		// mux block here would parse cleanly. It is refused because of
+		// what the outbound does with it at construction:
+		//
+		//   protocol/shadowsocks/outbound.go builds the mux dialer only
+		//   `if !uotOptions.Enabled`, and builds the UoT client only if
+		//   it is. The two are mutually exclusive, and whichever is not
+		//   chosen is discarded WITHOUT AN ERROR.
+		//
+		// Daal's shadowsocks route must carry udp_over_tcp: the box's
+		// ss-in inbound is TCP-only on one opened port, so UoT is the
+		// only UDP this tier has — losing it means no DNS and no QUIC
+		// through the route. So mux would lose the coin toss anyway, and
+		// emitting it would produce a pack that ADVERTISES the Xue et
+		// al. mitigation while silently applying nothing.
+		//
+		// The mitigation is not needed here in any case: multiplexing
+		// exists to break the per-flow shape of a NESTED TLS handshake,
+		// and this is the one family with no TLS handshake in it.
+		// Shadowsocks' exposure is entropy and packet-length
+		// classification, which h2mux inside the AEAD tunnel does not
+		// address. Do not "fix" this by dropping udp_over_tcp.
+		return false
 	default:
 		return false
 	}

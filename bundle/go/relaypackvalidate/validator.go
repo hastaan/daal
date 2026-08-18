@@ -700,6 +700,13 @@ func setsEqual(a, b map[string]bool) bool {
 // Per supplement §11.1.1:
 //   - vless-reality, naive, websocket-tls: yes (TCP-shaped, CDN-able)
 //   - hysteria2, tuic: no (UDP-only; CDNs do not transparently proxy UDP)
+//   - anytls: yes (TLS-over-TCP, same shape as the three above).
+//     Added in the Wave-5 repair pass: without a row, RP007's
+//     `support, known := matrix[...]` lookup fails the KNOWN check and
+//     a cdn_fronted anytls candidate is refused as "does not support
+//     exposure_mode=cdn_fronted" — the wrong reason for a missing row,
+//     and a diagnosis the next wave would have had to work backwards
+//     from. Inert at V1.5/V1.6, which are direct_vps only.
 //   - snowflake, webtunnel, masque, shadowsocks, tor-bridge,
 //     wireguard, amneziawg, psiphon, conjure, transport_module,
 //     lifeline_relay, other: conditional (case-by-case)
@@ -708,6 +715,7 @@ func defaultFamilyMatrix() FamilyExposureMatrix {
 		"vless-reality":    ExposureYes,
 		"naive":            ExposureYes,
 		"websocket-tls":    ExposureYes,
+		"anytls":           ExposureYes,
 		"hysteria2":        ExposureNo,
 		"tuic":             ExposureNo,
 		"snowflake":        ExposureConditional,

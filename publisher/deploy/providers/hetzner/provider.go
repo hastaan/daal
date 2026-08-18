@@ -16,6 +16,7 @@ import (
 	"daal/publisher/deploy/cloudinit"
 	"daal/publisher/deploy/health"
 	"daal/publisher/deploy/provider"
+	"daal/publisher/deploy/relayports"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -163,12 +164,29 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 
 	progress("provision_cloud_init", "Rendering server configuration")
+	// One resolution of "which families does this relay serve", used
+	// for all three things that have to agree about it: the sing-box
+	// inbounds baked into cloud-init, the box-side ufw rules baked
+	// alongside them, and the cloud-provider firewall attached below.
+	// Resolving it three times from three places is how a relay ends up
+	// listening on a port its firewall drops.
+	//
+	// An unresolvable profile is an error here, not a silent baseline:
+	// it is the same failure candidatesForProfile was taught to refuse,
+	// and refusing before the server exists costs nothing, while
+	// refusing after it does costs a billed box.
+	served, err := servedFamilies(opts.ToolboxProfile, opts.EnabledFamilies)
+	if err != nil {
+		return nil, fmt.Errorf("hetzner: resolve served families: %w", err)
+	}
+	dataPlanePorts := relayports.ExtraFirewallPortsFor(served)
 	userData, err := cloudinit.RenderV2(cloudinit.RenderInputV2{
 		RenderInput: cloudinit.RenderInput{
 			EphemeralSSHPublicKey: string(pubBytes),
 			ProvisioningClientIP:  opts.HelperIP.String(),
 			HealthToken:           healthToken,
-			SingBoxConfigJSON:     defaultSingBoxConfig(opts.ToolboxProfile, coverSNI),
+			SingBoxConfigJSON:     singBoxConfigForFamilies(coverSNI, served),
+			DataPlanePorts:        dataPlanePorts,
 		},
 		MgmtPubKeyHex: hex.EncodeToString(opts.PublisherPubKey),
 		MgmtPort:      mgmtPort,
@@ -232,7 +250,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	// roster) fails with "no attached firewall" because
 	// FirewallAddEphemeralRule has nothing to mutate.
 	progress("provision_cloud_firewall", "Attaching Daal baseline firewall to server")
-	if _, err := p.c.FirewallEnsureForServer(ctx, rec.ServerID); err != nil {
+	if _, err := p.c.FirewallEnsureForServer(ctx, rec.ServerID, dataPlanePorts); err != nil {
 		// Don't tear the whole provision down; the box-side ufw
 		// still provides surface-area minimisation for the
 		// non-mgmt ports. We just won't be able to talk to the
@@ -1098,7 +1116,20 @@ func (p *Provider) SetEphemeralFirewallRule(ctx context.Context, serverID, calle
 		// is reachable from anywhere (box-side ufw doesn't open
 		// it — see FRP-10 invariant 18). Create + attach the
 		// daal baseline firewall now and retry.
-		if _, eErr := p.c.FirewallEnsureForServer(ctx, serverID); eErr != nil {
+		// KNOWN LIMIT, recorded rather than papered over: this
+		// self-heal path is reached from SetEphemeralFirewallRule,
+		// which is handed a serverID and nothing else — no record, no
+		// family set. It therefore re-creates the firewall with the
+		// FLEET BASELINE data-plane ports, so a relay that serves an
+		// opt-in family (tuic, 8443/udp) and has somehow lost its cloud
+		// firewall gets that family's port left shut. The mgmt plane
+		// comes back, which is what this path exists for, and the tuic
+		// tier stays dark until the relay is reprovisioned. Passing the
+		// real set needs the record threaded down to
+		// SetEphemeralFirewallRule; it is a signature change across the
+		// provider interface and is not worth doing blind in a wave
+		// that cannot test it against hardware.
+		if _, eErr := p.c.FirewallEnsureForServer(ctx, serverID, nil); eErr != nil {
 			return nil, fmt.Errorf("hetzner: ensure firewall: %w", eErr)
 		}
 		id, err = p.c.FirewallAddEphemeralRule(ctx, serverID, callerIP, port, expiresAt)

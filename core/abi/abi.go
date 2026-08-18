@@ -40,7 +40,7 @@ import (
 //   - 0.7.0+v3-transport (Phase 3A): engine_set_experimental_families_enabled + transport-family taxonomy + WebTunnel handler + Iranian region caveat + bundle SBP-v1 widening (3 new optional routes[] fields + kill_switches[] reservation) (release surface 41→42). V3 transport-agility line begins.
 //   - 0.7.1+v3-transport (Phase 3B): engine_set_rendezvous_priority + engine_set_push_rendezvous_enabled (release surface 42→44). Snowflake transport family + 5-channel rendezvous taxonomy (domain_fronted_broker / sqs / amp_cache / push / offline_hint) with hedged-at-4s selection; per-route + per-network winning-channel persistence; gomobile-only push token plumbing (NEVER cshared); vault profile rejects push opt-in. Diagnostics widen with rendezvous_priority / rendezvous_channel / push_rendezvous_enabled / last_winning_rendezvous_channel.
 //   - 0.7.2+v3-transport (Phase 3C): engine_set_masque_submode_override (release surface 44→45). MASQUE transport family with three sub-modes (masque_h3_quic / masque_h2_connect / masque_lifeline); private chooseSubmode cascade (override → lifeline-strict hint → netmem hint → UDP probe → h2-burn drop); per-route + per-network sub-mode persistence; opportunistic only — auto-promotion never promotes a network whose only family is masque. Diagnostics widen with masque_submode / masque_submode_override.
-//   - 0.7.3+v3-transport (Phase 3D): refraction-family hooks. Two new transport families (psiphon, conjure), both shipped as Experimental. Psiphon is opaque-blob carriage (vendored psiphon-tunnel-core under GPLv3, isolated behind `-tags no_psiphon`); conjure is vendored gotapdance under Apache-2.0; phantom-pool floors locked at /24 IPv4 + /32 IPv6. Family registry gains `IsOpportunistic` (psiphon NOT opportunistic, conjure IS, masque retroactively annotated). NO new ABI symbols (release surface 45→45, append-only invariant preserved). Diagnostics widen with psiphon_compiled_in / conjure_compiled_in / psiphon_active_route / conjure_active_route / conjure_phantom_in_use (HASHED via 8-byte SHA-256). See specs/psiphon-route-v1.md and specs/conjure-route-v1.md.
+//   - 0.7.3+v3-transport (Phase 3D): refraction-family hooks. Two new transport families (psiphon, conjure), both shipped as Experimental. [CORRECTED IN WAVE 5 — this sentence was never true. Neither tree was ever vendored: core/go.mod has never required psiphon-tunnel-core or gotapdance, and no build script passes `-tags no_psiphon`. `psiphon_compiled_in` and `conjure_compiled_in` were hard-coded `true` for an absent dependency until Wave 5 set both to false and made the recorders refuse; see core/abi/refraction_compiled.go for the audit. NO GPLv3 CODE IS LINKED INTO ANY SHIPPED DAAL BINARY. The original claim: "Psiphon is opaque-blob carriage (vendored psiphon-tunnel-core under GPLv3, isolated behind `-tags no_psiphon`); conjure is vendored gotapdance under Apache-2.0".] Phantom-pool floors locked at /24 IPv4 + /32 IPv6. Family registry gains `IsOpportunistic` (psiphon NOT opportunistic, conjure IS, masque retroactively annotated). NO new ABI symbols (release surface 45→45, append-only invariant preserved). Diagnostics widen with psiphon_compiled_in / conjure_compiled_in / psiphon_active_route / conjure_active_route / conjure_phantom_in_use (HASHED via 8-byte SHA-256). See specs/psiphon-route-v1.md and specs/conjure-route-v1.md.
 //   - 0.8.0+v3-wasm (Phase 3E): WASM transport slot (WATER v1 ABI; wazero runtime). Two new release symbols (release surface 45 → 47, append-only): `engine_wasm_kill_switch_pubkey` (46) and `engine_loaded_wasm_modules` (47). New `transport_module` family at Experimental maturity, NOT opportunistic. Bundle-format widening: top-level `transport_modules[]` (slug + sha256 + wasm_blob_b64 + min_engine_version) + `routes[].transport_module_slug`; 5 new bundle errors. Routestore: 1 ALTER (`transport_module_slug`); engine-recorded kill-switch state lives in `secrets_kv` under the `wasm_killed:` namespace, never on the route row (3D-style non-clobber). Resource caps locked: 16 MiB memory; 1e9 fuel/dial; 5s dial+load timeouts; ≤4 MiB/module; ≤16 MiB/bundle; 1 instance per route per session. Project-controlled WASM kill-switch publisher key (CC.4 hardware-token; signed deltas append-only within a generation, no rescinds). `-tags no_wasm` excluder mirrors 3D's `no_psiphon`. Diagnostics widen with wasm_compiled_in / loaded_wasm_modules / wasm_kill_switched_count / last_wasm_module_dial_outcome (closed enum: ok / fuel_exhausted / memory_cap / dial_timeout / host_callback_error). NO new V0 failure categories. V3 success-metric milestone: shipped a new transport without an app update. See specs/wasm-transport-v1.md and specs/wasm-kill-switch-v1.md.
 //   - 0.9.0+v3-share (Phase 3F): one-tap delegate-share. One new release symbol (release surface 47 → 48, append-only): `engine_redistribute_route` (48). Reuses the existing 1C share identity (`secrets_kv:share/identity:v1`) as the delegate key — NO new key derivation. Closed-enum redistribution policy {none, delegated_n, transitive}; default "none" (fail-closed). Transitive chain depth capped at 5; original publisher signature preserved verbatim, delegate signatures appended. Bundle-format widening: `routes[].redistribution_policy` + `redistribution_cap`; `.sbp.share` shape with `redistribution_chain[]` + `delegate_caps[]`; 6 new bundle errors. Routestore: 1 ALTER (`redistribution_policy` TEXT) carrying both policy + cap as `<policy>` or `<policy>:<cap>`; per-route counter at `secrets_kv:delegate_share_counter:<route_id>` (3D/3E-style non-clobber). Diagnostics widen with delegate_share_compiled_in / delegate_share_counters / last_delegate_share_outcome (closed enum: ok / policy_refuses / cap_exhausted / chain_depth_exceeded / route_unknown / identity_unavailable). `-tags no_delegate_share` excluder mirrors 3D's `no_psiphon`. NO new V0 failure categories. See specs/delegate-keys-v1.md.
 const Version = "daal-core 0.9.0+v3-share"
@@ -237,6 +237,13 @@ func Init(stateDir, logLevel string) error {
 	}
 	core.pm.SetNow(nowUTC)
 	core.driver.Subscribe(core.subs)
+
+	// Wave 5: tell the engine where tor may keep its data directory.
+	// tor caches the directory consensus there; without it every route
+	// switch pays a cold bootstrap (sing-box's own docs call
+	// data_directory "Recommended" for this reason). The path must be
+	// app-writable and sandboxed, which is exactly what stateDir is.
+	engine.SetTorStateDir(stateDir)
 
 	// Phase 2D: detect the storage profile from the state-dir flag
 	// file. The default is "keystore" (platform-keystore-backed,
@@ -745,20 +752,26 @@ func ExportDiagnostics() (string, error) {
 		// specs/engine-abi-v1.md "Phase 3C".
 		"masque_submode":          c.lastChosenMasqueSubmode,
 		"masque_submode_override": c.masqueSubmodeOverride,
-		// Phase 3D refraction-family hooks. The compile-in
-		// booleans are populated from build-tag-conditional
-		// shims (see psiphon_compiled.go / conjure_compiled.go);
-		// `-tags no_psiphon` flips psiphon_compiled_in to false
-		// and the engine refuses to activate psiphon routes
-		// rather than papering over the missing vendor tree.
-		// `psiphon_active_route` / `conjure_active_route` are
-		// session-scoped snapshots of the most recently
-		// activated route ID for each family (empty string
-		// means "no activation this session").
-		// `conjure_phantom_in_use` is the HASHED phantom IP
-		// the conjure handler most recently picked: locked at
-		// 3D as 8-byte-SHA-256-hex, the raw IP NEVER appears
-		// here. See specs/conjure-route-v1.md "Diagnostics".
+		// Phase 3D refraction-family hooks, corrected in Wave 5.
+		// Both compile-in booleans are now constant FALSE and
+		// all three route fields are permanently the empty
+		// string, because this binary contains no psiphon and no
+		// conjure implementation and — unlike every other
+		// compile-in flag here — never will: psiphon is a third
+		// party's network you hand off to rather than host, and
+		// conjure needs a cooperating ISP running a refraction
+		// station. `refraction_compiled.go` carries the vendor-
+		// tree audit; `bundle/go/bundle/types.go` carries the
+		// protocol-level reasons on the enum values themselves.
+		//
+		// The fields stay in the blob rather than being deleted:
+		// they are a documented shape (specs/psiphon-route-v1.md,
+		// specs/conjure-route-v1.md, specs/engine-abi-v1.md), the
+		// soak rig reads them, and a permanently-empty field that
+		// a reader can check beats a field that vanished.
+		// `conjure_phantom_in_use` retains its locked redaction
+		// contract — if it ever carried a value it would be the
+		// 8-byte-SHA-256-hex hash, never the raw IP.
 		"psiphon_compiled_in":    psiphonCompiledIn,
 		"conjure_compiled_in":    conjureCompiledIn,
 		"psiphon_active_route":   c.lastActivePsiphonRouteID,

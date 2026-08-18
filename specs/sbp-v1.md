@@ -518,3 +518,76 @@ implementation, `client-desktop/daal-wizard/src/commands.rs`
 ::`subkey_rotate` for the wizard surface, and
 `specs/v1-5-closure-v1.md` for the V1.5 closure invariants this
 phase locks down.
+
+## Wave 5 widening (anytls, and per-route unknown-family degradation)
+
+**Wave 5 bumps `spec_version` from 4 to 5.** Verifier accepts
+`{1, 2, 3, 4, 5}`. Producers emit 5 **only** for a bundle that
+actually contains a `transport_family = "anytls"` route; a bundle
+without one keeps the version it would otherwise have had.
+
+Two rules land together at v5, and the coupling is deliberate.
+
+### 1. `anytls` joins the closed family enum
+
+`anytls` is added to the `transport_family` enum. A route naming it
+MUST appear in a manifest declaring `spec_version >= 5`; otherwise
+the verifier rejects the bundle with `ErrAnyTLSSpecVersionTooOld`.
+
+This rule exists to protect the **publisher** from itself, because
+the recipient-side consequence of getting it wrong is severe and
+misdiagnosed. Every verifier shipped before Wave 5 — Go
+(`bundle/go/bundle/sbp.go`) and Rust
+(`client-shell/tauri/bundle-rs/src/sbp.rs`) alike — walks
+`routes[]` and returns on the first failure, so an unknown
+`transport_family` rejects the **entire bundle**, not the one
+route. The importer classifies that `ErrInvalidEnum` as
+`bundle_corrupted`, which tells the recipient their file arrived
+damaged when nothing of the sort happened.
+
+Declaring `spec_version = 5` moves the refusal to the spec gate,
+which runs **before** the route loop. An old verifier then answers
+`ErrUnsupportedSpec` — "this build is too old" — which is true and
+actionable. It does not make the pack usable on an old build;
+nothing can. It only replaces a wrong diagnosis with a right one.
+
+### 2. From v5, an unknown family costs one route, not the pack
+
+At `spec_version >= 5`, a route naming a `transport_family` the
+verifier does not know is **dropped from the usable set** and the
+rest of the bundle verifies normally. At `spec_version <= 4` the
+behaviour is unchanged: `ErrInvalidEnum`, whole bundle rejected.
+
+Consumers MUST iterate `bundle.UsableRoutes(b)` (Go) /
+`sbp::usable_routes(&b)` (Rust) rather than `manifest.routes`, or
+they will persist a route whose family nothing downstream can dial.
+
+Constraints on the degradation:
+
+- The family check runs **last** in `validateRoute`, after the
+  archive-path, missing-profile, expiry and revocation checks. An
+  unknown family therefore never buys a route a pass on any safety
+  check; each of those still rejects the whole bundle with its own
+  error. No signature, revocation or expiry check is weakened.
+- `scarcity_class` is **not** degradable and stays hard-fatal. It
+  governs how a route may be used, not what it speaks.
+- If every route in a non-empty `routes[]` is dropped, the verifier
+  returns `ErrNoUsableRoutes` rather than reporting a successful
+  import of zero routes.
+
+Rule 2 is what makes the *next* family cheap: a v5 recipient handed
+a v6 pack keeps every route it understands. It could not be
+backported into binaries already in the field, which is the entire
+cost of the `anytls` bump.
+
+**Two new bundle errors** (sentinel; `errors.Is`-friendly):
+
+- `ErrAnyTLSSpecVersionTooOld`
+- `ErrNoUsableRoutes`
+
+Cross-language parity for all of the above is pinned by the fixture
+corpus (`bundle/go/cmd/bundle-rs-fixtures`, vectors
+`anytls-on-spec-v4`, `anytls-on-spec-v5`,
+`v5-unknown-transport-degrades`, `v5-all-unknown-transports`), which
+`client-shell/tauri/bundle-rs/tests/parity_with_go.rs` replays
+against the Rust verifier.

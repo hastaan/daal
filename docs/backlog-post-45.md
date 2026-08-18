@@ -490,6 +490,23 @@ These are what a censored device falls back to. All five re-verified true.
 
 ---
 
+- [ ] **W5-1. The box binds two listeners for families the relay does not serve.**
+  `cmd/daal-relay-mgmt/singbox_users.go:167,175` calls `appendSSUser` and
+  `appendAnyTLSUser` unconditionally, so `ss-in` and `anytls-in` are created for
+  every recipient even on a relay whose profile enables neither — and both are
+  `default_enabled: false` in every shipped profile. Their firewall ports were made
+  opt-in on 2026-08-18 (`relayports.ExtraFirewallPortsFor`), so the fleet-wide
+  *reachable* exposure is gone; what remains is two local sockets and credentials
+  for them sitting in the sing-box config of a relay that advertises no such route.
+  `appendTUICUser` shows the right pattern — append only to an inbound cloud-init
+  already wrote — which ss/anytls cannot copy as-is, because both are documented as
+  never existing with an empty `users[]` (an inbound nobody can authenticate to is a
+  listener that only serves probes). The fix is for the box to learn its own family
+  set: an `/etc/daal` file written at first boot and read before appending. That
+  changes what the box boots with, on a box with no SSH where rescue mode is the
+  only way back, and it needs a fresh provision to test. Deliberate change, with
+  Step 7's capability-probe discipline — not a drive-by.
+
 ## 5. L3 — measured, released, proven
 
 - [ ] **W3-6. L3's code and pin have landed; it has never run end-to-end

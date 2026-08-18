@@ -95,9 +95,16 @@ func TestSpecV4Accepted(t *testing.T) {
 	}
 }
 
-func TestSpecV5Rejected(t *testing.T) {
+// TestSpecV6Rejected pins the "one past the top" boundary.
+//
+// It used to be TestSpecV5Rejected. Wave 5 spent spec_version 5 on
+// anytls (see SpecVersionAnyTLS), so the rejected value moves up by
+// one — and that move IS the cost of the bump, recorded here rather
+// than quietly deleted. Every verifier built before Wave 5 still
+// rejects 5, which is the property the anytls gate relies on.
+func TestSpecV6Rejected(t *testing.T) {
 	m := baseManifest(t, "normal", "vless-reality", time.Now().Add(24*time.Hour))
-	m.SpecVersion = 5
+	m.SpecVersion = 6
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +120,7 @@ func TestSpecV5Rejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := VerifyBundle(b); !errors.Is(err, ErrUnsupportedSpec) {
-		t.Fatalf("expected ErrUnsupportedSpec for spec_version=5, got %v", err)
+		t.Fatalf("expected ErrUnsupportedSpec for spec_version=6, got %v", err)
 	}
 }
 

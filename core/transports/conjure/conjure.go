@@ -1,3 +1,48 @@
+// Package conjure is DORMANT (Wave 5). Nothing in this package
+// can ever run, and the reason is a property of the technique,
+// not a gap in this codebase.
+//
+// CONJURE NEEDS A COOPERATING ISP. Refraction networking works
+// because a network operator installs a refraction STATION on a
+// transit link it controls, taps the passing traffic, and
+// answers on behalf of unused ("phantom") addresses inside that
+// operator's own address space. The client connects to a decoy
+// that is not the real destination; the station in the middle
+// recognises the tagged flow and takes over. The station is the
+// entire product. A Daal publisher rents a VPS: it has no
+// transit link to tap, no address space to phantom into, and no
+// way to install anything in a path it does not own. There is
+// therefore no server side for a self-hosting publisher to
+// deploy, and a "conjure route" a publisher mints would point at
+// somebody else's station or at nothing.
+//
+// THE CLIENT HALF IS ALSO ABSENT. `ConjureDialer` below is a
+// callback that upstream `gotapdance` was meant to fill.
+// `core/go.mod` has never required gotapdance — not directly,
+// not indirectly — so the callback has never had an
+// implementation and `Handler.Available()` has never returned
+// true anywhere outside this package's own tests. The
+// diagnostics flag that claimed otherwise
+// (`conjure_compiled_in`, constant `true` through Phase 3D) is
+// corrected in `core/abi/refraction_compiled.go`.
+//
+// WHY IT IS KEPT RATHER THAN DELETED. `HashPhantom` is the only
+// implementation of the redaction contract that
+// `test-rigs/distribution-failure`'s
+// `ruleNoRawPhantomIPLeakInDiagnostics` asserts against, and
+// `core/abi/refraction.go` imports it. Deleting the package
+// would delete a privacy invariant to remove an unreachable
+// dialer. `ValidatePhantomSubnet` / `ValidDecoyHost` are kept
+// with it as the record of the locked /24 + /32 floors.
+//
+// WHAT WOULD HAVE TO BECOME TRUE. A partnership with a network
+// operator willing to run a station, plus a vendored gotapdance.
+// The first is not a code change. Do not re-open this as a
+// transport-family task; the enum value's doc comment in
+// `bundle/go/bundle/types.go` carries the same finding.
+//
+// ---- Original Phase 3D package doc, retained verbatim ----
+//
 // Package conjure is the Phase 3D Conjure transport-family
 // integration point. It wraps upstream `gotapdance`
 // (refraction-networking, Apache-2.0) with the engine's family

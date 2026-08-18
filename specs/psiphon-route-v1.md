@@ -1,7 +1,17 @@
 # psiphon-route-v1
 
 **Phase:** 3D
-**Status:** Locked at 3D. Experimental.
+**Status:** **SUPERSEDED at Wave 5 — the family is `unsupported`,
+not experimental, and cannot become otherwise.** Psiphon is a
+third party's proprietary NETWORK: a client can hand off to
+Psiphon Inc., a self-hosted publisher cannot host it, so there is
+no server side to deploy. psiphon-tunnel-core has never been in
+`core/go.mod`, so nothing in this spec has ever been executable.
+`psiphon_compiled_in` is now constant `false` and
+`RecordPsiphonActiveRoute` refuses a non-empty route ID. The spec
+is kept as the record of a decision, not as a plan. See
+`docs/transport-family-inventory.md` and the reason written onto
+`bundle.TransportPsiphon`.
 **Roadmap line:** V3.4 — "Refraction-family hooks (Psiphon + Conjure)."
 **Engine version:** `daal-core 0.7.3+v3-transport`.
 **ABI release surface:** 45 → **45** (no new symbols; append-only invariant preserved).
@@ -91,7 +101,7 @@ the size envelope (`ErrPsiphonBlobMalformed`).
 
 | Field                    | Type    | Default | Notes                                                                  |
 |--------------------------|---------|---------|------------------------------------------------------------------------|
-| `psiphon_compiled_in`    | bool    | `true`  | `false` when built with `-tags no_psiphon`; never carries a URL or IP. |
+| `psiphon_compiled_in`    | bool    | **`false`** | **Wave 5: constant `false`.** It claimed a vendored tree that has never been in `core/go.mod`, and no build script ever passed `-tags no_psiphon`, so the "false when isolated" branch was unreachable too. Never carries a URL or IP. |
 | `psiphon_active_route`   | string  | `""`    | Most recently activated psiphon route ID this session; `""` when no activation. |
 | (shared)                 |         |         | The `experimental_routes_skipped` (3A) and `experimental_families_enabled` (3A) fields apply. |
 

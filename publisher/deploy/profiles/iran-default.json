@@ -1,14 +1,14 @@
 {
   "name": "iran-default",
-  "description": "Default candidate mix for Iranian network conditions, V1.5 direct-VPS only.",
+  "description": "Default candidate mix for Iranian network conditions, V1.5 direct-VPS only. Only families this relay can actually serve. The three opt-in families all sit outside Iran's 53/80/443 egress whitelist — shadowsocks on 8446, anytls on 8447, tuic on 8443/udp — so each buys transport diversity on OTHER networks, not a way through the whitelist. Shadowsocks additionally fails independently of the TLS tiers when a nested-TLS classifier comes for them, which is why it is offered at all.",
   "spec_version": 1,
   "candidates": [
     {"family": "vless-reality", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
     {"family": "websocket-tls", "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false, "multiplex": {"enabled": true, "max_streams": 64}},
     {"family": "naive",         "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": false},
     {"family": "hysteria2",     "default_enabled": true,  "probing_risk_class": "low",      "udp_gated": true,  "multiplex": {"enabled": false}},
-    {"family": "tuic",          "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true,  "multiplex": {"enabled": false}},
-    {"family": "wireguard",     "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true},
-    {"family": "amnezia-wg",    "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true}
+    {"family": "shadowsocks",   "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": false, "multiplex": {"enabled": false}},
+    {"family": "anytls",        "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": false, "multiplex": {"enabled": false}},
+    {"family": "tuic",          "default_enabled": false, "probing_risk_class": "moderate", "udp_gated": true,  "multiplex": {"enabled": false}}
   ]
 }

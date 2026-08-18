@@ -178,15 +178,52 @@ read-only pricing call at FRP-5; live provisioning is wired at FRP-4b.
 
 The default candidate set for Iranian conditions, V1.5 direct-VPS:
 
-| Family          | Default | Probing risk | UDP-gated |
-|-----------------|---------|--------------|-----------|
-| vless-reality   | yes     | low          | no        |
-| websocket-tls   | yes     | low          | no        |
-| naive           | yes     | low          | no        |
-| hysteria2       | yes     | low          | yes       |
-| tuic            | no      | moderate     | yes       |
-| wireguard       | no      | moderate     | yes       |
-| amnezia-wg      | no      | moderate     | yes       |
+Regenerated from `publisher/deploy/profiles/iran-default.json` in the
+Wave-5 repair pass. The previous version of this table still listed
+`wireguard` and `amnezia-wg`, which the profile no longer carries, and
+omitted `shadowsocks` and `anytls`, which it gained.
+
+| Family          | Default | Probing risk | UDP-gated | Port     |
+|-----------------|---------|--------------|-----------|----------|
+| vless-reality   | yes     | low          | no        | 443/tcp  |
+| websocket-tls   | yes     | low          | no        | 8445/tcp |
+| naive           | yes     | low          | no        | 8444/tcp |
+| hysteria2       | yes     | low          | yes       | 443/udp  |
+| shadowsocks     | no      | moderate     | no        | 8446/tcp |
+| anytls          | no      | moderate     | no        | 8447/tcp |
+| tuic            | no      | moderate     | yes       | 8443/udp |
+
+**The three opt-in families all cost a port outside the target
+country's whitelist.** 8443, 8446 and 8447 are not whitelisted egress
+in Iran, exactly like naive on 8444 and websocket-tls on 8445
+(`publisher/deploy/relayports/relayports.go` states this in its own
+words). Enabling them buys transport diversity on OTHER networks — and
+for shadowsocks specifically, independence from the nested-TLS
+classifier that threatens the three TLS tiers at once. None of them is
+a new way through the whitelist, and nothing operator- or user-facing
+may imply otherwise.
+
+**`amnezia-wg` must not be enabled, and is no longer a candidate in
+either shipped profile.** sing-box 1.13.12 contains no AmneziaWG code
+at all, so the Jc/S1/H1..H4 obfuscation parameters that ARE the family
+have nowhere to go; a pasted AmneziaWG conf imports as a downgraded
+plain-WireGuard route. It is `unsupported` in
+`core/routestore/family.go`.
+
+**`wireguard` is dialable but is not a relay family.** Wave 5 gave
+`core/engine/config.go` the `endpoints[]` slot sing-box needs and made
+`bundle/go/uri/wireguard.go` emit a real endpoint object with
+`"type":"wireguard"`, so the label is now `experimental` rather than
+`unsupported`. Daal still does not SERVE it — no relay inbound, no
+per-recipient credential, no firewall rule — so it reaches a user only
+by paste or import. And the copy constraint travels with it: plain
+WireGuard is a named immediate-block target in Iran and must never
+borrow AmneziaWG's track record.
+
+Serving a family the recipient cannot dial produces a route the user
+selects and loses, which is worse than not offering it. The full
+serve-vs-dial reconciliation for every family is
+`docs/transport-family-inventory.md`.
 
 V1.6 will add `cdn_fronted` candidates to this profile via FRP-8.
 

@@ -1,3 +1,52 @@
+// Package masque is DORMANT (Wave 5) on two independent counts,
+// either of which alone is fatal.
+//
+//  1. NOTHING CAN DIAL IT. sing-box 1.13.12 — the engine this
+//     project ships — registers no masque outbound. The full
+//     outbound registry is direct, block, selector, urltest,
+//     socks, http, shadowsocks, vmess, trojan, naive, tor, ssh,
+//     shadowtls, vless, anytls, plus hysteria/hysteria2/tuic
+//     under `with_quic` (`include/registry.go`). The three
+//     `SubmodeDialer` callbacks below were to be filled by
+//     upstream `quic-go` (H3) and `golang.org/x/net/http2` (H2)
+//     trees that were never wired, so `NewHandler` has zero
+//     production callers and `Available()` has never returned
+//     true outside this package's tests.
+//
+//  2. NOTHING WOULD BE SERVED BY IT. MASQUE's censorship value is
+//     that CONNECT-UDP rides a large provider's existing proxy
+//     infrastructure, so the traffic is indistinguishable from
+//     the rest of that provider's enormous anonymity set. A
+//     self-hosted MASQUE proxy on a single rented VPS has none of
+//     that: it is one QUIC endpoint with one tenant, which is
+//     strictly worse than the hysteria2 route already on 443/udp.
+//     Even a complete implementation would not produce a family
+//     worth selecting.
+//
+// The three-sub-mode cascade in `chooseSubmode` (override →
+// lifeline-strict → netmem memory → UDP probe → burn) is real
+// code with real tests and no reachable caller. It is the
+// clearest existing statement of how a per-family sub-mode
+// ladder should be shaped, which is why it is marked rather than
+// deleted — but nothing here is a step toward shipping MASQUE.
+//
+// KNOWN LIVE REFERENCES, both of them label-only:
+// `core/abi/masque.go` calls `IsKnownSubmode` to validate a
+// user-chosen sub-mode override, and `core/netmem/store.go`
+// names the closed sub-mode list in a comment. The override
+// itself is INERT — a persisted setting with no production
+// reader — and is filed as CM-6 in `docs/capability-matrix.md`
+// §4b. Wiring a reader for it would connect a preference to a
+// family that cannot be dialled, so CM-6 must not be "fixed"
+// before this package stops being dormant.
+//
+// WHAT WOULD HAVE TO BECOME TRUE: an upstream sing-box release
+// registering a masque outbound, AND a provider relationship
+// worth riding. See the enum value's doc comment in
+// `bundle/go/bundle/types.go`.
+//
+// ---- Original Phase 3C package doc, retained verbatim ----
+//
 // Package masque is the Phase 3C MASQUE transport-family
 // integration point. MASQUE (RFC 9298 + RFC 9484) is a single
 // transport family with three sub-modes selected by the engine

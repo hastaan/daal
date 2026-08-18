@@ -77,6 +77,24 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 	return out, nil
 }
 
+// servedFamilies resolves the family set this relay will actually serve,
+// applying the same profile + enabled-families rules the candidate
+// renderer does. One resolver, so the sing-box inbounds, the box-side
+// ufw rules and the cloud-provider firewall cannot disagree about which
+// families exist on a box — a disagreement between any two of those
+// three is a route that mints and cannot be dialled.
+func servedFamilies(profileName string, enabledFamilies []string) ([]string, error) {
+	cands, err := candidatesForProfile(profileName, nil, enabledFamilies)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.Family)
+	}
+	return out, nil
+}
+
 // defaultSingBoxConfig produces a sing-box config skeleton
 // embedded in cloud-init. At FRP-14 the V2 boxes ship with the
 // vless-in inbound (the REALITY-fronted port-443 transport that
@@ -115,8 +133,63 @@ func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies [
 // so this only ever falls back on a programming error — and it falls
 // back loudly-wrong-but-working rather than silently broken.
 func defaultSingBoxConfig(profileName, coverSNI string) string {
+	// Resolve the profile's own default-enabled family set. A profile
+	// that will not load is not a reason to refuse here — the caller
+	// (candidatesForProfile) already errors on that, loudly — so this
+	// falls back to the always-present families.
+	fams, err := servedFamilies(profileName, nil)
+	if err != nil {
+		fams = nil
+	}
+	return singBoxConfigForFamilies(coverSNI, fams)
+}
+
+// singBoxConfigForFamilies is defaultSingBoxConfig with the served
+// family set supplied explicitly, which is what the provisioner has
+// after it applies the wizard's enabled-families override.
+//
+// vless-in and hy2-in are unconditional: they are the two tiers every
+// Daal relay has, and both start with an empty users[]. naive-in (8444)
+// and ws-in (8445) are absent because sing-box will not start a naive
+// inbound with no users and the mgmt service creates them with their
+// first recipient.
+//
+// tuic-in is the first inbound that is CONDITIONAL on the profile, and
+// it is written here rather than created on first use for one reason:
+// binding 8443/udp is a visible, permanent property of the relay, and
+// the box-side ufw rule that has to accompany it is baked by cloud-init
+// at first boot and cannot be changed afterwards. Deciding the family
+// set once, at provision time, is the only way the inbound, the two
+// firewalls and the minted pack can all agree. Turning tuic on for an
+// existing relay is a reprovision.
+func singBoxConfigForFamilies(coverSNI string, families []string) string {
 	if coverSNI == "" {
 		coverSNI = sni.LegacyCoverSNI
+	}
+	extra := ""
+	for _, f := range families {
+		if f != "tuic" {
+			continue
+		}
+		ep := relayports.For("tuic")
+		// alpn IS REQUIRED, and its absence is not a degradation.
+		// sing-quic defaults hysteria2's NextProtos to "h3" when the
+		// config omits it; its tuic service does not, and quic-go
+		// refuses a TLS config with no application protocol. An
+		// alpn-less tuic inbound fails every handshake. The client
+		// outbound sets the same single-element list — see
+		// relaypack/client_outbound.go tuicTLS.
+		//
+		// congestion_control must also match the client's ("bbr"): a
+		// mismatch does not fail, it stalls, which is harder to
+		// diagnose than a refusal.
+		extra = fmt.Sprintf(`,
+    {"type": "tuic", "tag": "tuic-in", "listen": "0.0.0.0", "listen_port": %d,
+     "users": [],
+     "congestion_control": "bbr",
+     "tls": {"enabled": true, "alpn": ["h3"],
+             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}`, ep.Port)
+		break
 	}
 	// %[1]q, twice: one value, two required sites.
 	return fmt.Sprintf(`{
@@ -130,10 +203,10 @@ func defaultSingBoxConfig(profileName, coverSNI string) string {
     {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 443,
      "users": [],
      "tls": {"enabled": true,
-             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}
+             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}%[2]s
   ],
   "outbounds": [{"type": "direct"}]
-}`, coverSNI)
+}`, coverSNI, extra)
 }
 
 // loadProfile dispatches on the profile name.

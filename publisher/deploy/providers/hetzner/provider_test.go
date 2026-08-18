@@ -3,6 +3,7 @@ package hetzner
 import (
 	"context"
 	"crypto/ed25519"
+	"daal/publisher/deploy/relayports"
 	"errors"
 	"net"
 	"strconv"
@@ -27,6 +28,11 @@ type fakeClient struct {
 	ephemeralRules   map[string]ephemeralRuleEntry        // ruleID -> entry (FRP-10)
 	ensuredFirewalls map[string]string                    // serverID -> firewallID (FRP-14)
 	fwAppliedTo      map[string][]string                  // firewallID -> server IDs behind it
+	// fwExtraPorts records the per-relay data-plane port set the
+	// provisioner asked for, so a test can assert that the cloud
+	// firewall, the box-side ufw rules and the sing-box inbounds were
+	// all derived from the same family set.
+	fwExtraPorts map[string][]relayports.Endpoint
 
 	// Failure injection for the teardown/rollback tables. Each one
 	// fails exactly the named call so a test can assert that one
@@ -358,12 +364,16 @@ func (f *fakeClient) FirewallRemoveEphemeralRule(_ context.Context, ruleID strin
 // step. Returns a deterministic ID per serverID and tracks which
 // servers sit behind it (fwAppliedTo), which is what makes the
 // shared-firewall case testable.
-func (f *fakeClient) FirewallEnsureForServer(_ context.Context, serverID string) (string, error) {
+func (f *fakeClient) FirewallEnsureForServer(_ context.Context, serverID string, extraPorts []relayports.Endpoint) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.ensuredFirewalls == nil {
 		f.ensuredFirewalls = map[string]string{}
 	}
+	if f.fwExtraPorts == nil {
+		f.fwExtraPorts = map[string][]relayports.Endpoint{}
+	}
+	f.fwExtraPorts[serverID] = extraPorts
 	if f.fwAppliedTo == nil {
 		f.fwAppliedTo = map[string][]string{}
 	}

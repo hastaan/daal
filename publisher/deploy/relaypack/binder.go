@@ -248,6 +248,34 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 		specVersion = 4
 		extras["trust/subkey-cert.json"] = append([]byte(nil), opts.SubkeyCertJSON...)
 	}
+	// WAVE 5. A pack that names anytls MUST declare spec_version 5, and
+	// a pack that does not MUST NOT — the condition is exactly "does
+	// this pack contain such a route", never "is this a new build".
+	//
+	// Both directions matter and they matter for opposite reasons.
+	//
+	// Bumping when anytls IS present: every client shipped before Wave 5
+	// rejects an unknown transport_family by failing the WHOLE bundle
+	// (bundle/go/bundle/sbp.go's route loop, mirrored in
+	// bundle-rs/src/sbp.rs), and its importer classifies that as
+	// "bundle_corrupted". Declaring 5 makes the same old client stop at
+	// the spec gate instead, which sits BEFORE the route loop, and
+	// report an unsupported spec version — true, actionable, and not an
+	// accusation that the file arrived damaged. bundle.validateRoute
+	// enforces the same rule from the verifying side, so a pack that
+	// skipped this line would fail to verify on the publisher's own
+	// machine rather than in a recipient's hands.
+	//
+	// NOT bumping when anytls is absent is the more important half. It
+	// is what makes adding this family cost nothing for anyone who is
+	// not offered it: an operator whose profile leaves anytls disabled
+	// keeps minting spec-3/4 packs that every already-distributed client
+	// imports exactly as before. The blast radius of this whole wave is
+	// therefore confined to packs that actually carry the new route.
+	if anyFamily(rendered.routes, string(bundle.TransportAnyTLS)) &&
+		specVersion < bundle.SpecVersionAnyTLS {
+		specVersion = bundle.SpecVersionAnyTLS
+	}
 	// The mirror set travels as a signed archive entry, NOT as a
 	// manifest field, and therefore does NOT bump spec_version.
 	// bundle.VerifyManifest verifies over

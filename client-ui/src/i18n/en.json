@@ -100,7 +100,7 @@
     "settings.advanced.experimental": "Experimental families",
     "settings.advanced.experimental.help": "Records your preference only. Route selection does not consult it yet, and experimental routes are already selectable.",
     "settings.advanced.masque": "MASQUE submode",
-    "settings.advanced.masque.help": "Force a specific HTTP version for MASQUE tunnels.",
+    "settings.advanced.masque.help": "Records your preference only. Daal cannot dial MASQUE at all — the engine it ships has no MASQUE support — so nothing reads this setting.",
     "settings.masque.auto": "auto",
     "settings.emergency.body": "Reachable from the duress shield even when the vault is locked. Triggering it from there will preserve no local evidence of Daal beyond the on-disk crypto blob.",
     "settings.diagnostics": "Diagnostics",

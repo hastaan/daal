@@ -16,17 +16,38 @@ func TestIranDefault_LoadsAndPinsSeven(t *testing.T) {
 	if p.SpecVersion != 1 {
 		t.Errorf("spec_version = %d want 1", p.SpecVersion)
 	}
-	if len(p.Candidates) != 7 {
-		t.Errorf("candidate count = %d want 7", len(p.Candidates))
+	// The four field-proven tiers lead, in order, because the wizard
+	// renders this list as-is.
+	lead := []string{"vless-reality", "websocket-tls", "naive", "hysteria2"}
+	for i, fam := range lead {
+		if i >= len(p.Candidates) || p.Candidates[i].Family != fam {
+			t.Fatalf("candidate[%d] = %+v, want family %q", i, p.Candidates, fam)
+		}
 	}
-	want := []string{"vless-reality", "websocket-tls", "naive", "hysteria2", "tuic", "wireguard", "amnezia-wg"}
-	for i, c := range p.Candidates {
-		if i >= len(want) {
-			t.Fatalf("extra candidate at %d: %+v", i, c)
+	present := map[string]bool{}
+	for _, c := range p.Candidates {
+		present[c.Family] = true
+	}
+	// EVERY candidate in a toolbox profile must be a family this relay
+	// can actually SERVE. A profile row is an offer: checking it in the
+	// wizard mints a route in the pack, and a family with no box inbound
+	// and no client-outbound renderer does not degrade — it makes
+	// RewriteProfilesForRecipient return an error, which kills the whole
+	// pack for every route, not just the checked one.
+	//
+	// wireguard and amnezia-wg were rows here until Wave 5 and could
+	// never have worked: Daal serves no WireGuard, has no WG inbound, no
+	// per-recipient WG credential and no firewall rule for 51820/udp,
+	// and the client half is for routes the user pastes from elsewhere.
+	// They are not "unfinished"; offering them was the bug.
+	for _, gone := range []string{"wireguard", "amnezia-wg", "amneziawg"} {
+		if present[gone] {
+			t.Errorf("profile offers %q, which this relay cannot serve — checking it in the "+
+				"wizard produces a pack that fails to render for EVERY route", gone)
 		}
-		if c.Family != want[i] {
-			t.Errorf("candidate[%d].family = %q want %q", i, c.Family, want[i])
-		}
+	}
+	if !present["tuic"] {
+		t.Error("tuic must remain an opt-in candidate")
 	}
 }
 
@@ -41,10 +62,12 @@ func TestIranDefault_DefaultEnabledFamilies(t *testing.T) {
 			t.Errorf("family %s must be default-enabled", want)
 		}
 	}
-	for _, want := range []string{"tuic", "wireguard", "amnezia-wg"} {
-		if enabled[want] {
-			t.Errorf("family %s must be default-disabled (moderate probing risk)", want)
-		}
+	// tuic is opt-in, and stays opt-in: it binds a third UDP-adjacent
+	// port (8443) that is outside the target country's egress whitelist,
+	// and every relay that enables it opens that port in both firewalls.
+	// It is diversity for other networks, not a default.
+	if enabled["tuic"] {
+		t.Error("family tuic must be default-disabled")
 	}
 }
 

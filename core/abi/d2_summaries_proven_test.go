@@ -133,8 +133,14 @@ func TestDisplayMaturity_NaiveTracksTheShippedArtifact(t *testing.T) {
 		}
 	}
 	// Never widens: a family the table calls unsupported stays so.
-	if displayMaturity("wireguard") != routestore.MaturityUnsupported.String() {
-		t.Errorf("wireguard renders %q, want unsupported", displayMaturity("wireguard"))
+	// The exemplar is `amneziawg` — it was `wireguard` until the Wave-5
+	// wireguard lane gave SingBoxConfig an `endpoints[]` slot and moved
+	// that family to Experimental. amneziawg stays Unsupported for a
+	// reason no build flag can change: sing-box 1.13.12 contains no
+	// AmneziaWG code at all, so there is nowhere to put the obfuscation
+	// parameters that ARE the family.
+	if displayMaturity("amneziawg") != routestore.MaturityUnsupported.String() {
+		t.Errorf("amneziawg renders %q, want unsupported", displayMaturity("amneziawg"))
 	}
 	// And no other family consults the cronet state.
 	if displayMaturity("vless-reality") != routestore.MaturityStable.String() {
