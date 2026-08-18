@@ -433,15 +433,29 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                                     String(preview.routeCount),
                                 )}
                             </div>
+                            {/* The HEX fingerprint, not the word grid.
+                                `previewBundle` is desktop-core's
+                                `preview_bundle`, which renders its words with
+                                a FOUR-WORD PLACEHOLDER list (see
+                                daal-desktop-core/src/commands.rs) — so the
+                                phrase it produces is not the phrase the
+                                publisher reads, and showing it here taught the
+                                user a fingerprint that is not theirs. The hex
+                                comes from `publisher_fingerprint` over the
+                                real publisher key and is the same on both
+                                sides. The trust decision itself is made on the
+                                engine's word grid in TrustPrompt, never on
+                                this line. */}
                             <div
                                 style={{
                                     fontFamily: 'var(--font-mono)',
                                     fontSize: 11,
                                     color: 'var(--ink-mute)',
                                     marginTop: 4,
+                                    wordBreak: 'break-all',
                                 }}
                             >
-                                {preview.fingerprintEN}
+                                {preview.fingerprintHex}
                             </div>
                         </div>
                     )}

@@ -254,7 +254,24 @@ func BuildSignedBundle(manifest Manifest, profiles map[string][]byte, pub ed2551
 // of the signed payload and tampering would have failed
 // VerifyManifest above.
 func VerifyBundle(b *Bundle) error {
-	return verifyBundleCore(b, nil)
+	return verifyBundleCore(b, nil, time.Now().UTC())
+}
+
+// VerifyBundleAt is VerifyBundle with an injected clock. It is the Go
+// twin of bundle-rs's `verify_bundle_at`, and it exists for the same
+// reason: a fixture bundle carries a FIXED validity window, so a test
+// that verifies it against the wall clock is not testing the verifier,
+// it is scheduling an alarm. This repo has already been bitten twice by
+// that; `specs/test-vectors/bundles/samples/subkey-signed-A.sbp` was the
+// third.
+//
+// PRODUCTION CALLERS MUST NOT USE THIS. Every check reached from here is
+// the same check VerifyBundle runs — nothing is skipped or widened, the
+// only difference is which instant "now" is — so passing a convenient
+// `now` would forge an expiry pass. The seam is for deterministic
+// fixtures whose window was pinned by the generator.
+func VerifyBundleAt(b *Bundle, now time.Time) error {
+	return verifyBundleCore(b, nil, now.UTC())
 }
 
 // VerifyBundleFor runs VerifyBundle plus the FRP-14 recipient-
@@ -264,10 +281,10 @@ func VerifyBundle(b *Bundle) error {
 // sha256(recipientPub); mismatch returns ErrRecipientMismatch.
 // An empty bundle.recipient_fp_hex (legacy V1.5 pack) is permitted.
 func VerifyBundleFor(b *Bundle, recipientPub []byte) error {
-	return verifyBundleCore(b, recipientPub)
+	return verifyBundleCore(b, recipientPub, time.Now().UTC())
 }
 
-func verifyBundleCore(b *Bundle, recipientPub []byte) error {
+func verifyBundleCore(b *Bundle, recipientPub []byte, now time.Time) error {
 	// Phase 1.5A: spec_version 1 (legacy) and 2 (3A-3F) are accepted.
 	// FRP-1: spec_version 3 (RelayPack) is also accepted.
 	// FRP-7.5: spec_version 4 (sub-key cert chain) is also accepted.
@@ -291,7 +308,7 @@ func verifyBundleCore(b *Bundle, recipientPub []byte) error {
 	signingKey, err := resolveManifestSigningKey(
 		b.SubkeyCertJSON,
 		ed25519.PublicKey(b.PublisherPub),
-		time.Now().UTC(),
+		now,
 	)
 	if err != nil {
 		return err
@@ -303,7 +320,7 @@ func verifyBundleCore(b *Bundle, recipientPub []byte) error {
 	if b.Manifest.Publisher.KeyFingerprintHex != "" && b.Manifest.Publisher.KeyFingerprintHex != fp.Hex {
 		return ErrFingerprintMismatch
 	}
-	if expired(b.Manifest.Bundle.ExpiresAt, time.Now().UTC()) {
+	if expired(b.Manifest.Bundle.ExpiresAt, now) {
 		return ErrExpiredBundle
 	}
 	if b.Revocation != nil {
@@ -314,7 +331,7 @@ func verifyBundleCore(b *Bundle, recipientPub []byte) error {
 		}
 	}
 	for _, route := range b.Manifest.Routes {
-		if err := validateRoute(route, b); err != nil {
+		if err := validateRoute(route, b, now); err != nil {
 			return err
 		}
 	}
@@ -360,7 +377,7 @@ func verifyBundleCore(b *Bundle, recipientPub []byte) error {
 	return nil
 }
 
-func validateRoute(route RouteManifestEntry, b *Bundle) error {
+func validateRoute(route RouteManifestEntry, b *Bundle, now time.Time) error {
 	if !validScarcity(route.ScarcityClass) || !validTransport(route.TransportFamily) {
 		return ErrInvalidEnum
 	}
@@ -370,7 +387,7 @@ func validateRoute(route RouteManifestEntry, b *Bundle) error {
 	if _, ok := b.Profiles[route.ConfigPath]; !ok {
 		return ErrMissingProfile
 	}
-	if expired(route.ValidUntil, time.Now().UTC()) {
+	if expired(route.ValidUntil, now) {
 		return ErrExpiredRoute
 	}
 	if b.Revocation != nil {

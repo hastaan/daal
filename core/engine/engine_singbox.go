@@ -29,6 +29,27 @@ func NewDefaultDriver() Driver {
 	return newSingBox()
 }
 
+// HasRealDataPlane — see the twin in engine_default.go. TRUE here: this
+// build links the in-process sing-box driver, whose Start() refuses to
+// run without a TUN fd and returns a real error when the instance
+// cannot be brought up. The ABI's fail-closed guard in
+// core/abi/dataplane.go is therefore inert on singbox builds.
+const HasRealDataPlane = true
+
+// HasByteAccounting — see the twin in engine_default.go.
+//
+// FALSE, and deliberately so on a build that CAN carry traffic. The
+// counters singBox.Stats() reads live in platformInterface
+// (platform_singbox.go) and are declared "reserved for the stats
+// follow-up phase": nothing in this repository ever writes them, so
+// Stats() returns (0, 0, nil) on a tunnel that is moving megabytes.
+// Reporting that as a measured zero is the lie; core/abi's
+// ThroughputSnapshot reads this constant and reports "unmeasured"
+// instead. Flip it to true in the same change that starts writing
+// platformInterface.bytesIn/bytesOut, and the UI begins rendering
+// numbers with no further edits.
+const HasByteAccounting = false
+
 // singBox embeds Stub so Subscribe / event publishing / hourBucket all
 // stay shared with the stub driver — only the lifecycle below differs.
 type singBox struct {

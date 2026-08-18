@@ -67,6 +67,19 @@ export default function NetworkPage({ t }: Props) {
     // active-route highlight — without this poll the page had no live link
     // truth, so a connected route still read "Connect / not tested yet".
     const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
+    // Whether the loaded engine has a data plane at all. On desktop it
+    // does not (core/abi links engine.NewStub), so engine_set_route
+    // refuses with ErrNoDataPlane — deliberately, because the Stub would
+    // otherwise publish "Connected" without opening a socket.
+    //
+    // ConnectionPage already reads this, but ConnectionPage's Connect
+    // only fires when an active route EXISTS. The first connect on a
+    // fresh install happens HERE, on the per-route button, so without
+    // this the refusal reached the user as the raw Go error string —
+    // in English, to a Farsi user, complete with a `-tags singbox`
+    // build instruction. `undefined` is "unknown", not "none": an older
+    // engine emits no field and must not be accused.
+    const [noDataPlane, setNoDataPlane] = useState(false);
 
     const load = async () => {
         try {
@@ -100,6 +113,7 @@ export default function NetworkPage({ t }: Props) {
                         ? s.activeRoute?.routeId ?? null
                         : null,
                 );
+                setNoDataPlane(s.dataPlane === 'none');
             } catch {
                 /* transient read failure — keep last known state */
             }
@@ -211,6 +225,28 @@ export default function NetworkPage({ t }: Props) {
                 </div>
             )}
 
+            {noDataPlane && (
+                <div
+                    role="alert"
+                    style={{
+                        background: 'rgba(200,85,61,0.10)',
+                        border: '1px solid var(--danger, #c0392b)',
+                        color: 'var(--fg)',
+                        padding: 12,
+                        borderRadius: 'var(--radius-md)',
+                        marginBottom: 16,
+                        fontSize: 13,
+                    }}
+                >
+                    <strong style={{ display: 'block', marginBottom: 6 }}>
+                        {t('conn.no_data_plane.title')}
+                    </strong>
+                    <span style={{ opacity: 0.9 }}>
+                        {t('conn.no_data_plane.body')}
+                    </span>
+                </div>
+            )}
+
             {error && (
                 <div
                     style={{
@@ -255,6 +291,14 @@ export default function NetworkPage({ t }: Props) {
                                 // disables, instantly. Cleared in
                                 // finally so error/success both
                                 // re-enable the affordance.
+                                // Refuse before the press does anything.
+                                // The engine would refuse anyway; letting
+                                // the call through only swaps honest,
+                                // translated copy for a developer string.
+                                if (noDataPlane) {
+                                    setError(t('conn.no_data_plane.title'));
+                                    return;
+                                }
                                 setConnectingId(routeId);
                                 try {
                                     await contract.connect(routeId);

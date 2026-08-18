@@ -20,3 +20,14 @@ func TestDriverSelectionByBuildTag(t *testing.T) {
 		t.Fatalf("expected *Stub from !singbox build, got %T", d)
 	}
 }
+
+// HasRealDataPlane must track the driver the tag actually selected. It
+// is the fact core/abi/dataplane.go fails SetRoute closed on, so a
+// constant that drifted away from the driver would restore the exact
+// bug this guard exists to prevent: engine.Stub publishing "Connected"
+// while the GUI renders it and traffic runs in the clear.
+func TestHasRealDataPlaneMatchesDriver(t *testing.T) {
+	if HasRealDataPlane {
+		t.Fatal("HasRealDataPlane is true on a !singbox build, which links the Stub")
+	}
+}

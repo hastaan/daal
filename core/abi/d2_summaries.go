@@ -9,7 +9,7 @@ package abi
 // New surface (all return JSON):
 //   RouteSummary(routeId)        -> {route_id, publisher_name, route_nickname, trust_class, family, family_maturity, in_cooldown, cooldown_until_unix_ms, budget_exhausted, health_pct, proven}
 //   AvailableRoutes()            -> {routes: [...routesummary...]}
-//   ThroughputSnapshot()         -> {up_bps, down_bps, window_ms}
+//   ThroughputSnapshot()         -> {up_bps, down_bps, window_ms}  (rates are null when unmeasured)
 //
 // Plus PanicWipe() (no JSON; tears down state and returns error|nil).
 //
@@ -20,12 +20,24 @@ package abi
 // install reported `in_cooldown:false, budget_exhausted:false,
 // health_pct:50` — three confident claims backed by nothing, because
 // the three routestore columns they read (`last_success_bucket`,
-// `consecutive_failures`, `cooldown_until`) are written by NO code
-// path: `routestore/store.go`'s INSERT hard-codes them to NULL/0 and
-// no UPDATE ever touches them (the durable RecordOutcome hook is
-// Wave-3 work). A UI cannot distinguish "measured healthy" from
-// "never measured" through a non-nullable field, so the field is
-// nullable and the UI renders "not measured yet" on null.
+// `consecutive_failures`, `cooldown_until`) had no writer at all. A UI
+// cannot distinguish "measured healthy" from "never measured" through a
+// non-nullable field, so the field is nullable and the UI renders "not
+// measured yet" on null.
+//
+// AS OF THE SOLIDIFICATION PASS those columns DO have a writer, and
+// exactly one: abi.SetRoute calls routestore.RecordSuccess on a connect
+// that succeeded and routestore.RecordFailure (with the classified
+// category and the FSM's cooldown expiry) on one that did not. So the
+// nullability above is no longer decorative — null still means "never
+// attempted", and a value now means a connect really happened.
+//
+// The limit worth knowing before trusting these numbers: SetRoute is
+// the ONLY writer, so health accrues only to routes the user connected
+// to BY HAND. There is no prober and no race, so on a fresh install one
+// route carries history and every other route carries none — the
+// evidence is a consequence of the user's choices, not an independent
+// measurement of the route.
 
 import (
 	"encoding/json"
@@ -380,36 +392,112 @@ func healthLess(a, b RouteSummaryDisplay) bool {
 
 // ---- ThroughputSnapshot ---------------------------------------------
 
-type throughputCounters struct {
-	mu          sync.Mutex
-	upBytes     int64
-	downBytes   int64
-	windowStart time.Time
+// throughputWindow remembers the previous cumulative reading from the
+// driver so a rate can be derived from the delta. It holds NO byte
+// counters of its own.
+//
+// It used to. `throughputCounters` had upBytes/downBytes fields that
+// ThroughputSnapshot divided by the window to produce up_bps/down_bps —
+// and no code in this repository ever incremented either field. The
+// result was a hard zero on every platform, every build, forever,
+// rendered by the Connection page as "↑ 0 B/s ↓ 0 B/s" the whole time a
+// tunnel was up. That is precisely the falsehood
+// client-shared/contract/d2-contract.ts forbids: "a non-optional number
+// is a promise that some Go code writes it; do not add one without a
+// writer."
+type throughputWindow struct {
+	mu        sync.Mutex
+	haveLast  bool
+	lastIn    int64
+	lastOut   int64
+	lastStamp time.Time
 }
 
-var globalThroughput = &throughputCounters{windowStart: time.Now()}
+var globalThroughput = &throughputWindow{}
 
-// ThroughputSnapshot returns up_bps, down_bps and window_ms. After
-// reading, the counters are reset so the next call covers a fresh
-// window — caller must poll at the rate it wants.
+// ThroughputSnapshot is engine_throughput_snapshot. It returns
+// {up_bps, down_bps, window_ms}.
+//
+// up_bps and down_bps are NULL when this build cannot count bytes
+// (engine.HasByteAccounting == false). Null means "nobody is counting",
+// which is a different fact from 0 ("counted, nothing moved"), and the
+// UI must render it differently — the same measured/unmeasured rule
+// health_pct and in_cooldown already follow.
+//
+// When accounting exists, the rate is the delta of the driver's
+// cumulative counters over the wall-clock gap since the previous call.
+// The first call after connect has no previous reading and reports
+// null rather than dividing a cumulative total by a made-up window.
+// A counter that went backwards (the driver restarted) is treated the
+// same way: drop the sample, re-anchor, report null.
 func ThroughputSnapshot() (string, error) {
 	globalThroughput.mu.Lock()
 	defer globalThroughput.mu.Unlock()
+
 	now := time.Now()
-	windowMs := now.Sub(globalThroughput.windowStart).Milliseconds()
+	var windowMs int64
+	if globalThroughput.haveLast {
+		windowMs = now.Sub(globalThroughput.lastStamp).Milliseconds()
+	}
 	if windowMs <= 0 {
 		windowMs = 1
 	}
-	upBps := globalThroughput.upBytes * 1000 / windowMs
-	downBps := globalThroughput.downBytes * 1000 / windowMs
-	globalThroughput.upBytes = 0
-	globalThroughput.downBytes = 0
-	globalThroughput.windowStart = now
-	body, _ := json.Marshal(map[string]any{
-		"up_bps":    upBps,
-		"down_bps":  downBps,
-		"window_ms": windowMs,
-	})
+
+	if !engine.HasByteAccounting {
+		globalThroughput.lastStamp = now
+		globalThroughput.haveLast = true
+		body, _ := json.Marshal(map[string]any{
+			"up_bps":    nil,
+			"down_bps":  nil,
+			"window_ms": windowMs,
+		})
+		return string(body), nil
+	}
+
+	// NOT mustCore(): this is an entry point the Android UI polls on a
+	// timer, including during the init window, and a panic on a
+	// gomobile-bound thread is fatal to the whole process (the
+	// goroutine is LockOSThread'd to the JNI worker). Unmeasured is the
+	// honest answer when there is nothing to ask.
+	c := loadedCore()
+	if c == nil || c.driver == nil {
+		globalThroughput.haveLast = false
+		body, _ := json.Marshal(map[string]any{
+			"up_bps":    nil,
+			"down_bps":  nil,
+			"window_ms": windowMs,
+		})
+		return string(body), nil
+	}
+	in, out, err := c.driver.Stats()
+	if err != nil {
+		// Not connected, or the driver cannot answer. Unmeasured, not
+		// zero; and forget the anchor so the next connect starts clean.
+		globalThroughput.haveLast = false
+		body, _ := json.Marshal(map[string]any{
+			"up_bps":    nil,
+			"down_bps":  nil,
+			"window_ms": windowMs,
+		})
+		return string(body), nil
+	}
+
+	var payload map[string]any
+	if !globalThroughput.haveLast || in < globalThroughput.lastIn || out < globalThroughput.lastOut {
+		payload = map[string]any{"up_bps": nil, "down_bps": nil, "window_ms": windowMs}
+	} else {
+		payload = map[string]any{
+			"up_bps":    (out - globalThroughput.lastOut) * 1000 / windowMs,
+			"down_bps":  (in - globalThroughput.lastIn) * 1000 / windowMs,
+			"window_ms": windowMs,
+		}
+	}
+	globalThroughput.haveLast = true
+	globalThroughput.lastIn = in
+	globalThroughput.lastOut = out
+	globalThroughput.lastStamp = now
+
+	body, _ := json.Marshal(payload)
 	return string(body), nil
 }
 

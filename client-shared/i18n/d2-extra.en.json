@@ -140,6 +140,8 @@
   "conn.export_copied": "Diagnostics copied to clipboard",
   "conn.export_failed": "Couldn't export diagnostics",
   "conn.mode_failed": "Couldn't change mode",
+  "conn.no_data_plane.title": "This build cannot carry traffic",
+  "conn.no_data_plane.body": "No tunnel engine is linked into this app, so Connect is turned off. Connecting here would protect nothing, and Daal will not show you a connection it does not have. Use a build that ships the tunnel engine.",
   "trust_pinned": "Pinned",
   "trust_lan": "LAN",
   "trust_unknown": "Unknown",

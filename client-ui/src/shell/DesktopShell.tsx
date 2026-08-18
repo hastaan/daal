@@ -1,6 +1,6 @@
 // DesktopShell.tsx — large-viewport host (≥1024px) built from
 // primitives in client-ui/src/design/primitives. Replaces the
-// pre-v0.3 D2Shell.
+// pre-v0.3 D2Shell (deleted once this shell superseded it).
 
 import { useEffect, useMemo, useState } from 'react';
 import { applyDir, type Locale } from '../lib/i18n';

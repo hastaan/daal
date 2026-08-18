@@ -35,6 +35,19 @@ const (
 	// live in different files is exactly how this codebase acquired
 	// its stock of code that exists and does nothing.
 	KindFreshness Kind = "freshness"
+	// KindNetmemSweep (Wave 5 / telemetry) fires once a day and drops
+	// per-network memory blobs older than netmem.TTL. It has no Ref
+	// because the sweep is process-global.
+	//
+	// This is a RETENTION action, not a refresh: netmem blobs are the
+	// only structure in the engine that grows with the number of
+	// networks the device has ever joined, and every one of them is a
+	// small piece of evidence about where its owner has been. The TTL
+	// and the Sweep that enforces it were written together in
+	// core/netmem, whose doc comment says callers "wire into the
+	// scheduler's hourly tick" — and until this pass no caller did, so
+	// the retention bound existed on paper only.
+	KindNetmemSweep Kind = "netmem-sweep"
 )
 
 // Cadence is the per-kind interval policy. Subscription cadence is
@@ -45,6 +58,13 @@ type Cadence struct {
 	Revocation  time.Duration
 	Bootstrap   time.Duration
 	BudgetReset time.Duration // Phase 2A. Defaults to 1 h.
+
+	// NetmemSweep is how often stale per-network memory is pruned.
+	// Defaults to 24 h. It does not need to be tight — netmem.TTL is
+	// 30 days, so a day of slack on the boundary is immaterial — and a
+	// sweep reads and re-decrypts every blob, which is not free on a
+	// phone.
+	NetmemSweep time.Duration
 
 	// Freshness is the FRP-8 per-RelayPack trigger policy. Zero value
 	// is replaced by selection.DefaultPolicy() in Plan/AllNextDues, so
@@ -63,6 +83,7 @@ func DefaultCadence() Cadence {
 		Revocation:  6 * time.Hour,
 		Bootstrap:   24 * time.Hour,
 		BudgetReset: 1 * time.Hour,
+		NetmemSweep: 24 * time.Hour,
 		Freshness:   selection.DefaultPolicy(),
 	}
 }
@@ -94,6 +115,10 @@ type Source interface {
 	// LastBudgetReset returns the wall-clock of the last budget-reset
 	// hour-rollover. Phase 2A. Zero → never (so first tick fires).
 	LastBudgetReset() time.Time
+	// LastNetmemSweep returns the wall-clock of the last per-network
+	// memory sweep. Zero → never (so the first tick after install
+	// prunes whatever a previous, unswept build left behind).
+	LastNetmemSweep() time.Time
 	// RelayPacks enumerates every imported RelayPack that carries at
 	// least one freshness endpoint, with its last successful and last
 	// failed refresh. A pack with no endpoint MUST NOT be returned:
@@ -154,6 +179,9 @@ func Plan(src Source, c Cadence, now time.Time) []Action {
 	if c.BudgetReset == 0 {
 		c.BudgetReset = 1 * time.Hour
 	}
+	if c.NetmemSweep == 0 {
+		c.NetmemSweep = 24 * time.Hour
+	}
 	c.Freshness = defaultedFreshness(c.Freshness)
 	var due []Action
 
@@ -200,6 +228,14 @@ func Plan(src Source, c Cadence, now time.Time) []Action {
 		due = append(due, Action{
 			Kind:    KindBudgetReset,
 			NextDue: brNext,
+		})
+	}
+
+	nsNext := nextDue(src.LastNetmemSweep(), c.NetmemSweep, now)
+	if !nsNext.After(now) {
+		due = append(due, Action{
+			Kind:    KindNetmemSweep,
+			NextDue: nsNext,
 		})
 	}
 
@@ -326,6 +362,9 @@ func AllNextDues(src Source, c Cadence, now time.Time) []Action {
 	if c.BudgetReset == 0 {
 		c.BudgetReset = 1 * time.Hour
 	}
+	if c.NetmemSweep == 0 {
+		c.NetmemSweep = 24 * time.Hour
+	}
 	c.Freshness = defaultedFreshness(c.Freshness)
 	var all []Action
 	for _, s := range src.Subscriptions() {
@@ -356,6 +395,10 @@ func AllNextDues(src Source, c Cadence, now time.Time) []Action {
 	all = append(all, Action{
 		Kind:    KindBudgetReset,
 		NextDue: nextDue(src.LastBudgetReset(), c.BudgetReset, now),
+	})
+	all = append(all, Action{
+		Kind:    KindNetmemSweep,
+		NextDue: nextDue(src.LastNetmemSweep(), c.NetmemSweep, now),
 	})
 	for _, rp := range src.RelayPacks() {
 		if rp.RelayPackID == "" {

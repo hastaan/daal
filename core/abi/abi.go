@@ -294,6 +294,12 @@ func Init(stateDir, logLevel string) error {
 	// without answering keeps plaintext route credentials on disk
 	// indefinitely. Init is the safe moment: no prompt is mid-flight.
 	core.sweepPendingPrompts(PendingPromptTTL, nowUTC())
+	// Retention, enforced on the one event that happens regardless of
+	// ticks and tunnels. The refresh_audit / diagnostics_explain prunes
+	// otherwise run only on the write path, so a device that stopped
+	// writing — disconnected, or seized — keeps its last 72 hours
+	// forever. See routestore.PruneLocalHistory.
+	_ = s.PruneLocalHistory(nowUTC())
 	return nil
 }
 
@@ -332,6 +338,16 @@ func VersionString() string { return Version }
 // SetRoute is engine_set_route.
 func SetRoute(routeID string) error {
 	c := mustCore()
+	// Fail closed before anything else. On a build with no data plane
+	// linked the driver is engine.Stub, whose Start() returns nil and
+	// publishes "Connected" without opening a socket — so every line
+	// below would faithfully record a tunnel that does not exist and
+	// the GUI would render it. Refusing here is the only honest
+	// outcome; see core/abi/dataplane.go for the artefact-by-artefact
+	// tag table.
+	if !dataPlaneLinked {
+		return ErrNoDataPlane
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	row, err := c.store.GetRoute(routeID)
@@ -360,7 +376,15 @@ func SetRoute(routeID string) error {
 	if err := c.driver.Start(context.Background(), body); err != nil {
 		// Start failed: no tunnel, so bootstrap/refresh may dial direct.
 		refresh.SetTunnelRequired(false)
-		c.pm.Failed(routeID, row.TransportFamily, diagnostics.Classify(err.Error()))
+		cat := diagnostics.Classify(err.Error())
+		c.pm.Failed(routeID, row.TransportFamily, cat)
+		// Persist the outcome the FSM just computed. Without this the
+		// classification lives only in the in-memory Manager and dies
+		// with the process, which is why `health_pct` and `proven` were
+		// null on every install: the columns that back them had no
+		// writer. See routestore.RecordFailure for the privacy shape
+		// (hour bucket + closed category vocabulary, one row per route).
+		_ = c.store.RecordFailure(routeID, string(cat), pmCooldownUntil(c, routeID), nowUTC())
 		// Posture: a fresh attempt that fails from PostureNoRoute
 		// should advance to PostureRecovery if legal so the GUI can
 		// render the recovery affordance. Illegal transitions (no
@@ -369,6 +393,10 @@ func SetRoute(routeID string) error {
 		return err
 	}
 	c.pm.Connected()
+	// Same on the success side: this is the ONLY moment the engine knows
+	// a route works, and until this pass it was thrown away. `proven`
+	// and `health_pct` are downstream of this single call.
+	_ = c.store.RecordSuccess(routeID, nowUTC())
 	// A tunnel is now up. From here until ClearRoute, any refresh that
 	// cannot ride it must FAIL rather than egress from the device's real
 	// address — see refresh.ErrTunnelRequired for the leak this closes.
@@ -587,15 +615,33 @@ func probeStub(_ int) int {
 }
 
 // StatsRedacted is engine_stats_redacted.
+//
+// `bytes_in` / `bytes_out` are NULL when this build cannot count bytes
+// (engine.HasByteAccounting == false, which is every build today —
+// including the singbox one, whose platformInterface.bytesIn/bytesOut
+// are declared "reserved for the stats follow-up phase" and never
+// written). This is the same measured/unmeasured rule
+// ThroughputSnapshot follows, applied to the other surface that reads
+// driver.Stats().
+//
+// It matters more here than on the Connection page: this blob is what a
+// user exports and hands to a helper. A helper reading `bytes_in: 0`
+// concludes "the tunnel carried nothing", which is a diagnosis. `null`
+// says "nobody counted", which is the truth. Do not restore the zero.
+// Backlog CM-1 is the real counter.
 func StatsRedacted() (string, error) {
 	c := mustCore()
 	in, out, err := c.driver.Stats()
 	if err != nil {
 		return "", err
 	}
+	var inVal, outVal any // nil marshals as JSON null
+	if engine.HasByteAccounting {
+		inVal, outVal = in, out
+	}
 	body, _ := json.Marshal(map[string]any{
-		"bytes_in":  in,
-		"bytes_out": out,
+		"bytes_in":  inVal,
+		"bytes_out": outVal,
 		"bucket":    routestore.HourBucket(nowUTC()),
 	})
 	return string(body), nil
@@ -620,8 +666,14 @@ func ExportDiagnostics() (string, error) {
 		// `posture` (the 8-state FSM from 2B) instead. ABI-neutral:
 		// removing a diagnostics field does not change the symbol
 		// count.
-		"posture":     c.pm.Posture(),
-		"why":         c.pm.LastReason(),
+		"posture": c.pm.Posture(),
+		"why":     c.pm.LastReason(),
+		// Which data plane this binary actually links: "singbox" (real,
+		// can carry traffic) or "none" (the deterministic Stub — this
+		// binary CANNOT tunnel and SetRoute refuses). A GUI reading
+		// "none" must not offer Connect as if it would work. Compile-
+		// time fact, never a probe. See core/abi/dataplane.go.
+		"data_plane":  DataPlaneKind(),
 		"route_count": len(routes),
 		"bucket":      routestore.HourBucket(nowUTC()),
 		// Phase 2B widens additively: route_health[] and
@@ -794,4 +846,22 @@ func mustCore() *Core {
 		panic(errors.New("abi: not initialized — call Init first"))
 	}
 	return c
+}
+
+// pmCooldownUntil returns the per-route cooldown expiry the pathmanager
+// FSM just assigned, or the zero time when the failure class carries no
+// cooldown (auth_failed and the other non-cooldown categories). It reads
+// the live Manager rather than re-deriving the duration, so the durable
+// column and the in-memory FSM cannot disagree about when a route
+// becomes selectable again.
+func pmCooldownUntil(c *Core, routeID string) time.Time {
+	if c == nil || c.pm == nil {
+		return time.Time{}
+	}
+	for _, h := range c.pm.RouteHealth() {
+		if h.RouteID == routeID {
+			return h.CooldownUntil
+		}
+	}
+	return time.Time{}
 }

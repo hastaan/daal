@@ -1,6 +1,6 @@
 // MobileShell.tsx — phone form-factor host (≤640px).
 //
-// Phase 1 stub: renders the legacy D2Shell content inside a phone-style
+// Phase 1 stub: renders the D-2 page set inside a phone-style
 // frame with a bottom tab bar so a resized browser instantly shows
 // "we know we're in mobile mode now". Phase 5 replaces the body with
 // proper screens.

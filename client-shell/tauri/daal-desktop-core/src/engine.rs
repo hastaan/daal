@@ -536,8 +536,11 @@ impl Engine {
         unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
     }
 
-    /// Heartbeat-style call used by the supervisor thread. Cheap and
-    /// side-effect-free.
+    /// Liveness probe used by `HeartbeatSupervisor::check_once`, which
+    /// the GUI pulls on a timer (there is no supervisor thread). Cheap
+    /// and side-effect-free: it asks the library for its version string
+    /// and reports only whether the call came back. A `true` here says
+    /// the library answered, NOT that traffic is flowing.
     pub fn heartbeat(&self) -> bool {
         let p = (self.version)();
         !p.is_null()
@@ -1131,9 +1134,23 @@ fn path_to_cstring(p: &Path) -> Result<CString> {
         .map_err(|_| DesktopError::EngineSymbol("path contained NUL".into()))
 }
 
-/// A heartbeat supervisor that polls `version()` every `interval` and
-/// flips its `healthy` flag false after `max_failures` consecutive null
-/// responses. The Tauri shell spawns this on a background thread.
+/// Liveness flag for the engine library, pulled by the GUI.
+///
+/// WHAT THIS ACTUALLY MEASURES, precisely: `check_once` calls
+/// `engine_version` and records whether the returned pointer was
+/// non-NULL. That is "the shared library is loaded and its Go runtime
+/// answers a call" — nothing more. It does NOT probe the network, the
+/// data plane, or the active route, so a build with no data plane
+/// linked (see core/abi/dataplane.go) reports healthy while being
+/// unable to carry a single byte. Callers must not render it as
+/// "the tunnel is fine".
+///
+/// There is no interval and no failure counter here: the GUI owns the
+/// cadence (App.tsx polls `heartbeat_tick` every 2s) and a single NULL
+/// flips the flag immediately. The previous version of this comment
+/// described an `interval` field, a `max_failures` consecutive-failure
+/// threshold and a background supervisor thread; none of the three
+/// ever existed.
 pub struct HeartbeatSupervisor {
     pub healthy: Arc<Mutex<bool>>,
 }

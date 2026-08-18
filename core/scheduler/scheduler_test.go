@@ -51,6 +51,14 @@ func (r *recordingExecutor) RefreshBudgetReset(_ context.Context, _ time.Time) e
 	return nil
 }
 
+func (r *recordingExecutor) SweepNetworkMemory(_ context.Context, _ time.Time) error {
+	r.calls = append(r.calls, "netmem-sweep:")
+	if r.fail[KindNetmemSweep] {
+		return errFake
+	}
+	return nil
+}
+
 func (r *recordingExecutor) RefreshFreshness(_ context.Context, id string) error {
 	r.calls = append(r.calls, "freshness:"+id)
 	if r.fail[KindFreshness] {
@@ -74,7 +82,7 @@ func TestTickInvokesEveryDueAction(t *testing.T) {
 	rec := newRec()
 	s := New(src, rec, DefaultCadence())
 	s.Tick(now)
-	want := []string{"bootstrap:", "budget-reset:", "revocation:p1", "subscription:s1"}
+	want := []string{"bootstrap:", "budget-reset:", "netmem-sweep:", "revocation:p1", "subscription:s1"}
 	if len(rec.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d: %+v", len(rec.calls), len(want), rec.calls)
 	}
@@ -136,8 +144,8 @@ func TestStatusJSONShape(t *testing.T) {
 	if got.Ticks != 1 {
 		t.Errorf("Ticks=%d want 1", got.Ticks)
 	}
-	if len(got.NextDue) != 4 {
-		t.Errorf("NextDue len=%d want 4 (sub+rev+bootstrap+budget-reset): %+v", len(got.NextDue), got.NextDue)
+	if len(got.NextDue) != 5 {
+		t.Errorf("NextDue len=%d want 5 (sub+rev+bootstrap+budget-reset+netmem-sweep): %+v", len(got.NextDue), got.NextDue)
 	}
 }
 

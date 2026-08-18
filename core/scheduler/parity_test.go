@@ -114,6 +114,7 @@ type replayingSource struct {
 	pubs    []PublisherState
 	bs      time.Time
 	budgRst time.Time // Phase 2A: last budget-reset
+	netSwp  time.Time // Wave 5: last per-network-memory sweep
 	packs   []RelayPackState
 }
 
@@ -121,6 +122,7 @@ func (r *replayingSource) Subscriptions() []SubscriptionState         { return r
 func (r *replayingSource) PublishersWithRevocation() []PublisherState { return r.pubs }
 func (r *replayingSource) LastBootstrapRefresh() time.Time            { return r.bs }
 func (r *replayingSource) LastBudgetReset() time.Time                 { return r.budgRst }
+func (r *replayingSource) LastNetmemSweep() time.Time                 { return r.netSwp }
 func (r *replayingSource) RelayPacks() []RelayPackState               { return r.packs }
 
 func (r *replayingSource) markFired(a Action, now time.Time) {
@@ -141,6 +143,8 @@ func (r *replayingSource) markFired(a Action, now time.Time) {
 		r.bs = now
 	case KindBudgetReset:
 		r.budgRst = now
+	case KindNetmemSweep:
+		r.netSwp = now
 	case KindFreshness:
 		for i, p := range r.packs {
 			if p.RelayPackID == a.Ref {

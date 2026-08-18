@@ -57,9 +57,18 @@ export async function resolveTrustPrompt(
 // receives the TUN fd before set_route is called. The plugin's
 // vpn_start command runs VpnService.prepare(), starts DaalVpnService,
 // which calls engine_set_tun_fd(fd) and then engine_set_route(routeId)
-// in the right order. Desktop falls through to the existing connect
-// command, which calls engine_set_route directly because the
-// daal-tun-helper has already delivered the fd at GUI startup.
+// in the right order.
+//
+// Desktop falls through to the plain `connect` command, which calls
+// engine_set_route directly. It does NOT have a TUN fd: this comment
+// used to claim "the daal-tun-helper has already delivered the fd at
+// GUI startup", and that was never true — `deliver_tun_fd` in
+// daal-desktop-core/src/commands.rs has no caller anywhere (see
+// tools/check-plumbing.mjs, which allowlists it for exactly that
+// reason). The desktop also links the Stub data plane, so
+// engine_set_route fails closed with ErrNoDataPlane
+// (core/abi/dataplane.go) before the missing fd could matter. See
+// docs/capability-matrix.md, "Connect / disconnect".
 function isAndroid(): boolean {
     if (typeof navigator === 'undefined') return false;
     // Tauri's Android WebView reports "Android" in the UA string; the
@@ -157,6 +166,13 @@ export interface DiagnosticsBlob {
     storage_profile?: 'vault' | 'keystore' | string;
     lifeline_strict_active_since?: string;
     session_allows_bulk_capable?: boolean;
+    // Which data plane the loaded engine binary links: "singbox" (real —
+    // can carry traffic) or "none" (the deterministic Stub, which
+    // reports "Connected" without opening a socket; engine_set_route
+    // refuses on such a build). Optional because an older engine emits
+    // nothing here — and `undefined` must be read as "unknown", never
+    // as "none", or every stale engine gets accused of being a stub.
+    data_plane?: 'singbox' | 'none' | string;
 }
 
 // Phase 2D: PIN-vault unlock outcome.
@@ -366,14 +382,33 @@ export async function availableRoutes(): Promise<{ routes: RouteSummaryRow[] }> 
     return JSON.parse(json) as { routes: RouteSummaryRow[] };
 }
 
-/** Returns `{up_bps,down_bps,window_ms}`. Reading resets counters. */
+/** Returns `{up_bps,down_bps,window_ms}`.
+ *
+ *  `up_bps`/`down_bps` are **null** when the build cannot count bytes
+ *  (`engine.HasByteAccounting == false`, which is every build today) or
+ *  when the sample has no predecessor to difference against. Null is
+ *  "nobody is counting"; 0 would be "counted, nothing moved". Do not
+ *  coalesce it to 0 — that is the exact lie this call was fixed for.
+ *
+ *  Reading does NOT reset any counter: `core/abi/d2_summaries.go` keeps
+ *  only the previous cumulative reading from the driver and derives a
+ *  rate from the delta. The counters this comment used to describe never
+ *  existed on the write side and have been deleted.
+ *
+ *  NOTE: nothing calls this wrapper — `backends/tauri.ts` invokes
+ *  `throughput_snapshot` directly (`rawThroughputSnapshot`). It is kept
+ *  as typed contract surface; see docs/capability-matrix.md §1. */
 export async function throughputSnapshot(): Promise<{
-    up_bps: number;
-    down_bps: number;
+    up_bps: number | null;
+    down_bps: number | null;
     window_ms: number;
 }> {
     const json = await invoke<string>('throughput_snapshot');
-    return JSON.parse(json) as { up_bps: number; down_bps: number; window_ms: number };
+    return JSON.parse(json) as {
+        up_bps: number | null;
+        down_bps: number | null;
+        window_ms: number;
+    };
 }
 
 /** Shuts the engine down and removes the state directory.

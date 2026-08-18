@@ -257,17 +257,19 @@ async function rawThroughputSnapshot(): Promise<ThroughputSnapshot> {
     try {
         const body = await invoke<string>('throughput_snapshot');
         const j = JSON.parse(body) as {
-            up_bps: number;
-            down_bps: number;
+            up_bps: number | null;
+            down_bps: number | null;
             window_ms: number;
         };
         return {
-            upBytesPerSec: j.up_bps,
-            downBytesPerSec: j.down_bps,
+            upBytesPerSec: j.up_bps ?? null,
+            downBytesPerSec: j.down_bps ?? null,
             windowMs: j.window_ms,
         };
     } catch {
-        return { upBytesPerSec: 0, downBytesPerSec: 0, windowMs: 1000 };
+        // The call failed, so we know nothing about throughput. Zero is
+        // a measurement; null is the truth.
+        return { upBytesPerSec: null, downBytesPerSec: null, windowMs: 1000 };
     }
 }
 
@@ -308,6 +310,14 @@ export class TauriContract implements D2Contract {
             pointerSource: pointer?.primarySource,
             pointerValidDays: pointer?.validForDays,
             netStatusLine: undefined,
+            // Only 'none' and 'singbox' are meaningful. Anything else —
+            // including the absent field an older engine emits — stays
+            // undefined so the UI claims nothing rather than accusing a
+            // working engine of being a stub.
+            dataPlane:
+                d.data_plane === 'none' || d.data_plane === 'singbox'
+                    ? d.data_plane
+                    : undefined,
         };
     }
 

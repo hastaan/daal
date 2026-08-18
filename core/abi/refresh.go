@@ -250,12 +250,14 @@ func DiagnosticsExplain() (string, error) {
 	exp.Reason = w.WhyChoseRoute
 	if w.ActiveRoute != "" {
 		if row, err := c.store.GetRoute(w.ActiveRoute); err == nil {
+			now := time.Now().UTC()
 			out := selection.Decide(selection.Input{
-				Routes:     []routestore.RouteRow{row},
-				Mode:       selection.ModeNormal,
-				Phase:      selection.CurrentPhase,
-				Now:        time.Now().UTC(),
-				DecisionID: "diagnostics-" + w.Bucket,
+				Routes:         []routestore.RouteRow{row},
+				NetworkSignals: activeNetworkSignals(c, now),
+				Mode:           selection.ModeNormal,
+				Phase:          selection.CurrentPhase,
+				Now:            now,
+				DecisionID:     "diagnostics-" + w.Bucket,
 			})
 			if out.Explanation != nil {
 				exp = out.Explanation
@@ -340,3 +342,94 @@ func (a revocationStoreAdapter) AppendRefreshAudit(kind, refID, outcome string,
 }
 
 var _ = errors.New
+
+// signalWindow is how recent a classified failure must be to count as
+// an ACTIVE network signal. Two hour buckets — the current one and the
+// one before it — so a failure at 13:59 is still a signal at 14:01,
+// which an "only the current bucket" rule would have thrown away at the
+// worst possible moment.
+//
+// It is deliberately short. A signal is meant to be a claim about the
+// network the device is on RIGHT NOW; a day-old sni_rst says something
+// about yesterday's cafe, and feeding it to a live decision is how a
+// selector starts explaining a confident wrong answer.
+//
+// FRESHNESS IS NOT SCOPE, and the difference is load-bearing. This
+// window bounds WHEN the failure happened, not WHERE. There is no
+// network scoping here at all: the derivation reads every route row and
+// consults neither the active network ID nor netmem, because the
+// network ID is a constant today (B2-a) and hashing a constant would
+// scope nothing while looking like it scoped something. So a failure
+// observed on a home Wi-Fi at 13:50 is still reported as an active
+// signal after the user walks into a cafe at 14:00, for the rest of the
+// window. Treat B2-a as a PRECONDITION for these signals meaning what
+// their names say; until it lands, the honest reading is "this device
+// saw this recently", not "this network does this".
+const signalWindow = 2
+
+// activeNetworkSignals derives the currently-active NetworkSignal set
+// from the durable per-route failure classifications the connect path
+// records (routestore.RecordFailure). It is the first and only producer
+// of Input.NetworkSignals in the tree.
+//
+// SCOPE, stated plainly because the gap matters more than the fill:
+// this produces at most the 5 signals that are the same fact as a
+// diagnostics.Category. The other 4 (protocol_whitelist_mode,
+// cdn_hostname_blocked, cdn_wide_failure, stateful_reassembly_present)
+// are cross-candidate, cross-network probe aggregations; no single
+// classified error implies any of them, and inventing one from a lesser
+// fact is exactly the failure this pass exists to remove. They stay
+// absent until an active prober exists — see docs/telemetry-audit.md.
+//
+// RECOVERY. A failure is only a signal while it is still the last thing
+// this route proved. routestore.RecordSuccess deliberately leaves the
+// failure bucket and category in place (that is what makes "flaky vs
+// solid" readable at all), so reading them raw keeps emitting
+// udp_collapsed about a network on which the very same route has since
+// carried a tunnel — the app demoting its working routes and explaining
+// why.
+//
+// The ordering test is `consecutive_failures`, NOT the two hour
+// buckets. Buckets cannot order a success and a failure inside the same
+// hour, and that hour is exactly when a recovery matters; comparing
+// them would have to guess, and either guess is wrong half the time.
+// The counter already carries the answer at instant precision without
+// storing an instant: RecordSuccess resets it to 0 and RecordFailure
+// increments it, so `consecutive_failures == 0` means "the most recent
+// recorded outcome for this route was a success" — the route has
+// disproved its own signal. No new column, no new timestamp, no
+// migration.
+//
+// PRIVACY. Nothing new is read or stored: the inputs are the failure
+// category and hour bucket already on the route row, both already in
+// the diagnostics export, both from closed vocabularies. The output is
+// a set of at most 5 enum values.
+func activeNetworkSignals(c *Core, now time.Time) []selection.NetworkSignal {
+	if c == nil || c.store == nil {
+		return nil
+	}
+	rows, err := c.store.ListRoutes()
+	if err != nil {
+		return nil
+	}
+	// The window as a set of acceptable bucket strings, so the
+	// comparison is exact-match on the same format the writer used
+	// rather than a parse-and-subtract that could drift.
+	fresh := make(map[string]bool, signalWindow)
+	for i := 0; i < signalWindow; i++ {
+		fresh[routestore.HourBucket(now.Add(-time.Duration(i)*time.Hour))] = true
+	}
+	cats := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.LastFailureCategory == "" || !fresh[r.LastFailureBucket] {
+			continue
+		}
+		// Recovered: the last recorded outcome was a success, so the
+		// stored failure is history, not a live claim.
+		if r.ConsecutiveFailures == 0 {
+			continue
+		}
+		cats = append(cats, r.LastFailureCategory)
+	}
+	return selection.SignalsFromCategories(cats)
+}

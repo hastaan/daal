@@ -44,7 +44,6 @@ SCAN_PATHS=(
     "client-ui/src/d2pages"
     "client-ui/src/shell"
     "client-ui/src/onboarding"
-    "client-ui/src/components/AddEntryModal.tsx"
     "client-ui/src/components/ScanSheet.tsx"
     "client-ui/src/recipient"
     "client-ui/src/components/PanicWipeDialog.tsx"

@@ -507,6 +507,93 @@ func (s *Store) UpdateRouteBytesHour(routeID string, consumed int64) error {
 	return err
 }
 
+// --- Durable connect outcomes (Wave 5 / telemetry) -------------------
+//
+// The five history columns (`last_success_bucket`, `last_failure_bucket`,
+// `last_failure_category`, `consecutive_failures`, `cooldown_until`) have
+// existed since the first schema and, until this pass, had NO writer:
+// UpsertRoute hard-codes them to NULL/0 and nothing ever updated them.
+// Everything that reads them — `abi.hasDurableOutcome`,
+// `abi.computeHealthPctLastHour`, `RouteSummaryDisplay.Proven` — therefore
+// answered "nothing measured" on every install, forever, while the engine
+// was computing exactly this outcome on every connect attempt and dropping
+// it on the floor at process exit.
+//
+// PRIVACY. What is written here is deliberately the coarsest form of the
+// fact that is still useful:
+//   - timestamps are HOUR BUCKETS (routestore.HourBucket), never instants,
+//     so the row cannot place the user on the network at a given minute;
+//   - the failure reason is a `diagnostics.Category` — a value from a
+//     closed, ~22-entry vocabulary — never an error string, which would
+//     carry hostnames, IPs and ports;
+//   - the row is keyed by route_id, which the store already holds in the
+//     clear, so no new identifier is introduced;
+//   - it is ONE ROW PER ROUTE, overwritten in place. There is no
+//     per-attempt log, so nothing here can reconstruct a session history
+//     or a browsing pattern, and the table cannot grow with use.
+// A per-attempt history would be far more useful to a selector and is
+// precisely the thing a seized device must not contain; see
+// docs/telemetry-audit.md.
+
+// RecordSuccess stamps a successful connect on routeID: the success hour
+// bucket advances, the consecutive-failure counter resets to zero, and any
+// durable cooldown is cleared (a route that just carried a tunnel is not
+// cooling down). The failure bucket and category are left ALONE — "when
+// did this last fail, and why" stays readable after a recovery, which is
+// what makes the difference between "flaky" and "solid" visible at all.
+//
+// `now` is supplied by the caller so the engine's single clock seam
+// (abi.nowUTC) governs; the function truncates it to the hour itself.
+func (s *Store) RecordSuccess(routeID string, now time.Time) error {
+	if routeID == "" {
+		return errors.New("routestore: empty routeID")
+	}
+	_, err := s.db.Exec(`
+UPDATE routes SET
+  last_success_bucket  = ?,
+  consecutive_failures = 0,
+  cooldown_until       = NULL
+WHERE route_id = ?`, HourBucket(now), routeID)
+	return err
+}
+
+// RecordFailure stamps a classified failure on routeID: the failure hour
+// bucket advances, the category is recorded, and the consecutive-failure
+// counter increments. `cooldownUntil` is the FSM's per-route cooldown
+// expiry; pass the zero time for the failure classes that carry no
+// cooldown (auth_failed and friends — see pathmanager.Failed), in which
+// case the column is cleared rather than back-dated.
+//
+// `category` MUST be a diagnostics.Category value. The routestore does
+// not import diagnostics (that would invert the dependency), so the
+// caller passes the string; abi.SetRoute is the only production caller
+// and it passes the output of diagnostics.Classify directly.
+//
+// The counter saturates at a small ceiling. It exists to answer "is this
+// route reliably broken", which three failures already answer; letting it
+// run to thousands would make a route that recovers take thousands of
+// successes' worth of doubt to look healthy again, and would leak a rough
+// count of how many times the user tried to reach the network.
+const maxConsecutiveFailures = 99
+
+func (s *Store) RecordFailure(routeID, category string, cooldownUntil, now time.Time) error {
+	if routeID == "" {
+		return errors.New("routestore: empty routeID")
+	}
+	var cd any
+	if !cooldownUntil.IsZero() {
+		cd = cooldownUntil.UTC().Format(time.RFC3339)
+	}
+	_, err := s.db.Exec(`
+UPDATE routes SET
+  last_failure_bucket   = ?,
+  last_failure_category = ?,
+  consecutive_failures  = MIN(consecutive_failures + 1, ?),
+  cooldown_until        = ?
+WHERE route_id = ?`, HourBucket(now), category, maxConsecutiveFailures, cd, routeID)
+	return err
+}
+
 // MarkPublisherRoutesRevoked sets every route under publisherID to revoked.
 func (s *Store) MarkPublisherRoutesRevoked(publisherID string) error {
 	_, err := s.db.Exec(`UPDATE routes SET trust_state='revoked' WHERE publisher_id=?`, publisherID)

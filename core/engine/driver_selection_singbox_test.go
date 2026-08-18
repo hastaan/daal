@@ -17,3 +17,11 @@ func TestDriverSelectionByBuildTag(t *testing.T) {
 		t.Fatalf("expected *singBox from singbox build, got %T", d)
 	}
 }
+
+// HasRealDataPlane must track the driver the tag actually selected —
+// see the !singbox twin for why this matters.
+func TestHasRealDataPlaneMatchesDriver(t *testing.T) {
+	if !HasRealDataPlane {
+		t.Fatal("HasRealDataPlane is false on a singbox build, which links the real driver")
+	}
+}

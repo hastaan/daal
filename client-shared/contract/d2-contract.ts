@@ -131,15 +131,24 @@ export interface PublisherHandoffSummary {
 export interface TrayState {
   state: ConnState;
   routeLabel: string;
-  upBytesPerSec: number;
-  downBytesPerSec: number;
+  /** Nullable for the same reason as ThroughputSnapshot below. */
+  upBytesPerSec: number | null;
+  downBytesPerSec: number | null;
   modeLabel: string;
   connectedSinceUnixMs?: number;
 }
 
 export interface ThroughputSnapshot {
-  upBytesPerSec: number;
-  downBytesPerSec: number;
+  /**
+   * Bytes per second, or `null` when nobody is counting. Null is NOT
+   * zero: zero means the engine counted and nothing moved. Today every
+   * shipped build reports null (engine.HasByteAccounting is false on
+   * both the stub and the sing-box driver, whose platform counters are
+   * declared but never written), so a renderer that treats these as
+   * plain numbers prints a permanent "0 B/s".
+   */
+  upBytesPerSec: number | null;
+  downBytesPerSec: number | null;
   windowMs: number;
 }
 

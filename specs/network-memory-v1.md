@@ -179,10 +179,28 @@ v1.
 ## TTL & sweep
 
 `netmem.Store.Sweep(now)` deletes snapshots whose `last_seen` is
-older than 30 days. Wired into the scheduler's hourly tick at the
-ABI layer (2C carry-over: a 2D refactor adds a dedicated
-KindNetmemSweep cadence; for 2C the sweep is opportunistic via
-the hourly KindBudgetReset).
+older than 30 days.
+
+It is driven by the scheduler's own `KindNetmemSweep` action on a
+24-hour cadence (`scheduler.DefaultCadence().NetmemSweep`), bound at
+the ABI layer by `refreshExecutor.SweepNetworkMemory` and stamped
+under the `scheduler:last-netmem-sweep` secret. The cadence is
+deliberately loose relative to the 30-day TTL: a day of slack at the
+boundary is immaterial, and a sweep re-reads every stored blob, which
+is not free on a phone.
+
+HISTORY, because it matters for how this section should be read. This
+paragraph previously said the sweep was "wired into the scheduler's
+hourly tick ... opportunistic via the hourly KindBudgetReset". No such
+wiring ever existed: `Sweep` had tests and no production caller, and
+`KindBudgetReset`'s executor only ever called `budget.Engine.HourRollover`.
+For the whole period that text stood, the 30-day bound was documented
+and unenforced, and per-network blobs accumulated for the life of the
+install. The retention bound is a privacy control — the set of stored
+networks is a coarse travel record recoverable from a seized device —
+and a bound that nothing enforces is not a bound. Treat a retention
+claim in this spec tree as a claim about code until you have found the
+caller.
 
 ## Panic-wipe (V2.4 last bullet)
 

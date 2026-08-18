@@ -1,5 +1,7 @@
 // TrustPrompt.tsx — modal trust prompt with EN+FA word grid.
-// Used by AddEntryModal and the onboarding R4 step.
+// Used by AddSheet and ScanSheet — those two files are its ONLY importers.
+// (The onboarding R4 step renders its own copy via t('trust.body'); it does
+// not mount this component.)
 
 import { useContract } from '../contract/ContractProvider';
 import type { PreviewedBundle, TrustDecision } from '../contract/D2Contract';
