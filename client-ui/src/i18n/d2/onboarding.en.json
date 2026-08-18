@@ -6,7 +6,7 @@
   "cap.p.server.note": "Auto-detect when the user has the Daal CLI running on the VPS. Otherwise, paste an endpoint or postpone — never block onboarding.",
   "cap.p.server.step": "Publisher · Step 3 of 4",
   "cap.p.share.name": "Share with family",
-  "cap.p.share.note": "QR + PIN + 6-word fingerprint, all visible at once. The publisher reads the words on a phone call so the recipient can verify the trust prompt — the same six words appear on their device.",
+  "cap.p.share.note": "QR + PIN + 4-word fingerprint, all visible at once. The publisher reads the words on a phone call so the recipient can verify the trust prompt — the same four words appear on their device.",
   "cap.p.share.step": "Publisher · Step 4 of 4",
   "cap.p.welcome.name": "What is publishing?",
   "cap.p.welcome.note": "Same three-card pattern as recipient, but the accent shifts from gold to a muted cyan so power-users know where they are.",

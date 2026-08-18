@@ -5,6 +5,24 @@
 **Phase 1.5B.** Implemented in `client-shell/tauri/`. Linux + Windows are
 shipping targets; macOS is a CI-matrix entry only.
 
+> **THE DESKTOP HAS NO DATA PLANE TODAY.** Every way the desktop engine
+> is actually built compiles `./cmd/libdaalcore` with `-tags cshared`
+> and nothing else — the README quick-start (`client-shell/tauri/README.md`),
+> the AppVeyor Windows job (`appveyor.yml:252`, `libdaalcore.dll`), the
+> AppVeyor macOS job (`appveyor.yml:339`, `libdaalcore.dylib`) and
+> `tools/preflight-appveyor.py:257`. Only `tools/build-engine-android.sh`
+> and `tools/build-engine-ios.sh` append `singbox` to the tag list. So
+> `engine.NewDefaultDriver()` resolves to the
+> deterministic `engine.Stub` (`core/engine/engine_default.go`). The
+> Stub's `Start()` returns nil and publishes a `Connected` state event
+> without opening a socket. Since Wave 5 `abi.SetRoute` refuses outright
+> on such a build (`ErrNoDataPlane`, `core/abi/dataplane.go`) and
+> diagnostics carry `data_plane: "none"`, so the desktop reports what it
+> is instead of rendering a tunnel it does not have. Everything below
+> describing sing-box carrying traffic is the TARGET topology; the rows
+> marked *(not implemented)* do not exist in any shipping build. Read
+> this section before trusting the diagram.
+
 ## Process model
 
 ```
@@ -30,23 +48,40 @@ shipping targets; macOS is a CI-matrix entry only.
 |  (Go c-shared from core/abi)      |      | sing-box sidecar    |
 |                                   |      | (long-lived child   |
 |             |                     |<-spawn| of GUI; Clash REST  |
-|             | SOCKS5 inlet        |  +-->| on 127.0.0.1)       |
-|             | from                |  |   |                     |
-|             | engine_set_tunnel_socks |  |   | sees TUN fd from   |
-|             v                     |  |   | helper via IPC     |
-+-----------------------------------+  |   +---------------------+
-                                       |
+|             |                     |  +-->| on 127.0.0.1;       |
+|             |                     |  |   | route.final=direct  |
+|             |                     |  |   | — carries NO tunnel |
+|             v                     |  |   +---------------------+
++-----------------------------------+  |
                                        +- Clash REST control plane
 ```
+
+What the diagram does NOT show, because it does not happen:
+
+- The sidecar never receives a TUN fd. `deliver_tun_fd` hands the fd
+  from the helper to **libdaalcore** (`engine_set_tun_fd`), the same
+  mechanism Android uses — never to the sidecar.
+- The sidecar's rendered config is `route.final = "direct"` with a
+  direct/block outbound pair. The route → outbound translation that
+  would make it carry a user's traffic was never written, so a running
+  sidecar egresses from the user's real address by construction.
+- No SOCKS5 inlet is installed. `commands::start_sidecar` deliberately
+  stopped calling `engine_set_tunnel_socks` in Wave 2: pointing refresh
+  at a `final: direct` listener sent every scheduled subscription,
+  revocation and bootstrap fetch out of the user's real address while
+  the Go core reported `via_tunnel: true`, which also suppressed the
+  fail-closed guard in `refresh.directFallback`. Desktop refresh now
+  rides the engine's own in-process inlet (`core/engine/inlet.go`) or
+  fails closed.
 
 ## Boundaries
 
 | Boundary | Direction | Protocol | Notes |
 |---|---|---|---|
-| GUI ↔ engine | in-process | C ABI via libloading | dlopen at startup; ABI version asserted; supervisor heartbeat every 2s |
-| GUI ↔ sing-box | sibling process | Clash REST API on `127.0.0.1:<random>` with random secret | also: SOCKS5 inlet on `127.0.0.1:<random>` for refresh + system-proxy toggle |
+| GUI ↔ engine | in-process | C ABI via libloading | dlopen at startup; ABI version asserted. Liveness: the GUI POLLS `heartbeat_tick` every 2s (App.tsx owns the cadence; there is no supervisor thread). A `true` means `engine_version` returned non-NULL — the library answered — and says nothing about the network or the data plane. |
+| GUI ↔ sing-box | sibling process | Clash REST API on `127.0.0.1:<random>` with random secret | *(not implemented)* No SOCKS5 inlet is installed — see above. The sidecar is legacy topology that `deliver_tun_fd` replaces on builds carrying `-tags singbox`. |
 | GUI ↔ TUN helper | sibling process | Unix abstract socket (Linux: `\0daal/tun-helper`) / named pipe (Windows: `\\.\pipe\daal-engine`) | helper passes raw fd / handle via SCM_RIGHTS / DuplicateHandle |
-| sing-box ↔ TUN | direct | TUN fd handed off at Connect | helper has no engine knowledge |
+| engine ↔ TUN | in-process | TUN fd handed to `libdaalcore` via `engine_set_tun_fd` at Connect | helper has no engine knowledge. *(Linux only)* The Windows WinTUN handoff is a stub — `daal-desktop-core/src/tun_helper.rs`. And the fd is only USABLE by a `-tags singbox` build; on the shipping desktop build the Stub ignores it. |
 
 ## Threat model
 

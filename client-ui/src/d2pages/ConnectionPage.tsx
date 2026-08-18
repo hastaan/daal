@@ -9,7 +9,7 @@
 //   - connect/disconnect/setMode/exportDiagnostics
 //
 // No legacy `bridge.diagnostics()` usage. The titlebar + connection-duration
-// ticker live in D2Shell (lifted state); this page only renders the
+// ticker live in the active shell (lifted state); this page only renders the
 // center hero + right rail and dispatches actions.
 
 import { useEffect, useState } from 'react';
@@ -59,6 +59,10 @@ function toDaalConnectState(s: ConnState): DaalConnectState {
     return s;
 }
 
+// `bps` is nullable on purpose: null means the build has no byte
+// accounting, which is NOT the same as a measured zero. The caller
+// renders `network.unmeasured` in that case rather than "0 B/s"; see
+// ThroughputSnapshot in contract/D2Contract.ts.
 function formatBps(bps: number): string {
     if (!Number.isFinite(bps) || bps <= 0) return '0 B/s';
     const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
@@ -169,6 +173,15 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     const state: ConnState = optimistic ?? conn?.state ?? 'disconnected';
     const mode: ConnMode = conn?.mode ?? 'normal';
 
+    // The loaded engine has no data plane linked: engine_set_route will
+    // refuse (core/abi/dataplane.go), and it refuses precisely because
+    // the Stub driver would otherwise publish "Connected" without
+    // opening a socket. Say so up front rather than letting the user
+    // press Connect and get a generic recovery sheet. `undefined` is
+    // "unknown", not "none" — an older engine emits no field and must
+    // not be accused.
+    const noDataPlane = conn?.dataPlane === 'none';
+
     // Safety net: never let an optimistic state linger longer than
     // 6 s. If the backend never converged we drop the override and
     // fall back to whatever the diagnostics blob says.
@@ -192,6 +205,13 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         }
         if (state === 'error') {
             setShowRecovery(true);
+            return;
+        }
+        // No data plane: never flip the eagle to "connecting" for a
+        // connection this binary cannot make. The engine would refuse
+        // anyway; showing intent-state first would be a 6-second lie.
+        if (noDataPlane) {
+            setNotice(t('conn.no_data_plane.title'));
             return;
         }
         // disconnected/connecting → if no active route, navigate to Routes;
@@ -308,6 +328,29 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                         : undefined,
                 }}
             >
+                {noDataPlane && (
+                    <div
+                        role="alert"
+                        style={{
+                            maxWidth: 520,
+                            marginBlockEnd: 20,
+                            padding: '12px 16px',
+                            borderRadius: 12,
+                            border: '1px solid var(--danger, #c0392b)',
+                            background: 'var(--surface-2, transparent)',
+                            color: 'var(--fg)',
+                            textAlign: 'center',
+                        }}
+                    >
+                        <strong style={{ display: 'block', marginBlockEnd: 6 }}>
+                            {t('conn.no_data_plane.title')}
+                        </strong>
+                        <span style={{ fontSize: 13, opacity: 0.9 }}>
+                            {t('conn.no_data_plane.body')}
+                        </span>
+                    </div>
+                )}
+
                 <div className={`d2-conn-state-label ${state}`}>
                     {t(STATE_LABEL_KEY[state])}
                 </div>
@@ -366,12 +409,19 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                             letterSpacing: '0.08em',
                         }}
                     >
-                        <span aria-label={t('conn.throughput.up')}>
-                            ↑ {formatBps(throughput.upBytesPerSec)}
-                        </span>
-                        <span aria-label={t('conn.throughput.down')}>
-                            ↓ {formatBps(throughput.downBytesPerSec)}
-                        </span>
+                        {throughput.upBytesPerSec === null ||
+                        throughput.downBytesPerSec === null ? (
+                            <span>{t('network.unmeasured')}</span>
+                        ) : (
+                            <>
+                                <span aria-label={t('conn.throughput.up')}>
+                                    ↑ {formatBps(throughput.upBytesPerSec)}
+                                </span>
+                                <span aria-label={t('conn.throughput.down')}>
+                                    ↓ {formatBps(throughput.downBytesPerSec)}
+                                </span>
+                            </>
+                        )}
                     </div>
                 )}
             </section>

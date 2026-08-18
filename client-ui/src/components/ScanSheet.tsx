@@ -4,11 +4,12 @@
 //
 // `RecipientImport` had exactly one caller, `AddEntryModal`, and
 // `AddEntryModal` was itself imported by nothing: the scanner was
-// unreachable from the running app. The fix is NOT to mount
-// AddEntryModal — it is a second, older, half-finished copy of the
+// unreachable from the running app. The fix was NOT to mount
+// AddEntryModal — it was a second, older, half-finished copy of the
 // intake flow that `AddSheet` already does for real (its own
-// `onChooseFile` is an empty stub), and mounting it would give the
-// user two different Add screens that disagree.
+// `onChooseFile` was an empty stub), and mounting it would have given
+// the user two different Add screens that disagree. The capability
+// audit deleted that file rather than leave a mountable trap on disk.
 //
 // So the scanner gets a mount of its own, following the exact pattern
 // `MyAddressSheet` already established for the other recipient-side

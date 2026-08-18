@@ -77,3 +77,60 @@ func TestSignalStrings_StableSort(t *testing.T) {
 		}
 	}
 }
+
+// The 5 mirrored signals are declared once in this package and once as
+// diagnostics.Category constants. This test is the pin between the two
+// lists: if either side is renamed the mapping stops covering the
+// vocabulary and the selector silently loses a signal, which is a
+// failure with no symptom.
+func TestSignalForCategory_CoversTheFiveMirroredCategories(t *testing.T) {
+	want := map[string]NetworkSignal{
+		"dns_bogon":        SignalDNSBogonDetected,
+		"udp_collapsed":    SignalUDPCollapsed,
+		"quic_collapsed":   SignalQUICCollapsed,
+		"sni_rst":          SignalSNIRst,
+		"origin_unhealthy": SignalOriginUnhealthy,
+	}
+	for cat, sig := range want {
+		got, ok := SignalForCategory(cat)
+		if !ok || got != sig {
+			t.Fatalf("SignalForCategory(%q) = (%q,%v), want (%q,true)", cat, got, ok, sig)
+		}
+	}
+	// The 4 selector-only signals are probe-derived aggregations and
+	// must NOT be reachable from a single error classification — a
+	// mapping that invented `cdn_wide_failure` from one failed dial
+	// would be exactly the fabricated signal this pass exists to
+	// prevent.
+	for _, notACategory := range []string{
+		"protocol_whitelist_mode", "cdn_hostname_blocked",
+		"cdn_wide_failure", "stateful_reassembly_present",
+	} {
+		if _, ok := SignalForCategory(notACategory); ok {
+			t.Fatalf("SignalForCategory(%q) must not map: it is probe-derived", notACategory)
+		}
+	}
+	// Ordinary categories carry no selector signal.
+	for _, cat := range []string{"auth_failed", "tcp_reset", "unknown", ""} {
+		if _, ok := SignalForCategory(cat); ok {
+			t.Fatalf("SignalForCategory(%q) must not map", cat)
+		}
+	}
+}
+
+func TestSignalsFromCategories_DedupesAndSorts(t *testing.T) {
+	got := SignalsFromCategories([]string{
+		"udp_collapsed", "auth_failed", "dns_bogon", "udp_collapsed", "", "tcp_reset",
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %v, want 2 signals", got)
+	}
+	if got[0] != SignalDNSBogonDetected || got[1] != SignalUDPCollapsed {
+		t.Fatalf("got %v, want [dns_bogon_detected udp_collapsed] in sorted order", got)
+	}
+	// Never nil: Explanation.NetworkSignals is a JSON array and a nil
+	// slice would render as `null`, which the FRP-6 contract forbids.
+	if SignalsFromCategories(nil) == nil {
+		t.Fatal("SignalsFromCategories(nil) must return an empty slice, not nil")
+	}
+}

@@ -59,6 +59,7 @@ to the existing `refresh.Refresher`, `RevocationRefresher`, and
 | Bootstrap | every 24 h | `Cadence.Bootstrap` |
 | BudgetReset *(Phase 2A)* | every 1 h | `Cadence.BudgetReset` |
 | Freshness *(Wave 3 / Step 8)* | **not a duration** — the FRP-8 trigger policy | `Cadence.Freshness` (`selection.FreshnessPolicy`) |
+| NetmemSweep *(Wave 5)* | every 24 h | `Cadence.NetmemSweep` |
 
 `Freshness` is the odd one out and deliberately so. Every other kind
 is "last + interval"; this one delegates to
@@ -135,10 +136,10 @@ Returns:
 
 The `kind` discriminator is
 `subscription | revocation | bootstrap | budget-reset` *(2A)*
-` | freshness` *(Wave 3)*. `ref`
+` | freshness` *(Wave 3)* ` | netmem-sweep` *(Wave 5)*. `ref`
 carries the subscription_id (subscription), the publisher_id
 (revocation) or the relay_pack_id (freshness), or is omitted
-(bootstrap and budget-reset are process-global).
+(bootstrap, budget-reset and netmem-sweep are process-global).
 
 The two `freshness_*` cadence fields are the floor and the ceiling of
 the trigger policy, exported so a diagnostics screen can say "next
@@ -152,6 +153,22 @@ and the per-device jitter.
 `core/abi/scheduler.go::refreshExecutor.RefreshBudgetReset` and stamps
 `secrets_kv["scheduler:last-budget-reset"]` so the next plan call
 gates on the cadence.
+
+`netmem-sweep` (Wave 5) enforces the 30-day retention bound on
+per-network memory by calling `netmem.Store.Sweep`. Cadence is 24 h;
+the executor binding is
+`core/abi/scheduler.go::refreshExecutor.SweepNetworkMemory` and it
+stamps `secrets_kv["scheduler:last-netmem-sweep"]` unconditionally,
+including on a sweep error — a sweep decrypts every stored blob, so
+retrying it on the next 60-second tick because one read failed costs
+far more than one missed day of pruning.
+
+This action is a PRIVACY control before it is housekeeping. Each netmem
+blob is a hashed network the device has joined; the set of them, and
+its size, is a coarse travel record recoverable from a seized device
+even though no single blob names an SSID. `netmem.TTL` is the bound on
+that record, and until this action existed nothing enforced it — see
+the history note in specs/network-memory-v1.md.
 
 `freshness` (Wave 3 / Step 8) polls one RelayPack's freshness
 endpoints and is what turns a publisher-side rotation into something

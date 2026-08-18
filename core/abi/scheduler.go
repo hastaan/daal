@@ -216,11 +216,19 @@ func (s storeSource) PublishersWithRevocation() []scheduler.PublisherState {
 	return out
 }
 
+// LastBootstrapRefresh reads the wall-clock of the last SUCCESSFUL
+// bootstrap refresh. The write half is refreshExecutor.RefreshBootstrap
+// below, which stamps this key only after bootstrap.Provider.Refresh
+// returns without error — so a run of failures leaves the value old and
+// the scheduler keeps the task due, which is the behaviour we want.
+//
+// Zero means "never refreshed on this device", which scheduler.Plan
+// treats as always-due; the 24-h cadence takes over from the first
+// success onward. (This comment used to say the timestamp was not
+// persisted at all. It is — the read below and the PutSecret in
+// RefreshBootstrap are the same key, and both are on the production
+// path via ensureScheduler.)
 func (s storeSource) LastBootstrapRefresh() time.Time {
-	// We do not yet persist a top-level "last bootstrap refresh"; until
-	// the directory-refresh flow stamps a row, treat it as zero so the
-	// scheduler considers it always due. The 24-h cadence then keeps
-	// it from re-firing once the executor records its first success.
 	val, err := s.store.GetSecret("scheduler:last-bootstrap-refresh")
 	if err != nil || len(val) == 0 {
 		return time.Time{}
@@ -237,6 +245,22 @@ func (s storeSource) LastBootstrapRefresh() time.Time {
 // restart.
 func (s storeSource) LastBudgetReset() time.Time {
 	val, err := s.store.GetSecret("scheduler:last-budget-reset")
+	if err != nil || len(val) == 0 {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, string(val))
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+// LastNetmemSweep returns the wall-clock of the last per-network-memory
+// prune. Persisted in secrets_kv so the cadence survives restart: an app
+// that is killed and relaunched must not re-decrypt every stored blob on
+// each launch.
+func (s storeSource) LastNetmemSweep() time.Time {
+	val, err := s.store.GetSecret("scheduler:last-netmem-sweep")
 	if err != nil || len(val) == 0 {
 		return time.Time{}
 	}
@@ -306,4 +330,35 @@ func (e *refreshExecutor) RefreshBudgetReset(ctx context.Context, now time.Time)
 		"scheduler:last-budget-reset",
 		[]byte(now.UTC().Format(time.RFC3339)),
 	)
+}
+
+// SweepNetworkMemory is the executor binding for KindNetmemSweep. It
+// enforces netmem's 30-day TTL, which until this pass was documented and
+// unenforced: netmem.Store.Sweep existed, was tested, and had no
+// production caller, so per-network blobs accumulated for the life of
+// the install.
+//
+// This is a privacy control before it is a housekeeping one. Each blob
+// is a hashed network the device has joined; the SET of them, and its
+// size, is a rough travel-and-habit record recoverable from a seized
+// device even though no single blob names an SSID. The TTL is the bound
+// on that record, and a bound nothing enforces is not a bound.
+//
+// The stamp is written UNCONDITIONALLY, including when the sweep errors.
+// A sweep decrypts every stored blob; retrying that on every 60-second
+// tick because one read failed would be far worse than one missed day of
+// pruning, and the next day's tick retries anyway.
+func (e *refreshExecutor) SweepNetworkMemory(ctx context.Context, now time.Time) error {
+	_ = ctx
+	var sweepErr error
+	if store := netmemStore(); store != nil {
+		_, sweepErr = store.Sweep(now)
+	}
+	if err := e.store.PutSecret(
+		"scheduler:last-netmem-sweep",
+		[]byte(now.UTC().Format(time.RFC3339)),
+	); err != nil {
+		return err
+	}
+	return sweepErr
 }

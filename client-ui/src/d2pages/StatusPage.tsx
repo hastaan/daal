@@ -95,14 +95,22 @@ export default function StatusPage({ t }: Props) {
             try {
                 const tp = await contract.throughputSnapshot();
                 if (cancelled) return;
-                upHistory.current = [
-                    ...upHistory.current.slice(-59),
-                    tp.upBytesPerSec,
-                ];
-                downHistory.current = [
-                    ...downHistory.current.slice(-59),
-                    tp.downBytesPerSec,
-                ];
+                // null = this build counts no bytes. Pushing it as 0
+                // would draw a confident flat line through a sparkline
+                // that has measured nothing; drop the sample instead
+                // and let the tile say so.
+                if (tp.upBytesPerSec !== null) {
+                    upHistory.current = [
+                        ...upHistory.current.slice(-59),
+                        tp.upBytesPerSec,
+                    ];
+                }
+                if (tp.downBytesPerSec !== null) {
+                    downHistory.current = [
+                        ...downHistory.current.slice(-59),
+                        tp.downBytesPerSec,
+                    ];
+                }
                 forceTick((n) => (n + 1) % 1024);
             } catch {
                 /* ignore */
@@ -147,8 +155,10 @@ export default function StatusPage({ t }: Props) {
                 : badRoutes > 0
                     ? 'bad'
                     : 'neutral';
-    const lastUp = upHistory.current[upHistory.current.length - 1] ?? 0;
-    const lastDown = downHistory.current[downHistory.current.length - 1] ?? 0;
+    // `null`, not 0, when no sample has ever landed — the history is
+    // empty exactly when the engine reported "unmeasured".
+    const lastUp = upHistory.current[upHistory.current.length - 1] ?? null;
+    const lastDown = downHistory.current[downHistory.current.length - 1] ?? null;
 
     const onExport = async () => {
         try {
@@ -385,8 +395,14 @@ export default function StatusPage({ t }: Props) {
                                 color: 'var(--paper)',
                             }}
                         >
-                            ↑ {fmtBps(lastUp)}
-                            <br />↓ {fmtBps(lastDown)}
+                            {lastUp === null || lastDown === null ? (
+                                t('network.unmeasured')
+                            ) : (
+                                <>
+                                    ↑ {fmtBps(lastUp)}
+                                    <br />↓ {fmtBps(lastDown)}
+                                </>
+                            )}
                         </div>
                         <Sparkline
                             values={downHistory.current}

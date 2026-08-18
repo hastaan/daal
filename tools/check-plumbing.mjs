@@ -198,9 +198,16 @@ const CORE_WRAPPER_ALLOWLIST = new Map([
         'deliver_tun_fd',
         'Desktop-only tun-fd handoff helper with no caller today. On Android ' +
         'the fd is delivered by the daal-platform plugin straight to ' +
-        'engine_set_tun_fd over JNI, bypassing this wrapper; on desktop the ' +
-        'tunnel is brought up without it. Kept because the Linux tun-helper ' +
-        'topology it belongs to is still live in tun_helper::unix.',
+        'engine_set_tun_fd over JNI, bypassing this wrapper. On desktop ' +
+        'there is NO tunnel at all — every desktop libdaalcore is built ' +
+        '`-tags cshared` with no `singbox`, so the linked driver is ' +
+        'engine.Stub and engine_set_route now refuses outright (see ' +
+        'core/abi/dataplane.go and docs/platform-reality.md). This entry ' +
+        'previously read "on desktop the tunnel is brought up without it", ' +
+        'which was the same false claim that let the desktop render ' +
+        '"Connected" with traffic in the clear. Kept because the Linux ' +
+        'tun-helper topology it belongs to is still live in ' +
+        'tun_helper::unix, and it is the path D1a will call.',
     ],
     [
         'clear_tun_fd',

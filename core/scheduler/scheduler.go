@@ -35,6 +35,12 @@ type Executor interface {
 	// silently returns without writing one converts a 15-minute floor
 	// into a per-tick beacon.
 	RefreshFreshness(ctx context.Context, relayPackID string) error
+	// SweepNetworkMemory (Wave 5) prunes per-network memory blobs older
+	// than netmem.TTL. Like the freshness executor, the implementation
+	// MUST persist its stamp whatever the outcome — a sweep that fails
+	// and does not stamp would re-read and re-decrypt every stored blob
+	// on every tick.
+	SweepNetworkMemory(ctx context.Context, now time.Time) error
 }
 
 // Scheduler is the in-engine ticker. Production hosts call
@@ -179,6 +185,8 @@ func (s *Scheduler) Tick(now time.Time) {
 			_ = s.exe.RefreshBudgetReset(ctx, now)
 		case KindFreshness:
 			_ = s.exe.RefreshFreshness(ctx, a.Ref)
+		case KindNetmemSweep:
+			_ = s.exe.SweepNetworkMemory(ctx, now)
 		}
 	}
 }

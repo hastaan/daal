@@ -6,9 +6,16 @@ Daal's mobile-only platform glue. On Android the plugin owns the
 `VpnService` lifecycle and the Kotlin → JNI → engine ABI bridge that
 hands the TUN file descriptor to libdaalcore's in-process sing-box
 driver. On desktop the plugin's command surface is a deterministic
-no-op so the same frontend bindings work everywhere; desktop data
-plane runs in the same process via the `daal-tun-helper` SCM_RIGHTS
-path and reaches the engine without going through a plugin command.
+no-op so the same frontend bindings work everywhere.
+
+**Desktop has no data plane.** The `daal-tun-helper` SCM_RIGHTS path is
+built but has no caller (`daal_desktop_core::commands::deliver_tun_fd`
+is dead code — `tools/check-plumbing.mjs` reports it), and every desktop
+`libdaalcore` is compiled `-tags cshared` with no `singbox`, so the
+linked driver is `engine.Stub`. Since this wave the engine refuses
+`engine_set_route` on such a build (`core/abi/dataplane.go`) rather than
+letting the Stub publish a "Connected" event nothing produced. See
+`docs/platform-reality.md`.
 
 ## File layout
 

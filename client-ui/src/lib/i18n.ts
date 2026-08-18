@@ -69,11 +69,26 @@ export function applyDir(locale: Locale): void {
 
 /** Translate a key. Falls back to the EN dictionary then to the key
  *  itself, so missing FA strings degrade to English rather than to
- *  the bare key. */
+ *  the bare key.
+ *
+ *  AN EMPTY VALUE COUNTS AS MISSING. This used to test `!= null`, which
+ *  an empty string passes — so a key that was present-but-untranslated
+ *  rendered as nothing at all, and the English fallback the line above
+ *  promises was skipped exactly when it was needed. That is not
+ *  hypothetical: `client-shared/i18n/onboarding.fa.json` carries 119
+ *  keys whose values are all `""`, and `mobile.fa.json` 100 of 104.
+ *  Nothing reads those keys today (they are design catalogues, and the
+ *  shipped onboarding copy lives in the legacy `fa.json`), so no screen
+ *  is blank right now — but the failure mode was one `t()` call away,
+ *  and it fails INVISIBLY in the language the project exists to serve:
+ *  English review looks perfect while Farsi renders empty. Fail to
+ *  English instead, which is wrong but readable. */
 export function translate(locale: Locale, key: string): string {
     const dict = dictionaries[locale];
-    if (dict[key] != null) return dict[key];
-    if (locale === 'fa' && dictionaries.en[key] != null) return dictionaries.en[key];
+    const hit = dict[key];
+    if (hit != null && hit !== '') return hit;
+    const en = dictionaries.en[key];
+    if (locale === 'fa' && en != null && en !== '') return en;
     return key;
 }
 

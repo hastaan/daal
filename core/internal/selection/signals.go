@@ -80,3 +80,59 @@ func SignalStrings(sig []NetworkSignal) []string {
 	sort.Strings(out)
 	return out
 }
+
+// SignalForCategory maps a diagnostics.Category value onto the
+// NetworkSignal it is the same fact as, for the 5 signals that have a
+// counterpart. Returns ok=false for the other ~17 categories and for
+// the 4 selector-only signals, which are probe-derived aggregations
+// (`cdn_wide_failure` needs "2+ candidates failed across 3+ networks")
+// and cannot be produced from a single classified error at all.
+//
+// The parameter is a plain string rather than a diagnostics.Category so
+// this package keeps its "no dependencies outside netmem/routestore"
+// property; the two vocabularies are pinned against each other by
+// TestSignalForCategory_CoversTheFiveMirroredCategories.
+//
+// WHY THIS EXISTS. The 5 mirrored signals were declared in two places
+// and derivable from neither: the selector's Input.NetworkSignals had
+// no producer anywhere in the tree, so every Decide call in production
+// ran with an empty signal set — which silently disables the
+// UDP-collapse penalty in rankCandidate and the degraded race plan in
+// PlanRace. This is the conversion that makes an already-measured
+// failure classification legible to the selector.
+func SignalForCategory(category string) (NetworkSignal, bool) {
+	switch category {
+	case "dns_bogon":
+		return SignalDNSBogonDetected, true
+	case "udp_collapsed":
+		return SignalUDPCollapsed, true
+	case "quic_collapsed":
+		return SignalQUICCollapsed, true
+	case "sni_rst":
+		return SignalSNIRst, true
+	case "origin_unhealthy":
+		return SignalOriginUnhealthy, true
+	}
+	return "", false
+}
+
+// SignalsFromCategories maps a batch of classified failure categories
+// onto the deduplicated, lexicographically sorted signal set they
+// imply. Unmapped categories are dropped silently — that is the point
+// of the closed vocabulary.
+//
+// Determinism matters here beyond tidiness: the result is embedded in
+// Explanation.NetworkSignals, which diagnostics exports and which the
+// FRP-6 explanation fixtures compare byte-for-byte.
+func SignalsFromCategories(categories []string) []NetworkSignal {
+	seen := map[NetworkSignal]bool{}
+	out := []NetworkSignal{}
+	for _, c := range categories {
+		if sig, ok := SignalForCategory(c); ok && !seen[sig] {
+			seen[sig] = true
+			out = append(out, sig)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}

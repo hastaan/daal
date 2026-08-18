@@ -13,6 +13,7 @@ type fakeSource struct {
 	pubs    []PublisherState
 	bs      time.Time
 	budgRst time.Time // Phase 2A
+	netSwp  time.Time // Wave 5: last per-network-memory sweep
 	packs   []RelayPackState
 }
 
@@ -20,6 +21,7 @@ func (f fakeSource) Subscriptions() []SubscriptionState         { return f.subs 
 func (f fakeSource) PublishersWithRevocation() []PublisherState { return f.pubs }
 func (f fakeSource) LastBootstrapRefresh() time.Time            { return f.bs }
 func (f fakeSource) LastBudgetReset() time.Time                 { return f.budgRst }
+func (f fakeSource) LastNetmemSweep() time.Time                 { return f.netSwp }
 func (f fakeSource) RelayPacks() []RelayPackState               { return f.packs }
 
 func ts(s string) time.Time {
@@ -41,9 +43,10 @@ func TestPlan_NeverRefreshedIsAlwaysDue(t *testing.T) {
 		},
 	}
 	due := Plan(src, DefaultCadence(), now)
-	// 4 = sub + rev + bootstrap + budget-reset (all never-fired ⇒ due)
-	if len(due) != 4 {
-		t.Fatalf("want 4 due (sub+rev+bootstrap+budget-reset), got %d: %+v", len(due), due)
+	// 5 = sub + rev + bootstrap + budget-reset + netmem-sweep
+	// (all never-fired ⇒ due)
+	if len(due) != 5 {
+		t.Fatalf("want 5 due (sub+rev+bootstrap+budget-reset+netmem-sweep), got %d: %+v", len(due), due)
 	}
 }
 
@@ -63,6 +66,7 @@ func TestPlan_StableOrdering(t *testing.T) {
 	want := []string{
 		"bootstrap:",
 		"budget-reset:",
+		"netmem-sweep:",
 		"revocation:pA",
 		"revocation:pB",
 		"subscription:s1",
@@ -91,6 +95,7 @@ func TestPlan_RecentlyRefreshedIsNotDue(t *testing.T) {
 		},
 		bs:      just30MinAgo,
 		budgRst: just30MinAgo, // budget-reset cadence is 1 h
+		netSwp:  just30MinAgo, // netmem-sweep cadence is 24 h
 	}
 	due := Plan(src, DefaultCadence(), now)
 	if len(due) != 0 {
@@ -109,15 +114,15 @@ func TestPlan_SubscriptionCadenceClamp(t *testing.T) {
 		},
 	}
 	due := Plan(src, DefaultCadence(), now)
-	// Subscription should NOT be due (clamped). Bootstrap and
-	// budget-reset are due (never fired).
+	// Subscription should NOT be due (clamped). Bootstrap,
+	// budget-reset and netmem-sweep are due (never fired).
 	for _, a := range due {
 		if a.Kind == KindSubscription {
 			t.Fatalf("s1 should not be due (clamped to 60m, refreshed 30m ago): %+v", due)
 		}
 	}
-	if len(due) != 2 {
-		t.Fatalf("expected 2 due (bootstrap + budget-reset), got %+v", due)
+	if len(due) != 3 {
+		t.Fatalf("expected 3 due (bootstrap + budget-reset + netmem-sweep), got %+v", due)
 	}
 }
 
@@ -158,8 +163,9 @@ func TestAllNextDues_IncludesEverything(t *testing.T) {
 		bs: now.Add(-2 * time.Hour),
 	}
 	all := AllNextDues(src, DefaultCadence(), now)
-	if len(all) != 6 {
-		t.Fatalf("want 6 (2 sub + 2 rev + 1 bootstrap + 1 budget-reset), got %d: %+v", len(all), all)
+	if len(all) != 7 {
+		t.Fatalf("want 7 (2 sub + 2 rev + bootstrap + budget-reset + netmem-sweep), got %d: %+v",
+			len(all), all)
 	}
 }
 

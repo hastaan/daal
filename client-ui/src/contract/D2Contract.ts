@@ -81,6 +81,12 @@ export interface ConnectionSummary {
   pointerValidDays?: number;
   /** Pre-rendered fallback used when individual fragments aren't enough. */
   netStatusLine?: string;
+  /** Whether the engine binary behind this GUI links a data plane that can
+   *  actually carry traffic. `'none'` means it cannot: the engine refuses
+   *  engine_set_route and the UI must not offer Connect as if it would
+   *  work. `undefined` = the engine said nothing (older build) — treat as
+   *  unknown and claim nothing, the engine-side guard still holds. */
+  dataPlane?: 'singbox' | 'none';
 }
 
 export interface SkippedRouteEntry {
@@ -153,8 +159,19 @@ export interface RouteHealthDisplayRow {
 }
 
 export interface ThroughputSnapshot {
-  upBytesPerSec: number;
-  downBytesPerSec: number;
+  /**
+   * Bytes per second, or `null` when NOBODY IS COUNTING.
+   *
+   * `null` is not `0`. `0` says the engine counted and no traffic moved;
+   * `null` says this build has no byte accounting (engine.HasByteAccounting
+   * — the desktop stub has no data plane at all, and the sing-box build's
+   * platform counters are still unwritten). These were non-nullable
+   * `number`s reading a Go counter that nothing incremented, so the
+   * Connection page rendered "↑ 0 B/s ↓ 0 B/s" for the entire life of
+   * every session on every platform. Renderers MUST branch on `null`.
+   */
+  upBytesPerSec: number | null;
+  downBytesPerSec: number | null;
   windowMs: number;
 }
 
