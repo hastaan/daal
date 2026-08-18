@@ -241,11 +241,10 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 // The containment is on the LIVE path: `daal-deploy assign-fip`
 // snapshots rec.PublicIP and runs rotation.CheckAddressMoved after
 // this returns, so the verb exits non-zero and the record is never
-// emitted — nothing downstream persists or re-signs. (The Go
-// rotation.Executor has the same post-condition and no production
-// caller; ActionForProvider's AvailabilityUnsupported only reaches
-// rotate_recommend, which the address-swap sheet does not consult.
-// Neither is what stops this.) Completing it needs a reserved-IP
+// emitted — nothing downstream persists or re-signs.
+// (ActionForProvider's AvailabilityUnsupported only reaches
+// rotate_recommend, which the address-swap sheet does not consult, so
+// it is not what stops this.) Completing it needs a reserved-IP
 // read-back call plus the
 // retag sequence in the Hetzner adapter's floating_ip.go — and this
 // whole adapter has never been exercised against a live Stark account.

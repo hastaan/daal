@@ -128,13 +128,13 @@ func ActionFor(level Level, caps RelayCapabilities) Action {
 // ActionForProvider is ActionFor plus the one fact L3 turns on: which
 // cloud adapter is behind this relay.
 //
-// WHY L3 NEEDS IT. Since Step 9 the Hetzner adapter reserves an address,
-// attaches it, reads it back, and moves rec.PublicIP plus every
-// candidate's public_ip:* tag onto it. The Vultr and Stark adapters still
-// do what Hetzner did before Step 9 — set FloatingIPID and stop — so on
-// those providers a "successful" L3 re-signs a pack aimed at the burned
-// address. That is a real difference between two relays and the answer
-// has to differ with it.
+// WHY L3 NEEDS IT. The Hetzner adapter (since Step 9) and the Vultr
+// adapter (since Wave 6) reserve an address, attach it, read it back,
+// and move rec.PublicIP plus every candidate's public_ip:* tag onto it.
+// The Stark adapter still does what Hetzner did before Step 9 — set
+// FloatingIPID and stop — so on that provider a "successful" L3
+// re-signs a pack aimed at the burned address. That is a real
+// difference between two relays and the answer has to differ with it.
 //
 // L3 ALSO NEEDS THE BOX, which is a correction to what this comment used
 // to say. It read: "L3 touches the cloud account, not the box, so its
@@ -212,7 +212,7 @@ func floatingIPSwapAction(providerName string, caps RelayCapabilities) Action {
 		InvalidatesEveryPack: true,
 	}
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case "hetzner":
+	case "hetzner", "vultr":
 		// The adapter can do its half. Whether the RELAY can do its half
 		// is a separate question with its own three states, and rounding
 		// "not asked" up to "ready" is how an operator presses a button
@@ -235,10 +235,20 @@ func floatingIPSwapAction(providerName string, caps RelayCapabilities) Action {
 		a.Note = "reserves an address if you do not supply one, attaches it, confirms the attachment with the provider, tells the relay to " +
 			"bind it to its interface, proves the relay answers there, and moves the record's public IP and every candidate public_ip:* tag onto it; " +
 			"the relay answers on BOTH addresses until the previous one is unbound and released after the new pack is signed"
+		if strings.EqualFold(strings.TrimSpace(providerName), "vultr") {
+			// Same sequence, same read-backs, same refusals — but say
+			// what has and has not been proven. The Hetzner path was
+			// exercised on live hardware on 2026-08-18; the Vultr
+			// adapter has only ever run against a fake API server. An
+			// operator deciding whether to bet a live relay on a
+			// one-tap button is entitled to that difference.
+			a.Note += " (on Vultr this uses a Reserved IP; the adapter is tested against a fake Vultr API, " +
+				"not yet against a live Vultr account)"
+		}
 		return a
-	case "vultr", "stark":
+	case "stark":
 		// Known-unsupported, and it must not read as merely unproven.
-		// These adapters set FloatingIPID and return success while
+		// This adapter sets FloatingIPID and returns success while
 		// rec.PublicIP and the candidate tags still name the burned
 		// address, so the rotation would report success and change
 		// nothing a censor can see. CheckAddressMoved stops it on the
@@ -246,6 +256,13 @@ func floatingIPSwapAction(providerName string, caps RelayCapabilities) Action {
 		// adapter returns), which turns a silent non-rotation into a
 		// visible failure — but a rung that always fails is not a
 		// rung, so say so before it is pressed.
+		//
+		// Vultr USED to be in this case and left it in Wave 6: its
+		// adapter now reserves the address, reads it back, refuses a
+		// swap it cannot confirm, and moves both copies of the address
+		// on the record (providers/vultr/reserved_ip.go). Stark stays
+		// here, and the deeper reason it stays is in that package's
+		// doc: its "API" is an invented one at a .example hostname.
 		a.Availability = AvailabilityUnsupported
 		a.Note = "this provider adapter attaches a reserved IP without moving the record onto it, so the swap would leave every pack " +
 			"pointing at the address you are rotating away from; the rotation will refuse rather than re-sign a stale pack. " +

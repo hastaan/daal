@@ -60,6 +60,9 @@ import { custodyLabelKey, fetchCustodyStatus } from './CustodyGate';
 // single busiest file in the publisher surface.
 import { FreshnessPanel } from './FreshnessPanel';
 import { AddressSwap } from './AddressSwap';
+import { RelayRebuild } from './RelayRebuild';
+import { RelayGonePanel } from './RelayGonePanel';
+import { RotationAdvice } from './RotationAdvice';
 import { RelayDestroySheet, relayTitle } from './RelayListPage';
 // Wave 4 Step 11. The one share affordance that needs no network at
 // all: the pack leaves this device as light, off the screen.
@@ -1322,7 +1325,31 @@ export default function PublisherRecipientsPage({
                 eyebrow={t('pub.danger.eyebrow')}
                 title={t('pub.danger.title')}
             >
+                {/* THE RELAY IS GONE. Above everything, because every
+                    row below offers an action against a server that no
+                    longer exists. Set by a rebuild whose delete leg
+                    succeeded and whose build leg did not — the one
+                    failure on this ladder with no way back. */}
+                {operator?.status === 'rebuild_failed' && (
+                    <RelayGonePanel t={t} operatorId={operatorId} />
+                )}
                 <Card>
+                    {/* Wave 6. The rotation recommender finally has a
+                        caller, and this is where it belongs: above the
+                        rungs, because it is the question you ask before
+                        you choose one, and inside the danger zone so it
+                        is read in the same breath as the warnings.
+
+                        It never rotates anything. Three of the six rungs
+                        destroy the server and rebuild it, and
+                        provisioning has no rollback — advice with an
+                        action attached is how a relay gets rebuilt by
+                        accident. */}
+                    <RotationAdvice
+                        t={t}
+                        operatorId={operatorId}
+                        reloadToken={freshTick}
+                    />
                     <ListRow
                         title={t('pub.danger.recovery.title')}
                         subtitle={t('pub.danger.recovery.body')}
@@ -1380,6 +1407,44 @@ export default function PublisherRecipientsPage({
                         // wrapper as every other box-touching action:
                         // helper-IP repair on a stale allowlist, and
                         // translated copy for a relay too old to bind.
+                        runMgmt={runMgmt}
+                        onDone={() => {
+                            void reloadOperator();
+                            void reloadArtifacts();
+                            setFreshTick((n) => n + 1);
+                        }}
+                    />
+                    {/* Wave 6 (L4, L5, L6). Below the address swap and
+                        above decommission, which keeps the whole card
+                        in one order: increasing blast radius. L3 keeps
+                        the server and everyone's keys; these three
+                        delete the server, so every file ever handed out
+                        dies and only the operator can repair it. Below
+                        them sits the one action that ends the relay for
+                        good.
+
+                        L5 is offered only where there is somewhere to
+                        go: the sheet's own destination list is the
+                        providers with a live adapter minus the one this
+                        relay is already on, and the row is shown
+                        disabled with a reason when that list is empty
+                        (rebuildPlan.ts, REBUILD_PROVIDERS). */}
+                    <RelayRebuild
+                        t={t}
+                        operatorId={operatorId}
+                        relayLabel={title}
+                        // The name every filename this screen produces
+                        // already uses, so the string the operator is
+                        // asked to type is one they have seen.
+                        confirmPhrase={friendlyName}
+                        provider={operator?.provider ?? ''}
+                        currentRegion={operator?.region ?? ''}
+                        serverType={operator?.server_type ?? ''}
+                        currentProfile={operator?.toolbox_profile ?? ''}
+                        servedFamilies={operator?.served_families ?? []}
+                        mirrorsInPack={mirrorsInPack}
+                        liveRecipients={operator?.live_recipient_count ?? 0}
+                        disabled={dangerBusy || rotateTlsBusy}
                         runMgmt={runMgmt}
                         onDone={() => {
                             void reloadOperator();

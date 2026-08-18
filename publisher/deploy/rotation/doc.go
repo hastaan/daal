@@ -19,11 +19,22 @@
 // FromExplanation can return [ConfidenceHigh]; FromContext is
 // capped at [ConfidenceMedium].
 //
-// The package also exposes [Executor], the rotation execution
-// surface, which wraps a [provider.Provider], the FRP-4b binder,
-// and an [OperatorDb] handle into one transactional rotate-step
-// (FRP-7 invariant 24, "rotation is reversible"; see
-// specs/v1-5-closure-v1.md).
+// It also owns the two POST-CONDITIONS of an address swap,
+// [CheckAddressMoved] and [CheckRecordAddressConsistent], plus the
+// optional [FloatingIPProvisioner] capability and the cross-language
+// [L3FastPathBudget] constant. Those run on the live path:
+// `daal-deploy assign-fip` calls both checks after the provider
+// adapter returns.
+//
+// IT DOES NOT EXECUTE ROTATIONS. Until Wave 6 this package also held
+// `Executor` — a full second implementation of the ladder, with a
+// transaction, a budget and a Revert, and no production caller. It was
+// deleted rather than wired up, because the state a rotation commits
+// (the V003 history table, the operator record, the publisher's signing
+// key custody) lives in the wizard process, not here. The live executor
+// is `rotate_execute` in client-shell/tauri/daal-wizard/src/commands.rs.
+// The decision and what became of each guarantee it advertised is in
+// docs/decisions/0004-one-rotation-executor.md.
 //
 // Position B: this package opens NO sockets. All network I/O is
 // delegated to the [provider.Provider] (which is the documented

@@ -116,6 +116,29 @@ pub struct RotationRecommendation {
     pub level: String,
     pub confidence: String,
     pub reason: String,
+    /// The rule that fired, as a stable code from the Go side's closed
+    /// vocabulary — `reason`'s machine-readable parallel.
+    ///
+    /// `reason` is English prose built in Go, and it is the most
+    /// decisive sentence the advice panel renders: it is the whole
+    /// substance of the answer, and three of the six rungs it can point
+    /// at DESTROY the relay. The panel keys this code to say it in the
+    /// operator's own language and falls back to `reason` when a
+    /// catalog does not carry the code — so a NEW rule degrades to
+    /// English, never to silence.
+    ///
+    /// Declared here for the reason `action` and `grounded` are: serde
+    /// drops unknown keys silently, so a field Go emits and this struct
+    /// omits dies with no error anywhere.
+    #[serde(default)]
+    pub reason_code: String,
+    /// The machine-specific fragment some reason codes interpolate (the
+    /// blocker that makes an address swap impossible; the inputs that
+    /// matched no rung). Substituted for `{detail}` in the catalog
+    /// string, and deliberately untranslated: it is provider notes and
+    /// closed-vocabulary identifiers.
+    #[serde(default)]
+    pub reason_detail: String,
     pub est_wallclock: String,
     #[serde(rename = "override", default, alias = "override_levels")]
     pub override_levels: Vec<String>,
@@ -138,6 +161,63 @@ pub struct RotationRecommendation {
     /// never a confident one-tap button.
     #[serde(default)]
     pub action: RotationAction,
+    /// Wave 6. False means the Go side chose `level` from NOTHING —
+    /// its last rule fired, which used to answer L1 in a sentence that
+    /// read like advice. A UI must render that as "Daal cannot tell
+    /// you", never as a rung to press.
+    ///
+    /// Declared here for the same reason `action` is: serde drops
+    /// unknown keys silently, so a field the Go side emits and this
+    /// struct omits dies with no error anywhere — and the one it would
+    /// kill here is the flag that stops an operator destroying a
+    /// working relay on no evidence.
+    #[serde(default)]
+    pub grounded: bool,
+    /// What the recommender was given, and — as load-bearing — what it
+    /// was not.
+    #[serde(default)]
+    pub evidence: RotationEvidence,
+}
+
+/// `RotationEvidence` mirrors the Go `rotation.Evidence`.
+///
+/// `absent` is the half that must never be dropped on the way to a
+/// screen: a rung that cannot fire because nothing in Daal produces its
+/// evidence is not a rung the operator has ruled out, and rendering
+/// only the present inputs turns "unmeasured" into "measured and fine".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RotationEvidence {
+    /// "explanation" | "context" — the ceiling on confidence.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub classifications: Vec<String>,
+    #[serde(default)]
+    pub signals: Vec<String>,
+    #[serde(default)]
+    pub cooldown_tags: Vec<String>,
+    /// Inputs that WERE present and that no rung consumes.
+    #[serde(default)]
+    pub unrecognised: Vec<String>,
+    /// Structurally unavailable inputs, each with its reason.
+    #[serde(default)]
+    pub absent: Vec<String>,
+    /// One stable code per `absent` entry — same order, same length
+    /// (pinned by the Go side's TestAbsentCodesParallelAbsentProse).
+    ///
+    /// THIS FIELD IS WHY THE ABSENCES ARE READABLE IN FARSI. It was
+    /// added to Go and to the panel together and omitted here, and
+    /// because serde drops unknown keys silently the Go side emitted
+    /// codes, this struct discarded them, and the panel — which keys
+    /// them and falls back to the English prose on a miss — fell back
+    /// on every single run. No error anywhere; the exact trap that made
+    /// `cover_sni`/`mux_inbound` inert one hop down.
+    ///
+    /// The absences are the half of that panel carrying its honesty:
+    /// they are what separates "measured and fine" from "never measured
+    /// at all". Losing them to English loses the half that matters.
+    #[serde(default)]
+    pub absent_codes: Vec<String>,
 }
 
 /// `RotationAction` mirrors the Go `rotation.Action`. Every field is
@@ -213,6 +293,68 @@ pub struct ServerTypeOption {
     pub hourly_eur: f64,
     pub location: String,
     pub arch: String,
+    /// Which currency `monthly_eur`/`hourly_eur` are in.
+    ///
+    /// CARRY IT EVEN THOUGH NOTHING IN RUST READS IT. Go states this
+    /// deliberately — Vultr bills in USD and its adapter's own comment
+    /// says the field is "what stops a dollar figure being drawn behind
+    /// a euro sign" — and this struct is the only thing between that
+    /// statement and the L5 sheet that draws the sign. A mirror that
+    /// omits a field does not merely ignore it: serde drops it on the
+    /// way in and it is gone by the time the UI asks. That is the same
+    /// silent-drop bug `absent_codes` had.
+    ///
+    /// `default` so an older `daal-deploy` (which emits no currency at
+    /// all, and only ever spoke to Hetzner) deserialises to "" rather
+    /// than failing the whole listing.
+    #[serde(default)]
+    pub currency: String,
+}
+
+/// One resource `account-audit` found carrying daal-deploy's ownership
+/// marks. Mirrors provider.AuditedResource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditedResourceRow {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub hint: String,
+    #[serde(default)]
+    pub reclaimable: bool,
+    /// Whether this resource costs money for as long as it exists.
+    ///
+    /// The auditor sets it (`provider.AuditedResource.Billing`); it
+    /// used to be dropped here in favour of a `monthly_eur` the Go
+    /// side never emits, so the row carried a price that was always
+    /// 0.00 and lost the one fact the panel exists to report.
+    #[serde(default)]
+    pub billing: bool,
+}
+
+/// The account audit, mirroring provider.AccountAudit.
+///
+/// `server_list_complete` is carried because it is the one field that
+/// decides whether any orphan finding means anything: a resource is an
+/// orphan because NO server stands behind it, and if the server list
+/// could not be read that claim cannot be made about anything. A UI
+/// that drops this boolean turns "could not look" into "nothing found",
+/// which is the single most dangerous thing this report can say.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountAuditReport {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub resources: Vec<AuditedResourceRow>,
+    #[serde(default)]
+    pub server_list_complete: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// An existing server on the user's cloud account.
@@ -240,6 +382,15 @@ pub trait CliRunner: Send + Sync {
         region: &str,
         token: &str,
     ) -> Result<Vec<ServerTypeOption>>;
+
+    /// `daal-deploy account-audit --json`. READ-ONLY: it enumerates
+    /// and classifies, and never deletes.
+    ///
+    /// Takes no record on purpose. The orphan this answers for is born
+    /// in the window where the wizard's record write never happened, so
+    /// a lookup driven by the app's own rows would be blind to exactly
+    /// the resource it was opened to find.
+    fn run_account_audit(&self, provider: &str, token: &str) -> Result<AccountAuditReport>;
 
     fn run_pricing(
         &self,
@@ -1314,6 +1465,40 @@ impl CliRunner for SubprocessRunner {
         }
         let types: Vec<ServerTypeOption> = serde_json::from_slice(&out.stdout)?;
         Ok(types)
+    }
+
+    fn run_account_audit(&self, provider: &str, token: &str) -> Result<AccountAuditReport> {
+        let tmp = tempfile_with_secret(token)?;
+        let token_path = tmp.path().to_path_buf();
+
+        let out = Command::new(&self.binary)
+            .arg("account-audit")
+            .arg("--provider")
+            .arg(provider)
+            .arg("--token-file")
+            .arg(&token_path)
+            .arg("--json")
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        drop(tmp);
+
+        let out = match out {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BridgeError::BinaryMissing);
+            }
+            Err(e) => return Err(BridgeError::Io(e)),
+        };
+        if !out.status.success() {
+            let rc = out.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
+        let report: AccountAuditReport = serde_json::from_slice(&out.stdout)?;
+        Ok(report)
     }
 
     fn run_pricing(
@@ -2517,12 +2702,84 @@ pub struct MockRunner {
     /// destroying the box. Only a recorded transcript catches that:
     /// the rotation succeeds either way.
     pub provision_targets: Mutex<Vec<(String, String)>>,
+    /// Wave 6: the `(token, server_type)` each `run_provision` was
+    /// handed, and the token each `run_reprovision` was handed.
+    ///
+    /// These exist because L5 is the one rung whose two legs run
+    /// against DIFFERENT cloud accounts — `reprovision` deletes on the
+    /// provider being left, `provision` creates on the one being moved
+    /// to — and an operator row stores exactly one credential. The
+    /// arm previously passed that single stored token to both, so a
+    /// live L5 deleted the relay and was then refused by the new
+    /// provider, leaving nothing to roll back to. A transcript is the
+    /// only thing that catches it: with a mock that ignores
+    /// credentials the rotation succeeds either way, which is exactly
+    /// how the old test passed while the rung could only destroy.
+    pub provision_tokens: Mutex<Vec<String>>,
+    pub provision_server_types: Mutex<Vec<String>>,
+    pub reprovision_tokens: Mutex<Vec<String>>,
+    /// Wave 6: the `(toolbox_profile, families)` each `run_provision`
+    /// was handed.
+    ///
+    /// L6's whole payload is the profile, and the families are what the
+    /// Go side INTERSECTS it against — `candidatesForProfile` keeps a
+    /// profile candidate only if the supplied family list also names
+    /// it. So the pair is what decides the rebuilt relay's wire shape,
+    /// and neither half is visible in the rotation's return value: an
+    /// L6 that forwarded the wrong profile, or forwarded the right one
+    /// with a family list that makes it a no-op, succeeds exactly like
+    /// one that worked. Only a recorded transcript can tell them apart.
+    pub provision_profiles: Mutex<Vec<(String, Vec<String>)>>,
+    /// Wave 6: the `(provider, region, token)` of every
+    /// `run_list_server_types` call, in order, and the catalogue it
+    /// answers with.
+    ///
+    /// This is not bookkeeping. `list-server-types` is the READ-ONLY
+    /// PREFLIGHT the L4/L5 guards run before the destroying legs: it is
+    /// the single call that proves the credential authenticates on the
+    /// target provider, that the region code exists in that provider's
+    /// vocabulary, and that the plan is sold there. All three are
+    /// otherwise discovered by `provision` — which runs after
+    /// `reprovision` has already deleted the relay.
+    ///
+    /// A mock that answers the same catalogue to every caller cannot
+    /// tell a preflight that ran from one that did not, and cannot
+    /// express "this plan is not sold in that region" at all — so the
+    /// guard would test green against a mock while a live L5 into a
+    /// mistyped region still ended the relay. `server_type_catalogue`
+    /// lets a test say what the target account actually offers, and
+    /// `list_server_type_calls` proves the preflight asked the RIGHT
+    /// account: an L5 preflight that asks the old provider with the old
+    /// token proves nothing about the new one.
+    pub list_server_type_calls: Mutex<Vec<(String, String, String)>>,
+    pub server_type_catalogue: Mutex<Option<Vec<ServerTypeOption>>>,
+    /// Make the preflight UNANSWERABLE. A 401 from a mistyped token is
+    /// an error, not an empty catalogue, and the two must not be
+    /// conflated: the guard has to refuse on both, and only an
+    /// injected failure reaches the branch that decides so.
+    pub list_server_types_error: Mutex<Option<String>>,
+    /// Wave 6: the account audit the app can now run for itself.
+    /// Make `run_provision` fail. The only way to reach the state that
+    /// matters most on this ladder: the delete leg has succeeded, so
+    /// the relay is already gone, and the build leg then refuses.
+    pub provision_error: Mutex<Option<String>>,
+    pub account_audit_calls: Mutex<usize>,
+    pub account_audit_result: Mutex<Option<AccountAuditReport>>,
     /// FRP-4b: optional canned record JSON for `run_provision`.
     pub provision_record_json: Mutex<Option<String>>,
     /// FRP-8: optional canned CDN front for `run_cdn_provision`.
     pub cdn_front_result: Mutex<Option<CdnFrontResult>>,
     /// FRP-4b: optional canned bind result for `run_bind_and_sign`.
     pub bind_result: Mutex<Option<BindResult>>,
+    /// Wave 6: make `run_release_fip` fail. Used to reach the branch
+    /// where a rotation's unwind cannot give back the address it took —
+    /// the leak the operator has to be told about by name.
+    pub release_fip_error: Mutex<Option<String>>,
+    /// Wave 6: make `run_bind_and_sign` fail. The re-sign is the first
+    /// step of a rotation that runs AFTER the provider has been mutated,
+    /// so it is the seam a test uses to ask what an L3 does when it
+    /// fails with an address already attached and billing.
+    pub bind_error: Mutex<Option<String>>,
     /// FRP-4b: a recorded copy of the priv-key bytes the wizard
     /// pushed through stdin. Used by tests to verify the end-to-end
     /// transport without leaving keys on disk.
@@ -2724,9 +2981,21 @@ impl MockRunner {
             provision_calls: Mutex::new(0),
             provision_cover_snis: Mutex::new(Vec::new()),
             provision_targets: Mutex::new(Vec::new()),
+            provision_tokens: Mutex::new(Vec::new()),
+            provision_server_types: Mutex::new(Vec::new()),
+            reprovision_tokens: Mutex::new(Vec::new()),
+            provision_profiles: Mutex::new(Vec::new()),
+            list_server_type_calls: Mutex::new(Vec::new()),
+            server_type_catalogue: Mutex::new(None),
+            list_server_types_error: Mutex::new(None),
+            provision_error: Mutex::new(None),
+            account_audit_calls: Mutex::new(0),
+            account_audit_result: Mutex::new(None),
             provision_record_json: Mutex::new(None),
             cdn_front_result: Mutex::new(None),
             bind_result: Mutex::new(None),
+            bind_error: Mutex::new(None),
+            release_fip_error: Mutex::new(None),
             last_priv_key: Mutex::new(None),
             last_subkey_cert_path: Mutex::new(None),
             bind_phases: Mutex::new(Vec::new()),
@@ -2764,6 +3033,45 @@ impl MockRunner {
     /// `run_rotate_recommend` will return.
     pub fn with_rotation_recommendation(self, r: RotationRecommendation) -> Self {
         *self.rotation_recommendation.lock().unwrap() = Some(r);
+        self
+    }
+
+    /// What the target cloud account offers, by plan id.
+    ///
+    /// The ids are all the L4/L5 preflight compares, so a test only has
+    /// to name them. Use this to build a target region that genuinely
+    /// does NOT sell the relay's plan — the case that, without the
+    /// preflight, deletes the relay and then fails to rebuild it.
+    pub fn with_server_types(self, ids: &[&str]) -> Self {
+        *self.server_type_catalogue.lock().unwrap() = Some(
+            ids.iter()
+                .map(|id| ServerTypeOption {
+                    id: (*id).to_string(),
+                    description: (*id).to_string(),
+                    cpus: 1,
+                    memory_gb: 1.0,
+                    disk_gb: 25,
+                    monthly_eur: 5.0,
+                    hourly_eur: 0.007,
+                    location: String::new(),
+                    arch: "x86".into(),
+                    currency: "EUR".into(),
+                })
+                .collect(),
+        );
+        self
+    }
+
+    /// The target account refuses the read entirely — a 401, a
+    /// network failure, a provider outage. All of them must refuse the
+    /// rebuild rather than proceed on an unanswered question.
+    pub fn with_provision_error(self, msg: impl Into<String>) -> Self {
+        *self.provision_error.lock().unwrap() = Some(msg.into());
+        self
+    }
+
+    pub fn with_list_server_types_error(self, msg: impl Into<String>) -> Self {
+        *self.list_server_types_error.lock().unwrap() = Some(msg.into());
         self
     }
 
@@ -2806,6 +3114,19 @@ impl MockRunner {
     /// Make `run_assign_fip` fail the way a real relay does. Exit 3 is
     /// the capability refusal the UI must render as `pub.rotate.too_old`
     /// in the operator's own language, not as a developer sentence.
+    /// Make the re-sign fail, which is the cheapest way to reach a
+    /// rotation's mid-flight failure path: the provider mutation has
+    /// already landed and nothing has been committed.
+    pub fn with_bind_error(self, stderr: impl Into<String>) -> Self {
+        *self.bind_error.lock().unwrap() = Some(stderr.into());
+        self
+    }
+
+    pub fn with_release_fip_error(self, stderr: impl Into<String>) -> Self {
+        *self.release_fip_error.lock().unwrap() = Some(stderr.into());
+        self
+    }
+
     pub fn with_assign_fip_error(self, rc: i32, stderr: impl Into<String>) -> Self {
         *self.assign_fip_error.lock().unwrap() = Some((rc, stderr.into()));
         self
@@ -2824,10 +3145,24 @@ impl CliRunner for MockRunner {
 
     fn run_list_server_types(
         &self,
-        _provider: &str,
-        _region: &str,
-        _token: &str,
+        provider: &str,
+        region: &str,
+        token: &str,
     ) -> Result<Vec<ServerTypeOption>> {
+        self.list_server_type_calls.lock().unwrap().push((
+            provider.to_string(),
+            region.to_string(),
+            token.to_string(),
+        ));
+        if let Some(e) = self.list_server_types_error.lock().unwrap().as_ref() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: e.clone(),
+            });
+        }
+        if let Some(c) = self.server_type_catalogue.lock().unwrap().as_ref() {
+            return Ok(c.clone());
+        }
         Ok(vec![
             ServerTypeOption {
                 id: "cax11".into(),
@@ -2839,6 +3174,7 @@ impl CliRunner for MockRunner {
                 hourly_eur: 0.006,
                 location: "fsn1".into(),
                 arch: "arm".into(),
+                currency: "EUR".into(),
             },
             ServerTypeOption {
                 id: "cx22".into(),
@@ -2850,8 +3186,22 @@ impl CliRunner for MockRunner {
                 hourly_eur: 0.007,
                 location: "fsn1".into(),
                 arch: "x86".into(),
+                currency: "EUR".into(),
             },
         ])
+    }
+
+    fn run_account_audit(&self, provider: &str, _token: &str) -> Result<AccountAuditReport> {
+        *self.account_audit_calls.lock().unwrap() += 1;
+        if let Some(r) = self.account_audit_result.lock().unwrap().as_ref() {
+            return Ok(r.clone());
+        }
+        Ok(AccountAuditReport {
+            provider: provider.to_string(),
+            resources: vec![],
+            server_list_complete: true,
+            warnings: vec![],
+        })
     }
 
     fn run_pricing(
@@ -2876,6 +3226,9 @@ impl CliRunner for MockRunner {
         on_progress: &mut dyn FnMut(ProgressEvent),
     ) -> Result<String> {
         *self.provision_calls.lock().unwrap() += 1;
+        if let Some(e) = self.provision_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc: 1, stderr: e });
+        }
         self.provision_cover_snis
             .lock()
             .unwrap()
@@ -2884,6 +3237,18 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push((args.provider.to_string(), args.region.to_string()));
+        self.provision_tokens
+            .lock()
+            .unwrap()
+            .push(args.token.to_string());
+        self.provision_server_types
+            .lock()
+            .unwrap()
+            .push(args.server_type.to_string());
+        self.provision_profiles.lock().unwrap().push((
+            args.toolbox_profile.to_string(),
+            args.families.iter().map(|f| f.to_string()).collect(),
+        ));
         on_progress(ProgressEvent {
             step: "provision_start".into(),
             message: "starting".into(),
@@ -3046,6 +3411,10 @@ impl CliRunner for MockRunner {
     }
 
     fn run_reprovision(&self, args: ReprovisionArgs<'_>) -> Result<String> {
+        self.reprovision_tokens
+            .lock()
+            .unwrap()
+            .push(args.token.to_string());
         self.reprovision_calls
             .lock()
             .unwrap()
@@ -3171,6 +3540,9 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(format!("{} {}", args.fip_id, args.fip_address));
+        if let Some(stderr) = self.release_fip_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc: 1, stderr });
+        }
         Ok(ReleaseFipOutcome {
             record_json: std::fs::read_to_string(args.record_path).unwrap_or_default(),
             warnings: vec![],
@@ -3213,6 +3585,9 @@ impl CliRunner for MockRunner {
         *self.last_priv_key.lock().unwrap() = Some(priv_key.to_vec());
         *self.last_subkey_cert_path.lock().unwrap() =
             args.subkey_cert_path.map(|p| p.to_path_buf());
+        if let Some(stderr) = self.bind_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc: 1, stderr });
+        }
         self.bind_phases
             .lock()
             .unwrap()
@@ -3278,8 +3653,12 @@ impl CliRunner for MockRunner {
             level: "L1".into(),
             confidence: "low".into(),
             reason: "mock default".into(),
+            reason_code: "no_evidence_at_all".into(),
+            reason_detail: String::new(),
             est_wallclock: "~90s".into(),
             override_levels: vec!["L2".into(), "L3".into()],
+            grounded: Default::default(),
+            evidence: Default::default(),
             // Unprobed, like every recommendation the wizard can
             // currently obtain: nothing in this app calls
             // mgmt.CapabilitiesWithFW or passes --relay-capabilities, so
@@ -3552,6 +3931,63 @@ fn tempfile_with_secret(secret: &str) -> Result<tempfile::NamedTempFile> {
 mod tests {
     use super::*;
 
+    // THE CURRENCY SURVIVES THE HOP.
+    //
+    // `daal-deploy list-server-types` states which currency a plan is
+    // priced in, because the two providers do not agree: Hetzner bills
+    // EUR, Vultr bills USD. This struct is the only thing between that
+    // statement and the L5 sheet that draws a currency symbol, and a
+    // mirror that omits a field does not ignore it — serde drops it
+    // silently and the UI can never ask. That is precisely how a $5.00
+    // Vultr plan came to be offered as "about EUR 5 a month".
+    #[test]
+    fn a_server_type_keeps_the_currency_it_was_priced_in() {
+        let vultr = r#"[{
+            "id": "vc2-1c-1gb",
+            "description": "1 vCPU, 1 GB",
+            "cpus": 1,
+            "memory_gb": 1.0,
+            "disk_gb": 25,
+            "monthly_eur": 5.0,
+            "hourly_eur": 0.007,
+            "location": "fra",
+            "arch": "x86",
+            "currency": "USD"
+        }]"#;
+        let got: Vec<ServerTypeOption> = serde_json::from_str(vultr).unwrap();
+        assert_eq!(got[0].currency, "USD", "the currency was dropped on the way in");
+
+        // And it survives re-serialisation, which is the leg the UI
+        // actually reads.
+        let back = serde_json::to_string(&got).unwrap();
+        assert!(
+            back.contains("\"currency\":\"USD\""),
+            "the currency was dropped on the way out: {back}"
+        );
+    }
+
+    // An older `daal-deploy` predates the second provider and emits no
+    // currency at all. That must degrade to a Hetzner-shaped answer,
+    // not fail the whole catalogue and leave the operator unable to
+    // pick a server.
+    #[test]
+    fn a_server_type_without_a_currency_still_parses() {
+        let legacy = r#"[{
+            "id": "cx22",
+            "description": "CX22",
+            "cpus": 2,
+            "memory_gb": 4.0,
+            "disk_gb": 40,
+            "monthly_eur": 4.59,
+            "hourly_eur": 0.007,
+            "location": "fsn1",
+            "arch": "x86"
+        }]"#;
+        let got: Vec<ServerTypeOption> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].currency, "");
+    }
+
     #[test]
     fn pricing_json_round_trips() {
         let p = Pricing {
@@ -3619,6 +4055,63 @@ mod tests {
         .unwrap();
         assert_eq!(old.action, RotationAction::default());
         assert!(old.action.availability.is_empty());
+    }
+
+    /// The two machine-readable parallels — `reason_code` and
+    /// `evidence.absent_codes` — must survive the Go→Rust hop too.
+    ///
+    /// They exist so a Farsi operator reads the decisive text of the
+    /// advice panel in Farsi: the panel keys them and falls back to the
+    /// English prose on a catalog miss. A dropped key here is invisible
+    /// — serde reports nothing, the prose still renders, and the whole
+    /// translation path is silently dead. `absent_codes` shipped that
+    /// way: it was added to Go and to the panel and omitted from this
+    /// struct, so the fallback fired on every run.
+    #[test]
+    fn rotation_recommendation_carries_the_translation_codes() {
+        let body = r#"{"level":"L3","confidence":"medium",
+            "reason":"TCP reset on this relay, with no address-level attribution recorded",
+            "reason_code":"address_reset_unattributed","reason_detail":"",
+            "est_wallclock":"~10s","override":["L4","L2"],"grounded":true,
+            "evidence":{"source":"explanation","classifications":["tcp_reset"],
+                        "signals":[],"cooldown_tags":[],"unrecognised":[],
+                        "absent":["cooldown tags: no producer — …","network signals …: no prober exists"],
+                        "absent_codes":["no_cooldown_producer","no_prober"]}}"#;
+        let r: RotationRecommendation = serde_json::from_str(body).unwrap();
+        assert_eq!(r.reason_code, "address_reset_unattributed");
+        assert!(r.reason_detail.is_empty());
+        assert_eq!(
+            r.evidence.absent_codes,
+            vec!["no_cooldown_producer".to_string(), "no_prober".to_string()],
+            "absent_codes did not survive the hop; the panel falls back to English on every run"
+        );
+        // Parallel arrays: the panel pairs them by index, so a length
+        // drift attaches the wrong sentence to a code — on this screen
+        // that means telling an operator something was measured and
+        // clean when it was never measured at all.
+        assert_eq!(r.evidence.absent.len(), r.evidence.absent_codes.len());
+
+        // The detail some codes interpolate.
+        let blocked: RotationRecommendation = serde_json::from_str(
+            r#"{"level":"L4","confidence":"medium","reason":"Address-level block …",
+                "reason_code":"address_block_no_swap",
+                "reason_detail":"this relay's software cannot configure an address",
+                "est_wallclock":"~3min","override":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(blocked.reason_code, "address_block_no_swap");
+        assert!(blocked.reason_detail.contains("cannot configure an address"));
+
+        // An older daal-deploy emits neither. Both must decode empty —
+        // which is exactly what makes the panel render the English
+        // prose instead of a bare key.
+        let old: RotationRecommendation = serde_json::from_str(
+            r#"{"level":"L1","confidence":"low","reason":"x","est_wallclock":"~90s","override":[]}"#,
+        )
+        .unwrap();
+        assert!(old.reason_code.is_empty());
+        assert!(old.reason_detail.is_empty());
+        assert!(old.evidence.absent_codes.is_empty());
     }
 
     #[test]

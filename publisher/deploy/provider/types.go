@@ -315,11 +315,25 @@ type ReprovisionOpts struct {
 // Pricing is the live per-hour cost for a server type, surfaced by
 // the wizard's cost-disclosure screen.
 type Pricing struct {
-	Provider     string  `json:"provider"`
-	Region       string  `json:"region"`
-	ServerType   string  `json:"server_type"`
-	HourlyEUR    float64 `json:"hourly_eur"`
-	MonthlyEUR   float64 `json:"monthly_eur"`
+	Provider   string  `json:"provider"`
+	Region     string  `json:"region"`
+	ServerType string  `json:"server_type"`
+	HourlyEUR  float64 `json:"hourly_eur"`
+	MonthlyEUR float64 `json:"monthly_eur"`
+	// Currency names the unit the two amounts above are actually in.
+	//
+	// The field names say EUR because Hetzner bills in euro and they
+	// are the established wire contract with the Rust shim and the
+	// wizard's cost screen; renaming them would break both. Vultr
+	// bills in USD. Leaving that unsaid would draw a dollar figure
+	// behind a euro sign on the one screen whose whole job is telling
+	// an operator what their relay costs — the same class of untruth
+	// as a rotation dial that quotes 90 seconds for a three-minute
+	// rebuild.
+	//
+	// Empty means EUR, so every record and every JSON payload written
+	// before this field existed stays byte-identical.
+	Currency     string  `json:"currency,omitempty"`
 	IncludedTBM  float64 `json:"included_traffic_tb_per_month,omitempty"`
 	OverageEURGB float64 `json:"overage_eur_per_gb,omitempty"`
 }
