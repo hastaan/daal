@@ -187,6 +187,19 @@ type Core struct {
 	lastActivePsiphonRouteID  string
 	lastActiveConjureRouteID  string
 	lastConjurePhantomHashHex string
+
+	// Connection check (route_check.go). proofCfg is read once at Init
+	// from the optional engine-config.json. activeRoute/activeFamily
+	// name the route whose engine instance is running (verifying or
+	// connected); routeEpoch increments every time that changes hands
+	// (SetRoute, ClearRoute), so a proof that returns after the route
+	// it was proving has been replaced can tell and records nothing.
+	// All four are guarded by mu; `check` has its own lock.
+	proofCfg     engine.ProofConfig
+	activeRoute  string
+	activeFamily string
+	routeEpoch   uint64
+	check        routeCheck
 }
 
 // globalCorePtr holds the process-wide Core. Init fully constructs the
@@ -218,12 +231,19 @@ func Init(stateDir, logLevel string) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
+	// Before the store is opened: a configuration file that does not
+	// parse must fail Init without leaving a database handle behind.
+	proofCfg, err := loadProofConfig(stateDir)
+	if err != nil {
+		return err
+	}
 	s, err := routestore.Open(stateDir)
 	if err != nil {
 		return err
 	}
 
 	core := &Core{
+		proofCfg:             proofCfg,
 		stateDir:             stateDir,
 		logLevel:             logLevel,
 		pending:              map[string]*pendingPrompt{},
@@ -318,6 +338,9 @@ func Shutdown() error {
 	if c == nil {
 		return nil
 	}
+	// A proof in flight and the liveness loop both hold the driver;
+	// let go of them before it is stopped.
+	c.check.abandon()
 	if c.driver != nil {
 		_ = c.driver.Stop()
 	}
@@ -343,106 +366,151 @@ func Shutdown() error {
 func VersionString() string { return Version }
 
 // SetRoute is engine_set_route.
+//
+// It returns nil only when the route has CARRIED A ROUND TRIP. The
+// engine instance starting is not that: sing-box dials the relay lazily,
+// so a route to a blocked relay starts like any other. After Start the
+// route is "verifying" (route_check in the diagnostics blob), the
+// driver proves the data plane through the route's own outbound
+// (core/engine/proof.go), and only then is the route Connected and a
+// success recorded. A route that fails the proof is torn down,
+// classified, cooled down and recorded exactly as a Start failure is,
+// and the error is returned. See route_check.go.
+//
+// The proof takes up to the configured bound (8 s by default; a tor
+// route is given longer). Core.mu is NOT held across it: the
+// diagnostics pollers, SetMode and — above all — ClearRoute must not
+// wait for a connection check, and a ClearRoute or a second SetRoute
+// during it cancels it (ErrConnectCancelled).
+//
+// A call that is REFUSED — unknown route, revoked or expired, cooling
+// down, endpoint guard, config build — changes nothing: the route that
+// was connected stays connected and stays watched by its liveness loop,
+// and a connection check in flight for another SetRoute goes on.
 func SetRoute(routeID string) error {
 	c := mustCore()
 	// Fail closed before anything else. On a build with no data plane
-	// linked the driver is engine.Stub, whose Start() returns nil and
-	// publishes "Connected" without opening a socket — so every line
-	// below would faithfully record a tunnel that does not exist and
-	// the GUI would render it. Refusing here is the only honest
-	// outcome; see core/abi/dataplane.go for the artefact-by-artefact
-	// tag table.
+	// linked the driver is engine.Stub, whose Start() returns nil
+	// without opening a socket and whose Prove() has nothing to
+	// disprove — so every line below would faithfully record a tunnel
+	// that does not exist and the GUI would render it. Refusing here is
+	// the only honest outcome; see core/abi/dataplane.go for the
+	// artefact-by-artefact tag table.
 	if !dataPlaneLinked {
 		return ErrNoDataPlane
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	row, err := c.store.GetRoute(routeID)
 	if err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("abi: route %s not found: %w", routeID, err)
 	}
 	if row.TrustState == "revoked" || row.TrustState == "expired" {
+		c.mu.Unlock()
 		return fmt.Errorf("abi: route %s is %s and cannot be activated", routeID, row.TrustState)
 	}
 	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok {
+		c.mu.Unlock()
 		return fmt.Errorf("abi: %s", reason)
 	}
 	profile, err := c.store.GetSecret("route:" + routeID)
 	if err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("abi: load profile for %s: %w", routeID, err)
+	}
+	// Defence in depth behind the importer (endpoint_guard.go): the
+	// outbound about to be dialled must still point where its publisher
+	// signed. Refused BEFORE pm.Attempt, so a refusal is never filed as
+	// a network failure of the route.
+	if err := routeEndpointGuard(c.store, row, profile); err != nil {
+		c.mu.Unlock()
+		return err
 	}
 	cfg, err := engine.BuildSingBoxConfig(row, profile)
 	if err != nil {
+		c.mu.Unlock()
 		return err
 	}
 	body, err := engine.MarshalSingBox(cfg)
 	if err != nil {
+		c.mu.Unlock()
 		return err
 	}
-	c.pm.Attempt(routeID, row.TransportFamily)
+	family := row.TransportFamily
+	// Every refusal is behind us: from here this call REPLACES whatever
+	// is running, so whatever was being proved or watched belongs to the
+	// route it replaces. Not a line earlier — a refused SetRoute leaves
+	// the connected route up, and abandoning its liveness loop there
+	// left it "Connected" (or "failed", for good) with nothing ever
+	// checking it again.
+	c.check.abandon()
+	c.routeEpoch++
+	epoch := c.routeEpoch
+	c.pm.Attempt(routeID, family)
 	if err := c.driver.Start(context.Background(), body); err != nil {
-		// Start failed: no tunnel, so bootstrap/refresh may dial direct.
-		refresh.SetTunnelRequired(false)
-		cat := diagnostics.Classify(err.Error())
-		c.pm.Failed(routeID, row.TransportFamily, cat)
-		// Persist the outcome the FSM just computed. Without this the
-		// classification lives only in the in-memory Manager and dies
-		// with the process, which is why `health_pct` and `proven` were
-		// null on every install: the columns that back them had no
-		// writer. See routestore.RecordFailure for the privacy shape
-		// (hour bucket + closed category vocabulary, one row per route).
-		_ = c.store.RecordFailure(routeID, string(cat), pmCooldownUntil(c, routeID), nowUTC())
-		// Posture: a fresh attempt that fails from PostureNoRoute
-		// should advance to PostureRecovery if legal so the GUI can
-		// render the recovery affordance. Illegal transitions (no
-		// active posture to "fail" from) are silently ignored.
-		_ = c.pm.SetPosture(pathmanager.EventActiveFailed, pathmanager.PostureRecovery)
+		// Start failed: there is no instance. Classified from the error
+		// text alone — a config or start-up error has no phase.
+		c.activeRoute, c.activeFamily = routeID, family
+		c.routeDownLocked(routeID, family, diagnostics.Classify(err.Error()), err.Error(), true)
+		c.mu.Unlock()
 		return err
 	}
-	c.pm.Connected()
-	// Same on the success side: this is the ONLY moment the engine knows
-	// a route works, and until this pass it was thrown away. `proven`
-	// and `health_pct` are downstream of this single call.
-	_ = c.store.RecordSuccess(routeID, nowUTC())
-	// A tunnel is now up. From here until ClearRoute, any refresh that
+	// The instance is up and has dialled nothing. From here until
+	// ClearRoute (or the teardown of a failed proof), any refresh that
 	// cannot ride it must FAIL rather than egress from the device's real
 	// address — see refresh.ErrTunnelRequired for the leak this closes.
 	// Note this deliberately fires even on platforms that have no
 	// tunnel-aware dialer yet: on those, scheduled refresh stops working
 	// while connected, which is the intended trade.
 	refresh.SetTunnelRequired(true)
-	// Posture axis (Phase-3-Soak): the legacy `state` field was
-	// removed from the diagnostics blob, and consumers MUST read
-	// `posture`. SetRoute previously advanced only the state axis,
-	// leaving the posture stuck at PostureNoRoute even after a
-	// successful tunnel — which made the GUI's "Connected?" badge
-	// read disconnected forever. Fire the canonical
-	// `imported_selected → ImportedActive` event; if the current
-	// posture is already active (e.g. re-selecting a route, or
-	// coming back from Lifeline), the transition is illegal-but-
-	// harmless and the posture stays at its current active state.
-	//
-	// Gap 5: branch on family maturity so an experimental-family
-	// route advances the posture to PostureExperimental (UI shows
-	// the warning). The corresponding {NoRoute,
-	// experimental_selected, Experimental} table edge was added in
-	// Gap 5 so this works as the first connection.
-	if routestore.IsExperimentalFamily(row.TransportFamily) {
-		_ = c.pm.SetPosture(pathmanager.EventExperimentalSelected, pathmanager.PostureExperimental)
-	} else {
-		_ = c.pm.SetPosture(pathmanager.EventImportedSelected, pathmanager.PostureImportedActive)
+	c.activeRoute, c.activeFamily = routeID, family
+	c.pm.Verifying()
+	c.check.set(RouteCheckVerifying, "")
+	pctx, cancel := context.WithCancel(context.Background())
+	c.check.mu.Lock()
+	c.check.cancelProof = cancel
+	c.check.mu.Unlock()
+	proofCfg := c.proofCfg
+	c.mu.Unlock()
+
+	res := c.driver.Prove(pctx, proofCfg)
+	cancel()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.routeEpoch != epoch || res.Cancelled {
+		// ClearRoute or another SetRoute took the engine while this
+		// proof ran. The state is theirs; nothing was learned about the
+		// route, and nothing is recorded.
+		return ErrConnectCancelled
 	}
+	if !res.OK {
+		cat := res.Category()
+		reason := proofFailureText(res)
+		c.routeDownLocked(routeID, family, cat, reason, true)
+		return fmt.Errorf("%w (route %s: %s): %s", ErrRouteNotCarrying, routeID, cat, reason)
+	}
+	c.routeUpLocked(routeID, family, res)
+	c.startLivenessLocked()
 	return nil
 }
 
 // ClearRoute is engine_clear_route.
 func ClearRoute() error {
 	c := mustCore()
+	// Before taking the lock: a connection check in flight must be
+	// abandoned, not waited for (it is bounded in seconds, and a
+	// Disconnect tap that hangs for them is the complaint behind
+	// end-to-end rig's finding O-2).
+	c.check.abandon()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.routeEpoch++
 	if err := c.driver.Stop(); err != nil {
 		return err
 	}
+	c.activeRoute, c.activeFamily = "", ""
+	c.check.set(RouteCheckNone, "")
 	// No route: there is no tunnel to betray, so direct egress is
 	// permitted again (bootstrap has to start somewhere).
 	refresh.SetTunnelRequired(false)
@@ -450,7 +518,7 @@ func ClearRoute() error {
 	// Posture axis: a user-initiated disconnect always returns to
 	// PostureNoRoute. The transition `EventDisconnected → NoRoute`
 	// is legal from every active posture in LegalTransitions.
-	_ = c.pm.SetPosture(pathmanager.EventDisconnected, pathmanager.PostureNoRoute)
+	c.advancePosture(pathmanager.EventDisconnected, pathmanager.PostureNoRoute)
 	return nil
 }
 
@@ -663,6 +731,7 @@ func StatsRedacted() (string, error) {
 func ExportDiagnostics() (string, error) {
 	c := mustCore()
 	routes, _ := c.store.ListRoutes()
+	routeCheckState, routeCheckCat, routeRunning := c.check.snapshot()
 	out := map[string]any{
 		"version": Version,
 		"mode":    c.mode,
@@ -675,6 +744,22 @@ func ExportDiagnostics() (string, error) {
 		// count.
 		"posture": c.pm.Posture(),
 		"why":     c.pm.LastReason(),
+		// Connection check (route_check.go). `route_check` is ""
+		// (no route), "verifying" (the engine instance is up and the
+		// route has NOT yet carried a round trip — a UI must not show
+		// this as connected), "ok", "degraded" (connected, too slow to
+		// call usable) or "failed". `route_check_category` is the
+		// taxonomy category behind "failed" / "degraded", else "".
+		// Always present. Both are closed vocabularies.
+		"route_check":          routeCheckState,
+		"route_check_category": string(routeCheckCat),
+		// `route_running`: true exactly while an engine instance for a
+		// route is up. It tells the two "failed" apart: false = the
+		// connect failed, the instance was torn down and NOTHING will
+		// retry (a UI must not say "connecting"); true = a connected
+		// route stopped carrying, its instance is up and is re-checked
+		// every recheck_interval_s. Always present.
+		"route_running": routeRunning,
 		// Which data plane this binary actually links: "singbox" (real,
 		// can carry traffic) or "none" (the deterministic Stub — this
 		// binary CANNOT tunnel and SetRoute refuses). A GUI reading

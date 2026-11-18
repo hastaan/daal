@@ -55,21 +55,28 @@ write_files:
     content: |
 {{ .SingBoxConfigJSON | indent 6 }}
 
-  # FRP-14 §6 kick wrapper. /users/revoke calls this to evict live
-  # sessions within ≤ 10 s. We send SIGUSR2 (sing-box ≥ v1.10 honors
-  # it as a graceful inbound drop), wait briefly, then ask systemd
-  # for a clean reload to settle config on disk.
+  # The one way this box applies a rewritten sing-box config. Every
+  # mgmt verb that changes the user table calls it ONCE.
+  #
+  # `reload` is ExecReload= in sing-box.service below: SIGHUP, which
+  # sing-box 1.13 handles in-process (cmd/sing-box/cmd_run.go) — it
+  # re-checks the config on disk, keeps the running instance if that
+  # check fails, and otherwise closes every inbound and every live
+  # connection and starts the new instance. That close is what makes a
+  # revoke real for a session that is already up.
+  #
+  # `restart` is the fallback for a unit with no ExecReload (a box whose
+  # unit file predates it); it costs the same sessions.
+  #
+  # This used to send SIGUSR2 and sleep 2 s first. sing-box registers no
+  # handler for SIGUSR2 and Go ignores it, so that was two seconds of
+  # nothing in front of every credential change.
   - path: /usr/local/lib/daal/singbox-kick.sh
     permissions: '0755'
     owner: root:root
     content: |
       #!/bin/sh
       set -eu
-      pid="$(systemctl show -p MainPID --value sing-box.service)"
-      if [ -n "$pid" ] && [ "$pid" != "0" ]; then
-        kill -USR2 "$pid" || true
-      fi
-      sleep 2
       systemctl reload sing-box.service || systemctl restart sing-box.service
 
   # FRP-10 V2 mgmt-plane: per-deploy publisher pubkey + listening
@@ -101,6 +108,22 @@ write_files:
     owner: root:root
     content: |
       {{ .CoverSNI }}
+{{ end }}
+{{ if .Families }}
+  # The family set THIS relay serves, one name per line, resolved once by
+  # the publisher at provision time. The sing-box inbounds above and the
+  # ufw rules below were derived from the same list. daal-relay-mgmt
+  # reads it on every user-table change and creates inbounds — and
+  # credentials — for these families only: without it the daemon cannot
+  # know which of the on-first-use inbounds (naive-in, ws-in, ss-in,
+  # anytls-in) this relay was asked for, and creates them all.
+  - path: /etc/daal/families
+    permissions: '0644'
+    owner: root:root
+    content: |
+{{- range .Families }}
+      {{ . }}
+{{- end }}
 {{ end }}
 {{ if .CDNEnabled }}
   - path: /etc/daal/cdn/origin_ca.pem
@@ -142,6 +165,7 @@ write_files:
       [Service]
       Type=simple
       ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+      ExecReload=/bin/kill -HUP $MAINPID
       Restart=on-failure
       RestartSec=5
       LimitNOFILE=1048576
@@ -211,8 +235,9 @@ write_files:
 
 runcmd:
   # FRP-10: box-side ufw is closed for mgmt; cloud-provider firewall
-  # is the gate (§9.5.2). We open 443 for sing-box and the helper-
-  # bound 22 + 9876 health windows for the provisioning step only.
+  # is the gate (§9.5.2). We open the served families' data-plane ports
+  # for sing-box and the helper-bound 22 + 9876 health windows for the
+  # provisioning step only.
   - |
     bash -euo pipefail <<'DAAL_PROVISION'
     fail() {
@@ -225,16 +250,14 @@ runcmd:
     }
     run ufw default deny incoming
     run ufw default allow outgoing
-    run ufw allow 443/tcp
-    run ufw allow 443/udp
-    # Data-plane ports for the families that cannot share 443 with
-    # REALITY. NOT a constant list any more: it comes from
-    # relayports.ExtraFirewallPortsFor(<this relay's families>) via
-    # RenderInput.DataPlanePorts, so a family the toolbox profile can
-    # switch off (tuic, 8443/udp) leaves no open port on relays that do
-    # not serve it. This runs ONCE, at first boot — there is no upgrade
-    # path for cloud-init, so changing a relay's family set means
-    # reprovisioning it, not editing a rule.
+    # Data-plane ports: one per family THIS relay serves and nothing
+    # else. Not a constant list, and no unconditional 443 rule: it is
+    # relayports.FirewallPortsFor(<this relay's families>) via
+    # RenderInput.DataPlanePorts, so a family this relay was not asked to
+    # serve — a default one included — leaves no open port here. This
+    # runs ONCE, at first boot — there is no upgrade path for cloud-init,
+    # so changing a relay's family set means reprovisioning it, not
+    # editing a rule.
 {{- range .UFWDataPlaneRules }}
     run ufw allow {{ . }}
 {{- end }}
@@ -259,17 +282,22 @@ runcmd:
     # FRP-14: the canonical sing-box config ships with an empty
     # REALITY private_key; sing-box refuses to start without one.
     # Mint a real X25519 keypair on first boot, then surgically
-    # inject the priv into every vless-in inbound's TLS/reality
-    # block. The PUBLIC key is written next to it so future rotate-
-    # credentials calls (and per-recipient .sbpx bundling) can read
-    # it without re-running keygen.
+    # inject the priv into every REALITY inbound's TLS block. The
+    # PUBLIC key is written next to it so future rotate-credentials
+    # calls (and per-recipient .sbpx bundling) can read it without
+    # re-running keygen.
+    #
+    # A relay that does not serve vless-reality has no REALITY inbound
+    # (the publisher renders the config from the relay's family set).
+    # That is exit status 3 below and it is not an error: nothing is
+    # keyed and /etc/daal/reality.pub is NOT written, so the box never
+    # states a REALITY key it does not serve.
     keys="$(/usr/local/bin/sing-box generate reality-keypair)" || fail "reality-keypair gen failed"
     reality_priv="$(printf '%s\n' "$keys" | awk '/PrivateKey:/ {print $2}')"
     reality_pub="$(printf '%s\n' "$keys" | awk '/PublicKey:/ {print $2}')"
     [ -n "$reality_priv" ] || fail "reality-keypair: empty PrivateKey"
     mkdir -p /etc/daal
-    printf '%s\n' "$reality_pub" > /etc/daal/reality.pub
-    chmod 0644 /etc/daal/reality.pub
+    reality_rc=0
     REALITY_PRIV="$reality_priv" python3 -c "$(printf '%s\n' \
       'import json, os, sys' \
       'path = "/etc/sing-box/config.json"' \
@@ -285,8 +313,16 @@ runcmd:
       '        reality["private_key"] = priv' \
       '        patched = True' \
       'if not patched:' \
-      '    sys.exit("no reality inbound found in sing-box config")' \
-      'json.dump(cfg, open(path, "w"))')" || fail "inject reality priv failed"
+      '    sys.exit(3)' \
+      'json.dump(cfg, open(path, "w"))')" || reality_rc=$?
+    case "$reality_rc" in
+      0)
+        printf '%s\n' "$reality_pub" > /etc/daal/reality.pub
+        chmod 0644 /etc/daal/reality.pub
+        ;;
+      3) ;;
+      *) fail "inject reality priv failed" ;;
+    esac
     # FRP-14: data-plane self-signed TLS cert for the hy2/naive/ws
     # inbounds (TLS families that, unlike REALITY, need a cert). ws/hy2
     # pin it by SPKI SHA-256 (no name check). naive/Cronet, however,
@@ -312,12 +348,37 @@ runcmd:
     DAAL_IP6="$(ip -6 -o addr show eth0 scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
     DAAL_SAN="IP:${DAAL_IP4}"
     [ -n "$DAAL_IP6" ] && DAAL_SAN="${DAAL_SAN},IP:${DAAL_IP6}"
+{{- if .CoverSNI }}
+    # ONE STABLE DNS NAME, so naive survives an address move (L3).
+    # This certificate is minted once and cannot follow the box to a
+    # floating address: after assign-fip the pack dials an address no
+    # iPAddress SAN names and Cronet refuses the handshake
+    # (ERR_CERT_COMMON_NAME_INVALID), on the only address that is not
+    # blocked. A DNS name does not depend on the address. The naive
+    # client verifies against it ONLY when the address it dials is not
+    # in this certificate (bundle.NaiveVerificationName), so a relay
+    # that never moves puts nothing new on the wire. The name is the
+    # cover host this relay was provisioned with — the one hostname
+    # already chosen to be plausible for this address. It is fixed for
+    # the certificate's life: a later rotate-tls moves REALITY's cover
+    # host, not this.
+    DAAL_SAN="${DAAL_SAN},DNS:{{ .CoverSNI }}"
+{{- end }}
     run openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
       -keyout /etc/daal/tls-key.pem -out /etc/daal/tls-cert.pem \
       -days 90 -nodes -subj /CN=daal-relay \
       -addext "subjectAltName=${DAAL_SAN}"
     run chmod 0600 /etc/daal/tls-key.pem
     run chmod 0644 /etc/daal/tls-cert.pem
+    # The pin of that key (base64 SHA-256 of the SubjectPublicKeyInfo),
+    # beside reality.pub, for the provisioner to read into the
+    # OperatorRecord. bind-and-sign commits every pinned route to it
+    # (specs/relaypack-v1.md "Endpoint commitment"); the Hetzner
+    # provisioner has always tried to read this file and nothing wrote it.
+    openssl x509 -in /etc/daal/tls-cert.pem -pubkey -noout \
+      | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary \
+      | base64 > /etc/daal/tls-spki-sha256.b64 || fail "tls spki pin failed"
+    run chmod 0644 /etc/daal/tls-spki-sha256.b64
     run systemctl daemon-reload
     run systemctl enable --now sing-box
     run systemctl enable --now daal-health

@@ -1,55 +1,25 @@
 [
   {
-    "id": "CEN-1",
-    "severity": "high",
-    "title": "a blocked route is reported Connected / proven; the engine never classifies a data-plane failure",
+    "id": "CEN-4",
+    "severity": "medium",
+    "title": "one route cannot tell apart what needs two observations: every silent UDP route is udp_no_reply (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is tls_sni_or_cert_block_suspected whether the filter is keyed on the name or the address",
     "match": [
       {
         "phase": "family",
+        "family": "hysteria2,tuic",
         "check": "engine.category",
         "expect_not": [
-          "none"
+          "none",
+          "path_too_slow"
         ],
-        "got": "none"
-      }
-    ]
-  },
-  {
-    "id": "LC-2",
-    "severity": "high",
-    "title": "the freshness channel, as the app drives it, replaces a working pack with a credential-less skeleton",
-    "match": [
+        "got": "udp_no_reply"
+      },
       {
-        "phase": "op:freshness",
-        "check": "unchanged.signed-pack-hosted.tunnel"
-      }
-    ]
-  },
-  {
-    "id": "LC-3",
-    "severity": "medium",
-    "title": "after an L3 address move naive cannot connect to the new address (certificate SAN)",
-    "match": [
-      {
-        "phase": "op:l3",
-        "family": "naive",
-        "check": "new-file.address-blocked.tunnel,new-file.address-blocked.wire"
-      }
-    ]
-  },
-  {
-    "id": "F-004",
-    "severity": "high",
-    "title": "pack profiles are outside the signature: a rewritten server address imports cleanly",
-    "match": [
-      {
-        "phase": "op:tamper",
-        "check": "import_of_tampered_pack",
-        "got": "pass",
-        "evidence": {
-          "rewritten": "profiles",
-          "manifest_rewrite": "refused"
-        }
+        "scenario": "tcp-reset-mid-handshake",
+        "phase": "family",
+        "family": "vless-reality,websocket-tls,anytls",
+        "check": "engine.category",
+        "got": "tls_sni_or_cert_block_suspected"
       }
     ]
   },
@@ -69,7 +39,7 @@
       {
         "phase": "mint",
         "family": "-",
-        "check": "users-provision.*.no_warnings,pack.*.no_dropped_routes"
+        "check": "users-provision.*.no_warnings,pack.*.no_dropped_routes,bind-and-sign.every_route_has_a_signed_endpoint"
       },
       {
         "phase": "family",
@@ -92,34 +62,6 @@
         "got": "pass"
       }
     ]
-  },
-  {
-    "id": "FAM-4",
-    "severity": "low",
-    "title": "a default family that was de-selected at provision time is still open and listening on the box",
-    "match": [
-      {
-        "phase": "mint",
-        "family": "vless-reality,websocket-tls,naive,hysteria2",
-        "check": "not_served"
-      }
-    ]
-  },
-  {
-    "id": "INT-1",
-    "severity": "high",
-    "title": "naive: the engine process dies with SIGSEGV in cronet-go's BidirectionalStream.Cancel when a connection is closed as its stream terminates (intermittent)",
-    "intermittent": true,
-    "match": [
-      {
-        "phase": "*",
-        "family": "naive",
-        "check": "*engine.survived",
-        "detail_contains": "BidirectionalStreamCancel"
-      }
-    ],
-    "max": 6,
-    "max_quick": 2
   },
   {
     "id": "INT-2",

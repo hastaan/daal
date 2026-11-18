@@ -36,11 +36,22 @@ OUT="${OUT:-libcronet.so}"
 CLANG="$CRONET_GO/naiveproxy/src/third_party/llvm-build/Release+Asserts/bin/clang++"
 SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 NDK_CXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}-clang++"
-LIBMOD="$(ls -d "$(go env GOMODCACHE)"/github.com/sagernet/cronet-go/lib/${GOMOD}@* | head -1)"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The libcronet.a to relink is the one core/go.mod PINS — not whichever
+# version of the module happens to sort first in the module cache, which
+# after a cronet-go bump is the old one. The Go wrapper compiled into the
+# engine and this library must come from the same cronet-go, or they do
+# not share a C ABI (see check-libcronet-stamp.sh).
+LIBVER="$("$HERE/check-libcronet-stamp.sh" --want "$ABI")"
+LIBMOD="$(go env GOMODCACHE)/github.com/sagernet/cronet-go/lib/${GOMOD}@${LIBVER}"
+if [ ! -f "$LIBMOD/libcronet.a" ]; then
+  echo "no libcronet.a at $LIBMOD — run: (cd $HERE/../../core && go mod download github.com/sagernet/cronet-go/lib/${GOMOD})" >&2
+  exit 1
+fi
 WRAPS="-Wl,-wrap,aligned_alloc -Wl,-wrap,calloc -Wl,-wrap,free -Wl,-wrap,malloc -Wl,-wrap,memalign -Wl,-wrap,posix_memalign -Wl,-wrap,pvalloc -Wl,-wrap,realloc -Wl,-wrap,valloc -Wl,-wrap,malloc_usable_size -Wl,-wrap,realpath -Wl,-wrap,strdup -Wl,-wrap,strndup -Wl,-wrap,getcwd -Wl,-wrap,asprintf -Wl,-wrap,vasprintf"
 "$NDK_CXX" -c -O2 -fPIC "$HERE/cronet_stubs.cc" -o "/tmp/cronet_stubs_${ABI}.o"
 "$CLANG" --target="$TRIPLE" --sysroot="$SYSROOT" -fuse-ld=lld -shared -o "$OUT" \
   -Wl,--whole-archive "$LIBMOD/libcronet.a" -Wl,--no-whole-archive "/tmp/cronet_stubs_${ABI}.o" \
   $WRAPS -unwindlib=none -nostdlib++ -Wl,-z,noexecstack -ldl -lm -llog -landroid
-echo "wrote $OUT ($(stat -c%s "$OUT") bytes)"
+"$HERE/check-libcronet-stamp.sh" --stamp "$OUT" "$ABI"
+echo "wrote $OUT ($(stat -c%s "$OUT") bytes), linked from cronet-go lib $LIBVER (stamp: $OUT.cronet-lib-version)"

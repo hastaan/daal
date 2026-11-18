@@ -4,8 +4,8 @@
 //
 //	POST /users/provision  — append a fresh per-recipient user row
 //	                          to every sing-box inbound; return creds.
-//	POST /users/revoke     — remove a user row, run kick wrapper,
-//	                          reload sing-box.
+//	POST /users/revoke     — remove a user row, reload sing-box
+//	                          (once; the reload drops live sessions).
 //	GET  /users/list       — list active user names.
 //
 // See specs/per-recipient-credentials-v1.md for the wire format
@@ -241,7 +241,17 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mint creds: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	effectiveWSPath, err := addUserToSingbox(s.singboxConfig, creds, s.singboxCheck)
+	// The relay's declared family set decides which inbounds this
+	// recipient gets a row in — and which of the on-first-use inbounds
+	// exist at all. Read on every provision: the file is written once at
+	// first boot, and a daemon that cached "undeclared" from a read that
+	// raced cloud-init would create every family for the life of the box.
+	fams, err := readFamilySet(s.familiesPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	effectiveWSPath, err := addUserToSingboxFor(s.singboxConfig, creds, s.singboxCheck, fams)
 	if err != nil {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -284,6 +294,11 @@ func (s *server) handleUsersProvision(w http.ResponseWriter, r *http.Request) {
 	// the point — the publisher must never be told a credential exists
 	// on a box that has no inbound to check it against.
 	creds.AnyTLSPassword = readAnyTLSPassword(s.singboxConfig, creds.Name)
+	// And the same for the four older families: a credential is echoed
+	// only if the live config carries the row it authenticates against.
+	if doc, err := loadSingboxDoc(s.singboxConfig); err == nil {
+		blankUnservedCreds(doc, &creds)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(creds)
 }
@@ -374,17 +389,14 @@ func (s *server) handleUsersRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("user %q not found", req.Name), http.StatusNotFound)
 		return
 	}
-	// Force-kick first (SIGUSR2 + reload via the wrapper script),
-	// then a plain reload to settle config. Both are best-effort:
-	// even if the wrapper fails (e.g., sing-box version doesn't
-	// honor SIGUSR2 on this build), the user row is gone from the
-	// config and new connections fail auth.
-	if err := s.singboxKick(); err != nil {
-		// Soft-fail: the revoke succeeded at the config level.
-		// Log but don't bubble — old-version-singbox boxes still
-		// get correct semantics on next idle/reconnect.
-		// Caller can still inspect counts.
-	}
+	// ONE apply. The reload closes every inbound and every live
+	// connection (see defaultSingboxControl), which is what evicts the
+	// revoked recipient's established session; the config rewrite alone
+	// would only stop NEW authentications.
+	//
+	// This used to be a "kick" followed by a reload. Both ran the same
+	// wrapper, so every revoke restarted the relay twice, two seconds
+	// apart, and disconnected every other recipient twice for it.
 	if err := s.singboxControl("reload"); err != nil {
 		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
 		return

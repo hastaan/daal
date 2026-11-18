@@ -139,6 +139,16 @@ func muxInbound() map[string]any {
 // sing-box immediately afterwards, so an unloadable config here takes
 // the relay down as surely as a bad rotation does.
 func addUserToSingbox(path string, c userCreds, validate func(string) error) (string, error) {
+	return addUserToSingboxFor(path, c, validate, nil)
+}
+
+// addUserToSingboxFor is addUserToSingbox for a relay with a declared
+// family set (see families.go). A family the relay was not provisioned
+// to serve gets no user row and — for the four inbounds created on first
+// use — no inbound at all, so the box binds only what it was asked for.
+// The nil set is the undeclared, pre-/etc/daal/families box: everything,
+// as before.
+func addUserToSingboxFor(path string, c userCreds, validate func(string) error, fams familySet) (string, error) {
 	doc, err := loadSingboxDoc(path)
 	if err != nil {
 		return "", err
@@ -148,37 +158,71 @@ func addUserToSingbox(path string, c userCreds, validate func(string) error) (st
 	if existing := wsInboundPath(doc); existing != "" {
 		c.WSPath = existing
 	}
-	if err := appendVLESSUser(doc, c); err != nil {
-		return "", err
+	if fams.serves(famVLESSReality) {
+		// Hard error when the inbound is missing: cloud-init bakes
+		// vless-in on every relay that serves the family, so its absence
+		// is a damaged config, not a narrower relay.
+		if err := appendVLESSUser(doc, c); err != nil {
+			return "", err
+		}
 	}
-	if err := appendHy2User(doc, c); err != nil {
-		return "", err
+	if fams.serves(famHysteria2) {
+		if err := appendHy2User(doc, c); err != nil {
+			return "", err
+		}
 	}
-	if err := appendNaiveUser(doc, c); err != nil {
-		return "", err
+	if fams.serves(famNaive) {
+		if err := appendNaiveUser(doc, c); err != nil {
+			return "", err
+		}
 	}
-	if err := appendWSUser(doc, c); err != nil {
-		return "", err
+	if fams.serves(famWebSocketTLS) {
+		if err := appendWSUser(doc, c); err != nil {
+			return "", err
+		}
+	} else {
+		c.WSPath = ""
 	}
 	// WAVE 5. shadowsocks-2022 — the only family here with no TLS
 	// handshake in it, and therefore the only one the Xue et al.
 	// nested-TLS classifier cannot reach. Creates ss-in on first use
 	// (see singbox_shadowsocks.go for why it must never exist empty).
-	if err := appendSSUser(doc, c); err != nil {
-		return "", err
+	if fams.serves(famShadowsocks) {
+		if err := appendSSUser(doc, c); err != nil {
+			return "", err
+		}
 	}
 	// WAVE 5. anytls — the one family whose length padding and session
 	// reuse are protocol features rather than add-ons. Creates anytls-in
 	// on first use with THIS relay's own padding scheme; see
 	// singbox_anytls.go for why the scheme is per-relay and why it needs
 	// no client-side plumbing.
-	if err := appendAnyTLSUser(doc, c); err != nil {
-		return "", err
+	if fams.serves(famAnyTLS) {
+		if err := appendAnyTLSUser(doc, c); err != nil {
+			return "", err
+		}
 	}
 	// No-op when the relay was not provisioned to serve tuic. The
 	// publisher learns which happened from the creds it gets back, not
 	// from an error here: see tuicUserPresent.
-	appendTUICUser(doc, c)
+	if fams.serves(famTUIC) {
+		appendTUICUser(doc, c)
+	}
+	// A recipient with no row anywhere is not a recipient: the registry
+	// (recipientNames) would not list them, a second provision of the
+	// same name would not be refused, and the response would be a 200
+	// carrying no usable credential. Refuse instead — this is a relay
+	// whose declared families this binary cannot serve at all.
+	present := false
+	for _, n := range recipientNames(doc) {
+		if n == c.Name {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return "", fmt.Errorf("no inbound on this relay can carry recipient %q: its declared families name nothing this service can provision", c.Name)
+	}
 	// Runs on every provision, not just the first, so a relay built
 	// before multiplex existed acquires it the next time a recipient is
 	// added — there is no other routine write path to this file, and the
@@ -333,33 +377,24 @@ func removeUserFromSingbox(path, name string, validate func(string) error) (bool
 	return true, writeSingboxDoc(path, doc, validate)
 }
 
-// listUsers walks the VLESS inbound users[] (canonical source of
-// truth — every user appears there) and returns one userMeta per
-// recipient. The provisioned_at timestamp is not stored on the box,
-// so we return 0.
+// listUsers returns one userMeta per recipient: everyone who owns a row
+// in any managed inbound (see recipientNames for why this is no longer
+// vless-in alone). The provisioned_at timestamp is not stored on the
+// box, so we return 0.
 func listUsers(path string) ([]userMeta, error) {
 	doc, err := loadSingboxDoc(path)
 	if err != nil {
 		return nil, err
 	}
-	in := findInboundByTag(doc, tagVLESS)
-	if in == nil {
-		return nil, nil
-	}
-	users, _ := in["users"].([]any)
-	out := make([]userMeta, 0, len(users))
-	for _, raw := range users {
-		u, _ := raw.(map[string]any)
-		name, _ := u["name"].(string)
-		if name != "" && nameRegex.MatchString(name) {
-			out = append(out, userMeta{Name: name})
-		}
+	names := recipientNames(doc)
+	out := make([]userMeta, 0, len(names))
+	for _, name := range names {
+		out = append(out, userMeta{Name: name})
 	}
 	return out, nil
 }
 
-// countUsers returns the number of recipient rows in the VLESS
-// inbound (canonical user count).
+// countUsers returns the number of recipients on this box.
 func countUsers(path string) (int, error) {
 	users, err := listUsers(path)
 	if err != nil {
@@ -368,8 +403,8 @@ func countUsers(path string) (int, error) {
 	return len(users), nil
 }
 
-// userExists reports whether `name` is already present in the
-// VLESS inbound users[].
+// userExists reports whether `name` already owns a row in any managed
+// inbound.
 func userExists(path, name string) (bool, error) {
 	users, err := listUsers(path)
 	if err != nil {

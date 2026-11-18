@@ -23,6 +23,7 @@ package relayconf
 import (
 	"fmt"
 	"net"
+	"strings"
 
 	"daal/publisher/deploy/profiles"
 	"daal/publisher/deploy/provider"
@@ -118,7 +119,7 @@ func ServedFamilies(profileName string, enabledFamilies []string) ([]string, err
 //
 // A profile that will not load is not a reason to refuse here — the
 // caller (CandidatesForProfile) already errors on that, loudly — so
-// this falls back to the always-present families.
+// this falls back to the legacy family set.
 func DefaultSingBoxConfig(profileName, coverSNI string) string {
 	fams, err := ServedFamilies(profileName, nil)
 	if err != nil {
@@ -131,20 +132,38 @@ func DefaultSingBoxConfig(profileName, coverSNI string) string {
 // family set supplied explicitly, which is what the provisioner has
 // after it applies the wizard's enabled-families override.
 //
-// vless-in and hy2-in are unconditional: they are the two tiers every
-// Daal relay has, and both start with an empty users[]. naive-in (8444)
-// and ws-in (8445) are absent because sing-box will not start a naive
-// inbound with no users, and the mgmt service creates them with their
-// first recipient.
+// EVERY INBOUND IS CONDITIONAL ON THE FAMILY SET. The box binds what the
+// relay was provisioned to serve and nothing else:
 //
-// tuic-in is the first inbound that is CONDITIONAL on the profile, and
-// it is written here rather than created on first use for one reason:
-// binding 8443/udp is a visible, permanent property of the relay, and
-// the box-side ufw rule that has to accompany it is baked by cloud-init
-// at first boot and cannot be changed afterwards. Deciding the family
-// set once, at provision time, is the only way the inbound, the two
-// firewalls and the minted pack can all agree. Turning tuic on for an
-// existing relay is a reprovision.
+//	vless-reality → vless-in   (443/tcp, REALITY, empty users[])
+//	hysteria2     → hy2-in     (443/udp, empty users[])
+//	tuic          → tuic-in    (8443/udp, empty users[])
+//
+// vless-in and hy2-in used to be unconditional — "the two tiers every
+// Daal relay has" — which stopped being true the day `--families` could
+// name a set without them: a relay provisioned with
+// `shadowsocks,anytls` still listened on 443/tcp and 443/udp, with
+// credentials for every recipient, behind two firewalls that were also
+// unconditionally open (finding FAM-4, backlog W5-1).
+//
+// naive-in (8444), ws-in (8445), ss-in (8446) and anytls-in (8447) are
+// never written here, whatever the family set: sing-box will not start a
+// naive inbound with no users, and an empty shadowsocks inbound is an
+// open relay (see cmd/daal-relay-mgmt/singbox_shadowsocks.go). The mgmt
+// service creates each with its first recipient — and only for the
+// families cloud-init lists in /etc/daal/families, which is this same
+// list. A config with no inbounds at all is therefore legitimate (a
+// relay serving only on-first-use families) and sing-box starts on it.
+//
+// The three written here are decided at provision time for one reason:
+// binding a port is a visible, permanent property of the relay, and the
+// box-side ufw rule that has to accompany it is baked by cloud-init at
+// first boot and cannot be changed afterwards. Deciding the family set
+// once is the only way the inbounds, the two firewalls and the minted
+// pack can all agree. Changing it for an existing relay is a reprovision.
+//
+// A nil or empty family list means relayports.LegacyFamilies(): the
+// caller could not say, so the relay is the one every relay used to be.
 //
 // coverSNI is substituted into BOTH tls.server_name — the name the
 // client advertises and the censor sees — AND
@@ -163,12 +182,31 @@ func SingBoxConfigForFamilies(coverSNI string, families []string) string {
 	if coverSNI == "" {
 		coverSNI = sni.LegacyCoverSNI
 	}
-	extra := ""
+	if len(families) == 0 {
+		families = relayports.LegacyFamilies()
+	}
+	served := map[string]bool{}
 	for _, f := range families {
-		if f != "tuic" {
-			continue
-		}
-		ep := relayports.For("tuic")
+		served[f] = true
+	}
+	var inbounds []string
+	if served["vless-reality"] {
+		// %[1]q, twice: one value, two required sites.
+		inbounds = append(inbounds, fmt.Sprintf(`    {"type": "vless", "tag": "vless-in", "listen": "0.0.0.0", "listen_port": %[2]d,
+     "users": [],
+     "tls": {"enabled": true, "server_name": %[1]q,
+             "reality": {"enabled": true, "private_key": "", "short_id": [],
+                         "handshake": {"server": %[1]q, "server_port": 443}}}}`,
+			coverSNI, relayports.For("vless-reality").Port))
+	}
+	if served["hysteria2"] {
+		inbounds = append(inbounds, fmt.Sprintf(`    {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": %d,
+     "users": [],
+     "tls": {"enabled": true,
+             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}`,
+			relayports.For("hysteria2").Port))
+	}
+	if served["tuic"] {
 		// alpn IS REQUIRED, and its absence is not a degradation.
 		// sing-quic defaults hysteria2's NextProtos to "h3" when the
 		// config omits it; its tuic service does not, and quic-go
@@ -180,30 +218,22 @@ func SingBoxConfigForFamilies(coverSNI string, families []string) string {
 		// congestion_control must also match the client's ("bbr"): a
 		// mismatch does not fail, it stalls, which is harder to
 		// diagnose than a refusal.
-		extra = fmt.Sprintf(`,
-    {"type": "tuic", "tag": "tuic-in", "listen": "0.0.0.0", "listen_port": %d,
+		inbounds = append(inbounds, fmt.Sprintf(`    {"type": "tuic", "tag": "tuic-in", "listen": "0.0.0.0", "listen_port": %d,
      "users": [],
      "congestion_control": "bbr",
      "tls": {"enabled": true, "alpn": ["h3"],
-             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}`, ep.Port)
-		break
+             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}`,
+			relayports.For("tuic").Port))
 	}
-	// %[1]q, twice: one value, two required sites.
+	body := ""
+	if len(inbounds) > 0 {
+		body = "\n" + strings.Join(inbounds, ",\n") + "\n  "
+	}
 	return fmt.Sprintf(`{
   "log": {"level": "info"},
-  "inbounds": [
-    {"type": "vless", "tag": "vless-in", "listen": "0.0.0.0", "listen_port": 443,
-     "users": [],
-     "tls": {"enabled": true, "server_name": %[1]q,
-             "reality": {"enabled": true, "private_key": "", "short_id": [],
-                         "handshake": {"server": %[1]q, "server_port": 443}}}},
-    {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 443,
-     "users": [],
-     "tls": {"enabled": true,
-             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}%[2]s
-  ],
+  "inbounds": [%s],
   "outbounds": [{"type": "direct"}]
-}`, coverSNI, extra)
+}`, body)
 }
 
 // DefaultPortForFamily is the relayports lookup, re-exported so

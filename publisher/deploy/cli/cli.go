@@ -288,7 +288,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	serverType := fs.String("server-type", "cx22", "server type (e.g. cx22)")
 	toolboxProfile := fs.String("toolbox-profile", "iran-default", "toolbox profile (V1.5: iran-default)")
 	toolboxAlias := fs.String("toolbox", "", "alias for --toolbox-profile")
-	families := fs.String("families", "", "comma-separated enabled transport families; empty uses profile defaults")
+	families := fs.String("families", "", "comma-separated transport families this relay serves; REPLACES the toolbox profile's defaults (it is not added to them), and every name must be one the profile offers. Empty uses the profile's defaults")
 	helperIP := fs.String("helper-ip", "", "Helper machine's public IPv4 (for ufw allowlist)")
 	mgmtPort := fs.Int("mgmt-port", 0, "V2 mgmt-plane port in [10000,65000]; 0 generates a random per-deploy port")
 	// Wave 2: the per-relay REALITY cover host. Empty is the normal
@@ -339,6 +339,27 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 
+	// --families is checked HERE, before a key is generated or a
+	// provider is built: a misspelt or unoffered family is an error
+	// naming the bad value and the valid set, and a list that drops the
+	// profile's defaults is said out loud. See cli_families.go for why
+	// this is in front of the provider's intersection rather than in it.
+	enabledFamilies := splitCSV(*families)
+	if familyValidationApplies(*providerName) {
+		plan, err := resolveFamilies(*toolboxProfile, enabledFamilies)
+		if err != nil {
+			emitProgress(*progressJSON, stderr, "provision_error", err.Error(), nil)
+			fmt.Fprintf(stderr, "provision: %v\n", err)
+			return 2
+		}
+		if plan != nil {
+			if plan.Explicit {
+				enabledFamilies = plan.Requested
+			}
+			plan.announce(*progressJSON, stderr)
+		}
+	}
+
 	var ephem ed25519.PrivateKey
 	if !*dryRun {
 		_, ephem, err = ed25519.GenerateKey(nil)
@@ -362,7 +383,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		Region:            *region,
 		ServerType:        *serverType,
 		ToolboxProfile:    *toolboxProfile,
-		EnabledFamilies:   splitCSV(*families),
+		EnabledFamilies:   enabledFamilies,
 		HelperIP:          hip,
 		MgmtPort:          *mgmtPort,
 		CoverSNI:          *coverSNI,
@@ -458,6 +479,18 @@ func runReprovision(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err := p.Reprovision(ctx, rec, opts); err != nil {
 		fmt.Fprintf(stderr, "reprovision: %v\n", err)
 		return 1
+	}
+	// A profile change can only take families away (the record's set is
+	// intersected with what the new profile offers). The provider has
+	// already refused an EMPTY result before deleting anything; what is
+	// left is made explicit here — in the record the caller rebuilds
+	// from, and on stderr — because `provision --families` no longer
+	// drops an unoffered family in silence. See cli_families.go.
+	if familyValidationApplies(rec.Provider) {
+		if dropped := narrowRecordToProfile(rec, *newToolboxProfile); len(dropped) > 0 {
+			fmt.Fprintf(stderr, "reprovision: toolbox profile %q does not offer %s; the rebuilt relay will not serve %s\n",
+				*newToolboxProfile, strings.Join(dropped, ", "), strings.Join(dropped, ", "))
+		}
 	}
 	return emitRecord(rec, *recordFile, stdout, stderr)
 }
@@ -2202,6 +2235,16 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		"RETIRED — use --freshness-mirror provider=url (repeat); a single freshness host is not a supported pack shape")
 	revocationURL := fs.String("revocation-url", "", "publisher revocation list URL (https://); requires --revocation-pub-hex")
 	revocationPubHex := fs.String("revocation-pub-hex", "", "revocation list SIGNING public key, 64 hex chars (not a fingerprint)")
+	// The signed manifest commits every route to WHERE it points and
+	// WHAT proves the relay is the relay (specs/relaypack-v1.md
+	// "Endpoint commitment"). The record supplies the address, the
+	// ports, the cover host and — when provisioning read them — the
+	// REALITY key and TLS pin. This flag supplies the rest from the
+	// relay itself: any `users-provision` (or `rotate-credentials`)
+	// reply carries the relay-wide material, and only those fields of
+	// it are read. No recipient secret reaches the pack from here.
+	endpointCreds := fs.String("endpoint-creds", "",
+		"a users-provision reply for THIS relay; its relay-wide fields (REALITY key, TLS pin, cover host, shadowsocks server key) complete the signed endpoints")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
@@ -2280,7 +2323,26 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		now = time.Unix(*nowUnix, 0).UTC()
 	}
 
+	var endpoint *relaypack.EndpointMaterial
+	if *endpointCreds != "" {
+		server := ""
+		if rec.PublicIP != nil {
+			server = rec.PublicIP.String()
+		}
+		// The record's cover host is deliberately NOT passed as the
+		// fallback here: Overlay lets the record win outright, so the
+		// reply's own value must arrive unmerged.
+		params, err := clientParamsFromCredsFile(*endpointCreds, server, "")
+		if err != nil {
+			fmt.Fprintf(stderr, "bind-and-sign: --endpoint-creds: %v\n", err)
+			return 2
+		}
+		m := relaypack.EndpointMaterialFromParams(params)
+		endpoint = &m
+	}
+
 	res, err := relaypack.BindAndSign(rec, priv, relaypack.BindOpts{
+		Endpoint:             endpoint,
 		Now:                  now,
 		Expiry:               time.Duration(*expiryDays) * 24 * time.Hour,
 		Phase:                ph,
@@ -2297,6 +2359,20 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 
 	emitProgress(*progressJSON, stderr, "bind_sign", "signing bundle", nil)
+
+	// A route signed without an endpoint is a route no recipient will
+	// ever connect on. Exit status stays 0 — the other routes are good
+	// — so this line is the operator's only notice. STDERR: stdout is
+	// the JSON the wizard parses.
+	uncommitted := []string{}
+	seenUncommitted := map[string]bool{}
+	for _, u := range res.Uncommitted {
+		fmt.Fprintf(stderr, "bind-and-sign: warning: %s\n", relaypack.UncommittedWarning(u))
+		if !seenUncommitted[u.Family] {
+			seenUncommitted[u.Family] = true
+			uncommitted = append(uncommitted, u.Family)
+		}
+	}
 
 	if err := os.WriteFile(*outFile, res.SBPBytes, 0o600); err != nil {
 		fmt.Fprintf(stderr, "write output: %v\n", err)
@@ -2317,6 +2393,9 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		"fingerprint_fa":    res.FingerprintFA,
 		"lint_warnings":     res.LintReport.Warnings,
 		"shared_risk_edges": len(res.SharedRiskGraph),
+		// Always present, possibly empty: the families whose route was
+		// signed without an endpoint and therefore cannot be used.
+		"uncommitted_families": uncommitted,
 	}
 	body, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {

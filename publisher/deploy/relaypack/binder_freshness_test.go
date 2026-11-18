@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -19,11 +20,12 @@ import (
 
 func freshnessRecord(pub ed25519.PublicKey) *provider.OperatorRecord {
 	return &provider.OperatorRecord{
-		Provider:        "hetzner",
-		ServerID:        "12345",
-		ServerType:      "cx22",
-		Region:          "fsn1",
-		ToolboxProfile:  "iran-default",
+		Provider:       "hetzner",
+		ServerID:       "12345",
+		ServerType:     "cx22",
+		Region:         "fsn1",
+		ToolboxProfile: "iran-default",
+		PublicIP:       net.ParseIP("5.75.0.1"), RealityPublicKey: fixtureRealityPub, TLSCertSHA256: fixtureTLSPin,
 		PublisherPubKey: pub,
 		Candidates: []provider.CandidateMeta{
 			{

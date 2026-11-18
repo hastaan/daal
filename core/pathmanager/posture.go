@@ -108,6 +108,11 @@ var LegalTransitions = []PostureTransition{
 	// From Recovery
 	{PostureRecovery, EventRecoverySelected, PostureImportedActive},
 	{PostureRecovery, EventRecoverySelected, PostureSharedActive},
+	// A route that failed its connection proof leaves the posture at
+	// Recovery; the next route the user picks may be an experimental-
+	// family one. Without this edge that connect succeeded while the
+	// posture stayed Recovery and `why` read "illegal transition".
+	{PostureRecovery, EventExperimentalSelected, PostureExperimental},
 	{PostureRecovery, EventActiveFailed, PostureNoRoute},
 	{PostureRecovery, EventDisconnected, PostureNoRoute},
 

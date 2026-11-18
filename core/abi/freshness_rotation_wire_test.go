@@ -25,13 +25,21 @@ package abi
 // tested against a document it minted itself, with an id it chose. The
 // seam is the only place the bug exists.
 //
-// So the fixtures here are REAL OUTPUT of the real publisher path:
+// So the fixtures here are REAL OUTPUT of the real publisher path
+// (testdata/mint-freshness-fixtures.sh runs exactly this):
 //
-//	# the pre-rotation pack (same one freshness_wire_test.go uses)
-//	daal-deploy bind-and-sign --operator-record rec.json ... -o fixture.sbp
+//	# the pre-rotation pack a RECIPIENT holds (same one
+//	# freshness_wire_test.go uses): signed, then one recipient's
+//	# credentials rewritten in
+//	daal-deploy bind-and-sign --operator-record rec.json ... -o signed.sbp
+//	daal-deploy users-pack-sbp --in signed.sbp --creds-file creds.json ... -o fixture.sbp
 //
 //	# an L3: only public_ip and the candidates' public_ip:* tags move,
-//	# exactly what hetzner.adoptPublicIP does to the record
+//	# exactly what provider.AdoptPublicIP does to the record. This is
+//	# the SIGNED, CREDENTIAL-LESS pack — the file a publisher puts on
+//	# the freshness mirrors. It holds nobody's credentials, and it does
+//	# not need to: the device merges its signed endpoint into the
+//	# credentials it already has.
 //	daal-deploy bind-and-sign --operator-record rec-rotated.json ... -o fixture-rotated.sbp
 //
 //	daal-deploy publish-freshness --relay-pack-id <old> ... -o freshness-doc-current.json
@@ -64,12 +72,17 @@ const (
 	docForeign         = "testdata/freshness-doc-foreign.json"
 
 	// The publisher key the fixtures were minted under.
-	fixturePubHex = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+	fixturePubHex = "89542b941e6277765ebc09728ca3b94c790a1d03028b39c9a74a8df24f4aff7d"
 
 	// The two pack ids the real binder produced. They differ, and only
 	// the dialled address differs between the two records.
-	fixturePackID        = "rp-ce01b099781cc3509d2662a838448fd7"
-	fixtureRotatedPackID = "rp-6a416c7fde2f4a8fdd38b97dac7cd742"
+	fixturePackID        = "rp-aa9770a424a0d29f4f1f0620f3753503"
+	fixtureRotatedPackID = "rp-1b23d36a5d05b954d9a3c680994894bd"
+
+	// The address the rotated record moved to, and the credential the
+	// recipient's pre-rotation pack carries.
+	fixtureRotatedServer = "203.0.113.201"
+	fixtureRecipientUUID = "11111111-2222-3333-4444-555555555555"
 )
 
 // fixtureNow sits inside every fixture's not_after window (the
@@ -335,6 +348,52 @@ func TestRotationHealsAnImportedPackOverTheNetwork(t *testing.T) {
 	if !res.Applied {
 		t.Fatalf("the rotated pack was not applied: outcome=%s verdict=%s changed=%v",
 			res.Outcome, res.Verdict, res.Changed)
+	}
+
+	// THE MERGE. What was fetched is the publisher's
+	// signed skeleton: it carries no credentials at all. Applying it
+	// must leave every route CONNECTABLE — the device's own credential,
+	// the new signed address — and must not have replaced a single
+	// working profile with one that holds no outbound.
+	if res.Verdict != "imported" {
+		t.Fatalf("verdict = %q", res.Verdict)
+	}
+	c := mustCore()
+	rows, err := c.store.ListRoutes()
+	if err != nil || len(rows) == 0 {
+		t.Fatalf("routes after the rotation: %v %v", rows, err)
+	}
+	sawVLESS := false
+	for _, row := range rows {
+		profile, err := c.store.GetSecret("route:" + row.RouteID)
+		if err != nil {
+			t.Fatalf("route %s: no profile after the rotation: %v", row.RouteID, err)
+		}
+		var ob map[string]any
+		if err := json.Unmarshal(profile, &ob); err != nil {
+			t.Fatal(err)
+		}
+		if typ, _ := ob["type"].(string); typ == "" {
+			t.Fatalf("route %s (%s): the freshness swap left a profile with NO outbound — "+
+				"a working route was replaced by the credential-less skeleton: %s", row.RouteID, row.TransportFamily, profile)
+		}
+		if ob["server"] != fixtureRotatedServer {
+			t.Fatalf("route %s: still dials %v after the address moved to %s", row.RouteID, ob["server"], fixtureRotatedServer)
+		}
+		if row.TransportFamily == "vless-reality" {
+			sawVLESS = true
+			if ob["uuid"] != fixtureRecipientUUID {
+				t.Fatalf("route %s: the device's credential was not kept: uuid=%v", row.RouteID, ob["uuid"])
+			}
+		}
+		// And the engine's own last gate agrees: the merged outbound
+		// matches the endpoint the publisher signed.
+		if err := routeEndpointGuard(c.store, row, profile); err != nil {
+			t.Fatalf("route %s: %v", row.RouteID, err)
+		}
+	}
+	if !sawVLESS {
+		t.Fatal("fixture has no vless-reality route")
 	}
 
 	// The device is now on the rotated pack, keyed by its NEW id.

@@ -54,8 +54,17 @@ package cloudinit
 //     the route works exactly as before — it just gets none of the
 //     benefit until the artefact ships.
 //
+//   - OPT-IN FAMILIES (Wave 5: shadowsocks, anytls, tuic). OPEN — the
+//     pin below predates them (finding F-002). Unlike multiplex this
+//     does NOT fail safe on its own: the operator-facing half (the
+//     wizard's "More ways to connect", `provision --families`) lives on
+//     the publisher's side and would offer them regardless. It is held
+//     shut by PinnedMgmtServesOptInFamilies, below the manifests.
+//
 // When re-releasing, bump BOTH Sha256 and SigHex for
-// daal-relay-mgmt-*, and re-run the provisioner-vs-client cross-check
+// daal-relay-mgmt-*, flip PinnedMgmtServesOptInFamilies (and its TS
+// mirror) in the same commit, and re-run the provisioner-vs-client
+// cross-check
 // (publisher/deploy/providers/hetzner/cover_sni_singbox_test.go).
 
 // Artifact is one pinned binary the box fetches and installs.
@@ -133,6 +142,73 @@ var V2Artifacts = ArtifactManifest{
 			},
 		},
 	},
+}
+
+// PinnedMgmtServesOptInFamilies says whether the daal-relay-mgmt pinned
+// in V2Artifacts above — the ONLY mgmt daemon an app- or CLI-provisioned
+// relay ever downloads — serves the opt-in families in
+// OptInFamiliesOfMgmt (finding F-002).
+//
+// It is false today. The pinned 0.1.0 artefact (Sha256 e8cb16e8…) was
+// built before those families landed in cmd/daal-relay-mgmt: it creates
+// no `ss-in` / `anytls-in`, returns no `ss_password` / `anytls_password`
+// / `tuic_uuid`, and so a relay asked for one of them gets no such
+// route in any connection file — while a signed manifest that names
+// anytls still stamps the file spec_version 5, which older apps refuse
+// whole. All of the cost, none of the benefit.
+//
+// Everything that OFFERS these families to an operator reads this one
+// constant instead of promising them:
+//
+//   - the build wizard's "More ways to connect" switches are shown but
+//     cannot be ticked, with the reason (client-ui/src/publisher
+//     /extraFamilies.ts mirrors this value; tools/check-toolbox-profiles
+//     .mjs and extraFamilies.test.tsx fail when the two disagree);
+//   - `daal-deploy provision --families …` says "will be ASKED to
+//     serve" and names what the release cannot serve yet
+//     (publisher/deploy/cli/cli_families.go).
+//
+// FLIP IT TO true IN THE SAME COMMIT THAT BUMPS Sha256/SigHex of
+// daal-relay-mgmt-* to an artefact built from a tree that has
+// cmd/daal-relay-mgmt/families.go, and set the TS mirror with it.
+// TestPinnedMgmtOptInGateMatchesThePin fails on a bump that forgets to,
+// and on a flip without a bump. The acceptance test for the flip is the
+// rig world `release.all-families` (`./run.sh clean`, pinned) going
+// green.
+const PinnedMgmtServesOptInFamilies = false
+
+// mgmtPinBeforeOptInFamilies is the SHA-256 of the last released
+// daal-relay-mgmt that predates the opt-in families. While the pin
+// equals it, PinnedMgmtServesOptInFamilies must be false.
+const mgmtPinBeforeOptInFamilies = "e8cb16e8ef021dd60d5d7aee60bd4b93e495e571d3d514a0b75c0695765df66b"
+
+// OptInFamiliesOfMgmt are the families whose relay half lives in
+// daal-relay-mgmt and landed after the artefact named by
+// mgmtPinBeforeOptInFamilies. In serving order of iran-default.
+var OptInFamiliesOfMgmt = []string{"shadowsocks", "anytls", "tuic"}
+
+// NotServedByPinnedMgmt returns, in the order given, the families of
+// the list that a relay provisioned from this build would be asked to
+// serve but whose pinned mgmt daemon cannot. Nil when the pin serves
+// everything asked.
+func NotServedByPinnedMgmt(families []string) []string {
+	return notServedBy(PinnedMgmtServesOptInFamilies, families)
+}
+
+func notServedBy(servesOptIn bool, families []string) []string {
+	if servesOptIn {
+		return nil
+	}
+	var out []string
+	for _, f := range families {
+		for _, o := range OptInFamiliesOfMgmt {
+			if f == o {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // DaalReleasePubKeyPEM is the Ed25519 public key the verifier shim

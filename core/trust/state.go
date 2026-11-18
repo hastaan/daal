@@ -55,6 +55,91 @@ func FreshnessMirrorsKey(relayPackID string) string {
 	return "freshness-mirrors:" + relayPackID
 }
 
+// RouteEndpointKey is the secrets_kv key holding one route's SIGNED
+// endpoint commitment (bundle.Endpoint JSON), written by SaveImport
+// from a manifest whose signature the importer has just verified.
+//
+// The profile beside it ("route:<id>") is the outbound the engine
+// dials, and nothing signs those bytes. The commitment is what the
+// outbound is held to: at import (bundle/go/importer planRoutes) and
+// again at set-route (core/abi), so no path that writes a profile can
+// make the engine dial somewhere the publisher did not sign.
+func RouteEndpointKey(routeID string) string { return "endpoint:" + routeID }
+
+// RouteEndpointSignedAtKey is the secrets_kv key holding the signed
+// manifest's bundle.created_at for the manifest that route's endpoint
+// commitment came from. It is written and deleted together with
+// RouteEndpointKey, and read back by DeviceRoute so the importer can
+// refuse to merge a signed skeleton that is OLDER than what the route
+// holds (bundle/go/importer planRoutes, rule 4): the skeleton is public
+// and an in-place key rotation keeps the pack id, so without this an
+// old file would silently return a phone to a burned relay key.
+func RouteEndpointSignedAtKey(routeID string) string { return "endpoint-signed-at:" + routeID }
+
+// DeviceRoute implements importer.DeviceRoutes: what this device
+// already holds for a route id, so the importer can apply a NEW signed
+// endpoint to credentials that are already here instead of replacing a
+// working profile with a credential-less one.
+func (a *StoreAdapter) DeviceRoute(routeID string) (importer.DeviceRoute, bool, error) {
+	row, err := a.S.GetRoute(routeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return importer.DeviceRoute{}, false, nil
+	}
+	if err != nil {
+		return importer.DeviceRoute{}, false, err
+	}
+	// A revoked or expired route is not something to carry forward.
+	if row.TrustState == "revoked" || row.TrustState == "expired" {
+		return importer.DeviceRoute{}, false, nil
+	}
+	profile, err := a.S.GetSecret("route:" + routeID)
+	if err != nil {
+		// No readable profile is "nothing to merge", not a failed import.
+		return importer.DeviceRoute{}, false, nil
+	}
+	// Absent (a route stored before these were kept) is not an error:
+	// the importer then declines file-path merges into this route.
+	endpoint, _ := a.S.GetSecret(RouteEndpointKey(routeID))
+	signedAt, _ := a.S.GetSecret(RouteEndpointSignedAtKey(routeID))
+	return importer.DeviceRoute{
+		PublisherFingerprint: row.PublisherID,
+		RelayPackID:          row.RelayPackID,
+		TransportFamily:      row.TransportFamily,
+		Profile:              profile,
+		Endpoint:             endpoint,
+		SignedAt:             string(signedAt),
+	}, true, nil
+}
+
+// RouteCommitted implements importer.CommittedRoutes: does this device
+// hold a route under that id that is bound to a signed endpoint, or
+// that belongs to a RelayPack? Asked of the row in ANY trust state — an
+// expired or revoked committed route is still not one an
+// unauthenticated route may take the place of. A commitment that is
+// present but unreadable counts as present (fail closed). A commitment
+// left behind by a route the user has since removed does not: there is
+// no route for it to protect.
+func (a *StoreAdapter) RouteCommitted(routeID string) (bool, error) {
+	row, err := a.S.GetRoute(routeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if row.RelayPackID != "" {
+		return true, nil
+	}
+	raw, err := a.S.GetSecret(RouteEndpointKey(routeID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return true, nil
+	}
+	return len(raw) > 0, nil
+}
+
 // LookupPublisher implements importer.State.
 func (a *StoreAdapter) LookupPublisher(fingerprint string) (importer.Pin, bool, error) {
 	row, err := a.S.GetPublisher(fingerprint)
@@ -82,6 +167,25 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 		}
 		if err := a.rejectDisallowedModifiers(r.RelayPack.ModifiersJSON); err != nil {
 			return fmt.Errorf("modifier platform gate route %s: %w", r.RouteID, err)
+		}
+	}
+	// A commitment is sticky (bundle/go/importer endpoint_plan.go,
+	// rule 5). The importer refuses this before it gets here; the store
+	// holds the line itself, BEFORE writing anything, so that no other
+	// caller and no State wrapper can overwrite a route that is checked
+	// against its publisher's signature with one that is not — which
+	// would also blank relay_pack_id and drop the stored commitment,
+	// the two things core/abi routeEndpointGuard keys on.
+	for _, r := range routes {
+		if len(r.Endpoint) > 0 {
+			continue
+		}
+		held, err := a.RouteCommitted(r.RouteID)
+		if err != nil {
+			return fmt.Errorf("save route %s: %w", r.RouteID, err)
+		}
+		if held {
+			return fmt.Errorf("save route %s: %w", r.RouteID, importer.ErrEndpointDowngrade)
 		}
 	}
 
@@ -178,6 +282,34 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 			if err := a.S.PutSecret("route:"+r.RouteID, r.Profile); err != nil {
 				return fmt.Errorf("save profile %s: %w", r.RouteID, err)
 			}
+		}
+		// The signed endpoint travels with the profile it bounds. A
+		// failure to store it FAILS the import: a RelayPack route with
+		// no stored commitment is one the engine refuses to dial
+		// (core/abi routeEndpointGuard), so carrying on would list a
+		// route that cannot be activated. A route that is not part of
+		// a RelayPack has none; the only commitment that can still be
+		// under its id here is one left behind by a route the user has
+		// since removed (a route that still exists and is committed
+		// was refused at the top of this function), and that one must
+		// not stay behind to veto the new route.
+		if len(r.Endpoint) > 0 {
+			if err := a.S.PutSecret(RouteEndpointKey(r.RouteID), r.Endpoint); err != nil {
+				return fmt.Errorf("save endpoint %s: %w", r.RouteID, err)
+			}
+			// When that endpoint was signed. Written on every save so
+			// it always describes the commitment beside it; a failure
+			// fails the import for the same reason as above, and
+			// because a commitment with a stale date would let an older
+			// signed skeleton be merged over it.
+			if r.SignedAt == "" {
+				_ = a.S.DeleteSecret(RouteEndpointSignedAtKey(r.RouteID))
+			} else if err := a.S.PutSecret(RouteEndpointSignedAtKey(r.RouteID), []byte(r.SignedAt)); err != nil {
+				return fmt.Errorf("save endpoint date %s: %w", r.RouteID, err)
+			}
+		} else {
+			_ = a.S.DeleteSecret(RouteEndpointKey(r.RouteID))
+			_ = a.S.DeleteSecret(RouteEndpointSignedAtKey(r.RouteID))
 		}
 	}
 	return nil

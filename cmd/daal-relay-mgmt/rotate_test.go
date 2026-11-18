@@ -83,7 +83,6 @@ func threeRecipientServer(t *testing.T) (*server, ed25519.PrivateKey, string) {
 	}
 	srv := newServer(pub, configPath)
 	srv.singboxControl = func(string) error { return nil }
-	srv.singboxKick = func() error { return nil }
 	srv.singboxCheck = func(string) error { return nil }
 	srv.realityPubPath = filepath.Join(tmp, "reality.pub")
 	srv.tlsCertPath = filepath.Join(tmp, "tls-cert.pem")
@@ -641,5 +640,27 @@ func TestMutatingEndpointsSerializeOnTheConfig(t *testing.T) {
 	}
 	if docContainsString(after, "22222222-2222-4222-8222-222222222222") {
 		t.Error("r2's retired UUID is still live: the rotation was discarded by a concurrent write, but the publisher has already recorded it as a completed revocation")
+	}
+}
+
+// INT-O1: a credential rotation is ONE reload of the data plane, and a
+// rotation whose reload fails is exactly two (the failed one, and the one
+// that re-activates the restored config) — never a third from a separate
+// "kick".
+func TestRotateCreds_ReloadsExactlyOnce(t *testing.T) {
+	srv, priv, _ := threeRecipientServer(t)
+	reloads := 0
+	srv.singboxControl = func(action string) error {
+		if action == "reload" {
+			reloads++
+		}
+		return nil
+	}
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	rotateCreds(t, ts, priv, `{"name":"r2"}`, 200)
+	if reloads != 1 {
+		t.Fatalf("rotate-credentials cost %d reloads of sing-box, want exactly 1", reloads)
 	}
 }

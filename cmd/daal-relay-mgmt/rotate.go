@@ -138,6 +138,13 @@ func rotateRecipientCreds(doc map[string]any, name string, fresh userCreds) (*cr
 	// addUserToSingbox's effectiveWSPath return exists for.
 	res.Creds.WSPath = wsInboundPath(doc)
 	res.Creds.RealityShortID = ""
+	// The four older families follow the same blank-first rule as the
+	// Wave-5 ones below: a credential is echoed only by the case that
+	// really rewrote a row for it. They were echoed unconditionally while
+	// every relay served all four; on a relay provisioned without
+	// hysteria2, say, that is a fresh hy2 password no inbound will ever
+	// check, returned as if it were live.
+	res.Creds.VLESSUUID, res.Creds.Hy2Password, res.Creds.NaivePassword = "", "", ""
 	// Same fail-closed contract as /users/provision: the tuic pair is
 	// echoed only if this box really rotated a tuic row. A relay whose
 	// profile did not enable the family must not hand back credentials
@@ -192,6 +199,7 @@ func rotateRecipientCreds(doc map[string]any, name string, fresh userCreds) (*cr
 				res.retire(old)
 				u["uuid"] = fresh.VLESSUUID
 			}
+			res.Creds.VLESSUUID = fresh.VLESSUUID
 			if sid, warn := rotateShortIDs(in, idxs, len(users), fresh.RealityShortID); warn != "" {
 				res.Warnings = append(res.Warnings, warn)
 				res.Creds.RealityShortID = sid
@@ -210,6 +218,7 @@ func rotateRecipientCreds(doc map[string]any, name string, fresh userCreds) (*cr
 				res.retire(old)
 				u["password"] = fresh.Hy2Password
 			}
+			res.Creds.Hy2Password = fresh.Hy2Password
 			res.Inbounds = append(res.Inbounds, tag)
 		case "tuic":
 			idxs := matchUserRows(users, "name", name)
@@ -290,6 +299,7 @@ func rotateRecipientCreds(doc map[string]any, name string, fresh userCreds) (*cr
 				res.retire(old)
 				u["password"] = fresh.NaivePassword
 			}
+			res.Creds.NaivePassword = fresh.NaivePassword
 			res.Inbounds = append(res.Inbounds, tag)
 		}
 	}

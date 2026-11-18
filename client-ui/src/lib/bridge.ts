@@ -173,6 +173,19 @@ export interface DiagnosticsBlob {
     // nothing here — and `undefined` must be read as "unknown", never
     // as "none", or every stale engine gets accused of being a stub.
     data_plane?: 'singbox' | 'none' | string;
+    // The connection check (core/abi/route_check.go): '' (no route),
+    // 'verifying' (the engine started and has NOT yet proved the route
+    // carries traffic — never show this as connected), 'ok', 'degraded'
+    // (proved, but slow) or 'failed'. `route_check_category` is the
+    // failure-taxonomy category behind 'failed' / 'degraded'. Optional:
+    // an older engine emits neither. Read through lib/routeCheck.ts.
+    route_check?: string;
+    route_check_category?: string;
+    // True exactly while an engine instance for a route is up. Tells
+    // the two 'failed' apart: false = the connect failed and nothing
+    // will retry; true = a connected route stopped carrying and is
+    // being re-checked. Optional: an older engine emits nothing.
+    route_running?: boolean;
 }
 
 // Phase 2D: PIN-vault unlock outcome.

@@ -30,6 +30,8 @@
 //   - L4 or L6 dropping out of `alwaysDestroys`, which is what makes
 //     the mirrored figure equal to WallClockFor's answer
 //   - the two i18n catalog copies differing
+//   - the wizard's opt-in family gate disagreeing with the constant next
+//     to the daal-relay-mgmt pin
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -286,6 +288,30 @@ for (const f of ['d2-extra.en.json', 'd2-extra.fa.json']) {
 }
 
 // ---- report --------------------------------------------------------
+
+// ---- 5. The opt-in family gate -------------------------------------
+//
+// "More ways to connect" offers families whose relay half is the pinned
+// daal-relay-mgmt artefact. Whether that artefact serves them is ONE Go
+// constant next to the pin; the wizard mirrors it. A mirror left at
+// `true` while the pin is stale offers switches that open a door with
+// nothing behind it (worldbox F-002); one left at `false` after the
+// release hides a working feature.
+{
+    const goSrc = read(join(ROOT, 'publisher/deploy/cloudinit/artifacts.go'));
+    const tsSrc = read(join(ROOT, 'client-ui/src/publisher/extraFamilies.ts'));
+    const go = /^const PinnedMgmtServesOptInFamilies = (true|false)$/m.exec(goSrc);
+    const tsv = /^export const RELEASED_RELAY_SERVES_EXTRA_FAMILIES = (true|false);$/m.exec(tsSrc);
+    must('artifacts.go PinnedMgmtServesOptInFamilies', go ? 1 : 0, 1);
+    must('extraFamilies.ts RELEASED_RELAY_SERVES_EXTRA_FAMILIES', tsv ? 1 : 0, 1);
+    if (go[1] !== tsv[1]) {
+        fail(
+            `the opt-in family gate differs: go PinnedMgmtServesOptInFamilies=${go[1]}, ` +
+                `ts RELEASED_RELAY_SERVES_EXTRA_FAMILIES=${tsv[1]}.\n` +
+                `  The wizard would ${tsv[1] === 'true' ? 'offer families the pinned relay release cannot serve' : 'hide families the pinned relay release serves'}.`,
+        );
+    }
+}
 
 if (fails.length) {
     console.error('[check-toolbox-profiles] FAIL');

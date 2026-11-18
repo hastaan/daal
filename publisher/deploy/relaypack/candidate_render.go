@@ -18,6 +18,10 @@ type renderedCandidates struct {
 	entries  []bundle.RelayPackEntry
 	profiles map[string][]byte
 	ids      []string // parallel id slice for risk-graph builder
+
+	// uncommitted lists the routes that were rendered WITHOUT a signed
+	// endpoint, with the reason. See endpointFor.
+	uncommitted []SkippedRoute
 }
 
 // renderCandidates folds an OperatorRecord's CandidateMeta slice
@@ -37,7 +41,7 @@ type renderedCandidates struct {
 // hyphen ("amnezia-wg") for human readability but the bundle's
 // TransportFamily enum uses the wire-form "amneziawg". This is the
 // only normalisation step.
-func renderCandidates(rec *provider.OperatorRecord, validFromRFC3339, validUntilRFC3339 string) (*renderedCandidates, error) {
+func renderCandidates(rec *provider.OperatorRecord, material EndpointMaterial, validFromRFC3339, validUntilRFC3339 string) (*renderedCandidates, error) {
 	if rec == nil {
 		return nil, fmt.Errorf("nil OperatorRecord")
 	}
@@ -82,6 +86,18 @@ func renderCandidates(rec *provider.OperatorRecord, validFromRFC3339, validUntil
 		// re-parsing the candidate; selector ignores unknown keys.
 		fc["port"] = c.Port
 		fc["_relaypack"] = entry
+
+		// The signed endpoint commitment (bundle.Endpoint). It lives in
+		// the route's family_specific_config, which is part of the
+		// signed manifest — and deliberately NOT in the profile below,
+		// which is rewritten per recipient after signing and is covered
+		// by nothing.
+		ep, why := endpointFor(family, c.Port, material)
+		if ep != nil {
+			fc[bundle.EndpointKey] = ep
+		} else {
+			out.uncommitted = append(out.uncommitted, SkippedRoute{RouteID: id, Family: family, Reason: why})
+		}
 
 		// FRP-8: cdn_fronted candidates carry their §11.7 hardening
 		// attestation under the reserved `_cdn_attestation` key.

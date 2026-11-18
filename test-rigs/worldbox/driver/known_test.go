@@ -71,32 +71,50 @@ func TestJudge(t *testing.T) {
 	if v.OK() {
 		t.Fatalf("F-002 must not excuse a default family: %+v", v)
 	}
-	// CEN-1: only where the scenario declares a failure category.
-	v = Judge(ks, []Check{chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "none")})
-	if !v.OK() || v.Known["CEN-1"] != 1 {
-		t.Fatalf("CEN-1: %+v", v)
+	// CEN-4: the engine names the coarser thing one route can see — and
+	// only that is excused.
+	v = Judge(ks, []Check{chk("relay-ip-block", BoxTree, "family", "hysteria2", "engine.category", "udp_address_blocked", "udp_no_reply")})
+	if !v.OK() || v.Known["CEN-4"] != 1 {
+		t.Fatalf("CEN-4: %+v", v)
 	}
-	v = Judge(ks, []Check{chk("clean", BoxTree, "family", "naive", "engine.category", "none", "unknown")})
+	v = Judge(ks, []Check{chk("tcp-reset-mid-handshake", BoxTree, "family", "vless-reality", "engine.category", "tcp_reset", "tls_sni_or_cert_block_suspected")})
+	if !v.OK() || v.Known["CEN-4"] != 1 {
+		t.Fatalf("CEN-4 (reset after the ClientHello): %+v", v)
+	}
+	v = Judge(ks, []Check{chk("clean", BoxTree, "family", "hysteria2", "engine.category", "none", "udp_no_reply")})
 	if v.OK() {
-		t.Fatalf("an engine that reports a failure on a working route is not CEN-1: %+v", v)
+		t.Fatalf("an engine that reports a failure on a working route is not CEN-4: %+v", v)
 	}
-	// CEN-1 is "the engine reports NOTHING". An engine that reports the
-	// WRONG category (CEN-2 territory) is a different defect: unexpected,
-	// and — being red — not "CEN-1 did not reproduce" either.
+	// CEN-1, fixed, was "the engine reports NOTHING". If that comes back
+	// nothing in the file excuses it: unexpected, on TCP and on UDP.
+	for _, c := range []Check{
+		chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "none"),
+		chk("relay-ip-block", BoxTree, "family", "hysteria2", "engine.category", "udp_address_blocked", "none"),
+	} {
+		if v = Judge(ks, []Check{c}); v.OK() || len(v.Unexpected) != 1 || len(v.Known) != 0 {
+			t.Fatalf("an engine that says nothing about a blocked route (CEN-1, fixed) must be unexpected: %+v", v)
+		}
+	}
+	// A WRONG category is a different defect again: unexpected, and —
+	// being red — not "CEN-4 did not reproduce" either.
 	v = Judge(ks, []Check{chk("sni-rst", BoxTree, "family", "vless-reality", "engine.category", "tls_sni_or_cert_block_suspected", "tcp_reset")})
-	if v.OK() || len(v.Unexpected) != 1 || v.Known["CEN-1"] != 0 || len(v.Stale) != 0 {
-		t.Fatalf("a wrong, non-none category must be unexpected, not KNOWN [CEN-1]: %+v", v)
+	if v.OK() || len(v.Unexpected) != 1 || len(v.Known) != 0 || len(v.Stale) != 0 {
+		t.Fatalf("a wrong category must be unexpected, not KNOWN: %+v", v)
+	}
+	v = Judge(ks, []Check{chk("udp-blackhole", BoxTree, "family", "tuic", "engine.category", "udp_unavailable", "quic_unavailable")})
+	if v.OK() || v.Known["CEN-4"] != 0 {
+		t.Fatalf("a network-wide claim from one silent route is not what CEN-4 excuses: %+v", v)
 	}
 	// A finding whose checks ran and were all green did not reproduce:
 	// that fails the run until a human edits the list.
-	v = Judge(ks, []Check{chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "tcp_connect_timeout")})
-	if v.OK() || len(v.Stale) != 1 || v.Stale[0] != "CEN-1" {
+	v = Judge(ks, []Check{chk("relay-ip-block", BoxTree, "family", "hysteria2", "engine.category", "udp_address_blocked", "udp_address_blocked")})
+	if v.OK() || len(v.Stale) != 1 || v.Stale[0] != "CEN-4" {
 		t.Fatalf("a fixed finding must be reported as not reproducing: %+v", v)
 	}
 	// …but one green among reds is not "fixed".
 	v = Judge(ks, []Check{
-		chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "tcp_connect_timeout"),
-		chk("relay-ip-block", BoxTree, "family", "tuic", "engine.category", "unknown", "none"),
+		chk("relay-ip-block", BoxTree, "family", "hysteria2", "engine.category", "udp_address_blocked", "udp_address_blocked"),
+		chk("relay-ip-block", BoxTree, "family", "tuic", "engine.category", "udp_address_blocked", "udp_no_reply"),
 	})
 	if !v.OK() {
 		t.Fatalf("%+v", v)
@@ -105,6 +123,19 @@ func TestJudge(t *testing.T) {
 	// and is never required to show up.
 	crash := chk("clean", BoxTree, "op:l1", "naive", "before.engine.survived", Pass, Fail)
 	crash.Detail = "the engine process died mid-session: SIGSEGV: segmentation violation | github.com/sagernet/cronet-go/internal/cronet.BidirectionalStreamCancel"
+	// INT-1 (the Cronet cancel/destroy crash) is fixed and no longer in
+	// the file: with the real list, one engine death fails the run.
+	if v = Judge(ks, []Check{crash}); v.OK() || len(v.Unexpected) != 1 || len(v.Known) != 0 {
+		t.Fatalf("an engine crash in Cronet (INT-1, fixed) must be unexpected: %+v", v)
+	}
+	// The budget mechanism it motivated is still what INT-2 runs on, so
+	// the entry is rebuilt here, as it stood, to keep the mechanism
+	// tested on a tree box and with a quick budget.
+	ks = append(ks, KnownFinding{
+		ID: "INT-1", Severity: "high", Title: "naive: the engine dies with SIGSEGV in cronet-go's BidirectionalStream.Cancel",
+		Intermittent: true, Max: 6, MaxQuick: 2,
+		Match: []KnownMatch{{Phase: "*", Family: "naive", Check: "*engine.survived", DetailContains: "BidirectionalStreamCancel"}},
+	})
 	if v = Judge(ks, []Check{crash}); !v.OK() || v.Known["INT-1"] != 1 {
 		t.Fatalf("INT-1: %+v", v)
 	}
@@ -306,15 +337,15 @@ func TestReportExitStatus(t *testing.T) {
 	}
 	good := worldRun{Label: "clean", RC: "0", Checks: []Check{chk("clean", BoxTree, "family", "naive", "tunnel", Pass, Pass)}}
 	known := worldRun{Label: "relay-ip-block", RC: "0", Checks: []Check{
-		chk("relay-ip-block", BoxTree, "family", "naive", "tunnel", Blocked, Blocked),
-		chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "none")}}
+		chk("relay-ip-block", BoxTree, "family", "hysteria2", "tunnel", Blocked, Blocked),
+		chk("relay-ip-block", BoxTree, "family", "hysteria2", "engine.category", "udp_address_blocked", "udp_no_reply")}}
 	bad := worldRun{Label: "sni-rst", RC: "1", Checks: []Check{chk("sni-rst", BoxTree, "family", "naive", "tunnel", Pass, Blocked)}}
 	dead := worldRun{Label: "quic-drop", RC: "2", Broken: "run.sh exit \"2\""}
 	var buf bytes.Buffer
 	if rc := report(&buf, "t", ks, []worldRun{good, known}); rc != 0 {
 		t.Errorf("known findings only: exit %d, want 0\n%s", rc, buf.String())
 	}
-	if !strings.Contains(buf.String(), "~blocked:") && !strings.Contains(buf.String(), "CEN-1") {
+	if !strings.Contains(buf.String(), "~blocked:") && !strings.Contains(buf.String(), "CEN-4") {
 		t.Errorf("the report does not name the known finding:\n%s", buf.String())
 	}
 	if rc := report(&buf, "t", ks, []worldRun{good, bad}); rc != 1 {
@@ -403,46 +434,60 @@ func TestKnownEntriesArePinnedToTheirDefect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// F-004 is "a profile rewrite is accepted while a manifest rewrite is
-	// refused" (ops_tamper.go puts the control's outcome in the evidence).
+	// The mechanism, on the entry that first needed it. F-004 (fixed; no
+	// longer in the file) was "a profile rewrite is accepted while a
+	// manifest rewrite is refused": ops_tamper.go puts the control's
+	// outcome in the evidence, and the entry required it. The entry is
+	// rebuilt here so the mechanism stays tested after the finding that
+	// motivated it was closed.
+	pinned := append([]KnownFinding{{
+		ID: "F-004", Severity: "high", Title: "pack profiles are outside the signature",
+		Match: []KnownMatch{{Phase: "op:tamper", Check: "import_of_tampered_pack", Got: Pass,
+			Evidence: map[string]string{"rewritten": "profiles", "manifest_rewrite": Refused}}},
+	}}, ks...)
 	tamper := func(manifest string) Check {
 		c := chk("clean", BoxTree, "op:tamper", "", "import_of_tampered_pack", Refused, Pass)
 		c.Evidence = map[string]any{"rewritten": "profiles", "manifest_rewrite": manifest}
 		return c
 	}
-	if v := Judge(ks, []Check{tamper(Refused)}); !v.OK() || v.Known["F-004"] != 1 {
+	if v := Judge(pinned, []Check{tamper(Refused)}); !v.OK() || v.Known["F-004"] != 1 {
 		t.Fatalf("F-004: %+v", v)
 	}
 	// Signature verification lost: the manifest rewrite imports too. Same
 	// cell, same got — and not F-004.
-	if v := Judge(ks, []Check{tamper(Pass)}); v.OK() || v.Known["F-004"] != 0 || len(v.Unexpected) != 1 || len(v.Stale) != 0 {
+	if v := Judge(pinned, []Check{tamper(Pass)}); v.OK() || v.Known["F-004"] != 0 || len(v.Unexpected) != 1 || len(v.Stale) != 0 {
 		t.Fatalf("an import that accepts a tampered pack while the manifest control is NOT refused must be unexpected, not KNOWN [F-004]: %+v", v)
 	}
 	// …nor when the control could not run, or the evidence is absent.
-	if v := Judge(ks, []Check{tamper(Fail)}); v.OK() {
+	if v := Judge(pinned, []Check{tamper(Fail)}); v.OK() {
 		t.Fatalf("F-004 without a refused manifest control: %+v", v)
 	}
 	bare := chk("clean", BoxTree, "op:tamper", "", "import_of_tampered_pack", Refused, Pass)
-	if v := Judge(ks, []Check{bare}); v.OK() {
+	if v := Judge(pinned, []Check{bare}); v.OK() {
 		t.Fatalf("F-004 without its evidence: %+v", v)
 	}
 	// …nor an import that is red for another reason (the client died).
 	died := tamper(Refused)
 	died.Got = Fail
-	if v := Judge(ks, []Check{died}); v.OK() {
+	if v := Judge(pinned, []Check{died}); v.OK() {
 		t.Fatalf("F-004 excuses only an ACCEPTED import: %+v", v)
+	}
+	// With the finding FIXED and its entry gone, an accepted tampered
+	// pack is not excused by anything in the real file.
+	if v := Judge(ks, []Check{tamper(Refused)}); v.OK() || len(v.Unexpected) != 1 {
+		t.Fatalf("a tampered pack that imports must be an unexpected red now that F-004 is fixed: %+v", v)
 	}
 	// The cells the review named are pinned, in the file itself.
 	for _, k := range ks {
 		for _, m := range k.Match {
 			switch k.ID {
-			case "F-004":
-				if m.Got != Pass || m.Evidence["manifest_rewrite"] != Refused || m.Evidence["rewritten"] != "profiles" {
-					t.Errorf("F-004 must be pinned to got=pass with the manifest control refused: %+v", m)
-				}
+			case "F-004", "LC-2", "LC-3":
+				t.Errorf("%s is fixed (FINDINGS.md); it must not come back as an excuse: %+v", k.ID, m)
 			case "CEN-1":
-				if m.Got != "none" {
-					t.Errorf("CEN-1 must be pinned to got=none: %+v", m)
+				t.Errorf("CEN-1 is fixed (FINDINGS.md); it must not come back as an excuse: %+v", m)
+			case "CEN-4":
+				if m.Got != "udp_no_reply" && m.Got != "tls_sni_or_cert_block_suspected" {
+					t.Errorf("CEN-4 must be pinned to the coarser category the engine reports: %+v", m)
 				}
 			}
 		}
@@ -494,14 +539,17 @@ func TestIntermittentIsNotExcusedInASingleWorld(t *testing.T) {
 		}
 	}
 	// Non-intermittent findings are untouched by the mode.
-	cen := chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "none")
-	if v := Judge(world, []Check{cen}); !v.OK() || v.Known["CEN-1"] != 1 {
-		t.Fatalf("CEN-1 in a single world: %+v", v)
+	cen := chk("relay-ip-block", BoxTree, "family", "hysteria2", "engine.category", "udp_address_blocked", "udp_no_reply")
+	if v := Judge(world, []Check{cen}); !v.OK() || v.Known["CEN-4"] != 1 {
+		t.Fatalf("CEN-4 in a single world: %+v", v)
 	}
 }
 
-// The report says outright how many blocked sessions the engine
-// classified, so a column of KNOWN [CEN-1] is not read as coverage.
+// The report says outright how many blocked sessions the engine named
+// correctly, how many it named as the coarser thing one route can see
+// (and which truth became which report), and how many it got wrong — so
+// a column of KNOWN reds is never read as coverage, and a regression to
+// "the engine says nothing" (CEN-1) reads as exactly that.
 func TestReportStatesEngineCategoryCoverage(t *testing.T) {
 	ks, err := LoadKnown(rigDir(t))
 	if err != nil {
@@ -509,19 +557,25 @@ func TestReportStatesEngineCategoryCoverage(t *testing.T) {
 	}
 	blocked := worldRun{Label: "relay-ip-block", RC: "0", Checks: []Check{
 		chk("relay-ip-block", BoxTree, "family", "naive", "tunnel", Blocked, Blocked),
-		chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "none"),
+		chk("relay-ip-block", BoxTree, "family", "naive", "engine.category", "tcp_connect_timeout", "tcp_connect_timeout"),
 		chk("relay-ip-block", BoxTree, "family", "tuic", "tunnel", Blocked, Blocked),
-		chk("relay-ip-block", BoxTree, "family", "tuic", "engine.category", "udp_unavailable", "none"),
+		chk("relay-ip-block", BoxTree, "family", "tuic", "engine.category", "udp_address_blocked", "udp_no_reply"),
 		chk("relay-ip-block", BoxTree, "family", "anytls", "engine.category", "none", "none")}}
 	var buf bytes.Buffer
 	report(&buf, "t", ks, []worldRun{blocked})
-	if !strings.Contains(buf.String(), "correctly in 0 of 2 blocked sessions") || !strings.Contains(buf.String(), "NOT coverage") {
-		t.Errorf("the report must say engine.category is 0 of 2 and is not coverage:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "correctly in 1 of 2 blocked sessions") ||
+		!strings.Contains(out, "in 1 more it reported what one route can see") ||
+		!strings.Contains(out, "udp_address_blocked → udp_no_reply ×1") || strings.Contains(out, "NOT coverage") {
+		t.Errorf("1 named, 1 coarser, each said as what it is:\n%s", out)
 	}
-	blocked.Checks[1].Got, blocked.Checks[1].OK = "tcp_connect_timeout", true
+	// The engine saying nothing at all (what CEN-1 was) is neither.
+	blocked.Checks[1].Got, blocked.Checks[1].OK = "none", false
+	blocked.Checks[3].Got = "none"
 	buf.Reset()
 	report(&buf, "t", ks, []worldRun{blocked})
-	if !strings.Contains(buf.String(), "correctly in 1 of 2 blocked sessions") || strings.Contains(buf.String(), "NOT coverage") {
-		t.Errorf("1 of 2:\n%s", buf.String())
+	out = buf.String()
+	if !strings.Contains(out, "correctly in 0 of 2 blocked sessions") || !strings.Contains(out, "2 misnamed with no finding") || !strings.Contains(out, "NOT coverage") {
+		t.Errorf("0 of 2, both unexplained, and not coverage:\n%s", out)
 	}
 }

@@ -11,7 +11,7 @@
 //	                             per-user credentials across every
 //	                             inbound that carries a row for them
 //	                             (vless-in, ws-in, hy2-in, naive-in);
-//	                             kick + reload sing-box; return the new
+//	                             reload sing-box (once); return the new
 //	                             credentials. A missing "name" is an
 //	                             ERROR — see rotate.go for why "rotate
 //	                             everything" must never be a default.
@@ -27,9 +27,9 @@
 //	                             credentials (UUID + short_id +
 //	                             passwords + WS path) to sing-box
 //	                             config; reload; return creds.
-//	POST /users/revoke        — FRP-14; remove a recipient, run
-//	                             SIGUSR2 + reload kick wrapper,
-//	                             effective for live sessions ≤10 s.
+//	POST /users/revoke        — FRP-14; remove a recipient, reload
+//	                             sing-box once (the reload closes live
+//	                             sessions), effective ≤10 s.
 //	GET  /users/list          — FRP-14; return active user names.
 //	GET|POST /whoami          — echo the source IP the box observes
 //	                             for this connection, so the
@@ -224,6 +224,7 @@ type server struct {
 	realityPubPath string // /etc/daal/reality.pub (FRP-14 Tier-2)
 	tlsCertPath    string // /etc/daal/tls-cert.pem (self-signed leaf, ws/hy2/naive)
 	coverSNIPath   string // /etc/daal/cover-sni (the box's own statement of its cover host)
+	familiesPath   string // /etc/daal/families (the family set this relay was provisioned to serve; see families.go)
 	rotateCredCnt  atomic.Int64
 	rotateTLSCnt   atomic.Int64
 	healthCnt      atomic.Int64
@@ -235,7 +236,6 @@ type server struct {
 	unbindAddrCnt  atomic.Int64
 	now            func() time.Time
 	singboxControl func(action string) error // injectable for tests
-	singboxKick    func() error              // injectable for tests
 	singboxCheck   func(path string) error   // injectable for tests
 
 	// --- L3 address binding (address.go) ---
@@ -363,9 +363,9 @@ func newServer(pubkey ed25519.PublicKey, singboxConfig string) *server {
 		realityPubPath: "/etc/daal/reality.pub",
 		tlsCertPath:    "/etc/daal/tls-cert.pem",
 		coverSNIPath:   "/etc/daal/cover-sni",
+		familiesPath:   defaultFamiliesPath,
 		now:            time.Now,
 		singboxControl: defaultSingboxControl,
-		singboxKick:    defaultSingboxKick,
 		singboxCheck:   defaultSingboxCheck,
 
 		boundAddrDir:      defaultBoundAddrDir,
@@ -417,39 +417,48 @@ func defaultSingboxCheck(path string) error {
 	return fmt.Errorf("sing-box check rejected the rewritten config: %s", strings.TrimSpace(string(out)))
 }
 
+// singboxApplyScript is the on-box wrapper cloud-init installs. It is
+// the one way this box applies a rewritten sing-box config:
+// `systemctl reload sing-box.service || systemctl restart
+// sing-box.service`.
+const singboxApplyScript = "/usr/local/lib/daal/singbox-kick.sh"
+
 // defaultSingboxControl runs `systemctl <action> sing-box.service`,
-// EXCEPT for "reload": sing-box's systemd unit ships without an
-// ExecReload= directive (sing-box has no SIGHUP-driven config
-// reload upstream), so `systemctl reload` fails with
+// except for "reload", which goes through singboxApplyScript.
 //
-//	Job type reload is not applicable for unit sing-box.service.
+// WHAT A RELOAD IS HERE, checked against sing-box 1.13.12's source
+// (cmd/sing-box/cmd_run.go, run()) rather than assumed. sing-box
+// registers handlers for SIGINT, SIGTERM and SIGHUP and nothing else. On
+// SIGHUP it re-checks the config on disk; if the check fails it logs and
+// KEEPS the running instance; otherwise it closes the instance — every
+// inbound, and through route.ConnectionManager.Close every live
+// connection — and starts a new one in the same process. That is a true
+// reload, it is what the unit's ExecReload= sends, and the connection
+// close is what makes a revoke or a credential rotation effective for a
+// session that is already established.
 //
-// Route reload through the cloud-init kick wrapper, which knows the
-// graceful pattern: SIGUSR2 (drop new inbounds) → settle → `reload
-// || restart`. Other actions (start/stop/restart/status) still go
-// straight to systemctl.
+// So ONE call is the whole apply, and callers must make exactly one.
+// Earlier revisions of this service called a "kick" (SIGUSR2, then
+// `sleep 2`, then the same reload-or-restart) and THEN this, on the
+// belief that SIGUSR2 was a graceful inbound drop. sing-box has no
+// SIGUSR2 handler and the Go runtime ignores the signal, so every
+// credential change slept two seconds and restarted the relay twice.
+//
+// A box whose unit file has no ExecReload= (built by an older
+// cloud-init) falls through to `restart` inside the wrapper: one
+// restart, same eviction.
 func defaultSingboxControl(action string) error {
 	if action == "reload" {
-		return defaultSingboxKick()
+		out, err := exec.Command(singboxApplyScript).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("singbox reload: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		return nil
 	}
 	cmd := exec.Command("systemctl", action, "sing-box.service")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl %s: %w (%s)", action, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// defaultSingboxKick runs the on-box kick wrapper installed by
-// cloud-init: /usr/local/lib/daal/singbox-kick.sh. The wrapper
-// sends SIGUSR2 to sing-box (graceful inbound drop) and then
-// reloads. Used by /users/revoke to evict live sessions within
-// ≤ 10 s.
-func defaultSingboxKick() error {
-	cmd := exec.Command("/usr/local/lib/daal/singbox-kick.sh")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("singbox-kick: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -891,28 +900,24 @@ func (s *server) handleRotateCreds(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "singbox config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// APPLY SEMANTICS — the same pair /users/revoke uses, and for the same
-	// reason. Rewriting the file alone would only stop NEW authentications;
-	// the seized credential's established session would keep carrying
-	// traffic indefinitely. The kick wrapper sends SIGUSR2 (graceful inbound
-	// drop) and then reloads, evicting live sessions within ~10 s. Every
+	// APPLY SEMANTICS — the same single reload /users/revoke uses, and for
+	// the same reason. Rewriting the file alone would only stop NEW
+	// authentications; the seized credential's established session would
+	// keep carrying traffic indefinitely. The reload closes every inbound
+	// and every live connection, so the old session ends with it. Every
 	// other recipient is disconnected too and reconnects automatically on
-	// credentials that did not change — a few seconds of interruption is the
-	// price of the revocation being real.
+	// credentials that did not change — one interruption, not two: this
+	// handler used to run the wrapper twice (a "kick", then the reload).
 	//
-	// Kick is soft-fail (a box whose sing-box build ignores SIGUSR2 still
-	// gets correct semantics on the next reconnect); reload is hard-fail,
-	// because without it the box is still serving the pre-rotation user
-	// table and reporting success would be a lie.
+	// The reload is hard-fail, because without it the box is still
+	// serving the pre-rotation user table and reporting success would be
+	// a lie.
 	//
 	// The hard failure ROLLS BACK (applyReload). Without that, the new
 	// UUID and passwords would exist only in a file the box is not
 	// running and that nobody has a copy of — this response is the one
 	// time they leave the box — so the recipient would be cut off at the
 	// next unrelated reload with credentials recoverable from nowhere.
-	if err := s.singboxKick(); err != nil {
-		_ = err // best effort; the config is already the source of truth
-	}
 	if err := s.applyReload(rollback); err != nil {
 		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
 		return

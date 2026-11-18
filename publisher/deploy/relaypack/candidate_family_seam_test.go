@@ -57,7 +57,7 @@ func assertCandidateRenders(t *testing.T, family string) {
 			Port:             relayports.For(family).Port,
 		}},
 	}
-	out, err := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-06-01T00:00:00Z")
+	out, err := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-06-01T00:00:00Z")
 	if err != nil {
 		t.Fatalf("renderCandidates refused family %q: %v\n"+
 			"This is the whole-pack failure: the binder calls renderCandidates first, "+

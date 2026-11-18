@@ -48,6 +48,17 @@ type ClientOpts struct {
 
 var clientSeq int
 
+// ProofTargets is what the engine's connection check dials through the
+// tunnel in this world: the "every other website" host and the release
+// mirror, both TLS on 443 on the lab's internet. Two, so the engine's
+// "try a different target before calling the route dead" is exercised.
+var ProofTargets = CoverIP + ":443," + MirrorIP + ":443"
+
+// StageProof is the stage of a wb-client error event when the engine
+// started the route, tried a round trip through it and got none: it
+// dialled and was stopped, which is "blocked", not "refused".
+const StageProof = "proof"
+
 // StartClient launches the session. It returns as soon as the process is
 // running; use Wait for the outcome.
 func StartClient(p Paths, label string, o ClientOpts) (*Client, error) {
@@ -69,7 +80,12 @@ func StartClient(p Paths, label string, o ClientOpts) (*Client, error) {
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return nil, err
 	}
-	args := []string{filepath.Join(p.Bin, "wb-client"), "--state-dir", state, "--pack", o.Pack}
+	args := []string{filepath.Join(p.Bin, "wb-client"), "--state-dir", state, "--pack", o.Pack,
+		// The engine's connection check must reach a host beyond the
+		// relay; in this world that is the lab's own internet (two TLS
+		// sites the relay can reach), named through the engine's ordinary
+		// configuration file. See labclient --proof-targets.
+		"--proof-targets", ProofTargets}
 	if o.Family != "" {
 		args = append(args, "--family", o.Family)
 	}

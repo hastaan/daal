@@ -13,6 +13,45 @@
 //! key (or the FRP-7.5 sub-key chain) and swaps the pack with nobody
 //! touching a phone.
 //!
+//! # What is published, and what a recipient does with it
+//!
+//! The digest this module publishes is `signed_sbp_sha256`: the digest
+//! of `bind-and-sign`'s own output. That file is the **signed,
+//! credential-less pack** — it says where the relay is and what proves
+//! it is the relay (each route's signed endpoint: address, port, TLS key
+//! pin, REALITY public key), and holds nobody's credentials. It is
+//! therefore safe to put on a public URL, and it is the ONLY file that
+//! may be: a file minted for a person (`users-pack-sbp[x]`) carries
+//! that person's access and must never be hosted.
+//!
+//! A recipient's app does not *replace* its pack with that file — that
+//! was the defect this channel shipped with: every polling phone
+//! swapped a working pack for one that could not connect. It **merges**
+//! it: for each route it already holds credentials for, it keeps the
+//! credentials and takes the new signed endpoint
+//! (`bundle/go/importer/endpoint_plan.go`). So what this channel can and
+//! cannot deliver follows from what a rotation changes:
+//!
+//! | rotation | changes | who still needs a new file |
+//! |---|---|---|
+//! | cover name (L2) | the signed endpoint | **nobody** — apps repair themselves |
+//! | address (L3) | the signed endpoint | **nobody** |
+//! | one person's access (L1) | that person's credentials | **that person** |
+//! | rebuild (L4–L6) | everything, credentials included | **everyone** |
+//!
+//! Credentials are never published, so the last two rows cannot be made
+//! to heal over this channel, and the UI copy (`pub.fresh.*`) says so
+//! instead of promising that "changes to this relay fix themselves".
+//! [`needs_new_file`] is the machine-readable form of the table.
+//!
+//! Because the published digest must be the digest of the file that is
+//! actually uploaded, [`publish`] checks the signed file it can see
+//! against the stored digest and refuses when they differ
+//! (`blocked_reason = "signed_pack_changed"`): a note naming a file
+//! that is not the one on the URL is refused by every recipient, and a
+//! green "published" tick over that is the silent failure this module
+//! exists to prevent.
+//!
 //! # Division of labour — read this before adding an uploader here
 //!
 //! The document is built, signed and **uploaded** by
@@ -501,6 +540,72 @@ pub fn mirror_args(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Who still needs a file handed to them after a rotation, given that
+/// recipients poll the freshness mirrors. See the module header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeedsNewFile {
+    /// The rotation changed only what the signed pack carries.
+    Nobody,
+    /// The rotation changed one recipient's credentials.
+    ThatRecipient,
+    /// The rotation changed every recipient's credentials.
+    Everyone,
+}
+
+/// The rotation ladder's rungs, by what a polling recipient is left
+/// needing. `rung` is the ladder level, 1..=6; anything else is
+/// answered with the safe side ([`NeedsNewFile::Everyone`]).
+///
+/// L1 re-mints one recipient's credentials. L2 moves the cover name and
+/// L3 the address — both live in the signed endpoint. L4–L6 rebuild the
+/// box, which mints fresh credentials for every recipient: the relay
+/// generates them itself (`/users/provision` takes a name and nothing
+/// else), so a rebuilt relay cannot be given the old ones from here.
+pub fn needs_new_file(rung: u8) -> NeedsNewFile {
+    match rung {
+        1 => NeedsNewFile::ThatRecipient,
+        2 | 3 => NeedsNewFile::Nobody,
+        _ => NeedsNewFile::Everyone,
+    }
+}
+
+/// What [`publish`] found when it looked for the signed file whose
+/// digest it is about to publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedPackCheck {
+    /// The file is there and its SHA-256 is the stored digest.
+    Matches,
+    /// The file is there and is NOT the file that was signed.
+    Changed { found_sha256: String },
+    /// No file at that path. The publisher may have signed into a
+    /// directory of their own choosing; nothing can be said.
+    NotFound,
+}
+
+/// Compare the signed pack at `path` with the digest `bind-and-sign`
+/// reported for it.
+pub fn check_signed_pack(path: &Path, expected_sha256: &str) -> SignedPackCheck {
+    use sha2::{Digest, Sha256};
+    let Ok(body) = std::fs::read(path) else {
+        return SignedPackCheck::NotFound;
+    };
+    let found = hex::encode(Sha256::digest(&body));
+    if found.eq_ignore_ascii_case(expected_sha256.trim()) {
+        SignedPackCheck::Matches
+    } else {
+        SignedPackCheck::Changed {
+            found_sha256: found,
+        }
+    }
+}
+
+/// Where `sign_relaypack` writes the signed pack when the caller names
+/// no output directory (the app's own flow).
+pub fn default_signed_pack_path(ctx: &WizardCtx, operator_id: i64) -> PathBuf {
+    ctx.staging_dir.join(format!("{operator_id}.sbp"))
+}
+
 /// One provider's outcome, as returned to the UI after a publish.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct PublishOutcome {
@@ -527,9 +632,15 @@ pub struct PublishReport {
     /// a silent publish failure becomes a visible outage.
     pub not_after: String,
     /// Present when the run could not even be attempted (no pack URL,
-    /// too few providers, custody locked). Empty when the CLI ran, even
-    /// if every mirror failed — those failures are in `results`.
+    /// too few providers, custody locked, the signed file is not the
+    /// one that was signed). Empty when the CLI ran, even if every
+    /// mirror failed — those failures are in `results`.
     pub blocked_reason: String,
+    /// The signed, credential-less pack whose digest was published —
+    /// the file that must sit at the pack URL. Empty when it is not at
+    /// the app's default location (the publisher signed somewhere
+    /// else), in which case nothing was checked.
+    pub signed_pack_path: String,
 }
 
 /// Publish the current pack's freshness document to every configured
@@ -572,6 +683,23 @@ pub fn publish(
     if row.freshness_pack_url.is_empty() {
         report.blocked_reason = "no_pack_url".into();
         return Ok(report);
+    }
+    // The note names ONE file by digest: the signed, credential-less
+    // pack. If the copy this app wrote is no longer that file, the note
+    // would name something the pack URL cannot be serving, every
+    // recipient would refuse the download, and this screen would show a
+    // green publish. Refuse instead, and say which file to upload when
+    // it does match.
+    let signed_path = default_signed_pack_path(ctx, operator_id);
+    match check_signed_pack(&signed_path, &bundle_sha) {
+        SignedPackCheck::Matches => {
+            report.signed_pack_path = signed_path.to_string_lossy().into_owned();
+        }
+        SignedPackCheck::Changed { .. } => {
+            report.blocked_reason = "signed_pack_changed".into();
+            return Ok(report);
+        }
+        SignedPackCheck::NotFound => {}
     }
     let endpoints = ctx.db.list_freshness_endpoints(operator_id)?;
     let mut kinds: Vec<&str> = endpoints.iter().map(|e| e.kind.as_str()).collect();
@@ -930,6 +1058,49 @@ mod tests {
              the wizard's MIN_MIRRORS must move with it"
         );
         assert_eq!(MIN_MIRRORS, 2);
+    }
+
+    /// The honesty table. If a rung is ever reclassified as
+    /// self-healing, this is the test that has to be edited — together
+    /// with the importer rule that would make it true.
+    #[test]
+    fn only_endpoint_rotations_heal_without_a_file() {
+        assert_eq!(needs_new_file(1), NeedsNewFile::ThatRecipient);
+        assert_eq!(needs_new_file(2), NeedsNewFile::Nobody);
+        assert_eq!(needs_new_file(3), NeedsNewFile::Nobody);
+        for rebuild in [4u8, 5, 6] {
+            assert_eq!(needs_new_file(rebuild), NeedsNewFile::Everyone);
+        }
+        // Unknown rungs err on the side of a courier.
+        assert_eq!(needs_new_file(0), NeedsNewFile::Everyone);
+        assert_eq!(needs_new_file(9), NeedsNewFile::Everyone);
+    }
+
+    /// What is published must be the file that was signed.
+    #[test]
+    fn the_signed_pack_is_checked_against_the_published_digest() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("7.sbp");
+        assert_eq!(
+            check_signed_pack(&path, "00"),
+            SignedPackCheck::NotFound,
+            "a file that is not there cannot be judged"
+        );
+        std::fs::write(&path, b"the signed, credential-less pack").unwrap();
+        let sha = hex::encode(Sha256::digest(b"the signed, credential-less pack"));
+        assert_eq!(check_signed_pack(&path, &sha), SignedPackCheck::Matches);
+        assert_eq!(
+            check_signed_pack(&path, &sha.to_uppercase()),
+            SignedPackCheck::Matches
+        );
+        // Overwritten since it was signed — e.g. by a file minted for a
+        // person, which must never be what the note points at.
+        std::fs::write(&path, b"somebody's personal file").unwrap();
+        assert!(matches!(
+            check_signed_pack(&path, &sha),
+            SignedPackCheck::Changed { .. }
+        ));
     }
 
     #[test]

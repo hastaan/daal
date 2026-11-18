@@ -138,7 +138,7 @@ func TestShadowsocksPortAgreesAcrossTheChain(t *testing.T) {
 	// which is a free fingerprint. Both directions fail badly and in
 	// opposite ways, so both are asserted.
 	var opened bool
-	for _, e := range relayports.ExtraFirewallPortsFor([]string{"vless-reality", "shadowsocks"}) {
+	for _, e := range relayports.FirewallPortsFor([]string{"vless-reality", "shadowsocks"}) {
 		if e.Port == ep.Port && e.UDP == ep.UDP {
 			opened = true
 		}
@@ -149,7 +149,7 @@ func TestShadowsocksPortAgreesAcrossTheChain(t *testing.T) {
 	if !opened {
 		t.Fatalf("8446/tcp is not opened for a relay that serves shadowsocks: the box would serve it behind a shut firewall, which is a route that mints and cannot be dialled")
 	}
-	for _, e := range relayports.ExtraFirewallPortsFor([]string{"vless-reality", "hysteria2"}) {
+	for _, e := range relayports.FirewallPortsFor([]string{"vless-reality", "hysteria2"}) {
 		if e.Port == ep.Port {
 			t.Errorf("8446 is open on a relay that does not serve shadowsocks — a constant port advertising nothing")
 		}

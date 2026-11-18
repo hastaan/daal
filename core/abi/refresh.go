@@ -282,6 +282,13 @@ func DiagnosticsExplain() (string, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
+	// Routes whose last recorded outcome was a connection proof that
+	// SUCCEEDED in a degraded way (path_too_slow). Deliberately a list of
+	// its own and not more entries in failures[]: the rotation
+	// recommender and the selector read failures[] as "this route does
+	// not work", and a slow route works. Same shape, same closed
+	// vocabulary, same freshness window. Always present.
+	payload["degraded"] = activeRouteDegraded(c, now)
 	// Compatibility fields for pre-FRP-6 renderers and store-backed
 	// diagnostics. FRP-6 clients bind to the Explanation keys above;
 	// older clients can keep reading the pathmanager shape.
@@ -491,6 +498,33 @@ func activeRouteFailures(c *Core, now time.Time) []selection.FailureRecord {
 			RouteID:        r.RouteID,
 			Classification: r.LastFailureCategory,
 		})
+	}
+	return out
+}
+
+// activeRouteDegraded projects the durable degraded columns
+// (routestore.RecordDegraded) the way activeRouteFailures projects the
+// failure ones. A row is live while the degraded outcome is the last
+// thing the route recorded — RecordSuccess and RecordFailure both clear
+// the pair — and inside the same freshness window.
+func activeRouteDegraded(c *Core, now time.Time) []selection.FailureRecord {
+	out := []selection.FailureRecord{}
+	if c == nil || c.store == nil {
+		return out
+	}
+	rows, err := c.store.ListRoutes()
+	if err != nil {
+		return out
+	}
+	fresh := make(map[string]bool, signalWindow)
+	for i := 0; i < signalWindow; i++ {
+		fresh[routestore.HourBucket(now.Add(-time.Duration(i)*time.Hour))] = true
+	}
+	for _, r := range rows {
+		if r.LastDegradedCategory == "" || !fresh[r.LastDegradedBucket] {
+			continue
+		}
+		out = append(out, selection.FailureRecord{RouteID: r.RouteID, Classification: r.LastDegradedCategory})
 	}
 	return out
 }

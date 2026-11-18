@@ -180,7 +180,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: resolve served families: %w", err)
 	}
-	dataPlanePorts := relayports.ExtraFirewallPortsFor(served)
+	dataPlanePorts := relayports.FirewallPortsFor(served)
 	userData, err := cloudinit.RenderV2(cloudinit.RenderInputV2{
 		RenderInput: cloudinit.RenderInput{
 			EphemeralSSHPublicKey: string(pubBytes),
@@ -192,6 +192,9 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		MgmtPubKeyHex: hex.EncodeToString(opts.PublisherPubKey),
 		MgmtPort:      mgmtPort,
 		CoverSNI:      coverSNI,
+		// The box's own copy of the family set its inbounds and both
+		// firewalls were derived from; daal-relay-mgmt obeys it.
+		Families: served,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: render cloud-init: %w", err)

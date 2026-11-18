@@ -346,6 +346,37 @@ Successful signature verification proves only that the bundle was signed by the 
 
 Unknown publishers enter TOFU flow. The user must explicitly accept the publisher or accept only the current bundle.
 
+## What the signature covers
+
+`manifest.sig` is an Ed25519 signature over the canonical JSON of
+`manifest.json`. It covers every manifest field, including each route's
+`family_specific_config`. It does **not** cover the bytes of
+`profiles/<id>.json` — only the fact that the entry named by
+`config_path` exists.
+
+For a RelayPack that gap is closed by the route's signed endpoint
+commitment (`family_specific_config._endpoint`,
+`specs/relaypack-v1.md` "Endpoint commitment"): the profile's outbound
+must match it on server, port and server-authentication material or the
+import is refused. For a bundle with no `relay_pack` slot the profile
+bytes remain unauthenticated; treat such a bundle as exactly as
+trustworthy as the channel it arrived over.
+
+Because of that, such a bundle can ADD routes and can never REPLACE an
+authenticated one. If the device already holds a route under the same
+route id that is bound to a signed endpoint commitment, or that belongs
+to a RelayPack — in any trust state, expired and revoked included — the
+importer MUST refuse the **whole** bundle with reason
+`endpoint_downgrade`, before any trust prompt and again before
+persistence, and change nothing. The store MUST refuse the same write
+on its own. (Without this rule one genuine, unexpired plain bundle of a
+publisher, with its profiles rewritten by anybody, would silently turn
+that publisher's authenticated routes into unauthenticated ones.) See
+`specs/relaypack-v1.md` "A commitment is sticky".
+
+What this does not give: a plain bundle's routes under NEW route ids are
+still stored with unauthenticated profiles under the publisher's name.
+
 ## Security Constraints
 
 - No bundle import may create telemetry.

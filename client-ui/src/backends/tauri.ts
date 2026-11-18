@@ -5,6 +5,7 @@
 // This is the ONLY file in client-ui/ that imports from
 // @tauri-apps/api/core. Screens never call invoke() directly.
 
+import { connStateWithCheck, parseRouteCheck, parseRouteRunning } from '../lib/routeCheck';
 import { invoke } from '@tauri-apps/api/core';
 import type {
     AddSubscriptionRequest,
@@ -278,7 +279,17 @@ async function rawThroughputSnapshot(): Promise<ThroughputSnapshot> {
 export class TauriContract implements D2Contract {
     async connectionSummary(): Promise<ConnectionSummary> {
         const d = await bridgeDiagnostics();
-        const state = postureToConnState(d.posture ?? '');
+        // The posture does not advance until the engine has PROVED the
+        // route; `route_check` says what is happening meanwhile.
+        const routeCheck = parseRouteCheck(d.route_check);
+        // ...and `route_running` whether anything is running at all:
+        // after a failed connect the posture is Recovery ('connecting')
+        // with the engine stopped.
+        const state = connStateWithCheck(
+            postureToConnState(d.posture ?? ''),
+            routeCheck,
+            parseRouteRunning(d.route_running),
+        );
         const mode = ((d.mode as ConnMode) ?? 'normal');
         let activeRoute: RouteDisplayRow | undefined;
         try {
@@ -310,6 +321,7 @@ export class TauriContract implements D2Contract {
             pointerSource: pointer?.primarySource,
             pointerValidDays: pointer?.validForDays,
             netStatusLine: undefined,
+            routeCheck,
             // Only 'none' and 'singbox' are meaningful. Anything else —
             // including the absent field an older engine emits — stays
             // undefined so the UI claims nothing rather than accusing a

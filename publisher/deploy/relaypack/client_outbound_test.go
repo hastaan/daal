@@ -355,7 +355,7 @@ func TestTUICPortAgreesAcrossBoxFirewallAndClient(t *testing.T) {
 	}
 
 	// 2. The firewalls — but only for a relay that serves the family.
-	extra := relayports.ExtraFirewallPortsFor([]string{"tuic"})
+	extra := relayports.FirewallPortsFor([]string{"tuic"})
 	found := false
 	for _, e := range extra {
 		if e == ep {
@@ -365,7 +365,7 @@ func TestTUICPortAgreesAcrossBoxFirewallAndClient(t *testing.T) {
 	if !found {
 		t.Errorf("firewall ports %+v do not open %+v", extra, ep)
 	}
-	for _, e := range relayports.ExtraFirewallPortsFor(nil) {
+	for _, e := range relayports.FirewallPortsFor(nil) {
 		if e == ep {
 			t.Errorf("a relay that does not serve tuic must not open %+v", ep)
 		}

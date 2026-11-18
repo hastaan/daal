@@ -18,8 +18,10 @@ import (
 
 // newUsersTestServer writes a v2-shaped empty-users sing-box
 // scaffold to a tempdir and returns a server wired against it.
-// The kick wrapper is replaced with a counter so tests can assert
-// it ran without invoking systemctl.
+// The sing-box control seam is replaced with a counter of "reload"
+// calls — each one is, on a real box, every recipient's connection
+// dropped — so tests can assert how many an operation costs without
+// invoking systemctl.
 func newUsersTestServer(t *testing.T) (*server, ed25519.PrivateKey, string, *atomic.Int64) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -43,11 +45,15 @@ func newUsersTestServer(t *testing.T) (*server, ed25519.PrivateKey, string, *ato
 		t.Fatal(err)
 	}
 	srv := newServer(pub, configPath)
-	srv.singboxControl = func(action string) error { return nil }
-	var kickCount atomic.Int64
-	srv.singboxKick = func() error { kickCount.Add(1); return nil }
+	var reloadCount atomic.Int64
+	srv.singboxControl = func(action string) error {
+		if action == "reload" {
+			reloadCount.Add(1)
+		}
+		return nil
+	}
 	srv.now = func() time.Time { return time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC) }
-	return srv, priv, configPath, &kickCount
+	return srv, priv, configPath, &reloadCount
 }
 
 func postJSON(t *testing.T, url string, priv ed25519.PrivateKey, op string, body any) *http.Response {
@@ -188,8 +194,11 @@ func TestUsersProvision_Isolation(t *testing.T) {
 	}
 }
 
-func TestUsersRevoke_RemovesAndKicks(t *testing.T) {
-	srv, priv, configPath, kickCount := newUsersTestServer(t)
+// INT-O1: a revoke is ONE reload of the data plane. It was two (a "kick"
+// and then a reload, both the same wrapper), which on a live relay is
+// every other recipient disconnected twice, two seconds apart.
+func TestUsersRevoke_RemovesAndReloadsExactlyOnce(t *testing.T) {
+	srv, priv, configPath, reloadCount := newUsersTestServer(t)
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
@@ -198,14 +207,19 @@ func TestUsersRevoke_RemovesAndKicks(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&c)
 	resp.Body.Close()
 
+	if n := reloadCount.Load(); n != 1 {
+		t.Fatalf("provision cost %d reloads of sing-box, want exactly 1", n)
+	}
+	reloadCount.Store(0)
+
 	resp = postJSON(t, ts.URL+"/users/revoke", priv, "users-revoke", revokeReq{Name: "r9"})
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := readAll(resp.Body)
 		t.Fatalf("revoke: %d body %s", resp.StatusCode, body)
 	}
-	if kickCount.Load() != 1 {
-		t.Errorf("kick not invoked: count=%d", kickCount.Load())
+	if n := reloadCount.Load(); n != 1 {
+		t.Errorf("revoke cost %d reloads of sing-box, want exactly 1", n)
 	}
 	cfg, _ := os.ReadFile(configPath)
 	if bytes.Contains(cfg, []byte(c.VLESSUUID)) {

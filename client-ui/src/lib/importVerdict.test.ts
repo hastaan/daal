@@ -13,6 +13,7 @@ import {
     parseVerdict,
     trustFailure,
     trustFromVerdict,
+    unavailableLines,
 } from './importVerdict';
 
 /** Captured from core/abi.FountainFeedFrame, verbatim. */
@@ -113,6 +114,14 @@ describe('friendlyReason', () => {
             'publisher_unknown_freshness_path',
             'user_cancelled',
             'invalid_decision',
+            // The signed-endpoint gate (bundle/go/importer
+            // endpoint_plan.go).
+            'endpoint_mismatch',
+            'endpoint_unauthenticated',
+            'endpoint_malformed',
+            'endpoint_downgrade',
+            'pack_has_no_credentials',
+            'pack_is_older',
         ];
         const enMap = en as Record<string, string>;
         const faMap = fa as Record<string, string>;
@@ -196,5 +205,49 @@ describe('trustFailure — did the routes actually commit?', () => {
             error: null,
         } as never);
         expect(got).toBeNull();
+    });
+});
+
+describe('unavailableLines — what the file did NOT give this person', () => {
+    // The shape the engine returns after importing a pack in which the
+    // publisher's tool dropped one route and the relay's key changed
+    // under another (bundle/go/importer.Verdict.Unavailable).
+    const verdict = parseVerdict(
+        JSON.stringify({
+            Kind: 0,
+            RouteCount: 2,
+            Merged: 1,
+            Unavailable: [
+                { RouteID: 'r5', Family: 'tuic', Reason: 'not_offered' },
+                { RouteID: 'r3', Family: 'naive', Reason: 'needs_new_file' },
+                { RouteID: 'r6', Family: 'anytls', Reason: 'a_reason_from_a_newer_engine' },
+            ],
+        }),
+    );
+    it('says one plain line per route, naming the route type', () => {
+        const lines = unavailableLines(t, verdict);
+        expect(lines).toHaveLength(3);
+        expect(lines[0]).toContain('tuic');
+        expect(lines[0]).toBe(
+            (en as Record<string, string>)['add.unavailable.not_offered'].replace('{family}', 'tuic'),
+        );
+        expect(lines[1]).toContain('new file');
+        // An unknown reason never reaches the user as an identifier.
+        expect(lines[2]).not.toContain('a_reason_from_a_newer_engine');
+        expect(lines[2]).not.toContain('add.unavailable.');
+    });
+    it('is empty for a pack that gave everything it lists', () => {
+        expect(unavailableLines(t, parseVerdict(ENGINE_FIRST_SEEN))).toEqual([]);
+        expect(unavailableLines(t, null)).toEqual([]);
+    });
+    it('has Farsi for every reason the engine can give', () => {
+        const faMap = fa as Record<string, string>;
+        for (const reason of ['not_offered', 'no_credentials', 'needs_new_file', 'older_than_device']) {
+            const key = `add.unavailable.${reason}`;
+            expect((en as Record<string, string>)[key], key).toBeTruthy();
+            expect(faMap[key], key).toMatch(/[\u0600-\u06FF]/);
+            expect(faMap[key], key).toContain('{family}');
+        }
+        expect(faMap['add.unavailable.title']).toMatch(/[\u0600-\u06FF]/);
     });
 });

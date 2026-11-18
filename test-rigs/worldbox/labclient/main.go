@@ -26,10 +26,12 @@ import "C"
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -53,7 +55,7 @@ func emit(event string, kv map[string]any) {
 
 func fatal(stage string, err error) {
 	kv := map[string]any{"stage": stage, "error": err.Error()}
-	if stage == "set_route" {
+	if stage == "set_route" || stage == "proof" {
 		// What the engine itself says about the attempt it just refused
 		// or failed (the driver's engine.category check reads this).
 		exp, _ := abi.DiagnosticsExplain()
@@ -82,6 +84,7 @@ func main() {
 	experimental := flag.Bool("experimental", false, "turn on the engine's experimental-families gate, as the user would in Settings")
 	importOnly := flag.Bool("import-only", false, "import, list routes, exit")
 	idle := flag.Bool("idle", false, "after import, do NOT connect: wait for commands on stdin (tick | routes | connect <family> | stop). A phone that holds a pack and is not connected")
+	proofTargets := flag.String("proof-targets", "", "comma list of host:port: what the engine's connection check reaches through the tunnel. Written to the engine's own configuration file (engine-config.json, connection_check.targets) before engine_init, as an operator would; empty leaves the engine on its production default")
 	classify := flag.Bool("classify", false, "read error texts on stdin, one per line; print the product classifier's category for each (core/diagnostics.Classify) and exit")
 	flag.Parse()
 	if *classify {
@@ -96,6 +99,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The engine's connection check needs a host on the far side of the
+	// relay. Its production default is a set of public sites, which do
+	// not exist in the lab; the lab names its own through the engine's
+	// ordinary configuration file. Nothing else about the check changes.
+	if *proofTargets != "" {
+		cfg, _ := json.Marshal(map[string]any{"connection_check": map[string]any{"targets": strings.Split(*proofTargets, ",")}})
+		if err := os.WriteFile(filepath.Join(*stateDir, abi.EngineConfigFile), cfg, 0o600); err != nil {
+			emit("error", map[string]any{"stage": "init", "error": err.Error()})
+			os.Exit(1)
+		}
+	}
 	if err := abi.Init(*stateDir, "warn"); err != nil {
 		emit("error", map[string]any{"stage": "init", "error": err.Error()})
 		os.Exit(1)
@@ -180,12 +194,27 @@ func main() {
 		}
 	}()
 
+	t0 := time.Now()
 	if err := abi.SetRoute(id); err != nil {
 		_, _ = abi.ClearTunFD()
 		vpn.teardown()
-		fatal("set_route", err)
+		// "proof": the engine started the route, tried to carry a round
+		// trip through it and could not — it DIALLED, and was stopped.
+		// "set_route": it refused the route without dialling anything.
+		stage := "set_route"
+		if errors.Is(err, abi.ErrRouteNotCarrying) {
+			stage = "proof"
+		}
+		kv := map[string]any{"stage": stage, "error": err.Error(), "route_id": id, "set_route_ms": time.Since(t0).Milliseconds()}
+		exp, _ := abi.DiagnosticsExplain()
+		diag, _ := abi.ExportDiagnostics()
+		routes, _ := abi.AvailableRoutes()
+		kv["explain"], kv["diag"], kv["routes_after"] = rawJSON(exp), rawJSON(diag), rawJSON(routes)
+		emit("error", kv)
+		abi.Shutdown()
+		os.Exit(1)
 	}
-	emit("connected", map[string]any{"route_id": id, "family": *family})
+	emit("connected", map[string]any{"route_id": id, "family": *family, "set_route_ms": time.Since(t0).Milliseconds()})
 
 	// --- stay up until the driver says stop (a line on stdin, EOF, or a signal).
 	stop := make(chan string, 2)
@@ -237,6 +266,9 @@ func main() {
 //	                  tick's error, the scheduler's status, and the route
 //	                  list afterwards
 //	routes            the engine's route list
+//	import <file>     the phone is handed ANOTHER file while it already
+//	                  holds a pack (the app's own import call); reports
+//	                  the verdict and the route list afterwards
 //	connect <family>  leave the loop and bring the VPN up on that family
 //	stop              exit
 func idleLoop(sc *bufio.Scanner) (family string, connect bool) {
@@ -256,6 +288,16 @@ func idleLoop(sc *bufio.Scanner) (family string, connect bool) {
 		case "routes":
 			routes, err := abi.AvailableRoutes()
 			emit("routes", map[string]any{"routes": rawJSON(routes), "error": errString(err)})
+		case "import":
+			if len(f) < 2 {
+				emit("error", map[string]any{"stage": "idle", "error": "import needs a file"})
+				continue
+			}
+			verdictJSON, ierr := abi.ImportSBP(f[1])
+			v := parseVerdict(verdictJSON)
+			routes, _ := abi.AvailableRoutes()
+			emit("reimport", map[string]any{"kind": v.kind(), "reason": v.Reason, "route_count": v.RouteCount,
+				"verdict": rawJSON(verdictJSON), "error": errString(ierr), "routes": rawJSON(routes)})
 		case "connect":
 			if len(f) < 2 {
 				emit("error", map[string]any{"stage": "idle", "error": "connect needs a family"})

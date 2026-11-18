@@ -29,6 +29,15 @@ and no longer contradict it. **Where any document disagrees with the tree,
 the tree is right.**
 Everything in §11 (this pass's own changes) is unaffected.
 
+**2026-11-18 — the "truth wave".** The worldbox end-to-end rig
+(`test-rigs/worldbox/`, `./daal e2e`) found 30-odd defects and observations
+in seams no unit test crosses; this wave fixed most of them in the tree.
+**§13 at the end of this file** lists what that closed here, and the items it
+opened (TW-1…TW-14: one relay re-release, one Android library rebuild, the
+wizard's signing order, and the phone checks nothing on a laptop can do).
+The per-finding record is `test-rigs/worldbox/FINDINGS.md`; items above §13
+that the wave touched carry a one-line *2026-11-18* note.
+
 ---
 
 ## 0. Landed — evidence kept, do not re-litigate
@@ -163,6 +172,13 @@ answer arrives with a rationale attached. These two are the gate.
     not exist and there is no note. With the durable `routes.cooldown_until`
     column added this pass it is now largely redundant, which argues for
     deleting the write rather than adding the read. Size: `½d`.
+  *2026-11-18 (truth wave, CEN-1/CEN-2):* the engine now has one real
+  producer of failure signals from the data plane — a connect is proved by a
+  round trip, a failed proof is classified by phase and recorded
+  (`RecordFailure` + cooldown), and a connected route is re-proved every
+  ~3 min and on a network change (`abi.CheckActiveRoute`). It is per-route
+  only; the network-wide categories still need a second observation
+  (TW-5).
 - [ ] **B1. The selection engine's only production caller is diagnostics.**
   `core/internal/selection/` is fully built and tested — `Decide`
   (pipeline.go:68), `PlanRace` (race.go:37), `Shortlist` (shortlist.go:28)
@@ -331,6 +347,12 @@ These are what a censored device falls back to. All five re-verified true.
   built. **This is the last courier step in the "no courier" path.**
   Size: `2-3d`. Highest-value item in this section: the backends already
   work (W3-7), this is reusing them for a second object.
+  *2026-11-18 (truth wave, LC-2):* what the document points at is now
+  usable — the file `bind-and-sign` writes (the signed, credential-less
+  pack whose digest the app publishes) is MERGED into a polling phone's own
+  credentials, so after L2 and L3 a phone recovers with no new file. Before
+  this, hosting that file broke every polling recipient. The upload is still
+  the operator's, so this item stands as written.
 - [ ] **W3-3. Recipients have no manual "check for a new pack now".**
   `core/refresh.RelayPackRefresher.RefreshUser`
   (`core/refresh/relaypack_refresh.go:511`) exists, is tested, and has
@@ -487,10 +509,22 @@ These are what a censored device falls back to. All five re-verified true.
   and was not carried across. Size: `½d` to route the ranking call through
   the gate, or `1h` to disable the toggle honestly. See
   `docs/capability-matrix.md` §4b.
+  *2026-11-18:* confirmed by the rig on all three opt-in families
+  (worldbox O-4), unchanged.
 
 ---
 
-- [ ] **W5-1. The box binds two listeners for families the relay does not serve.**
+- [x] **W5-1. The box binds two listeners for families the relay does not serve.**
+  *DONE in the tree 2026-11-18 (worldbox FAM-4), NOT yet on any relay: it needs
+  the planned relay re-release (new `daal-relay-mgmt`) and a fresh provision (new
+  cloud-init).* cloud-init now writes the relay's family set to
+  `/etc/daal/families`; `daal-relay-mgmt` creates inbounds, rows and credentials
+  for those families only; `vless-in`/`hy2-in` are baked only when their family
+  is served; and both firewalls open exactly `relayports.FirewallPortsFor(set)`
+  (443 included — it was unconditional). Contract:
+  `specs/per-recipient-credentials-v1.md` §2.3. Rig: world `narrow-relay`, and
+  `listener_on_box: false` in `mint/* not_served` on default relays (O-3). The
+  original entry follows for the record.
   `cmd/daal-relay-mgmt/singbox_users.go:167,175` calls `appendSSUser` and
   `appendAnyTLSUser` unconditionally, so `ss-in` and `anytls-in` are created for
   every recipient even on a relay whose profile enables neither — and both are
@@ -526,6 +560,13 @@ These are what a censored device falls back to. All five re-verified true.
   (c) it has never been exercised against a live box.
   Size: `½d` of human release work, then one live run. **W3-10 gets its
   measurement for free from that run.**
+  *2026-11-18 (truth wave):* (c) is now half answered — the rig drives the
+  real `assign-fip` → `/bind-address` → re-mint → connect, and
+  `floating-ip release`, against the pinned release artefacts on a lab box
+  (world `release.lifecycle`, op `l3`; worldbox LC-O4), and found and fixed
+  the naive half of it (LC-3; needs a fresh provision). Still never against
+  a real provider or real hardware, and the rig's box holds `CAP_NET_ADMIN`
+  by construction, so (a) is NOT exercised there.
 - [ ] **W3-10. The L3 15-second budget was never measured, and the window
   it bounds grew in Wave 3c.** `L3_FAST_PATH_BUDGET`
   (`daal-wizard/src/commands.rs:2295`, asserted at `:5708`),
@@ -721,6 +762,11 @@ These are what a censored device falls back to. All five re-verified true.
   `libcronet.{so,dylib,dll}` sidecar.** No desktop copy exists in the tree
   (the only `libcronet.so` outside Android build output is the relay's own,
   under `dist-release/`). Size: `2-3d`, mostly build plumbing. Part of D1.
+  *2026-11-18 (truth wave, FAM-5):* the loader half is fixed — off Android
+  the engine now lets cronet-go search beside its own binary, and on
+  linux/amd64 the library is the one inside the `cronet-go/lib` Go module
+  (that is how the rig runs naive). Packaging a per-OS sidecar is still
+  this item.
 
 ---
 
@@ -1042,3 +1088,141 @@ verification and are recorded so they are not re-filed:
   documented first step. The hazard is a **stale local artefact**, which is
   precisely the case nothing could see — now gated by
   `tools/check-engine-so-manifest.sh`.
+
+---
+
+## 13. The truth wave (2026-11-18) — closed, and opened
+
+Source of truth: `test-rigs/worldbox/FINDINGS.md` (ids below are its ids).
+Gate at close: `bash tools/hooks/pre-push` green; `./daal e2e full` green
+twice (5095 checks, 18 worlds; the only reds are the open findings CEN-4,
+F-002 and — on the pinned box — LC-1). **Everything below is in the working
+tree only: nothing has been released, re-minted, rebuilt for Android or
+tried on a phone.** TW-1…TW-4 are what turns it into something a user has.
+
+### Closed in the tree
+
+- [x] **A route that carries nothing is no longer "Connected"** (CEN-1,
+  CEN-2, CEN-3, CEN-5, CEN-6, O-2). Connected means one real round trip
+  through the route; a failed connect is an error with words (en+fa), a
+  slow one says slow, a lost one says it is retrying; failures are
+  classified by where they happened; disconnect no longer hangs 5 s on a
+  dead relay. Spec: `engine-abi-v1.md`, `failure-taxonomy-v1.md` rev 2.
+- [x] **A pack's server addresses and keys are signed** (F-004, F-006,
+  LC-4). Every RelayPack route carries a signed endpoint; an outbound that
+  disagrees is refused at import and again at connect; a plain bundle
+  cannot replace a committed route; an old public pack cannot roll a route
+  back. Spec: `relaypack-v1.md`, `sbp-v1.md`. **Format change: every pack
+  signed before this is refused** (nothing is fielded; all fixtures were
+  migrated).
+- [x] **The freshness channel heals instead of breaking** (LC-2, LC-3). The
+  signed pack is merged into the phone's own credentials; L2 and L3 need no
+  new file on a polling phone; naive survives an address move on relays
+  provisioned from this tree.
+- [x] **Routes the minter dropped are not routes** (F-003): not stored, not
+  listed, not selectable; the import verdict names them.
+- [x] **Families** — FAM-1 (names resolve on naive/tor), FAM-2 (the wizard
+  has the opt-in switches — locked until TW-1), FAM-3 (`--families` refuses
+  a typo and says what it drops), FAM-4 + **W5-1** (a relay binds and opens
+  only what it serves), FAM-5 (Cronet loads off Android).
+- [x] **Relay daemon** — LC-1 (mutating mgmt tokens are single-use), INT-2
+  (naive ALPN race), INT-O1 (one in-process reload per verb, no restart).
+  All three reach a relay only with TW-1.
+- [x] **INT-1** — the Cronet use-after-free that killed the engine process:
+  `cronet-go` bumped. Linux proven (0 deaths in 1040 sessions, was 3 in
+  520); Android is TW-3.
+- [x] **F-001** — the artefact verifier works across mounts and says why a
+  mirror failed.
+
+### Opened — do these, roughly in this order
+
+- [ ] **TW-1. Re-release `daal-relay-mgmt` and re-pin it** (F-002; release
+  key). One release carries: shadowsocks/anytls/tuic on the box (F-002),
+  the family set (FAM-4/W5-1), single-use tokens (LC-1), the naive ALPN key
+  (INT-2), the single reload (INT-O1). In the SAME commit as the pin bump:
+  set `PinnedMgmtServesOptInFamilies` (`publisher/deploy/cloudinit/
+  artifacts.go`) and `RELEASED_RELAY_SERVES_EXTRA_FAMILIES`
+  (`client-ui/src/publisher/extraFamilies.ts`) to `true` — a test fails on
+  either half alone — and delete the `F-002`, `LC-1` and `INT-2` entries
+  from `test-rigs/worldbox/known-findings.json` (the run fails with "did
+  not reproduce" until they go). Acceptance: `./daal e2e full`, world
+  `release.all-families` all green. Then every relay must be provisioned
+  FRESH (cloud-init has no upgrade path). Size: `½d` of release work.
+- [ ] **TW-2. The app signs a relay before it has what a signed endpoint
+  needs** (F-005, high; read from source, app not run). `sign_relaypack` →
+  `run_bind_and_sign` passes no `--endpoint-creds`: on Vultr (and wherever
+  the provisioning SSH read failed) `bind-and-sign` exits 1 and the Sign
+  step fails; on Hetzner shadowsocks is never committed. A regression
+  accepted to close F-004. Fix: provision the shared `r0` first and pass
+  its reply (`commands.rs`, `cli_bridge.rs`), re-sign after each rotation.
+  Size: `1d`. **Until this lands the app cannot make a pack on Vultr.**
+- [ ] **TW-3. Rebuild Android `libcronet.so` for every shipped ABI, then
+  the APK** (INT-1). The `cronet-go` bump changed the library's C ABI; an
+  old `.so` beside the new wrapper is undefined behaviour.
+  `build-engine-android.sh` now refuses an unstamped or mismatched library
+  (so the next APK build fails until this is done; `DAAL_NAIVE=0` builds
+  without naive). Neither guard has been run against a real NDK. Sign with
+  `release-keys/android-device-signing.jks`. Size: `½d` + toolchain time.
+- [ ] **TW-4. Phone checks nothing here could do.** (a) Connect on a good
+  route, a dead route (button returns an error within ~8 s, says "Could not
+  connect on this route"), and a route that dies while connected
+  ("Connection lost. Trying again…") — `engine_set_route` now blocks for
+  the proof and the Kotlin/Rust callers were not run; (b) the proof against
+  the DEFAULT public targets (the lab has no internet); (c) naive with
+  Private DNS off, open a site by name; same on tor (FAM-1); (d) naive for
+  a day after TW-3, then `adb logcat -b crash` (INT-1); (e) import a pack
+  with a dropped route; (f) the wizard's "More ways to connect" section in
+  a real window. Size: `½d` with a phone and a relay from TW-1.
+- [ ] **TW-5. The second observation** (CEN-4, medium). One route cannot
+  tell network-wide UDP loss from one dead address, or a name-keyed reset
+  from an address-keyed one; the engine says the coarser true thing
+  (`udp_no_reply`, `tls_sni_or_cert_block_suspected`). The prober of the
+  selection wave supplies it (`abi.CheckActiveRoute`,
+  `diagnostics.ClassifyObservation` are the plug points). Belongs with
+  B1/B2. Acceptance: the `CEN-4` known-findings entry goes stale.
+- [ ] **TW-6. The import screens do not show which routes were left out**
+  (F-003 remainder). The verdict's `Unavailable` list and the strings
+  (`add.unavailable.*`, en+fa) exist; no screen renders them. Size: `½d`.
+- [ ] **TW-7. No way to disconnect while a lost connection is being
+  retried** (CEN-5 remainder). In that state a tap means *connect*, which
+  the cooldown refuses. And the failed-connect error does not clear when
+  the cooldown ends. Size: `½d`.
+- [ ] **TW-8. naive carries no app UDP except DNS** (FAM-6, medium;
+  decision). One line in the minted outbound (`udp_over_tcp`) carries it —
+  tried against the released box — but it changes a default family's bytes
+  and needs a re-mint. Decide, then flip `families/naive.json`.
+- [ ] **TW-9. Plain (non-RelayPack) bundles still carry unsigned profiles**
+  (F-004/F-006 residual). They can no longer replace a committed route, but
+  routes under new ids are unauthenticated. Needs a signed per-route digest
+  in the base manifest and its cross-language fixtures. Size: `2-3d`.
+- [ ] **TW-10. A congested link is told "could not connect" and cooled
+  down** (CEN-O5). Behind seconds of queue the 2 × 4 s proof finishes
+  nothing; the route gets 5–30 min of cooldown and the recommender gets an
+  SNI-block signal. Needs the reach-check's SYN time, or byte counting
+  (CM-1). Also: a path fast enough for the proof and too slow for a page is
+  not seen until bytes are counted.
+- [ ] **TW-11. LC-3's two leftovers.** A relay provisioned before this
+  wave has no stable name in its certificate and still loses naive on L3
+  (rebuild it); after an L3, naive shows the cover host the relay was
+  provisioned with even if a later L2 moved it (re-issue the certificate on
+  `rotate-tls` — a mgmt change, ride TW-1 if cheap).
+- [ ] **TW-12. Sign the request body into the mgmt token** (LC-1
+  residual). Single use is in-memory: a daemon restart inside the 300 s
+  window re-opens a captured token. A coordinated wire change.
+- [ ] **TW-13. Small, recorded, undecided.** `rotate-tls` tells the
+  operator every recipient needs a new file when only vless-reality (and
+  now, with freshness, nobody who polls) does (LC-O1); `/whoami` has no
+  caller that can authenticate (LC-O2); the first freshness poll always
+  downloads the pack (LC-O3 — harmless now); the Android protect callback
+  is never called (O-1); shadowsocks/anytls ports reset opaque bytes in
+  < 1 ms (CEN-O1, an active-probing tell — needs someone who knows the
+  code); naive ends a first request with `EOF` on a lossy path (CEN-O4,
+  not root-caused); report the INT-2 race to sing-box upstream.
+- [ ] **TW-14. Decide the connection proof's public targets.** The proof
+  opens a TLS connection through the tunnel to one of a small default set
+  of very common sites on every connect and every ~3 min. Through the
+  tunnel, so the censor does not see it — but the relay's egress does, and
+  a relay that cannot reach any of them fails every proof as `unknown`.
+  The list (`connection_check.targets`) was chosen without a phone or a
+  real relay; review it before the first APK that carries it.
+

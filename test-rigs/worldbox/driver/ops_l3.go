@@ -35,6 +35,10 @@ func init() { Ops["l3"] = opL3 }
 //  8. the OLD file                                      → blocked
 //  9. the NEW file                                      → pass  (proves the new
 //     address serves — and that it is the bind that made it serve, see 1 and 13)
+//     9b. NO NEW FILE: a phone holding a file minted BEFORE the move polls
+//     the freshness mirrors, where the publisher has put nothing but
+//     the re-signed, credential-less pack, and connects — with the old
+//     address still blocked                              → pass
 //  10. the censor's block is lifted
 //  11. `floating-ip release`                             (detach → unbind → release)
 //  12. the record is back on the primary address; the box no longer holds
@@ -75,6 +79,10 @@ func opL3(rc *RunCtx) {
 			"this relay's daal-relay-mgmt does not advertise bind-address, so an L3 swap cannot be performed on it (run with --mgmt=tree); the refusal itself is asserted above", nil, t0)
 		return
 	}
+
+	// 9b is armed here, before the move: r1's file as it is in the
+	// field, with a mirror set in it.
+	fc, heldPack, armed := rc.armNoNewFile(phase, "l3")
 
 	// 1. control: nothing answers on the address the pool will issue.
 	t0 := time.Now()
@@ -182,6 +190,12 @@ func opL3(rc *RunCtx) {
 	for _, f := range fams {
 		rc.sub(f, phase, "old-file.address-blocked", oldPack, Blocked)
 		rc.sub(f, phase, "new-file.address-blocked", newPack, Pass)
+	}
+
+	// 9b. no new file. L3 touched no credential, so the signed endpoint
+	// is all a phone is missing — and that is public.
+	if armed {
+		fc.noNewFile("l3", "address-blocked", fams, heldPack)
 	}
 
 	// 10. lift the block: what follows is about the box, not the censor.

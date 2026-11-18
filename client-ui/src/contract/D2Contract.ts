@@ -87,6 +87,18 @@ export interface ConnectionSummary {
    *  work. `undefined` = the engine said nothing (older build) — treat as
    *  unknown and claim nothing, the engine-side guard still holds. */
   dataPlane?: 'singbox' | 'none';
+  /** What the engine's connection check says about the active route
+   *  (lib/routeCheck.ts). `state` already takes it into account — a
+   *  route still being checked is 'connecting', never 'connected' —
+   *  and this carries the detail the copy needs: 'verifying' reads
+   *  "Checking the connection…", 'degraded' reads "Connected, but
+   *  slow". 'failed' reads "Could not connect on this route. Try
+   *  another one." when `state` is 'error' (the connect failed and the
+   *  engine stopped) and "Connection lost. Trying again…" when `state`
+   *  is 'connecting' (a connected route stopped carrying and the engine
+   *  is re-checking it). `undefined` = no route, or the engine said
+   *  nothing. */
+  routeCheck?: 'verifying' | 'ok' | 'degraded' | 'failed';
 }
 
 export interface SkippedRouteEntry {

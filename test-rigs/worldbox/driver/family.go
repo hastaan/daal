@@ -5,7 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -404,6 +406,14 @@ func (rc *RunCtx) wrongCreds(f Family, phase, expect, outcome string) {
 // The relay is the genuine one, so it now fails to match the pack, and
 // the client must refuse it — that refusal is all that stands between an
 // insider and an impostor relay in the path.
+//
+// Who the relay is, is SIGNED: a pack cannot name another key unless the
+// publisher signed that key into its manifest (a rewrite without the key
+// is refused at import — op:tamper). So this control has the publisher
+// sign a pack for the forged identity (bind-and-sign against a relay
+// reply carrying the forged value) and mints from that. What it then
+// proves is the data plane's half: handed a correctly signed pack for a
+// relay with ANOTHER key, the client does not accept the one it meets.
 func (rc *RunCtx) wrongServer(f Family, phase, expect, outcome string) {
 	if len(f.Pins) == 0 && f.Skip == "" {
 		rc.R.Add(f.Name, phase, "wrongserver", Skipped, Skipped,
@@ -455,7 +465,36 @@ func (rc *RunCtx) forgedControl(f Family, phase, check string, fields []string, 
 			details = append(details, field+": "+err.Error())
 			continue
 		}
-		v := rc.Pub.PackSBP(rc.Ctx, "base.sbp", "creds-"+stem+".json", "pack-"+stem+".sbp")
+		base := "base.sbp"
+		if check == "wrongserver" {
+			// The forged identity has to be signed (see wrongServer).
+			// The relay's TLS identity is ONE key with two spellings in
+			// its reply — the pin (tls_cert_sha256) and the certificate
+			// naive trusts (tls_cert_pem). Forging one and not the other
+			// describes a relay that contradicts itself, which the
+			// minter refuses; so the forged identity is another KEY, in
+			// both spellings, whichever field this row is named for.
+			if field == "tls_cert_pem" || field == "tls_cert_sha256" {
+				if orig, _ := creds["tls_cert_pem"].(string); orig != "" {
+					if other, cerr := otherCertPEM(orig); cerr == nil {
+						if pin, perr := spkiPin(other); perr == nil {
+							forged["tls_cert_pem"], forged["tls_cert_sha256"] = other, pin
+							fb, _ = json.Marshal(forged)
+							_ = os.WriteFile(rc.Pub.Path("creds-"+stem+".json"), fb, 0o600)
+							one["forged_identity"] = "another key: certificate and pin together"
+						}
+					}
+				}
+			}
+			base = "base-" + stem + ".sbp"
+			if bv := rc.Pub.BindAndSignFor(rc.Ctx, base, "creds-"+stem+".json"); !bv.OK() {
+				worst = Fail
+				details = append(details, field+": bind-and-sign refused the forged identity: "+oneLine(bv.Tail(), 200))
+				continue
+			}
+			one["signed_for_the_forged_identity"] = true
+		}
+		v := rc.Pub.PackSBP(rc.Ctx, base, "creds-"+stem+".json", "pack-"+stem+".sbp")
 		if !v.OK() {
 			worst = Fail
 			details = append(details, field+": users-pack-sbp refused the forged value: "+oneLine(v.Tail(), 200))
@@ -495,6 +534,22 @@ func (rc *RunCtx) forgedControl(f Family, phase, check string, fields []string, 
 		}
 	}
 	rc.R.Add(f.Name, phase, check, Blocked, worst, strings.Join(details, "; "), map[string]any{"forged_alone": fields, "per_field": ev}, t0)
+}
+
+// spkiPin is the base64 SHA-256 of a PEM certificate's
+// SubjectPublicKeyInfo — the form the relay reports as tls_cert_sha256.
+func spkiPin(pemText any) (string, error) {
+	s, _ := pemText.(string)
+	blk, _ := pem.Decode([]byte(s))
+	if blk == nil {
+		return "", fmt.Errorf("not PEM")
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+	return base64.StdEncoding.EncodeToString(sum[:]), nil
 }
 
 // otherCertPEM returns a fresh self-signed certificate with the same

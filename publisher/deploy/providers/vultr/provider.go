@@ -116,7 +116,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("vultr: resolve served families: %w", err)
 	}
-	dataPlanePorts := relayports.ExtraFirewallPortsFor(served)
+	dataPlanePorts := relayports.FirewallPortsFor(served)
 
 	if opts.DryRun {
 		return p.dryRunRecord(label, opts, mgmtPort, coverSNI)
@@ -182,6 +182,9 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		MgmtPubKeyHex: hex.EncodeToString(opts.PublisherPubKey),
 		MgmtPort:      mgmtPort,
 		CoverSNI:      coverSNI,
+		// The box's own copy of the family set its inbounds and both
+		// firewalls were derived from; daal-relay-mgmt obeys it.
+		Families: served,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("vultr: render cloud-init: %w", err)
@@ -781,10 +784,10 @@ func removeCommand(kind, id string) string {
 
 // portsForDisplay renders a rule set for a progress message.
 func portsForDisplay(eps []relayports.Endpoint) string {
-	if len(eps) == 0 {
-		return "443/tcp, 443/udp, 80/tcp"
+	if eps == nil {
+		eps = relayports.FirewallPortsFor(nil)
 	}
-	parts := []string{"443/tcp", "443/udp", "80/tcp"}
+	parts := []string{"80/tcp"}
 	for _, ep := range eps {
 		proto := "tcp"
 		if ep.UDP {

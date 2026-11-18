@@ -4,23 +4,41 @@ package relaypack
 // per-route profiles with real client sing-box outbounds for one
 // recipient, WITHOUT re-signing.
 //
-// Profiles are not covered by the manifest signature (VerifyBundle only
-// checks that each route's ConfigPath exists in the archive — see
-// bundle.validateRoute), so we can swap `profiles/<id>.json` freely and
-// re-emit the bundle with the original manifest bytes + signature. The
-// per-recipient .sbpx age envelope provides the in-transit integrity for
-// the rewritten profiles.
+// Profile BYTES are not covered by the manifest signature, which is
+// what lets this file replace `profiles/<id>.json` per recipient and
+// re-emit the bundle with the original manifest bytes + signature.
+//
+// That used to read "so we can swap them freely", and it was the hole:
+// so could anybody else, and an age envelope addressed to a public key
+// is confidentiality, not authentication. What a profile may SAY is now
+// bounded by the manifest: each route's signed family_specific_config
+// carries an `_endpoint` commitment (endpoint.go) and the recipient's
+// client refuses any outbound that disagrees with it on server, port or
+// server-authentication material. Only the per-recipient credentials
+// are free — and a wrong credential can only fail to connect.
+//
+// This file therefore checks its own output against the commitment
+// before writing it. A pack that would be refused on arrival is an
+// error here, where the operator is watching.
 
 import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
 	"daal/bundle-go/bundle"
 	"daal/publisher/deploy/relayports"
 )
+
+// ErrStaleSignedPack is returned when a rendered outbound disagrees
+// with the endpoint the input pack was SIGNED for: the relay has moved
+// (address, cover host, key) since bind-and-sign ran. Minting anyway
+// would produce a file every recipient's client refuses.
+var ErrStaleSignedPack = errors.New(
+	"the signed pack no longer describes this relay — run bind-and-sign again, then mint from its output")
 
 // SkippedRoute records one route this rewrite could not make
 // connectable, and why. Returned rather than swallowed: the operator
@@ -41,7 +59,7 @@ type SkippedRoute struct {
 // wrong, and it names the family and reason so a human opening the pack
 // (or a support conversation) gets the answer immediately rather than
 // "outbound type missing".
-const unavailableMarkerKey = "_daal_unavailable"
+const unavailableMarkerKey = bundle.UnavailableMarkerKey
 
 // RewriteProfilesForRecipient parses a signed operator `.sbp`, replaces
 // each route's profile with a concrete client outbound built from
@@ -102,6 +120,25 @@ func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, [
 				b.Profiles[route.ConfigPath], route.TransportFamily, err)
 			continue
 		}
+		// The route's signed endpoint decides whether this outbound can
+		// ever be used. No commitment: the recipient's client will not
+		// accept an outbound for the route, so it is dropped and
+		// reported like any other route that cannot be made connectable.
+		ep, epErr := bundle.ParseEndpoint(route.FamilySpecificConfig)
+		if errors.Is(epErr, bundle.ErrNoEndpoint) {
+			cause := errors.New("the signed pack carries no endpoint for this route " +
+				"(bind-and-sign did not have the relay's connection material for it)")
+			skipped = append(skipped, SkippedRoute{RouteID: route.ID, Family: route.TransportFamily, Reason: cause.Error()})
+			files[route.ConfigPath] = markUnavailable(b.Profiles[route.ConfigPath], route.TransportFamily, cause)
+			continue
+		}
+		if epErr != nil {
+			return nil, skipped, fmt.Errorf("rewrite: route %s: %w", route.ID, epErr)
+		}
+		if err := bundle.CheckOutbound(route.TransportFamily, ep, ob); err != nil {
+			return nil, skipped, fmt.Errorf("rewrite: route %s (%s): %w (%v)",
+				route.ID, route.TransportFamily, ErrStaleSignedPack, err)
+		}
 		files[route.ConfigPath] = ob
 		rendered++
 	}
@@ -112,10 +149,10 @@ func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, [
 			len(b.Manifest.Routes), firstReason(skipped))
 	}
 
-	// Re-emit with the ORIGINAL manifest. Profiles are not signed, so
-	// the signature (carried in files["manifest.sig"]) stays valid; the
-	// manifest re-marshals canonically to the same bytes it was signed
-	// over.
+	// Re-emit with the ORIGINAL manifest. Profile bytes are not signed,
+	// so the signature (carried in files["manifest.sig"]) stays valid;
+	// the manifest re-marshals canonically to the same bytes it was
+	// signed over.
 	out, err := bundle.BuildUnsignedBundle(b.Manifest, files)
 	if err != nil {
 		return nil, skipped, fmt.Errorf("rewrite: rebuild sbp: %w", err)

@@ -119,19 +119,20 @@ type RenderInput struct {
 	// non-CDN.
 	AOPClientCertPEM string
 
-	// DataPlanePorts are the non-baseline data-plane ports this relay's
-	// box-side ufw must open, beyond 443/tcp + 443/udp + 80/tcp. Nil
-	// means "the fleet baseline", i.e. relayports.ExtraFirewallPorts().
+	// DataPlanePorts is the COMPLETE set of data-plane ports this
+	// relay's box-side ufw opens — relayports.FirewallPortsFor(<the
+	// relay's served families>). Nil means a relay with no declared
+	// family set, i.e. relayports.FirewallPortsFor(nil): the four
+	// legacy tiers.
 	//
-	// It is a field rather than a constant in the template because the
-	// set is no longer the same on every relay: a family the toolbox
-	// profile can switch off (tuic, 8443/udp) must not leave its port
-	// open on the relays that do not serve it, and a family that mints
-	// against a shut port is a route the recipient selects and loses.
-	// Both firewalls have to agree — the cloud-provider one and this —
-	// and both are written once at provision time, so turning such a
-	// family on for an existing relay means reprovisioning it. There is
-	// no upgrade path for cloud-init.
+	// There is no unconditional rule beside it any more. 443/tcp and
+	// 443/udp used to be constants in the template, which left them open
+	// on a relay provisioned without vless-reality or hysteria2
+	// (finding FAM-4). A port follows its family, for every
+	// family. Both firewalls have to agree — the cloud-provider one and
+	// this — and both are written once at provision time, so changing a
+	// relay's family set means reprovisioning it. There is no upgrade
+	// path for cloud-init.
 	DataPlanePorts []relayports.Endpoint
 }
 
@@ -162,11 +163,12 @@ type templateData struct {
 }
 
 // ufwDataPlaneRules renders the data-plane port list as ufw arguments.
-// Nil input means the fleet baseline; the order is relayports' order, so
-// the same family set always renders byte-identical cloud-init.
+// Nil input means a relay with no declared family set (the four legacy
+// tiers); the order is relayports' order, so the same family set always
+// renders byte-identical cloud-init.
 func ufwDataPlaneRules(ports []relayports.Endpoint) []string {
 	if ports == nil {
-		ports = relayports.ExtraFirewallPorts()
+		ports = relayports.FirewallPortsFor(nil)
 	}
 	out := make([]string, 0, len(ports))
 	for _, ep := range ports {
@@ -357,6 +359,21 @@ type RenderInputV2 struct {
 	// Empty is allowed (V1.5-era boxes, and non-REALITY profiles); the
 	// file is then not written at all rather than written blank.
 	CoverSNI string
+
+	// Families is the family set this relay serves, exactly as the
+	// provider resolved it (relayconf.ServedFamilies) — the same list
+	// SingBoxConfigJSON's inbounds and DataPlanePorts were derived from.
+	// It is written to /etc/daal/families, one name per line, and it is
+	// how the box learns its own family set: daal-relay-mgmt creates the
+	// inbounds that cannot exist without a user (naive-in, ws-in, ss-in,
+	// anytls-in) on the first recipient, and without this file it has no
+	// way to know which of them this relay was asked to serve — so it
+	// created all of them, on every relay (FINDINGS FAM-4, backlog W5-1).
+	//
+	// Empty writes no file, and the daemon then behaves as it did before
+	// the file existed. Every provider adapter passes the resolved set;
+	// only fixtures leave it empty.
+	Families []string
 }
 
 // RenderV2 produces the V2 cloud-init YAML. Same determinism
@@ -389,6 +406,9 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 	if err := checkDeclaredCoverSNI(in.CoverSNI, in.SingBoxConfigJSON); err != nil {
 		return nil, err
 	}
+	if err := checkFamilies(in.Families); err != nil {
+		return nil, err
+	}
 	manifest, err := canonicalManifestJSON(V2Artifacts)
 	if err != nil {
 		return nil, err
@@ -414,6 +434,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		MgmtPubKeyHex          string
 		MgmtPort               int
 		CoverSNI               string
+		Families               []string
 		UFWDataPlaneRules      []string
 	}{
 		EphemeralSSHPublicKey:  in.EphemeralSSHPublicKey,
@@ -429,7 +450,8 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		AOPClientCertPEM:       in.AOPClientCertPEM,
 		MgmtPubKeyHex:          in.MgmtPubKeyHex,
 		MgmtPort:               in.MgmtPort,
-		CoverSNI:               in.CoverSNI,
+		CoverSNI:               declaredCoverSNI(in.CoverSNI, in.SingBoxConfigJSON),
+		Families:               in.Families,
 		UFWDataPlaneRules:      ufwDataPlaneRules(in.DataPlanePorts),
 	}
 	tmpl, err := template.New("cloudinit-v2").Funcs(template.FuncMap{
@@ -443,6 +465,57 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		return nil, fmt.Errorf("execute v2 template: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// declaredCoverSNI is the value written to /etc/daal/cover-sni: the
+// caller's cover host when the config has a REALITY inbound to advertise
+// it, and nothing otherwise. A provider picks a cover host for every
+// relay before it knows whether the relay's family set includes
+// vless-reality; a relay without that family must not carry a file
+// stating a cover host it does not serve.
+func declaredCoverSNI(coverSNI, configJSON string) string {
+	var doc struct {
+		Inbounds []struct {
+			TLS *struct {
+				Reality *struct {
+					Enabled bool `json:"enabled"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &doc); err != nil {
+		return coverSNI // validate() has already refused unparseable JSON
+	}
+	for _, inb := range doc.Inbounds {
+		if inb.TLS != nil && inb.TLS.Reality != nil && inb.TLS.Reality.Enabled {
+			return coverSNI
+		}
+	}
+	return ""
+}
+
+// checkFamilies refuses a family name that could not be written to
+// /etc/daal/families as one clean line. The names come from embedded
+// toolbox profiles, so this never fires in practice; it exists because
+// the value is interpolated into a root-owned file inside a YAML block
+// scalar, and "never fires in practice" is not a property of a template.
+func checkFamilies(families []string) error {
+	seen := map[string]bool{}
+	for _, f := range families {
+		if f == "" {
+			return fmt.Errorf("RenderInputV2.Families contains an empty name")
+		}
+		for _, r := range f {
+			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+				return fmt.Errorf("RenderInputV2.Families: %q is not a family name ([a-z0-9-]+)", f)
+			}
+		}
+		if seen[f] {
+			return fmt.Errorf("RenderInputV2.Families names %q twice", f)
+		}
+		seen[f] = true
+	}
+	return nil
 }
 
 // checkDeclaredCoverSNI verifies RenderInputV2.CoverSNI against the

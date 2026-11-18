@@ -80,21 +80,27 @@ FINDINGS.md, and one broad enough to be a blanket.
 An entry excuses a **defect, not a cell**. Besides its scope it can state
 what the red check must look like to be this finding: `got` (the observed
 value) and `evidence` (keys of the check's evidence). A check in scope that
-is red some other way is UNEXPECTED. CEN-1 is "the engine reported `none`";
-F-004 is "a profile rewrite was accepted (`got: pass`) **while** the
-manifest rewrite of the same op was refused" — `op:tamper` runs that
-control first (`manifest_rewrite_refused`) and puts its outcome in the
-evidence, so an importer that stops checking signatures is two unexpected
-reds, never "the old F-004". And every report prints `ENGINE CATEGORY — …
-correctly in N of M blocked sessions`: while that is 0 of M the
-`engine.category` column is CEN-1 restated, not coverage.
+is red some other way is UNEXPECTED. CEN-4 is "the engine reported
+`udp_no_reply`" (or, under one scenario, `tls_sni_or_cert_block_suspected`).
+(The mechanism was built for F-004, since fixed: "a profile rewrite was
+accepted **while** the manifest rewrite of the same op was refused" —
+`op:tamper` still runs that control first and puts its outcome in the
+evidence; `known_test.go` keeps the mechanism tested on a rebuilt entry.)
+And every report prints `ENGINE CATEGORY — …
+correctly in N of M blocked sessions`, and for the rest lists each
+truth → reported pair an open finding explains (CEN-4: the engine named
+the coarser thing one route can see). Were it ever 0 of M with nothing
+listed, the `engine.category` column would be the censor restated, not
+coverage — which is what it was while CEN-1 was open.
 
-Two findings are races (INT-1, an engine crash inside Cronet; INT-2, a
-start-up race in sing-box that now and then leaves a relay's naive inbound
-refusing every handshake until the next restart — fixed in the tree
-daemon, so excused on the pinned box only). They cannot be required to
-reproduce, so their entries are marked `intermittent` — and are held
-tighter for it: each is pinned to a signature in the red check's detail
+One open finding is a race (INT-2, a start-up race in sing-box that now
+and then leaves a relay's naive inbound refusing every handshake until the
+next restart — fixed in the tree daemon, so excused on the pinned box
+only; INT-1, an engine crash inside Cronet, was the other until its
+dependency fix, and an engine death is no longer excused by anything). A
+race cannot be required to reproduce, so its entry is marked
+`intermittent` — and is held tighter for it: it is pinned to a signature
+in the red check's detail
 (`detail_contains`), and has a budget (`max`) of red checks per run. Over
 budget, none of them is excused: a race shows once or twice; a regression
 with the same face shows in every session. A race is told from a regression
@@ -103,13 +109,14 @@ has a budget of **zero**: a red check with a race's signature fails that
 run, and says so (re-run it; red twice is not the race). Only the matrix
 (`e2e.sh`, which re-judges every world's checks together) excuses them. The quick matrix has a smaller
 budget of its own (`max_quick`), sized to what quick has shown, and every
-report states the count against the budget (`INTERMITTENT — … INT-1 ×1
-(budget 2)`); the pre-push hook repeats that line next to its ✓.
+report states the count against the budget (`INTERMITTENT — … INT-2 ×0
+(budget 4)`); the pre-push hook repeats that line next to its ✓.
 
 An entry can also say what a red check must have GOT to be excused
-(`got`). CEN-1 is "the engine reports nothing" (`got: none`): an engine
-that reports the wrong category is red in the same check and is NOT
-excused — it is unexpected.
+(`got`). CEN-4 is "the engine reports `udp_no_reply` for a silent UDP
+route": an engine that reports nothing (`none` — what CEN-1 was), or some
+other wrong category, is red in the same check and is NOT excused — it is
+unexpected.
 
 **An engine that dies.** If the engine process exits mid-session without
 being asked to, the session records a red `engine.survived` carrying the
@@ -164,7 +171,7 @@ again after disconnecting.
 |---|---|---|
 | world | namespaces, veths, routes; target / cloud / mirror / DNS / cover site start | rig |
 | provision | `daal-deploy provision --provider hetzner …` → hcloud-go → HTTPS → the lab cloud API. Creating the server **boots a box**: the user-data, byte for byte, is executed by `box/init.py` (bootcmd, write_files, runcmd). The runcmd downloads the three artefacts from the lab mirror with the unmodified `daal-fetch-verify`, which checks the real SHA-256 pins and the real Ed25519 release signature, generates the REALITY keypair and TLS cert, and starts `sing-box`, `daal-relay-health`, `daal-relay-mgmt` from the unit files the template wrote. The publisher then polls the real health endpoint and pins the mgmt TLS fingerprint. | **product**, end to end |
-| mint | `bind-and-sign` → `users-provision` (opens the cloud firewall window through the cloud API, signs an op-bound token, calls the real mgmt API over pinned TLS) → `users-pack-sbp` | **product** |
+| mint | `users-provision` (opens the cloud firewall window through the cloud API, signs an op-bound token, calls the real mgmt API over pinned TLS) → `bind-and-sign --endpoint-creds <that reply>` (every route is committed to a signed endpoint; this lab's record has no REALITY key or TLS pin because there is no sshd to read them over) → `users-pack-sbp` | **product** verbs; the ORDER is the rig's (the app signs first — FINDINGS F-005) |
 | family | `wb-client`: the real engine (`daal/core/abi`, sing-box data plane) imports the pack, answers the trust prompt, is handed a TUN fd, `SetRoute`s the family's route. `wb probe` (an ordinary process under another uid) fetches the target. | **product** engine; rig plays the Android shell |
 | ops | scripted publisher operations with insider-side assertions | **product** verbs |
 
@@ -322,6 +329,7 @@ Per family the matrix has these columns (ids are stable):
 | `not_served` | blocked | *(families the relay was NOT provisioned with)* both firewalls shut, no route in the pack — "default-off" is a claim too |
 | `control.before` | blocked | no tunnel ⇒ target out of reach (so a later pass means something) |
 | `import` | pass | pack verified, trust prompt answered, routes listed |
+| `import.unconnectable_not_listed` | pass | no route the pack cannot connect on (dropped by the minter, or holding no outbound) is in the engine's route list |
 | `tunnel` | *the scenario's expectation* | fresh nonce echoed; 256 KiB downloaded and SHA-256-verified; 96 KiB **uploaded** and verified by the far end; 32 simultaneous connections; **the target saw the relay's egress IP** |
 | `wire` | *same as `tunnel`* | at the censor: the session's packets went to **this family's** port/proto, at least the payload came back, and the client opened no flow to anything else on the relay. A "tuic" route that is really a vless outbound passes `tunnel` and fails here. Under a blocking scenario: the client did try (blocked ≠ never attempted) |
 | `udp` | the family's `udp` | both datagram sizes round-trip, seen by the target from the relay |
@@ -427,13 +435,16 @@ the module cache, beside the binary.
   `blocked`, and a censor that fails to block is a red cell.
 * `category` — for every family expected `blocked`: the failure category
   from `specs/failure-taxonomy-v1.md` that describes what this censor does
-  to it (`"*"` allowed; `none` = it connects and is merely too slow;
-  `unasserted` = not deterministic, e.g. random loss). Two checks hang off it:
+  to it (`"*"` allowed; `path_too_slow` = it connects and is merely too
+  slow; `unasserted` = not deterministic, e.g. random loss). No scenario
+  declares an alternation (`a|b`): a cell that accepts either answer
+  checks nothing. These checks hang off it:
 
   | check | expect | got | proves |
   |---|---|---|---|
   | `censor / truth.category` | the declared category | what a **raw differential probe** of the family's own endpoint observes, shaped like the family's first flight (TLS with the pack's SNI, or opaque bytes, or a QUIC-Initial-shaped datagram) — the ladder is the comment on `truthCategory` in `censor.go` | the declaration describes the network, not a hope |
   | `family / engine.category` | the declared category (`none` for a family that passes) | what the **engine** reported for that route: `abi.DiagnosticsExplain().failures[].classification`, captured by `wb-client` while the route was active | the client's classification matches reality — the thing route selection will act on |
+  | `family / engine.first_verdict` | `connected`, for every family with an `established` claim in a scenario that asserts a category | what the **first phone** was told: `connected`, or `failed:<category>` | a session under a degraded path may ask again with a fresh phone when the engine's connection proof fails (the later checks need a connected engine), and a fresh phone has no cooldown and no memory of the failure. This check is the first phone's answer alone — the one a real person gets — and a retry that works does not turn it green. Every attempt is in the `connects` evidence of `tunnel` |
   | `family / established` | `pass`, for every family the scenario expects `blocked` under `"established": {…: "pass"}` | one fresh nonce through the tunnel and back, seen by the target as arriving from the relay — taken from the session's own probe, or asked again (`wb probe --whoami-only`, up to 20 s) while the engine is still up | the family **connected and authenticated** before its payload ran out of budget. `throttle-56k` and `heavy-loss` block nothing; they expect `blocked` only because 256 KiB cannot finish in 5 s, and a dead family (no user on the relay, a shut port) produces exactly that. A scenario whose blocked family has category `none` or `unasserted` and no `established` claim is refused by the `declarations` tests. Shown in the matrix as `blocked:never-connected` when red |
 
   The differential matters: one reset after a ClientHello is an SNI block
@@ -442,6 +453,17 @@ the module cache, beside the binary.
 
 The scenario is applied after provisioning and minting (the publisher is
 outside the censor) and stays for the whole matrix and all ops.
+
+**One phone at a time on a shaped link.** A scenario with a `tc` rate cap
+queues what it cannot forward, and the QUIC families go on sending for
+seconds after their client is gone. Each session is a separate phone, so
+before it starts the driver waits (up to 60 s) until the censor's qdiscs
+hold nothing of the session before (`shaper_backlog_packets`,
+`waited_for_quiet_ms` on `control.before`; a shaper that never drains is a
+red `link.quiet`). Without it the family after hysteria2 and the one after
+tuic spent their whole connection proof behind the previous phone's
+packets. `WB_NO_QUIET=1` turns the wait off, to see what the engine says
+on a link that already has seconds of queue (FINDINGS CEN-O5).
 `./e2e.sh full` runs every scenario against every family and prints one
 scenario × family table (`./e2e.sh full --only sni-rst,quic-drop` for a
 few). It builds once into its own bin directory (`WB_BIN`, `run.sh
@@ -494,13 +516,24 @@ the only family that puts a name on the wire. The other TLS/QUIC families
 name the relay by IP literal (which is not sent as SNI) and shadowsocks is
 not TLS (FINDINGS CEN-O2).
 
-`engine.category` is **red for every blocked cell above** (the engine
-reports no failure at all for a route that carries nothing, and marks it
-proven) — FINDINGS CEN-1. That red is the product's, and it stays red
-until the product changes; the report lists it under `KNOWN [CEN-1]`,
-apart from any other red, so a broken scenario cannot hide behind it — and
-the day the engine starts reporting the truth the run fails with "CEN-1
-did not reproduce" until `known-findings.json` is updated.
+`engine.category` compares the engine's own account of each blocked
+session with the cell above. The engine proves every route with one real
+round trip before it calls it connected (FINDINGS CEN-1, fixed), so it
+names the failure: exactly, in the TCP cells; as `udp_no_reply` in every
+blocked UDP cell and as `tls_sni_or_cert_block_suspected` under
+tcp-reset-mid-handshake, where the narrower truth needs a second
+observation (FINDINGS CEN-4, open — listed under `KNOWN [CEN-4]`, apart
+from any other red). Under throttle-56k the declaration is `path_too_slow`
+and the cell is decided per connect by the time the connect took
+(`slowCategoryFor`, `first_verdict.go`): longer than the engine's
+`slow_after_ms` (2 s) and the engine must have said `path_too_slow`
+("Connected" with nothing more is red); within it and the engine must have
+said nothing — the engine sees a slow path only through its own proof
+(the taxonomy's "What one route can see"). Either is accepted only in the
+150 ms in which `set_route_ms` cannot say which side the proof was on. The
+engine's connection check reaches the lab's own "internet" hosts: the
+driver passes `--proof-targets` to `wb-client`, which writes them to the
+engine's ordinary `engine-config.json` before `engine_init`.
 
 #### Fidelity: what this censor is and is not
 
@@ -583,9 +616,12 @@ never issued carries nothing), `tamper` (the negative controls for what is other
 succeed: one altered byte of the signed manifest, a stranger's valid
 signature, a stranger's key, a pack minted 40 days ago by the real verbs,
 and a mgmt endpoint that fails the TLS pin — each must be refused for the
-reason named in the row; plus the profile rewrite of FINDINGS F-004, a row
-of its own so that open finding cannot absorb the others), and the
-lifecycle ops below.
+reason named in the row; plus the unsigned half of a pack: the `server`,
+port, TLS pin, REALITY public key, trusted certificate and shadowsocks
+server key of the profiles rewritten one at a time, and the endpoint
+commitment stripped from the manifest — each refused at import — and one
+recipient CREDENTIAL rewritten, which imports, by design, and then goes to
+the genuine relay and carries nothing), and the lifecycle ops below.
 
 #### Lifecycle ops — what happens after first contact
 
@@ -604,23 +640,28 @@ nothing).
 | `recipients` | `users-provision`, `users-pack-sbp`, `users-list` | four recipients on one relay: every per-user secret differs, box-wide material is shared, each inbound has a row per recipient, **each one's pack carries verified bytes on every family** | `revoke` / `wrongcreds`: a missing or wrong row does not connect |
 | `revoke` | `users-revoke` | the revoked recipient is cut off on every family | the others still connect — and if a bystander does not, the revoked recipient's `blocked` is not counted as revocation (`revoked.attributable`, never excused) |
 | `l1` | `rotate-credentials --name r21` | every secret of r21 changed and none of the old ones is left in the box's config; no box-wide key moved; the relay names every inbound it rewrote; **old pack blocked, new pack connects** | two bystanders' rows are byte-identical and their packs still connect |
-| `l3` | `assign-fip`, `bind-and-sign`, `users-pack-sbp`, `floating-ip release` | the real `/bind-address`: record moved, box holds and persists the address; re-minted pack connects **while the censor blocks the old address**; then the real `/unbind-address`: record, box and cloud account are clean | new address dead before the swap; old pack still works until the block (grace), then does not; the released address stops serving. (`refused_before_reserving` — a relay that does not advertise `bind-address` is refused before anything is reserved — is coded but **runs in no world**: every daemon here advertises it, see "Known gaps: privilege on the box") |
-| `l2` | `rotate-tls`, then Rebuild | cover host moved in the record and in both places on the box; no key, no user row changed; **old pack per family = `l2OldPackExpect`** (vless-reality blocked, the rest pass); rebuilt pack connects everywhere | the pre-rotation session passed |
+| `l3` | `assign-fip`, `bind-and-sign`, `users-pack-sbp`, `publish-freshness`, `floating-ip release` | the real `/bind-address`: record moved, box holds and persists the address; re-minted pack connects **while the censor blocks the old address**; **a phone holding a pre-move file polls the mirrors and connects with no new file** (`no-new-file.address-blocked.*`); then the real `/unbind-address`: record, box and cloud account are clean | new address dead before the swap; old pack still works until the block (grace), then does not; the released address stops serving. (`refused_before_reserving` — a relay that does not advertise `bind-address` is refused before anything is reserved — is coded but **runs in no world**: every daemon here advertises it, see "Known gaps: privilege on the box") |
+| `l2` | `rotate-tls`, `bind-and-sign`, `publish-freshness`, then Rebuild | cover host moved in the record and in both places on the box; no key, no user row changed; **old pack per family = `l2OldPackExpect`** (vless-reality blocked, the rest pass); **a phone holding a pre-rotation file polls the mirrors and connects on every family with no new file** (`no-new-file.cover-host-moved.*`); rebuilt pack connects everywhere | the pre-rotation session passed |
 | `mgmtauth` | (hand-built requests, `mgmtprobe.go`) | unsigned, wrong scheme, garbage, empty signature, stranger's key, wrong op, stale, future, replayed address token, **replayed `users-revoke` token aimed at a second recipient** are all refused | a correctly signed request is honoured; afterwards the config is byte-identical and the targeted recipient still connects |
-| `freshness` | `bind-and-sign --freshness-mirror`, `publish-freshness`, `rotate-tls`, Rebuild; engine: `abi.SchedulerTick` | a phone holding the old pack polls the mirrors with no tunnel and connects **with no new file**; and what the app's own publish shape does to a working phone (FINDINGS LC-2) | no poll → still blocked; a document signed by another key → refused, no pack downloaded; a pack whose digest does not match → refused |
+| `freshness` | `bind-and-sign --freshness-mirror`, `publish-freshness`, `rotate-tls`; engine: `abi.SchedulerTick` | what the app publishes — the digest of the SIGNED, credential-less pack, with that file at the pack URL — is **merged** by a polling phone: with nothing changed it still connects and keeps every route; after an L2 it connects **with no new file** (nothing is minted for it); the published file holds no credential (`published.*.holds_no_credentials`) | no poll → still blocked; a document signed by another key → refused, no pack downloaded; a pack whose digest does not match → refused; the signed pack handed as a file to a phone that holds nothing → refused; the signed pack from BEFORE the rotation handed as a file to a phone that has already moved on → not merged, routes kept, still connects (`rotated.stale-signed-pack-by-file.*`) |
 | `caps` | — (reads this run's results) | every token `/health` advertises was observed to work in this run, and nothing that worked is unadvertised; a token with no evidence is `skipped` with the op that would produce it; a token the rig has no proof for fails. **It judges the binary's claim against the binary's behaviour, not the box's privilege**: `bind-address` is advertised because the daemon holds `CAP_NET_ADMIN`, which in this world every process does. It does not show that the systemd unit grants it, nor that a relay with an older unit advertises nothing | — |
 | `restarts` | `users-provision`, `users-revoke` (N cycles, `WB_RESTART_CYCLES`, default 6) | the relay comes back serving **every** family after every restart of its data plane: each cycle restarts sing-box three times and then runs a bystander's session on each family | the bystander's pack is r1's, never touched by the verbs |
 
-`l2` invalidates every vless-reality pack minted before it and re-issues
-r1's at the end (`rc.Pack` is replaced); `freshness` does the same. `l3`
-leaves the world as it found it. `caps` must run last. The rotation rungs
+`l2` invalidates every vless-reality pack minted before it (for a phone
+that does not poll), re-signs `base.sbp` (`rc.Resign`: the signed endpoints
+name the cover host) and re-issues r1's at the end (`rc.Pack` is
+replaced); `freshness` does the same. `l3` leaves the world as it found it.
+Any op that moves an endpoint must `rc.Resign` before it mints from
+`base.sbp`: `users-pack-sbp` refuses a signed pack that no longer
+describes the relay. `caps` must run last. The rotation rungs
 need a mgmt daemon that advertises them: the pinned release does for
 L1/L2/L3 on the four default families (FINDINGS LC-O4).
 
 The client side of `freshness` uses `wb-client --idle`: import, then wait
 for commands with the VPN off — `tick` calls the product's own
-`abi.SchedulerTick` once, `connect <family>` brings the VPN up. Nothing was
-added to the engine for it.
+`abi.SchedulerTick` once, `import <file>` hands the phone another file
+(the app's own `abi.ImportSBP`), `connect <family>` brings the VPN up.
+Nothing was added to the engine for it.
 
 ### (d) Results
 
@@ -734,9 +775,11 @@ the `nf_conntrack` module, which `nft … ct state` loads or finds loaded.
   jitter — needs clock control; `cmd/daal-soak-engine` has `set-now` under
   `-tags soak`), a poll THROUGH an active tunnel, rollback (lower
   sequence), document expiry, every mirror blocked → bootstrap-pointer
-  recovery, the R2/GitHub uploaders, and an L3 move learned through
-  freshness (blocked on FINDINGS LC-2: no connectable pack can be named by
-  the app's document).
+  recovery, the R2/GitHub uploaders. (An L3 move and an L2 learned through
+  freshness ARE exercised: `op:l3` / `op:l2` `no-new-file.*`.) Not
+  exercised either: what a polling phone does after L1 (that recipient
+  needs a new file — nothing in the published pack can help) and after a
+  rebuild (everyone does).
 * **Expiry / revocation lists**: no revocation mirror; packs are minted
   without one (the verb warns).
 * **sshd on the box**, so the provisioning log observer and the
@@ -773,9 +816,10 @@ the `nf_conntrack` module, which `nft … ct state` loads or finds loaded.
   named provider) does not exist here. Consequence for **FAM-1**: the fix
   is verified against the "Private DNS: Off" shape only; `naive dns pass`
   does not replace the phone retest written in that finding.
-* **Two findings are code-reading, not observation**: LC-2's "as the app
-  drives it" and all of FAM-2 rest on reading `freshness.rs` and
-  `PublisherWizard.tsx`. Neither file is compiled or run by the rig; the
+* **Code-reading, not observation**: that the APP publishes the signed
+  pack's digest (`freshness.rs`), that it signs before it has a recipient
+  (FINDINGS F-005), and all of FAM-2 rest on reading `freshness.rs`,
+  `commands.rs` and `PublisherWizard.tsx`. Neither file is compiled or run by the rig; the
   CLI is driven with the arguments that reading says the app would pass
   (each finding says so).
 * **Quick mode says little about relays in the field.** 14 of its 15

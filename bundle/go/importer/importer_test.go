@@ -91,6 +91,13 @@ func makeBundle(t *testing.T, mutate func(m *bundle.Manifest)) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return makeBundleSignedBy(t, pub, priv, mutate)
+}
+
+// makeBundleSignedBy is makeBundle under a caller-held publisher key,
+// for tests in which the SAME publisher issues more than one pack.
+func makeBundleSignedBy(t *testing.T, pub ed25519.PublicKey, priv ed25519.PrivateKey, mutate func(m *bundle.Manifest)) []byte {
+	t.Helper()
 	now := time.Now().UTC()
 	m := bundle.Manifest{
 		SpecVersion: 1,
@@ -131,11 +138,36 @@ func makeBundle(t *testing.T, mutate func(m *bundle.Manifest)) []byte {
 		"profiles/rA.json": []byte(`{"type":"direct"}`),
 		"profiles/rB.json": []byte(`{"type":"direct"}`),
 	}
+	// A RelayPack's outbounds are held to the endpoint its manifest
+	// signs (endpoint_plan.go); a fixture that is a RelayPack therefore
+	// carries real relay outbounds that match fixtureEndpoint.
+	if m.RelayPack != nil {
+		profiles["profiles/rA.json"] = fixtureOutbound()
+		profiles["profiles/rB.json"] = fixtureOutbound()
+	}
 	data, err := bundle.BuildSignedBundle(m, profiles, pub, priv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// fixtureEndpoint is the signed endpoint every RelayPack fixture route
+// commits to; fixtureOutbound is the vless-reality outbound that
+// matches it (the two routes are both vless-reality).
+func fixtureEndpoint() bundle.Endpoint {
+	return bundle.Endpoint{
+		V: bundle.EndpointVersion, Server: "5.75.0.1", Port: 443,
+		ServerName: "cover.example", RealityPublicKey: "fixture-reality-public-key",
+	}
+}
+
+func fixtureOutbound() []byte {
+	return []byte(`{"type":"vless","tag":"active","server":"5.75.0.1","server_port":443,` +
+		`"uuid":"11111111-2222-3333-4444-555555555555","flow":"xtls-rprx-vision",` +
+		`"tls":{"enabled":true,"server_name":"cover.example",` +
+		`"utls":{"enabled":true,"fingerprint":"chrome"},` +
+		`"reality":{"enabled":true,"public_key":"fixture-reality-public-key","short_id":"abcd"}}}`)
 }
 
 // addRelayPack populates the bundle slot and per-candidate
@@ -162,7 +194,7 @@ func addRelayPack(t *testing.T, m *bundle.Manifest) {
 			},
 			OriginRiskTags: []string{},
 		}
-		fcBytes, err := json.Marshal(map[string]any{"_relaypack": entry})
+		fcBytes, err := json.Marshal(map[string]any{"_relaypack": entry, bundle.EndpointKey: fixtureEndpoint()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -268,7 +300,7 @@ func cdnRoute(t *testing.T, m *bundle.Manifest, att *bundle.CDNAttestation) {
 		PublicRiskTags:   []string{"cdn:cloudflare", "public_domain:test.example"},
 		OriginRiskTags:   []string{"origin_ip:10.0.0.1"},
 	}
-	blob := map[string]any{"_relaypack": entry}
+	blob := map[string]any{"_relaypack": entry, bundle.EndpointKey: fixtureEndpoint()}
 	if att != nil {
 		blob["_cdn_attestation"] = att
 	}

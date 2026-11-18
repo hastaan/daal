@@ -66,6 +66,23 @@ type RouteInput struct {
 	TrustState      string
 	Profile         []byte // sing-box outbound JSON; passed through to PutSecret
 
+	// Endpoint is the route's SIGNED endpoint commitment
+	// (bundle.Endpoint, as JSON), or nil for a route that is not part
+	// of a RelayPack. The store keeps it beside the profile so the
+	// engine can re-check, at set-route, that the outbound it is about
+	// to dial still points where the publisher signed — a second gate
+	// behind planRoutes, for any path that writes a profile without
+	// coming through here.
+	Endpoint []byte
+
+	// SignedAt is the signed manifest's bundle.created_at for the
+	// manifest Endpoint came from: when the publisher signed the
+	// endpoint this route is now held to. The store keeps it beside the
+	// commitment, and planRoutes reads it back (DeviceRoute.SignedAt)
+	// so a signed skeleton handed over as a file can only move a route
+	// FORWARD. Empty exactly when Endpoint is.
+	SignedAt string
+
 	// RelayPack carries the parsed FRP-2 metadata for this candidate.
 	// nil for non-RelayPack routes; legacy callers leave it nil. The
 	// concrete State implementation (e.g. core/trust/state.go's
@@ -153,6 +170,15 @@ type Verdict struct {
 	BundleID    string
 	RouteCount  int
 	Reason      string // populated when Kind==VerdictRejected
+
+	// Merged counts routes whose NEW signed endpoint was applied to
+	// credentials the device already held (see endpoint_plan.go).
+	Merged int
+	// Unavailable lists the pack's routes that were NOT stored, and
+	// why. They are not routes on this device: nothing can list,
+	// select or activate them. Present so the UI can say, in plain
+	// words, what the file did not give this person.
+	Unavailable []UnavailableRoute
 }
 
 // RotationChainDoc mirrors publisher.RotationChain on the wire (canonical
@@ -201,11 +227,30 @@ func ImportBytes(body []byte, st State, wordlists bundle.Wordlists, now time.Tim
 		return Verdict{Kind: VerdictRejected, Reason: "lookup_failed"}, err
 	}
 
-	switch {
-	case pinned && pin.TrustLevel == "revoked":
+	if pinned && pin.TrustLevel == "revoked" {
 		return Verdict{Kind: VerdictRejected, Reason: "publisher_revoked",
 			Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA}, errors.New("publisher revoked")
+	}
 
+	// Endpoint authentication, BEFORE any trust decision. A pack whose
+	// outbounds do not match what its publisher signed is refused
+	// here, with its own reason, whether or not the publisher is
+	// already trusted: asking "do you trust this publisher?" about a
+	// file that is provably not what the publisher signed would turn
+	// the trust prompt into the attack.
+	//
+	// The RelayPack validator runs first so a pack that is invalid as
+	// a RelayPack keeps reporting its own code (relaypack_RPxxx).
+	if verdict, err := validateRelayPackCurrent(parsed, fp, rendered); err != nil {
+		return verdict, err
+	}
+	plan, reason, planErr := planRoutes(parsed, st, fp.Hex, false)
+	if planErr != nil {
+		return Verdict{Kind: VerdictRejected, Reason: reason,
+			Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA}, planErr
+	}
+
+	switch {
 	case pinned:
 		// Known, not revoked — silent import.
 		return apply(st, parsed, fp, rendered, bucket, pin.TrustLevel, false)
@@ -237,13 +282,16 @@ func ImportBytes(body []byte, st State, wordlists bundle.Wordlists, now time.Tim
 
 	default:
 		// First-seen publisher. UI must confirm before any persistence.
-		if verdict, err := validateRelayPackCurrent(parsed, fp, rendered); err != nil {
-			return verdict, err
-		}
+		// (The RelayPack validator and the endpoint plan have both
+		// already passed, above: an invalid or altered pack never
+		// reaches the trust prompt.)
 		return Verdict{
 			Kind:        VerdictTrustPromptNeeded,
 			Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA,
-			BundleID: parsed.Manifest.Bundle.ID, RouteCount: len(parsed.Manifest.Routes),
+			// What the user is about to be asked to trust is the set
+			// of routes that would actually be stored.
+			BundleID: parsed.Manifest.Bundle.ID, RouteCount: len(plan.routes),
+			Unavailable: plan.unavailable,
 		}, nil
 	}
 }
@@ -326,13 +374,25 @@ func validateRelayPackCurrent(parsed *bundle.Bundle, fp bundle.Fingerprint, rend
 
 func apply(st State, parsed *bundle.Bundle, fp bundle.Fingerprint,
 	rendered bundle.RenderedFingerprint, bucket, trustLevel string, firstSeen bool) (Verdict, error) {
-	return applyWithRelayPackPhase(st, parsed, fp, rendered, bucket, trustLevel, firstSeen, relaypack.CurrentPhase)
+	return applyWithRelayPackPhase(st, parsed, fp, rendered, bucket, trustLevel, firstSeen, relaypack.CurrentPhase, false)
 }
 
+// applyWithRelayPackPhase persists an import. continuity is true only
+// on the freshness path, where a publisher-signed document has already
+// said that this pack replaces the one the device holds; see planRoutes.
 func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerprint,
-	rendered bundle.RenderedFingerprint, bucket, trustLevel string, firstSeen bool, phase relaypack.Phase) (Verdict, error) {
+	rendered bundle.RenderedFingerprint, bucket, trustLevel string, firstSeen bool, phase relaypack.Phase,
+	continuity bool) (Verdict, error) {
 	if verdict, err := validateRelayPack(parsed, fp, rendered, phase); err != nil {
 		return verdict, err
+	}
+	// Re-planned here rather than passed in: this function is also
+	// reached from AcceptTrustPrompt and ApplyVerifiedRefresh, and the
+	// gate must hold on every one of them.
+	plan, reason, planErr := planRoutes(parsed, st, fp.Hex, continuity)
+	if planErr != nil {
+		return Verdict{Kind: VerdictRejected, Reason: reason,
+			Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA}, planErr
 	}
 
 	// In-archive RevocationList: revoke the listed routes/publishers
@@ -391,8 +451,13 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 	// At spec_version <= 4 this is a no-op: an unknown family there
 	// fails the whole bundle before this line is reached.
 	var routes []RouteInput
-	for _, r := range bundle.UsableRoutes(parsed) {
-		profile := parsed.Profiles[r.ConfigPath]
+	//
+	// plan.routes is UsableRoutes filtered once more: a RelayPack route
+	// with no outbound is not stored (endpoint_plan.go rule 2), and one
+	// whose signed endpoint was merged into credentials the device
+	// already holds carries the MERGED profile, not the pack's.
+	for _, pr := range plan.routes {
+		r, profile := pr.route, pr.profile
 		ri := RouteInput{
 			RouteID:         r.ID,
 			TransportFamily: r.TransportFamily,
@@ -404,6 +469,10 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 			ImportedAt:      bucket,
 			TrustState:      trustStateFromLevel(trustLevel),
 			Profile:         append([]byte(nil), profile...),
+			Endpoint:        append([]byte(nil), pr.endpoint...),
+		}
+		if len(pr.endpoint) > 0 {
+			ri.SignedAt = parsed.Manifest.Bundle.CreatedAt
 		}
 		if hasRP {
 			entry, err := bundle.ParseRelayPackEntry(r.FamilySpecificConfig)
@@ -452,6 +521,7 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 		Kind:        VerdictImported,
 		Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA,
 		BundleID: parsed.Manifest.Bundle.ID, RouteCount: len(routes),
+		Merged: plan.merged, Unavailable: plan.unavailable,
 	}
 	_ = firstSeen
 	return v, nil

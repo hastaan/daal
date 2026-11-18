@@ -26,6 +26,15 @@ type Publisher struct {
 	p     Paths
 	Dir   string
 	steps int
+
+	// endpointCreds is the newest reply the relay gave to a
+	// users-provision — the file the wizard would have saved. Its
+	// relay-wide fields (REALITY public key, TLS pin, shadowsocks server
+	// key) are what bind-and-sign commits each route's signed endpoint
+	// to. This rig has no sshd, so the OperatorRecord carries none of
+	// them (README "What is real and what is not"); on a VPS the record
+	// has the first two and this file supplies the rest.
+	endpointCreds string
 }
 
 // ToolboxProfile is the profile every relay in the rig is provisioned with.
@@ -130,10 +139,25 @@ func (pb *Publisher) Provision(ctx context.Context, families []string) Verb {
 	return pb.Deploy(ctx, args...)
 }
 
-func (pb *Publisher) BindAndSign(ctx context.Context, out string) Verb {
-	return pb.Deploy(ctx, "bind-and-sign", "--operator-record", pb.Path("record.json"),
+// BindAndSign signs the base pack against record.json as it is NOW.
+// Every route is committed to an endpoint (address, port, the key that
+// proves the relay is the relay), so it has to be run again after any
+// rotation that moves one of those: users-pack-sbp refuses to mint from
+// a signed pack that no longer describes the relay.
+func (pb *Publisher) BindAndSign(ctx context.Context, out string, extra ...string) Verb {
+	return pb.BindAndSignFor(ctx, out, pb.endpointCreds, extra...)
+}
+
+// BindAndSignFor is BindAndSign with an explicit relay reply to take
+// the relay-wide connection material from.
+func (pb *Publisher) BindAndSignFor(ctx context.Context, out, credsFile string, extra ...string) Verb {
+	args := []string{"bind-and-sign", "--operator-record", pb.Path("record.json"),
 		"--priv-key", pb.Path("publisher.priv"), "--output", pb.Path(out),
-		"--publisher-name", "Worldbox Publisher")
+		"--publisher-name", "Worldbox Publisher"}
+	if credsFile != "" {
+		args = append(args, "--endpoint-creds", pb.Path(credsFile))
+	}
+	return pb.Deploy(ctx, append(args, extra...)...)
 }
 
 // UsersProvision creates a recipient on the relay and saves the box's
@@ -144,6 +168,7 @@ func (pb *Publisher) UsersProvision(ctx context.Context, name string) Verb {
 		"--helper-ip", PublisherIP, "--name", name)
 	if v.OK() {
 		_ = os.WriteFile(pb.Path("creds-"+name+".json"), []byte(v.Stdout), 0o600)
+		pb.endpointCreds = "creds-" + name + ".json"
 	}
 	return v
 }

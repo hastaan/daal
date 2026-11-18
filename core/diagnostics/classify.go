@@ -55,6 +55,30 @@ const (
 	// hygiene per supplement §13.4 — NOT a censorship event;
 	// excluded from IsCensorshipClass below.
 	OriginUnhealthy Category = "origin_unhealthy"
+
+	// Taxonomy revision 2 (end-to-end rig finding CEN-3). Three things a censor does
+	// that revision 1 had no word for, and the one thing a single route
+	// can honestly say about UDP. See specs/failure-taxonomy-v1.md
+	// "Revision 2" for the definitions and "What one route can see" for
+	// why the engine itself only ever produces UDPNoReply of the first
+	// three: telling them apart needs a second observation (another
+	// address, another port, a non-QUIC datagram) that a route's own
+	// connection proof does not make.
+	//
+	// UDPNoReply: this route's UDP endpoint never answered. Nothing is
+	// claimed about UDP on the network as a whole.
+	UDPNoReply Category = "udp_no_reply"
+	// UDPAddressBlocked: UDP toward THIS address is dropped while UDP
+	// to other hosts on the same port is delivered.
+	UDPAddressBlocked Category = "udp_address_blocked"
+	// UDPPortBlocked: UDP on THIS port is dropped while UDP on another
+	// port is delivered.
+	UDPPortBlocked Category = "udp_port_blocked"
+	// PathTooSlow: the route connects and carries a round trip, but
+	// took longer than the engine's "usable" threshold to do it. A
+	// DEGRADED outcome, not a failure: never a cooldown, never
+	// RecordFailure. Excluded from IsCensorshipClass.
+	PathTooSlow Category = "path_too_slow"
 )
 
 // Classify maps a free-form error string from sing-box (or another driver)
@@ -144,7 +168,7 @@ func IsCensorshipClass(c Category) bool {
 	switch c {
 	case AuthFailed, RouteExpired, PublisherRevoked, PublisherKeyChanged,
 		BundleCorrupted, BundleSignatureInvalid, NetworkOffline, Unknown,
-		OriginUnhealthy:
+		OriginUnhealthy, PathTooSlow:
 		return false
 	}
 	return true

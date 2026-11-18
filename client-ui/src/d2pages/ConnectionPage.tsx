@@ -33,6 +33,7 @@ import WhyThisRoute from '../components/connection/WhyThisRoute';
 import RouteHealthBars from '../components/connection/RouteHealthBars';
 import PointerBanner from '../components/connection/PointerBanner';
 import ModePickerSheet from '../components/connection/ModePickerSheet';
+import { checkHeadlineKey, checkStateLabelKey } from '../lib/routeCheck';
 import RecoverySheet from '../components/RecoverySheet';
 import type { SectionId } from '../shell/Sidebar';
 
@@ -55,6 +56,7 @@ const STATE_LABEL_KEY: Record<ConnState, string> = {
     error: 'conn.error',
 };
 
+// (copy for the connection-check states: lib/routeCheck.ts)
 function toDaalConnectState(s: ConnState): DaalConnectState {
     return s;
 }
@@ -172,6 +174,11 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // next poll lands a matching ground-truth state.
     const state: ConnState = optimistic ?? conn?.state ?? 'disconnected';
     const mode: ConnMode = conn?.mode ?? 'normal';
+    // What the engine's connection check says, for the copy only: the
+    // engine starting is not a connection, and while it is still
+    // proving the route the page says "Checking the connection…". Not
+    // applied over an optimistic state the poll has not confirmed yet.
+    const routeCheck = optimistic ? undefined : conn?.routeCheck;
 
     // The loaded engine has no data plane linked: engine_set_route will
     // refuse (core/abi/dataplane.go), and it refuses precisely because
@@ -352,7 +359,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 )}
 
                 <div className={`d2-conn-state-label ${state}`}>
-                    {t(STATE_LABEL_KEY[state])}
+                    {t(checkStateLabelKey(state, routeCheck) ?? STATE_LABEL_KEY[state])}
                 </div>
 
                 <DaalButton
@@ -365,7 +372,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     className="d2-conn-headline"
                     style={{ marginBlockStart: 24, marginBlockEnd: 10 }}
                 >
-                    {t(HEADLINE_KEY[state])}
+                    {t(checkHeadlineKey(state, routeCheck) ?? HEADLINE_KEY[state])}
                 </h1>
 
                 <RouteChip

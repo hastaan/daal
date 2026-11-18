@@ -117,140 +117,138 @@ func TestDeclaredCoversEveryFamilyTheRelayServes(t *testing.T) {
 	}
 }
 
-// TestExtraFirewallPorts asserts the non-baseline data-plane ports stay
-// in sync with For(), family by family rather than by index — the list
-// is derived by BOTH firewalls (the cloud-provider ruleset and the
+// TestFirewallPortsForLegacyRelay pins what a relay with NO declared
+// family set gets: exactly the four tiers every relay served before the
+// set became per-relay, family by family rather than by index — the
+// list is consumed by BOTH firewalls (the cloud-provider ruleset and the
 // box-side ufw baked into cloud-init), so a port here that For() does
-// not agree with is a family served behind a shut gate or a gate open
-// on nothing.
+// not agree with is a family served behind a shut gate or a gate open on
+// nothing.
 //
-// The count is asserted deliberately and is meant to be uncomfortable.
-// Every entry is the SAME number on every relay Daal has ever built, so
-// this list is literally the argument of a single censor rule; each
-// family added here widens `drop tcp dport 8444,8445,…` by one. Adding
-// a port must be a decision someone made on purpose, with the cost
-// written down in ExtraFirewallPorts' own comment — never a line that
-// slipped in with a feature.
-func TestExtraFirewallPorts(t *testing.T) {
-	// ONLY families every shipped profile enables belong here. 8446
-	// (shadowsocks) and 8447 (anytls) were briefly in this list and were
-	// removed on 2026-08-18: both are default_enabled:false in every
-	// profile, so baselining them opened two constant ports on every
-	// relay for families that mint no route — exactly the "slipped in
-	// with a feature" case this test exists to catch. They are opt-in
-	// now; see TestExtraFirewallPortsFor.
+// The count is asserted deliberately and is meant to be uncomfortable:
+// each entry is the same number on every default relay, i.e. the
+// argument of a single censor rule. Adding a port to the default must
+// be a decision someone made on purpose — never a line that slipped in
+// with a feature. 8446 (shadowsocks) and 8447 (anytls) were briefly in
+// the default and were removed on 2026-08-18 for exactly that reason.
+func TestFirewallPortsForLegacyRelay(t *testing.T) {
 	want := map[string]Endpoint{
+		"vless-reality": {Port: 443, UDP: false},
+		"hysteria2":     {Port: 443, UDP: true},
 		"naive":         {Port: 8444, UDP: false},
 		"websocket-tls": {Port: 8445, UDP: false},
 	}
-	extra := ExtraFirewallPorts()
-	if len(extra) != len(want) {
-		t.Fatalf("ExtraFirewallPorts() len = %d, want %d (%v)", len(extra), len(want), extra)
-	}
-	got := map[Endpoint]bool{}
-	for _, e := range extra {
-		if got[e] {
-			t.Errorf("duplicate entry %+v", e)
+	for _, fams := range [][]string{nil, {}, LegacyFamilies()} {
+		ports := FirewallPortsFor(fams)
+		if len(ports) != len(want) {
+			t.Fatalf("FirewallPortsFor(%v) len = %d, want %d (%v)", fams, len(ports), len(want), ports)
 		}
-		got[e] = true
-	}
-	for family, ep := range want {
-		if !got[ep] {
-			t.Errorf("%s (%+v) is missing from ExtraFirewallPorts()", family, ep)
+		got := map[Endpoint]bool{}
+		for _, e := range ports {
+			if got[e] {
+				t.Errorf("duplicate entry %+v", e)
+			}
+			got[e] = true
 		}
-		if forEp := For(family); forEp != ep {
-			t.Errorf("For(%s) = %+v but the firewall opens %+v; one of the two is wrong and the family is either unreachable or exposed on the wrong port", family, forEp, ep)
+		for family, ep := range want {
+			if !got[ep] {
+				t.Errorf("%s (%+v) is missing from FirewallPortsFor(%v)", family, ep, fams)
+			}
+			if forEp := For(family); forEp != ep {
+				t.Errorf("For(%s) = %+v but the firewall opens %+v; one of the two is wrong and the family is either unreachable or exposed on the wrong port", family, forEp, ep)
+			}
 		}
 	}
 }
 
-// TestExtraFirewallPortsFor covers the opt-in half: tuic's 8443/udp is
-// opened for a relay whose family set includes it and for no other.
-//
-// Both halves matter and they fail in opposite directions. Shut on a
-// relay that serves tuic = a family that mints and cannot be dialled,
-// because the cloud firewall drops the packet before sing-box sees it.
-// Open on a relay that does not = a third fleet-wide constant port and a
-// free `drop udp dport 8443` for a tier nobody runs.
-func TestExtraFirewallPortsFor(t *testing.T) {
-	baseline := ExtraFirewallPorts()
-	tuicEP := For("tuic")
-
-	// No tuic in the family set ⇒ byte-identical to the baseline.
-	for _, fams := range [][]string{
-		nil,
-		{},
-		{"vless-reality", "hysteria2", "naive", "websocket-tls"},
-	} {
-		got := ExtraFirewallPortsFor(fams)
-		if len(got) != len(baseline) {
-			t.Fatalf("ExtraFirewallPortsFor(%v) = %+v, want the baseline %+v", fams, got, baseline)
-		}
-		for i := range baseline {
-			if got[i] != baseline[i] {
-				t.Errorf("ExtraFirewallPortsFor(%v)[%d] = %+v, want %+v", fams, i, got[i], baseline[i])
+// TestFirewallPortsForFollowsTheFamilySet is the whole contract: a port
+// is open on a relay if and only if the relay serves the family that
+// listens on it. Both directions matter and they fail in opposite ways.
+// Shut on a relay that serves the family = a route that mints and cannot
+// be dialled, because the firewall drops the packet before sing-box sees
+// it. Open on a relay that does not = a reachable port nobody asked for.
+func TestFirewallPortsForFollowsTheFamilySet(t *testing.T) {
+	all := []string{"vless-reality", "hysteria2", "naive", "websocket-tls", "tuic", "shadowsocks", "anytls"}
+	has := func(ports []Endpoint, ep Endpoint) bool {
+		for _, e := range ports {
+			if e == ep {
+				return true
 			}
 		}
+		return false
+	}
+	// Every single family alone: exactly its own endpoint.
+	for _, f := range all {
+		got := FirewallPortsFor([]string{f})
+		if len(got) != 1 || got[0] != For(f) {
+			t.Errorf("FirewallPortsFor([%s]) = %+v, want exactly %+v", f, got, For(f))
+		}
+	}
+	// Every family removed from the full set: its port goes, the rest stay.
+	for _, off := range all {
+		var fams []string
+		for _, f := range all {
+			if f != off {
+				fams = append(fams, f)
+			}
+		}
+		got := FirewallPortsFor(fams)
+		if has(got, For(off)) {
+			t.Errorf("%s is not served but its port %+v is open", off, For(off))
+		}
+		if len(got) != len(all)-1 {
+			t.Errorf("FirewallPortsFor(all but %s) = %+v, want %d ports", off, got, len(all)-1)
+		}
 	}
 
-	// tuic present ⇒ the baseline plus exactly its endpoint, once.
-	got := ExtraFirewallPortsFor([]string{"vless-reality", "tuic", "hysteria2"})
-	if len(got) != len(baseline)+1 {
-		t.Fatalf("ExtraFirewallPortsFor with tuic = %+v, want baseline+1", got)
+	// FAM-4, the case that was wrong: a relay provisioned for the two
+	// opt-in TCP families only must not open any of the four ports the
+	// old unconditional baseline opened on every relay.
+	narrow := FirewallPortsFor([]string{"shadowsocks", "anytls"})
+	for _, f := range LegacyFamilies() {
+		if has(narrow, For(f)) {
+			t.Errorf("a shadowsocks+anytls relay opens %+v for %s, which it does not serve", For(f), f)
+		}
 	}
-	last := got[len(got)-1]
-	if last != tuicEP {
-		t.Errorf("tuic firewall port = %+v, want For(\"tuic\") = %+v", last, tuicEP)
-	}
-	if !last.UDP {
-		t.Error("tuic is QUIC; a TCP rule would open the wrong socket entirely")
+	if len(narrow) != 2 {
+		t.Errorf("shadowsocks+anytls relay ports = %+v, want exactly 8446/tcp and 8447/tcp", narrow)
 	}
 
+	// tuic is QUIC; a TCP rule would open the wrong socket entirely.
+	if got := FirewallPortsFor([]string{"tuic"}); len(got) != 1 || !got[0].UDP {
+		t.Errorf("tuic firewall rule = %+v, want one UDP endpoint", got)
+	}
 	// Duplicates in the family list must not duplicate the rule.
-	if dup := ExtraFirewallPortsFor([]string{"tuic", "tuic"}); len(dup) != len(baseline)+1 {
+	if dup := FirewallPortsFor([]string{"tuic", "tuic"}); len(dup) != 1 {
 		t.Errorf("duplicate families produced %+v", dup)
 	}
-
-	// The same contract for every opt-in family, not just tuic. Each is
-	// default_enabled:false in both shipped profiles, so a relay that
-	// does not serve it must not carry its port — and a relay that does
-	// must, or the family mints a route whose packets die at the
-	// firewall.
-	for _, f := range []string{"shadowsocks", "anytls"} {
-		off := ExtraFirewallPortsFor([]string{"vless-reality", "hysteria2"})
-		for _, e := range off {
-			if e == For(f) {
-				t.Errorf("%s port %+v is open on a relay that does not serve it", f, e)
-			}
+	// An unknown name opens nothing — in particular not For()'s 443/tcp
+	// default for unknown families.
+	if got := FirewallPortsFor([]string{"tiuc"}); len(got) != 0 {
+		t.Errorf("an unknown family opened %+v", got)
+	}
+	// Order of the input must not change the rendered ruleset.
+	a := FirewallPortsFor([]string{"anytls", "tuic", "shadowsocks", "naive"})
+	b := FirewallPortsFor([]string{"naive", "shadowsocks", "anytls", "tuic"})
+	if len(a) != 4 || len(a) != len(b) {
+		t.Fatalf("got %+v and %+v", a, b)
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("ruleset is input-order dependent at %d: %+v vs %+v", i, a[i], b[i])
 		}
-		on := ExtraFirewallPortsFor([]string{"vless-reality", f})
-		var found bool
-		for _, e := range on {
-			if e == For(f) {
+	}
+	// firewallOrder must cover every family the relay can serve, or a
+	// served family silently gets no port.
+	for _, f := range all {
+		found := false
+		for _, o := range firewallOrder {
+			if o == f {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("%s is served but its port %+v was never opened — the route would mint and die at the firewall", f, For(f))
-		}
-		if len(on) != len(baseline)+1 {
-			t.Errorf("ExtraFirewallPortsFor(%s) = %+v, want baseline+1", f, on)
-		}
-	}
-
-	// All three opt-ins at once: order is fixed so a rendered ruleset is
-	// byte-identical for the same family set.
-	all := ExtraFirewallPortsFor([]string{"anytls", "tuic", "shadowsocks"})
-	if len(all) != len(baseline)+3 {
-		t.Fatalf("all opt-ins = %+v, want baseline+3", all)
-	}
-	if again := ExtraFirewallPortsFor([]string{"shadowsocks", "anytls", "tuic"}); len(again) != len(all) {
-		t.Errorf("order of the input changed the output length")
-	} else {
-		for i := range all {
-			if all[i] != again[i] {
-				t.Errorf("ruleset is input-order dependent at %d: %+v vs %+v", i, all[i], again[i])
-			}
+			t.Errorf("%s is missing from firewallOrder: it would be served behind a shut firewall", f)
 		}
 	}
 }

@@ -590,6 +590,14 @@ importer-roundtrip cases, idempotent re-import, legacy
 non-RelayPack passthrough, and an explicit RP021 rejection
 exercise.
 
+Every route of the corpus that carries `_relaypack` also carries a signed
+`_endpoint` and a profile holding the outbound the real minter renders
+for it (one profile per route, `profiles/<id>.json`), for one fixture
+relay with made-up credentials and a throwaway certificate: the corpus is
+an import corpus as well as a validator one, and a RelayPack outbound
+with no commitment is refused at import. The `expected.json` validator
+outcomes are unchanged by this.
+
 ## Importer behaviour (FRP-2)
 
 The on-device importer at `bundle/go/importer/importer.go` calls
@@ -606,6 +614,12 @@ bypass validation if the importer gated validation on slot presence.
 On `*ValidationError`, the importer returns `VerdictRejected` with
 `Reason = "relaypack_" + code` so the FRP-6 UI surface can render
 the lint code verbatim. No row is written; no secret is persisted.
+
+After validation, and still before any trust prompt, the importer applies
+the endpoint rules of "Endpoint commitment" below: an outbound that does
+not match its route's signed endpoint refuses the import, a route with no
+outbound is not stored, and a signed endpoint is merged into credentials
+the device already holds.
 
 When the bundle passes validation AND `Manifest.relay_pack != nil`,
 the importer per-route calls `bundle.ParseRelayPackEntry` on the
@@ -640,6 +654,262 @@ the on-device cadence policy. Verified by
 `http.Client` / `net/http` references in `bundle/go/importer/`,
 `core/trust/`, or `core/routestore/` outside `_test.go`).
 
+## Endpoint commitment — "signed endpoint, local credential"
+
+**Normative.** Implemented by `bundle/go/bundle/endpoint.go` (format,
+check, merge), `bundle/go/importer/endpoint_plan.go` (import policy),
+`publisher/deploy/relaypack/endpoint.go` (signing) and
+`core/abi/endpoint_guard.go` (set-route).
+
+### The problem
+
+`manifest.sig` covers `manifest.json`. It does not cover
+`profiles/<id>.json` — the sing-box outbound a route dials — because a
+RelayPack's profiles are rewritten per recipient *after* signing
+(`users-pack-sbp[x]`, without the publisher key). Until this section
+existed, anyone who could touch a pack in transit could therefore point
+every route at a server of their choosing, under the genuine publisher's
+fingerprint words. An age envelope addressed to a recipient's public key
+is confidentiality, not authentication, and the default shared `.sbp`
+has no envelope at all.
+
+### The commitment
+
+At `bind-and-sign` time the relay exists, so everything about a route
+that is **not** a per-recipient secret is known. Each route's
+`family_specific_config` — an object inside the **signed** manifest —
+carries it under the reserved key `_endpoint`:
+
+```jsonc
+"family_specific_config": {
+  "port": 443,
+  "_relaypack": { /* … */ },
+  "_endpoint": {
+    "v": 1,
+    "server": "203.0.113.10",          // the address the route dials
+    "port": 443,
+    "server_name": "cover.example",    // see the table
+    "tls_spki_sha256": "<base64>",     // SHA-256 of the relay's TLS leaf SubjectPublicKeyInfo
+    "reality_public_key": "<base64url>",
+    "ss_method": "2022-blake3-aes-128-gcm",
+    "ss_server_key_sha256": "<hex>"    // SHA-256("daal/ss-server-key/v1\0" + iPSK)
+  }
+}
+```
+
+| family | fields | the outbound must… |
+|---|---|---|
+| `vless-reality` | `server port server_name reality_public_key` | be `vless`; TLS on; `tls.server_name` = `server_name`; REALITY on with that public key |
+| `websocket-tls` `hysteria2` `tuic` `anytls` | `server port tls_spki_sha256 [server_name]` | be the family's type; TLS on; `tls.certificate_public_key_sha256` = the pin (every entry); no REALITY; no extra trusted certificate; `tls.server_name` = `server_name` when committed |
+| `naive` | `server port tls_spki_sha256` | be `naive`; TLS on; install at least one trusted certificate, **every** one of which carries the pinned key; `tls.server_name` (absent = the address) equals `NaiveVerificationName(server, certificates)` |
+| `shadowsocks` | `server port ss_method ss_server_key_sha256` | be `shadowsocks`; that method; the box-wide half of `"<iPSK>:<uPSK>"` hashes to the digest; no `tls`, no `plugin` |
+
+For every family: `server` and `server_port` equal the commitment;
+`tls.insecure` is absent or false; no `detour`, bind or routing-mark
+knob; no `server_ports` (hysteria2's port-hopping list replaces
+`server_port` when present); no trust anchor read from a path on the
+device.
+
+**Member names.** In the outbound object, its `tls` object and
+`tls.reality`, every member name MUST be plain lower-case ASCII: one or
+more of `a`–`z`, `0`–`9`, `_`. An outbound with any other member name in
+those three objects — `Server`, `INSECURE`, `\u017ferver`, the empty
+name — does not match (`endpoint_mismatch`), whatever its values, and
+this is tested before any of the equalities above. The reason is that
+the equalities are read by exact name while sing-box matches a member to
+a field without regard to case, using Unicode simple case folding
+(U+017F LATIN SMALL LETTER LONG S is an `s`, U+212A KELVIN SIGN is a
+`k`), and lets the later of two members that fold onto one field win. A
+profile could otherwise keep `"server"` exactly as signed, add
+`"\u017ferver"`, and satisfy the check while the engine dialled the
+second; `"Insecure": true` would be a `tls.insecure` the "absent or
+false" rule never saw. Every sing-box field name is plain lower-case
+ASCII, so nothing a pack legitimately says is excluded. Objects below
+those three (`transport`, `multiplex`, …) are not constrained: nothing
+in them is committed, and `transport.headers` carries HTTP header names.
+Pinned by `TestCheckOutbound_RefusesFoldedKeySpellings`
+(bundle/go/bundle) and, against the linked sing-box,
+`TestFoldedProfileKeys_SingBoxReadsThem_TheEndpointCheckRefusesThem`
+(core/engine, `-tags singbox`).
+
+`_endpoint` is strict: an unknown member, a version other than `1`, or a
+field that does not belong to the route's family makes the commitment
+malformed (`endpoint_malformed`) — a commitment this build would not
+fully enforce is not one it may partially enforce.
+
+No manifest struct changes, so the canonical bytes of every existing
+field are unchanged and **`spec_version` does not move**:
+`family_specific_config` was already an opaque, signed object.
+
+`naive` has no committed name, and its name is still not free: the
+client recomputes it and refuses an outbound that carries any other
+(whether the certificates a naive outbound installs replace the
+platform's roots or are added to them is the HTTP stack's business; a
+name of somebody else's choosing is only harmless in the first case).
+Its TLS verification name is a function
+of the address and the certificate —
+`NaiveVerificationName(server, certificates)`: the address when the
+certificate names it; otherwise the certificate's first DNS name;
+otherwise the address. Relays provisioned since this section carry one
+stable DNS name in their certificate (cloud-init), which is what lets a
+naive route follow the relay to a new address (L3) without the
+certificate changing. A relay provisioned earlier has no such name and
+loses naive on L3.
+
+### Why the credentials may stay unsigned
+
+The per-recipient credentials (uuid, passwords, REALITY short id, ws
+path) stay in the unsigned profile. That is safe, and the argument is
+the design:
+
+> The client refuses to dial a route whose outbound disagrees with the
+> commitment on server, port or server-authentication material. So the
+> only thing left for an attacker to change is a credential. A changed
+> credential is presented to the **committed** server over a channel
+> authenticated by the **committed** key. The genuine relay refuses it;
+> nobody else can complete the handshake to receive it. A tampered
+> credential can only fail to connect. It can never be sent elsewhere.
+
+Tested: `TestCheckOutbound_CredentialsAreFreeAndCannotMoveTheEndpoint`,
+and on the wire by the rig (`op:tamper credential_rewrite.*`).
+
+Stated limits:
+
+- **shadowsocks** has no server authentication independent of the shared
+  key. A stranger cannot substitute a key (the digest is committed);
+  someone who is both a recipient of the same relay and on the network
+  path can still impersonate it to another recipient. That is the
+  protocol.
+- **Bundles that are not RelayPacks** (`Manifest.relay_pack == nil`)
+  carry no commitment: their profile bytes are covered by no signature
+  and can be rewritten by whoever handles the file. They can therefore
+  never replace a committed route (next section); the routes they add
+  under new ids remain unauthenticated.
+
+### A commitment is sticky
+
+Once a route on the device is bound to a signed endpoint — it has a
+stored commitment, or its row carries a `relay_pack_id` — nothing that
+carries **no** commitment for that route id may replace it. An import
+of a bundle with `Manifest.relay_pack == nil` that names such a route id
+is **refused whole**, reason `endpoint_downgrade`, before any trust
+prompt and again before persistence; no route, commitment or
+`relay_pack_id` on the device changes. This holds whatever the route's
+trust state (an expired or revoked committed route is not an opening),
+and whoever signed the incoming bundle. The store enforces it
+independently of the importer (`core/trust` `SaveImport` refuses the
+write before writing anything).
+
+The only way a committed route stops being one is the user removing it;
+a commitment left in the store by a removed route binds nothing.
+
+Tested: `TestImport_BundleWithoutCommitmentsDoesNotReplaceCommittedRoutes`
+(bundle/go/importer), `TestStoreAdapter_CommitmentIsSticky` (core/trust),
+rig `op:tamper uncommitted_replacement.*`.
+
+### Recipient rules (import)
+
+For a bundle with `Manifest.relay_pack != nil`, per usable route, before
+any trust prompt and again before persistence:
+
+1. **Outbound present** (the profile is a JSON object with a non-empty
+   `type`): the route MUST carry a valid `_endpoint` and the outbound
+   MUST match it. Otherwise the **whole import is refused** —
+   `endpoint_unauthenticated` (no commitment) or `endpoint_mismatch`.
+   It is a refusal, never a trust prompt: the file is provably not what
+   its publisher signed.
+2. **No outbound** (the signed skeleton's metadata-only profile, or the
+   minter's `_daal_unavailable` marker): the route is **not stored**. It
+   is not listed, not selectable, not activatable. It is reported in
+   `Verdict.Unavailable` with a reason — `not_offered` (marker),
+   `no_credentials`, `needs_new_file`, or `older_than_device`.
+3. **Merge.** If the route has a commitment and the device already holds
+   an outbound for the same route id, from the **same publisher**, of the
+   **same family**, the new signed endpoint is applied to that outbound
+   and its credentials are kept (`MergeEndpoint`: server, port, TLS
+   name, pin, REALITY public key, shadowsocks method move; nothing else
+   does). The result must itself match the commitment. If it cannot —
+   the device's naive certificate does not carry the committed key, its
+   shadowsocks server key is not the committed one — the route is
+   reported `needs_new_file` and **left exactly as it was**. A profile
+   that yields no outbound never replaces one that does.
+   A merge additionally requires *continuity*: on the freshness path the
+   publisher-signed document (which names the pack ids it supersedes)
+   provides it; for a pack handed over as a file the `relay_pack_id`
+   must equal the one on the device's route, **and the merge must move
+   the route forward** (next rule).
+4. **A file only moves a route forward.** The credential-less signed
+   pack is public (it is what the freshness mirrors serve), and an
+   in-place rotation — port, cover host, REALITY key, TLS key — keeps
+   the `relay_pack_id`. So a merge that does not come from the freshness
+   path (file, QR, share) additionally requires the incoming manifest's
+   `bundle.created_at` to be **strictly later** than the `created_at` of
+   the manifest the route's current commitment came from. The one
+   exception is the manifest the route is already on (equal
+   `created_at` **and** an identical `_endpoint`), which changes nothing
+   and is accepted. Otherwise the route is reported `older_than_device`
+   and **left exactly as it was**. If either date is missing or is not
+   RFC 3339, nothing can be shown and the route is reported
+   `needs_new_file`, untouched. The freshness path is ordered by its own
+   signed sequence high-water mark and is not subject to this rule.
+   Without it, whoever holds a relay key the publisher rotated away from
+   could hand a recipient the old public file and return the phone,
+   silently (the publisher is already trusted), to that key.
+5. A pack that leaves no route to store is refused:
+   `pack_is_older` if any of its routes was `older_than_device`,
+   otherwise `pack_has_no_credentials`.
+
+**A RelayPack with no commitments is refused**, not accepted with a
+warning. Nothing is fielded, every fixture was migrated, and an
+"unauthenticated endpoint" state a user may click through is the
+original hole with a label on it.
+
+The engine keeps each stored route's commitment beside its profile
+(`endpoint:<route_id>`), together with the `bundle.created_at` of the
+manifest it was signed in (`endpoint-signed-at:<route_id>`; written and
+removed with the commitment, read by rule 4). `SetRoute` re-checks the outbound against it
+before dialling; a RelayPack route with no stored commitment is not
+dialled. A refusal there is not recorded as a failure of the route.
+
+### Publisher rules
+
+- `bind-and-sign` commits every candidate whose family is in the table.
+  Material comes from the OperatorRecord (address, ports, cover host,
+  and — when provisioning read them — REALITY public key and TLS pin)
+  and from `--endpoint-creds <file>`: any `users-provision` /
+  `rotate-credentials` reply, of which only the relay-wide fields are
+  read. The record wins wherever it speaks: it is what every rotation
+  verb rewrites, while a saved reply is a snapshot. No recipient secret
+  and no shadowsocks key (only its digest) is written to the pack.
+- A candidate whose material is missing is signed **without** a
+  commitment, named on stderr and in `uncommitted_families` on stdout;
+  no recipient can use it. If no committable candidate got one, nothing
+  is signed.
+- `users-pack-sbp[x]` checks each outbound it renders against the
+  route's commitment. A route with no commitment is dropped and
+  reported like any other unrenderable route. A mismatch — the relay
+  moved since the pack was signed — fails the verb: sign again first.
+- After any rotation that moves an endpoint (L2, L3) the publisher MUST
+  run `bind-and-sign` again before minting or announcing.
+
+### Freshness delivers the signed endpoint; what still needs a file
+
+The file whose digest a freshness document names is `bind-and-sign`'s
+output: the signed, credential-less pack. It is the only pack that may
+be hosted publicly. Recipients merge it (rule 3). Consequently:
+
+| rung | what changes | per-recipient credentials | a recipient that polls |
+|---|---|---|---|
+| L1 `rotate-credentials` | one recipient's credentials | changed for that recipient | **that recipient needs a new file** |
+| L2 `rotate-tls` | cover host | unchanged | recovers, no new file. (If the shared ws path was moved as well, the websocket route alone needs a new file: the path travels with the credentials.) |
+| L3 `assign-fip` | address | unchanged | recovers, no new file |
+| L4–L6 rebuild | new box: new REALITY key, new TLS key, new credentials | changed for everyone | **every recipient needs a new file** |
+
+L4–L6 cannot be made mergeable from the publisher alone: the relay mints
+each recipient's credentials itself (`/users/provision` takes a name),
+so a rebuilt relay answers with different secrets. The new keys do
+travel in the signed endpoint; the credentials need a courier.
+
 ## Helper-side production (FRP-4a / FRP-4b)
 
 The Helper produces RelayPacks in two phases that the wizard
@@ -672,6 +942,11 @@ opts)` function — added at FRP-4b, not here — reads the
 - `freshness_url`: empty string at V1.5; FRP-8 sets it.
 - `shared_risk_graph`: derived from each candidate's
   `public_risk_tags[]` per supplement §12.3.
+- per route, the signed `_endpoint` commitment (see "Endpoint
+  commitment" above), from the record plus
+  `BindOpts.Endpoint` / `--endpoint-creds`. The profile the binder
+  writes for each route still holds no outbound and no secret: its
+  output is the signed, credential-less pack.
 
 …then runs `bundle/go/relaypackvalidate.Validate(b,
 ValidateOpts{Phase: PhaseV15})` BEFORE signing, signs via the

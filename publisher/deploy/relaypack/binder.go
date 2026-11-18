@@ -96,6 +96,14 @@ type BindOpts struct {
 	// Publisher".
 	PublisherDisplayName string
 
+	// Endpoint, when non-nil, is the relay's own live connection
+	// material (the relay-wide fields of a `users-provision` reply). It
+	// fills whatever the OperatorRecord does not carry — the record has
+	// no shadowsocks key at all, and on a relay provisioned without the
+	// SSH read it has no REALITY key or TLS pin either. See
+	// EndpointMaterial.Overlay for the precedence.
+	Endpoint *EndpointMaterial
+
 	// SubkeyCertJSON is optional FRP-7.5 cert-chain material. When
 	// non-empty, priv is allowed to be the certified sub-key while
 	// rec.PublisherPubKey remains the root publisher key shipped as
@@ -130,6 +138,15 @@ type BindResult struct {
 	// SharedRiskGraph is the bundle-wide §12.3 graph (signed inside
 	// the bundle; surfaced here for the wizard's diagnostics view).
 	SharedRiskGraph []bundle.SharedRiskEdge
+
+	// Uncommitted lists every route that was signed WITHOUT an endpoint
+	// commitment because the material its family needs was missing.
+	// Those routes can never be made connectable from this pack: the
+	// recipient's client refuses an outbound it cannot check against a
+	// signed endpoint. Callers MUST surface this — it is the same
+	// "the pack is one tier smaller than you think" notice as
+	// RewriteProfilesForRecipient's skipped list, one step earlier.
+	Uncommitted []SkippedRoute
 }
 
 // errors -------------------------------------------------------------
@@ -232,9 +249,18 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	expiresAt := now.Add(expiry).Format(time.RFC3339)
 
 	// ---- 2. Render candidates ------------------------------------
-	rendered, err := renderCandidates(rec, createdAt, expiresAt)
+	material := EndpointMaterialFromRecord(rec)
+	if opts.Endpoint != nil {
+		material = material.Overlay(*opts.Endpoint)
+	}
+	rendered, err := renderCandidates(rec, material, createdAt, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("relaypack: render candidates: %w", err)
+	}
+	// A pack in which not one servable route has a signed endpoint is a
+	// pack every recipient's client will refuse. Do not sign it.
+	if committable, committed := countCommitments(rendered); committable > 0 && committed == 0 {
+		return nil, ErrNoEndpointMaterial
 	}
 
 	// ---- 3. RelayPackID + shared_risk_graph ---------------------
@@ -372,7 +398,27 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 		LintReport:      lintReport,
 		RelayPackID:     relayPackID,
 		SharedRiskGraph: srg,
+		Uncommitted:     rendered.uncommitted,
 	}, nil
+}
+
+// countCommitments reports how many rendered routes are of a family
+// Daal can commit an endpoint for, and how many of those got one.
+func countCommitments(r *renderedCandidates) (committable, committed int) {
+	missing := map[string]bool{}
+	for _, u := range r.uncommitted {
+		missing[u.RouteID] = true
+	}
+	for _, route := range r.routes {
+		if !bundle.EndpointFamilySupported(route.TransportFamily) {
+			continue
+		}
+		committable++
+		if !missing[route.ID] {
+			committed++
+		}
+	}
+	return committable, committed
 }
 
 // normaliseRevocation validates the revocation pair and returns

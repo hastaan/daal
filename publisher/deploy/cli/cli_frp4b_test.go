@@ -59,7 +59,37 @@ func mkBindFixture(t *testing.T) (recPath, privPath string, pub ed25519.PublicKe
 	if rc != 0 {
 		t.Fatalf("provision rc=%d stderr=%s", rc, stderr.String())
 	}
+	// A dry-run record describes a relay that never booted, so it lacks
+	// the connection material a real provision reads off the box. With
+	// none of it bind-and-sign cannot commit any route to an endpoint
+	// and refuses to sign (TestBindAndSign_EndpointMaterial below).
+	// Stamp what the box would have reported.
+	addEndpointMaterial(t, recPath)
 	return
+}
+
+// Fixture connection material: a REALITY public key and the base64
+// SHA-256 of a TLS SubjectPublicKeyInfo.
+const (
+	fixtureRealityPub = "Zml4dHVyZS1yZWFsaXR5LXB1YmxpYy1rZXktMzJieXRlcw"
+	fixtureTLSPin     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+)
+
+func addEndpointMaterial(t *testing.T, recPath string) {
+	t.Helper()
+	body, err := os.ReadFile(recPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(body, &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec["reality_public_key"], rec["tls_cert_sha256"] = fixtureRealityPub, fixtureTLSPin
+	out, _ := json.Marshal(rec)
+	if err := os.WriteFile(recPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // 1. bind-and-sign happy-path: produces .sbp on disk + summary on stdout.
@@ -404,5 +434,92 @@ func TestProvision_ProgressJSONEmitsSteps(t *testing.T) {
 		if !got[want] {
 			t.Errorf("missing progress step %q in stderr:\n%s", want, stderr.String())
 		}
+	}
+}
+
+// F-004 at the verb boundary: bind-and-sign commits each route to an
+// endpoint, refuses to sign when it has nothing to commit with, takes
+// the relay's own reply through --endpoint-creds, and users-pack-sbp
+// refuses to mint from a signed pack that no longer describes the relay.
+func TestBindAndSign_EndpointMaterial(t *testing.T) {
+	recPath, privPath, _, _ := mkBindFixture(t)
+	// Strip the material again: a record that knows nothing.
+	body, _ := os.ReadFile(recPath)
+	var rec map[string]any
+	_ = json.Unmarshal(body, &rec)
+	delete(rec, "reality_public_key")
+	delete(rec, "tls_cert_sha256")
+	bare, _ := json.Marshal(rec)
+	barePath := filepath.Join(t.TempDir(), "bare.json")
+	if err := os.WriteFile(barePath, bare, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, _ := rec["public_ip"].(string)
+
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "rp.sbp")
+	bind := func(extra ...string) (int, string, string) {
+		var stdout, stderr bytes.Buffer
+		rc := Run(append([]string{"bind-and-sign", "--operator-record", barePath, "--priv-key", privPath,
+			"--output", out, "--phase", testPhase}, extra...), &stdout, &stderr)
+		return rc, stdout.String(), stderr.String()
+	}
+	if rc, _, stderr := bind(); rc == 0 || !strings.Contains(stderr, "--endpoint-creds") {
+		t.Fatalf("a record with no connection material must not be signed: rc=%d stderr=%s", rc, stderr)
+	}
+
+	creds := map[string]any{
+		"name": "r1", "vless_uuid": "11111111-2222-3333-4444-555555555555", "reality_short_id": "deadbeef",
+		"hy2_password": "hy2secretpassword22ch", "reality_public_key": fixtureRealityPub,
+		// The relay reports the cover host it serves — the one the
+		// record says it was provisioned with.
+		"tls_cert_sha256": fixtureTLSPin, "cover_sni": rec["cover_sni"],
+	}
+	credsPath := filepath.Join(tmp, "creds.json")
+	cb, _ := json.Marshal(creds)
+	if err := os.WriteFile(credsPath, cb, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rc, stdout, stderr := bind("--endpoint-creds", credsPath)
+	if rc != 0 {
+		t.Fatalf("bind with --endpoint-creds: rc=%d stderr=%s", rc, stderr)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if u, ok := summary["uncommitted_families"].([]any); !ok || len(u) != 0 {
+		t.Fatalf("uncommitted_families = %v, want present and empty", summary["uncommitted_families"])
+	}
+	signed, _ := os.ReadFile(out)
+	parsed, err := bundle.ParseSBP(bytes.NewReader(signed), int64(len(signed)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range parsed.Manifest.Routes {
+		ep, err := bundle.ParseEndpoint(r.FamilySpecificConfig)
+		if err != nil || ep.Server != server {
+			t.Fatalf("route %s: endpoint %+v err=%v (relay is %s)", r.ID, ep, err, server)
+		}
+		// No per-recipient secret from the creds file reaches the pack.
+		for _, secret := range []string{"11111111-2222-3333-4444-555555555555", "hy2secretpassword22ch", "deadbeef"} {
+			if bytes.Contains(r.FamilySpecificConfig, []byte(secret)) || bytes.Contains(parsed.Profiles[r.ConfigPath], []byte(secret)) {
+				t.Fatalf("route %s: a recipient secret leaked into the signed pack", r.ID)
+			}
+		}
+	}
+
+	pack := func(server string) (int, string) {
+		var stdout, stderr bytes.Buffer
+		rc := Run([]string{"users-pack-sbp", "--in", out, "--out", filepath.Join(tmp, "r1.sbp"),
+			"--creds-file", credsPath, "--server", server}, &stdout, &stderr)
+		return rc, stderr.String()
+	}
+	if rc, stderr := pack(server); rc != 0 {
+		t.Fatalf("users-pack-sbp: rc=%d stderr=%s", rc, stderr)
+	}
+	// The relay moved and nobody re-signed: minting must fail loudly.
+	if rc, stderr := pack("203.0.113.77"); rc == 0 || !strings.Contains(stderr, "bind-and-sign again") {
+		t.Fatalf("minting against a moved relay must be refused: rc=%d stderr=%s", rc, stderr)
 	}
 }
