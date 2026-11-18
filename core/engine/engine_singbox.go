@@ -58,6 +58,16 @@ type singBox struct {
 	mu       sync.Mutex
 	instance *box.Box
 	platform *androidPlatform
+	// kind describes the active outbound of `instance` (proof_singbox.go).
+	kind outboundKind
+	// cancel ends the context `instance` was built on. Close alone does
+	// not interrupt a dial that is already waiting on a dead address —
+	// sing-box lets it run out its own 5 s connect timeout, and Close
+	// waits for it (the end-to-end rig's finding O-2: Disconnect hung for 5 s
+	// exactly when the relay was blackholed). Every connection the
+	// instance handles derives its context from this one, so cancelling
+	// first makes those dials return at once.
+	cancel context.CancelFunc
 }
 
 func newSingBox() *singBox {
@@ -108,8 +118,8 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		// VpnService's onRevoke teardown — so the previous instance is
 		// still live here. Tear it down and start the new one rather
 		// than failing "already started" (which left the switch dead).
-		_ = s.instance.Close()
-		s.instance = nil
+		closeInstance(s.instance, s.cancel)
+		s.instance, s.cancel = nil, nil
 		s.Stub.mu.Lock()
 		s.Stub.connected = false
 		s.Stub.mu.Unlock()
@@ -208,7 +218,17 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	// loop that wedges the VPN) and for the TUN device built from the
 	// host-supplied fd.
 	s.platform = newAndroidPlatform()
-	bctx := include.Context(ctx)
+	// The instance gets a context of its own to be cancelled at Stop
+	// (see singBox.cancel). It is detached from the caller's: Start's
+	// ctx bounds the START, and an instance must outlive it.
+	ictx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+		}
+	}()
+	bctx := include.Context(ictx)
 	bctx = service.ContextWith[adapter.PlatformInterface](bctx, s.platform)
 
 	// Load libcronet.so before box.New builds any naive outbound (no-op
@@ -241,7 +261,8 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		return err
 	}
 
-	s.instance = inst
+	s.instance, s.cancel, started = inst, cancel, true
+	s.kind = kindOfActive(raw)
 
 	// The instance is up, which means sing-box has bound every inbound
 	// in the config — including the loopback SOCKS5 refresh inlet. Only
@@ -252,15 +273,27 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	s.Stub.mu.Lock()
 	s.Stub.connected = true
-	s.Stub.publishLocked(Event{Type: "state", State: "Connected", Bucket: hourBucket(time.Now())})
+	// "Verifying": sing-box is running and has dialled nothing. Whether
+	// the route carries traffic is what Prove finds out, and only the
+	// ABI, having seen that, publishes "Connected". See proof.go.
+	s.Stub.publishLocked(Event{Type: "state", State: StateVerifying, Bucket: hourBucket(time.Now())})
 	s.Stub.mu.Unlock()
 	return nil
 }
 
+// closeInstance cancels the instance's context and then closes it. The
+// order is the point: see singBox.cancel.
+func closeInstance(inst *box.Box, cancel context.CancelFunc) error {
+	if cancel != nil {
+		cancel()
+	}
+	return inst.Close()
+}
+
 func (s *singBox) Stop() error {
 	s.mu.Lock()
-	inst := s.instance
-	s.instance = nil
+	inst, cancel := s.instance, s.cancel
+	s.instance, s.cancel = nil, nil
 	s.mu.Unlock()
 	// Unconditionally — even on the no-instance path — so a stop can
 	// never leave a live inlet record behind a dead listener.
@@ -268,10 +301,10 @@ func (s *singBox) Stop() error {
 	if inst == nil {
 		return nil
 	}
-	err := inst.Close()
+	err := closeInstance(inst, cancel)
 	s.Stub.mu.Lock()
 	s.Stub.connected = false
-	s.Stub.publishLocked(Event{Type: "state", State: "Disconnected", Bucket: hourBucket(time.Now())})
+	s.Stub.publishLocked(Event{Type: "state", State: StateDisconnected, Bucket: hourBucket(time.Now())})
 	s.Stub.mu.Unlock()
 	return err
 }

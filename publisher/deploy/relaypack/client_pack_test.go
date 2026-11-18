@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,6 +16,18 @@ import (
 // profiles (the pre-Tier-2 shape) for the given families.
 func buildStubPack(t *testing.T, families []string) []byte {
 	t.Helper()
+	return buildStubPackWithout(t, families)
+}
+
+// buildStubPackWithout is buildStubPack with the named families signed
+// WITHOUT an endpoint commitment — what bind-and-sign produces for a
+// family whose connection material it did not have.
+func buildStubPackWithout(t *testing.T, families []string, without ...string) []byte {
+	t.Helper()
+	uncommitted := map[string]bool{}
+	for _, f := range without {
+		uncommitted[f] = true
+	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -33,13 +46,21 @@ func buildStubPack(t *testing.T, families []string) []byte {
 			"_relaypack": map[string]any{"exposure_mode": "direct_vps"},
 		})
 		profiles[cp] = stub
+		// The signed half: where this route points and what proves the
+		// relay is the relay, for the relay fullParams() describes.
+		fsc := map[string]any{"port": 443, "_relaypack": map[string]any{"exposure_mode": "direct_vps"}}
+		if ep, _ := endpointFor(fam, 443, EndpointMaterialFromParams(fullParams())); ep != nil && !uncommitted[fam] {
+			fsc[bundle.EndpointKey] = ep
+		}
+		fscBytes, _ := json.Marshal(fsc)
 		routes = append(routes, bundle.RouteManifestEntry{
-			ID:              id,
-			ScarcityClass:   "normal",
-			TransportFamily: fam,
-			ConfigPath:      cp,
-			ValidFrom:       from,
-			ValidUntil:      until,
+			ID:                   id,
+			ScarcityClass:        "normal",
+			TransportFamily:      fam,
+			ConfigPath:           cp,
+			ValidFrom:            from,
+			ValidUntil:           until,
+			FamilySpecificConfig: fscBytes,
 		})
 	}
 	m := bundle.Manifest{
@@ -162,5 +183,53 @@ func TestRewriteProfiles_DegradesPerRouteRatherThanKillingThePack(t *testing.T) 
 			t.Errorf("route %s (%s) should have rendered but has no type",
 				route.ID, route.TransportFamily)
 		}
+	}
+}
+
+// F-004, publisher side. The minter holds its own output to the signed
+// endpoint: a route with no commitment is dropped and reported (the
+// recipient's client would refuse it), and an outbound that disagrees
+// with the commitment — the relay moved after the pack was signed — is
+// an error HERE, where the operator is watching, not a file every
+// recipient's phone rejects.
+func TestRewriteProfiles_HoldsItsOutputToTheSignedEndpoint(t *testing.T) {
+	// 1. No commitment for one family: dropped, reported, marked.
+	sbp := buildStubPackWithout(t, []string{"vless-reality", "hysteria2"}, "hysteria2")
+	out, skipped, err := RewriteProfilesForRecipient(sbp, fullParams())
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0].Family != "hysteria2" {
+		t.Fatalf("skipped = %+v, want the uncommitted hysteria2 route", skipped)
+	}
+	parsed, _ := bundle.ParseSBP(bytes.NewReader(out), int64(len(out)))
+	for _, r := range parsed.Manifest.Routes {
+		typ := bundle.ProfileOutboundType(parsed.Profiles[r.ConfigPath])
+		if r.TransportFamily == "hysteria2" && (typ != "" || !bundle.ProfileUnavailable(parsed.Profiles[r.ConfigPath])) {
+			t.Errorf("uncommitted route carries an outbound (%q) or no marker", typ)
+		}
+		if r.TransportFamily == "vless-reality" {
+			ep, err := bundle.ParseEndpoint(r.FamilySpecificConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bundle.CheckOutbound(r.TransportFamily, ep, parsed.Profiles[r.ConfigPath]); err != nil {
+				t.Errorf("minted outbound does not match its signed endpoint: %v", err)
+			}
+		}
+	}
+
+	// 2. The relay moved (L3) after signing: refuse to mint.
+	sbp = buildStubPack(t, []string{"vless-reality", "hysteria2"})
+	moved := fullParams()
+	moved.Server = "203.0.113.77"
+	if _, _, err := RewriteProfilesForRecipient(sbp, moved); !errors.Is(err, ErrStaleSignedPack) {
+		t.Fatalf("minting against a moved relay: err=%v, want ErrStaleSignedPack", err)
+	}
+	// 3. Its cover host moved (L2): same.
+	rotated := fullParams()
+	rotated.CoverSNI = "another-cover.example.net"
+	if _, _, err := RewriteProfilesForRecipient(sbp, rotated); !errors.Is(err, ErrStaleSignedPack) {
+		t.Fatalf("minting against a rotated cover host: err=%v, want ErrStaleSignedPack", err)
 	}
 }

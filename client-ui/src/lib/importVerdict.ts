@@ -34,6 +34,22 @@ export interface ImportVerdict {
     BundleID?: string;
     RouteCount?: number;
     Reason?: string;
+    /** Routes whose NEW signed endpoint was applied to access this
+     *  device already held (a freshness merge). */
+    Merged?: number;
+    /** Routes of the pack that were NOT stored, and why. They are not
+     *  routes on this device: nothing can list or select them. */
+    Unavailable?: UnavailableRoute[] | null;
+}
+
+/** One pack route that did not become a route on the device. Mirrors
+ *  `bundle/go/importer.UnavailableRoute`; `Reason` is one of
+ *  `not_offered`, `no_credentials`, `needs_new_file`,
+ *  `older_than_device`. */
+export interface UnavailableRoute {
+    RouteID: string;
+    Family: string;
+    Reason: string;
 }
 
 /** Engine VerdictKind enum (mirrors bundle/go/importer.VerdictKind):
@@ -99,6 +115,31 @@ export function friendlyReason(t: (k: string) => string, reason: string): string
     const copy = t(`add.err.reason.${token}`);
     if (copy && copy !== `add.err.reason.${token}`) return copy;
     return t('add.err.rejected');
+}
+
+/** One plain-language line per pack route that was NOT added, for the
+ *  surface that shows an import's result. Empty when the pack gave this
+ *  device everything it lists.
+ *
+ *  These routes do not exist on the device — the engine never stores a
+ *  route it cannot connect on — so this is the only place a person can
+ *  learn that the file held fewer ways to connect than it could have,
+ *  and whether that is something to ask the sender about. An unknown
+ *  reason token gets the least alarming true statement rather than the
+ *  token itself. */
+export function unavailableLines(
+    t: (k: string) => string,
+    v: ImportVerdict | null,
+    familyLabel: (family: string) => string = (f) => f,
+): string[] {
+    const rows = v?.Unavailable ?? [];
+    return rows.map((r) => {
+        const key = `add.unavailable.${r.Reason}`;
+        const copy = t(key);
+        const template =
+            copy && copy !== key ? copy : t('add.unavailable.no_credentials');
+        return template.replace('{family}', familyLabel(r.Family));
+    });
 }
 
 /** Map a raw error message from the Tauri bridge into friendly copy.

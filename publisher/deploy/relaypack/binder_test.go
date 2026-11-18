@@ -39,11 +39,12 @@ func minimalRec(t *testing.T) *provider.OperatorRecord {
 	t.Helper()
 	pub, _ := fixedKey(t, 0x42)
 	return &provider.OperatorRecord{
-		Provider:        "hetzner",
-		ServerID:        "12345",
-		Region:          "fsn1",
-		ServerType:      "cx22",
-		PublicIP:        net.ParseIP("5.75.0.1"),
+		Provider:         "hetzner",
+		ServerID:         "12345",
+		Region:           "fsn1",
+		ServerType:       "cx22",
+		PublicIP:         net.ParseIP("5.75.0.1"),
+		RealityPublicKey: fixtureRealityPub, TLSCertSHA256: fixtureTLSPin,
 		ToolboxProfile:  "iran-default",
 		PublisherPubKey: append([]byte(nil), pub...),
 		Candidates: []provider.CandidateMeta{

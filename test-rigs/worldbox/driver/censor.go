@@ -96,6 +96,34 @@ func (s Scenario) CategoryFor(family string) (string, error) {
 	return "", fmt.Errorf("scenario %q blocks family %q but declares no failure category for it (\"category\": {…})", s.Name, family)
 }
 
+// A declared category may be an alternation, "a|b": the scenario does
+// something whose visible face is legitimately one of several.
+// categoryAllows reports whether got is one of the declared alternatives.
+//
+// No scenario file uses one today, and one that does must say what
+// decides between the alternatives: throttle-56k once declared
+// "path_too_slow|none" and was green whichever the engine said. It now
+// declares path_too_slow, and the alternative is derived per connect from
+// the time the connect took (first_verdict.go: slowCategoryFor).
+func categoryAllows(declared, got string) bool {
+	for _, d := range strings.Split(declared, "|") {
+		if d == got {
+			return true
+		}
+	}
+	return false
+}
+
+// categoryExpect is the expectation to RECORD for a check: what was got
+// when the declaration allows it (so an alternation does not read as a
+// mismatch), the declaration itself otherwise.
+func categoryExpect(declared, got string) string {
+	if categoryAllows(declared, got) {
+		return got
+	}
+	return declared
+}
+
 // TaxonomyCategories reads the closed category list out of the product's
 // own spec, so a declared category can never drift from it.
 func TaxonomyCategories(repo string) (map[string]bool, error) {
@@ -132,8 +160,13 @@ func ValidateScenario(s Scenario, families []string, taxonomy map[string]bool) [
 		if f != "*" && !contains(families, f) {
 			bad("category for %q, which is not a declared family", f)
 		}
-		if !taxonomy[c] && c != CategoryNone && c != CategoryUnasserted {
-			bad("category[%q]=%q is not in %s", f, c, taxonomySpecPath)
+		for _, one := range strings.Split(c, "|") {
+			if !taxonomy[one] && one != CategoryNone && one != CategoryUnasserted {
+				bad("category[%q]=%q: %q is not in %s", f, c, one, taxonomySpecPath)
+			}
+		}
+		if strings.Contains(c, "|") && strings.Contains(c, CategoryUnasserted) {
+			bad("category[%q]=%q: \"unasserted\" cannot be one alternative of several", f, c)
 		}
 	}
 	for f, v := range s.Established {
@@ -155,7 +188,7 @@ func ValidateScenario(s Scenario, families []string, taxonomy map[string]bool) [
 		// budget. A family that never connected at all produces the very
 		// same "blocked" — so the declaration must also claim, and the
 		// run then check, that it did connect (family/established).
-		if e, _ := s.ExpectFor(f); e == Blocked && err == nil && (cat == CategoryNone || cat == CategoryUnasserted) && !s.MustEstablish(f) {
+		if e, _ := s.ExpectFor(f); e == Blocked && err == nil && (categoryAllows(rawFace(cat), CategoryNone) || cat == CategoryUnasserted) && !s.MustEstablish(f) {
 			bad("family %q is expected blocked with category %q — blocked by the probe's budget, not by a rule — so a dead family would pass too: declare \"established\": {%q: \"pass\"} (or \"*\")", f, cat, f)
 		}
 		if e, _ := s.ExpectFor(f); e == Blocked {
@@ -404,6 +437,12 @@ func (rc *RunCtx) ProveCensor() {
 	fmt.Fprintf(r.human, "phase: censor (raw probes, no Daal: does %q do what it says?)\n", rc.Scn.Name)
 	vars := scenarioVars(rc.Rec.CoverSNI)
 	for _, pr := range rc.Scn.Prove {
+		// A TCP probe at a relay port this relay was not provisioned to
+		// serve proves nothing about the censor; it is asserted closed
+		// instead (prove_unserved.go).
+		if rc.proveUnservedRelayPort(pr, vars) {
+			continue
+		}
 		t0 := time.Now()
 		obs := RawProbeRun(rc.Ctx, rc.P, RawProbe{Kind: pr.Probe, Addr: rc.proofAddr(pr.To), Port: pr.Port,
 			SNI: substVars(pr.SNI, vars), Split: pr.Split, Shape: pr.Shape})
@@ -424,8 +463,15 @@ func (rc *RunCtx) ProveCensor() {
 			continue
 		}
 		observed, ev := rc.truthCategory(f)
-		r.Add(name, "censor", "truth.category", declared, observed,
-			got(declared == observed, "", fmt.Sprintf("the scenario declares %s for this family, but a raw probe of its endpoint observes %s", declared, observed)), ev, t0)
+		if ev != nil {
+			ev["declared"] = declared
+		}
+		// The raw ladder sees packets, not speed: a declared
+		// path_too_slow is confirmed as "none" (every handshake
+		// completes); see rawFace.
+		face := rawFace(declared)
+		r.Add(name, "censor", "truth.category", categoryExpect(face, observed), observed,
+			got(categoryAllows(face, observed), "", fmt.Sprintf("the scenario declares %s for this family, but a raw probe of its endpoint observes %s", declared, observed)), ev, t0)
 	}
 }
 
@@ -506,8 +552,9 @@ func packWireShape(pack, family string) wireShape {
 //	  first flight (TLS) never answered                tls_handshake_failed
 //	UDP endpoint
 //	  plain datagram dropped
-//	      … and dropped toward the control host too    udp_unavailable
-//	      … but delivered to the control host          unknown  (the taxonomy has no "UDP to this address is dropped")
+//	      … but delivered to the control host          udp_address_blocked
+//	      … dropped there too, delivered on another port   udp_port_blocked
+//	      … dropped there on that port as well         udp_unavailable
 //	  plain delivered, QUIC-Initial-shaped dropped     quic_unavailable
 //	otherwise                                          none
 func (rc *RunCtx) truthCategory(f Family) (string, map[string]any) {
@@ -525,10 +572,21 @@ func (rc *RunCtx) truthCategory(f Family) (string, map[string]any) {
 	port := f.Endpoint.Port
 	if f.Endpoint.Proto == "udp" {
 		if run("udp_plain", RawProbe{Kind: "udp", Addr: Relay1IP, Port: port, Shape: "plain"}).Result != "delivered" {
-			if run("udp_plain_control", RawProbe{Kind: "udp", Addr: ElsewhereIP, Port: port, Shape: "plain"}).Result != "delivered" {
-				return "udp_unavailable", ev
+			if run("udp_plain_control", RawProbe{Kind: "udp", Addr: ElsewhereIP, Port: port, Shape: "plain"}).Result == "delivered" {
+				// Another host, same port, gets the datagram: it is this
+				// ADDRESS that is cut off.
+				return "udp_address_blocked", ev
 			}
-			return "unknown", ev
+			other := 443
+			if port == other {
+				other = 8443
+			}
+			ev["other_port"] = other
+			if run("udp_plain_control_other_port", RawProbe{Kind: "udp", Addr: ElsewhereIP, Port: other, Shape: "plain"}).Result == "delivered" {
+				// The same host on another port gets it: it is this PORT.
+				return "udp_port_blocked", ev
+			}
+			return "udp_unavailable", ev
 		}
 		if run("udp_quic", RawProbe{Kind: "udp", Addr: Relay1IP, Port: port, Shape: "quic"}).Result != "delivered" {
 			return "quic_unavailable", ev
@@ -596,15 +654,25 @@ func (rc *RunCtx) EngineCategory(f Family, phase string, c *Client, bye map[stri
 		return
 	}
 	routeID := ""
+	var connectMs any
 	if ev := c.Event("connected"); ev != nil {
 		routeID, _ = ev["route_id"].(string)
+		connectMs = ev["set_route_ms"]
 	}
 	src := bye
 	if src == nil {
-		src = c.Event("error")
+		// The engine did not connect: its own account of the attempt is
+		// on the error event (wb-client takes it right after set_route
+		// returned).
+		if src = c.Event("error"); src != nil && routeID == "" {
+			routeID, _ = src["route_id"].(string)
+		}
 	}
 	reported := CategoryNone
 	evidence := map[string]any{"declared": declared, "route_id": routeID}
+	if connectMs != nil {
+		evidence["set_route_ms"] = connectMs
+	}
 	if src != nil {
 		if exp, ok := src["explain"].(map[string]any); ok {
 			evidence["explain_reason"] = exp["reason"]
@@ -622,11 +690,32 @@ func (rc *RunCtx) EngineCategory(f Family, phase string, c *Client, bye map[stri
 					}
 				}
 			}
+			// A route that connected but whose proof was a DEGRADED
+			// outcome (path_too_slow) is not in failures[] — it did not
+			// fail — and is the engine naming what it saw all the same.
+			if deg, ok := exp["degraded"].([]any); ok && reported == CategoryNone {
+				for _, x := range deg {
+					dr, _ := x.(map[string]any)
+					if dr == nil {
+						continue
+					}
+					if id, _ := dr["route_id"].(string); routeID == "" || id == routeID {
+						if cl, _ := dr["classification"].(string); cl != "" {
+							reported = cl
+							evidence["degraded_not_failed"] = true
+						}
+					}
+				}
+			}
 		} else {
 			evidence["explain"] = "wb-client did not capture abi.DiagnosticsExplain()"
 		}
 		if diag, ok := src["diag"].(map[string]any); ok {
 			evidence["posture"], evidence["why"] = diag["posture"], diag["why"]
+			evidence["route_check"] = diag["route_check"]
+		}
+		if ms, ok := src["set_route_ms"]; ok {
+			evidence["set_route_ms"] = ms
 		}
 		if routes, ok := src["routes_after"].(map[string]any); ok {
 			if list, ok := routes["routes"].([]any); ok {
@@ -646,12 +735,48 @@ func (rc *RunCtx) EngineCategory(f Family, phase string, c *Client, bye map[stri
 			}
 		}
 	}
-	detail := ""
-	if reported != declared {
-		detail = fmt.Sprintf("the network did %s to this route (see censor/truth.category); the engine reported %s — posture=%v why=%q proven_after=%v",
-			declared, reported, evidence["posture"], evidence["why"], evidence["proven_after"])
+	// A slow path is declared as path_too_slow and nothing else; which
+	// of "slow" and "nothing" the engine must have said for THIS connect
+	// is decided by how long the connect took (first_verdict.go:
+	// slowCategoryFor), never left open.
+	if declared == CategorySlow && bye != nil {
+		ms := msOf(evidence["set_route_ms"])
+		declared = slowCategoryFor(declared, ms)
+		evidence["declared_for_this_connect"] = declared
+		evidence["engine_slow_after_ms"] = EngineSlowAfterMs
 	}
-	rc.R.Add(f.Name, phase, "engine.category", declared, reported, detail, evidence, t0)
+	detail := ""
+	if !categoryAllows(declared, reported) {
+		detail = fmt.Sprintf("the network did %s to this route (see censor/truth.category); the engine reported %s — posture=%v why=%q proven_after=%v",
+			evidence["declared"], reported, evidence["posture"], evidence["why"], evidence["proven_after"])
+		if evidence["declared_for_this_connect"] != nil {
+			detail += fmt.Sprintf(" — this connect took %v ms against the engine's slow threshold of %d ms, so the engine must have reported %s",
+				evidence["set_route_ms"], EngineSlowAfterMs, declared)
+		}
+	}
+	rc.R.Add(f.Name, phase, "engine.category", categoryExpect(declared, reported), reported, detail, evidence, t0)
+
+	// A connect that failed leaves posture=Recovery and
+	// route_check=failed — exactly what a connected route that is being
+	// retried reads. `route_running` is what lets the app tell "Could
+	// not connect on this route" from "Connection lost. Trying again…";
+	// without it every blocked session here read "Connecting…" for good.
+	// The engine tore the instance down, so it must say false.
+	if bye == nil && src != nil {
+		if diag, ok := src["diag"].(map[string]any); ok && diag["route_check"] == "failed" {
+			gotRunning := "missing"
+			if v, ok := diag["route_running"].(bool); ok {
+				gotRunning = fmt.Sprintf("%v", v)
+			}
+			d := ""
+			if gotRunning != "false" {
+				d = fmt.Sprintf("after a failed connect the diagnostics blob says route_running=%s (posture=%v, route_check=failed): the app cannot tell this from a connection that is being retried and would show \"Connecting…\" with nothing running",
+					gotRunning, diag["posture"])
+			}
+			rc.R.Add(f.Name, phase, "engine.failed_connect_not_running", "false", gotRunning, d,
+				map[string]any{"posture": diag["posture"], "route_check": diag["route_check"], "route_running": diag["route_running"]}, t0)
+		}
+	}
 }
 
 // Events returns every recorded event with the given name.

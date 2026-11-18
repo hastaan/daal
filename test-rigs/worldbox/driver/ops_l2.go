@@ -37,6 +37,10 @@ var l2OldPackExpect = map[string]string{
 //  5. "Rebuild" r31 the way the app does (revoke → provision → pack);
 //     the re-minted pack connects on every family      → pass
 //  6. the re-minted pack names the NEW cover host
+//  7. NO NEW FILE: a phone that holds a file minted BEFORE the rotation
+//     polls the freshness mirrors — where the publisher has put nothing
+//     but the re-signed, credential-less pack — and connects on every
+//     family                                          → pass
 //
 // Afterwards r1's file is re-issued too and becomes the run's pack: L2's
 // documented cost is that every distributed pack must be replaced.
@@ -51,6 +55,9 @@ func opL2(rc *RunCtx) {
 	for _, f := range fams {
 		rc.sub(f, phase, "before", oldPack, Pass)
 	}
+	// 7 is armed here, before the rotation: r1's file as it is in the
+	// field, with a mirror set in it.
+	fc, heldPack, armed := rc.armNoNewFile(phase, "l2")
 	oldSNI := rc.Rec.CoverSNI
 	rowsBefore := rc.userRows()
 	realityBefore := rc.realityState()
@@ -121,7 +128,17 @@ func opL2(rc *RunCtx) {
 		rc.sub(f, phase, "old-pack", oldPack, expect)
 	}
 
-	// 5. the app's Rebuild, against the rewritten record.
+	// 7. no new file. L2 touched no credential, so the signed endpoint
+	// is all a phone is missing — and that is public.
+	if armed {
+		fc.noNewFile("l2", "cover-host-moved", fams, heldPack)
+	}
+
+	// 5. the app's Rebuild, against the rewritten record. The base pack
+	// is re-signed first: its signed endpoints name the cover host.
+	if !rc.Resign(phase) {
+		return
+	}
 	newPack, ok := rc.Rebuild(name, phase, "base.sbp", "after-l2")
 	rc.MgmtWindowClosed(phase)
 	if !ok {
@@ -135,8 +152,9 @@ func opL2(rc *RunCtx) {
 		rc.sub(f, phase, "rebuilt", newPack, Pass)
 	}
 
-	// Everybody needs a new file after L2. Re-issue r1's so the ops that
-	// follow start from a relay whose first recipient can connect.
+	// r1's file from before the rotation names the old cover host.
+	// Re-issue it so the ops that follow start from a relay whose first
+	// recipient can connect without a poll.
 	if p1, ok := rc.Rebuild("r1", phase, "base.sbp", "after-l2"); ok {
 		rc.Pack = p1
 	}

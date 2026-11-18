@@ -145,23 +145,25 @@ type hcloudClient interface {
 	// is reachable only through the wizard's ephemeral allowances
 	// added by FirewallAddEphemeralRule.
 	//
-	// The baseline ruleset opens 443/tcp + 443/udp + 80/tcp from
-	// anywhere (so sing-box on the relay can serve recipients) and
-	// nothing else. Hetzner's "any inbound rule present → drop
-	// everything else by default" semantics make the random mgmt
-	// port unreachable until an ephemeral allow rule is added.
+	// The ruleset opens 80/tcp plus dataPlanePorts from anywhere (so
+	// sing-box on the relay can serve recipients) and nothing else.
+	// Hetzner's "any inbound rule present → drop everything else by
+	// default" semantics make the random mgmt port unreachable until an
+	// ephemeral allow rule is added.
 	//
 	// The firewall is named "daal-relay-<serverID>" so cleanup on
 	// teardown is straightforward. Returns the firewall ID; safe
 	// to call multiple times for the same server (returns the
 	// existing firewall ID without re-attaching).
-	// extraPorts are the non-baseline data-plane ports this relay
-	// serves, from relayports.ExtraFirewallPortsFor(<its families>).
+	//
+	// dataPlanePorts is the COMPLETE set of data-plane ports this relay
+	// serves, from relayports.FirewallPortsFor(<its families>) — 443
+	// included, and only when a family that listens there is served.
 	// It is a parameter and not a package constant because the set is
-	// no longer identical on every relay: a family the toolbox profile
-	// can switch off must not leave its port open on relays that do not
-	// serve it, and must not be shut on the ones that do.
-	FirewallEnsureForServer(ctx context.Context, serverID string, extraPorts []relayports.Endpoint) (firewallID string, err error)
+	// not identical on every relay: a family this relay was not asked
+	// to serve must not leave its port open, and one it does serve must
+	// not be shut. nil means a relay with no declared family set.
+	FirewallEnsureForServer(ctx context.Context, serverID string, dataPlanePorts []relayports.Endpoint) (firewallID string, err error)
 
 	// FirewallDeleteForServer detaches and deletes the per-server
 	// firewall created by FirewallEnsureForServer. Idempotent:

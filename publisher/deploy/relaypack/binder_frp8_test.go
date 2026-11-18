@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -21,11 +22,12 @@ import (
 func TestBindAndSign_EmitsCDNAttestation(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	rec := &provider.OperatorRecord{
-		Provider:        "hetzner",
-		ServerID:        "12345",
-		ServerType:      "cx22",
-		Region:          "fsn1",
-		ToolboxProfile:  "iran-default",
+		Provider:       "hetzner",
+		ServerID:       "12345",
+		ServerType:     "cx22",
+		Region:         "fsn1",
+		ToolboxProfile: "iran-default",
+		PublicIP:       net.ParseIP("5.75.0.1"), RealityPublicKey: fixtureRealityPub, TLSCertSHA256: fixtureTLSPin,
 		PublisherPubKey: pub,
 		Candidates: []provider.CandidateMeta{
 			{
@@ -111,11 +113,12 @@ func TestBindAndSign_EmitsCDNAttestation(t *testing.T) {
 func TestBindAndSign_RejectsCDNWithoutAttestationAtV16(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	rec := &provider.OperatorRecord{
-		Provider:        "hetzner",
-		ServerID:        "12345",
-		ServerType:      "cx22",
-		Region:          "fsn1",
-		ToolboxProfile:  "iran-default",
+		Provider:       "hetzner",
+		ServerID:       "12345",
+		ServerType:     "cx22",
+		Region:         "fsn1",
+		ToolboxProfile: "iran-default",
+		PublicIP:       net.ParseIP("5.75.0.1"), RealityPublicKey: fixtureRealityPub, TLSCertSHA256: fixtureTLSPin,
 		PublisherPubKey: pub,
 		Candidates: []provider.CandidateMeta{
 			{

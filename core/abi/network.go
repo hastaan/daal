@@ -178,6 +178,14 @@ func NetworkChanged(kind, carrier, ssid string) (string, error) {
 		_ = store.Put(incoming, stub, now)
 	}
 
+	// A route that was proved on the network the device just left has
+	// proved nothing about this one. Ask the liveness loop to check now
+	// rather than at its next tick (route_check.go). No-op when no
+	// route is connected.
+	if outgoing != incoming {
+		c.kickLiveness()
+	}
+
 	body, _ := json.Marshal(map[string]any{
 		"network_id":      incoming,
 		"mode":            c.mode,

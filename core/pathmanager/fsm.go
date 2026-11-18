@@ -34,9 +34,15 @@ type State string
 const (
 	StateNoRoute    State = "NoRoute"
 	StateConnecting State = "Connecting"
-	StateConnected  State = "Connected"
-	StateCooldown   State = "Cooldown"
-	StateFailed     State = "Failed"
+	// StateVerifying: the engine instance is running and the route's
+	// data plane has not been proved yet (engine/proof.go). It is NOT
+	// connected: sing-box dials lazily, so an instance that started says
+	// nothing about whether the relay can be reached. Entered by
+	// Verifying(); left by Connected() or Failed().
+	StateVerifying State = "Verifying"
+	StateConnected State = "Connected"
+	StateCooldown  State = "Cooldown"
+	StateFailed    State = "Failed"
 	// StateBudgetExhausted (Phase 2A) is entered when a route's hourly
 	// byte cap is hit. The state clears at the next hour bucket; the
 	// scheduler's KindBudgetReset action fires HourRollover and the
@@ -54,6 +60,11 @@ type RouteHealth struct {
 	CooldownReason  diagnostics.Category `json:"cooldown_reason,omitempty"`
 	CooldownUntil   time.Time            `json:"cooldown_until,omitempty"`
 	BudgetExhausted bool                 `json:"budget_exhausted"`
+	// Degraded is set when the route's last proof succeeded but was a
+	// degraded outcome (today only diagnostics.PathTooSlow). It is not
+	// a failure: no cooldown accompanies it. Cleared by the next clean
+	// Connected().
+	Degraded diagnostics.Category `json:"degraded,omitempty"`
 }
 
 // Manager owns the FSM. Phase 2B widens it with a parallel `posture`
@@ -196,6 +207,43 @@ func (m *Manager) Attempt(routeID, family string) {
 	m.lastReason = "attempting route " + routeID
 }
 
+// Verifying records that the engine instance for the current route is
+// up and its data plane is being proved. Nothing about cooldowns or
+// escalation changes: no outcome exists yet.
+func (m *Manager) Verifying() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state = StateVerifying
+	m.lastReason = "checking that " + m.currentRoute + " carries traffic"
+}
+
+// MarkDegraded records that the current route is connected but its
+// proof was a degraded outcome. Call after Connected().
+func (m *Manager) MarkDegraded(cat diagnostics.Category) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rid := m.currentRoute
+	if rid == "" {
+		return
+	}
+	h := m.routeHealth[rid]
+	h.RouteID = rid
+	h.Degraded = cat
+	m.routeHealth[rid] = h
+	m.lastReason = fmt.Sprintf("tunnel up on %s, but degraded: %s", rid, cat)
+}
+
+// Resume makes routeID the current route again without recording an
+// attempt. The liveness check uses it when a route that failed while
+// connected is about to be reported on (Failed and Connected both act
+// on the current route's family and health entry).
+func (m *Manager) Resume(routeID, family string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentRoute = routeID
+	m.currentFamily = family
+}
+
 // Connected records a successful tunnel. Phase 2B: also resets the
 // family-escalation counter so a freshly-recovered family starts the
 // next cooldown event at ladder step 1.
@@ -224,6 +272,7 @@ func (m *Manager) Connected() {
 		h.InCooldown = false
 		h.CooldownReason = ""
 		h.CooldownUntil = time.Time{}
+		h.Degraded = ""
 		m.routeHealth[rid] = h
 	}
 }
@@ -332,6 +381,15 @@ func perRouteCooldown(cat diagnostics.Category) time.Duration {
 		return 1 * time.Hour
 	case diagnostics.UDPUnavailable, diagnostics.QUICUnavailable:
 		return 2 * time.Hour
+	case diagnostics.UDPNoReply:
+		// One silent UDP endpoint is the UDP twin of an unanswered SYN:
+		// the route cools down like tcp_connect_timeout. It is NOT a
+		// family-class category — nothing is known about UDP elsewhere.
+		return 5 * time.Minute
+	case diagnostics.UDPAddressBlocked:
+		return 30 * time.Minute
+	case diagnostics.UDPPortBlocked:
+		return 30 * time.Minute
 	case diagnostics.DNSPoisoned:
 		return 30 * time.Minute
 	case diagnostics.EngineCrash:

@@ -1,6 +1,7 @@
 package hetzner
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strings"
@@ -335,7 +336,7 @@ func TestServedFamiliesDrivesFirewallPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("servedFamilies: %v", err)
 	}
-	got := relayports.ExtraFirewallPortsFor(fams)
+	got := relayports.FirewallPortsFor(fams)
 	want := relayports.For("tuic")
 	found := false
 	for _, ep := range got {
@@ -353,7 +354,7 @@ func TestServedFamiliesDrivesFirewallPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("servedFamilies: %v", err)
 	}
-	for _, ep := range relayports.ExtraFirewallPortsFor(def) {
+	for _, ep := range relayports.FirewallPortsFor(def) {
 		if ep == want {
 			t.Errorf("default relay must not open tuic's %+v", want)
 		}
@@ -361,5 +362,76 @@ func TestServedFamiliesDrivesFirewallPorts(t *testing.T) {
 	// And the sing-box config agrees with the firewall about it.
 	if strings.Contains(singBoxConfigForFamilies("x.example.net", def), `"tuic-in"`) {
 		t.Error("default relay must not bind a tuic inbound either")
+	}
+}
+
+// FAM-4. Provisioning with a narrow family set hands the cloud firewall
+// exactly that set's ports (443 was unconditional), bakes no inbound for
+// the families left out, opens no ufw port for them, and tells the box
+// its family set so daal-relay-mgmt does not create the on-first-use
+// inbounds of families nobody asked for.
+func TestProvision_NarrowFamilySetLeavesNothingElseOpen(t *testing.T) {
+	f := newFake()
+	p := New(f)
+	opts := seededOpts(0x21)
+	opts.EnabledFamilies = []string{"shadowsocks", "anytls"}
+	rec, err := p.Provision(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	got := f.fwExtraPorts[rec.ServerID]
+	want := []relayports.Endpoint{relayports.For("shadowsocks"), relayports.For("anytls")}
+	if len(got) != len(want) {
+		t.Fatalf("cloud firewall data-plane ports = %+v, want exactly %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("cloud firewall port %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	cfg := singBoxFromCloudInit(t, f.lastUserData)
+	if ins, _ := cfg["inbounds"].([]any); len(ins) != 0 {
+		t.Errorf("cloud-init bakes %d inbound(s) on a relay whose families are all created on first use: %v", len(ins), ins)
+	}
+	for _, bad := range []string{"ufw allow 443/tcp", "ufw allow 443/udp", "ufw allow 8444/tcp", "ufw allow 8445/tcp"} {
+		if strings.Contains(f.lastUserData, bad) {
+			t.Errorf("cloud-init for a shadowsocks+anytls relay contains %q", bad)
+		}
+	}
+	for _, w := range []string{"run ufw allow 8446/tcp", "run ufw allow 8447/tcp"} {
+		if !strings.Contains(f.lastUserData, w) {
+			t.Errorf("cloud-init for a shadowsocks+anytls relay is missing %q", w)
+		}
+	}
+	fams, ok := fileFromCloudInit(t, f.lastUserData, "/etc/daal/families")
+	if !ok {
+		t.Fatal("cloud-init does not write /etc/daal/families")
+	}
+	if fams != "shadowsocks\nanytls" {
+		t.Errorf("/etc/daal/families = %q, want the served set one per line", fams)
+	}
+	// No REALITY inbound, so the box must not state a cover host either.
+	if v, ok := fileFromCloudInit(t, f.lastUserData, "/etc/daal/cover-sni"); ok {
+		t.Errorf("/etc/daal/cover-sni = %q on a relay with no REALITY inbound", v)
+	}
+
+	// And a default relay still gets all four, and says so.
+	f2 := newFake()
+	rec2, err := New(f2).Provision(context.Background(), seededOpts(0x22))
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if got := f2.fwExtraPorts[rec2.ServerID]; len(got) != 4 {
+		t.Errorf("default relay cloud firewall ports = %+v, want the four default families'", got)
+	}
+	if fams, _ := fileFromCloudInit(t, f2.lastUserData, "/etc/daal/families"); len(strings.Fields(fams)) != 4 {
+		t.Errorf("default relay /etc/daal/families = %q, want four names", fams)
+	}
+	for _, w := range []string{"run ufw allow 443/tcp", "run ufw allow 443/udp", "run ufw allow 8444/tcp", "run ufw allow 8445/tcp"} {
+		if !strings.Contains(f2.lastUserData, w) {
+			t.Errorf("default relay cloud-init is missing %q", w)
+		}
 	}
 }

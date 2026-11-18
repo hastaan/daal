@@ -127,6 +127,111 @@ VLESS-Reality, Hysteria2, and Naive each have a single inbound whose
 array also grows by one entry. All are stable additive ops; no other
 inbound or outbound is touched.
 
+
+### 2.3. Which inbounds a relay has: its family set
+
+**Added 2026-11-18 (worldbox finding FAM-4, backlog W5-1).** The config
+above shows the four default families. A relay does not necessarily
+serve those four, and it must not carry an inbound — or a credential, or
+an open port — for a family it was not provisioned to serve.
+
+The family set is resolved once, by the publisher, at provision time
+(`relayconf.ServedFamilies`: the toolbox profile's defaults, or the
+`--families` list). Four things are derived from that one list and
+nothing else:
+
+| what | where | rule |
+|---|---|---|
+| inbounds baked at first boot | `/etc/sing-box/config.json` (cloud-init) | `vless-in` iff `vless-reality`; `hy2-in` iff `hysteria2`; `tuic-in` iff `tuic`. None is unconditional. A relay serving only on-first-use families boots with an empty `inbounds[]`. |
+| the box's own copy of the set | `/etc/daal/families`, one family name per line (cloud-init) | written whenever the provider resolved a set |
+| inbounds created on first recipient | `daal-relay-mgmt` | `naive-in`, `ws-in`, `ss-in`, `anytls-in` are created **only** for families named in `/etc/daal/families`; a user row is appended to a baked inbound only if its family is named there |
+| open data-plane ports | cloud-provider firewall and box-side `ufw` | exactly `relayports.FirewallPortsFor(<set>)` — 443/tcp only with `vless-reality`, 443/udp only with `hysteria2`, and so on |
+
+`/etc/daal/families` semantics on the box:
+
+* **absent** — the box predates the file. The daemon behaves as it did
+  before it existed (every family it knows is created on first use).
+* **present, naming at least one family** — obeyed exactly. Names the
+  daemon does not recognise are ignored (a newer publisher, an older
+  daemon); the publisher already refuses to mint a route whose
+  credential the box did not return.
+* **present but empty or unreadable** — `/users/provision` answers
+  `500` and changes nothing. A declared set must never degrade to
+  "serve everything".
+* a provision that would leave the recipient with **no row in any
+  inbound** is `500`, not a `200` with empty credentials.
+
+The **user registry** — what `/users/list`, the duplicate-name check and
+the `MaxRecipientsPerServer` cap read — is the union of user names over
+every managed inbound. It used to be `vless-in`'s `users[]` alone, which
+is empty on a relay that does not serve `vless-reality`.
+
+`/users/provision` and `/rotate-credentials` return a credential **only
+for a row that exists in the live config after the write**:
+`vless_uuid` iff the recipient has a row in `vless-in` or `ws-in`,
+`reality_short_id` iff in `vless-in`, `ws_path` iff in `ws-in`,
+`hy2_password` iff in `hy2-in`, `naive_password` iff in `naive-in` — the
+same "a value the box does not send is the signal" rule the `tuic_*`,
+`ss_*` and `anytls_password` fields already followed. An empty field is
+a family this relay does not serve, never a failed write.
+
+On a relay with no REALITY inbound, first boot generates no REALITY key:
+`/etc/daal/reality.pub` and `/etc/daal/cover-sni` are not written and
+`reality_public_key` / `cover_sni` come back empty.
+
+Changing a relay's family set is a reprovision: both firewalls and the
+baked inbounds are written once, at first boot.
+
+**How the set is chosen (`daal-deploy provision --families`, worldbox
+finding FAM-3).** With no `--families`, the relay serves the toolbox
+profile's `default_enabled` families. With it, the list **replaces**
+those defaults — it is not added to them — and:
+
+* every name must be a family the chosen profile offers. Anything else
+  (a misspelling, or a real family of a different profile) stops the
+  command with exit status 2 **before any cloud call**, naming each bad
+  value and the profile's valid set. It used to be dropped silently.
+* what the relay will and will not serve is stated before the cloud is
+  called: a line on stderr, or — with `--progress-json` — one
+  `provision_families` event carrying `families`, `dropped_defaults`,
+  `added_opt_in` and `unserved_by_release`.
+* the app's wizard therefore always sends "every default family plus
+  the ones ticked", or an empty list when nothing is ticked
+  (`client-ui/src/publisher/extraFamilies.ts`).
+
+**The released relay software gates the opt-in families (worldbox
+F-002).** The box's half of `shadowsocks`, `anytls` and `tuic` is
+`daal-relay-mgmt`, which a relay downloads as a pinned release artefact
+(`publisher/deploy/cloudinit/artifacts.go`), not from the publisher's
+tree. Whether the pinned artefact serves them is one build constant
+beside the pin, `cloudinit.PinnedMgmtServesOptInFamilies`. While it is
+`false`:
+
+* the wizard shows the opt-in families but does not let them be turned
+  on, says why in one line, and always sends an empty list — a choice
+  remembered from another build is ignored
+  (`RELEASED_RELAY_SERVES_EXTRA_FAMILIES`, the mirror of the constant);
+* `provision --families` naming one of them is still accepted (a relay
+  may run a daemon newer than the pin: a release in progress, the
+  end-to-end rig), but the statement reads "will be **asked** to serve"
+  rather than "will serve", names the families the release cannot
+  serve, and says what that means — no credential and no route for
+  them, and with `anytls` named a connection file that is still
+  `spec_version` 5. `unserved_by_release` lists them; it is `[]` when
+  the pin serves everything asked.
+
+The constant is flipped in the commit that bumps the `daal-relay-mgmt`
+`Sha256`/`SigHex` to an artefact that serves them; a unit test fails on
+a bump without the flip and on a flip without a bump.
+
+The L6 rung (rebuild on a different toolbox profile) still intersects
+the relay's families with the new profile, but no longer inside
+`provision`: `daal-deploy reprovision --new-toolbox-profile` refuses an
+empty intersection before deleting anything (unchanged), and then
+narrows the record's candidates to what the new profile offers and says
+what the rebuild drops, so the `provision --families <record's
+families>` that follows passes the check above.
+
 ## 3. On-box surface — additions to `daal-relay-mgmt`
 
 Per FRP-14 the "exactly three routes" invariant lifts to **exactly six
@@ -189,32 +294,45 @@ Request body:
 ```
 
 Side effects (**hard revoke**):
-1. Remove the user's row from the four inbounds' `users[]` arrays
-   (`vless-in`, `hy2-in`, `naive-in`, `ws-in`). Note this is a **user
+1. Remove the user's row from every managed inbound's `users[]` array
+   that carries one (`vless-in`, `hy2-in`, `naive-in`, `ws-in`, and on
+   relays that serve them `tuic-in`, `ss-in`, `anytls-in` — see §2.3
+   for which exist on a given relay). Note this is a **user
    removal, not an inbound removal** — `removeWSUser`
    (`singbox_users.go:415`) drops the row; the shared `ws-in` inbound
    itself disappears only when its last user is revoked. The shared WS
    path is NOT rotated by a revoke (§2.1).
 2. Remove the recipient's `short_id` from the Reality array.
-3. Set the VLESS inbound's connection idle window to 1 s temporarily
-   (a "drain" knob via sing-box config; restored after step 5).
-4. **Force-kick:** invoke `/usr/local/lib/daal/singbox-kick.sh`, which:
-   ```bash
+3. **Apply, exactly once.** Invoke `/usr/local/lib/daal/singbox-kick.sh`,
+   which is the one way the box applies a rewritten config:
+   ```sh
    #!/bin/sh
-   set -e
-   systemctl kill -s USR2 sing-box.service || true
-   sleep 1
-   systemctl reload sing-box.service
+   set -eu
+   systemctl reload sing-box.service || systemctl restart sing-box.service
    ```
-   SIGUSR2 in sing-box ≥ v1.10 triggers a graceful drop of all
-   inbound connections; the immediate reload then re-establishes
-   inbounds for the remaining users. Sessions held by the revoked
-   user reconnect, fail auth (no UUID in the table), and stay
-   disconnected.
-5. Restore `max_idle_time` to the default after the drain (server
-   does this in-memory; the on-disk config is restored to its
-   default settings via the same rewriter pass).
-6. Return:
+   `reload` is the unit's `ExecReload=/bin/kill -HUP $MAINPID`. sing-box
+   1.13 handles SIGHUP in-process (`cmd/sing-box/cmd_run.go`): it
+   re-checks the config on disk, **keeps the running instance if that
+   check fails**, and otherwise closes the instance — every inbound, and
+   through the connection manager every live connection — and starts a
+   new one. That close is what evicts the revoked recipient's
+   established session; it reconnects, fails auth (no row in the table),
+   and stays disconnected. `restart` is the fallback for a unit file with
+   no `ExecReload=` and has the same effect on sessions.
+
+   **Amended 2026-11-18 (worldbox finding INT-O1).** This step used to be
+   a "force-kick" — `SIGUSR2`, a sleep, then the reload — followed by a
+   second reload, with a temporary 1 s idle-window "drain" around them.
+   None of it did what it said: sing-box registers handlers for SIGINT,
+   SIGTERM and SIGHUP only, the Go runtime ignores an unhandled SIGUSR2,
+   and the drain knob was never implemented. The observable behaviour was
+   a 2 s sleep and **two** restarts of the relay per revoke, each one
+   disconnecting every other recipient. One reload is the whole
+   mechanism; a caller that applies twice is a defect
+   (`TestUsersRevoke_RemovesAndReloadsExactlyOnce`,
+   `TestRotateCreds_ReloadsExactlyOnce`,
+   `TestRenderV2_ApplyWrapperIsOneReloadAndNoSleep`).
+4. Return:
 ```json
 { "revoked_at_unix": 1748100000 }
 ```
@@ -437,7 +555,7 @@ UI then calls the platform share dispatcher.
 | `cmd/daal-relay-mgmt/main_test.go` | provision append, revoke remove, revoke kicks via wrapper, list, op-binding, `TestExactlyNRoutes` (n=**7**), isolation, idempotency, 128-cap |
 | `cmd/daal-relay-mgmt/singbox_users_shortid_test.go`, `singbox_users_tls_test.go` | golden config diffs for VLESS append/remove, Hy2 append/remove, Naive append/remove, shared `ws-in` user add/remove. *(There is no `singbox_rewriter_test.go`; that name was cited here and never existed.)* |
 | `publisher/deploy/mgmt/client_test.go` | new methods round-trip, ephemeral firewall ordering for users routes |
-| `publisher/deploy/cloudinit/template_test.go` | empty users[] at boot, kick-wrapper present, sing-box v1.10 pinned |
+| `publisher/deploy/cloudinit/template_test.go`, `families_test.go` | empty users[] at boot; the apply wrapper is one `reload || restart` with no SIGUSR2 and no sleep; `ExecReload` on the unit; `/etc/daal/families`; ufw opens exactly the served families' ports |
 | `client-shell/tauri/daal-wizard/src/recipient_book.rs` | insert/dedupe by address, FK cascade on operator delete, soft-revoke status |
 | `client-shell/tauri/daal-wizard/src/commands.rs` | recipient_add success, dup-address handling, revoke, resend |
 

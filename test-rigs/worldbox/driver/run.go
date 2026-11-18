@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -449,13 +450,20 @@ func fileSum(path string) string {
 
 func (rc *RunCtx) mint() bool {
 	r := rc.R
-	fmt.Fprintln(r.human, "phase: mint (bind-and-sign → users-provision → users-pack-sbp)")
-	t0 := time.Now()
-	v := rc.Pub.BindAndSign(rc.Ctx, "base.sbp")
-	if !r.Add("", "mint", "verb.bind-and-sign", Pass, got(v.OK(), Pass, Fail), v.Tail(), nil, t0) {
+	// The first recipient is created BEFORE the pack is signed: the
+	// relay's reply carries the relay-wide connection material
+	// (REALITY public key, TLS key pin, shadowsocks server key) that
+	// bind-and-sign commits each route's signed endpoint to. On a VPS
+	// the record already has the first two from provisioning; here it
+	// has neither (no sshd).
+	fmt.Fprintln(r.human, "phase: mint (users-provision → bind-and-sign → users-pack-sbp)")
+	if !rc.provisionRecipient("r1", "mint") {
 		return false
 	}
-	pack, _ := rc.MintRecipient("r1", "mint")
+	if !rc.Resign("mint") {
+		return false
+	}
+	pack, _ := rc.packRecipient("r1", "mint")
 	rc.Pack = pack
 	// Not fatal: a family the relay does not serve is a finding about
 	// that family, and the others still deserve their session.
@@ -495,20 +503,54 @@ func (rc *RunCtx) relayListens() bool {
 // MintRecipient provisions one recipient on the relay and mints their
 // pack. Ops reuse it for extra recipients.
 func (rc *RunCtx) MintRecipient(name, phase string) (string, bool) {
+	if !rc.provisionRecipient(name, phase) {
+		return "", false
+	}
+	return rc.packRecipient(name, phase)
+}
+
+// Resign runs bind-and-sign against record.json as it is now and
+// replaces base.sbp. Called at mint and after every rotation that moves
+// something the signed endpoints name (L2: the cover host; L3: the
+// address) — the app re-signs after a rotation for the same reason.
+func (rc *RunCtx) Resign(phase string) bool {
+	t0 := time.Now()
+	v := rc.Pub.BindAndSign(rc.Ctx, "base.sbp")
+	var ans struct {
+		Uncommitted []string `json:"uncommitted_families"`
+	}
+	_ = json.Unmarshal([]byte(v.Stdout), &ans)
+	ok := rc.R.Add("", phase, "verb.bind-and-sign", Pass, got(v.OK(), Pass, Fail), v.Tail(),
+		map[string]any{"uncommitted_families": ans.Uncommitted}, t0)
+	// The verb exits 0 while signing a route WITHOUT an endpoint — a
+	// route no recipient can use. Exit status alone would hide that.
+	if ok && len(ans.Uncommitted) > 0 {
+		rc.R.Add("", phase, "bind-and-sign.every_route_has_a_signed_endpoint", Pass, Fail,
+			"signed without an endpoint: "+strings.Join(ans.Uncommitted, ", ")+" — "+oneLine(v.Tail(), 400), nil, t0)
+	}
+	return ok
+}
+
+func (rc *RunCtx) provisionRecipient(name, phase string) bool {
 	r := rc.R
 	t0 := time.Now()
 	v := rc.Pub.UsersProvision(rc.Ctx, name)
 	if !r.Add("", phase, "verb.users-provision."+name, Pass, got(v.OK(), Pass, Fail), v.Tail(), nil, t0) {
-		return "", false
+		return false
 	}
 	// The verb exits 0 while telling the operator a family it offers has
 	// no credential. Exit status alone would hide that.
 	if warn := strings.Count(v.Stderr, "warning:"); warn > 0 {
 		r.Add("", phase, "users-provision."+name+".no_warnings", Pass, Fail, v.Tail(), nil, t0)
 	}
-	t0 = time.Now()
+	return true
+}
+
+func (rc *RunCtx) packRecipient(name, phase string) (string, bool) {
+	r := rc.R
+	t0 := time.Now()
 	out := "pack-" + name + ".sbp"
-	v = rc.Pub.PackSBP(rc.Ctx, "base.sbp", "creds-"+name+".json", out)
+	v := rc.Pub.PackSBP(rc.Ctx, "base.sbp", "creds-"+name+".json", out)
 	ok := r.Add("", phase, "verb.users-pack-sbp."+name, Pass, got(v.OK(), Pass, Fail), v.Tail(), map[string]any{"stdout": strings.TrimSpace(v.Stdout)}, t0)
 	if ok && strings.Contains(v.Stderr, "NOT connectable") {
 		// The verb exits 0 while dropping routes; that is a finding, not a pass.
@@ -518,6 +560,39 @@ func (rc *RunCtx) MintRecipient(name, phase string) (string, bool) {
 		return "", false
 	}
 	return rc.Pub.Path(out), true
+}
+
+// unconnectableNotListed: a route the pack cannot connect on — one the
+// minter dropped (`_daal_unavailable`), or one with no outbound at all —
+// must not be a route on the client. The engine's own route list is
+// compared with the pack: nothing the pack marks unconnectable may be
+// offered for selection (FINDINGS F-003).
+func (rc *RunCtx) unconnectableNotListed(f Family, phase, pack string, routesEv map[string]any, t0 time.Time) {
+	v, err := ReadPack(pack)
+	if err != nil {
+		return // packChecks reports an unreadable pack
+	}
+	listed := map[string]bool{}
+	doc, _ := routesEv["routes"].(map[string]any)
+	rows, _ := doc["routes"].([]any)
+	for _, r := range rows {
+		m, _ := r.(map[string]any)
+		id, _ := m["route_id"].(string)
+		listed[id] = true
+	}
+	var dead, offered []string
+	for _, r := range v.Routes {
+		if r.Unavailable == "" && r.Type != "" {
+			continue
+		}
+		dead = append(dead, r.ID+":"+r.Family)
+		if listed[r.ID] {
+			offered = append(offered, r.ID+":"+r.Family)
+		}
+	}
+	rc.R.Add(f.Name, phase, "import.unconnectable_not_listed", Pass, got(len(offered) == 0, Pass, Fail),
+		got(len(offered) == 0, "", "the engine lists route(s) the pack cannot connect on: "+strings.Join(offered, ", ")),
+		map[string]any{"unconnectable_in_pack": dead, "routes_listed": len(listed)}, t0)
 }
 
 // ---- phase: family ---------------------------------------------------
@@ -569,10 +644,17 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		r.Add(f.Name, phase, "tunnel", Skipped, Skipped, f.Skip, nil, time.Now())
 		return Skipped, false
 	}
-	// Negative control BEFORE: with no tunnel the target must be out of reach.
+	// A separate phone gets a link that carries nothing of the phone
+	// before it (first_verdict.go: linkQuiet).
 	t0 := time.Now()
+	quietEv, quietErr := rc.linkQuiet()
+	if quietErr != nil {
+		r.Add(f.Name, phase, "link.quiet", Pass, Fail, quietErr.Error(), quietEv, t0)
+	}
+	// Negative control BEFORE: with no tunnel the target must be out of reach.
+	t0 = time.Now()
 	pre := Probe(rc.Ctx, p, false, 2*time.Second)
-	r.Add(f.Name, phase, "control.before", Blocked, got(pre.OK, Pass, Blocked), pre.Error, nil, t0)
+	r.Add(f.Name, phase, "control.before", Blocked, got(pre.OK, Pass, Blocked), pre.Error, quietEv, t0)
 
 	t0 = time.Now()
 	_, _ = WireReset(rc.Ctx) // the wire tap's window for this session starts here
@@ -585,6 +667,37 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 	if err != nil && rc.engineDied(f, phase, c, retry, t0) {
 		return Fail, true
 	}
+	// The engine only reports a route connected once it has carried a
+	// round trip through it (its connection proof), and gives up after a
+	// bounded few seconds. Under a scenario that DEGRADES the path
+	// (MustEstablish: 30% loss, a 56k cap) that proof can lose to the
+	// same retransmissions the nonce round trip below is given 90 s for —
+	// so, as there, a family that has not yet connected is asked again,
+	// each time as a fresh phone, within the same budget, because
+	// family/established and the wire check need a connected engine. A
+	// family that is really dead costs the budget once and is then red.
+	//
+	// A fresh phone has forgotten the failure, so the retry answers "can
+	// this family connect at all" and NOT "what was the person told":
+	// every attempt is recorded, and the first is judged on its own
+	// (engine.first_verdict, first_verdict.go).
+	attempts := []ConnectAttempt{connectAttempt(1, c, ev, err)}
+	if phase == "family" && expect == Blocked && rc.Scn.MustEstablish(f.Name) {
+		deadline := time.Now().Add(EstablishBudget)
+		for err != nil && ev != nil && ev["stage"] == StageProof && time.Now().Before(deadline) && rc.Ctx.Err() == nil {
+			c.Stop()
+			if c, err = StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental}); err != nil {
+				r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
+				return Fail, false
+			}
+			ev, err = c.Wait(rc.Ctx, 20*time.Second, "connected")
+			if err != nil && rc.engineDied(f, phase, c, retry, t0) {
+				return Fail, true
+			}
+			attempts = append(attempts, connectAttempt(len(attempts)+1, c, ev, err))
+		}
+	}
+	connects := len(attempts)
 	importEv := c.Event("import")
 	routesEv := c.Event("routes")
 	if routesEv == nil {
@@ -596,6 +709,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		return Refused, false
 	}
 	r.Add(f.Name, phase, "import", Pass, Pass, "", map[string]any{"verdict": verdictKind(importEv), "trust": verdictKind(c.Event("trust"))}, t0)
+	rc.unconnectableNotListed(f, phase, pack, routesEv, t0)
 	if err != nil {
 		c.Stop()
 		outcome := Blocked
@@ -603,10 +717,16 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		if stage == "pick" || stage == "set_route" {
 			outcome = Refused
 		}
-		r.Add(f.Name, phase, "tunnel", expect, outcome, "engine did not connect: "+err.Error(), map[string]any{"client_dir": c.Dir}, t0)
+		r.Add(f.Name, phase, "tunnel", expect, outcome, "engine did not connect: "+err.Error(),
+			map[string]any{"client_dir": c.Dir, "stage": stage, "connect_attempts": connects, "connects": attempts, "set_route_ms": ev["set_route_ms"]}, t0)
+		rc.firstVerdictCheck(f, phase, expect, attempts, t0)
 		if outcome == Blocked {
+			// The bar is the payload a session ASKS for: the engine gave
+			// the route up after its own round trip failed, so nothing
+			// was fetched, and a completed TCP handshake before the
+			// reset must not read as the family having carried anything.
 			wire, werr := WireReset(rc.Ctx)
-			rc.wireCheck(f, phase, expect, wire, werr, 0, t0)
+			rc.wireCheck(f, phase, expect, wire, werr, ProbeBlobBytes, t0)
 		}
 		rc.established(f, phase, expect, nil, ProbeResult{}, "the engine did not connect: "+err.Error(), false, t0)
 		rc.EngineCategory(f, phase, c, nil)
@@ -642,7 +762,8 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		"route_id": ev["route_id"], "target_saw": pr.Remote, "nonce_ok": pr.NonceOK,
 		"blob_bytes": pr.BlobBytes, "blob_sha256_ok": pr.BlobOK, "upload_bytes": pr.UploadBytes, "upload_sha256_ok": pr.UploadOK,
 		"burst_connections": pr.BurstN, "burst_ok": pr.BurstOK,
-		"fetch_ms": pr.Ms, "client_dir": c.Dir}, t0)
+		"fetch_ms": pr.Ms, "client_dir": c.Dir, "connect_attempts": connects, "connects": attempts, "set_route_ms": ev["set_route_ms"]}, t0)
+	rc.firstVerdictCheck(f, phase, expect, attempts, t0)
 	// Where the bytes actually went: this family's endpoint, and nowhere else.
 	// The bar is the payload the probe ASKED for, not what it got: a
 	// censor that lets the TCP handshake through and kills the flow after

@@ -168,8 +168,19 @@ func TestVerifierShim_LineCount(t *testing.T) {
 // TestVerifierShim_SHA256Pinned captures the shim's SHA-256 so
 // FRP-7 / FRP-8 amendments are auditable. If the shim changes
 // legitimately, update this constant in the same commit.
+//
+// 2026-11-18 (finding F-001): re-pinned. The shim downloaded each
+// artefact to the default temp directory and rename(2)d it into the
+// install directory, which is EXDEV when the two are different mounts
+// (a tmpfs /tmp — systemd's default — or /usr/local on its own volume),
+// and it swallowed that error, so a verified artefact was reported as
+// "no mirror passed verification". It now stages beside the destination,
+// fsyncs, and prints the per-mirror reason. The gate itself — SHA-256,
+// then the Ed25519 signature via openssl, before anything is installed —
+// is unchanged; shim_exec_test.go runs these exact bytes against a good,
+// a missing and a wrongly-signed artefact.
 func TestVerifierShim_SHA256Pinned(t *testing.T) {
-	const want = "fa6e2f0ccb246156899ed4db508085985986c2a65e27efad044e6cddb3735e63"
+	const want = "cfbb59086294fb5a806319436d8913878fe7e4705fa9e7e9194f91fc4b605949"
 	got := sha256.Sum256(VerifierShimSource())
 	gotHex := hex.EncodeToString(got[:])
 	if gotHex != want {
@@ -234,7 +245,7 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	// were opened only in the V2 template), so this render gains them —
 	// which is the latent gap the shared source of truth closes, not a
 	// cosmetic edit. The list comes from
-	// relayports.ExtraFirewallPortsFor(<this relay's families>), so this
+	// relayports.FirewallPortsFor(<this relay's families>), so this
 	// pin now moves whenever a served family's port set moves.
 	// Wave 5 (shadowsocks-2022, anytls): re-pinned again as those
 	// families joined relayports.ExtraFirewallPorts — 8446/tcp and
@@ -251,7 +262,20 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	// ports on every relay — a free fingerprint for a tool whose premise
 	// is not looking like a proxy. The rendered ufw rules are part of
 	// this golden, so the drift IS that change.
-	const want = "791c931a931c1f300a0764967d3177d6781bcd0f2c18462d443ce64845aed9e8"
+	// 2026-11-18: re-pinned for three changes that land together and
+	// reach the box only with the next relay build (cloud-init has no
+	// upgrade path, so every one of them needs a fresh provision):
+	//   - F-001: the verifier shim's bytes (see its own pin above);
+	//   - FAM-4 / backlog W5-1: `ufw allow 443/tcp` and `443/udp` are no
+	//     longer literal lines. Every data-plane rule now comes from
+	//     relayports.FirewallPortsFor(<this relay's families>), so a
+	//     relay provisioned without vless-reality or hysteria2 does not
+	//     open 443. For THIS fixed input (no declared family set, i.e.
+	//     the four legacy tiers) the rules are the same four as before,
+	//     in the same order; only the comment above them moved;
+	//   - INT-O1: sing-box.service gained `ExecReload=/bin/kill -HUP
+	//     $MAINPID`, so applying a config is an in-process reload.
+	const want = "83d3171becd1ac7806c5e52dbd7aac41d5fd6976bb9807b9d49d2232c0cfb7df"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}

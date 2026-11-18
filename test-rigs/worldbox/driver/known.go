@@ -70,9 +70,10 @@ type KnownMatch struct {
 	// Got: a red check is EXCUSED only if what it got is one of these (a
 	// comma list of globs). It does not narrow which checks the finding is
 	// about: a check in scope that is red with some other value is not
-	// this finding — it is unexpected, and fails the run. (CEN-1 is "the
-	// engine says nothing"; an engine that says the WRONG thing is a
-	// different defect and must not hide behind it.)
+	// this finding — it is unexpected, and fails the run. (CEN-4 is "the
+	// engine names the coarser thing one route can see"; an engine that
+	// says NOTHING, or something else, is a different defect and must
+	// not hide behind it.)
 	Got string `json:"got,omitempty"`
 	// Evidence: like Got, a condition for EXCUSING a red check, never for
 	// scoping it: every key must be present in the check's evidence with
@@ -196,6 +197,12 @@ func (m KnownMatch) evidenceMatches(c Check) bool {
 	return true
 }
 
+// FindingCoarser is the finding behind an engine.category check that is
+// red because the engine reported the coarser thing one route can see
+// (FINDINGS CEN-4). The report counts those separately from "named
+// correctly" and from "misnamed".
+const FindingCoarser = "CEN-4"
+
 // ModeWorld is the mode of a single world judged on its own (run.sh).
 const ModeWorld = "world"
 
@@ -265,17 +272,22 @@ type Verdict struct {
 	// them it got right. Reported on its own line because a column of
 	// KNOWN reds reads like coverage and is none (categoryLine).
 	Classified, ClassifiedOK int
-	Total                    int
-	Unexpected               []Check        // red, and no finding explains it
-	Known                    map[string]int // finding id → red checks it explains
-	Stale                    []string       // findings whose checks ran and were all green
-	Over                     map[string]int // intermittent finding id → hits, where that is over its budget (none excused)
+	// Coarser: of the misnamed ones, expect→got pairs an open finding
+	// explains — the engine named something true of what one route can
+	// see, and the narrower truth needs a second observation (CEN-4).
+	// Misnamed with no finding behind it is in Unexpected, not here.
+	Coarser    map[string]int
+	Total      int
+	Unexpected []Check        // red, and no finding explains it
+	Known      map[string]int // finding id → red checks it explains
+	Stale      []string       // findings whose checks ran and were all green
+	Over       map[string]int // intermittent finding id → hits, where that is over its budget (none excused)
 }
 
 func (v Verdict) OK() bool { return len(v.Unexpected) == 0 && len(v.Stale) == 0 }
 
 func Judge(ks []KnownFinding, checks []Check) Verdict {
-	v := Verdict{Total: len(checks), Known: map[string]int{}, Over: map[string]int{}}
+	v := Verdict{Total: len(checks), Known: map[string]int{}, Over: map[string]int{}, Coarser: map[string]int{}}
 	// ran: checks in the finding's scope; red: those of them that were red
 	// for ANY reason. A finding is stale only when its whole scope is
 	// green — a scope that is red with a value the finding does not
@@ -286,6 +298,8 @@ func Judge(ks []KnownFinding, checks []Check) Verdict {
 			v.Classified++
 			if c.OK {
 				v.ClassifiedOK++
+			} else if c.Known == FindingCoarser || knownFor(ks, c) == FindingCoarser {
+				v.Coarser[c.Expect+" → "+c.Got]++
 			}
 		}
 		for _, k := range ks {
@@ -370,18 +384,34 @@ func (v Verdict) intermittentLine(ks []KnownFinding) string {
 	return "INTERMITTENT — known races this run: " + strings.Join(parts, ", ")
 }
 
-// categoryLine says how much the engine.category column is worth. Every
-// blocked session expects the engine to name what blocked it; while
-// CEN-1 is open the engine says "none" and each of those checks is a
-// KNOWN red. A reader must not take that column for coverage: it is the
-// rig's expectation, restated, until the count here leaves zero.
+// categoryLine says how much the engine.category column is worth: in
+// how many blocked sessions the engine named what the censor did, and —
+// for the rest — exactly which truth it reported as which coarser thing.
+// A reader must be able to tell "the engine got it right" from "the
+// engine said something true but less" from "the engine said nothing"
+// without opening results.jsonl. (While FINDINGS CEN-1 was open this line
+// read "0 of N": Start succeeding was taken for a tunnel and no failure
+// was ever classified.)
 func (v Verdict) categoryLine() string {
 	if v.Classified == 0 {
 		return ""
 	}
 	l := fmt.Sprintf("ENGINE CATEGORY — the engine named the failure correctly in %d of %d blocked sessions", v.ClassifiedOK, v.Classified)
-	if v.ClassifiedOK == 0 {
-		l += " (CEN-1). The engine.category column is therefore NOT coverage in this run: it restates what the censor did, nothing the engine reported"
+	coarse := 0
+	var pairs []string
+	for pair, n := range v.Coarser {
+		coarse += n
+		pairs = append(pairs, fmt.Sprintf("%s ×%d", pair, n))
+	}
+	sort.Strings(pairs)
+	if coarse > 0 {
+		l += fmt.Sprintf("; in %d more it reported what one route can see and could not tell the narrower truth apart (truth → reported: %s) — FINDINGS CEN-4, needs a second observation", coarse, strings.Join(pairs, "; "))
+	}
+	if rest := v.Classified - v.ClassifiedOK - coarse; rest > 0 {
+		l += fmt.Sprintf("; %d misnamed with no finding to explain it (listed under UNEXPECTED)", rest)
+	}
+	if v.ClassifiedOK == 0 && coarse == 0 {
+		l += ". The engine.category column is therefore NOT coverage in this run: it restates what the censor did, nothing the engine reported"
 	}
 	return l
 }

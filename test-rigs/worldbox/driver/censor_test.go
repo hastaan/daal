@@ -26,7 +26,8 @@ func TestScenariosAreProvableAndUseTheProductTaxonomy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, must := range []string{"tcp_connect_timeout", "tcp_reset", "tls_sni_or_cert_block_suspected", "udp_unavailable", "quic_unavailable", "unknown"} {
+	for _, must := range []string{"tcp_connect_timeout", "tcp_reset", "tls_handshake_failed", "tls_sni_or_cert_block_suspected",
+		"udp_unavailable", "quic_unavailable", "udp_address_blocked", "udp_port_blocked", "udp_no_reply", "path_too_slow", "unknown"} {
 		if !tax[must] {
 			t.Errorf("%s no longer lists %s; the censor's truth ladder (censor.go) returns it", taxonomySpecPath, must)
 		}

@@ -348,6 +348,117 @@ int   engine_resolve_trust_prompt(const char* publisher_fingerprint,
 bytes written (excluding the trailing NUL) or a negative value on
 failure.
 
+**Signed endpoints (no symbol added; behaviour of three existing ones).**
+See `specs/relaypack-v1.md` "Endpoint commitment".
+
+- `engine_import_sbp` / `engine_resolve_trust_prompt` reject a RelayPack
+  whose outbound does not match its route's signed endpoint. The verdict's
+  `Reason` is one of `endpoint_mismatch`, `endpoint_unauthenticated`,
+  `endpoint_malformed`, `pack_has_no_credentials`, `pack_is_older`.
+  A bundle of any kind that carries no signed endpoint for a route the
+  device already holds with one is rejected the same way, with
+  `endpoint_downgrade` (`relaypack-v1.md` "A commitment is sticky").
+  `engine_import_sbp`
+  returns the rejection directly — never a trust prompt — and leaves no
+  pending prompt.
+- The verdict gains two additive members: `Merged` (routes whose new
+  signed endpoint was applied to credentials the device already held) and
+  `Unavailable` (`[{RouteID, Family, Reason}]`, `Reason` ∈ `not_offered`,
+  `no_credentials`, `needs_new_file`, `older_than_device`): the pack's
+  routes that were NOT
+  stored. `RouteCount` counts stored routes only, on the trust prompt as
+  well. A route in `Unavailable` does not exist for any other call.
+- `engine_set_route` refuses a route whose stored outbound no longer
+  matches the endpoint its import stored, and a RelayPack route that has
+  none. The refusal is returned before any attempt is recorded: it is not
+  a route failure and feeds no health or cooldown state.
+
+**Connection check (no symbol added; behaviour of four existing ones).**
+The engine instance starting is not a connection: the data plane dials
+the relay lazily, so a route to a blocked relay starts like any other.
+A route is connected only once it has carried one real round trip
+(`core/engine/proof.go`, `core/abi/route_check.go`).
+
+- `engine_set_route` returns 0 only after that round trip. After the
+  instance starts the route is *verifying*; the engine opens a connection
+  through the route's own outbound to one of a small set of very common
+  hosts (drawn at random; a second, different one is tried before the
+  route is called dead) and reads a TLS ServerHello back. Nothing leaves
+  the device outside the tunnel and no application data is sent. The call
+  therefore blocks for up to `attempts × attempt_timeout_ms` (8 s by
+  default; a `tor` route is given longer). On failure the instance is
+  torn down, the failure is classified by phase
+  (`specs/failure-taxonomy-v1.md` "Classification by phase"), the route
+  is cooled down and recorded as failed, the posture goes to `Recovery`,
+  and the call fails — the path an instance that could not start has
+  always taken. Success, `proven` and `health_pct` are recorded only on
+  proof. A proof that succeeds slower than `slow_after_ms` connects the
+  route and records it as *degraded* (`path_too_slow`), never as failed.
+  "Slower" is the whole proof — every attempt, the failed ones included,
+  whichever phase they had reached: the caller waited through all of it.
+- `engine_clear_route`, and an `engine_set_route` for another route,
+  abandon a check in flight instead of waiting for it; the abandoned call
+  fails and records nothing about its route. `engine_clear_route` does
+  not wait for dials that are still waiting on an unreachable relay.
+- An `engine_set_route` that is refused before it starts anything — the
+  route is unknown, revoked, expired, cooling down, fails the endpoint
+  check, or its configuration cannot be built — changes nothing: a
+  connected route stays connected and keeps being re-checked (below), and
+  a check in flight for another call is not abandoned. This includes a
+  call for the connected route itself while it is `failed` and cooling
+  down: it fails, and the route still returns to `ok` by itself when a
+  re-check succeeds.
+- `engine_export_diagnostics` gains two always-present members:
+  `route_check` ∈ `""` (no route), `"verifying"`, `"ok"`, `"degraded"`,
+  `"failed"`, and `route_check_category` (the taxonomy category behind
+  `failed` / `degraded`, else `""`). A consumer MUST NOT present
+  `verifying` as connected. The event stream's `state` values are
+  `Verifying`, `Connected`, `Degraded`, `Disconnected`.
+- `engine_export_diagnostics` also carries the always-present boolean
+  `route_running`: true exactly while an engine instance for a route is
+  up. It is true for `verifying`, `ok` and `degraded`, false for `""`,
+  and it is what tells the two `failed` apart: `false` after a connect
+  that failed (the instance was torn down; the engine retries nothing and
+  selects nothing), `true` for a connected route that failed a re-check
+  (the instance is up and is re-checked, below). Both leave the posture
+  at `Recovery`. A consumer MUST NOT present `failed` with
+  `route_running: false` as connecting or retrying; it is a failed
+  attempt that needs the user. `route_check` and `route_running` are read
+  under one lock and always describe the same moment.
+- While a route is connected the same proof is repeated every
+  `liveness_interval_s` (±25 %), and at once when
+  `engine_network_changed` reports a different network. A connected route
+  that fails it becomes `failed` with a classified category, a cooldown
+  and a failure record; its instance is left running (stopping it would
+  leave the platform tunnel interface up with nothing behind it), it is
+  re-checked every `recheck_interval_s`, and it returns to `ok` when a
+  proof succeeds. One outage is one failure record. The engine does not
+  select another route (that is the selection stage, which calls the same
+  function: `abi.CheckActiveRoute`).
+
+*Engine configuration file.* `<state_dir>/engine-config.json`, optional,
+read once by `engine_init`. Absent means every default. A file that does
+not parse, carries an unknown member, a negative value or a target that
+is not `host:port` fails `engine_init`.
+
+```json
+{ "connection_check": {
+    "targets": ["www.example.com:443"],
+    "attempt_timeout_ms": 4000, "attempts": 2, "slow_after_ms": 2000,
+    "liveness_interval_s": 180, "recheck_interval_s": 30 } }
+```
+
+Every member is optional; zero or absent means the default shown (the
+default `targets` are the six hosts in `engine.DefaultProofTargets`).
+`targets` are TLS endpoints on the far side of the relay; the target's
+certificate is deliberately not verified (nothing is authenticated or
+sent, and a device with a wrong clock must not be told its route is
+dead).
+
+Regressions: `core/abi/route_check_test.go` (all), `core/engine/proof_test.go`,
+`core/engine/proof_singbox_test.go` (`-tags singbox`),
+`core/diagnostics/observe_test.go`.
+
 ## Surface (Phase 1C — 9 additional functions, append-only)
 
 ```c

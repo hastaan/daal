@@ -88,8 +88,19 @@ if [ ! -d "$NDK_BIN" ]; then
 fi
 
 # stage_cronet copies a prebuilt libcronet.so next to the engine for one
-# ABI, or explains why the naive tier will not work without it. Never
-# fatal: every other tier builds and runs fine without Cronet.
+# ABI, or explains why the naive tier will not work without it.
+#
+# A MISSING library is not fatal: every other tier builds and runs fine
+# without Cronet, and naive routes then fail cleanly at connect.
+#
+# A library that does not MATCH is fatal. libcronet.so is relinked by
+# hand from the libcronet.a inside a cronet-go Go module and then reused
+# across engine builds, while the Go wrapper that calls into it is
+# compiled fresh from whatever core/go.mod pins — so after a cronet-go
+# bump an old .so would be packaged beside a wrapper with a different C
+# ABI. tools/cronet/check-libcronet-stamp.sh compares the two; a .so that
+# fails it is never copied and never left in place.
+CRONET_STAMP_CHECK="$ROOT/tools/cronet/check-libcronet-stamp.sh"
 stage_cronet() {
   local abi="$1"
   local dest="$OUT_DIR/$abi/libcronet.so"
@@ -98,14 +109,26 @@ stage_cronet() {
     return 0
   fi
   if [ -f "$src" ]; then
+    if ! "$CRONET_STAMP_CHECK" "$src" "$abi"; then
+      echo "FATAL: refusing to package $src for $abi (see above)." >&2
+      echo "       Rebuild it, or set DAAL_NAIVE=0 to build without naive." >&2
+      exit 1
+    fi
     cp -f "$src" "$dest"
-    echo "    libcronet.so <- $src ($(stat -c%s "$dest" 2>/dev/null || echo ?) bytes)"
+    cp -f "$src.cronet-lib-version" "$dest.cronet-lib-version"
+    echo "    libcronet.so <- $src ($(stat -c%s "$dest" 2>/dev/null || echo ?) bytes, cronet-go lib $(cat "$dest.cronet-lib-version"))"
     return 0
   fi
   if [ -f "$dest" ]; then
     # Already staged by a previous run (or by hand — this is how the
-    # field-proven APK got one). Leave it alone.
-    echo "    libcronet.so already present at $dest"
+    # field-proven APK got one). Keep it only if it is the library this
+    # engine's cronet-go expects.
+    if ! "$CRONET_STAMP_CHECK" "$dest" "$abi"; then
+      echo "FATAL: $dest is already staged and does not match (see above)." >&2
+      echo "       Rebuild it into $src, delete the stale file, or set DAAL_NAIVE=0." >&2
+      exit 1
+    fi
+    echo "    libcronet.so already present at $dest (cronet-go lib $(cat "$dest.cronet-lib-version"))"
     return 0
   fi
   echo "    WARNING: no libcronet.so for $abi." >&2

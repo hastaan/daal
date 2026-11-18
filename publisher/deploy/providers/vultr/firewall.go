@@ -35,15 +35,15 @@ import (
 //     hole stays open until they do. It is bound to one source address
 //     and one port, which is what keeps that survivable.
 
-// baselineRules is the ruleset every Daal relay's firewall carries.
+// baselineRules is the ruleset a Daal relay's firewall carries.
 //
-//	443/tcp  world  — VLESS-REALITY / HTTPS
-//	443/udp  world  — Hysteria2 / QUIC
 //	80/tcp   world  — ACME http-01 future-proofing
-//	extras          — the families that cannot share 443/tcp with
-//	                  REALITY, resolved from THIS relay's family set by
-//	                  relayports.ExtraFirewallPortsFor, never from a
-//	                  fleet-wide constant.
+//	the rest        — one port per family THIS relay serves, from
+//	                  relayports.FirewallPortsFor(<its families>), 443
+//	                  included: never a fleet-wide constant, so a family
+//	                  the relay was not asked to serve leaves nothing
+//	                  open (finding FAM-4). nil means a relay
+//	                  with no declared family set (the four legacy tiers).
 //
 // Everything else is closed: Vultr drops inbound traffic that matches
 // no rule once a group is attached, so the random mgmt port stays
@@ -54,12 +54,10 @@ func baselineRules(relay string, extraPorts []relayports.Endpoint) []FirewallRul
 		proto string
 	}
 	wanted := []portProto{
-		{"443", "tcp"},
-		{"443", "udp"},
 		{"80", "tcp"},
 	}
 	if extraPorts == nil {
-		extraPorts = relayports.ExtraFirewallPorts()
+		extraPorts = relayports.FirewallPortsFor(nil)
 	}
 	for _, ep := range extraPorts {
 		proto := "tcp"
@@ -156,7 +154,7 @@ func (p *Provider) ensureFirewallGroup(ctx context.Context, relay string, extraP
 // THIS IS THE L5/L6 CALL. A rotation that changes the toolbox profile
 // changes which families the relay serves, and the data-plane ports
 // those families need are rendered publisher-side from
-// relayports.ExtraFirewallPortsFor(<families>). Move a relay to a new
+// relayports.FirewallPortsFor(<families>). Move a relay to a new
 // provider or a new profile without re-rendering, and the box listens
 // on a port its cloud firewall drops: every route in the freshly minted
 // pack validates, and the ones on the new port cannot be dialed.
@@ -171,7 +169,7 @@ func (p *Provider) ReRenderFirewall(ctx context.Context, rec *provider.OperatorR
 		return errors.New("vultr: record cannot name its relay (publisher key + region required)")
 	}
 	relay := derivedInstanceLabel(rec.PublisherPubKey, rec.Region)
-	_, _, err := p.ensureFirewallGroup(ctx, relay, relayports.ExtraFirewallPortsFor(families))
+	_, _, err := p.ensureFirewallGroup(ctx, relay, relayports.FirewallPortsFor(families))
 	if err != nil {
 		return fmt.Errorf("vultr: re-render firewall for %v: %w", families, err)
 	}

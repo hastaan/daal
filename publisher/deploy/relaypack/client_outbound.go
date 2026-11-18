@@ -24,6 +24,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"daal/bundle-go/bundle"
 )
 
 // legacyRealityCoverSNI is the cover host EVERY relay provisioned before
@@ -406,13 +408,28 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 		}
 		// naive rides Cronet, which verifies against a trusted-root set
 		// (no CA, no uTLS, no SPKI pin): install the box's leaf as the
-		// trusted root. server_name must match its iPAddress SAN.
+		// trusted root.
+		//
+		// server_name is the name Cronet VERIFIES that certificate
+		// against, and it is not always the address. The certificate is
+		// minted once, at first boot, naming the address the box had
+		// then. After an L3 address move the pack dials an address the
+		// certificate does not name, and Cronet — correctly — refuses
+		// it (net_error -200), while every pinned family carries on
+		// because a key pin has no opinion about names. So the rule
+		// (bundle.NaiveVerificationName): the address when the
+		// certificate names it, which puts nothing new on the wire;
+		// otherwise the certificate's stable DNS name, which cloud-init
+		// has issued since this rule existed. Cronet resolves that name
+		// to `server` itself (cronet-go's server-redirect resolver), so
+		// no lookup leaves the device.
 		naiveTLS := map[string]any{
 			"enabled":     true,
 			"server_name": p.Server,
 		}
 		if p.TLSCertPEM != "" {
 			naiveTLS["certificate"] = []any{p.TLSCertPEM}
+			naiveTLS["server_name"] = bundle.NaiveVerificationName(p.Server, []string{p.TLSCertPEM})
 		}
 		// An empty PEM means the box predates the data-plane cert (it is
 		// minted by cloud-init at first boot and returned by

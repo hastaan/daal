@@ -144,3 +144,56 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// FAM-4 / backlog W5-1. Every inbound cloud-init bakes follows the
+// relay's family set — the two that used to be unconditional included.
+// A relay provisioned without vless-reality or hysteria2 must not bind
+// 443/tcp or 443/udp: an inbound nobody asked for is a listening,
+// credentialled socket that no pack this relay mints will ever mention.
+func TestSingBoxConfig_EveryInboundFollowsTheFamilySet(t *testing.T) {
+	tags := func(t *testing.T, families []string) map[string]bool {
+		t.Helper()
+		body := SingBoxConfigForFamilies("x.example.net", families)
+		var doc struct {
+			Inbounds  []map[string]any `json:"inbounds"`
+			Outbounds []map[string]any `json:"outbounds"`
+		}
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("families %v: config is not valid JSON: %v\n%s", families, err, body)
+		}
+		if len(doc.Outbounds) != 1 {
+			t.Errorf("families %v: outbounds = %v, want the single direct outbound", families, doc.Outbounds)
+		}
+		out := map[string]bool{}
+		for _, in := range doc.Inbounds {
+			tag, _ := in["tag"].(string)
+			out[tag] = true
+		}
+		return out
+	}
+	cases := []struct {
+		families []string
+		want     []string
+	}{
+		{[]string{"shadowsocks", "anytls"}, nil}, // the FAM-4 reproduction: nothing is baked
+		{[]string{"naive", "websocket-tls"}, nil},
+		{[]string{"vless-reality"}, []string{"vless-in"}},
+		{[]string{"hysteria2"}, []string{"hy2-in"}},
+		{[]string{"tuic"}, []string{"tuic-in"}},
+		{[]string{"vless-reality", "hysteria2", "naive", "websocket-tls"}, []string{"vless-in", "hy2-in"}},
+		{[]string{"tuic", "hysteria2", "vless-reality"}, []string{"vless-in", "hy2-in", "tuic-in"}},
+		// No declared set: the relay every relay used to be.
+		{nil, []string{"vless-in", "hy2-in"}},
+	}
+	for _, tc := range cases {
+		got := tags(t, tc.families)
+		if len(got) != len(tc.want) {
+			t.Errorf("families %v: inbounds = %v, want exactly %v", tc.families, got, tc.want)
+		}
+		for _, w := range tc.want {
+			if !got[w] {
+				t.Errorf("families %v: %s is missing", tc.families, w)
+			}
+		}
+	}
+}

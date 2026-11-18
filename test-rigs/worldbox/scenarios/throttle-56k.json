@@ -13,6 +13,6 @@
     {"name": "bulk-is-slow", "probe": "bulk", "to": "elsewhere", "port": 80, "expect": "slow"}
   ],
   "expect": {"*": "blocked"},
-  "category": {"*": "none"},
+  "category": {"*": "path_too_slow"},
   "established": {"*": "pass"}
 }

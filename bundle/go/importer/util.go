@@ -133,3 +133,16 @@ func canonicalRotation(doc RotationChainDoc) []byte {
 	buf.WriteByte('}')
 	return buf.Bytes()
 }
+
+// rawMember returns one member of a JSON object, verbatim.
+func rawMember(object json.RawMessage, key string) ([]byte, bool) {
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(object, &probe) != nil {
+		return nil, false
+	}
+	raw, ok := probe[key]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), raw...), true
+}

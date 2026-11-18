@@ -4,6 +4,14 @@
 
 Draft for V0 freeze. Locked enumeration; new categories require a spec revision.
 
+**Revision 2** (this document) adds four categories — `udp_no_reply`,
+`udp_address_blocked`, `udp_port_blocked`, `path_too_slow` — and two
+sections, "Classification by phase" and "What one route can see". It
+re-maps nothing: every category of revision 1 keeps its meaning and its
+path-manager behaviour, and the error-string table in
+`core/diagnostics/classify.go` is unchanged. See "Revision 2" below for
+why each was needed.
+
 ## Purpose
 
 Every failure surfaced in diagnostics, every cooldown trigger, every "Why this route?" explanation refers back to this list.
@@ -20,6 +28,9 @@ Every failure surfaced in diagnostics, every cooldown trigger, every "Why this r
 | `tls_sni_or_cert_block_suspected` | TCP works, TLS resets immediately after ClientHello | Cooldown family 1 h on this network | "Encrypted connection blocked" |
 | `udp_unavailable` | UDP probe to known echo target failed | Disable UDP-based families on this network for 2 h | "UDP not available on this network" |
 | `quic_unavailable` | UDP works but QUIC handshake fails | Disable QUIC families specifically; keep raw UDP | "QUIC not available" |
+| `udp_no_reply` | This route's UDP endpoint never answered. One observation: nothing is claimed about UDP anywhere else (rev. 2) | Cooldown route 5 min; **no** family or network-wide action | "No answer from this server" |
+| `udp_address_blocked` | UDP toward this route's address is dropped while UDP to another host on the same port is delivered (rev. 2) | Cooldown route 30 min; the address is burned for UDP, the network is not | "This server's address is blocked" |
+| `udp_port_blocked` | UDP on this route's port is dropped while UDP on another port is delivered (rev. 2) | Cooldown route 30 min; prefer UDP routes on another port | "This server's port is blocked" |
 | `auth_failed` | Server reachable, credentials rejected | **No cooldown** — surface to UI | "Authentication failed — check credentials" |
 | `route_expired` | `valid_until` passed | Disable route; offer refresh path | "Route expired" |
 | `publisher_revoked` | Publisher key on revocation list | Mark all publisher's routes revoked; warn | "Provider revoked" |
@@ -30,13 +41,137 @@ Every failure surfaced in diagnostics, every cooldown trigger, every "Why this r
 | `bundle_corrupted` | Bundle parse error | Reject | "Bundle is corrupted" |
 | `network_offline` | No network at all | Halt route attempts | "No internet connection" |
 | `unknown` | None of the above match | No automatic action; surface raw diagnostic | "Unknown error — see details" |
+| `path_too_slow` | The route connects and carries a round trip, but too slowly to be called usable. A **degraded** outcome, not a failure (rev. 2) | **No cooldown**, not a failure record; recorded as degraded and shown as such | "Connected, but very slow" |
 | `skipped_lifeline_strict` | Refresh attempt skipped because the engine is in `lifeline-strict` and the call is not user-triggered | None — recorded in audit ledger and dropped | not user-facing (audit-only) |
 
 ## Critical Rules
 
 - `auth_failed` must never trigger censorship cooldown.
 - Categories are not free-form strings; code must reference these constants.
-- Adding a category requires a spec revision and a fixture under `test-rigs/censor-lab/fixtures/failures/<category>/`.
+- Adding a category requires a spec revision and either a fixture under
+  `test-rigs/censor-lab/fixtures/failures/<category>/` or a worldbox
+  scenario that declares it (`test-rigs/worldbox/scenarios/*.json`,
+  `"category"`), whose raw differential probe reproduces it. The four
+  revision-2 categories are covered the second way: `udp_address_blocked`
+  by `relay-ip-block`, `udp_port_blocked` by `port-whitelist`,
+  `path_too_slow` by `throttle-56k`, and `udp_no_reply` is what the engine
+  reports in every scenario that blocks a UDP family.
+- `path_too_slow` is not a failure. It must never be written as one
+  (`routestore.RecordFailure`), never start a cooldown, and never appear
+  in `failures[]` of the diagnostics explanation; it has its own list
+  (`degraded[]`).
+- A network-wide category (`udp_unavailable`, `quic_unavailable`) must
+  never be derived from one route's silence. See "What one route can
+  see".
+
+## Revision 2
+
+The worldbox rig (`test-rigs/worldbox/FINDINGS.md`, CEN-2 and CEN-3)
+declared, per censor scenario and family, which category describes what
+the network really does, and had a raw probe check it. Three situations
+had no word:
+
+1. **UDP dropped toward one address.** A null-routed relay: UDP works to
+   every other host. `udp_unavailable` is defined by a probe to a known
+   echo target and disables every UDP family on the network for two hours
+   — the wrong conclusion from one burned address — and
+   `tcp_connect_timeout` is TCP by name. → `udp_address_blocked`.
+2. **UDP dropped on one port.** A port whitelist: UDP/443 passes,
+   UDP/8443 does not. Acting on `udp_unavailable` there disables a family
+   that is carrying traffic on the open port in the same minute. →
+   `udp_port_blocked`.
+3. **Connects, and is too slow to use.** Every handshake completes; there
+   is no failure to classify. → `path_too_slow`, a degraded outcome.
+
+A fourth is the honest form of the first two as ONE ROUTE sees them: a
+UDP route that hears nothing cannot tell a dead address from a dead port
+from a network without UDP from a QUIC-only filter. → `udp_no_reply`.
+
+`network_offline` ("no network at all") is likewise not observable from
+a route's seat when the link is up and every packet is dropped: per route
+that is `tcp_connect_timeout` / `udp_no_reply`, and only the aggregate
+says "nothing works". No category was added for it.
+
+## Classification by phase
+
+An error string cannot carry where in the attempt a failure happened —
+`i/o timeout` on a TCP socket is a dead address when the SYN went
+unanswered and a swallowed ClientHello when the first read after it did —
+so the engine classifies a failed connection proof
+(`core/engine/proof.go`) from an *observation*: the phase the failure
+happened in, whether the transport is UDP, whether the family's first
+flight is a TLS ClientHello, and the kind of failure
+(`core/diagnostics/observe.go`, `ClassifyObservation`). Failures that say
+what they are (`auth_failed`, `network_offline`, `engine_crash`, …) keep
+the category the string table gives them; where the observation settles
+nothing, the string table decides, unchanged.
+
+Phases: **reach** — opening the transport to the relay (the SYN; the
+first datagram). **handshake** — the transport is open and the family's
+own first flight is out; the relay has not answered it. **carry** — the
+relay answered; the failure is in a round trip through it.
+
+| Transport | Phase | What happened | Category |
+|---|---|---|---|
+| TCP | reach | SYN unanswered | `tcp_connect_timeout` |
+| TCP | reach | SYN refused / reset | `tcp_reset` |
+| TCP, TLS first flight | handshake | reset | `tls_sni_or_cert_block_suspected` |
+| TCP, TLS first flight | handshake | no answer, or closed | `tls_handshake_failed` |
+| TCP, opaque first flight | handshake | reset | `tcp_reset` |
+| TCP | carry | reset | `tcp_reset` |
+| TCP | carry | no answer, or closed | `unknown` |
+| UDP | reach or handshake | no answer | `udp_no_reply` |
+| UDP | carry | no answer, or closed | `unknown` |
+
+A timeout's phase is not taken from the error where the error cannot be
+trusted to give it (a multiplexed outbound re-dials on the expired
+context and reports a connect timeout for a connection whose SYN was
+answered; a lazy outbound reports every timeout from the round trip). In
+those cases the engine makes one bare TCP connect to the route's own
+address and port — after the attempt has failed, never on a healthy
+connect — and the phase is *reach* if that goes unanswered and
+*handshake* if it is answered.
+
+`carry` + no answer is `unknown` on purpose: the relay is alive and its
+handshake completed, so neither `tcp_connect_timeout` nor
+`tls_handshake_failed` would be true, and "the relay accepted us and
+carried nothing" (a revoked credential on a family that fails silently,
+a relay with no way out) has no narrower word yet.
+
+## What one route can see
+
+Several categories are statements about the NETWORK and need two
+observations. The connection proof makes one. So the engine reports the
+category that is true of what it saw, and never the narrower one it would
+have to guess:
+
+| The network does | Needs, to be told apart | One route reports |
+|---|---|---|
+| `udp_unavailable` | a UDP datagram to another host and port | `udp_no_reply` |
+| `quic_unavailable` | a non-QUIC datagram to the same endpoint | `udp_no_reply` |
+| `udp_address_blocked` | UDP to another host on the same port | `udp_no_reply` |
+| `udp_port_blocked` | UDP on another port | `udp_no_reply` |
+| `tcp_reset` keyed on the ADDRESS, on a TLS family | a ClientHello with another name to the same address | `tls_sni_or_cert_block_suspected` |
+| `path_too_slow`, when a handshake still finishes quickly | a throughput measurement | nothing (`ok`) |
+
+The second observation is the prober's job (the selection stage); until
+it exists `udp_unavailable`, `quic_unavailable`, `udp_address_blocked` and
+`udp_port_blocked` are produced by no engine code path, and
+`tls_sni_or_cert_block_suspected` keeps the word "suspected" for exactly
+this reason. `path_too_slow` is detected only by the proof itself taking
+longer than the configured threshold — the whole proof, attempts that
+failed included, in whatever phase they failed: on a capped path the
+relay answers and the round trip through it still does not fit in one
+attempt. A path fast enough for the whole proof to finish under the
+threshold and too slow for a page is not detected (it is reported as
+nothing, `ok`), and will not be until the engine counts bytes.
+
+A proof in which NO attempt finishes is a failed connect, classified by
+phase like any other, even when the cause is a path too slow (or too
+backlogged) to finish a handshake inside the proof's few seconds: from
+one route's seat a handshake that is still crawling when the budget ends
+is the same silence as one that was swallowed. `path_too_slow` is never
+the category of a failure.
 
 ## Cross-References
 

@@ -14,11 +14,12 @@ delete the entry there and mark the finding fixed here. So a fix is noticed
 the day it lands, and nothing in that file can become a blanket excuse
 (`driver/known_test.go` holds both files to that).
 
-Repo state: `main @ 4808569` + the uncommitted work of 2026-11-18.
+Repo state: `main @ 257238a` + the uncommitted work of 2026-11-18 (the
+"truth wave" and its review repairs).
 Reproductions are run from `test-rigs/worldbox/`. "quick"/"full" are the
 modes of `./daal e2e` (`./e2e.sh`); a world name is a row of its report.
 
-### Fixed in this tree (4)
+### Fixed in this tree (20)
 
 | id | severity | one line | status | reproduce (before the fix) | pinned by |
 |---|---|---|---|---|---|
@@ -26,43 +27,50 @@ modes of `./daal e2e` (`./e2e.sh`); a world name is a row of its report.
 | LC-1 | low-to-medium (security, defence in depth) | A mgmt token already used once could be replayed with a different body (`users-revoke` against another recipient, etc.) | **fixed** in `cmd/daal-relay-mgmt/main.go` + spec §3/§4.8; **open on released relays** until the next mgmt release (the one F-002 needs) | `./run.sh --ops mgmtauth clean @default` (pinned release) → `replay.users-revoke` honoured | unit `TestMutatingTokensAreSingleUse` (cmd/daal-relay-mgmt); rig check `op:mgmtauth replay.users-revoke` green on the tree build in quick and full; on the pinned box tracked in known-findings.json (`LC-1`, box=pinned) |
 | FAM-5 | low (latent) | Off Android the engine could never load Cronet from beside its own binary (a failed first try is cached for the process) | **fixed** in `core/engine/cronet_state.go`, `cronet_loader_naive.go` | revert, `./run.sh clean naive` → `tunnel` refused, "cronet: failed to load library" | unit `TestCronetLibraryArg` + `TestLoadCronetUsesCronetLibraryArg` (core/engine); rig: every `family/naive tunnel`. Android unchanged by construction, not device-tested |
 | INT-2 | medium (intermittent; on the relay) | naive: sing-box 1.13.12 decides the naive inbound's ALPN with a start-up race; about 1 start in 1000 leaves naive/TCP answering every ClientHello with alert 120 (`no_application_protocol`; Cronet `net_error -107`) for the whole life of that sing-box process. Nothing is logged; the engine says Connected | **fixed** in `cmd/daal-relay-mgmt/singbox_users.go` (the daemon now writes `alpn` into `naive-in`, so nothing is left to race; an older inbound is healed on the next recipient add); **open on released relays** until the next mgmt release (the one F-002 and LC-1 need). Root cause is upstream sing-box, worth reporting there | `repro/int2-naive-alpn-race.sh` (no Daal involved: 3 dead instances in 3000 starts; `… pinned` → 0 in 3000) | unit `TestAppendNaiveUserCreatesInbound`, `TestNaiveALPNHealsAnOlderInbound` (cmd/daal-relay-mgmt); on the pinned box tracked in known-findings.json `INT-2` (box=pinned, signature `net_error -107`, budget 4); on a tree box the same face is an unexpected red |
+| F-004 | **high** (security, design) | A pack's outbound profiles were not authenticated: anyone could rewrite the server address under the publisher's fingerprint | **fixed** — "signed endpoint, local credential": every route's server, port and server-authentication material is committed in the signed manifest (`_endpoint`), the importer refuses an outbound that disagrees (`endpoint_mismatch`, before any trust prompt), `SetRoute` re-checks. `bundle/go/bundle/endpoint.go`, `bundle/go/importer/endpoint_plan.go`, `publisher/deploy/relaypack/endpoint.go`, `core/abi/endpoint_guard.go`; spec `relaypack-v1.md` §"Endpoint commitment". **Not covered:** bundles that are not RelayPacks (section below) | at `257238a`: `./run.sh --ops tamper clean vless-reality` → `import_of_tampered_pack got=pass` | `op:tamper import_of_tampered_pack` and `.port` / `.tls_pin` / `.reality_public_key` / `.trusted_certificate` / `.tls_insecure` / `.folded_key` / `.shadowsocks_server_key`, `commitment_stripped.import`, `credential_rewrite.*` (quick + full); `tampered_pack.connect` (a phone told to connect with the tampered pack stops at import: no route listed, engine never started); `TestSetRoute_EndpointRefusalComesBeforeAnyConnectionAttempt` (core/abi: a refused route starts no engine, runs no connection check, records no attempt); `TestCheckOutbound_RefusesEveryEndpointRewrite`, `TestCheckOutbound_RefusesFoldedKeySpellings` (a second, case-folded spelling of a checked member name), `TestImport_TamperedEndpointIsRefusedNotPrompted`, `TestImportSBP_RefusesAPackWhoseEndpointWasRewritten` |
+| F-006 | medium (security) | A bundle with no `relay_pack` slot — same publisher, same route ids, profiles rewritten with no key — silently replaced committed routes and deleted their commitments | **fixed** — a commitment is sticky: an import that carries no signed endpoint for a route the device already holds with one (stored commitment or `relay_pack_id`, in any trust state) is refused whole, `endpoint_downgrade`, before any trust prompt; the store refuses the same write itself, before writing anything. `bundle/go/importer/endpoint_plan.go` (rule 5), `core/trust/state.go` (`RouteCommitted`, `SaveImport`); specs `relaypack-v1.md` §"A commitment is sticky", `sbp-v1.md` §"What the signature covers". **Not covered:** a plain bundle's routes under NEW ids are still unauthenticated (section below) | with both guards switched off: `./run.sh --mgmt=tree --ops tamper clean vless-reality` → `uncommitted_replacement.import expect=refused got=pass` | `TestImport_BundleWithoutCommitmentsDoesNotReplaceCommittedRoutes` (bundle/go/importer); `TestStoreAdapter_CommitmentIsSticky`, `TestStoreAdapter_KeepsWhenARouteEndpointWasSigned` (core/trust); `op:tamper uncommitted_replacement.{control.new_routes.import,import,routes_kept}` |
+| LC-2 | **high** | The freshness channel could only deliver the credential-less signed skeleton, which REPLACED a polling recipient's working pack with one that could not connect | **fixed** — a signed pack with no credentials is MERGED: the device keeps its credentials and takes the new signed endpoint; a profile with no outbound never replaces one that has one; the same file imported on a phone that holds nothing is refused (`pack_has_no_credentials`). After L2 and L3 a polling phone recovers with **no new file**. **Still needs a new file:** L1 (that one recipient) and L4–L6 (everyone) — section below | at `257238a`: `./run.sh --mgmt=tree --ops freshness clean vless-reality` → `unchanged.signed-pack-hosted.tunnel got=refused` | `op:freshness unchanged.signed-pack-hosted.{tunnel,routes_kept}`, `signed-pack-alone.import`, `published.*.holds_no_credentials`, `rotated.polled.tunnel`; `op:l2 no-new-file.cover-host-moved.*` (7 families); `op:l3 no-new-file.address-blocked.*` — including `.route_checked`: the merged route passed the engine's own connection check (`route_check=ok`) before it was Connected; `TestSetRoute_MergedRouteIsConnectedOnlyAfterTheConnectionCheck`, `TestSetRoute_MergedRouteThatCarriesNothingIsNotConnected` (core/abi); `TestApplyVerifiedRefresh_MergesSignedEndpointIntoDeviceCredentials`, `TestRotationHealsAnImportedPackOverTheNetwork` |
+| LC-4 | medium (security) | A signed, credential-less pack from BEFORE a rotation, handed over as a file, was merged into a phone that had already moved on: its routes went back to the old cover host / port / relay key, silently (the publisher is already trusted) | **fixed** — a file only moves a route forward: outside the freshness path a merge needs the incoming manifest's `bundle.created_at` to be strictly later than the one the route's commitment came from (kept by the store beside the commitment); the manifest the route is already on is a no-op. An older one is reported `older_than_device` (`pack_is_older` when nothing else is in the file) and the route is untouched. Section below | importer: import v1, merge v2's skeleton (same pack id, REALITY key rotated), import v1's skeleton → `Imported, Merged=2`, both routes back on the old key. Rig, with the rule switched off: `./run.sh --mgmt=tree --ops freshness clean vless-reality` → `rotated.stale-signed-pack-by-file.tunnel got=blocked` (`reality verification failed`) | `TestImport_AnOlderSkeletonDoesNotRollARouteBack`, `TestImport_AnOlderSkeletonRouteIsReportedAndLeftAlone`, `TestImport_SkeletonDoesNotMergeIntoARouteOfUnknownAge` (bundle/go/importer); `TestStoreAdapter_KeepsWhenARouteEndpointWasSigned` (core/trust); `op:freshness rotated.stale-signed-pack-by-file.{not_merged,routes_kept,tunnel}` |
+| LC-3 | medium | After an L3 address move naive could not connect to the new address (the box certificate named only the first-boot address) | **fixed for relays provisioned from this tree** — cloud-init adds one stable DNS name to the certificate; naive verifies against it when (and only when) the address it dials is not in the certificate (`bundle.NaiveVerificationName`). A relay provisioned BEFORE this change has no such name and still loses naive on L3 until it is rebuilt. The "engine says Connected" half was CEN-1 | at `257238a`: `./run.sh --mgmt=tree --ops l3 clean naive hysteria2` → naive `new-file.address-blocked got=blocked` | `op:l3/naive new-file.address-blocked.{tunnel,wire}` and `no-new-file.address-blocked.tunnel` (full); `TestNaiveVerificationName`, `TestClientOutbound_NaiveVerificationNameFollowsTheCertificate` |
+| F-003 | medium | Routes the minter "dropped" still imported, listed and could be activated on the client | **fixed** — a RelayPack route whose profile holds no outbound is not stored: it is not listed, not selectable, not activatable; the import verdict names it (`Unavailable`, reason `not_offered` / `no_credentials` / `needs_new_file`) and the app has copy for each | at `257238a`: `./run.sh clean anytls` (pinned): `routes` lists r5–r7, `error` carries a parse error | `family/* import.unconnectable_not_listed` in every session of every world (red only where a pack has a dropped route: world release.all-families); `TestImport_RoutesTheMinterDroppedAreNotStored`, `TestDroppedRouteIsNeitherListedNorActivatable` |
+| INT-1 | **high** (intermittent) | naive: the whole engine process died with SIGSEGV inside Cronet when a connection was closed at the moment its stream terminated — a use-after-free race in the pinned `cronet-go` (`Close`→`Cancel` against `terminate`→`Destroy`). Seen in the rig only; never observed on a device | **fixed** by bumping `cronet-go` (and `cronet-go/all`, `lib/*`) in `core/go.mod` to `v0.0.0-20260912104727-0d28acc44093`, the first module build with upstream `172bb4ede18c` "Fix bidirectional stream cancel racing with destroy" (it is what sing-box 1.14.1 ships; it builds against the pinned sing-box 1.13.12). **Linux proven here; Android NOT verified, and the phone needs a rebuilt `libcronet.so`** — the bump changes the library's C ABI (see the section) | `for i in 1 2 3 4; do WB_RESTART_CYCLES=25 ./run.sh --mgmt=tree --ops restarts clean naive & done; wait` → before: 3 engine deaths in 520 naive sessions; after: 0 in 1040 | unit `TestCronetGoCarriesTheCancelDestroyFix`, `TestCronetLibModulesMoveTogether`, `TestCronetGoCloseCancelsUnderTheLock` (`core/engine/cronet_pin_test.go`); rig: `*/naive engine.survived` is no longer excused by anything — one engine death fails the run; `tools/cronet/check-libcronet-stamp.sh` refuses a mismatched Android library |
+| FAM-2 | medium | The app could not enable shadowsocks, anytls or tuic at all: the wizard hard-coded an empty family list | **fixed** in `client-ui/src/publisher/` — a collapsed, default-off "More ways to connect" section on the plan screen (`MoreWaysToConnect.tsx`, `extraFamilies.ts`), en+fa. **The switches are locked, with the reason, until F-002's release** (`cloudinit.PinnedMgmtServesOptInFamilies`; section below). *Basis: unit-tested and type-checked; the app itself was not run* | `grep -n enabledFamilies client-ui/src/publisher/PublisherWizard.tsx` (was a constant `[]`) | vitest `src/publisher/extraFamilies.test.tsx` (26 tests); not pinned by the rig (above the ABI) |
+| FAM-3 | medium | `provision --families` was a silent filter: a typo dropped the family, a short list dropped the defaults, exit 0 either way | **fixed** in `publisher/deploy/cli/cli_families.go`: a name the profile does not offer is exit 2 before any cloud call, naming the value and the valid set; what the list drops is stated (stderr, or a `provision_families` progress event) — as "will be asked to serve", naming what the pinned release cannot serve, until F-002's release. L6 keeps working: `reprovision` narrows the record it hands on | `daal-deploy provision … --dry-run --families vless-reality,tiuc` (section below) | unit `publisher/deploy/cli/cli_families_test.go`; not pinned by the rig |
+| FAM-4 | low | De-selecting a default family did not take it off the box: 4 open, listening ports the pack never mentions | **fixed in the tree** (cloud-init + `daal-relay-mgmt` + both firewalls; backlog W5-1 with it); reaches a relay only with the planned re-release and a fresh provision | `./run.sh --mgmt=tree --relay-families shadowsocks,anytls clean shadowsocks anytls` | rig world narrow-relay (full): `mint/* not_served` green with `listener_on_box: false`, and `censor/prove.relay-tls-answers` asserted CLOSED on a relay without a 443/tcp family; unit `TestProvision_NarrowRelayBindsOnlyItsFamilies` and neighbours (`cmd/daal-relay-mgmt/families_test.go`), `TestFirewallPortsForFollowsTheFamilySet`, `TestSingBoxConfig_EveryInboundFollowsTheFamilySet`, `TestProvision_NarrowFamilySetLeavesNothingElseOpen` (hetzner, vultr), `TestRender_UFWOpensExactlyTheDataPlanePorts` |
+| F-001 | low (latent) | `daal-fetch-verify` failed with a misleading message when `/tmp` and `/usr/local/bin` are different mounts | **fixed** in `publisher/deploy/cloudinit/shim.sh.tmpl` (stages beside the destination, prints the per-mirror reason); shim hash and cloud-init golden re-pinned; reaches a relay with the next provision | mount a tmpfs on the box's `/tmp` in `box/init.py` (section below) | unit `TestVerifierShim_InstallsAcrossMounts`, `_SaysWhyAMirrorFailed`, `_RefusesBadSignature`, `_FallsBackToSecondMirror` (`shim_exec_test.go` — they run the embedded shim) |
+| CEN-1 | **high** | A route that carried nothing was "Connected", recorded as a success, and came out `proven: true`, `health_pct: 100`; the engine never classified a data-plane failure | **fixed** — a route is Connected only after one real round trip through its own outbound (`core/engine/proof.go`, `core/abi/route_check.go`): `verifying` → `ok` / `degraded` / `failed`; a failed proof is torn down, classified, cooled down and recorded, and `SetRoute` returns the error; a connected route is re-proved every ~3 min (jittered) and on a network change. Spec `engine-abi-v1.md`. **Not verified:** the phone (SetRoute now blocks for the proof, up to 8 s on a dead route, 90 s per attempt on tor) and the default public targets, which the lab cannot reach | at `257238a`: `./run.sh --mgmt=tree relay-ip-block vless-reality hysteria2` → `engine.category got=none`, posture `ImportedActive`, `proven_after=true` | `family/* engine.category` in every blocking scenario (40 sessions in full: 26 named exactly, 14 named as the coarser thing one route can see — CEN-4); unit `TestSetRoute_StartedButCarriesNothingIsNotConnected`, `TestSetRoute_IsVerifyingUntilProved`, `TestCheckActiveRoute_ConnectedToFailedAndBack`, `TestLiveness_TimerAndNetworkChange`, `TestSetRoute_RefusedLeavesTheConnectedRouteWatched`, `TestSetRoute_RefusedForCooldownKeepsTheRecoveryLoop` (a refused `SetRoute` used to stop the liveness loop of the route that stayed up — review finding, fixed), `TestSetRoute_RefusedLeavesTheCheckInFlightRunning` (a refused `SetRoute` used to cancel the connection check of another `SetRoute` still in flight and strand its instance in `verifying`, unproven and unwatched — review finding, fixed) (core/abi), `TestProveInstance_*` (core/engine, `-tags singbox`); vitest `src/lib/routeCheck.test.ts` |
+| CEN-2 | medium | `diagnostics.Classify` could not tell a reset after the ClientHello from a reset of the address, and filed a TLS-phase timeout under `tcp_connect_timeout` | **fixed as far as one route can see** — the engine classifies a failed proof from an observation (phase reach / handshake / carry, UDP or TCP, TLS first flight or not: `core/diagnostics/observe.go`, `ClassifyObservation`); the locked string table is unchanged and still decides where the observation settles nothing. Name-keyed vs address-keyed reset is CEN-4 | at `257238a`: `echo 'read tcp4 1.2.3.4:5->6.7.8.9:443: i/o timeout' \| bin/wb-client --classify` → `tcp_connect_timeout` | `family/* engine.category` under sni-rst, sni-rst-stateless, sni-drop (the engine's category equals the raw probe's); unit `TestClassifyObservation_PhaseSeparatesWhatTheStringCannot`, `_FallsBackToTheLockedTable`, `TestSetRoute_FailedProofIsClassifiedByPhase`, `TestProveInstance_SwallowedHelloIsNotADeadAddress` |
+| CEN-3 | medium (spec) | The failure taxonomy had no word for three things a censor does: UDP dropped toward ONE address, UDP dropped on ONE port, and "connects but too slow to use" | **fixed** — `specs/failure-taxonomy-v1.md` revision 2 adds `udp_address_blocked`, `udp_port_blocked`, `path_too_slow` (a degraded outcome, never a failure or a cooldown) and `udp_no_reply` (what one silent UDP route can honestly say). The engine produces `udp_no_reply` and `path_too_slow`; the two narrower UDP words need a second observation (CEN-4) | at `257238a`: scenarios relay-ip-block, port-whitelist, throttle-56k declared the nearest category (`unknown`, `udp_unavailable`, `none`) | `censor/* truth.category` now declares and raw-proves the new words; `family/* engine.category` under throttle-56k (`path_too_slow` where the proof sees it); unit `TestSetRoute_SlowProofIsDegradedNotFailed`, `TestPathTooSlowIsNotACooldownClass`, `TestClassifyObservation_SilentUDPIsNeverANetworkClaim`; `driver/censor_test.go` |
+| CEN-5 | **high** (user-visible) | After a connect that failed the app said "Connecting…" for good while nothing was running — on Android with no error at all (the connect call resolves before the engine has tried the route). Same words as a connected route the engine really is retrying | **fixed** — the diagnostics blob says `route_running` (true exactly while an engine instance for a route is up); the app shows a failed connect as an error, "Could not connect on this route. Try another one.", and a lost connection as "Connection lost. Trying again…" (en + fa). Spec `engine-abi-v1.md`. **Not verified:** on a phone; the rig does not render the app, it checks the engine field the app reads. **Still open:** while a lost connection is being retried the main button does not disconnect (section below) | at `257238a` + CEN-1: any blocked session, e.g. `./run.sh --mgmt=tree relay-ip-block vless-reality` → the error event's `diag` has `posture: Recovery`, `route_check: failed` and nothing that says the engine stopped; `connStateWithCheck('connecting','failed')` → `connecting` → headline "Connecting…" / «در حال اتصال…» | `family/* engine.failed_connect_not_running` in every blocked session; unit `TestRouteRunning_TellsAFailedConnectFromALostConnection`, `TestRouteRunning_LostConnectionKeepsRunning` (core/abi); vitest `src/lib/routeCheck.test.ts` |
+| CEN-6 | **high** (the rig hid it; one product defect under it) | throttle-56k could not go red: a first phone whose connect FAILED ("the route started but carried no traffic", `tls_handshake_failed` / `unknown`, a 5–30 min cooldown) was replaced by a fresh phone and only that one was judged; the cell accepted `path_too_slow|none`; and a connect that took 4.7–5.5 s read plain "Connected" | **fixed** — engine: a proof is slow when the WHOLE proof took longer than `slow_after_ms`, failed attempts included (`core/engine/proof.go` `proofWasSlow`; specs `engine-abi-v1.md`, `failure-taxonomy-v1.md`). Rig: every connect attempt is recorded and the first is judged alone (`engine.first_verdict`); the scenario declares `path_too_slow` and the cell is decided per connect by its time; a session waits for the censor's shaper to drain the session before it (the first-phone failures were the previous QUIC family's queue — rig cross-talk, measured). **Left as it is:** what the engine says on a link that already has seconds of queue (CEN-O5) | before: `./run.sh --mgmt=tree throttle-56k` → exit 0 with `connect_attempts: 2` on naive and vless-reality and `route_check: ok` after `set_route_ms` ≈ 5000. Now, the same failure made visible: `WB_NO_QUIET=1 ./run.sh --mgmt=tree throttle-56k` → `engine.first_verdict` red | `family/* engine.first_verdict`, `family/* engine.category` under throttle-56k; unit `TestRunProofTimedOutCarryAttemptThenSuccessIsSlow`, `TestProofWasSlowJudgesTheWholeProof` (core/engine); `driver/first_verdict_test.go` |
 
-### Open — need a decision, a release or a dependency fix (14)
+### Open — need a decision, a release or a dependency fix (4)
 
 | id | severity | one line | status | reproduce | pinned by |
 |---|---|---|---|---|---|
-| CEN-1 | **high** | A route that carries nothing is "Connected", recorded as a success, and comes out `proven: true`, `health_pct: 100`; the engine never classifies a data-plane failure, so every failure category, cooldown and network signal is fed nothing | open — design decision (what proves a tunnel works) | `./run.sh --mgmt=tree relay-ip-block vless-reality hysteria2` | known-findings.json `CEN-1`: `family/* engine.category` in every blocking scenario (11 checks in quick, 37 in full) |
-| LC-2 | **high** | The freshness channel, as the app drives it, can only deliver the credential-less signed skeleton: a polling recipient's working pack is replaced by one that cannot connect (or, if the operator hosts the connectable file, nothing is delivered) | open — design decision. *Basis: the engine's behaviour is observed; "as the app drives it" is established by reading the wizard source — the CLI stands in for the app* | `./run.sh --mgmt=tree --ops freshness clean vless-reality` | known-findings.json `LC-2`: `op:freshness unchanged.signed-pack-hosted.tunnel` (full: worlds clean.rotation, release.lifecycle) |
+| CEN-4 | medium | One route cannot tell apart what needs two observations: every silent UDP route is `udp_no_reply` (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is `tls_sni_or_cert_block_suspected` whether the filter is keyed on the name or on the address | open — the prober's job (selection stage): a second datagram / a second name. What the engine says is true, cools down only the one route, and is never the wrong network-wide claim | `./run.sh --mgmt=tree relay-ip-block hysteria2` → `engine.category expect=udp_address_blocked got=udp_no_reply`; `./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality` → `expect=tcp_reset got=tls_sni_or_cert_block_suspected` | known-findings.json `CEN-4` (14 checks in full: 11 UDP, 3 reset); the report's ENGINE CATEGORY line lists each truth → reported pair |
 | F-002 | **high** | A relay provisioned from `main` cannot serve shadowsocks, anytls or tuic: the pinned `daal-relay-mgmt` predates them | open — needs a release (release key); the code is right | `./run.sh clean` (pinned) vs `./run.sh --mgmt=tree clean` | known-findings.json `F-002` (box=pinned): world release.all-families in full. Acceptance after the release: that world all green, and the run then fails with "F-002 did not reproduce" until the entry is deleted |
-| F-004 | **high** (security, design) | A pack's outbound profiles are not authenticated: anyone can rewrite the server address under the publisher's fingerprint | open — format decision | `./run.sh --ops tamper clean vless-reality` | known-findings.json `F-004`: `op:tamper import_of_tampered_pack` in quick and full |
-| INT-1 | **high** (intermittent) | naive: the whole engine process dies with SIGSEGV inside Cronet when a connection is closed at the moment its stream terminates — a use-after-free race in the pinned `cronet-go`. Observed in the rig only; on the phone the same code would take the VPN service down with it, which is inferred, not yet seen on a device (see the section for the logcat check) | open — upstream dependency (`github.com/sagernet/cronet-go`); needs a bump or a fork | `for i in 1 2 3 4; do WB_RESTART_CYCLES=25 ./run.sh --mgmt=tree --ops restarts clean naive & done; wait` → 3 engine deaths in 104 naive sessions here; identical signature each time | known-findings.json `INT-1` (intermittent, pinned to the crash signature): `*/naive engine.survived`; unit `TestCrashSignature` (fixture `driver/testdata/cronet-cancel-crash.stderr`) |
-| LC-3 | medium | After an L3 address move naive cannot connect to the new address (the box certificate's SAN is the first-boot address); the engine reports "Connected" | open — every fix moves something recipients pin | `./run.sh --mgmt=tree --ops l3 clean naive hysteria2` | known-findings.json `LC-3`: `op:l3/naive new-file.address-blocked.{tunnel,wire}` (full) |
-| F-003 | medium | Routes the minter "dropped" still import, list and can be activated on the client; nothing client-side reads the marker | open — touches what is offered for selection | `./run.sh clean anytls` (pinned), then the `routes` and `error` events in `out/latest/clients/*/events.jsonl` | not pinned on its own: it is only reachable through F-002 today (the `family/* engine.category = unknown` reds of world release.all-families are this). Needs a check of its own once F-002 is released |
-| FAM-2 | medium | The app cannot enable shadowsocks, anytls or tuic at all: the wizard hard-codes an empty family list | open — UI work. *Basis: established by reading the wizard source; the app was not run* | `grep -n enabledFamilies client-ui/src/publisher/PublisherWizard.tsx` | not pinned (above the ABI; the rig enables them through the CLI flag) |
-| FAM-3 | medium | `provision --families` is a silent filter: a typo drops the family, a short list drops the defaults, exit 0 either way | open — the same intersection is load-bearing for L6 | `daal-deploy provision … --dry-run --families vless-reality,tiuc` (section below) | not pinned |
+| F-005 | **high** (the app; code-reading) | The app signs a relay BEFORE it has the relay's connection material: `bind-and-sign` can commit a route only to what the OperatorRecord carries, and the wizard passes no `--endpoint-creds` | open — wizard work (`commands.rs`, `cli_bridge.rs`). *Basis: established by reading the wizard source; the app was not run. The CLI behaviour it would meet is unit-tested* | `daal-deploy bind-and-sign` on a record with no `reality_public_key`/`tls_cert_sha256` → exit 1 (`TestBindAndSign_EndpointMaterial`) | not pinned: the rig is not the app (it provisions a recipient first and passes `--endpoint-creds`) |
 | FAM-6 | medium (user-visible) | naive carries **no app UDP except DNS**: QUIC without a TCP fallback, calls, games get nothing while the route is "Connected". The rig's `udp = blocked` cell for naive is this limitation written down as an expectation — it is green because the product still has the limitation, not because anything works | open — product decision: one line in the pack's naive outbound (`udp_over_tcp`) carries it, tried here against the released box; it changes what is minted for a default family | `./run.sh clean naive` → `family/naive udp expect=blocked got=blocked` | not in known-findings.json (the check is green by declaration): `families/naive.json` `"udp": "blocked"` is the pin — the day a pack carries UDP on naive that check goes red (`expect=blocked got=pass`) and the declaration must be flipped to `pass` |
-| CEN-2 | medium | Even shown the error, `diagnostics.Classify` cannot tell an SNI block from an address block, and files a TLS-phase timeout under `tcp_connect_timeout` | open — the mapping table is locked; needs context the string does not carry | `./run.sh --mgmt=tree sni-rst vless-reality`, then `wb-client --classify` on the raw probe's error (section below) | not pinned: masked by CEN-1 (no error reaches the classifier). The `censor/* truth.category` checks hold the ground truth it will be compared with |
-| CEN-3 | medium (spec) | The failure taxonomy has no word for three things a censor does: UDP dropped toward ONE address, UDP dropped on ONE port, and "connects but too slow to use" | open — spec revision | scenarios relay-ip-block, port-whitelist, throttle-56k declare the nearest category (`unknown`, `udp_unavailable`, `none`) | `driver/censor_test.go` (every declared category must exist in `specs/failure-taxonomy-v1.md`) |
-| FAM-4 | low | De-selecting a default family does not take it off the box: 4 open, listening ports the pack never mentions | open — same root as backlog W5-1 | `./run.sh --mgmt=tree --relay-families shadowsocks,anytls clean shadowsocks anytls` | known-findings.json `FAM-4`: `mint/* not_served` in world narrow-relay (full) |
-| F-001 | low (latent) | `daal-fetch-verify` fails with a misleading message when `/tmp` and `/usr/local/bin` are different mounts | open — the shim's bytes are hash-pinned | mount a tmpfs on the box's `/tmp` in `box/init.py` (section below) | not pinned (needs a modified box) |
 
 ### Observations (no verdict; recorded so the day they change is visible)
 
 | id | one line | where to see it |
 |---|---|---|
 | O-1 | The protect callback the phone registers is never called; only the uid exclusion keeps the engine out of its own TUN | `engine_protect_calls` in every `control.after` |
-| O-2 | Disconnect blocks ~5 s when the relay is blackholed (vless-reality, websocket-tls) | `ms` of `control.after` under relay-ip-block |
-| O-3 | Confirms backlog W5-1: a default relay binds `ss-in`/`anytls-in` (firewalled) | `listener_on_box` in `mint/* not_served` |
+| O-2 | **Fixed in the tree.** Disconnect blocked ~5 s when the relay was blackholed (vless-reality, websocket-tls): closing sing-box waited out a dial already in flight. The instance's context is now cancelled before it is closed, and a connection check in flight is abandoned, not waited for | unit `TestCloseInstance_DoesNotWaitForADialToADeadRelay` (core/engine, `-tags singbox`), `TestClearRoute_DoesNotWaitForAConnectionCheck` (core/abi). The rig no longer reaches the old state: a blackholed route never becomes connected |
+| O-3 | Backlog W5-1, **fixed in the tree with FAM-4**: a default relay no longer binds `ss-in`/`anytls-in`. A relay built from the pinned release still does (firewalled) | `listener_on_box` in `mint/* not_served` — `false` on `--mgmt=tree` worlds |
 | O-4 | The three opt-in families connect with the experimental-families gate OFF | every session of anytls, shadowsocks, tuic |
 | LC-O1 | `rotate-tls` says every recipient needs a new pack; only vless-reality stops working | `op:l2 old-pack.tunnel` per family |
 | LC-O2 | `/whoami` has a handler and no caller that can authenticate to it (`MintToken` refuses the op) | section below |
 | LC-O3 | The first freshness poll after an import always downloads the whole pack | `op:freshness` evidence |
 | LC-O4 | L1, L2, L3, revoke and multi-recipient all work end to end on the pinned release artefacts (default families) | world release.lifecycle (full) |
-| INT-O1 | The kick wrapper's `SIGUSR2` ("graceful inbound drop") is a no-op: sing-box 1.13.12 registers handlers for INT, TERM and HUP only, and a Go program ignores an unhandled SIGUSR2. Every kick is therefore `sleep 2` + a full restart; `users-revoke` and `rotate-credentials` kick twice, so the relay restarts twice, 2 s apart, and the verb takes ~4.7 s | relay `sing-box.service.log` (instances that live exactly 2 s); `ms` of the verbs in `publisher-verbs.jsonl`; `cmd_run.go:147` in sing-box |
+| INT-O1 | **Fixed in the tree.** The kick wrapper's `SIGUSR2` ("graceful inbound drop") was a no-op — sing-box 1.13.12 registers handlers for INT, TERM and HUP only — so every kick was `sleep 2` + a full restart, and `users-revoke` / `rotate-credentials` kicked twice (~4.7 s, two restarts). Now one in-process reload (SIGHUP via `ExecReload`, verified in `cmd/sing-box/cmd_run.go`): the verbs take ~0.1 s and the relay's sing-box pid does not change. A relay on the pinned daemon still applies twice (two reloads, no sleep) until the re-release | relay `sing-box.service.lifecycle.log` (one `start`, no restarts); `ms` of the verbs in `publisher-verbs.jsonl`; unit `TestUsersRevoke_RemovesAndReloadsExactlyOnce`, `TestRotateCreds_ReloadsExactlyOnce`, `TestRenderV2_ApplyWrapperIsOneReloadAndNoSleep` |
 | CEN-O1 | The relay's shadowsocks and anytls ports answer a few opaque bytes with a TCP reset within a millisecond; naive and websocket-tls wait, REALITY forwards — an active-probing tell, for triage | section below |
 | CEN-O2 | Only vless-reality puts a name on the wire; its ClientHello is 600 bytes in one TCP segment, so even a first-packet-only SNI filter reads it | scenarios sni-rst, sni-rst-stateless |
 | CEN-O3 | Under 30% random loss the QUIC families still complete the fetch (7–11 s) and every TCP family fails it | scenario heavy-loss |
 | CEN-O4 | naive's first request can end in `EOF` after ~0.5 s on a lossy or slow path, where the other families retry and get through — not root-caused | section below |
+| CEN-O5 | On a link that already has seconds of queue the connection proof (2 × 4 s) finishes nothing, and the engine says what it says for a swallowed handshake: "could not connect", `tls_handshake_failed` or `unknown`, a cooldown. One route cannot tell a handshake that is still crawling from one that was dropped | section below (under CEN-6) |
 
 ---
 
@@ -116,7 +124,14 @@ FAIL family/anytls|shadowsocks|tuic tunnel  expect=pass got=refused — engine: 
 
 **Not fixed here** because the fix is a release, not a code change: rebuild
 with `tools/release/relay-v1.5.0.sh` (or a v1.5.1), sign with the release
-key, upload, bump `Sha256` + `SigHex` in `artifacts.go`. After that,
+key, upload, bump `Sha256` + `SigHex` in `artifacts.go` **and, in the same
+commit, set `PinnedMgmtServesOptInFamilies` (same file) and its mirror
+`RELEASED_RELAY_SERVES_EXTRA_FAMILIES` (`client-ui/src/publisher/
+extraFamilies.ts`) to `true`** — that is what unlocks the wizard's "More
+ways to connect" switches and turns `provision --families`' "will be
+asked to serve" back into "will serve" (FAM-2, FAM-3). `go test
+./deploy/cloudinit/` fails on a bump without the flip and on a flip
+without a bump. After that,
 `./run.sh clean` (no flag) is the acceptance test: it downloads through the
 real verifier, so a wrong hash or signature fails it too.
 
@@ -128,7 +143,7 @@ world `release.all-families` is exactly `./run.sh clean` without
 
 ---
 
-## F-004 — pack profiles are outside the signature; the server address can be rewritten by anyone
+## F-004 — pack profiles were outside the signature; the server address could be rewritten by anyone (fixed)
 
 **What.** `VerifyBundle` authenticates `manifest.json` (via `manifest.sig`)
 and, per route, only that `config_path` exists in the archive.
@@ -174,20 +189,157 @@ FAIL op:tamper  import_of_tampered_pack  expect=refused got=pass   — the engin
 The import verdict is the ordinary first-seen trust prompt, with the
 publisher's own fingerprint; the routes are listed and activatable.
 
-**Not fixed here**: it is a format decision (bind profiles into what is
-signed — e.g. a per-recipient signature over the profile set by the
-publisher key or a certified sub-key, for which `bind-and-sign
---subkey-cert` already has machinery — or have the client refuse a profile
-whose `server`/port disagrees with the signed `public_risk_tags`). No
-signature check was weakened or bypassed to demonstrate it. The check stays
-red, reported as `KNOWN [F-004]` — but only in this exact shape: the
-known-findings entry requires `got=pass` with evidence `rewritten=profiles`
-and `manifest_rewrite=refused`. If the manifest control is not refused
-(signature verification lost), neither red is F-004 and the run fails.
+**Fixed: "signed endpoint, local credential".** At bind-and-sign time the
+relay exists, so everything about a route that is not a per-recipient
+secret is known. `bind-and-sign` now writes, per route, an `_endpoint`
+object into the route's `family_specific_config` — part of the signed
+manifest: server address, port, the TLS name where it matters, the TLS key
+pin (SPKI SHA-256), the REALITY public key, and for shadowsocks the method
+and a digest of the box-wide key. The client refuses an outbound that
+disagrees with it:
+
+* at import (`bundle/go/importer/endpoint_plan.go`), for every path —
+  file, trust prompt, freshness — with its own reason, `endpoint_mismatch`,
+  **before** the trust prompt. A RelayPack outbound with no commitment at
+  all is `endpoint_unauthenticated`;
+* again at `SetRoute` (`core/abi/endpoint_guard.go`), against the
+  commitment the import stored, so no other writer of a profile can make
+  the engine dial an address nobody signed.
+
+Credentials (uuid, passwords, short id, ws path) stay per-recipient and
+unsigned. That is sound because the server and its key are pinned: a
+rewritten credential is presented to the committed relay over a channel
+authenticated by the committed key, so it can only be refused. It cannot
+be sent anywhere else. `op:tamper credential_rewrite.*` shows exactly that
+on the wire.
+
+```
+ok   op:tamper  manifest_rewrite_refused                        refused   bundle_signature_invalid
+ok   op:tamper  import_of_tampered_pack                         refused   endpoint_mismatch (server)
+ok   op:tamper  import_of_tampered_pack.port                    refused
+ok   op:tamper  import_of_tampered_pack.tls_pin                 refused
+ok   op:tamper  import_of_tampered_pack.reality_public_key      refused
+ok   op:tamper  import_of_tampered_pack.trusted_certificate     refused   (naive's root)
+ok   op:tamper  import_of_tampered_pack.tls_insecure            refused
+ok   op:tamper  import_of_tampered_pack.folded_key              refused   (a second spelling of `server`)
+ok   op:tamper  commitment_stripped.import                      refused   bundle_signature_invalid
+ok   op:tamper  credential_rewrite.import                       pass      (not signed, by design)
+ok   op:tamper  credential_rewrite.carries_nothing              blocked
+ok   op:tamper  credential_rewrite.went_to_the_genuine_relay    pass
+```
+
+**A way round it, found in review and closed: a second spelling of a
+member name.** The check read the outbound by exact member name; sing-box
+matches a member to a field without regard to case, with Unicode simple
+case folding (U+017F "ſ" is an `s`, U+212A "K" is a `k`), and the later of
+two members that fold onto one field wins. The engine re-marshals a profile
+with its keys in byte order, so a non-ASCII spelling always comes after the
+genuine one. A pack that kept `"server"` exactly as signed and added
+`"ſerver": "198.51.100.66"` (and `"public_Key"` in `tls.reality`, or
+`"certificate_public_key_ſha256"` for the pinned families) passed both
+gates — import and `SetRoute` — and the linked sing-box dialled the
+attacker's address, authenticated by the attacker's key. Plain ASCII did
+the same for members that must be absent: `"Insecure": true`,
+`"Server_Ports"`, `"Detour"`. No key material needed; that is F-004 again.
+
+Fixed at the cause, in `bundle.CheckOutbound` (so both gates and
+`MergeEndpoint`'s result check): before any equality, every member name in
+the outbound, its `tls` object and `tls.reality` must be plain lower-case
+ASCII (`[a-z0-9_]+`), or the outbound does not match (`endpoint_mismatch`).
+Nothing can then fold onto a checked field except the field's own name.
+Spec: `relaypack-v1.md` §"Endpoint commitment", "Member names". Tests:
+`TestCheckOutbound_RefusesFoldedKeySpellings` (bundle/go/bundle),
+`TestImport_TamperedEndpointIsRefusedNotPrompted` (importer, four folded
+cases), `TestFoldedProfileKeys_SingBoxReadsThem_TheEndpointCheckRefusesThem`
+(core/engine, `-tags singbox`: shows the linked sing-box really reads the
+second spelling, and that the check refuses it), and the rig row
+`import_of_tampered_pack.folded_key`. Before the fix:
+`./run.sh --mgmt=tree --ops tamper clean vless-reality` →
+`import_of_tampered_pack.folded_key got=pass`.
+
+**A pack with no commitments is refused, not flagged.** Nothing is fielded,
+every fixture and test was migrated (`specs/test-vectors/relaypack/`
+regenerated; `core/abi/testdata/` re-minted by
+`mint-freshness-fixtures.sh`), and an "unauthenticated endpoint" state the
+user may click through is the hole with a warning on it.
+
+**What the publisher has to do differently.** `bind-and-sign` needs the
+relay's connection material. The OperatorRecord carries the REALITY key
+and the TLS pin when provisioning read them over SSH; otherwise — and
+always for shadowsocks — pass any `users-provision` reply with
+`--endpoint-creds` (only its relay-wide fields are read). A route whose
+material is missing is signed WITHOUT an endpoint, reported on stderr and
+in `uncommitted_families`, and can never be used; a pack in which no route
+could be committed is not signed. `users-pack-sbp[x]` checks its own
+output against the commitment and refuses to mint from a signed pack that
+no longer describes the relay ("run bind-and-sign again"). **The app does
+not pass `--endpoint-creds` yet** (`cli_bridge.rs`): a relay whose record
+has the SSH-read fields is fine; one serving shadowsocks loses that route
+until the bridge passes the flag.
+
+**Residual, stated.**
+
+* *Bundles that are not RelayPacks* (`daal-publish`, the bootstrap
+  directory, a `.sbp` with no `relay_pack` slot) still carry profiles that
+  nothing signs, and anybody handling the file can rewrite them (they are
+  NOT "fixed at signing", as this section used to say). Such a bundle can
+  no longer replace a committed route (F-006, below); the routes it adds
+  under new ids are still unauthenticated. Closing that is a signed
+  digest per route — a change to the base manifest and its
+  cross-language fixtures — and was not made here.
+* *shadowsocks* has no server authentication independent of the shared
+  key. The commitment pins the address, port, method and a digest of the
+  box-wide key, so a stranger cannot substitute one; somebody who is both a
+  recipient of the same relay and on the path still can. That is the
+  protocol.
+* The stored commitment is as trustworthy as the device's own store.
 
 ---
 
-## F-003 — "dropped" routes are still routes on the client
+## F-006 — a bundle with no commitments replaced committed routes (fixed)
+
+**What.** `planRoutes` passed every profile of a bundle with no
+`relay_pack` slot through unchecked; `SaveImport` then deleted the
+route's stored commitment (the incoming route had none) and `UpsertRoute`
+overwrote `relay_pack_id` with `''` — after which `routeEndpointGuard`
+had nothing to hold the route to. Since `manifest.sig` does not cover
+profile bytes, the attacker needs no key: one genuine, unexpired plain
+bundle of the publisher naming the same route ids, profiles rewritten to
+`{server: 198.51.100.66, tls.insecure: true}`. The publisher is already
+trusted, so there was no prompt: `Imported`.
+
+**Fixed.** A commitment is sticky (`endpoint_plan.go` rule 5). The
+importer asks the store (`importer.CommittedRoutes`, implemented by
+`trust.StoreAdapter.RouteCommitted`) whether the device holds a route
+under that id that has a stored commitment or a `relay_pack_id` — in any
+trust state, so an expired or revoked committed route is not an opening
+— and refuses the whole import with `endpoint_downgrade`, before the
+trust prompt and again before persistence. `SaveImport` makes the same
+check itself, before its first write, so no other caller can do it
+either. The app has copy for the new reason (en + fa).
+
+```
+ok   op:tamper  uncommitted_replacement.control.new_routes.import  expect=pass     got=pass
+ok   op:tamper  uncommitted_replacement.import                     expect=refused  got=refused
+ok   op:tamper  uncommitted_replacement.routes_kept                expect=pass     got=pass
+```
+
+**Residual, stated.**
+
+* A plain bundle whose route ids are NEW to the device is still stored
+  with unauthenticated profiles under the publisher's name (the control
+  row above is exactly that). Only a signed per-route digest in the base
+  manifest closes it.
+* The only way out of a commitment is the user removing the route. A
+  publisher who really wants to re-issue a route id as a plain route
+  cannot.
+* `routes_kept` compares the engine's route list, which does not show a
+  route's pack id or profile; with the fix switched off it stayed green
+  while `.import` went red. The unit tests are what pin "nothing changed".
+
+---
+
+## F-003 — "dropped" routes were still routes on the client (fixed)
 
 **What.** When a credential is missing (F-002 is one way to get there),
 `RewriteProfilesForRecipient` cannot remove the route — the manifest is
@@ -216,13 +368,78 @@ string the publisher wrote for a human is never shown to one.
 `error` event carries the parse error. `unzip -p
 out/latest/publisher/pack-r1.sbp profiles/r5.json` shows the marker.
 
-**Not fixed here**: the natural fix (import or `AvailableRoutes` treats a
-marked profile as unavailable-with-reason and never attempts it) changes
-what is offered for selection, which this work was told not to touch.
+**Fixed.** A RelayPack route whose profile holds no outbound — the
+minter's `_daal_unavailable` marker, or the signed skeleton's metadata-only
+profile — is not stored by the importer
+(`bundle/go/importer/endpoint_plan.go`, rule 2). It is not in
+`AvailableRoutes()`, it has no row for `SetRoute` to find, and it feeds no
+health or cooldown bookkeeping. The import verdict lists it under
+`Unavailable` with a closed reason (`not_offered`, `no_credentials`,
+`needs_new_file`), and the app has plain-language copy for each
+(`add.unavailable.*`, en + fa). The trust prompt's route count is the
+number of routes that will actually be stored.
+
+Pinned by `family/* import.unconnectable_not_listed`, which compares the
+engine's route list with the pack in every session of every world (it can
+only go red where a pack has a dropped route — today world
+release.all-families, through F-002), and by
+`TestImport_RoutesTheMinterDroppedAreNotStored` /
+`TestDroppedRouteIsNeitherListedNorActivatable`.
+
+*Not done:* the desktop/Android import screens do not yet render the
+`Unavailable` list; the strings and the verdict field are there for them.
 
 ---
 
-## F-001 — the artefact verifier needs `/tmp` and `/usr/local/bin` on one mount, and hides it when they are not
+## F-005 — the app signs before it has what a signed endpoint needs
+
+**Evidence basis: reading the wizard source; the CLI stands in for the
+app.** Nothing here was seen in the desktop app or on a phone.
+
+**What.** Since F-004 was fixed, `bind-and-sign` commits every route to a
+signed endpoint, and a route it cannot commit is unusable. The material
+comes from two places: the OperatorRecord, and a relay reply passed with
+`--endpoint-creds`. The app (`commands.rs sign_relaypack` →
+`cli_bridge.rs run_bind_and_sign`) passes the record only, and runs the
+Sign step before any recipient exists, so it has no reply to pass.
+
+What the record carries depends on the provider adapter:
+
+* **Hetzner**: `reality_public_key` and `tls_cert_sha256` are read over
+  the provisioning SSH session (`providers/hetzner/provider.go`). The pin
+  file it reads, `/etc/daal/tls-spki-sha256.b64`, was written by nothing
+  until this change (cloud-init now writes it). So a relay provisioned
+  from this tree with the SSH read working signs all four default
+  families, plus tuic and anytls. **shadowsocks is never committed** from
+  the record alone (its server key is in no record), so that route is
+  signed without an endpoint and dropped at mint.
+* **Vultr**: the adapter reads neither (its own comment: the material "is
+  read from the box's own /users/provision response at pack time"). The
+  record has no material, `bind-and-sign` exits 1 with
+  `no route could be given a signed endpoint`, and the Sign step fails.
+* **Any provider, SSH read failed**: the same as Vultr, or REALITY only.
+
+**Why it matters.** On Vultr the app cannot produce a pack at all until
+this is wired. That is a regression introduced by closing F-004, accepted
+because the alternative — signing packs whose endpoints nobody
+authenticated — is F-004.
+
+**What it takes.** One of:
+
+1. the app provisions its first recipient (it already has a shared `r0`:
+   `recipient_book.rs produce_shared_sbp`) before signing, stages that
+   reply at mode 0600 and passes `--endpoint-creds`; and re-signs with the
+   newest reply after each rotation; or
+2. the relay publishes its public identity (REALITY public key, TLS key
+   pin — neither is secret) through the bootstrap health endpoint that
+   already relays the mgmt TLS fingerprint, so every adapter records it at
+   provision time. That needs `daal-relay-health`, a pinned artefact.
+
+(1) is self-contained in the app and also covers shadowsocks.
+
+---
+
+## F-001 — the artefact verifier needs `/tmp` and `/usr/local/bin` on one mount, and hides it when they are not (fixed)
 
 **What.** `publisher/deploy/cloudinit/shim.sh.tmpl` downloads each artefact
 to a `tempfile.NamedTemporaryFile` (default directory, `/tmp`) and installs
@@ -252,10 +469,23 @@ run `./run.sh clean vless-reality`: `verb.provision` fails and
 `out/latest/boxes/*/rootfs/var/log/cloud-init-output.log` ends with the
 message above.
 
-**Not fixed here**: the shim's bytes are pinned by a test
-(`VerifierShimSource` SHA-256) and "must stay stable"; the two-line fix
-(create the temp file in the target directory, and print the exception
-instead of swallowing it) deserves its own change with that pin updated.
+**Fixed.** The shim now creates its temp file in the install directory
+(`tempfile.NamedTemporaryFile(dir=target, …)`), fsyncs it, verifies it
+there and renames it into place — one mount by construction — removes its
+temp files on every path, and prints, per mirror, why it was not accepted
+(`<url>: sha256 mismatch`, `signature did not verify`, or the exception).
+The gate is unchanged: SHA-256, then the Ed25519 signature through
+`openssl`, before anything is installed. `VerifierShimSource`'s SHA-256
+and the V1.5 cloud-init golden are re-pinned in `template_test.go`, with
+the reason next to each. `shim_exec_test.go` runs the embedded shim bytes
+against a local mirror with `TMPDIR` on a different filesystem
+(`TestVerifierShim_InstallsAcrossMounts` — fails on the old shim with
+exactly the message above), a missing artefact, a wrongly-signed one, and
+a dead first mirror.
+
+**Not verified in the rig**: the reproduction above needs a modified box
+(`box/init.py`), which was not done; the unit test exercises the same
+`EXDEV`. Reaches a relay only through a fresh provision.
 
 ---
 
@@ -275,7 +505,21 @@ one. Without uid exclusion the engine's dial loops into its own TUN
 (observed while building the rig: a socket owned by the engine stuck in
 `SYN-SENT 10.20.30.40 → 203.0.113.10:443`).
 
-## O-2 — disconnect takes ~5 s when the relay is unreachable
+## O-2 — disconnect took ~5 s when the relay was unreachable (fixed)
+
+**Fixed.** `box.Close()` does not interrupt a dial that is already waiting
+on a dead address: sing-box lets it run out its 5 s connect timeout and
+Close waits for it. The engine now builds each instance on a context of
+its own and cancels it before closing (`closeInstance`,
+`core/engine/engine_singbox.go`), so those dials return at once; and
+`ClearRoute` abandons a connection check in flight instead of waiting for
+it (`core/abi/abi.go`). Pinned by `TestCloseInstance_DoesNotWaitForADialToADeadRelay`
+(an instance with a dial in flight to a blackholed address must close in
+well under the connect timeout) and
+`TestClearRoute_DoesNotWaitForAConnectionCheck`. The rig cannot show the
+old number any more — with CEN-1 fixed a blackholed route never reaches
+"connected", so there is no such session to disconnect — which is why the
+pin is a unit test. As found:
 
 Under `relay-ip-block`, stopping a vless-reality or websocket-tls session
 (`ClearRoute`) blocks for ~5.0 s (`control.after` 5036 ms vs ~40 ms on a
@@ -426,7 +670,7 @@ be missed), move this entry to "Fixed", and run `./e2e.sh full` — naive's
 
 ---
 
-## FAM-2 — the app has no way to turn on shadowsocks, anytls or tuic
+## FAM-2 — the app has no way to turn on shadowsocks, anytls or tuic (fixed)
 
 **Evidence basis: established by reading the wizard source; the CLI stands
 in for the app.** Nothing here was observed in a running app. The rig does
@@ -461,12 +705,75 @@ to the real verb (see `verb.provision` evidence `families_flag`) — and with
 that, plus a mgmt daemon that knows the families (`--mgmt=tree`, see F-002),
 all three carry verified bytes.
 
-**Not fixed here**: it is a wizard screen (which families, with what
-warning about the extra open ports), not a seam.
+**Fixed.** The plan screen of the build wizard has a collapsed section,
+"More ways to connect" (`MoreWaysToConnect.tsx`). Opened, it lists the
+profile's opt-in families — read from the `TOOLBOX_PROFILES` mirror that
+`tools/check-toolbox-profiles.mjs` holds to the Go profiles — each off by
+default, each with a plain-language name and one sentence on what it is
+and what it costs (one more open port; nothing that gets through a
+web-only network). anytls says, and repeats in a warning once ticked,
+that the connection file is then made in a newer format that an older app
+cannot open **at all**. The list the wizard sends
+(`extraFamilies.ts: enabledFamiliesFor`) is `[]` when nothing is ticked —
+exactly what it sent before — and otherwise every default family plus the
+ticked ones, because `--families` replaces the defaults (FAM-3). The
+choice is remembered per relay across a relaunch (best effort,
+`localStorage`), so a resumed build does not silently fall back to the
+defaults. Strings are in `d2-extra.{en,fa}.json` (both copies).
+
+**Evidence basis, unchanged in kind: unit tests and the type checker.**
+`extraFamilies.test.tsx` renders the section to markup, and checks the
+list composition, the default-off/collapsed state, the wording rules and
+— at source level — that the wizard's constant is gone. **The app was not
+run**: nobody has clicked this in a Tauri window or on a phone, and the
+Rust bridge's handling of a non-empty `enabled_families` on a FIRST
+provision (it was only ever exercised by rebuilds) is established by
+reading `cli_bridge.rs`, not by running it.
+
+**Review finding on this fix (high): the switches offered what the
+released relay cannot serve — fixed by locking them until F-002's
+release.** With F-002 open, the only `daal-relay-mgmt` an app-provisioned
+relay downloads serves none of the three. Reproduced on the pinned box:
+
+```
+./run.sh clean anytls vless-reality      # pinned
+KNWN mint/anytls   relay.listens  [F-002]   (nothing on 8447/tcp)
+KNWN mint/anytls   pack.route     [F-002]   — the minter dropped this route: anytls needs anytls_password …
+KNWN family/anytls tunnel  got=refused [F-002] — pick: pack has no route of family "anytls"
+```
+
+So a publisher who ticked anytls got one more open door, no anytls route,
+and (the signed manifest names anytls) a connection file older apps
+refuse — the cost the warning describes with none of the benefit, behind
+copy that said only "newer and used far less".
+
+Whether the pinned artefact serves these families is now one build
+constant beside the pin, `PinnedMgmtServesOptInFamilies` in
+`publisher/deploy/cloudinit/artifacts.go` (false today), mirrored for the
+UI as `RELEASED_RELAY_SERVES_EXTRA_FAMILIES` in `extraFamilies.ts`. While
+it is false the section is still there and still explains each option,
+but every switch is disabled and unticked, one line says why ("You cannot
+turn these on yet. The software that a new server installs does not
+include them…", en+fa), the collapsed line reads "Not available yet", and
+`enabledFamiliesFor` returns `[]` whatever was ticked or remembered in
+`localStorage` — the wizard cannot ask a server for them. The feature is
+not removed: flipping the two constants in the commit that bumps the pin
+restores exactly the behaviour described above, and that state keeps its
+tests (they run with the gate open).
+
+Held by: `TestPinnedMgmtOptInGateMatchesThePin` (stale hash ⇔ gate shut;
+a bump that forgets the flip, or a flip without a bump, fails),
+`TestOptInFamiliesOfMgmtAreTheProfilesOptInFamilies`,
+`tools/check-toolbox-profiles.mjs` §5 and the vitest suite "while the
+released relay software cannot serve them" (which also reads the Go
+constant). **Not pinned by the rig** (above the ABI), and, as before,
+**the app was not run**. The rig evidence for the underlying fact is
+unchanged: F-002 stays open and `release.all-families` stays KNOWN-red
+until the release.
 
 ---
 
-## FAM-3 — `--families` filters silently
+## FAM-3 — `--families` filters silently (fixed)
 
 **What.** `relayconf.CandidatesForProfile` keeps a profile candidate only if
 the list names it. So:
@@ -489,17 +796,66 @@ daal-deploy provision --provider hetzner --region fsn1 --server-type cx22 \
 # rc=0; rec.json candidates: ["tuic"]
 ```
 
-**Not fixed here.** Rejecting unknown names inside `CandidatesForProfile`
-would be two lines, and wrong: the L6 rung calls the same function with the
-record's families against a NEW profile and relies on the intersection
-(`refuseEmptyProfileIntersection`), and the second half of a reprovision
-runs `provision --families` after the old server is already deleted. The
-check belongs at the operator-input boundary only (the wizard screen of
-FAM-2, or a first-provision-only validation in `cli.go`).
+**Fixed, at the operator-input boundary** (`publisher/deploy/cli/
+cli_families.go`). `provision` resolves `--families` against the toolbox
+profile before it generates a key or builds a provider:
+
+```
+… --dry-run --families vless-reality,tiuc
+# rc=2, no record:
+# provision: --families: "tiuc" — not a transport family toolbox profile "iran-default" offers.
+#   Valid: vless-reality, websocket-tls, naive, hysteria2, shadowsocks, anytls, tuic. Nothing was created
+… --families tuic
+# rc=0; rec.json candidates: ["tuic"], and on stderr:
+# provision: --families REPLACES the defaults of toolbox profile "iran-default": this relay will serve tuic
+#   and will NOT serve vless-reality, websocket-tls, naive, hysteria2, which the profile enables by default (…)
+```
+
+A real family of a different profile (`tuic` on `iran-tcp443`) is refused
+the same way, with the profile that does offer it named. With
+`--progress-json` the statement is one `provision_families` event.
+
+`relayconf.CandidatesForProfile` is untouched — the intersection L6 needs
+is still there. What changed for L6 is where it becomes visible:
+`reprovision --new-toolbox-profile` (after the provider's unchanged
+pre-delete refusal of an empty intersection) narrows the record's
+candidates to what the new profile offers and says what the rebuild
+drops, so the `provision --families <the record's families>` the app runs
+next passes the new check (`TestReprovision_NarrowsTheRecordSoTheL6Rebuild
+StillProvisions`). Both halves are the same binary.
+
+**Review finding (with F-002 open): the line promised what the release
+cannot serve.** `--families …,anytls` printed "this relay will serve …,
+anytls" while the pinned `daal-relay-mgmt` serves no anytls. The plan now
+carries `UnservedByRelease` (from `cloudinit.NotServedByPinnedMgmt`), and
+when it is not empty the statement is a request, with the consequence:
+
+```
+… --dry-run --families vless-reality,websocket-tls,naive,hysteria2,anytls
+# rc=0, stderr:
+# provision: --families REPLACES the defaults of toolbox profile "iran-default": this relay will be asked to serve
+#   vless-reality, websocket-tls, naive, hysteria2, anytls (anytls: off by default, turned on by this list). …
+#   NOT SERVED YET: the released relay software this build installs (daal-relay-mgmt, pinned in
+#   publisher/deploy/cloudinit/artifacts.go) predates anytls. Unless this relay runs a newer daal-relay-mgmt than
+#   that release, the firewall port is opened for nothing: no recipient gets a credential for it and no connection
+#   file will carry a route for anytls; and because anytls is named, every connection file is still made in the
+#   newer format that older Daal apps cannot open at all
+```
+
+It is deliberately a statement and not a refusal: the same verb
+provisions a relay whose daemon is newer than the pin (`--mgmt=tree` in
+this rig, a release being tested), where the families do carry traffic.
+The `provision_families` event gains `unserved_by_release`. Unit:
+`TestFamilySummary_DoesNotPromiseWhatTheReleaseCannotServe`,
+`TestResolveFamilies_UnservedComesFromThePin`.
+
+**Not verified**: an L6 run through the app, or against a cloud — the
+rig has no L6 op. `--provider stark` is exempt from the check: that
+placeholder adapter has its own family table and its own silent filter.
 
 ---
 
-## FAM-4 — a default family you did not ask for is still on the box
+## FAM-4 — a default family you did not ask for is still on the box (fixed)
 
 **What.** With `--families shadowsocks,anytls` the record, both pack and
 firewall *additions* follow the list — but the base firewall set
@@ -519,8 +875,51 @@ mentions.
 
 (`listener_on_box: true` for all four in the check's evidence.)
 
-**Not fixed here**: the box has to learn its own family set, which is the
-change backlog item W5-1 already describes as deliberate work.
+**Fixed in the tree** — the box now learns its own family set, and
+everything follows it:
+
+* `relayports.FirewallPortsFor(families)` is the complete port set of a
+  relay; there is no unconditional 443 any more, in the cloud firewall
+  (hetzner, vultr) or in the ufw rules both cloud-init templates render.
+* `relayconf.SingBoxConfigForFamilies` bakes `vless-in` only with
+  vless-reality and `hy2-in` only with hysteria2 (`tuic-in` as before).
+  A relay serving only on-first-use families boots with no inbound; the
+  first-boot REALITY keying no longer fails when there is no REALITY
+  inbound, and then writes no `reality.pub` / `cover-sni`.
+* cloud-init writes the set to `/etc/daal/families`; `daal-relay-mgmt`
+  creates inbounds, user rows and credentials for those families only,
+  keeps its user registry as the union over all managed inbounds (it was
+  `vless-in` alone), and returns a credential only for a row that exists.
+  A box with no such file behaves as before; a file it cannot read is a
+  `500`, not "everything".
+
+```
+./run.sh --mgmt=tree --relay-families shadowsocks,anytls clean shadowsocks anytls
+  ok mint/vless-reality not_served expect=blocked got=blocked   (box_ufw_open false, cloud_firewall_open false, listener_on_box false)
+  … hysteria2, naive, websocket-tls, tuic the same
+  ok censor prove.relay-tls-answers expect=blocked got=blocked  — this relay serves nothing on 443/tcp …
+RESULT: PASS — 55 checks
+```
+
+The last line is a rig change that came with the fix: `clean`'s
+`relay-tls-answers` proof dials the relay on 443/tcp, which a relay
+without vless-reality no longer has. A TCP proof aimed at a relay port
+no served family listens on is now run with its expectation inverted
+(`driver/prove_unserved.go`): it must NOT connect.
+
+Contract: `specs/per-recipient-credentials-v1.md` §2.3. The cloud-init
+golden moved and is re-pinned (`template_test.go`).
+
+**What it does not reach.** Relays are built from pinned artefacts and
+cloud-init has no upgrade path: this needs the planned relay re-release
+(new `daal-relay-mgmt`) AND a fresh provision. A relay with new
+cloud-init and the currently pinned daemon serves the default set
+correctly (world `release`) but still creates `ss-in`/`anytls-in`, and
+cannot be provisioned at all without vless-reality (the old daemon
+requires `vless-in`: `/users/provision` answers 500, nothing is minted).
+`rotate-credentials` on a relay without vless-reality makes the CLI warn
+that the relay "did not echo its cover host / REALITY public key" — true,
+and not a fault there; the warning's wording was left alone.
 
 ---
 
@@ -560,7 +959,12 @@ The rig only ever exercises the linux branch.
 
 ---
 
-## O-3 — W5-1, observed
+## O-3 — W5-1, observed (fixed in the tree with FAM-4)
+
+**Now:** on a `--mgmt=tree` world the same checks record
+`listener_on_box: false` — the tree daemon creates inbounds only for the
+families in `/etc/daal/families` (FAM-4). A relay on the pinned daemon
+still binds both. As found:
 
 `./run.sh --mgmt=tree clean vless-reality`: the `not_served` checks for
 shadowsocks and anytls pass (both firewalls shut, no route in the pack) and
@@ -584,7 +988,7 @@ Found by the lifecycle ops (`./run.sh --mgmt=tree --ops lifecycle clean`;
 README "Lifecycle ops"). Same rules as above: a check that a defect turns
 red stays red.
 
-## LC-2 — the freshness channel, as the app drives it, replaces a working pack with one that cannot connect
+## LC-2 — the freshness channel replaced a working pack with one that could not connect (fixed)
 
 **Evidence basis: two halves, of different strength.**
 *Observed in the rig* (real engine, real `publish-freshness`, real
@@ -661,23 +1065,64 @@ ok   rotated.polled.tunnel                             pass     ← no new file 
 path); `clients/NN-fresh-*/events.jsonl` has the tick's scheduler status
 and the engine's own explanation of the failure.
 
-**Not fixed.** It is a design gap, not a typo. One public pack cannot carry
-per-recipient credentials, so "publish the recipient's pack" is not the
-answer either. The two shapes that would work: (a) the document names the
-*shared* pack (`users-pack-sbp` for `r0`) and the app uploads/points at that
-one — which only helps recipients of the shared file; or (b) a
-freshness-fetched skeleton is **merged** into the routes already on the
-device (new address / cover host / ports from the signed skeleton, existing
-credentials kept) instead of replacing their profiles. Until one of them
-exists the importer should at least refuse to swap a profile that parses to
-no outbound over one that does.
+**Fixed: the signed skeleton is merged, not swapped.** With the endpoint
+commitments of F-004 the skeleton is exactly the public half of a pack:
+where the relay is and what proves it is the relay. So for every route in
+a fetched (or handed-over) signed pack whose profile holds no outbound,
+the importer looks at what the device already has for that route — same
+publisher, same family — and applies the NEW signed endpoint to the
+credentials ALREADY there (`bundle.MergeEndpoint`). Then:
+
+* a route the device holds credentials for comes out connectable, on the
+  new address / cover host / key;
+* a route the device holds nothing for is not stored (F-003);
+* a route whose credentials cannot belong to the relay any more (its key
+  changed) is left exactly as it was and reported `needs_new_file`;
+* **a profile with no outbound never replaces one that has one**;
+* the same file on a phone that holds nothing is refused
+  (`pack_has_no_credentials`), not imported as dead routes.
+
+On the freshness path the publisher-signed document (which names the pack
+ids it supersedes) is what says "this pack replaces yours"; a skeleton
+handed over as a file is merged only into routes of the same pack id.
+
+**What needs a new file, by rung** (also in `specs/relaypack-v1.md` and in
+the app's copy, `freshness.rs`):
+
+| rung | what changes | per-recipient credentials | a polling phone |
+|---|---|---|---|
+| L1 `rotate-credentials` | one recipient's credentials | **changed, for that recipient** | that recipient needs a new file; nobody else is affected |
+| L2 `rotate-tls` | cover host (and, if asked, the shared ws path) | unchanged | **recovers with no new file** (`op:l2 no-new-file.*`, 7 families). If the ws path was moved too, the websocket route alone needs a new file: the path travels with the credentials |
+| L3 `assign-fip` | address | unchanged | **recovers with no new file** (`op:l3 no-new-file.*`) |
+| L4–L6 rebuild | a new box: new REALITY key, new TLS key, new credentials | **changed, for everyone** | every recipient needs a new file |
+
+L4–L6 cannot be made mergeable from the publisher side alone. The relay
+mints each recipient's credentials itself: `/users/provision` takes a name
+and nothing else, and the publisher's database stores what the box
+answered. A rebuilt box therefore answers with different secrets. Having
+it accept the old ones is a change to the mgmt wire (a pinned, released
+artefact) — and when the reason for the rebuild is that the box was
+compromised or seized, re-installing the credentials it held is the wrong
+thing to do. The new keys DO travel in the signed endpoint; it is only the
+credentials that need a courier.
+
+```
+ok   op:freshness  unchanged.signed-pack-hosted.tunnel        pass
+ok   op:freshness  unchanged.signed-pack-hosted.routes_kept   pass
+ok   op:freshness  signed-pack-alone.import                   refused   pack_has_no_credentials
+ok   op:freshness  published.fresh2.holds_no_credentials      pass
+ok   op:freshness  rotated.polled.tunnel                      pass      ← nothing was minted for this phone
+```
+
+LC-O3 (the first poll after an import always downloads the pack) is now
+harmless — the merge is idempotent — and still true.
 
 **What stands in.** The storage (`wb storage`) and the upload to it: the
 rig copies `publish-freshness --out-file`'s signed document and the pack
 onto a static HTTPS host the phone reaches through the censor.
 `publish-freshness`'s R2 and GitHub uploaders are not exercised.
 
-## LC-3 — after an L3 address move, naive cannot connect to the new address (and the engine says "Connected")
+## LC-3 — after an L3 address move, naive could not connect to the new address (fixed for newly provisioned relays)
 
 **What.** The box's TLS certificate is generated once, at first boot, with
 `subjectAltName=IP:<primary address>` (`v2.yaml.tmpl:313`). Every family but
@@ -711,14 +1156,87 @@ hysteria2  pass            blocked                   pass                      b
 naive      pass            blocked                   !blocked(want pass)       blocked                pass
 ```
 
-**Not fixed.** Every fix moves something recipients pin: re-issuing the
-certificate with both addresses in `/bind-address` changes
-`tls_cert_sha256` for every family (harmless after an L3, since everybody
-needs a new file anyway, but it would break the grace period in which old
-files still work on the old address); giving the naive outbound a
-`server_name` the existing certificate covers needs Cronet to accept a
-verification name that differs from the dialled address, which I did not
-verify. Needs a decision.
+**Fixed, for relays provisioned from this tree.** The certificate now
+carries one stable DNS name beside the address (cloud-init,
+`v2.yaml.tmpl`: the cover host the relay was provisioned with). The naive
+outbound verifies against the ADDRESS when the certificate names the
+address it dials — so a relay that never moved puts nothing new on the
+wire — and against that DNS name otherwise (`bundle.NaiveVerificationName`,
+used by the minter, the importer's merge and nothing else). Cronet resolves
+the name to the dialled address itself (cronet-go's server-redirect
+resolver); no lookup leaves the device. No pin moves, so old files keep
+working on the old address through the grace period, and a phone that
+polls needs no new file at all:
+
+```
+family     old-file.grace  old-file.address-blocked  new-file.address-blocked  no-new-file.address-blocked  released-address-file  original-file
+hysteria2  pass            blocked                   pass                      pass                         blocked                pass
+naive      pass            blocked                   pass                      pass                         blocked                pass
+```
+
+**What this does not do.**
+
+* A relay provisioned BEFORE this change has a certificate with no DNS
+  name; nothing can add one without re-issuing it. Its naive route still
+  dies on L3 (the minter emits the route as before, and it fails the name
+  check). Rebuild the relay to get it.
+* After an L3, naive presents that DNS name as SNI — the cover host the
+  relay was provisioned with, on the relay's own address. If a later L2
+  moved REALITY's cover host because the old name was being filtered,
+  naive on a moved address still shows the old one. Re-issuing the
+  certificate with the same key on `rotate-tls` would close that; it is a
+  change to `daal-relay-mgmt` and was not made here.
+* "The engine reports Connected while no byte passes" was CEN-1, not this.
+
+## LC-4 — an old signed pack, handed over as a file, rolled a phone back (fixed)
+
+Found in review of the LC-2 fix, not by the rig. The signed skeleton is
+public by design: it is the file the freshness mirrors serve, so anybody
+who ever fetched one can keep it. LC-2 made the importer MERGE such a file
+into the credentials a phone already holds, on two paths: the freshness
+path, which is ordered by the signed document's sequence high-water mark,
+and the file path (file, QR, share), which asked only for the same
+publisher, family and `relay_pack_id`. An in-place rotation — port, cover
+host, REALITY key, TLS key — keeps the pack id. So the file path had no
+notion of older and newer.
+
+The scenario: the operator rotates a relay key or a port because the old
+one is burned or seized. Whoever holds the old key hands a recipient the
+old public file. The publisher is already trusted, so there is no prompt;
+the phone goes back to the burned endpoint and to a key the adversary
+holds, until the old pack's `expires_at`.
+
+**Fixed: a file only moves a route forward.** The store keeps, beside each
+route's signed commitment, the `bundle.created_at` of the manifest it came
+from (`endpoint-signed-at:<route_id>`). Outside the freshness path a merge
+now also requires the incoming manifest to be strictly later than that.
+The manifest the route is already on (same date, identical commitment) is
+a no-op and still accepted, which is what keeps LC-O3 harmless. Otherwise
+the route is reported `older_than_device` and left exactly as it was; a
+file with nothing else in it is refused as `pack_is_older`. A route whose
+date is not known is not merged into by file at all (`needs_new_file`).
+The freshness path is unchanged. Spec: `specs/relaypack-v1.md`, importer
+rule 4.
+
+```
+ok   op:freshness/vless-reality rotated.stale-signed-pack-by-file.not_merged   pass
+ok   op:freshness/vless-reality rotated.stale-signed-pack-by-file.routes_kept  pass
+ok   op:freshness/vless-reality rotated.stale-signed-pack-by-file.tunnel       pass
+```
+
+With the rule switched off the same world is red on `.not_merged` and on
+`.tunnel` (`reality verification failed`: the phone was back on the cover
+host the relay had left).
+
+**What this does not cover.** `created_at` has one-second resolution. Two
+signings in the same second are not ordered, so the second one cannot be
+delivered by FILE as a skeleton (it is refused as not newer; the
+freshness path still delivers it). That is the rig's own situation — it
+re-signs within a second of the first signing — and never an operator's.
+And the rule is about the credential-less merge only: a recipient's own
+OLDER full file (one that carries their credentials) still imports and
+replaces what the phone holds, as any re-import does. That file is not
+public, so it is a different threat; it is left as it was.
 
 ## LC-1 — a mgmt token already used once could be replayed with a different body (fixed in the tree; shipped relays still accept it)
 
@@ -828,7 +1346,54 @@ leaves the record, the box and the account clean. `/health` advertises
 exactly what was observed to work. The reds in that run are LC-1, LC-2 and
 LC-3.
 
-## CEN-1 — a blocked route is "Connected", a success, and proven; the engine never classifies a data-plane failure
+## CEN-1 — a blocked route was "Connected", a success, and proven; the engine never classified a data-plane failure (fixed)
+
+**Fixed — what "this route works" now means.** One real round trip through
+the route's own outbound: a connection opened through the active outbound
+to a host on the far side of the relay, and a TLS ServerHello read back
+(`core/engine/proof.go`, `proof_singbox.go`). Nothing leaves the device
+except through the tunnel. The far-side host is drawn at random from a
+small set of very common sites and a second, different one is tried before
+a route is called dead; the set is an ordinary engine configuration field
+(`<state_dir>/engine-config.json`, `connection_check.targets`) with a
+production default — the rig points it at its own "internet" hosts through
+that file (`wb-client --proof-targets`), no lab seam. The target's
+certificate is deliberately not verified: nothing is authenticated or sent,
+and a phone with a wrong clock must not be told its route is dead.
+
+* `SetRoute`: Start → **verifying** (`route_check: "verifying"` in the
+  diagnostics blob, FSM state `Verifying`, event `Verifying`) → proof. Only
+  a proof gives `pm.Connected()`, `RecordSuccess`, posture
+  `ImportedActive`. A failed proof tears the instance down, classifies the
+  failure by phase (CEN-2), `pm.Failed`, `RecordFailure` with the FSM's
+  cooldown, posture → Recovery, and `SetRoute` returns an error wrapping
+  `abi.ErrRouteNotCarrying`. Default bound: 2 attempts × 4 s.
+* Core.mu is not held across the proof; `ClearRoute` or another `SetRoute`
+  cancels it and nothing is recorded (`ErrConnectCancelled`).
+* While connected, `abi.CheckActiveRoute` re-proves the route every ~3 min
+  (±25 %), and at once on `NetworkChanged` to a different network. A route
+  that stops carrying goes to `route_check: "failed"` with a category, a
+  cooldown and a failure row; the instance is left running (stopping it
+  would leave the phone's VPN interface up with nothing behind it), it is
+  rechecked every 30 s and goes back to `ok` when it carries again. It is
+  the function the prober of the next stage calls; it selects nothing.
+* The app shows "Checking the connection…" while verifying and "Connected,
+  but slow" for a degraded route (`client-ui/src/lib/routeCheck.ts`, en+fa).
+
+**Measured.** Full run, 40 blocked sessions that assert a category: the
+engine names the failure exactly in 26 and as the coarser thing one route
+can see in 14 (CEN-4); none reports `none`, none is `proven`. Clean path:
+`SetRoute` including the proof takes 7–13 ms per family in the lab (the
+`set_route_ms` of each `connected` event) — one round trip.
+
+**Not verified.** The phone: `engine_set_route` now blocks for the proof
+(up to 8 s on a dead route; a tor route is given 90 s per attempt), and
+the Kotlin/Rust callers were not run. The default public targets: the lab
+has no internet, so only the configured-target path is exercised. A relay
+whose own egress cannot reach any default target would fail the proof as
+`unknown` (carry phase) although the relay is reachable.
+
+As found:
 
 **What.** `abi.SetRoute` treats `driver.Start` returning nil as "the tunnel
 is up": it calls `pm.Connected()`, `store.RecordSuccess()`, moves the
@@ -889,7 +1454,7 @@ Evidence per session: `out/<run>/clients/NN-<family>/events.jsonl`, the
 `disconnected` event — `explain` (`abi.DiagnosticsExplain()` taken while
 the route was active), `diag`, `routes_after`.
 
-**Not done, and why.** Not small and not obviously one thing. The engine
+**Why it was not fixed when found.** Not small and not obviously one thing. The engine
 needs a definition of "this route works" that is true: a handshake through
 the active outbound, or the first bytes back through the TUN, or sing-box's
 dial errors (a `PlatformLogWriter`, or a wrapping dialer) fed to the
@@ -901,7 +1466,81 @@ The rig's `engine.category` check is the acceptance test for whichever is
 chosen: it goes green, cell by cell, when the engine's report equals what
 the raw probe saw.
 
-## CEN-2 — the classifier cannot say what the taxonomy asks of it
+## CEN-5 — after a failed connect the app said "Connecting…" for good, with nothing running (fixed)
+
+**What happened.** CEN-1 made a failed connect honest inside the engine:
+the instance is torn down, the route cooled down, `SetRoute` returns the
+error, posture → `Recovery`, `route_check: "failed"`. The app maps
+`Recovery` to "connecting" and had no words for `failed`, so the headline
+read "Connecting…" / «در حال اتصال…» — indefinitely, because the engine
+never selects another route. On desktop the connect call rejects after
+about 8 s and a generic recovery sheet opens over that headline. On
+Android `vpnStart` resolves as soon as the service is started and the
+service stops itself when `setRoute` fails: no error at all, a permanent
+"Connecting…", and a second tap meets the cooldown refusal.
+
+A connected route that stops carrying (the liveness check) reads exactly
+the same — `Recovery`, `failed` — and there the engine really is
+re-checking every ~30 s. The app could not tell the two apart.
+
+**The review's suggested discriminator does not exist.** It proposed
+"`explain.active_route` is empty" for the failed connect. It is not: the
+path manager keeps the route as current after a failure
+(`routeDownLocked` → `pm.Resume`), so `DiagnosticsExplain` returns
+`active_route` and `pick` for the torn-down route too (measured). Nothing
+in either blob said whether an instance was running.
+
+**Fix.**
+
+* Engine: `engine_export_diagnostics` gains the always-present boolean
+  `route_running` — true exactly while an engine instance for a route is
+  up (`verifying`, `ok`, `degraded`, and `failed` after a liveness
+  failure); false with no route and after a failed connect. Kept in the
+  connection-check state and read under the same lock as `route_check`
+  (`core/abi/route_check.go`).
+* App (`client-ui/src/lib/routeCheck.ts`): `failed` + `route_running:
+  false` is the **error** state — "Could not connect on this route. Try
+  another one."; tapping the button opens the recovery sheet ("Try
+  another route" …). `failed` + `route_running: true` stays "connecting"
+  with its own words — "Connection lost. Trying again…". An engine that
+  does not emit the field changes nothing.
+
+**Pinned by.** `engine.failed_connect_not_running` (every blocked
+session: the diagnostics captured right after the failed `set_route`
+must say `route_running: false`); `TestRouteRunning_*` (core/abi);
+`src/lib/routeCheck.test.ts`.
+
+**Not verified.** The rig drives the engine, not the app: nothing renders
+the page, and nothing was run on a phone. The wiring from the blob to
+the page (`backends/tauri.ts`) is covered by the type checker only.
+
+**Still open (found while fixing, not changed).** While a lost
+connection is being retried the page is in the "connecting" state, where
+a tap means *connect*: it calls `connect` for the same route, which the
+cooldown refuses, and the recovery sheet opens. There is no way to
+disconnect from that state on the Connection page. And the error state
+stays until the user picks a route or disconnects — it does not clear
+when the cooldown ends.
+
+## CEN-2 — the classifier could not say what the taxonomy asks of it (fixed as far as one route can see)
+
+**Fixed.** The string table stays locked and unchanged. Beside it, the
+engine classifies a failed proof from an *observation* — the phase the
+failure happened in (reach / handshake / carry), whether the transport is
+UDP, whether the family's first flight is a TLS ClientHello, and the kind
+of failure read from the error chain (`core/diagnostics/observe.go`,
+`ClassifyObservation`; spec "Classification by phase"). So a swallowed
+ClientHello is `tls_handshake_failed` and not `tcp_connect_timeout`, and a
+reset right after a ClientHello is `tls_sni_or_cert_block_suspected` and
+not `tcp_reset`. Where the error cannot be trusted to give a timeout's
+phase (a multiplexed outbound re-dials on the expired context and reports
+a connect timeout for a connection whose SYN was answered; naive reports
+everything from inside Cronet) the engine makes one bare TCP connect to
+the route's own address and port, after the attempt has failed, and takes
+the phase from that. What is left — a name-keyed reset vs an address-keyed
+one — needs a second name to the same address and is CEN-4.
+
+As found:
 
 **What.** Suppose CEN-1 were fixed by handing the dial error to
 `diagnostics.Classify`. For each blocked cell the rig records, as evidence
@@ -938,11 +1577,33 @@ as the best case.
 and `product_classify_of_that_error`. Or directly:
 `echo 'read tcp4 1.2.3.4:5->6.7.8.9:443: i/o timeout' | bin/wb-client --classify`.
 
-**Not done.** The mapping table is declared locked, and no string rule
-fixes it; the classification has to be made where the stage is known (the
-dialer) and, for SNI-vs-address, by a second probe.
+**Why no string rule could fix it.** The mapping table is declared locked;
+the classification had to be made where the stage is known (the
+dialer) and, for SNI-vs-address, by a second probe (CEN-4).
 
-## CEN-3 — three things a censor does that the taxonomy cannot name
+## CEN-3 — three things a censor does that the taxonomy could not name (fixed)
+
+**Fixed.** `specs/failure-taxonomy-v1.md` revision 2 names them:
+`udp_address_blocked`, `udp_port_blocked`, and `path_too_slow` — a
+*degraded* outcome: never `RecordFailure`, never a cooldown, its own
+`degraded[]` list in the explanation and `last_degraded_*` columns in the
+route store. It adds a fourth, `udp_no_reply`, for what one silent UDP
+route can honestly say, and a rule that a network-wide category is never
+derived from one route's silence. The scenarios now declare the new words
+and the raw differential probe proves them (`truth.category`: another
+host on the same port, then another port). Wired in the engine:
+`udp_no_reply` (every silent UDP route) and `path_too_slow` (the whole
+proof took longer than `slow_after_ms`, 2 s by default — see CEN-6, which
+replaced the first rule: "the round trip that succeeded, or an earlier
+attempt that timed out before the relay answered"). Under throttle-56k
+the proof takes 0.8–6 s depending on the family and the run; a path fast
+enough for the proof and too slow for a page is not detected until the
+engine counts bytes. The scenario declares `path_too_slow`, and which of
+"slow" and "nothing" the engine must have said is decided per connect by
+the time it took (CEN-6). The two narrower UDP words are produced by
+no engine path yet (CEN-4).
+
+As found:
 
 Found by writing down, per scenario and family, which category describes
 reality (`"category"` in `scenarios/*.json`) and having a raw probe check it.
@@ -971,7 +1632,152 @@ gateway answers, every SYN times out; per route it is
 `tcp_connect_timeout` / `udp_unavailable`, and only the aggregate says
 "nothing works".
 
-**Not done.** A spec revision, not a code fix.
+## CEN-6 — throttle-56k could not go red: a wrong "route is dead" behind a fresh-phone retry, an either-way cell, and a 5 s connect that read "Connected" (fixed)
+
+**As found** (review of the tree, then six full `throttle-56k` worlds, then
+two more while fixing it — the same in all of them). The scenario says
+every handshake completes and every family connects. In every full run:
+
+- the first naive phone and the first vless-reality phone FAILED their
+  connect after 8 s: `abi: the route started but carried no traffic`,
+  category `tls_handshake_failed` (naive; "cooldown 30m0s") or `unknown`
+  (vless-reality; "cooldown 5m0s"), posture `Recovery`. The session's
+  MustEstablish loop stopped that phone, started another with an empty
+  state directory, and every check after that — `engine.category` among
+  them — was about the second phone. Evidence: `connect_attempts: 2`,
+  exit 0.
+- the cell was declared `path_too_slow|none`, so "slow" and "nothing to
+  report" were both green, on any family, in any run.
+- websocket-tls, shadowsocks, hysteria2 and tuic came back plain
+  "Connected" (`route_check: ok`) with `set_route_ms` between 4.7 and
+  5.6 s: the first proof attempt had run out its 4 s AFTER the relay
+  answered (phase carry), the second succeeded in about a second, and
+  `runProof` counted a carry-phase timeout as "a dead target, says nothing
+  about the route".
+
+So on this scenario the engine could say dead, connected or slow and the
+row stayed green.
+
+**What the first-phone failures were.** Not the scenario: the phone
+before. They happened to naive and to vless-reality and to nobody else —
+the two families that come after hysteria2 and after tuic. A QUIC family
+keeps sending for seconds after its client is gone, and a 56 kbit/s netem
+queues what it cannot forward: measured at the start of each session,
+the censor's qdisc toward the client still held 23–32 packets (≈ 43 kB,
+nine seconds at that rate) after a QUIC session and 3–18 after the
+others. The next phone's SYN sat behind them: `attempt 1 (reach): dial
+tcp 203.0.113.10:443: i/o timeout | attempt 2 (carry): context deadline
+exceeded`. A family run alone, or first, connected on its first phone
+every time. One phone's traffic failing another phone's connect is
+cross-talk of the rig.
+
+**Fix.**
+
+- Engine (`core/engine/proof.go`, `proofWasSlow`): a proof that succeeded
+  is slow when the whole proof — failed attempts included — took longer
+  than `slow_after_ms`. The person who tapped Connect waited through all
+  of it, and the phase an earlier attempt died in cannot tell a dead
+  target from a capped path. A 5 s connect is now "Connected, but very
+  slow" (`path_too_slow`, degraded, no cooldown). Cost, accepted: one
+  proof target that is silent from the relay's side makes the connects
+  that draw it first read "slow"; they were.
+- Rig, the retry: every connect attempt is recorded (`connects` in the
+  `tunnel` evidence — what each phone was told, its category, posture and
+  the cooldown line), and `engine.first_verdict` judges the FIRST one
+  alone: it must be `connected`. The retry is kept, because
+  `family/established` and the wire check need a connected engine, but it
+  can no longer make anything green.
+- Rig, the cell: the scenario declares `path_too_slow`. For one connect
+  exactly one answer is right, and the time the connect took decides it
+  (`slowCategoryFor`): over 2 s the engine must have said
+  `path_too_slow`; within 2 s it must have said nothing (the taxonomy's
+  "What one route can see"); either is accepted only in a 150 ms band in
+  which `set_route_ms` cannot say which side the proof was on. A failure
+  category is red in every case. A unit test refuses any scenario that
+  declares an alternation.
+- Rig, the cross-talk: before a session on a shaped link the driver
+  waits until the censor's qdiscs are empty (`shaper_backlog_packets`,
+  `waited_for_quiet_ms` on `control.before`; a shaper that does not drain
+  in 60 s is a red `link.quiet`).
+
+**After** (three full worlds): every first phone connected
+(`connect_attempts: 1` everywhere), waits of 0.3–9.3 s for the queue,
+connects of 0.8–3.0 s; `none` on the four connects under 2 s and
+`path_too_slow` on the other three, each as its time requires. Heavy-loss,
+lossy-throttle and clean are unchanged and green.
+
+**Reproduce.** Before the fix: `./run.sh --mgmt=tree throttle-56k`, exit
+0, and in `results.jsonl` `connect_attempts: 2` on naive and
+vless-reality. The failure itself, now visible instead of retried away:
+`WB_NO_QUIET=1 ./run.sh --mgmt=tree throttle-56k` → `engine.first_verdict`
+red with the first phone's error, category and cooldown.
+
+**Not verified:** on a phone or a real throttled network; the rig's
+throttle is a symmetric netem cap.
+
+### CEN-O5 — what the engine says behind seconds of queue
+
+With `WB_NO_QUIET=1` (above) the first phone starts on a link that has
+about nine seconds of somebody else's packets queued toward it. Its
+connection proof is two attempts of 4 s; neither finishes; the engine
+reports a failed connect — truthfully, nothing was carried — with the
+category of a handshake that was swallowed (`tls_handshake_failed`, after
+the reach check finds the address alive) or `unknown` (the relay answered,
+then nothing), and the route is cooled down for 5 to 30 minutes. Ten
+seconds later the same route connects in two.
+
+That is recorded, not fixed. From one route's seat a handshake still
+crawling when the budget ends is the same silence as one a filter
+dropped (`specs/failure-taxonomy-v1.md`, "What one route can see", now
+says so). What would tell them apart is a measurement the engine does not
+make: how long the bare SYN to the relay took in the reach check (seconds
+behind a queue, milliseconds under an SNI filter), or bytes still
+arriving when the attempt timed out. Until then a phone on a link this
+congested is told "could not connect" and waits out a cooldown, and the
+publisher's recommender is sent the SNI-block signal for it.
+
+## CEN-4 — one route cannot tell apart what needs two observations
+
+**What.** The connection proof (CEN-1) makes one observation per route.
+Several taxonomy categories are statements about the network and need
+two. The engine reports the category that is true of what it saw and
+never guesses the narrower one:
+
+| the censor does (raw differential probe) | the engine reports | to tell apart it would need |
+|---|---|---|
+| `udp_unavailable` (all UDP dropped) | `udp_no_reply` | a datagram to another host and port |
+| `quic_unavailable` (QUIC-shaped datagrams dropped) | `udp_no_reply` | a non-QUIC datagram to the same endpoint |
+| `udp_address_blocked` | `udp_no_reply` | UDP to another host on the same port |
+| `udp_port_blocked` | `udp_no_reply` | UDP on another port |
+| `tcp_reset` keyed on the address, TLS family | `tls_sni_or_cert_block_suspected` | a ClientHello with another name to the same address |
+
+Full run: 14 of the 40 blocked sessions (11 UDP, 3 reset —
+tcp-reset-mid-handshake × vless-reality, websocket-tls, anytls). The
+report's ENGINE CATEGORY line lists every truth → reported pair.
+
+**Why it matters, and why it is not worse.** `udp_no_reply` cools down the
+one route for 5 minutes and nothing else; the wrong answers it replaces
+(`udp_unavailable`, `quic_unavailable`) would disable every UDP family on
+the network for two hours on the evidence of one dead address. But
+selection cannot yet learn "UDP is gone here, skip hysteria2 and tuic"
+from the engine — it will try each. `tls_sni_or_cert_block_suspected`
+cools the family for an hour where `tcp_reset` would cool it for five
+minutes: on an address-keyed reset that is the harsher of the two.
+
+**Reproduce.**
+
+```
+./run.sh --mgmt=tree relay-ip-block hysteria2            # expect=udp_address_blocked got=udp_no_reply
+./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality   # expect=tcp_reset got=tls_sni_or_cert_block_suspected
+```
+
+**Not done.** The second observation is a probe the device sends outside
+any route (another host, another port, another name) — what it sends and
+to whom is a fingerprinting decision and belongs to the prober of the
+selection stage, which this change was told not to build.
+`abi.CheckActiveRoute` and `diagnostics.ClassifyObservation` are where its
+result plugs in; the categories and their behaviours are already in the
+spec. Acceptance: the known-findings entry goes stale cell by cell.
 
 ## CEN-O1 — shadowsocks and anytls answer opaque bytes with an instant reset
 
@@ -1043,7 +1849,7 @@ then `./run.sh --mgmt=tree lossy-throttle naive`; or
 
 # Integration findings (INT-*) — found by running the whole matrix repeatedly
 
-## INT-1 — naive: the engine process dies with SIGSEGV in Cronet when a connection closes as its stream terminates
+## INT-1 — naive: the engine process dies with SIGSEGV in Cronet when a connection closes as its stream terminates (fixed)
 
 **What.** During the third consecutive run of the full matrix, one naive
 session's engine process (`wb-client`, i.e. `daal/core/abi` with the
@@ -1146,25 +1952,90 @@ side by side. Every one has the identical stack.
 for i in 1 2 3 4; do WB_RESTART_CYCLES=25 ./run.sh --mgmt=tree --ops restarts clean naive & done; wait
 ```
 
-and look for `KNWN … engine.survived … [INT-1]` in the output; each hit keeps its stderr under
+and look for a red `engine.survived` in the output (while the finding was
+open it printed as `KNWN … engine.survived … [INT-1]`; it is now an
+unexpected red that fails the run); each hit keeps its stderr under
 `out/<run>/clients/NN-naive/stderr.log`.
 
-**What the rig does now.** A session whose engine process dies records a
+**What the rig does.** A session whose engine process dies records a
 red `engine.survived` with the crash signature, removes the dead VPN's
-routing the way Android would, and repeats the session once — so the crash
+routing the way Android would, and repeats the session once — so a crash
 is one red check with a name, not (as on first sight) "DNS blocked on
-naive" plus "ip rule: File exists" on the next family. Because it is a
-race, its `known-findings.json` entry is marked `intermittent` and is
-pinned to the signature (`BidirectionalStreamCancel`, family naive) with a
-budget of 6 per full run (a full matrix has seen 0, 1 and 2) and 2 per quick run (quick has seen 0 and 1; the count is printed in the pre-push result line): any other engine death, on any family, fails the
-run, and so does this one if it starts happening in every session.
+naive" plus "ip rule: File exists" on the next family. While this finding
+was open that check was excused, pinned to the signature
+(`BidirectionalStreamCancel`, family naive) with a per-run budget. It is
+not excused any more: any engine death, on any family, fails the run.
 
-**Not fixed here**: the defect is in a dependency. The fix is upstream's
-(hold `c.access` across the CAS and the native call in `Close`/`Read`/
-`Write`, and across `Destroy` in `terminate`, or reference-count the
-stream); Daal's part is to bump `cronet-go` once it lands, or carry a
-`replace` to a patched fork. Worth checking upstream first: newer
-`cronet-go` commits may already serialise this.
+**Fixed by a dependency bump — proven on Linux, NOT on Android.**
+
+*Upstream.* `cronet-go` fixed exactly this on 2026-09-12: commit
+`172bb4ede18c`, "Fix bidirectional stream cancel racing with destroy" —
+`cancelled` becomes a plain bool guarded by `c.access`, `Close` and the
+two deadline paths call `cancelLocked()` under the lock, and `terminate`
+calls `Destroy` under the same lock. No tagged release contains it (the
+newest Go-importable tag, `v0.0.1-143.0.7499.109-1`, is from December
+2025 and older than what was pinned); it ships as the module-branch build
+`v0.0.0-20260912104727-0d28acc44093`, which is what **sing-box 1.14.1
+and later** pin. sing-box 1.13.x never picked it up (1.13.21 pins
+`20260807…`).
+
+*What was done.* `cronet-go` and `cronet-go/all` are bumped to that build
+— and `cronet-go/lib/*` to the matching `20260912104006-c10c03c318db` —
+in `core/go.mod`, `cmd/daal-core`, `cmd/daal-soak-engine` and the rig's
+`labclient`. sing-box stays at 1.13.12; its naive outbound compiles
+against the newer cronet-go unchanged. No fork, no `replace`.
+
+*Proof.* The reproduction above, on this laptop, on an isolated copy of
+`main` plus this change:
+
+| cronet-go | worlds | naive sessions | engine deaths |
+|---|---|---|---|
+| `20260513…` (was pinned) | 20 | 520 | 3 — two with the `BidirectionalStreamCancel` stack above, one glibc abort `double free or corruption (!prev)` with no Go stack |
+| `20260912…` (now pinned) | 40 | 1040 | 0 |
+
+The rate before is lower than the 3-in-104 first recorded, because the
+relay no longer restarts twice per revoke (INT-O1). The glibc abort is a
+second way the same use-after-free can end; it was not in
+`known-findings.json` and would have failed a run on its own. With the
+old rate (~0.6 %), 1040 clean sessions happen by chance about one time in
+400. The entry is deleted from `known-findings.json`: an engine death on
+naive is an unexcused red check again.
+
+*What is NOT verified — read this before shipping an APK.* Only
+linux/amd64 was run, with the `libcronet.so` that ships inside the
+`lib/linux_amd64` module at the matching version. On Android the library
+is not taken from a module: it is relinked by hand from
+`lib/android_*/libcronet.a` (`tools/cronet/build-libcronet-android.sh`,
+a multi-GB Chromium toolchain) and reused across engine builds. **The
+bump changes that library's C ABI** — `Cronet_Engine_SetUdpDialer` gained
+an argument between the two versions, for one — so an APK that packages
+the old `libcronet.so` beside the new Go wrapper is undefined behaviour,
+not a fixed crash. Two guards were added because of that, neither of
+which was run against a real NDK here:
+
+* `build-libcronet-android.sh` now relinks the `libcronet.a` of the
+  version `core/go.mod` pins (it took whichever sorted first in the
+  module cache — after a bump, the old one) and writes a version stamp
+  beside the `.so`;
+* `build-engine-android.sh` refuses to package a `libcronet.so` whose
+  stamp is missing or does not match (`tools/cronet/check-libcronet-
+  stamp.sh`; `DAAL_NAIVE=0` builds without naive). Every existing
+  `libcronet.so` is unstamped and will be refused until rebuilt.
+
+So: **the Android `libcronet.so` must be rebuilt for all shipped ABIs
+before the next APK**, and naive must be exercised on a phone afterwards.
+Nothing here shows the race ever fired on a device, and nothing here
+shows the new pair works on one.
+
+*Also not verified*: iOS/darwin/windows builds; `cmd/daal-soak-engine`
+beyond `go build`.
+
+*Upstream report*: none to file — upstream found and fixed it. If a
+reference is wanted for a sing-box 1.13.x backport request: "naive
+outbound: process SIGSEGV in `cronet-go` `BidirectionalConn.Close` →
+`BidirectionalStream.Cancel` racing `terminate` → `Destroy` (fixed in
+cronet-go 172bb4ede18c, shipped in 1.14.1); 1.13.21 still pins
+cronet-go ec9a39c5ba3b, which has the race."
 
 ## INT-2 — naive: a relay whose naive inbound refuses every TLS handshake until sing-box restarts (root-caused: sing-box start-up race; fixed in the tree daemon)
 

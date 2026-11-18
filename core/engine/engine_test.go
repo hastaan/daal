@@ -20,17 +20,26 @@ func TestStubRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(ch)
-	gotConn, gotDisc := false, false
+	gotVerifying, gotConn, gotDisc := false, false, false
 	for ev := range ch {
-		if ev.State == "Connected" {
+		switch ev.State {
+		case StateVerifying:
+			gotVerifying = true
+		case StateConnected:
 			gotConn = true
-		}
-		if ev.State == "Disconnected" {
+		case StateDisconnected:
 			gotDisc = true
 		}
 	}
-	if !gotConn || !gotDisc {
-		t.Fatalf("missed events: conn=%v disc=%v", gotConn, gotDisc)
+	// A driver that has started knows nothing about the route yet: it
+	// says "Verifying". "Connected" is the ABI's to publish, after a
+	// proof (rig finding CEN-1) — a driver that says it on Start is the
+	// defect.
+	if !gotVerifying || !gotDisc {
+		t.Fatalf("missed events: verifying=%v disc=%v", gotVerifying, gotDisc)
+	}
+	if gotConn {
+		t.Fatal("Start published \"Connected\": an engine instance that started has proved nothing about its route")
 	}
 }
 

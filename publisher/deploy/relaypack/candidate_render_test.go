@@ -49,7 +49,7 @@ func mkDirectVPSRec() *provider.OperatorRecord {
 
 func TestRenderCandidates_DirectVPSFields(t *testing.T) {
 	rec := mkDirectVPSRec()
-	out, err := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+	out, err := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -84,8 +84,8 @@ func TestRenderCandidates_DirectVPSFields(t *testing.T) {
 
 func TestRenderCandidates_OrderStable(t *testing.T) {
 	rec := mkDirectVPSRec()
-	a, _ := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
-	b, _ := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+	a, _ := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+	b, _ := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
 	if a.routes[0].ID != b.routes[0].ID || a.routes[1].ID != b.routes[1].ID {
 		t.Fatalf("rendering not order-stable")
 	}
@@ -101,7 +101,7 @@ func TestRenderCandidates_UDPFamilyMarkedGated(t *testing.T) {
 				PublicRiskTags: []string{"public_ip:5.75.0.1"}, OriginRiskTags: []string{}},
 		},
 	}
-	out, err := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+	out, err := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestRenderCandidates_AmneziaFamilyNormalised(t *testing.T) {
 				PublicRiskTags: []string{"public_ip:5.75.0.1"}, OriginRiskTags: []string{}},
 		},
 	}
-	out, err := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+	out, err := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestRenderCandidates_AmneziaFamilyNormalised(t *testing.T) {
 func TestRenderCandidates_PassThroughParams(t *testing.T) {
 	rec := mkDirectVPSRec()
 	rec.Candidates[0].Params = json.RawMessage(`{"reality_dest":"www.microsoft.com"}`)
-	out, err := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+	out, err := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestRenderCandidates_RejectsUnknownFamily(t *testing.T) {
 				ProbingRiskClass: "low", PublicRiskTags: []string{"public_ip:5.75.0.1"}, OriginRiskTags: []string{}},
 		},
 	}
-	if _, err := renderCandidates(rec, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"); err == nil {
+	if _, err := renderCandidates(rec, EndpointMaterialFromRecord(rec), "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"); err == nil {
 		t.Fatalf("expected error for unknown family")
 	}
 }

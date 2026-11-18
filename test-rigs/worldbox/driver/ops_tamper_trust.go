@@ -235,9 +235,7 @@ func trustExpiry(rc *RunCtx, phase string) {
 		t0 := time.Now()
 		base, out := "base-"+tag+".sbp", "pack-"+tag+".sbp"
 		at := time.Now().Add(-time.Duration(daysAgo) * 24 * time.Hour).Unix()
-		v := rc.Pub.Deploy(rc.Ctx, "bind-and-sign", "--operator-record", rc.Pub.Path("record.json"),
-			"--priv-key", rc.Pub.Path("publisher.priv"), "--output", rc.Pub.Path(base),
-			"--publisher-name", "Worldbox Publisher", "--now-unix", strconv.FormatInt(at, 10), "--expiry-days", strconv.Itoa(window))
+		v := rc.Pub.BindAndSign(rc.Ctx, base, "--now-unix", strconv.FormatInt(at, 10), "--expiry-days", strconv.Itoa(window))
 		if v.OK() {
 			v = rc.Pub.PackSBP(rc.Ctx, base, "creds-r1.json", out)
 		}

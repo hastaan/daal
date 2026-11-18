@@ -39,6 +39,13 @@ import {
     type ExistingServer,
 } from './wizardCommands';
 import { RELAYPACK_PHASE } from './phase';
+import { MoreWaysToConnect } from './MoreWaysToConnect';
+import {
+    enabledFamiliesFor,
+    recallExtraFamilies,
+    rememberExtraFamilies,
+    toggleExtraFamily,
+} from './extraFamilies';
 import { ensureHelperIp, reAllowlist, detectPublicIp, isValidIp } from './helperIp';
 import { isHarnessActive } from '../harness/scenarios';
 import { isTauriRuntime } from '../backends';
@@ -337,9 +344,19 @@ export default function PublisherWizard({
     // later fails bind-and-sign with "OperatorRecord carries no
     // candidates".
     const toolboxProfile = 'iran-default';
+    // "More ways to connect": the profile's opt-in families the operator
+    // ticked on screen 2. Nothing is ticked by default and the section
+    // starts collapsed.
+    const [extraFamilies, setExtraFamilies] = useState<string[]>([]);
+    const [moreWaysOpen, setMoreWaysOpen] = useState(false);
     // Empty array = use the profile's DefaultEnabled candidates
-    // (vless-reality, websocket-tls, naive, hysteria2).
-    const enabledFamilies = useMemo<string[]>(() => [], []);
+    // (vless-reality, websocket-tls, naive, hysteria2). Otherwise the
+    // defaults PLUS the ticked extras — the list replaces the defaults,
+    // it is not added to them (see extraFamilies.ts).
+    const enabledFamilies = useMemo<string[]>(
+        () => enabledFamiliesFor(toolboxProfile, extraFamilies),
+        [extraFamilies],
+    );
 
     // Screen 3 — the build.
     const [stage, setStage] = useState<BuildStage>('idle');
@@ -415,6 +432,12 @@ export default function PublisherWizard({
                 setProvider((state.provider || 'hetzner') as ProviderId);
                 if (state.server_type) setServerType(state.server_type);
                 if (state.nickname) setNickname(state.nickname);
+                // The ticked extras are chosen on screen 2 and used by
+                // the build; a relaunch in between must not silently
+                // fall back to the defaults.
+                const recalled = recallExtraFamilies(resumeOperatorId, toolboxProfile);
+                setExtraFamilies(recalled);
+                if (recalled.length > 0) setMoreWaysOpen(true);
                 setHasStoredToken(state.has_cloud_token);
                 // The old wizard never hydrated the fingerprint, so a
                 // resumed operator was re-offered "Generate keypair"
@@ -1360,6 +1383,37 @@ export default function PublisherWizard({
                                     <EmptyHint>{t('wiz.plan.empty')}</EmptyHint>
                                 )}
 
+                            {/* Opt-in transport families. Hidden once the
+                                box exists: the family set is baked into
+                                the server at build time and cannot be
+                                changed from here. */}
+                            {!alreadyProvisioned && (
+                                <MoreWaysToConnect
+                                    t={t}
+                                    profileSlug={toolboxProfile}
+                                    open={moreWaysOpen}
+                                    onToggleOpen={() => setMoreWaysOpen((o) => !o)}
+                                    selected={extraFamilies}
+                                    disabled={busy}
+                                    onChange={(family, on) => {
+                                        const next = toggleExtraFamily(
+                                            toolboxProfile,
+                                            extraFamilies,
+                                            family,
+                                            on,
+                                        );
+                                        setExtraFamilies(next);
+                                        if (operatorId) {
+                                            rememberExtraFamilies(
+                                                operatorId,
+                                                toolboxProfile,
+                                                next,
+                                            );
+                                        }
+                                    }}
+                                />
+                            )}
+
                             <div
                                 style={{
                                     fontSize: 11,
@@ -1397,6 +1451,11 @@ export default function PublisherWizard({
                                             ),
                                         );
                                     }
+                                    rememberExtraFamilies(
+                                        operatorId,
+                                        toolboxProfile,
+                                        extraFamilies,
+                                    );
                                     mark('plan');
                                     setStepIdx(2);
                                 }}

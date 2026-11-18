@@ -126,22 +126,27 @@ type PublisherRow struct {
 
 // RouteRow mirrors a row in `routes`.
 type RouteRow struct {
-	RouteID              string
-	TransportFamily      string
-	Engine               string
-	SourceType           string
-	PublisherID          string
-	PublisherLabel       string
-	TrustState           string
-	ScarcityClass        string
-	ModesAllowed         []string
-	ExpiresAt            string
-	ImportedAt           string
-	LastSuccessBucket    string
-	LastFailureBucket    string
-	LastFailureCategory  string
-	ConsecutiveFailures  int
-	CooldownUntil        string
+	RouteID             string
+	TransportFamily     string
+	Engine              string
+	SourceType          string
+	PublisherID         string
+	PublisherLabel      string
+	TrustState          string
+	ScarcityClass       string
+	ModesAllowed        []string
+	ExpiresAt           string
+	ImportedAt          string
+	LastSuccessBucket   string
+	LastFailureBucket   string
+	LastFailureCategory string
+	ConsecutiveFailures int
+	CooldownUntil       string
+	// LastDegradedBucket / LastDegradedCategory: the route's last
+	// recorded outcome was a proof that succeeded in a degraded way
+	// (RecordDegraded). Both empty after a clean success or a failure.
+	LastDegradedBucket   string
+	LastDegradedCategory string
 	BytesUsedThisHour    int64
 	BytesUsedThisSession int64
 	UserNote             string
@@ -550,10 +555,41 @@ func (s *Store) RecordSuccess(routeID string, now time.Time) error {
 	}
 	_, err := s.db.Exec(`
 UPDATE routes SET
-  last_success_bucket  = ?,
-  consecutive_failures = 0,
-  cooldown_until       = NULL
+  last_success_bucket    = ?,
+  consecutive_failures   = 0,
+  cooldown_until         = NULL,
+  last_degraded_bucket   = '',
+  last_degraded_category = ''
 WHERE route_id = ?`, HourBucket(now), routeID)
+	return err
+}
+
+// RecordDegraded stamps a proof that SUCCEEDED but was a degraded
+// outcome — the route connected and carried a round trip, too slowly to
+// be called usable. It is a success for everything a success means
+// (the bucket advances, the failure counter resets, the cooldown clears:
+// the relay is reachable and the credential is good), and it
+// additionally records the degraded hour bucket and category so the
+// route is not presented as healthy.
+//
+// `category` MUST be a diagnostics.Category value from the degraded set
+// (today only path_too_slow); like RecordFailure, the caller passes the
+// string so routestore need not import diagnostics.
+func (s *Store) RecordDegraded(routeID, category string, now time.Time) error {
+	if routeID == "" {
+		return errors.New("routestore: empty routeID")
+	}
+	if category == "" {
+		return errors.New("routestore: empty degraded category")
+	}
+	_, err := s.db.Exec(`
+UPDATE routes SET
+  last_success_bucket    = ?,
+  consecutive_failures   = 0,
+  cooldown_until         = NULL,
+  last_degraded_bucket   = ?,
+  last_degraded_category = ?
+WHERE route_id = ?`, HourBucket(now), HourBucket(now), category, routeID)
 	return err
 }
 
@@ -586,10 +622,12 @@ func (s *Store) RecordFailure(routeID, category string, cooldownUntil, now time.
 	}
 	_, err := s.db.Exec(`
 UPDATE routes SET
-  last_failure_bucket   = ?,
-  last_failure_category = ?,
-  consecutive_failures  = MIN(consecutive_failures + 1, ?),
-  cooldown_until        = ?
+  last_failure_bucket    = ?,
+  last_failure_category  = ?,
+  consecutive_failures   = MIN(consecutive_failures + 1, ?),
+  cooldown_until         = ?,
+  last_degraded_bucket   = '',
+  last_degraded_category = ''
 WHERE route_id = ?`, HourBucket(now), category, maxConsecutiveFailures, cd, routeID)
 	return err
 }
@@ -629,7 +667,9 @@ SELECT route_id, transport_family, engine, source_type, publisher_id, publisher_
        COALESCE(modifiers_json, ''),
        COALESCE(relay_pack_id, ''),
        COALESCE(freshness_url, ''),
-       COALESCE(shared_risk_graph_json, '[]')
+       COALESCE(shared_risk_graph_json, '[]'),
+       COALESCE(last_degraded_bucket, ''),
+       COALESCE(last_degraded_category, '')
 FROM routes ORDER BY imported_at, route_id`)
 	if err != nil {
 		return nil, err
@@ -652,7 +692,8 @@ FROM routes ORDER BY imported_at, route_id`)
 			&r.TransportModuleSlug, &rrp,
 			&r.ExposureMode, &r.FamilyClass, &r.ProbingRiskClass,
 			&prt, &ort, &r.ModifiersJSON,
-			&r.RelayPackID, &r.FreshnessURL, &r.SharedRiskGraphJSON); err != nil {
+			&r.RelayPackID, &r.FreshnessURL, &r.SharedRiskGraphJSON,
+			&r.LastDegradedBucket, &r.LastDegradedCategory); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(modes), &r.ModesAllowed)
@@ -693,7 +734,9 @@ SELECT route_id, transport_family, engine, source_type, publisher_id, publisher_
        COALESCE(modifiers_json, ''),
        COALESCE(relay_pack_id, ''),
        COALESCE(freshness_url, ''),
-       COALESCE(shared_risk_graph_json, '[]')
+       COALESCE(shared_risk_graph_json, '[]'),
+       COALESCE(last_degraded_bucket, ''),
+       COALESCE(last_degraded_category, '')
 FROM routes WHERE route_id = ?`, id)
 	var r RouteRow
 	var modes, rrp, prt, ort string
@@ -710,7 +753,8 @@ FROM routes WHERE route_id = ?`, id)
 		&r.TransportModuleSlug, &rrp,
 		&r.ExposureMode, &r.FamilyClass, &r.ProbingRiskClass,
 		&prt, &ort, &r.ModifiersJSON,
-		&r.RelayPackID, &r.FreshnessURL, &r.SharedRiskGraphJSON); err != nil {
+		&r.RelayPackID, &r.FreshnessURL, &r.SharedRiskGraphJSON,
+		&r.LastDegradedBucket, &r.LastDegradedCategory); err != nil {
 		return r, err
 	}
 	_ = json.Unmarshal([]byte(modes), &r.ModesAllowed)

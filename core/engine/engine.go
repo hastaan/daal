@@ -29,6 +29,19 @@ type Driver interface {
 	Stop() error
 	Stats() (bytesIn, bytesOut int64, err error)
 	Subscribe(ch chan<- Event)
+	// Prove makes one real round trip through the running instance's
+	// active outbound (proof.go). Start returning nil is NOT a tunnel;
+	// only a successful Prove is. A driver with no instance returns a
+	// failed result with ErrNotRunning. Prove never changes the
+	// driver's lifecycle: tearing a route down after a failed proof is
+	// the caller's decision.
+	Prove(ctx context.Context, cfg ProofConfig) ProofResult
+	// PublishState tells subscribers what the ABI concluded from a
+	// proof ("Connected", "Degraded") — the driver itself only ever
+	// knows "Verifying".
+	PublishState(state string)
+	// PublishFailure tells subscribers a route failed its proof.
+	PublishFailure(cat diagnostics.Category, reason string)
 }
 
 // Stub is a deterministic in-process Driver suitable for unit tests and
@@ -39,6 +52,13 @@ type Stub struct {
 	connected bool
 	subs      []chan<- Event
 	failure   error
+	// proofs is the queue of results InjectProof staged; proofHook, when
+	// set, is asked instead. With neither, Prove succeeds — the Stub has
+	// no data plane to disprove, and the ABI refuses to activate a route
+	// on a build whose driver is the Stub (abi/dataplane.go).
+	proofs    []ProofResult
+	proofHook func(ctx context.Context, cfg ProofConfig) ProofResult
+	proved    int
 }
 
 // NewStub returns a fresh Stub.
@@ -62,8 +82,80 @@ func (s *Stub) Start(ctx context.Context, configJSON []byte) error {
 		return errors.New("engine: empty config")
 	}
 	s.connected = true
-	s.publishLocked(Event{Type: "state", State: "Connected", Bucket: hourBucket(time.Now())})
+	// "Verifying", not "Connected": the instance is up and nothing has
+	// been proved about the route yet. See proof.go.
+	s.publishLocked(Event{Type: "state", State: StateVerifying, Bucket: hourBucket(time.Now())})
 	return nil
+}
+
+// The state strings a driver and the ABI publish on the event stream.
+const (
+	StateVerifying    = "Verifying"
+	StateConnected    = "Connected"
+	StateDegraded     = "Degraded"
+	StateDisconnected = "Disconnected"
+)
+
+// Prove returns the next injected result, or success.
+func (s *Stub) Prove(ctx context.Context, cfg ProofConfig) ProofResult {
+	s.mu.Lock()
+	if !s.connected {
+		s.mu.Unlock()
+		return ProofResult{Err: ErrNotRunning, Observation: diagnostics.Observation{Message: ErrNotRunning.Error()}}
+	}
+	s.proved++
+	hook := s.proofHook
+	var next *ProofResult
+	if hook == nil && len(s.proofs) > 0 {
+		r := s.proofs[0]
+		s.proofs = s.proofs[1:]
+		next = &r
+	}
+	s.mu.Unlock()
+	if hook != nil {
+		return hook(ctx, cfg)
+	}
+	if next != nil {
+		return *next
+	}
+	return ProofResult{OK: true, Attempts: 1}
+}
+
+// InjectProof stages the results of the next Prove calls, in order.
+func (s *Stub) InjectProof(results ...ProofResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proofs = append(s.proofs, results...)
+}
+
+// SetProofHook makes every Prove call f instead (nil restores the
+// default). For tests that need a proof to block or to watch its
+// context.
+func (s *Stub) SetProofHook(f func(ctx context.Context, cfg ProofConfig) ProofResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proofHook = f
+}
+
+// ProofCount reports how many times Prove has run on a live stub.
+func (s *Stub) ProofCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.proved
+}
+
+// PublishState publishes a state event.
+func (s *Stub) PublishState(state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishLocked(Event{Type: "state", State: state, Bucket: hourBucket(time.Now())})
+}
+
+// PublishFailure publishes a failure event.
+func (s *Stub) PublishFailure(cat diagnostics.Category, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishLocked(Event{Type: "failure", Category: cat, Reason: reason, Bucket: hourBucket(time.Now())})
 }
 
 // Stop stops the stub tunnel.
@@ -78,7 +170,7 @@ func (s *Stub) Stop() error {
 		return nil
 	}
 	s.connected = false
-	s.publishLocked(Event{Type: "state", State: "Disconnected", Bucket: hourBucket(time.Now())})
+	s.publishLocked(Event{Type: "state", State: StateDisconnected, Bucket: hourBucket(time.Now())})
 	return nil
 }
 

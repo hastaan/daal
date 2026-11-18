@@ -13,29 +13,38 @@ import json, hashlib, subprocess, sys, urllib.request, os, tempfile
 m = json.load(open(sys.argv[1]))
 pub = sys.argv[2]; target = sys.argv[3]
 for art in m["artefacts"]:
-    ok = False
+    ok = False; why = []
     for url in art["mirrors"]:
+        tmp = sig_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False) as f:
-                data = urllib.request.urlopen(url, timeout=30).read()
-                f.write(data); f.flush()
+            data = urllib.request.urlopen(url, timeout=30).read()
             if hashlib.sha256(data).hexdigest() != art["sha256"]:
-                continue
-            sig_path = f.name + ".sig"
+                why.append(f"{url}: sha256 mismatch"); continue
+            # Beside the destination, never /tmp: rename(2) cannot cross
+            # mounts, and /tmp is a tmpfs on many images.
+            with tempfile.NamedTemporaryFile(dir=target, prefix=".fetch-", delete=False) as f:
+                tmp = f.name; sig_path = tmp + ".sig"
+                f.write(data); f.flush(); os.fsync(f.fileno())
             open(sig_path, "wb").write(bytes.fromhex(art["sig_hex"]))
             r = subprocess.run(
                 ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", pub,
-                 "-rawin", "-in", f.name, "-sigfile", sig_path],
+                 "-rawin", "-in", tmp, "-sigfile", sig_path],
                 capture_output=True)
             if r.returncode != 0:
-                continue
+                why.append(f"{url}: signature did not verify"); continue
             dst = os.path.join(target, art["install_as"])
-            os.replace(f.name, dst); os.chmod(dst, 0o755)
+            os.chmod(tmp, 0o755); os.replace(tmp, dst); tmp = None
             ok = True; break
-        except Exception:
-            continue
+        except Exception as e:
+            why.append(f"{url}: {type(e).__name__}: {e}")
+        finally:
+            for p in (tmp, sig_path):
+                if p and os.path.exists(p):
+                    os.unlink(p)
     if not ok:
         print(f"FAIL: no mirror passed verification for {art['name']}", file=sys.stderr)
+        for w in why:
+            print(f"  {w}", file=sys.stderr)
         sys.exit(1)
 PY
 )" "$MANIFEST" "$PUBKEY" "$TARGET"

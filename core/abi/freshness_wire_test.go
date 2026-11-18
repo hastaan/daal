@@ -18,17 +18,25 @@ package abi
 // That is the same failure shape that made Wave 2's multiplex inert.
 //
 // So: testdata/freshness-3mirrors.sbp is REAL OUTPUT of the real
-// publisher path, minted by
+// publisher path, minted by testdata/mint-freshness-fixtures.sh:
 //
 //	daal-deploy provision --dry-run --pubkey-file pub.bin --region fsn1 \
 //	    --toolbox-profile iran-default --helper-ip 203.0.113.9 -o rec.json
 //	daal-deploy bind-and-sign --operator-record rec.json --priv-key priv.bin \
-//	    --output fixture.sbp --expiry-days 3650 \
+//	    --endpoint-creds creds.json \
+//	    --output signed.sbp --expiry-days 3650 \
 //	    --freshness-mirror ghpages=https://freshness.pages.invalid/f/abc.json \
 //	    --freshness-mirror r2=https://cdn-r2.invalid/daal/f/abc.json \
 //	    --freshness-mirror bunny=https://b-cdn.invalid/daal/freshness/abc.json \
 //	    --revocation-url https://revoke.invalid/daal/rev.json \
 //	    --revocation-pub-hex <32-byte hex>
+//	daal-deploy users-pack-sbp --in signed.sbp --creds-file creds.json \
+//	    --server <relay> --out fixture.sbp
+//
+// The last step matters: what a recipient imports is the pack with
+// THEIR credentials in it. bind-and-sign's own output holds no
+// credentials and is refused on a device that has none to merge it
+// into (bundle/go/importer endpoint_plan.go).
 //
 // It is a byte fixture and not a builder because a builder written in
 // this module would re-implement the publisher's encoder, and then the

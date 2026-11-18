@@ -52,6 +52,13 @@ var e2eBindNow = time.Now().UTC().Add(-time.Hour)
 //
 // This is the single test that proves the FRP-4b chain works end
 // to end without a live cloud.
+// The relay's non-secret connection material (REALITY public key, TLS
+// key pin) as a provisioned record carries it.
+const (
+	e2eRealityPub = "ZTJlLXJlYWxpdHktcHVibGljLWtleS0zMi1ieXRlcy0"
+	e2eTLSPin     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+)
+
 func TestFRP4b_DryRunProvisionThenBindAndSign(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -109,6 +116,12 @@ func TestFRP4b_DryRunProvisionThenBindAndSign(t *testing.T) {
 		t.Fatalf("PublicIP malformed: %v", rec.PublicIP)
 	}
 
+	// A dry-run record describes a relay that was never booted, so it
+	// has none of the connection material a real provision reads off
+	// the box. Without it no route can be given a signed endpoint and
+	// the pack is (rightly) not signed; supply what the box would have.
+	rec.RealityPublicKey, rec.TLSCertSHA256 = e2eRealityPub, e2eTLSPin
+
 	// 4) Bind-and-sign in-process. We pin --now-unix via opts.Now
 	//    so the .sbp is byte-deterministic across reruns.
 	res, err := relaypack.BindAndSign(&rec, priv, relaypack.BindOpts{
@@ -152,8 +165,9 @@ func TestFRP4b_BindAndSignDeterministicCrossRun(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	rec := &provider.OperatorRecord{
 		Provider: "hetzner", ServerID: "12345", Region: "fsn1",
-		ServerType:      "cx22",
-		PublicIP:        net.ParseIP("5.75.0.1"),
+		ServerType:       "cx22",
+		PublicIP:         net.ParseIP("5.75.0.1"),
+		RealityPublicKey: e2eRealityPub, TLSCertSHA256: e2eTLSPin,
 		PublisherPubKey: append([]byte(nil), pub...),
 		Candidates: []provider.CandidateMeta{
 			{Family: "vless-reality", ExposureMode: "direct_vps",

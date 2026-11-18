@@ -17,5 +17,5 @@
     {"name": "udp-8443-dropped", "probe": "udp", "to": "elsewhere", "port": 8443, "shape": "plain", "expect": "dropped"}
   ],
   "expect": {"*": "blocked", "vless-reality": "pass", "hysteria2": "pass"},
-  "category": {"*": "tcp_connect_timeout", "tuic": "udp_unavailable"}
+  "category": {"*": "tcp_connect_timeout", "tuic": "udp_port_blocked"}
 }

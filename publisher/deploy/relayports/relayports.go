@@ -44,8 +44,8 @@ var declaredFor = map[string]Endpoint{
 	// 8443 is NOT whitelisted egress in the target country, so a
 	// tuic route is worth zero there — the same honest caveat that
 	// applies to naive and websocket-tls below. Serving tuic also
-	// needs 8443/udp opened, which ExtraFirewallPorts deliberately
-	// does not do; see its comment.
+	// needs 8443/udp opened, which FirewallPortsFor does only for
+	// a relay that serves the family; see its comment.
 	"tuic": {Port: 8443, UDP: true},
 
 	// WAVE 5 / shadowsocks-2022. Daal mints exactly ONE method under
@@ -101,7 +101,7 @@ var declaredFor = map[string]Endpoint{
 	// the cover HOST, not to a local sibling listener, so the
 	// fallback is a way to look innocent, not a way to multiplex two
 	// Daal services. Sharing 443 needs the port-sharing spike this
-	// repo has recorded as unstarted (see ExtraFirewallPorts), not a
+	// repo has recorded as unstarted (see FirewallPortsFor), not a
 	// different port number.
 	//
 	// THE COST, stated as plainly as the 8444/8445 note below. 8447
@@ -180,146 +180,84 @@ func For(family string) Endpoint {
 	return Endpoint{Port: 443, UDP: false}
 }
 
-// ExtraFirewallPorts lists the data-plane ports that must be opened
-// BEYOND the 443/tcp + 443/udp + 80/tcp baseline for the served
-// families. Keep in sync with For(): naive=8444/tcp, websocket-tls=8445/tcp.
-//
-// KNOWN, UNFIXED, AND DELIBERATELY RECORDED HERE (Wave 2 Step 6, not
-// done). Both entries are the same two numbers on every relay Daal has
-// ever built, so one `drop tcp dport 8444,8445` is a single censor
-// action that takes two of four tiers down across the whole fleet —
-// precisely the correlated failure this wave set out to remove, solved
-// for the cover-SNI axis and untouched on the port axis. Worse, under
-// the target country's protocol-whitelist posture (only 53/80/443
-// egress) these two tiers cannot start there at all: they were proven
-// from outside, and inside they are worth zero.
-//
-// The fix is port SHARING on 443, not a different port number, and it
-// carries the one genuine unknown of the wave — whether sing-box
-// 1.13.12's REALITY inbound can hand a fallback connection to a local
-// ws listener while the client still completes a real TLS handshake to
-// it. That needs a spike against a live box before any code is written,
-// so it is out of this wave rather than half-done in it.
-//
-// anytls IS here for the same reason as shadowsocks: cmd/daal-relay-mgmt
-// creates the anytls-in inbound for every recipient it provisions, with
-// no profile switch in between, so a shut 8447 would be a route that
-// mints and cannot be dialled. TCP only — the inbound is TCP and anytls
-// carries UDP over its own session layer, so there is no 8447/udp rule.
-//
-// shadowsocks IS here, unlike tuic, because the box really does serve
-// it: cmd/daal-relay-mgmt creates the ss-in inbound for every recipient
-// it provisions, exactly as it does for naive and ws, with no profile
-// switch in between. A served family with a shut port is a route that
-// mints and cannot be dialled — the one outcome this wave forbids. Note
-// TCP only: the inbound is `"network":"tcp"` and UDP rides
-// udp_over_tcp, so there is no 8446/udp rule to add.
-//
-// tuic is intentionally absent from THIS list and lives in
-// ExtraFirewallPortsFor instead. See that function for the decision and
-// the reasoning; the short version is that tuic is the first family a
-// relay can be provisioned WITHOUT, so its port must not join the
-// fleet-wide constant.
-// WHY 8446/8447 ARE NOT HERE, corrected 2026-08-18.
-//
-// They were briefly baseline, which meant a fleet-wide open port for
-// two families both shipped profiles mark `default_enabled: false` —
-// two credentialled, publicly reachable, UNADVERTISED listeners on
-// every relay, and two more constants a single
-// `drop tcp dport 8444,8445,8446,8447` takes at once. For a tool whose
-// whole premise is not looking like a proxy, a port that is open on
-// every relay and serves nothing is a free fingerprint.
-//
-// The argument for keeping them was that shutting them would strand an
-// operator who DOES enable the family, minting a route whose packets
-// die at the firewall — the one outcome this wave forbids. That is a
-// real failure, but it is not what happens: the firewall ruleset is
-// rendered PUBLISHER-side from the relay's actual family set
-// (provider.go calls ExtraFirewallPortsFor(served), and the cloud-init
-// template takes it as RenderInput.DataPlanePorts), so the port opens
-// exactly on the relays that serve the family. That is how tuic has
-// always worked; ss and anytls simply did not inherit it.
-//
-// WHAT IS STILL ASYMMETRIC, deliberately. cmd/daal-relay-mgmt still
-// creates ss-in and anytls-in for EVERY recipient, because both are
-// documented as never existing with an empty users[] and so cannot be
-// pre-created by cloud-init the way tuic-in is. With the ports shut
-// those listeners are unreachable from outside, so the fleet-wide
-// exposure is gone — but a relay serving neither family still binds two
-// local sockets and holds credentials for them in its config. Removing
-// that needs the box to learn its own family set (an /etc/daal file
-// written at first boot) and changes what the box boots with, on a box
-// with no SSH where rescue mode is the only way back. Tracked in the
-// backlog; do the box side deliberately, not as a drive-by.
-func ExtraFirewallPorts() []Endpoint {
-	return []Endpoint{
-		{Port: 8444, UDP: false}, // naive
-		{Port: 8445, UDP: false}, // websocket-tls
-	}
+// LegacyFamilies is the family set of a relay that never declared one:
+// the four tiers every relay served before a relay could be provisioned
+// with a narrower (or wider) set. It is what a nil family list means to
+// FirewallPortsFor, and what the box's management daemon assumes on a box
+// whose cloud-init predates /etc/daal/families.
+func LegacyFamilies() []string {
+	return []string{"vless-reality", "hysteria2", "naive", "websocket-tls"}
 }
 
-// ExtraFirewallPortsFor is ExtraFirewallPorts plus the ports of the
-// OPT-IN families in `families` (the relay's actual candidate set, as
-// resolved from its toolbox profile). Order is stable: the baseline
-// first, then opt-in ports in a fixed order, so a rendered firewall
-// ruleset is byte-identical for the same family set.
-//
-// THE 8443/udp DECISION, and why it is conditional rather than baseline.
-//
-// The question ExtraFirewallPorts poses is whether to open 8443/udp for
-// tuic. Both available answers are wrong on their own:
-//
-//   - Leave it shut. Then a publisher who enables tuic mints a route
-//     whose packets are dropped by the cloud firewall before they ever
-//     reach sing-box. That is a family that mints and cannot be dialled
-//     — a route the recipient will select and lose — which is the one
-//     outcome this wave forbids outright.
-//   - Open it for everyone. Then every relay Daal builds carries a
-//     third constant port whether or not it serves tuic, and
-//     `drop udp dport 8443` becomes a fleet-wide censor action against a
-//     tier most relays do not even run. That is precisely the
-//     correlated-failure complaint ExtraFirewallPorts is written to
-//     apologise for, paid for nothing.
-//
-// So the port follows the family. tuic is the first family a relay can
-// be provisioned WITHOUT — vless/hy2 are in every cloud-init, naive/ws
-// are created on first recipient — and the toolbox profile already
-// decides it at provision time, which is also when both firewalls are
-// written. A relay that serves tuic opens 8443/udp; one that does not
-// looks exactly as it did before this wave.
-//
-// WHAT THE PORT COSTS WHERE IT MATTERS MOST. 8443 is not whitelisted
-// egress in the primary target country. Under a 53/80/443 protocol
-// whitelist a tuic route there is worth zero, exactly like naive on
-// 8444 and websocket-tls on 8445 — and worse than either, because the
-// adversary document states the goal as complete and permanent blocking
-// of outbound UDP, and Daal already ships one UDP tier (hysteria2) that
-// would fall to the same rule. Opening this port buys transport
-// diversity on OTHER networks. It does not buy a new lifeline in Iran,
-// and nothing user-visible may imply that it does.
-//
-// BOTH FIREWALLS OR NEITHER. The cloud-provider firewall (hetzner
-// FirewallEnsureForServer) and the box-side ufw rules baked by
-// cloud-init are separate gates and a packet has to pass both. ufw
-// rules are written once, at first boot, and there is no upgrade path
-// for cloud-init: turning tuic on for an existing relay means
-// reprovisioning it, not editing a rule.
-// optInPortFamilies are the families a relay can be provisioned
-// WITHOUT. Their ports open only on relays that actually serve them, so
-// the fleet does not carry a constant open port for a family nobody
-// enabled. Order is fixed so a rendered ruleset is byte-identical for
-// the same family set.
-var optInPortFamilies = []string{"tuic", "shadowsocks", "anytls"}
+// firewallOrder fixes the order FirewallPortsFor emits ports in, so a
+// rendered ruleset is byte-identical for the same family set whatever
+// order the caller listed the families in.
+var firewallOrder = []string{
+	"vless-reality", "hysteria2", "naive", "websocket-tls",
+	"tuic", "shadowsocks", "anytls",
+}
 
-func ExtraFirewallPortsFor(families []string) []Endpoint {
-	out := ExtraFirewallPorts()
+// FirewallPortsFor is the COMPLETE set of data-plane ports a relay
+// serving `families` must have open — in the cloud-provider firewall and
+// in the box-side ufw alike — and nothing else. A nil or empty list means
+// LegacyFamilies().
+//
+// THE RULE: A PORT FOLLOWS ITS FAMILY, EVERY FAMILY, INCLUDING THE FOUR
+// DEFAULTS. This used to be "443/tcp + 443/udp + 8444 + 8445 on every
+// relay, plus the ports of whichever opt-in families were enabled"
+// (ExtraFirewallPorts / ExtraFirewallPortsFor). The opt-in half was
+// right and the unconditional half was the same mistake it had been
+// written to avoid: a relay provisioned with `--families
+// shadowsocks,anytls` still carried four open ports — with four
+// listening, credentialled inbounds behind them — that no pack it ever
+// minted mentions (finding FAM-4, backlog W5-1). For a tool
+// whose premise is not looking like a proxy, a port that is open on a
+// relay and serves nothing its operator asked for is a free fingerprint
+// and an unowned attack surface.
+//
+// So there is no baseline any more. The served family set is resolved
+// ONCE, publisher-side, at provision time (relayconf.ServedFamilies),
+// and three things are derived from that one list: the sing-box inbounds
+// baked into cloud-init, the /etc/daal/families file the box's
+// management daemon obeys when it creates the on-first-use inbounds, and
+// this port list for both firewalls. A disagreement between any two is
+// either a route that mints and cannot be dialled, or a listener nobody
+// asked for.
+//
+// BOTH FIREWALLS OR NEITHER. The cloud-provider firewall and the ufw
+// rules cloud-init writes are separate gates and a packet has to pass
+// both. ufw rules are written once, at first boot, and there is no
+// upgrade path for cloud-init: changing a relay's family set means
+// reprovisioning it, not editing a rule.
+//
+// WHAT THE NON-443 PORTS COST, unchanged by any of this and still
+// unfixed (Wave 2 Step 6). 8444 (naive) and 8445 (websocket-tls) are the
+// same two numbers on every relay that serves those families, so one
+// `drop tcp dport 8444,8445` is a single censor action against two
+// tiers fleet-wide; 8443/udp (tuic), 8446 (shadowsocks) and 8447
+// (anytls) add to that constant on the relays that enable them. None of
+// those ports is whitelisted egress under the target country's
+// 53/80/443 posture, so inside it those tiers are worth zero. The fix is
+// port SHARING on 443, which needs a spike against a live box (can
+// sing-box 1.13.12's REALITY inbound hand a fallback connection to a
+// local listener while the client still completes a real TLS handshake
+// to it?) before any code is written. Nothing user-visible may imply
+// these ports buy a lifeline there.
+//
+// A family with no row in declaredFor contributes nothing: an unknown
+// name must not open For()'s 443/tcp default behind the operator's back.
+func FirewallPortsFor(families []string) []Endpoint {
+	if len(families) == 0 {
+		families = LegacyFamilies()
+	}
 	have := make(map[string]bool, len(families))
 	for _, f := range families {
 		have[f] = true
 	}
-	for _, f := range optInPortFamilies {
+	var out []Endpoint
+	for _, f := range firewallOrder {
 		if have[f] {
-			out = append(out, For(f))
+			out = append(out, declaredFor[f])
 		}
 	}
 	return out

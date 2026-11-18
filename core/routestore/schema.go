@@ -199,4 +199,14 @@ var migrations = []string{
 	"ALTER TABLE routes ADD COLUMN relay_pack_id                  TEXT NOT NULL DEFAULT ''",
 	"ALTER TABLE routes ADD COLUMN freshness_url                  TEXT NOT NULL DEFAULT ''",
 	"ALTER TABLE routes ADD COLUMN shared_risk_graph_json         TEXT NOT NULL DEFAULT '[]'",
+	// Connection proof (end-to-end rig findings CEN-1 / CEN-3). A route whose proof
+	// SUCCEEDED but was a degraded outcome (today: path_too_slow) is
+	// neither a success to celebrate nor a failure to cool down, and
+	// the five history columns have no way to say so. One hour bucket
+	// and one closed-vocabulary category, overwritten in place, cleared
+	// by the next clean success — the same privacy shape as the failure
+	// pair (see RecordFailure). Engine-recorded: UpsertRoute never
+	// writes them.
+	"ALTER TABLE routes ADD COLUMN last_degraded_bucket           TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE routes ADD COLUMN last_degraded_category         TEXT NOT NULL DEFAULT ''",
 }

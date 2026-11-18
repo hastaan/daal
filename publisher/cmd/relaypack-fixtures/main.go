@@ -39,6 +39,8 @@ import (
 
 	"daal/bundle-go/bundle"
 	relaypack "daal/bundle-go/relaypackvalidate"
+	rp "daal/publisher/deploy/relaypack"
+	"daal/publisher/deploy/relayports"
 )
 
 var emitManifestJSON = flag.Bool(
@@ -112,6 +114,7 @@ func buildVector(name, purpose string, m bundle.Manifest, profiles map[string][]
 		profiles = map[string][]byte{
 			"profiles/route.json": []byte(`{"type":"direct"}`),
 		}
+		commitEndpoints(name, &m, profiles)
 	}
 
 	dir := outDir()
@@ -175,6 +178,83 @@ func buildVector(name, purpose string, m bundle.Manifest, profiles map[string][]
 	}
 	writeFile(filepath.Join(dir, name+".expected.json"), body)
 	fmt.Printf("ok  %s\n", name)
+}
+
+// fixtureRelay is the relay every RelayPack vector describes: its
+// address, its (throwaway) data-plane certificate, and one recipient's
+// made-up credentials. NOTHING here is a real secret or a real host.
+//
+// A RelayPack's outbounds are held to the endpoint its manifest signs
+// (specs/relaypack-v1.md "Endpoint commitment"): a vector whose routes
+// carried an outbound and no commitment would be refused at import, and
+// the corpus is an IMPORT corpus as well as a validator one. So every
+// route that carries `_relaypack` is given a signed `_endpoint`, its own
+// profile path, and the outbound the real minter renders for it.
+const fixtureCertPEM = `-----BEGIN CERTIFICATE-----
+MIIBqTCCAU+gAwIBAgIUEmYmfNqrTQvdAylINy35qb6LAEowCgYIKoZIzj0EAwIw
+FTETMBEGA1UEAwwKZGFhbC1yZWxheTAgFw0yNjExMTgxODE2MzNaGA8yMTI2MTAy
+NTE4MTYzM1owFTETMBEGA1UEAwwKZGFhbC1yZWxheTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABLwTDBAzWjM4p/TnnkBVkuhjLL9lbxKivKIz6VndFnPg28Ei6EjE
+JVM11k7TkBsEU8qL4OQwLavGHflqHW+TIRGjezB5MB0GA1UdDgQWBBQASYXeH5kK
+AciGy5X9dZPF4+rJxDAfBgNVHSMEGDAWgBQASYXeH5kKAciGy5X9dZPF4+rJxDAP
+BgNVHRMBAf8EBTADAQH/MCYGA1UdEQQfMB2HBAVLAAGCFWNvdmVyLmZpeHR1cmUu
+ZXhhbXBsZTAKBggqhkjOPQQDAgNIADBFAiA9BunpXkya325v+uzpeC8AK0gjCTOv
+c8mLVCYsCe0soAIhAI02yBbdbzZQUYaTc3jpfZltMulFlDp5NGy761woL/pl
+-----END CERTIFICATE-----
+`
+
+func fixtureRelay() rp.ClientConnParams {
+	pin, err := bundle.SPKIPinFromCertPEM(fixtureCertPEM)
+	if err != nil {
+		log.Fatalf("fixture certificate: %v", err)
+	}
+	return rp.ClientConnParams{
+		Server:           "5.75.0.1",
+		Name:             "r1",
+		VLESSUUID:        "11111111-2222-3333-4444-555555555555",
+		RealityShortID:   "deadbeef",
+		RealityPublicKey: "Zml4dHVyZS1yZWFsaXR5LXB1YmxpYy1rZXktMzJieXRlcw",
+		Hy2Password:      "fixture-hy2-password",
+		NaivePassword:    "fixture-naive-password",
+		WSPath:           "/r1/cafebabe",
+		TLSCertSHA256:    pin,
+		TLSCertPEM:       fixtureCertPEM,
+		CoverSNI:         "cover.fixture.example",
+	}
+}
+
+// commitEndpoints gives every `_relaypack` route of a vector its signed
+// endpoint and a matching outbound. Routes without `_relaypack` (the
+// legacy vectors) are left exactly as they were.
+func commitEndpoints(name string, m *bundle.Manifest, profiles map[string][]byte) {
+	relay := fixtureRelay()
+	material := rp.EndpointMaterialFromParams(relay)
+	for i := range m.Routes {
+		r := &m.Routes[i]
+		var fsc map[string]json.RawMessage
+		if len(r.FamilySpecificConfig) == 0 || json.Unmarshal(r.FamilySpecificConfig, &fsc) != nil {
+			continue
+		}
+		if _, ok := fsc["_relaypack"]; !ok {
+			continue
+		}
+		port := relayports.For(r.TransportFamily).Port
+		ep, why := rp.EndpointFor(r.TransportFamily, port, material)
+		if ep == nil {
+			log.Fatalf("%s: route %s (%s): no endpoint: %s", name, r.ID, r.TransportFamily, why)
+		}
+		ob, err := rp.ClientOutboundForFamily(r.TransportFamily, port, relay)
+		if err != nil {
+			log.Fatalf("%s: route %s: outbound: %v", name, r.ID, err)
+		}
+		if err := bundle.CheckOutbound(r.TransportFamily, ep, ob); err != nil {
+			log.Fatalf("%s: route %s: fixture outbound does not match its own endpoint: %v", name, r.ID, err)
+		}
+		fsc[bundle.EndpointKey] = mustMarshal(ep)
+		r.FamilySpecificConfig = mustMarshal(fsc)
+		r.ConfigPath = "profiles/" + r.ID + ".json"
+		profiles[r.ConfigPath] = ob
+	}
 }
 
 func basePub() bundle.PublisherInfo {

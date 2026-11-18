@@ -662,3 +662,46 @@ func TestProvision_TheRecordMovesAsAWhole(t *testing.T) {
 		}
 	}
 }
+
+// FAM-4. A relay provisioned for a narrow family set carries nothing of
+// the families it was not asked to serve: not in the cloud firewall
+// (443/tcp and 443/udp used to be unconditional there), not in the
+// sing-box config cloud-init installs, and the box is told the set so
+// its management daemon does not create the rest on first use.
+func TestProvision_NarrowFamilySetLeavesNothingElseOpen(t *testing.T) {
+	f := newFakeVultr(t)
+	opts := mkOpts()
+	opts.EnabledFamilies = []string{"shadowsocks", "anytls"}
+	_, rec := mustProvision(t, f, opts)
+
+	rules := f.rulesFor(t, rec.ServerID)
+	for _, want := range []string{"v4|tcp|0.0.0.0|0|8446", "v6|tcp|::|0|8446", "v4|tcp|0.0.0.0|0|8447", "v6|tcp|::|0|8447"} {
+		if !rules[want] {
+			t.Errorf("served-family rule %q missing; have %v", want, keys(rules))
+		}
+	}
+	for _, bad := range []string{
+		"v4|tcp|0.0.0.0|0|443", "v6|tcp|::|0|443", "v4|udp|0.0.0.0|0|443", "v6|udp|::|0|443",
+		"v4|tcp|0.0.0.0|0|8444", "v4|tcp|0.0.0.0|0|8445", "v4|udp|0.0.0.0|0|8443",
+	} {
+		if rules[bad] {
+			t.Errorf("%q is open on a relay provisioned for shadowsocks+anytls only", bad)
+		}
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(f.lastUserData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, bad := range []string{`"vless-in"`, `"hy2-in"`, "ufw allow 443/tcp", "ufw allow 443/udp", "ufw allow 8444/tcp", "ufw allow 8445/tcp"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("cloud-init for a shadowsocks+anytls relay contains %q", bad)
+		}
+	}
+	for _, want := range []string{"run ufw allow 8446/tcp", "run ufw allow 8447/tcp", "path: /etc/daal/families", "      shadowsocks\n      anytls\n"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cloud-init for a shadowsocks+anytls relay is missing %q", want)
+		}
+	}
+}

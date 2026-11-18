@@ -516,19 +516,20 @@ func stringPtr(s string) *string { return &s }
 // to call multiple times for the same server; second call returns the
 // existing firewall ID without changing anything.
 //
-// Baseline rules (inbound):
-//   - 443/tcp from 0.0.0.0/0 + ::/0 (VLESS / HTTPS)
-//   - 443/udp from 0.0.0.0/0 + ::/0 (Hysteria2 / QUIC)
-//   - 80/tcp  from 0.0.0.0/0 + ::/0 (ACME http-01 future-proofing)
-//   - plus the caller's extraPorts — the families that can't share
-//     443/tcp with REALITY, resolved from this relay's own family set
-//     by relayports.ExtraFirewallPortsFor. nil means the fleet
-//     baseline.
+// Rules (inbound, from 0.0.0.0/0 + ::/0):
+//   - 80/tcp (ACME http-01 future-proofing; nothing on the box listens
+//     there and the box-side ufw does not open it)
+//   - dataPlanePorts — one per family THIS relay serves, from
+//     relayports.FirewallPortsFor(<its families>): 443/tcp only if it
+//     serves vless-reality, 443/udp only if it serves hysteria2, and so
+//     on. nil means a relay with no declared family set (the four
+//     legacy tiers).
 //
 // Hetzner closes everything else when any inbound rule is present,
 // so the random V2 mgmt port stays sealed until the wizard's
 // FirewallAddEphemeralRule punches a (helperIP, port) hole.
-func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID string, extraPorts []relayports.Endpoint) (string, error) {
+func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID string, dataPlanePorts []relayports.Endpoint) (string, error) {
+	extraPorts := dataPlanePorts
 	srvInt, err := strconv.ParseInt(serverID, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid server id %q: %w", serverID, err)
@@ -549,20 +550,18 @@ func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID strin
 	_, ipv4Any, _ := net.ParseCIDR("0.0.0.0/0")
 	_, ipv6Any, _ := net.ParseCIDR("::/0")
 	srcAny := []net.IPNet{*ipv4Any, *ipv6Any}
-	port443 := "443"
 	port80 := "80"
 	baseRules := []hcloud.FirewallRule{
-		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP, Port: &port443, SourceIPs: srcAny},
-		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolUDP, Port: &port443, SourceIPs: srcAny},
 		{Direction: hcloud.FirewallRuleDirectionIn, Protocol: hcloud.FirewallRuleProtocolTCP, Port: &port80, SourceIPs: srcAny},
 	}
-	// Data-plane ports for the families that can't share 443/tcp with
-	// REALITY. Derived from relayports so the firewall never drifts
-	// from the sing-box inbound generator or the box-side ufw rules,
-	// and per-relay rather than fleet-wide so an opt-in family's port
-	// is open exactly on the relays that serve it.
+	// Data-plane ports: one per served family, never a constant. 443/tcp
+	// and 443/udp were unconditional here once, which left them open on a
+	// relay provisioned without vless-reality or hysteria2 (finding
+	// FAM-4). Derived from relayports so the firewall never
+	// drifts from the sing-box inbound generator or the box-side ufw
+	// rules.
 	if extraPorts == nil {
-		extraPorts = relayports.ExtraFirewallPorts()
+		extraPorts = relayports.FirewallPortsFor(nil)
 	}
 	for _, ep := range extraPorts {
 		portStr := strconv.Itoa(ep.Port)

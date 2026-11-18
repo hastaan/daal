@@ -14,5 +14,5 @@
     {"name": "elsewhere-udp-spared", "probe": "udp", "to": "elsewhere", "port": 443, "shape": "plain", "expect": "delivered"}
   ],
   "expect": {"*": "blocked"},
-  "category": {"*": "tcp_connect_timeout", "hysteria2": "unknown", "tuic": "unknown"}
+  "category": {"*": "tcp_connect_timeout", "hysteria2": "udp_address_blocked", "tuic": "udp_address_blocked"}
 }
