@@ -1,0 +1,18 @@
+{
+  "name": "quic-drop",
+  "description": "Any UDP datagram from the client that carries a QUIC v1 Initial (long header, version 1) is silently dropped, on every port. Other UDP is untouched, and so is TCP. A QUIC handshake can never start; an app's UDP inside a TCP tunnel is unaffected.",
+  "analogue": "QUIC blocking by protocol rather than by port: Iran's QUIC/HTTP3 block of 22 September 2022 and the pre-blackout HTTP/3 collapse; the 2025 policy paper's 'immediate blocking of any simulated VPN connections such as QUIC'. Model: a stateless match on the QUIC invariant header (first nibble 0xC, version 0x00000001). It does NOT decrypt the Initial to read the SNI (the GFW's April 2024 QUIC-SNI blocking does; Daal's QUIC families send an IP-literal server name, so they carry no SNI to match), does not block QUIC v2, and an obfuscated QUIC (Hysteria2 salamander) would not match — Daal does not enable it.",
+  "censor": {
+    "nft": [
+      "ip saddr $CLIENT_IP meta l4proto udp @th,64,4 0xc @th,72,32 0x00000001 drop"
+    ]
+  },
+  "prove": [
+    {"name": "quic-initial-dropped", "probe": "udp", "to": "relay", "port": 443, "shape": "quic", "expect": "dropped"},
+    {"name": "quic-initial-dropped-any-port", "probe": "udp", "to": "elsewhere", "port": 8443, "shape": "quic", "expect": "dropped"},
+    {"name": "plain-udp-spared", "probe": "udp", "to": "relay", "port": 443, "shape": "plain", "expect": "delivered"},
+    {"name": "tcp-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass", "hysteria2": "blocked", "tuic": "blocked"},
+  "category": {"hysteria2": "quic_unavailable", "tuic": "quic_unavailable"}
+}

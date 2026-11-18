@@ -1,0 +1,13 @@
+{
+  "name": "shadowsocks",
+  "endpoint": {
+    "port": 8446,
+    "proto": "tcp"
+  },
+  "udp": "pass",
+  "dns": "pass",
+  "secrets": [
+    "ss_password"
+  ],
+  "note": "2022-blake3-aes-128-gcm, multi-user (ss_password is '<box iPSK>:<recipient uPSK>'; the control forges the recipient half). App UDP rides udp_over_tcp v2, so only 8446/tcp is opened."
+}

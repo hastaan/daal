@@ -1,0 +1,16 @@
+{
+  "name": "anytls",
+  "endpoint": {
+    "port": 8447,
+    "proto": "tcp"
+  },
+  "udp": "pass",
+  "dns": "pass",
+  "secrets": [
+    "anytls_password"
+  ],
+  "pins": [
+    "tls_cert_sha256"
+  ],
+  "note": "Forces pack spec_version 5 (asserted by the pack.spec_version check)."
+}

@@ -1073,3 +1073,115 @@ func TestHealthCapabilityConstantsMatchTheWire(t *testing.T) {
 		t.Errorf("mgmtAPIVersion = %d; the split-rotation contract is 2", mgmtAPIVersion)
 	}
 }
+
+// TestMutatingTokensAreSingleUse: the token signs nonce:ts:op and NOT
+// the body, so a token that can be presented twice authorises a second
+// call with a different body. For /users/revoke that is "revoke somebody
+// else"; for /rotate-credentials, "rotate somebody else"; for
+// /rotate-tls, "move the cover host again". The one-machine end-to-end
+// rig did exactly that against a running relay (its finding LC-1).
+//
+// The replay that matters is never a repeat of the same request, so
+// each case re-presents the token with a DIFFERENT body and asserts both
+// the 401 and that the second body had no effect.
+func TestMutatingTokensAreSingleUse(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	call := func(method, path, tok, body string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	fresh := func(op string) string { return mintToken(priv, op, srv.now().Unix()) }
+	hasUser := func(name string) bool {
+		body, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(string(body), `"name": "`+name+`"`) || strings.Contains(string(body), `"name":"`+name+`"`)
+	}
+
+	// The fixture already carries r1 and r2.
+	if !hasUser("r1") || !hasUser("r2") {
+		t.Fatal("fixture: r1 and r2 should both be on the box")
+	}
+
+	// users-provision: one token, two names.
+	tok := fresh("users-provision")
+	if code := call("POST", "/users/provision", tok, `{"name":"r3"}`); code != 200 {
+		t.Fatalf("provision r3 = %d, want 200", code)
+	}
+	if code := call("POST", "/users/provision", tok, `{"name":"r4"}`); code != 401 {
+		t.Fatalf("replayed users-provision token = %d, want 401", code)
+	}
+	if hasUser("r4") {
+		t.Error("a replayed users-provision token created a second recipient")
+	}
+
+	// users-revoke: one token, two victims.
+	tok = fresh("users-revoke")
+	if code := call("POST", "/users/revoke", tok, `{"name":"r1"}`); code != 200 {
+		t.Fatalf("revoke r1 = %d, want 200", code)
+	}
+	if code := call("POST", "/users/revoke", tok, `{"name":"r2"}`); code != 401 {
+		t.Fatalf("replayed users-revoke token = %d, want 401", code)
+	}
+	if !hasUser("r2") {
+		t.Error("a replayed users-revoke token revoked a recipient the publisher never named")
+	}
+
+	// rotate-credentials: one token, two recipients.
+	before, _ := os.ReadFile(configPath)
+	tok = fresh("rotate-credentials")
+	if code := call("POST", "/rotate-credentials", tok, `{"name":"r2"}`); code != 200 {
+		t.Fatalf("rotate r2 = %d, want 200", code)
+	}
+	mid, _ := os.ReadFile(configPath)
+	if string(before) == string(mid) {
+		t.Fatal("fixture: the first rotation should have rewritten the config")
+	}
+	if code := call("POST", "/rotate-credentials", tok, `{"name":"r3"}`); code != 401 {
+		t.Fatalf("replayed rotate-credentials token = %d, want 401", code)
+	}
+	if after, _ := os.ReadFile(configPath); string(after) != string(mid) {
+		t.Error("a replayed rotate-credentials token rotated a second recipient")
+	}
+
+	// rotate-tls: one token, two moves.
+	tok = fresh("rotate-tls")
+	//
+	// The first move must really land, or "the config did not change on
+	// the replay" below is true of a box that never moves at all.
+	before, _ = os.ReadFile(configPath)
+	if code := call("POST", "/rotate-tls", tok, `{"new_sni":"mirror.example.net"}`); code != 200 {
+		t.Fatalf("rotate-tls to mirror.example.net = %d, want 200", code)
+	}
+	mid, _ = os.ReadFile(configPath)
+	if string(before) == string(mid) || !strings.Contains(string(mid), "mirror.example.net") {
+		t.Fatal("fixture: the first rotate-tls should have moved the cover host in the config")
+	}
+	if code := call("POST", "/rotate-tls", tok, `{"new_sni":"other.example.net"}`); code != 401 {
+		t.Fatalf("replayed rotate-tls token = %d, want 401", code)
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(after) != string(mid) || strings.Contains(string(after), "other.example.net") {
+		t.Error("a replayed rotate-tls token moved the cover host again")
+	}
+
+	// A token refused for a bad signature must NOT burn anything: the
+	// nonce set only ever holds tokens that verified.
+	if code := call("POST", "/users/revoke", "n:1:users-revoke:AAAA", `{"name":"r2"}`); code != 401 {
+		t.Fatalf("garbage token = %d, want 401", code)
+	}
+
+	// The read-only verb stays replayable: a GET may be re-sent by the
+	// transport with the same token, and refusing that would turn a
+	// connection hiccup into a failed operation.
+	tok = fresh("users-list")
+	for i := 0; i < 2; i++ {
+		if code := call("GET", "/users/list", tok, ""); code != 200 {
+			t.Fatalf("users-list use %d = %d, want 200 (GET tokens are deliberately replayable)", i+1, code)
+		}
+	}
+}

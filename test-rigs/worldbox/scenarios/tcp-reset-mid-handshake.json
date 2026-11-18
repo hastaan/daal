@@ -1,0 +1,19 @@
+{
+  "name": "tcp-reset-mid-handshake",
+  "description": "Every TCP connection to the relay's address completes its three-way handshake and is then reset — toward both ends — on the first packet that carries data, whatever that data is. Not keyed on a name: another SNI to the same address dies the same way. UDP is untouched, so the QUIC families survive.",
+  "analogue": "RST injection against an address already suspected of being a proxy (censor-lab's tcp-reset-mid-handshake; the 20 August 2025 incident in which every TCP/443 connection across China was reset for 74 minutes). Model: address-keyed, first data packet, one reset each way, in-path. No residual timer, no probabilistic behaviour.",
+  "censor": {
+    "dpi": [
+      {"when": "first_data", "dst": "$RELAY_IP", "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "relay-reset-after-first-data", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "relay-reset-whatever-the-name", "probe": "tls", "to": "relay", "port": 443, "sni": "www.wb-control.example", "expect": "reset_after_hello"},
+    {"name": "relay-tcp-handshake-completes", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"},
+    {"name": "elsewhere-spared", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "udp-spared", "probe": "udp", "to": "relay", "port": 443, "shape": "quic", "expect": "delivered"}
+  ],
+  "expect": {"*": "blocked", "hysteria2": "pass", "tuic": "pass"},
+  "category": {"*": "tcp_reset"}
+}

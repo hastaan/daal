@@ -1,0 +1,16 @@
+{
+  "name": "tuic",
+  "endpoint": {
+    "port": 8443,
+    "proto": "udp"
+  },
+  "udp": "pass",
+  "dns": "pass",
+  "secrets": [
+    "tuic_uuid",
+    "tuic_password"
+  ],
+  "pins": [
+    "tls_cert_sha256"
+  ]
+}

@@ -1,0 +1,198 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// Publisher is the OUTSIDER: the person with the wizard. It owns a
+// keypair and a working directory and does everything by running the
+// REAL daal-deploy binary, unmodified, inside the publisher namespace —
+// the same verbs with the same flags the Tauri shim passes.
+//
+// Two things stand in for the wizard itself and are the rig's, not the
+// product's: generating the Ed25519 keypair (the wizard's keystore does
+// that) and remembering file paths between verbs.
+type Publisher struct {
+	p     Paths
+	Dir   string
+	steps int
+}
+
+// ToolboxProfile is the profile every relay in the rig is provisioned with.
+const ToolboxProfile = "iran-default"
+
+// Verb is the outcome of one daal-deploy invocation.
+type Verb struct {
+	Argv   []string
+	RC     int
+	Stdout string
+	Stderr string
+	Ms     int64
+}
+
+func (v Verb) OK() bool { return v.RC == 0 }
+
+// Tail is the end of stderr, for a check's detail line.
+func (v Verb) Tail() string {
+	s := strings.TrimSpace(v.Stderr)
+	if len(s) > 1500 {
+		s = "…" + s[len(s)-1500:]
+	}
+	return s
+}
+
+func NewPublisher(p Paths) (*Publisher, error) {
+	dir := filepath.Join(p.Run, "publisher")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "publisher.pub"), pub, 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "publisher.priv"), priv, 0o600); err != nil {
+		return nil, err
+	}
+	tok := make([]byte, 32)
+	_, _ = rand.Read(tok)
+	if err := os.WriteFile(filepath.Join(dir, "cloud.token"), []byte(fmt.Sprintf("%x\n", tok)), 0o600); err != nil {
+		return nil, err
+	}
+	return &Publisher{p: p, Dir: dir}, nil
+}
+
+func (pb *Publisher) Path(name string) string { return filepath.Join(pb.Dir, name) }
+
+// Deploy runs `daal-deploy <args>` as the publisher. The process sees the
+// lab's /etc/hosts (api.hetzner.cloud → the lab) and the lab CA; nothing
+// else about its environment differs from a laptop.
+func (pb *Publisher) Deploy(ctx context.Context, args ...string) Verb {
+	return pb.deployStdin(ctx, nil, args...)
+}
+
+func (pb *Publisher) deployStdin(ctx context.Context, stdin []byte, args ...string) Verb {
+	pb.steps++
+	script := `mount --bind "$WB_HOSTS" /etc/hosts && exec "$@"`
+	argv := inNS(NSPublisher, "unshare", "--mount", "--propagation", "private", "sh", "-c", script, "sh",
+		filepath.Join(pb.p.Bin, "daal-deploy"))
+	argv = append(argv, args...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = pb.Dir
+	cmd.Env = append(os.Environ(), "WB_HOSTS="+pb.p.Hosts(), "SSL_CERT_FILE="+pb.p.CA())
+	var so, se bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &so, &se
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	t0 := time.Now()
+	err := cmd.Run()
+	v := Verb{Argv: append([]string{"daal-deploy"}, args...), Stdout: so.String(), Stderr: se.String(), Ms: time.Since(t0).Milliseconds()}
+	if err != nil {
+		v.RC = 1
+		if ee, ok := err.(*exec.ExitError); ok {
+			v.RC = ee.ExitCode()
+		} else {
+			v.Stderr += "\n[worldbox] " + err.Error()
+		}
+	}
+	// Every verb, verbatim, in order: the publisher's side of the story.
+	rec, _ := json.Marshal(map[string]any{"n": pb.steps, "argv": v.Argv, "rc": v.RC, "ms": v.Ms, "stdout": v.Stdout, "stderr": v.Stderr})
+	if f, err := os.OpenFile(filepath.Join(pb.p.Run, "publisher-verbs.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		f.Write(append(rec, '\n'))
+		f.Close()
+	}
+	return v
+}
+
+// ---- the verbs, with the flags the app passes ------------------------
+
+func (pb *Publisher) Provision(ctx context.Context, families []string) Verb {
+	args := []string{"provision", "--provider", "hetzner", "--region", "fsn1", "--server-type", "cx22",
+		"--toolbox-profile", ToolboxProfile,
+		"--pubkey-file", pb.Path("publisher.pub"), "--token-file", pb.Path("cloud.token"),
+		"--helper-ip", PublisherIP, "--progress-json", "-o", pb.Path("record.json")}
+	if len(families) > 0 {
+		args = append(args, "--families", strings.Join(families, ","))
+	}
+	return pb.Deploy(ctx, args...)
+}
+
+func (pb *Publisher) BindAndSign(ctx context.Context, out string) Verb {
+	return pb.Deploy(ctx, "bind-and-sign", "--operator-record", pb.Path("record.json"),
+		"--priv-key", pb.Path("publisher.priv"), "--output", pb.Path(out),
+		"--publisher-name", "Worldbox Publisher")
+}
+
+// UsersProvision creates a recipient on the relay and saves the box's
+// credential reply to creds-<name>.json, as the wizard does.
+func (pb *Publisher) UsersProvision(ctx context.Context, name string) Verb {
+	v := pb.Deploy(ctx, "users-provision", "--record-file", pb.Path("record.json"),
+		"--priv-key", pb.Path("publisher.priv"), "--token-file", pb.Path("cloud.token"),
+		"--helper-ip", PublisherIP, "--name", name)
+	if v.OK() {
+		_ = os.WriteFile(pb.Path("creds-"+name+".json"), []byte(v.Stdout), 0o600)
+	}
+	return v
+}
+
+func (pb *Publisher) UsersRevoke(ctx context.Context, name string) Verb {
+	return pb.Deploy(ctx, "users-revoke", "--record-file", pb.Path("record.json"),
+		"--priv-key", pb.Path("publisher.priv"), "--token-file", pb.Path("cloud.token"),
+		"--helper-ip", PublisherIP, "--name", name)
+}
+
+func (pb *Publisher) UsersList(ctx context.Context) Verb {
+	return pb.Deploy(ctx, "users-list", "--record-file", pb.Path("record.json"),
+		"--priv-key", pb.Path("publisher.priv"), "--token-file", pb.Path("cloud.token"),
+		"--helper-ip", PublisherIP)
+}
+
+// PackSBP turns the signed base pack + one recipient's credentials into
+// the file that gets handed to an insider.
+func (pb *Publisher) PackSBP(ctx context.Context, in, credsFile, out string) Verb {
+	rec, _ := pb.Record()
+	args := []string{"users-pack-sbp", "--in", pb.Path(in), "--out", pb.Path(out),
+		"--creds-file", pb.Path(credsFile), "--server", rec.PublicIP}
+	if rec.CoverSNI != "" {
+		args = append(args, "--cover-sni", rec.CoverSNI)
+	}
+	return pb.Deploy(ctx, args...)
+}
+
+// Record is the subset of OperatorRecord the rig reads. It never writes
+// the record; the verbs own it.
+type Record struct {
+	Provider           string `json:"provider"`
+	ServerID           string `json:"server_id"`
+	PublicIP           string `json:"public_ip"`
+	MgmtPort           int    `json:"mgmt_port"`
+	MgmtTLSFingerprint string `json:"mgmt_tls_fingerprint"`
+	CoverSNI           string `json:"cover_sni"`
+	RealityPublicKey   string `json:"reality_public_key"`
+	Candidates         []struct {
+		Family string `json:"family"`
+		Port   int    `json:"port"`
+	} `json:"candidates"`
+}
+
+func (pb *Publisher) Record() (Record, error) {
+	var r Record
+	body, err := os.ReadFile(pb.Path("record.json"))
+	if err != nil {
+		return r, err
+	}
+	return r, json.Unmarshal(body, &r)
+}

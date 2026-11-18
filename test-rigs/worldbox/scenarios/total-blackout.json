@@ -1,0 +1,18 @@
+{
+  "name": "total-blackout",
+  "description": "The border forwards nothing at all: every packet from the client toward anywhere beyond the censor is silently dropped. The client still has a network (its gateway answers) — it is the outside world that is gone. No family can work; the point of the scenario is what the client CONCLUDES.",
+  "analogue": "Iran's shutdowns executed in the data plane with BGP left announced: November 2019 (AS12880 'data plane went to zero'), the June 2025 stealth blackout, the January 2026 near-total blackout. Model: drop at the border. It does not model the domestic network that stays up behind it (there is no NIN host here except the gateway), nor BGP withdrawal.",
+  "censor": {
+    "nft": [
+      "drop"
+    ]
+  },
+  "prove": [
+    {"name": "relay-tcp-dropped", "probe": "tcp", "to": "relay", "port": 443, "expect": "connect_timeout"},
+    {"name": "elsewhere-tcp-dropped", "probe": "tcp", "to": "elsewhere", "port": 443, "expect": "connect_timeout"},
+    {"name": "elsewhere-udp-dropped", "probe": "udp", "to": "elsewhere", "port": 443, "shape": "plain", "expect": "dropped"},
+    {"name": "link-is-up", "probe": "tcp", "to": "gateway", "port": 443, "expect": "connect_reset"}
+  ],
+  "expect": {"*": "blocked"},
+  "category": {"*": "tcp_connect_timeout", "hysteria2": "udp_unavailable", "tuic": "udp_unavailable"}
+}

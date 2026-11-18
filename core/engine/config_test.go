@@ -2,6 +2,10 @@ package engine
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -143,5 +147,109 @@ func TestNonEndpointFamiliesStayInOutbounds(t *testing.T) {
 	// tuic is UDP-gated, like hysteria2: the path manager must be told.
 	if cfg.Route["udp_gated"] != true {
 		t.Errorf("tuic route must be udp_gated: %v", cfg.Route)
+	}
+}
+
+// A TCP-only outbound must not leave apps without names: plain UDP/53 is
+// what the platform resolver sends, and naive cannot carry it. Found by
+// an end-to-end run (naive: tunnel pass, dns blocked, "the same lookup
+// over TCP/53 succeeded").
+func TestBuildSingBoxConfigHijacksDNSForUDPLessOutbounds(t *testing.T) {
+	hijacks := func(profile string) bool {
+		t.Helper()
+		cfg, err := BuildSingBoxConfig(routestore.RouteRow{RouteID: "r"}, []byte(profile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules, _ := cfg.Route["rules"].([]any)
+		for _, r := range rules {
+			m, _ := r.(map[string]any)
+			if m["action"] == "hijack-dns" {
+				if m["network"] != "udp" || m["port"] != 53 {
+					t.Fatalf("hijack rule must be exactly UDP/53, got %v", m)
+				}
+				return true
+			}
+		}
+		return false
+	}
+	// tor goes through materialiseTorOutbound first, so it is checked on
+	// outboundCarriesUDP below rather than through a whole config.
+	for _, profile := range []string{
+		`{"type":"naive"}`,
+		`{"type":"naive","udp_over_tcp":false}`,
+		`{"type":"naive","udp_over_tcp":{"enabled":false}}`,
+		`{"type":"http"}`,
+		`{"type":"ssh"}`,
+		`{"type":"shadowtls"}`,
+		// "network" is honoured by the types that have it: pinned to
+		// tcp, the outbound refuses UDP exactly as naive does.
+		`{"type":"vless","network":"tcp"}`,
+		`{"type":"shadowsocks","network":["tcp"]}`,
+	} {
+		if !hijacks(profile) {
+			t.Errorf("%s cannot carry UDP: its config must hijack UDP/53 into the engine's DNS-over-TCP server", profile)
+		}
+	}
+	// Outbounds that carry UDP forward the app's own query unchanged.
+	for _, profile := range []string{
+		`{"type":"vless"}`,
+		`{"type":"hysteria2"}`,
+		`{"type":"tuic"}`,
+		`{"type":"shadowsocks"}`,
+		`{"type":"anytls"}`,
+		`{"type":"wireguard"}`,
+		`{"type":"vless","network":["tcp","udp"]}`,
+		`{"type":"vless","network":""}`,
+		`{"type":"hysteria2","network":"udp"}`,
+		`{"type":"naive","udp_over_tcp":true}`,
+		`{"type":"naive","udp_over_tcp":{"enabled":true,"version":2}}`,
+	} {
+		if hijacks(profile) {
+			t.Errorf("%s carries UDP: its DNS must not be intercepted", profile)
+		}
+	}
+	// tor is TCP streams only (and the one family whose every route is
+	// TCP-only): the same defect, the same rule.
+	if outboundCarriesUDP(map[string]any{"type": "tor"}) {
+		t.Error("tor cannot carry UDP: its config must hijack UDP/53")
+	}
+}
+
+// tcpOnlyOutboundTypes is a copy of a fact that lives in sing-box: which
+// outbounds register themselves with networks [tcp] and nothing else.
+// Read it back from the source of the version go.mod pins, so a bump that
+// adds a TCP-only type (or gives one UDP) is caught here.
+func TestTCPOnlyOutboundTypesMatchSingBox(t *testing.T) {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/sagernet/sing-box").Output()
+	dir := strings.TrimSpace(string(out))
+	if err != nil || dir == "" {
+		t.Skipf("sing-box module source not available (go list: %v)", err)
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "protocol", "*", "outbound.go"))
+	if len(files) < 10 {
+		t.Fatalf("expected sing-box outbound sources under %s/protocol, found %d", dir, len(files))
+	}
+	// e.g. outbound.NewAdapterWithDialerOptions(C.TypeTor, tag, []string{N.NetworkTCP}, …)
+	re := regexp.MustCompile(`outbound\.NewAdapter(?:WithDialerOptions)?\(C\.Type(\w+), tag, \[\]string\{N\.NetworkTCP\}`)
+	got := map[string]bool{}
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range re.FindAllSubmatch(src, -1) {
+			got[strings.ToLower(string(m[1]))] = true
+		}
+	}
+	for typ := range got {
+		if !tcpOnlyOutboundTypes[typ] {
+			t.Errorf("sing-box registers %q as TCP-only; tcpOnlyOutboundTypes does not list it", typ)
+		}
+	}
+	for typ := range tcpOnlyOutboundTypes {
+		if !got[typ] {
+			t.Errorf("tcpOnlyOutboundTypes lists %q, which sing-box no longer registers as TCP-only", typ)
+		}
 	}
 }

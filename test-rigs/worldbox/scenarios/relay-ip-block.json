@@ -1,0 +1,18 @@
+{
+  "name": "relay-ip-block",
+  "description": "The relay's address is null-routed at the border: every packet toward it vanishes, on every port and protocol, while the rest of the world stays reachable. The failure the L3 address-swap rung exists for. Nothing gets through on any family.",
+  "analogue": "IP blocking of a burned proxy address: the GFW's border ACL / null-route, and Iran's per-IP blocking of VPS addresses ('IPs on MCI burning in 2-7 days'). Model: one address, silent drop, permanent. It does not model the whole-prefix or whole-provider blocks (DigitalOcean, OVH) or the dynamic 3-tuple residual block.",
+  "censor": {
+    "nft": [
+      "ip daddr $RELAY_IP drop"
+    ]
+  },
+  "prove": [
+    {"name": "relay-tcp-dropped", "probe": "tcp", "to": "relay", "port": 443, "expect": "connect_timeout"},
+    {"name": "relay-udp-dropped", "probe": "udp", "to": "relay", "port": 443, "shape": "plain", "expect": "dropped"},
+    {"name": "elsewhere-tcp-spared", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "elsewhere-udp-spared", "probe": "udp", "to": "elsewhere", "port": 443, "shape": "plain", "expect": "delivered"}
+  ],
+  "expect": {"*": "blocked"},
+  "category": {"*": "tcp_connect_timeout", "hysteria2": "unknown", "tuic": "unknown"}
+}

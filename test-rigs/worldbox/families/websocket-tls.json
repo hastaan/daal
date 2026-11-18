@@ -1,0 +1,16 @@
+{
+  "name": "websocket-tls",
+  "endpoint": {
+    "port": 8445,
+    "proto": "tcp"
+  },
+  "udp": "pass",
+  "dns": "pass",
+  "secrets": [
+    "vless_uuid",
+    "ws_path"
+  ],
+  "pins": [
+    "tls_cert_sha256"
+  ]
+}
