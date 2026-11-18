@@ -1,0 +1,56 @@
+# The same gate developers run before pushing (tools/hooks/pre-push), run
+# on every push to main, on every pull request, and once a night.
+#
+# The nightly run is not decoration. This repository has shipped three
+# "time-bomb" tests: fixtures signed at a fixed date and verified against
+# the wall clock, which pass on the day they are written and go red on
+# their own months later. Between 2026-08-18 and 2026-11-18 nothing ran
+# the suite at all, so the third one sat unnoticed for however long it
+# had been red. A scheduled run turns that into a notification on the day.
+#
+# GitHub Actions was abandoned in mid-2026 because the account's queue was
+# throttled. If runs sit queued indefinitely again, the fallback is the
+# local timer in tools/ci/ — do not simply delete this file.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: "**/go.sum"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client-shell/tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client-ui/package-lock.json
+      - name: Tools the gates shell out to
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
+      - name: UI dependencies
+        run: npm ci
+        working-directory: client-ui
+      - name: Gate
+        run: bash tools/hooks/pre-push
