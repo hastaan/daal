@@ -1,0 +1,17 @@
+{
+  "name": "naive",
+  "endpoint": {
+    "port": 8444,
+    "proto": "tcp"
+  },
+  "udp": "blocked",
+  "dns": "pass",
+  "secrets": [
+    "naive_password"
+  ],
+  "pins": [
+    "tls_cert_pem"
+  ],
+  "needs": "cronet",
+  "note": "naive is HTTP/2 CONNECT: TCP only as minted today (no udp_over_tcp), so an app's UDP datagrams do NOT pass. udp=blocked is a DECLARED PRODUCT LIMITATION (FINDINGS FAM-6, open), not a property worth having: a green cell here means the limitation is still there. When a pack carries UDP on naive this check goes red; flip it to pass. Names must still resolve (dns=pass): engine_singbox.go says so in as many words. The client needs Cronet; run.sh stages the linux build that sing-box's own dependency (cronet-go) ships as a Go module."
+}

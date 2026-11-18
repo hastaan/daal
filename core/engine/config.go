@@ -114,6 +114,11 @@ func BuildSingBoxConfig(route routestore.RouteRow, profile []byte) (*SingBoxConf
 	} else {
 		cfg.Outbounds = append([]map[string]any{outbound}, cfg.Outbounds...)
 	}
+	// An outbound that cannot carry UDP leaves every app without names.
+	// See outboundCarriesUDP.
+	if !outboundCarriesUDP(outbound) {
+		cfg.Route["rules"] = []any{dnsHijackRule()}
+	}
 	if isUDPFamily(bundle.TransportFamily(route.TransportFamily)) {
 		// Mark the config so the engine driver knows to gate on UDP probe.
 		cfg.Route["udp_gated"] = true
@@ -148,4 +153,97 @@ func isUDPFamily(f bundle.TransportFamily) bool {
 		return true
 	}
 	return false
+}
+
+// outboundCarriesUDP reports whether sing-box will accept a UDP packet
+// for this outbound. Where it will not, an app's name lookup cannot work
+// as sent:
+//
+// The VpnService hands Android two resolvers (1.1.1.1, 9.9.9.9), and the
+// platform resolver queries them over plain UDP/53 — it turns to TCP only
+// when an answer comes back truncated, not when none comes back. Inside
+// the engine that datagram is routed to route.final like everything
+// else, the outbound says "UDP is not supported", and the netstack
+// answers the app with an ICMP port-unreachable. Every lookup fails, so
+// no connection ever starts: the route is "connected" and nothing loads.
+//
+// (A device that upgrades those resolvers to DNS-over-TLS on its own —
+// Android's "Private DNS: Automatic" — never sends the UDP query, which
+// is how a naive route can look fine on one phone and dead on the next.)
+//
+// engine_singbox.go has always added a dns block with a DNS-over-TCP
+// server detoured through the active outbound "so name lookups work over
+// every transport" — but a dns block only answers queries the ROUTER
+// hands it, and nothing did. dnsHijackRule is that missing half, applied
+// only where UDP DNS is certain to be dead; outbounds that carry UDP keep
+// forwarding the app's own queries untouched.
+//
+// The answer mirrors the network list each sing-box 1.13.12 outbound
+// registers itself with (protocol/*/outbound.go, the NewAdapter call),
+// which is what the router consults:
+//
+//   - tcpOnlyOutboundTypes register [tcp] unconditionally;
+//   - naive registers [tcp] unless udp_over_tcp is enabled;
+//   - every other type registers what its "network" option says, and both
+//     when the option is absent — so a profile pinned to "network":"tcp"
+//     is as UDP-less as naive is.
+//
+// A type this function does not know is assumed to carry UDP: the cost
+// of being wrong that way is the defect as it stood, never a new one.
+func outboundCarriesUDP(outbound map[string]any) bool {
+	t, _ := outbound["type"].(string)
+	if tcpOnlyOutboundTypes[t] {
+		return false
+	}
+	if t == "naive" {
+		return udpOverTCPEnabled(outbound["udp_over_tcp"])
+	}
+	switch n := outbound["network"].(type) {
+	case string:
+		return n == "" || n == "udp"
+	case []any:
+		if len(n) == 0 {
+			return true
+		}
+		for _, v := range n {
+			if v == "udp" {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// tcpOnlyOutboundTypes are the outbound types sing-box 1.13.12 registers
+// with networks [tcp] whatever their options say.
+// TestTCPOnlyOutboundTypesMatchSingBox reads the list back out of the
+// sing-box source this module is pinned to, so a version bump that adds
+// or changes one fails a test instead of a phone.
+var tcpOnlyOutboundTypes = map[string]bool{
+	"http":      true,
+	"tor":       true,
+	"ssh":       true,
+	"shadowtls": true,
+}
+
+// udpOverTCPEnabled reads sing-box's udp_over_tcp option, which is
+// either a bare bool or an object with an "enabled" field.
+func udpOverTCPEnabled(v any) bool {
+	switch u := v.(type) {
+	case bool:
+		return u
+	case map[string]any:
+		on, _ := u["enabled"].(bool)
+		return on
+	}
+	return false
+}
+
+// dnsHijackRule makes the engine answer UDP/53 itself, through its own
+// dns servers (DNS-over-TCP via the active outbound), instead of
+// forwarding a datagram the outbound cannot carry. TCP/53 is left alone:
+// it is a stream and already reaches the resolver the app asked for.
+func dnsHijackRule() map[string]any {
+	return map[string]any{"network": "udp", "port": 53, "action": "hijack-dns"}
 }

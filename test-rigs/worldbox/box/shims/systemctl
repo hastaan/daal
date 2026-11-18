@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""worldbox shim: `systemctl`.
+
+A deliberately small stand-in for systemd, enough for the verbs the Daal
+box uses on itself (cloud-init runcmd, daal-relay-mgmt, daal-relay-health,
+singbox-kick.sh). It reads the REAL unit files the provisioning code wrote
+to /etc/systemd/system and runs their REAL ExecStart lines.
+
+Faithful on purpose:
+  * `reload` of a unit with no ExecReload= FAILS, exactly as systemd does
+    ("Job type reload is not applicable") — the product relies on the
+    fallback to restart.
+  * `restart` of a Type=oneshot unit re-runs ExecStart synchronously and
+    returns its exit status.
+  * a unit with no unit file is "not found" (exit 5), except the handful
+    the Ubuntu base image ships (BASE_IMAGE_UNITS), which are no-ops.
+
+  * jobs on one unit are serialised (a per-unit lock), and `stop` returns
+    only when the main process is gone — after SIGKILL too.
+
+NOT modelled (say so, don't pretend): User=/Group=, capabilities,
+NoNewPrivileges, Restart= supervision, dependencies/ordering, journald.
+
+Process supervision is where this shim REPLACES systemd, so a failure seen
+right after a restart is not evidence about the product until the shim is
+ruled out. Every stop/start is therefore journalled to
+/var/log/wb-units/<unit>.lifecycle.log: which pid was stopped, how long
+SIGTERM took, whether SIGKILL was needed, which listening sockets the old
+instance held and whether any was STILL held after it was "gone", the new
+pid, and whether the job had to wait for another job on the same unit
+(FINDINGS INT-2).
+"""
+import fcntl, os, signal, subprocess, sys, time
+
+UNIT_DIR = "/etc/systemd/system"
+STATE = "/run/wb-systemd"
+LOGS = "/var/log/wb-units"
+BASE_IMAGE_UNITS = {"ssh.service", "sshd.service"}
+
+
+def norm(u):
+    return u if "." in u else u + ".service"
+
+
+def parse(unit):
+    path = os.path.join(UNIT_DIR, unit)
+    if not os.path.isfile(path):
+        return None
+    out = {"Type": "simple"}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#") and not line.startswith("["):
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    return out
+
+
+def apply_override(cmd):
+    """--mgmt=tree: swap the verified, pinned artefact for a tree build
+    just before the unit starts. Loud by design: the run reports it."""
+    exe = cmd.split()[0]
+    src = os.path.join(os.environ.get("WB_BOX_STATE", ""), "overrides", os.path.basename(exe))
+    if os.environ.get("WB_BOX_STATE") and os.path.isfile(src):
+        import shutil
+        tmp = exe + ".wb-override"
+        shutil.copyfile(src, tmp)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, exe)
+        with open(os.path.join(os.environ["WB_BOX_STATE"], "overrides-applied.log"), "a") as f:
+            f.write(exe + "\n")
+
+
+def journal(unit, msg):
+    """One line per lifecycle event; never fails the job."""
+    try:
+        os.makedirs(LOGS, exist_ok=True)
+        t = time.time()
+        stamp = time.strftime("%H:%M:%S", time.gmtime(t)) + ".%03d" % (int(t * 1000) % 1000)
+        with open(os.path.join(LOGS, unit + ".lifecycle.log"), "a") as f:
+            f.write(f"{stamp} shim={os.getpid()} {msg}\n")
+    except OSError:
+        pass
+
+
+def listeners(pid=0):
+    """Listening sockets in this network namespace as "proto/addr:port"
+    → owner. With pid: only that process's. Evidence only; empty when ss
+    is unavailable."""
+    out = {}
+    try:
+        txt = subprocess.run(["ss", "-Hlntup"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return out
+    for line in txt.splitlines():
+        col = line.split()
+        if len(col) < 5:
+            continue
+        owner = col[-1] if "users:" in col[-1] else ""
+        if pid and f"pid={pid}," not in owner:
+            continue
+        out[col[0] + "/" + col[4]] = owner
+    return out
+
+
+def unit_lock(unit):
+    """systemd runs one job per unit at a time. Without this, two
+    overlapping `restart`s would both see "not running" and start two
+    instances. A job that had to wait says so in the journal."""
+    os.makedirs(STATE, exist_ok=True)
+    fd = os.open(os.path.join(STATE, unit + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        t0 = time.time()
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        journal(unit, f"CONTENDED: waited {time.time() - t0:.3f}s for another job on this unit")
+    return fd
+
+
+def gone(pid):
+    try:
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return True
+
+
+def pidfile(unit):
+    return os.path.join(STATE, unit + ".pid")
+
+
+def mainpid(unit):
+    try:
+        pid = int(open(pidfile(unit)).read().strip())
+    except (OSError, ValueError):
+        return 0
+    try:
+        os.kill(pid, 0)
+        # a zombie is not "running"
+        with open(f"/proc/{pid}/stat") as f:
+            if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return 0
+        return pid
+    except OSError:
+        return 0
+
+
+def is_active(unit):
+    if mainpid(unit):
+        return True
+    return os.path.exists(os.path.join(STATE, unit + ".exited-ok"))
+
+
+def stop(unit):
+    if unit in BASE_IMAGE_UNITS:
+        return 0
+    pid = mainpid(unit)
+    for marker in (pidfile(unit), os.path.join(STATE, unit + ".exited-ok")):
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+    if not pid:
+        journal(unit, "stop: no main process")
+        return 0
+    held = listeners(pid)
+    t0 = time.time()
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        journal(unit, f"stop pid={pid}: already gone")
+        return 0
+    how = "TERM"
+    for _ in range(50):
+        if gone(pid):
+            break
+        time.sleep(0.1)
+    else:
+        how = "KILL (ignored TERM for 5s)"
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        for _ in range(50):
+            if gone(pid):
+                break
+            time.sleep(0.1)
+        else:
+            how = "KILL, and STILL ALIVE after 5s more"
+    # A socket the old instance held that is still listening now would be
+    # served by something other than the instance about to start.
+    still = sorted(set(held) & set(listeners()))
+    journal(unit, f"stop pid={pid}: {how} in {time.time() - t0:.3f}s; it held {len(held)} listener(s) [{' '.join(sorted(held))}]; "
+            + (f"STILL LISTENING after stop: {' '.join(still)}" if still else "none left listening"))
+    return 0
+
+
+def start(unit, restart=False):
+    if unit in BASE_IMAGE_UNITS:
+        return 0
+    u = parse(unit)
+    if u is None:
+        sys.stderr.write(f"Failed to start {unit}: Unit {unit} not found.\n")
+        return 5
+    cmd = u.get("ExecStart", "")
+    if not cmd:
+        sys.stderr.write(f"{unit}: no ExecStart\n")
+        return 1
+    os.makedirs(LOGS, exist_ok=True)
+    os.makedirs(STATE, exist_ok=True)
+    apply_override(cmd)
+    log = open(os.path.join(LOGS, unit + ".log"), "ab", buffering=0)
+    if u["Type"] == "oneshot":
+        if not restart and is_active(unit):
+            return 0  # systemd: start on an active oneshot is a no-op
+        rc = subprocess.run(["/bin/sh", "-c", "exec " + cmd], stdout=log, stderr=log, stdin=subprocess.DEVNULL).returncode
+        marker = os.path.join(STATE, unit + ".exited-ok")
+        if rc == 0:
+            open(marker, "w").close()
+        else:
+            try:
+                os.remove(marker)
+            except OSError:
+                pass
+            sys.stderr.write(f"Job for {unit} failed because the control process exited with error code.\n")
+        return 1 if rc else 0
+    if mainpid(unit):
+        if not restart:
+            return 0
+        stop(unit)
+    p = subprocess.Popen(["/bin/sh", "-c", "exec " + cmd], stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                         start_new_session=True)
+    with open(pidfile(unit), "w") as f:
+        f.write(str(p.pid))
+    journal(unit, f"{'restart' if restart else 'start'}: new pid={p.pid}")
+    # Type=simple returns as soon as the process is forked; give an
+    # immediately-crashing binary a moment so `enable --now` is not a lie.
+    time.sleep(0.15)
+    if p.poll() is not None and p.returncode != 0:
+        sys.stderr.write(f"{unit}: main process exited, code={p.returncode}\n")
+        journal(unit, f"pid={p.pid} EXITED within 150ms, code={p.returncode}")
+    return 0
+
+
+def reload(unit):
+    if unit in BASE_IMAGE_UNITS:
+        return 0
+    u = parse(unit)
+    if u is None:
+        sys.stderr.write(f"Failed to reload {unit}: Unit {unit} not found.\n")
+        return 5
+    cmd = u.get("ExecReload")
+    if not cmd:
+        sys.stderr.write(f"Failed to reload {unit}: Job type reload is not applicable for unit {unit}.\n")
+        return 1
+    env = dict(os.environ, MAINPID=str(mainpid(unit)))
+    return subprocess.run(["/bin/sh", "-c", cmd], env=env).returncode
+
+
+def main(argv):
+    flags = [a for a in argv if a.startswith("-")]
+    args = [a for a in argv if not a.startswith("-")]
+    # `show -p MainPID --value unit` : "-p" takes a value.
+    if args and args[0] == "show":
+        prop = None
+        rest = argv[1:]
+        units = []
+        i = 0
+        while i < len(rest):
+            a = rest[i]
+            if a in ("-p", "--property"):
+                prop = rest[i + 1]; i += 2; continue
+            if a.startswith("--property="):
+                prop = a.split("=", 1)[1]
+            elif a.startswith("-p") and len(a) > 2:
+                prop = a[2:]
+            elif not a.startswith("-"):
+                units.append(norm(a))
+            i += 1
+        for u in units:
+            if prop == "MainPID":
+                val = str(mainpid(u))
+                print(val if "--value" in rest else f"MainPID={val}")
+            else:
+                sys.stderr.write(f"wb-systemctl: show -p {prop} not modelled\n")
+                return 1
+        return 0
+    if not args:
+        return 0
+    verb, units = args[0], [norm(u) for u in args[1:]]
+    now = "--now" in flags
+    rc = 0
+    if verb == "daemon-reload":
+        return 0
+    for u in units:
+        lock = unit_lock(u) if verb in ("enable", "disable", "start", "restart", "stop") else None
+        try:
+            rc = job(verb, u, now, flags, rc)
+        except NotModelled:
+            sys.stderr.write(f"wb-systemctl: verb {verb!r} not modelled\n")
+            return 1
+        finally:
+            if lock is not None:
+                os.close(lock)
+    return rc
+
+
+class NotModelled(Exception):
+    pass
+
+
+def job(verb, u, now, flags, rc):
+    if verb == "enable":
+        if u not in BASE_IMAGE_UNITS and parse(u) is None:
+            sys.stderr.write(f"Failed to enable unit: Unit file {u} does not exist.\n")
+            rc = 1
+            return rc
+        if now:
+            rc = start(u) or rc
+    elif verb == "disable":
+        if now:
+            stop(u)
+    elif verb == "start":
+        rc = start(u) or rc
+    elif verb == "restart":
+        rc = start(u, restart=True) or rc
+    elif verb == "stop":
+        stop(u)
+    elif verb == "reload":
+        rc = reload(u) or rc
+    elif verb == "is-active":
+        ok = is_active(u)
+        if "--quiet" not in flags and "-q" not in flags:
+            print("active" if ok else "inactive")
+        rc = (0 if ok else 3) or rc
+    else:
+        raise NotModelled(verb)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

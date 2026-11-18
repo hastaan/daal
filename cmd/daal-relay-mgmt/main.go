@@ -288,10 +288,12 @@ type server struct {
 // timestamp so the entries that survive are the ones still presentable.
 const maxSeenAddrNonces = 4096
 
-// consumeAddressNonce enforces SINGLE USE of a token for the two
-// address verbs, and returns false if this nonce has been seen before.
+// consumeAddressNonce enforces SINGLE USE of a token, and returns false
+// if this nonce has been seen before. It is applied to every mutating
+// verb (singleUseOp); the text below is the original reasoning, written
+// when it covered the two address verbs only.
 //
-// WHY ONLY THESE TWO VERBS. The token signs `nonce:ts:op` and NOT the
+// WHY IT STARTED WITH THESE TWO VERBS. The token signs `nonce:ts:op` and NOT the
 // request body, so one captured token authorises any number of calls to
 // its route for the rest of the ±window. That was tolerable when the
 // bodies named a recipient; it is weaker for a verb whose body chooses
@@ -302,13 +304,23 @@ const maxSeenAddrNonces = 4096
 // change (the publisher already mints a fresh 128-bit random nonce per
 // request: mgmt.MintToken).
 //
-// It is deliberately NOT applied to the other five verbs. GET
+// It is deliberately NOT applied to the two read-only verbs. GET
 // /users/list carries a token on a request net/http's transport is
 // allowed to retry on a reused-idle-connection race, and a retried GET
 // re-sends the same token; refusing it would turn a transport hiccup
 // into a failed rotation. POSTs are not replayable that way (a POST
-// with a body is not `isReplayable`), which is what makes it safe here:
-// both address verbs are POSTs.
+// with a body is not `isReplayable`), which is what makes it safe for
+// every mutating verb: they are all POSTs. The name is historical — it
+// started with the two address verbs and now guards every op
+// singleUseOp names.
+//
+// LIMITS. The set is in memory and is not persisted, so single use
+// holds for the life of this process only: after a restart (or a
+// reboot) a token captured earlier is presentable once more until its
+// timestamp leaves the accept window. And the nonce is consumed as
+// soon as the token verifies, before the handler reads the body, so a
+// request rejected with 400/405/500 has still spent its token. Both
+// are stated in the spec (§4.8).
 //
 // The proper fix — signing sha256(body) into the token — is a wire
 // change on both ends and is recorded in the spec (§4.8) as the next
@@ -569,18 +581,50 @@ func (s *server) verifyToken(token, expectedOp string) error {
 	if !ed25519.Verify(s.pubkey, msg, sig) {
 		return errors.New("signature verification failed")
 	}
-	// The five older verbs do not deduplicate: the cloud-firewall
-	// window narrows replay enough for bodies that name a recipient,
-	// and GET /users/list is on a request the transport may legitimately
-	// retry with the same token. The two ADDRESS verbs do, because
-	// their body chooses which address this host configures and the
-	// signature does not cover it. See consumeAddressNonce.
-	if op == "bind-address" || op == "unbind-address" {
+	// Every verb that MUTATES is single-use. The signature covers
+	// nonce:ts:op and not the body, so a token that could be presented
+	// twice would authorise a second call with a different body: a
+	// different address for the two address verbs, a different
+	// recipient for /users/revoke and /rotate-credentials, another
+	// cover-host move for /rotate-tls. See consumeAddressNonce and
+	// singleUseOp for the two verbs that stay replayable and why.
+	if singleUseOp(op) {
 		if !s.consumeAddressNonce(nonce, ts) {
-			return errors.New("token already used (address verbs are single-use; mint a fresh one)")
+			return errors.New("token already used (mutating verbs are single-use; mint a fresh one)")
 		}
 	}
 	return nil
+}
+
+// singleUseOp reports whether a token minted for op may be presented
+// only once.
+//
+// Everything is, except the two verbs that change nothing on the box:
+//
+//   - users-list is a GET, and net/http's transport is allowed to
+//     re-send a GET (same token) after a reused-idle-connection race.
+//     Refusing the second copy would turn a transport hiccup into a
+//     failed operation, and a replayed roster read discloses nothing
+//     the first one did not.
+//   - whoami is read-only for the same reason and may be sent as GET.
+//
+// The mutating verbs are all POSTs with a body, which the transport
+// never replays once any byte reached the server, so single use cannot
+// refuse a legitimate retry: the only way this box sees one of those
+// tokens twice is that somebody presented it twice.
+//
+// It began as the two address verbs only (Wave 3c). The one-machine
+// end-to-end rig then replayed a /users/revoke token, already used once,
+// against a second recipient on a running relay, and it was honoured
+// (the rig's finding LC-1): the reasoning that made the address verbs
+// single-use — the body is unsigned — applies to every POST here, and
+// the reason for the exemption applies only to the GET.
+func singleUseOp(op string) bool {
+	switch op {
+	case "users-list", "whoami":
+		return false
+	}
+	return true
 }
 
 // decodeBase64 accepts both standard and URL-safe base64.

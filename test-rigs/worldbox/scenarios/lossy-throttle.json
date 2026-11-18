@@ -1,0 +1,12 @@
+{
+  "name": "lossy-throttle",
+  "description": "A bad but not blocking path: 60 ms delay, 1% loss and a 4 Mbit/s cap in each direction. Every family must still carry verified bytes.",
+  "analogue": "Ordinary degraded mobile connectivity, and the mild end of Iran's bandwidth shaping at the TIC gateways. Model: netem on both censor interfaces; loss is independent per packet (no bursts), the same for every protocol.",
+  "censor": {
+    "tc": [
+      {"dev": "$DEV_RELAY", "args": "netem delay 60ms loss 1% rate 4mbit"},
+      {"dev": "$DEV_CLIENT", "args": "netem delay 60ms loss 1% rate 4mbit"}
+    ]
+  },
+  "expect": {"*": "pass"}
+}

@@ -1,0 +1,20 @@
+{
+  "name": "sni-rst-stateless",
+  "description": "A TLS ClientHello naming the relay's cover host draws a single forged RST+ACK toward the CLIENT only — but the box reads just the first data packet of a flow and does not reassemble: a ClientHello whose server_name lies in a second TCP segment passes untouched. Daal's REALITY ClientHello is 600 bytes in one segment, so it is caught.",
+  "analogue": "Iran's SNI filter as measured by Bock et al. (FOCI 2020), IRBlock (USENIX Sec 2025) and Niere et al. (2025): 'inspects only the first two data-carrying packets of a flow and does not perform full TCP stream reassembly', 'injects RST+ACK toward the client — single-middlebox enforcement'. Model: first data packet only (stricter than the real two), exact name match, one reset toward the client; the server is left with a half-open connection, as there. Not modelled: the certificate SAN/CN second check, case-sensitivity quirks, the fake-SNI/out-of-window tricks that exploit the same statelessness.",
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$COVER_SNI"], "action": "rst", "rst_to": "client"}
+    ]
+  },
+  "prove": [
+    {"name": "cover-sni-blocked", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "split-hello-slips-through", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "split": true, "expect": "ok"},
+    {"name": "cover-sni-blocked-on-any-address", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "other-sni-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "www.wb-control.example", "expect": "ok"},
+    {"name": "no-sni-spared", "probe": "tls", "to": "elsewhere", "port": 443, "expect": "ok"},
+    {"name": "tcp-handshake-spared", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"}
+  ],
+  "expect": {"*": "pass", "vless-reality": "blocked"},
+  "category": {"vless-reality": "tls_sni_or_cert_block_suspected"}
+}

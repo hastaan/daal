@@ -47,3 +47,26 @@ func markCronet(ok bool) {
 func CronetStatus() (attempted bool, ok bool) {
 	return cronetAttempted.Load(), cronetLoaded.Load()
 }
+
+// cronetLibraryArg is the argument loadCronet hands cronet-go's
+// LoadLibrary, which is a sync.Once: the FIRST call decides, for the
+// life of the process, whether the naive tier can dial.
+//
+//   - Android: the bare soname. purego.Dlopen resolves it through the
+//     app's linker namespace (jniLibs/<abi>/); cronet-go's own search
+//     (executable directory, LD_LIBRARY_PATH, /usr/local/lib, /usr/lib)
+//     never looks there.
+//   - everywhere else: "" — cronet-go's own search, whose first stop is
+//     the executable's directory, where a desktop build ships the
+//     library. dlopen("libcronet.so") does NOT search that directory, so
+//     the soname fails there and the Once caches the failure: the
+//     library sits beside the binary and every naive route dies at
+//     connect with "cannot open shared object file".
+//
+// Lives in this untagged file so the default test build covers it.
+func cronetLibraryArg(goos string) string {
+	if goos == "android" {
+		return "libcronet.so"
+	}
+	return ""
+}

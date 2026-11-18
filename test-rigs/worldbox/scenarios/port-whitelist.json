@@ -1,0 +1,21 @@
+{
+  "name": "port-whitelist",
+  "description": "Port whitelist: only 53, 80 and 443 (TCP and UDP) leave the client's network; everything else is silently dropped, whatever it contains. Only the families that live on 443 survive.",
+  "analogue": "Iran's crisis-mode whitelister as first described by Bock et al. (FOCI 2020) and seen in the June 2025 'stealth blackout': DNS/53, HTTP/80 and HTTPS/443 forwarded, everything else dropped without RST or ICMP. Model: destination PORT only — it does not look at what the flow carries (protocol-whitelist does), and it still lets UDP/443 through, which the 2025–26 posture no longer does.",
+  "censor": {
+    "nft": [
+      "ip saddr $CLIENT_IP tcp dport != { 53, 80, 443 } drop",
+      "ip saddr $CLIENT_IP udp dport != { 53, 80, 443 } drop"
+    ]
+  },
+  "prove": [
+    {"name": "tcp-443-spared", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "tcp-80-spared", "probe": "tcp", "to": "elsewhere", "port": 80, "expect": "ok"},
+    {"name": "tcp-8443-dropped", "probe": "tcp", "to": "elsewhere", "port": 8443, "expect": "connect_timeout"},
+    {"name": "relay-tcp-8445-dropped", "probe": "tcp", "to": "relay", "port": 8445, "expect": "connect_timeout"},
+    {"name": "udp-443-spared", "probe": "udp", "to": "elsewhere", "port": 443, "shape": "plain", "expect": "delivered"},
+    {"name": "udp-8443-dropped", "probe": "udp", "to": "elsewhere", "port": 8443, "shape": "plain", "expect": "dropped"}
+  ],
+  "expect": {"*": "blocked", "vless-reality": "pass", "hysteria2": "pass"},
+  "category": {"*": "tcp_connect_timeout", "tuic": "udp_unavailable"}
+}

@@ -1,0 +1,12 @@
+#!/bin/sh
+# worldbox shim: `chown`. A rootless user namespace maps exactly one uid,
+# so the `daal` service account cloud-init creates cannot exist here.
+# Ownership changes to it are recorded and skipped; everything else is
+# passed through. STUB: the box's unprivileged-user separation is NOT
+# exercised by the rig.
+for a in "$@"; do
+  case "$a" in
+    daal:daal|daal) echo "chown $*" >> "${WB_BOX_STATE:-/tmp}/chown-skipped.log"; exit 0 ;;
+  esac
+done
+exec /usr/bin/chown "$@"

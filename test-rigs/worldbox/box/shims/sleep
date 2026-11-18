@@ -1,0 +1,17 @@
+#!/bin/sh
+# worldbox shim: `sleep`. Short sleeps are real. A long sleep (>= 60 s) is
+# cloud-init's provisioning window: mark that the box reached it, then
+# sleep a scaled-down amount so the "window closes" half of the script
+# still runs inside a test's lifetime.
+n="${1:-0}"
+case "$n" in
+  ''|*[!0-9]*) exec /usr/bin/sleep "$@" ;;
+esac
+if [ "$n" -ge 60 ]; then
+  : > "${WB_BOX_STATE:-/tmp}/provision-window-open"
+  scale="${WB_TIMESCALE:-20}"
+  /usr/bin/sleep "$(( n / scale ))"
+  : > "${WB_BOX_STATE:-/tmp}/provision-window-closed"
+  exit 0
+fi
+exec /usr/bin/sleep "$n"

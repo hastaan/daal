@@ -64,6 +64,27 @@ func newSingBox() *singBox {
 	return &singBox{Stub: NewStub()}
 }
 
+// defaultDNSBlock is the dns block Start adds when the profile brought
+// none: one DNS-over-TCP server reached through the active outbound.
+//
+// It is a function, not an inline literal, so that
+// TestHijackedDNSConfigIsAcceptedBySingBox can hand the REAL block to
+// the real sing-box together with dnsHijackRule (config.go). Since that
+// rule exists this block answers every app lookup on a UDP-less route
+// (naive, http), and it is written in the legacy server format
+// (`address: tcp://…`) that sing-box deprecated in 1.12 and has
+// scheduled for removal. A sing-box bump that drops it must fail a unit
+// test, not a phone.
+func defaultDNSBlock() map[string]any {
+	return map[string]any{
+		"servers": []any{
+			map[string]any{"tag": "remote", "address": "tcp://1.1.1.1", "detour": "active"},
+		},
+		"final":    "remote",
+		"strategy": "prefer_ipv4",
+	}
+}
+
 // Start parses the engine-side config produced by BuildSingBoxConfig,
 // rewrites it into sing-box's option.Options, attaches a TUN inbound
 // from the file descriptor the Android VpnService handed to the ABI,
@@ -173,13 +194,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	// if the profile didn't bring its own dns block. Legacy server shape —
 	// still accepted in v1.13.
 	if _, ok := raw["dns"]; !ok {
-		raw["dns"] = map[string]any{
-			"servers": []any{
-				map[string]any{"tag": "remote", "address": "tcp://1.1.1.1", "detour": "active"},
-			},
-			"final":    "remote",
-			"strategy": "prefer_ipv4",
-		}
+		raw["dns"] = defaultDNSBlock()
 	}
 
 	merged, err := json.Marshal(raw)

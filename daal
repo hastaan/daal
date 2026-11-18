@@ -4,6 +4,11 @@
 # Subcommands:
 #   doctor         — verify host has Go, Rust, Node, npm.
 #   test           — run all Go test suites + Rust bundle parity tests.
+#   e2e [quick|full] — run a whole Daal world on this machine, rootless:
+#                    real provisioning, real relay binaries, real engine,
+#                    a censor in the middle. quick ≈ 1 min, full ≈ 5 min.
+#                    Exits 77 (SKIPPED, not a pass) where the machine
+#                    cannot host it.
 #   build          — build engine .so/.dll, Tauri desktop, publisher CLI,
 #                    gate-eval CLI. Output under build/.
 #   package        — copy final artifacts into build/release/ + write
@@ -28,6 +33,7 @@
 #   0   success
 #   1   subcommand failed
 #   2   doctor / release-check found a problem
+#   77  e2e: skipped — this machine cannot host the end-to-end rig
 #   64  bad subcommand
 #
 # Developer escape hatches:
@@ -178,6 +184,10 @@ cmd_test() {
     "cmd/daal-gate-eval"
     "cmd/daal-relay-health"
     "cmd/daal-relay-mgmt"
+    # Static, hermetic tests only (no namespaces): they hold the rule
+    # that nothing shippable depends on the lab rig, and validate the
+    # rig's scenario/family declarations. The rig itself is `./daal e2e`.
+    "test-rigs/worldbox/driver"
   )
   if [[ "$TEST_SOAK" == "1" ]]; then
     go_modules+=(
@@ -200,6 +210,22 @@ cmd_test() {
     else
       err "$m: tests failed"
       fail=1
+    fi
+    # core has a second, different program in it: under `-tags singbox`
+    # engine_singbox.go replaces the stub driver, and every
+    # *_singbox_test.go — the ones that hand our generated configs to
+    # the sing-box this module actually links — compiles only there.
+    # Until this pass existed NOTHING in `./daal test` or the pre-push
+    # hook ran them, so "the shipped engine can parse what we mint" was
+    # checked by whoever remembered to type the tag.
+    if [[ "$m" == "core" ]]; then
+      log "go test -tags singbox ./... ($m)"
+      if ( cd "$REPO_ROOT/$m" && "$GO_BIN" test -tags singbox ./... ); then
+        ok "$m (singbox)"
+      else
+        err "$m: tests failed under -tags singbox"
+        fail=1
+      fi
     fi
   done
 
@@ -236,6 +262,31 @@ cmd_test() {
   fi
   ok "test: all suites green"
   return 0
+}
+
+# --- Subcommand: e2e.
+# The end-to-end rig: one machine, no root, no network, no VPS, no phone.
+# All logic lives in the rig's own entry point; this verb only maps its
+# exit status onto ours, and refuses to let "could not run" look like
+# "passed" (see the rig's README for what 77 means and why).
+cmd_e2e() {
+  local e2e="$REPO_ROOT/test-rigs/worldbox/e2e.sh"
+  if [[ ! -x "$e2e" ]]; then
+    err "e2e: $e2e is missing"
+    return 1
+  fi
+  log "Daal e2e ${*:-quick}"
+  hr
+  local rc=0
+  "$e2e" "$@" || rc=$?
+  hr
+  case "$rc" in
+    0)  ok "e2e: nothing unexpected"; return 0 ;;
+    77) warn "e2e: SKIPPED — this machine cannot host the rig (reason above). NOTHING was tested end to end; this is NOT a pass."
+        return 77 ;;
+    2)  err "e2e: the rig itself did not run (a world is broken — see above); Daal was not judged"; return 1 ;;
+    *)  err "e2e: unexpected red checks (or a known finding that no longer reproduces) — see above"; return 1 ;;
+  esac
 }
 
 # --- Subcommand: build.
@@ -471,7 +522,7 @@ cmd_release_check() {
 }
 
 cmd_help() {
-  sed -n '2,30p' "$0"
+  sed -n '2,35p' "$0"
 }
 
 main() {
@@ -480,6 +531,7 @@ main() {
   case "$sub" in
     doctor)        cmd_doctor "$@" ;;
     test)          cmd_test "$@" ;;
+    e2e)           cmd_e2e "$@" ;;
     build)         cmd_build "$@" ;;
     package)       cmd_package "$@" ;;
     manifest)      cmd_manifest "$@" ;;

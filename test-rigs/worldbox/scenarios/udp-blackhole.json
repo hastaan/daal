@@ -1,0 +1,18 @@
+{
+  "name": "udp-blackhole",
+  "description": "Every UDP datagram the client sends is silently dropped (no ICMP). QUIC-shaped families cannot complete a handshake; TCP families are untouched — and must still carry an app's UDP, because that travels inside the TCP tunnel.",
+  "analogue": "Iran's standing posture toward outbound UDP ('UDP dropping that notably impacts QUIC'; the 2025 policy paper asks for 'complete and permanent blocking of outbound IPv6, UDP and ICMP'), and the HTTP/3 collapse on AS58224 before the January 2026 blackout. Model: all UDP, all ports, both directions. The real thing usually spares UDP/53 to the national resolver; see protocol-whitelist for that.",
+  "censor": {
+    "nft": [
+      "meta l4proto udp drop"
+    ]
+  },
+  "prove": [
+    {"name": "udp-to-relay-dropped", "probe": "udp", "to": "relay", "port": 443, "shape": "plain", "expect": "dropped"},
+    {"name": "udp-to-anyone-dropped", "probe": "udp", "to": "elsewhere", "port": 443, "shape": "plain", "expect": "dropped"},
+    {"name": "tcp-tls-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "tcp-elsewhere-spared", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass", "hysteria2": "blocked", "tuic": "blocked"},
+  "category": {"hysteria2": "udp_unavailable", "tuic": "udp_unavailable"}
+}

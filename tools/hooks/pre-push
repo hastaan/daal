@@ -29,6 +29,9 @@
 #
 #   git push --no-verify        # or: DAAL_SKIP_PREPUSH=1 git push
 #
+#   DAAL_E2E_ALLOW_SKIP=1 git push   # run everything; tolerate ONLY "this
+#                                    # machine cannot host the e2e rig" (77)
+#
 # Bypass deliberately, not habitually. If this is slow enough that you want to
 # skip it routinely, fix the slowness — a gate that is always bypassed is the
 # false-green this hook exists to replace.
@@ -73,6 +76,9 @@ vet_all() {
       (cd "$m" && go vet ./... ) || rc=1
     fi
   done
+  # core's real data plane and its tests only compile under `singbox`
+  # (`./daal test` runs them; this vets them).
+  (cd core && go vet -tags singbox ./... ) || rc=1
   return $rc
 }
 step "go vet (all modules)" vet_all
@@ -136,10 +142,61 @@ done
 # passing quietly if either is missing.
 [[ -f tools/check-qr-send.mjs ]] && step "check-qr-send.mjs" node tools/check-qr-send.mjs
 
+# The end-to-end rig, quick mode (~1 minute): a whole Daal world on this
+# machine — the real provisioning verbs against a lab cloud, the real
+# cloud-init on a real box, the real relay binaries, the real engine
+# behind a TUN, and a censor in the middle. Every bug the seven waves
+# found late (code nothing calls, a value a struct drops on the way
+# across, a family listening behind a shut firewall) lived in a seam no
+# unit test crosses; this is the only step here that crosses them.
+#
+# It needs unprivileged user namespaces. Where the machine cannot host it
+# (`./daal e2e` exits 77) the hook FAILS: a skip notice scrolls past in a
+# long log, and a gate that silently stops crossing the seams is the exact
+# failure this rig exists to end. A machine that genuinely cannot host the
+# rig opts in, per push and in so many words:
+#
+#   DAAL_E2E_ALLOW_SKIP=1 git push
+#
+# and the skip is then still printed here and again in the last line of
+# this hook, never counted as a pass. `./daal e2e full` is the 5-minute
+# version; it is not run here.
+e2e_skipped=0
+printf '\n\033[1m▶ %s\033[0m\n' "daal e2e quick"
+e2e_races="$(mktemp)"
+WB_INTERMITTENT_FILE="$e2e_races" ./daal e2e quick
+e2e_rc=$?
+# Known races (FINDINGS INT-*) are excused up to a budget; how many fired
+# is part of the result, not a detail of the report above.
+e2e_note="$(cat "$e2e_races" 2>/dev/null)"; rm -f "$e2e_races"
+case $e2e_rc in
+  0)  printf '\033[32m  ✓ %s\033[0m\n' "daal e2e quick"
+      case "$e2e_note" in
+        "")       ;;
+        *×[1-9]*) printf '\033[33m    ⚠ %s\033[0m\n' "$e2e_note" ;;
+        *)        printf '    %s\n' "$e2e_note" ;;
+      esac ;;
+  77) if [[ "${DAAL_E2E_ALLOW_SKIP:-}" == "1" ]]; then
+        printf '\033[33m  ⚠ %s — SKIPPED (DAAL_E2E_ALLOW_SKIP=1): this machine cannot host the rig. Nothing was tested end to end.\033[0m\n' "daal e2e quick"
+        e2e_skipped=1
+      else
+        printf '\033[31m  ✗ %s — this machine cannot host the rig (reason above). Nothing was tested end to end.\033[0m\n' "daal e2e quick"
+        printf '\033[31m    Fix the cause, or accept the gap for this push only: DAAL_E2E_ALLOW_SKIP=1 git push\033[0m\n'
+        fail=1
+      fi ;;
+  *)  printf '\033[31m  ✗ %s\033[0m\n' "daal e2e quick"; fail=1 ;;
+esac
+
 if (( fail )); then
   printf '\n\033[31mpre-push: FAILED — push aborted.\033[0m\n'
   printf 'Fix the above, or bypass deliberately with: git push --no-verify\n'
   exit 1
+fi
+
+if (( e2e_skipped )); then
+  printf '\n\033[33mpre-push: every check that RAN passed — but the end-to-end rig was SKIPPED on this machine (DAAL_E2E_ALLOW_SKIP=1)\033[0m\n'
+  printf '\033[33m          (see "daal e2e quick" above). Run ./daal e2e on a machine with unprivileged user namespaces before trusting this push.\033[0m\n'
+  exit 0
 fi
 
 printf '\n\033[32mpre-push: all checks passed.\033[0m\n'

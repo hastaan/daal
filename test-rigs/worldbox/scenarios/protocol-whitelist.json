@@ -1,0 +1,25 @@
+{
+  "name": "protocol-whitelist",
+  "description": "Iran's 'heavy mode': only UDP/53 and TCP/80+443 leave the network, and a TCP flow must BEGIN like TLS (record type 0x16) or HTTP (a request verb) — anything else is silently dropped from its first data packet on. QUIC is gone with the rest of UDP. Only a family that is real TLS on 443 survives.",
+  "analogue": "The protocol whitelist of the June 2025 Twelve-Day War and the January 2026 blackout (Bock et al. 2020; IRBlock, USENIX Sec 2025): flows must start with a DNS/HTTP/TLS signature, 'this is what killed OpenVPN, WireGuard, IKEv2, obfs4, Hysteria and most QUIC'. Model: first-data-packet prefix test + port/protocol rules. It does NOT model the destination allow-list that the later 'whitelist new normal' adds on top (under that, no foreign VPS is reachable at all: see total-blackout), nor any entropy or fingerprint classifier.",
+  "censor": {
+    "nft": [
+      "ip saddr $CLIENT_IP udp dport != 53 drop",
+      "ip saddr $CLIENT_IP tcp dport != { 80, 443 } drop"
+    ],
+    "dpi": [
+      {"when": "first_bytes_not", "allow": ["tls", "http"], "action": "drop"}
+    ]
+  },
+  "prove": [
+    {"name": "tls-on-443-spared", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "relay-tls-on-443-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "non-tls-on-443-dropped", "probe": "bytes", "to": "elsewhere", "port": 443, "expect": "silent"},
+    {"name": "non-http-on-80-dropped", "probe": "bytes", "to": "elsewhere", "port": 80, "expect": "silent"},
+    {"name": "tcp-8443-dropped", "probe": "tcp", "to": "elsewhere", "port": 8443, "expect": "connect_timeout"},
+    {"name": "udp-443-dropped", "probe": "udp", "to": "elsewhere", "port": 443, "shape": "plain", "expect": "dropped"},
+    {"name": "quic-443-dropped", "probe": "udp", "to": "relay", "port": 443, "shape": "quic", "expect": "dropped"}
+  ],
+  "expect": {"*": "blocked", "vless-reality": "pass"},
+  "category": {"*": "tcp_connect_timeout", "hysteria2": "udp_unavailable", "tuic": "udp_unavailable"}
+}

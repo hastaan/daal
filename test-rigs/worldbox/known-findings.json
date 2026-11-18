@@ -1,0 +1,142 @@
+[
+  {
+    "id": "CEN-1",
+    "severity": "high",
+    "title": "a blocked route is reported Connected / proven; the engine never classifies a data-plane failure",
+    "match": [
+      {
+        "phase": "family",
+        "check": "engine.category",
+        "expect_not": [
+          "none"
+        ],
+        "got": "none"
+      }
+    ]
+  },
+  {
+    "id": "LC-2",
+    "severity": "high",
+    "title": "the freshness channel, as the app drives it, replaces a working pack with a credential-less skeleton",
+    "match": [
+      {
+        "phase": "op:freshness",
+        "check": "unchanged.signed-pack-hosted.tunnel"
+      }
+    ]
+  },
+  {
+    "id": "LC-3",
+    "severity": "medium",
+    "title": "after an L3 address move naive cannot connect to the new address (certificate SAN)",
+    "match": [
+      {
+        "phase": "op:l3",
+        "family": "naive",
+        "check": "new-file.address-blocked.tunnel,new-file.address-blocked.wire"
+      }
+    ]
+  },
+  {
+    "id": "F-004",
+    "severity": "high",
+    "title": "pack profiles are outside the signature: a rewritten server address imports cleanly",
+    "match": [
+      {
+        "phase": "op:tamper",
+        "check": "import_of_tampered_pack",
+        "got": "pass",
+        "evidence": {
+          "rewritten": "profiles",
+          "manifest_rewrite": "refused"
+        }
+      }
+    ]
+  },
+  {
+    "id": "F-002",
+    "severity": "high",
+    "title": "the pinned daal-relay-mgmt release predates Wave 5: shadowsocks, anytls and tuic cannot be provisioned",
+    "when": {
+      "box": "pinned"
+    },
+    "match": [
+      {
+        "phase": "mint",
+        "family": "anytls,shadowsocks,tuic",
+        "check": "relay.listens,pack.route"
+      },
+      {
+        "phase": "mint",
+        "family": "-",
+        "check": "users-provision.*.no_warnings,pack.*.no_dropped_routes"
+      },
+      {
+        "phase": "family",
+        "family": "anytls,shadowsocks,tuic",
+        "check": "tunnel,engine.category"
+      }
+    ]
+  },
+  {
+    "id": "LC-1",
+    "severity": "low-medium",
+    "title": "the pinned daal-relay-mgmt release honours a replayed users-revoke token (fixed in the tree)",
+    "when": {
+      "box": "pinned"
+    },
+    "match": [
+      {
+        "phase": "op:mgmtauth",
+        "check": "replay.users-revoke",
+        "got": "pass"
+      }
+    ]
+  },
+  {
+    "id": "FAM-4",
+    "severity": "low",
+    "title": "a default family that was de-selected at provision time is still open and listening on the box",
+    "match": [
+      {
+        "phase": "mint",
+        "family": "vless-reality,websocket-tls,naive,hysteria2",
+        "check": "not_served"
+      }
+    ]
+  },
+  {
+    "id": "INT-1",
+    "severity": "high",
+    "title": "naive: the engine process dies with SIGSEGV in cronet-go's BidirectionalStream.Cancel when a connection is closed as its stream terminates (intermittent)",
+    "intermittent": true,
+    "match": [
+      {
+        "phase": "*",
+        "family": "naive",
+        "check": "*engine.survived",
+        "detail_contains": "BidirectionalStreamCancel"
+      }
+    ],
+    "max": 6,
+    "max_quick": 2
+  },
+  {
+    "id": "INT-2",
+    "severity": "medium",
+    "title": "naive on a released relay: sing-box's start-up ALPN race now and then leaves naive/TCP refusing every handshake (alert 120, Cronet net_error -107) until its next restart (fixed in the tree daemon; intermittent)",
+    "intermittent": true,
+    "max": 4,
+    "when": {
+      "box": "pinned"
+    },
+    "match": [
+      {
+        "phase": "*",
+        "family": "naive",
+        "check": "*tunnel,*wire",
+        "detail_contains": "net_error -107"
+      }
+    ]
+  }
+]

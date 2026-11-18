@@ -532,6 +532,7 @@ func appendNaiveUser(doc map[string]any, c userCreds) error {
 		inbounds, _ := doc["inbounds"].([]any)
 		doc["inbounds"] = append(inbounds, in)
 	}
+	pinNaiveALPN(in)
 	users, _ := in["users"].([]any)
 	users = append(users, map[string]any{
 		"username": c.Name,
@@ -539,6 +540,44 @@ func appendNaiveUser(doc map[string]any, c userCreds) error {
 	})
 	in["users"] = users
 	return nil
+}
+
+// naiveALPN is written into naive-in's tls block so that sing-box does
+// not have to decide it at start-up — because sing-box 1.13.12 decides it
+// with a race (protocol/naive/inbound.go Start):
+//
+//   - the TCP goroutine does: if NextProtos is empty, set [h2 http/1.1];
+//     else if h2 is missing, prepend it;
+//   - the caller, concurrently, runs sing-quic's ConfigureHTTP3 for the
+//     inbound's UDP half: if NextProtos is empty, set [h3].
+//
+// Both act on the SAME tls config. Nearly always the caller wins and the
+// result is [h2 h3]. When both see "empty" and the caller writes last,
+// the result is [h3] alone, and for the whole life of that sing-box
+// process every TCP ClientHello offering h2 — every Daal naive client —
+// is answered with the fatal alert no_application_protocol (120). The
+// client sees Cronet net_error -107; the relay logs nothing; only the
+// next restart of sing-box clears it. Measured on the released binary
+// with no Daal code involved: 3 dead instances in 3000 starts without an
+// alpn key, 0 in 3000 with it.
+//
+// With alpn present neither branch writes, so there is nothing to race.
+// The value is exactly what the usual interleaving produces, so a relay
+// with this key behaves as a relay without it does on a good start.
+var naiveALPN = []any{"h2", "h3"}
+
+// pinNaiveALPN sets tls.alpn on a naive inbound that has none. It runs on
+// every user add, so an inbound created by an older daemon is healed by
+// the next provision. An alpn somebody set is left alone.
+func pinNaiveALPN(in map[string]any) {
+	tls, _ := in["tls"].(map[string]any)
+	if tls == nil {
+		return
+	}
+	if cur, ok := tls["alpn"].([]any); ok && len(cur) > 0 {
+		return
+	}
+	tls["alpn"] = append([]any(nil), naiveALPN...)
 }
 
 func removeNaiveUser(doc map[string]any, name string) bool {

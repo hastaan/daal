@@ -1,0 +1,16 @@
+{
+  "name": "vless-reality",
+  "endpoint": {
+    "port": 443,
+    "proto": "tcp"
+  },
+  "udp": "pass",
+  "dns": "pass",
+  "secrets": [
+    "vless_uuid",
+    "reality_short_id"
+  ],
+  "pins": [
+    "reality_public_key"
+  ]
+}

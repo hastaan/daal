@@ -1,0 +1,18 @@
+{
+  "name": "heavy-loss",
+  "description": "Protocol-selective loss: 30% of TCP packets are dropped at random in each direction; UDP is untouched. TCP connections open (eventually) and then crawl — no TCP-based family can move the probe's payload within its budget. The QUIC families are unaffected. Which step a TCP family fails at differs from run to run, so no failure category is asserted — but each must still be shown to have connected and authenticated (family/established: one nonce through the tunnel and back, retried for up to 60 s), or a dead family would read as a slow one.",
+  "analogue": "Iran's protest-period shaping: 'protocol-selective shaping degrades HTTPS handshake completion below 50%' (OONI/M-Lab), and the ~40% packet loss measured at the TIC chokepoint in March-April 2024. Model: independent per-packet random drop of TCP only. The real shaping is bursty, rate-based and keyed on more than the protocol number; and where it also hits UDP the QUIC families would suffer too (measured here with 30% loss on everything: hysteria2 and tuic still completed the fetch, in 7-11 s instead of 40 ms).",
+  "censor": {
+    "nft": [
+      "meta l4proto tcp numgen random mod 100 < 30 drop"
+    ]
+  },
+  "prove": [
+    {"name": "tcp-loss-is-partial", "probe": "tcp_burst", "to": "elsewhere", "port": 80, "expect": "some"},
+    {"name": "tcp-loss-toward-relay-too", "probe": "tcp_burst", "to": "relay", "port": 443, "expect": "some"},
+    {"name": "udp-spared", "probe": "udp", "to": "relay", "port": 443, "shape": "quic", "expect": "delivered"}
+  ],
+  "expect": {"*": "blocked", "hysteria2": "pass", "tuic": "pass"},
+  "category": {"*": "unasserted"},
+  "established": {"*": "pass"}
+}

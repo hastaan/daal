@@ -1,0 +1,16 @@
+{
+  "name": "clean",
+  "description": "The censor forwards everything between the client and the relay untouched. The baseline: every family the rig can dial must carry verified bytes.",
+  "analogue": "An uncensored path. Models nothing; it is the control every other scenario is read against.",
+  "censor": {},
+  "prove": [
+    {"name": "relay-tls-answers", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "elsewhere-tls-answers", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "udp-delivered", "probe": "udp", "to": "relay", "port": 443, "shape": "plain", "expect": "delivered"},
+    {"name": "quic-shape-delivered", "probe": "udp", "to": "relay", "port": 443, "shape": "quic", "expect": "delivered"},
+    {"name": "no-loss", "probe": "tcp_burst", "to": "elsewhere", "port": 80, "expect": "all"},
+    {"name": "no-throttle", "probe": "bulk", "to": "elsewhere", "port": 80, "expect": "fast"},
+    {"name": "non-tls-answered", "probe": "bytes", "to": "elsewhere", "port": 80, "expect": "answered"}
+  ],
+  "expect": {"*": "pass"}
+}

@@ -48,7 +48,19 @@ jobs:
           cache: npm
           cache-dependency-path: client-ui/package-lock.json
       - name: Tools the gates shell out to
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep nftables iproute2 util-linux openssl
+      # The end-to-end rig (test-rigs/worldbox) builds its world inside an
+      # unprivileged user namespace. Ubuntu 24.04 runners restrict those
+      # through AppArmor; without this the rig exits 77 and the gate fails
+      # (by design: a skipped rig is never counted as a pass).
+      - name: Allow unprivileged user namespaces (end-to-end rig)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo chmod 0666 /dev/net/tun || true
+      - name: Rig dependencies (libcronet for the naive family)
+        run: go mod download
+        working-directory: test-rigs/worldbox/labclient
       - name: UI dependencies
         run: npm ci
         working-directory: client-ui

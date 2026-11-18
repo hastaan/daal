@@ -1,0 +1,20 @@
+{
+  "name": "sni-drop",
+  "description": "A TLS ClientHello naming the relay's cover host is swallowed, and so is every later client packet of that flow — no RST, no ICMP: the TCP connection opens and then the handshake simply never completes. The box reassembles a ClientHello that spans TCP segments. Only the family that sends that name is blocked.",
+  "analogue": "In-path drop on a TLS trigger: the GFW's ESNI blocking (since July 2020: 'drop all client-to-server packets') and its fully-encrypted-traffic blocker, both silent; and what happens when a cover SNI itself lands on a blocklist (XTLS #3269). Model: exact server_name match, per-flow. It does NOT model residual blocking of the 3-tuple for 120-180 s after the trigger, record-layer fragmentation (a ClientHello split across TLS records is not parsed — the real blind spot too), or ECH.",
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$COVER_SNI"], "reassemble": true, "action": "drop"}
+    ]
+  },
+  "prove": [
+    {"name": "cover-sni-blocked", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "timeout_after_hello"},
+    {"name": "cover-sni-blocked-split-hello", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "split": true, "expect": "timeout_after_hello"},
+    {"name": "cover-sni-blocked-on-any-address", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "timeout_after_hello"},
+    {"name": "other-sni-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "www.wb-control.example", "expect": "ok"},
+    {"name": "no-sni-spared", "probe": "tls", "to": "elsewhere", "port": 443, "expect": "ok"},
+    {"name": "tcp-handshake-spared", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"}
+  ],
+  "expect": {"*": "pass", "vless-reality": "blocked"},
+  "category": {"vless-reality": "tls_handshake_failed"}
+}

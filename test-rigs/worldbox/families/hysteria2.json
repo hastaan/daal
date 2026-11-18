@@ -1,0 +1,15 @@
+{
+  "name": "hysteria2",
+  "endpoint": {
+    "port": 443,
+    "proto": "udp"
+  },
+  "udp": "pass",
+  "dns": "pass",
+  "secrets": [
+    "hy2_password"
+  ],
+  "pins": [
+    "tls_cert_sha256"
+  ]
+}

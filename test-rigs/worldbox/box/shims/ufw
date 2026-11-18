@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""worldbox shim: `ufw` → nftables in the box's own network namespace.
+
+The rule list is whatever the REAL cloud-init runcmd issues; this shim
+turns it into a real, enforcing nft ruleset (table inet wb_ufw), so a
+family listening on a port the box-side firewall never opened is dropped
+here exactly as it would be on the VPS.
+
+Modelled grammar (everything cloud-init v2.yaml.tmpl uses):
+    ufw default deny|allow incoming|outgoing
+    ufw allow <port>/<proto>
+    ufw allow from <ip> to any port <port> proto <proto>
+    ufw [--force] delete allow ...          (same two shapes)
+    ufw --force enable
+Anything else exits 1 loudly — an unmodelled rule must not be silently
+"allowed".
+"""
+import json, os, subprocess, sys
+
+DB = "/etc/wb-ufw.json"
+
+
+def load():
+    try:
+        return json.load(open(DB))
+    except OSError:
+        return {"enabled": False, "incoming": "deny", "rules": []}
+
+
+def save(db):
+    json.dump(db, open(DB, "w"), indent=1)
+
+
+def parse_rule(a):
+    if len(a) == 1 and "/" in a[0]:
+        port, proto = a[0].split("/")
+        return {"port": int(port), "proto": proto, "from": ""}
+    if len(a) == 8 and a[0] == "from" and a[2:5] == ["to", "any", "port"] and a[6] == "proto":
+        return {"port": int(a[5]), "proto": a[7], "from": a[1]}
+    raise SystemExit(f"wb-ufw: rule shape not modelled: {' '.join(a)}")
+
+
+def render(db):
+    lines = ["add table inet wb_ufw", "delete table inet wb_ufw"]
+    if db["enabled"]:
+        policy = "drop" if db["incoming"] == "deny" else "accept"
+        lines += ["table inet wb_ufw {", f"  chain input {{ type filter hook input priority 0; policy {policy};",
+                  "    ct state established,related accept", "    iif lo accept",
+                  "    meta l4proto { icmp, ipv6-icmp } accept"]
+        for r in db["rules"]:
+            src = ""
+            if r["from"]:
+                src = ("ip6 saddr " if ":" in r["from"] else "ip saddr ") + r["from"] + " "
+            lines.append(f"    {src}{r['proto']} dport {r['port']} accept")
+        lines += ["  }", "}"]
+    subprocess.run(["nft", "-f", "-"], input="\n".join(lines) + "\n", text=True, check=True)
+
+
+def main(argv):
+    argv = [a for a in argv if a != "--force"]
+    db = load()
+    if argv[:1] == ["default"] and len(argv) == 3:
+        if argv[2] == "incoming":
+            db["incoming"] = argv[1]
+        elif argv[2] != "outgoing" or argv[1] != "allow":
+            raise SystemExit(f"wb-ufw: not modelled: {' '.join(argv)}")
+    elif argv[:1] == ["allow"]:
+        r = parse_rule(argv[1:])
+        if r not in db["rules"]:
+            db["rules"].append(r)
+    elif argv[:2] == ["delete", "allow"]:
+        r = parse_rule(argv[2:])
+        if r not in db["rules"]:
+            sys.stderr.write("Could not delete non-existent rule\n")
+            save(db)
+            return 0  # real ufw also exits 0 here
+        db["rules"].remove(r)
+    elif argv == ["enable"]:
+        db["enabled"] = True
+    else:
+        raise SystemExit(f"wb-ufw: not modelled: {' '.join(argv)}")
+    save(db)
+    render(db)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

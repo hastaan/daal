@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -157,11 +158,48 @@ func TestAppendNaiveUserCreatesInbound(t *testing.T) {
 	if users, _ := in["users"].([]any); len(users) != 1 {
 		t.Errorf("naive-in users = %d, want 1", len(users))
 	}
+	// alpn must be written down: left to sing-box it is decided by a
+	// start-up race that now and then leaves naive/TCP dead (INT-2).
+	if got := fmt.Sprint(tls["alpn"]); got != "[h2 h3]" {
+		t.Errorf("naive-in tls.alpn = %s, want [h2 h3]", got)
+	}
 	// Removing the only user must drop the whole inbound.
 	if !removeNaiveUser(doc, "r1") {
 		t.Fatalf("removeNaiveUser returned false")
 	}
 	if findInboundByTag(doc, tagNaive) != nil {
 		t.Errorf("naive-in must be removed when its last user leaves")
+	}
+}
+
+// TestNaiveALPNHealsAnOlderInbound: a naive-in written by a daemon that
+// predates the alpn pin (as it looks after a JSON reload) gains it on the
+// next user add; an alpn an operator set is not overwritten.
+func TestNaiveALPNHealsAnOlderInbound(t *testing.T) {
+	old := func(tls map[string]any) map[string]any {
+		return map[string]any{"inbounds": []any{map[string]any{
+			"type": "naive", "tag": tagNaive, "listen_port": float64(naiveListenPort),
+			"users": []any{map[string]any{"username": "r1", "password": "pw"}},
+			"tls":   tls,
+		}}}
+	}
+	doc := old(map[string]any{"enabled": true, "certificate_path": tlsCertPath, "key_path": tlsKeyPath})
+	if err := appendNaiveUser(doc, userCreds{Name: "r2", NaivePassword: "pw2"}); err != nil {
+		t.Fatal(err)
+	}
+	in := findInboundByTag(doc, tagNaive)
+	if got := fmt.Sprint(in["tls"].(map[string]any)["alpn"]); got != "[h2 h3]" {
+		t.Errorf("older inbound not healed: alpn = %s", got)
+	}
+	if users, _ := in["users"].([]any); len(users) != 2 {
+		t.Errorf("users = %d, want 2", len(users))
+	}
+
+	doc = old(map[string]any{"enabled": true, "alpn": []any{"h2"}})
+	if err := appendNaiveUser(doc, userCreds{Name: "r2", NaivePassword: "pw2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(findInboundByTag(doc, tagNaive)["tls"].(map[string]any)["alpn"]); got != "[h2]" {
+		t.Errorf("an explicit alpn was overwritten: %s", got)
 	}
 }

@@ -1,0 +1,20 @@
+{
+  "name": "sni-rst",
+  "description": "A TLS ClientHello naming the relay's cover host is answered with forged TCP resets toward BOTH ends (and dropped); the connection dies immediately after the ClientHello. The box reassembles a ClientHello that spans TCP segments. Only the family that sends that name is blocked.",
+  "analogue": "The GFW's classic SNI blocking: 'a forged TCP RST + RST/ACK pair is injected to both endpoints' after the plaintext server_name is read, with TCP-level reassembly. Model: in-path and deterministic — the offending segment never reaches the server and exactly one reset goes each way. The real injector is on-path (the ClientHello arrives and the resets race the ServerHello), sends three per direction, and adds 90-180 s of residual 3-tuple blocking; none of that is modelled.",
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$COVER_SNI"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "cover-sni-blocked", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "cover-sni-blocked-split-hello", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "split": true, "expect": "reset_after_hello"},
+    {"name": "cover-sni-blocked-on-any-address", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "other-sni-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "www.wb-control.example", "expect": "ok"},
+    {"name": "no-sni-spared", "probe": "tls", "to": "elsewhere", "port": 443, "expect": "ok"},
+    {"name": "tcp-handshake-spared", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"}
+  ],
+  "expect": {"*": "pass", "vless-reality": "blocked"},
+  "category": {"vless-reality": "tls_sni_or_cert_block_suspected"}
+}

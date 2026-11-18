@@ -1,0 +1,842 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// RunCtx is everything a phase or an op needs. Ops (ops_*.go) receive it
+// and nothing else.
+type RunCtx struct {
+	Ctx   context.Context
+	P     Paths
+	R     *Results
+	Pub   *Publisher
+	Scn   Scenario
+	Fams  map[string]Family // every declared family
+	Want  []string          // families under test this run, in order
+	Serve []string          // families the relay is provisioned to serve
+	// ExplicitFamilies: Serve differs from the profile default, so
+	// provisioning passes --families.
+	ExplicitFamilies bool
+	Rec              Record // the provisioned relay's OperatorRecord (read-only view)
+	Pack             string // recipient r1's pack, as handed to the insider
+}
+
+func cmdRun(args []string) int {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	repo := fs.String("repo", "", "repository root")
+	rig := fs.String("rig", "", "test-rigs/worldbox")
+	bin := fs.String("bin", "", "built binaries")
+	runDir := fs.String("run-dir", "", "evidence directory for this run")
+	jsonMode := fs.Bool("json", false, "one JSON line per check on stdout (human progress → stderr)")
+	opsFlag := fs.String("ops", "", "comma list of publisher ops to run after the matrix (see `wb list`)")
+	artifacts := fs.String("artifacts", "", "release artefact directory the lab mirror serves")
+	override := fs.String("override", "", "name=path[,…]: run a tree build of a box artefact instead of the pinned one")
+	timescale := fs.String("timescale", "20", "divide cloud-init's 300 s provisioning window by this")
+	relayFams := fs.String("relay-families", "", "comma list: families the relay is provisioned with (default: the profile's default-enabled families + any opt-in family under test)")
+	shell := fs.Bool("shell", false, "after the run, open a shell inside the world (it dies when you exit)")
+	_ = fs.Parse(args)
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: run.sh [--json] [--ops a,b] <scenario> [family…]")
+		return 2
+	}
+	p := Paths{Repo: *repo, Rig: *rig, Bin: *bin, Run: *runDir}
+	for _, d := range []string{p.Logs(), filepath.Join(p.Run, "boxes"), filepath.Join(p.Run, "clients")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, "wb:", err)
+			return 2
+		}
+	}
+
+	scn, err := LoadScenario(p.Rig, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wb:", err)
+		return 2
+	}
+	fams, all, err := LoadFamilies(p.Rig)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wb:", err)
+		return 2
+	}
+	resolveNeeds(p, fams)
+	// What an operator who changes nothing gets: the toolbox profile's
+	// default-enabled families. "@default" on the command line means
+	// exactly those (the only set the pinned release artefacts can serve
+	// until FINDINGS F-002 is released).
+	_, defaults, err := ProfileFamilies(p.Repo, ToolboxProfile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wb:", err)
+		return 2
+	}
+	var want []string
+	for _, a := range fs.Args()[1:] {
+		if a == "@default" {
+			want = append(want, defaults...)
+		} else {
+			want = append(want, a)
+		}
+	}
+	if len(want) == 0 {
+		want = all
+	}
+	for _, f := range want {
+		if _, ok := fams[f]; !ok {
+			fmt.Fprintf(os.Stderr, "wb: no families/%s.json (have: %s)\n", f, strings.Join(all, " "))
+			return 2
+		}
+		if _, err := scn.ExpectFor(f); err != nil {
+			fmt.Fprintln(os.Stderr, "wb:", err)
+			return 2
+		}
+	}
+	var ops []string
+	if *opsFlag != "" {
+		ops = strings.Split(*opsFlag, ",")
+		for _, o := range ops {
+			if _, ok := Ops[o]; !ok {
+				fmt.Fprintf(os.Stderr, "wb: unknown op %q\n", o)
+				return 2
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	// PID 1 gets no default signal dispositions; die on purpose. Exiting
+	// is the teardown: the kernel kills every process in this pid
+	// namespace and the network namespaces go with their last process.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sig
+		fmt.Fprintln(os.Stderr, "\nwb: interrupted — tearing the world down")
+		CollectEvidence(p)
+		os.Exit(130)
+	}()
+
+	res, err := NewResults(p, filepath.Base(p.Run), scn.Name, got(*override == "", BoxPinned, BoxTree), *jsonMode)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wb:", err)
+		return 2
+	}
+	// What the relay is provisioned to serve: the toolbox profile's
+	// default-enabled families (what an operator who changes nothing
+	// gets) plus any opt-in family under test. When that is exactly the
+	// default set, --families is not passed at all, as in the app.
+	serve := append([]string{}, defaults...)
+	explicit := false
+	if *relayFams != "" {
+		serve, explicit = strings.Split(*relayFams, ","), true
+	}
+	for _, f := range want {
+		if !contains(serve, f) {
+			if *relayFams != "" {
+				fmt.Fprintf(os.Stderr, "wb: family %s is under test but not in --relay-families\n", f)
+				return 2
+			}
+			serve, explicit = append(serve, f), true
+		}
+	}
+	for _, f := range serve {
+		if _, ok := fams[f]; !ok {
+			fmt.Fprintf(os.Stderr, "wb: the relay will serve %q but there is no families/%s.json — declare it (see README)\n", f, f)
+			return 2
+		}
+	}
+	rc := &RunCtx{Ctx: ctx, P: p, R: res, Scn: scn, Fams: fams, Want: want, Serve: serve, ExplicitFamilies: explicit}
+	t0 := time.Now()
+	fmt.Fprintf(res.human, "worldbox: scenario=%s  under test: %s  relay serves: %s  ops: %s  box artefacts: %s\nworldbox: evidence in %s\n",
+		scn.Name, strings.Join(want, ","), strings.Join(serve, ","), strings.Join(ops, ","), got(*override == "", "pinned release", "TREE BUILD "+*override), p.Run)
+
+	if rc.world(*artifacts, *override, *timescale) && rc.provision() && rc.mint() {
+		var served []Family
+		for _, name := range serve {
+			served = append(served, fams[name])
+		}
+		if err := InstallWireTap(ctx, served); err != nil {
+			res.Add("", "world", "censor.wire_tap", Pass, Fail, err.Error(), nil, time.Now())
+		} else if err := ApplyScenario(ctx, p, scn, scenarioVars(rc.Rec.CoverSNI)); err != nil {
+			res.Add("", "world", "censor.apply", Pass, Fail, err.Error(), nil, time.Now())
+		} else {
+			res.Add("", "world", "censor.apply", Pass, Pass, "", map[string]any{"rules": len(scn.Censor.NFT) + len(scn.Censor.NFTRaw), "tc": len(scn.Censor.TC), "dpi": len(scn.Censor.DPI)}, time.Now())
+			rc.ProveCensor() // raw, Daal-free: the censor does what the scenario says (censor.go)
+			for _, name := range want {
+				rc.family(fams[name])
+			}
+			for _, o := range ops {
+				fmt.Fprintf(res.human, "op: %s\n", o)
+				Ops[o](rc)
+			}
+		}
+	}
+	CollectEvidence(p)
+	res.Matrix(res.human)
+	fmt.Fprintf(res.human, "elapsed: %s   evidence: %s\n", time.Since(t0).Round(100*time.Millisecond), p.Run)
+	if *shell {
+		fmt.Fprintln(os.Stderr, "wb: shell inside the world (ip netns list; ip netns exec relay1 …). exit to tear down.")
+		c := exec.Command("bash")
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		_ = c.Run()
+	}
+	if !res.Verdict().OK() {
+		return 1
+	}
+	return 0
+}
+
+// ---- phase: world ----------------------------------------------------
+
+func (rc *RunCtx) world(artifacts, override, timescale string) bool {
+	p, r := rc.P, rc.R
+	t0 := time.Now()
+	fmt.Fprintln(r.human, "phase: world")
+	if err := BringUp(rc.Ctx, p); err != nil {
+		return r.Add("", "world", "namespaces", Pass, Fail, err.Error(), nil, t0)
+	}
+	r.Add("", "world", "namespaces", Pass, Pass, "", map[string]any{"netns": []string{NSClient, NSCensor, NSRelay1, NSInternet, NSPublisher}}, t0)
+
+	t0 = time.Now()
+	if err := MakeLabCA(p.Run, []string{"api.hetzner.cloud", "github.com"}, []string{CloudIP, MirrorIP}); err != nil {
+		return r.Add("", "world", "internet.services", Pass, Fail, err.Error(), nil, t0)
+	}
+	pub, err := NewPublisher(p)
+	if err != nil {
+		return r.Add("", "world", "internet.services", Pass, Fail, err.Error(), nil, t0)
+	}
+	rc.Pub = pub
+	wb := filepath.Join(p.Bin, "wb")
+	if _, err := Spawn(p, "target", nil, inNS(NSInternet, wb, "target")...); err != nil {
+		return r.Add("", "world", "internet.services", Pass, Fail, err.Error(), nil, t0)
+	}
+	cloudArgs := []string{wb, "fakecloud", "--repo", p.Repo, "--rig", p.Rig, "--bin", p.Bin, "--run-dir", p.Run,
+		"--token-file", pub.Path("cloud.token"), "--artifacts", artifacts, "--timescale", timescale}
+	if override != "" {
+		cloudArgs = append(cloudArgs, "--override", override)
+	}
+	if _, err := Spawn(p, "fakecloud", nil, inNS(NSInternet, cloudArgs...)...); err != nil {
+		return r.Add("", "world", "internet.services", Pass, Fail, err.Error(), nil, t0)
+	}
+	if _, err := Spawn(p, "inet", nil, inNS(NSInternet, wb, "inet", "--run-dir", p.Run)...); err != nil {
+		return r.Add("", "world", "internet.services", Pass, Fail, err.Error(), nil, t0)
+	}
+	up := waitFor(rc.Ctx, 10*time.Second, func() bool {
+		return rc.tcpFrom(NSInternet, TargetIP, 80) && rc.tcpFrom(NSInternet, CloudIP, 443) &&
+			rc.tcpFrom(NSInternet, MirrorIP, 443) && rc.tcpFrom(NSInternet, CoverIP, 443)
+	})
+	if !up {
+		return r.Add("", "world", "internet.services", Pass, Fail, "target / cloud API / mirror / cover site did not come up; see logs/", nil, t0)
+	}
+	r.Add("", "world", "internet.services", Pass, Pass, "", nil, t0)
+
+	// The censor forwards between the client and the relay…
+	t0 = time.Now()
+	_, err = sh(rc.Ctx, inNS(NSClient, "ping", "-c1", "-W2", Relay1IP)...)
+	if !r.Add("", "world", "client_reaches_relay_addr", Pass, got(err == nil, Pass, Blocked), errStr(err), nil, t0) {
+		return false
+	}
+	// …the target is alive and reachable from where the relay sits…
+	t0 = time.Now()
+	pr := probeIn(rc.Ctx, p, NSRelay1, false, 5*time.Second)
+	if !r.Add("", "world", "target_alive_from_relay", Pass, got(pr.OK && pr.Remote == Relay1EgressIP, Pass, Fail), pr.Error,
+		map[string]any{"remote_seen_by_target": pr.Remote, "blob_bytes": pr.BlobBytes}, t0) {
+		return false
+	}
+	// …and NOT reachable from the client. Without this, nothing later proves anything.
+	t0 = time.Now()
+	pr = Probe(rc.Ctx, p, false, 3*time.Second)
+	return r.Add("", "world", "target_unreachable_from_client", Blocked, got(pr.OK, Pass, Blocked), pr.Error, nil, t0)
+}
+
+func got(cond bool, yes, no string) string {
+	if cond {
+		return yes
+	}
+	return no
+}
+
+func errStr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// tcpFrom reports whether a TCP connect from inside ns to ip:port succeeds.
+func (rc *RunCtx) tcpFrom(ns, ip string, port int) bool {
+	_, err := sh(rc.Ctx, inNS(ns, "timeout", "2", "bash", "-c", fmt.Sprintf("exec 3<>/dev/tcp/%s/%d", ip, port))...)
+	return err == nil
+}
+
+func probeIn(ctx context.Context, p Paths, ns string, udp bool, timeout time.Duration) ProbeResult {
+	// Same probe binary, different vantage point.
+	args := []string{filepath.Join(p.Bin, "wb"), "probe", "--timeout", timeout.String()}
+	if udp {
+		args = append(args, "--udp")
+	}
+	return runProbeCmd(ctx, inNS(ns, args...))
+}
+
+// ---- phase: provision ------------------------------------------------
+
+func (rc *RunCtx) provision() bool {
+	p, r := rc.P, rc.R
+	fmt.Fprintln(r.human, "phase: provision (real `daal-deploy provision` → lab cloud → real cloud-init on a real box)")
+
+	t0 := time.Now()
+	ctx, cancel := context.WithTimeout(rc.Ctx, 4*time.Minute)
+	defer cancel()
+	var famFlag []string
+	if rc.ExplicitFamilies {
+		famFlag = rc.Serve
+	}
+	v := rc.Pub.Provision(ctx, famFlag)
+	if !r.Add("", "provision", "verb.provision", Pass, got(v.OK(), Pass, Fail), v.Tail(), map[string]any{"rc": v.RC, "serve": rc.Serve, "families_flag": famFlag}, t0) {
+		return false
+	}
+	rec, err := rc.Pub.Record()
+	if err != nil {
+		return r.Add("", "provision", "record", Pass, Fail, err.Error(), nil, t0)
+	}
+	rc.Rec = rec
+	fpOK := len(rec.MgmtTLSFingerprint) == 64
+	var problems []string
+	if rec.PublicIP != Relay1IP {
+		problems = append(problems, "public_ip="+rec.PublicIP)
+	}
+	if !fpOK {
+		problems = append(problems, "mgmt_tls_fingerprint missing")
+	}
+	if rec.MgmtPort == 0 {
+		problems = append(problems, "mgmt_port missing")
+	}
+	if rec.CoverSNI == "" {
+		problems = append(problems, "cover_sni missing")
+	}
+	candFam := map[string]int{}
+	for _, c := range rec.Candidates {
+		candFam[c.Family] = c.Port
+	}
+	for _, f := range rc.Serve {
+		port, ok := candFam[f]
+		if !ok {
+			problems = append(problems, "no candidate for "+f)
+		} else if port != rc.Fams[f].Endpoint.Port {
+			problems = append(problems, fmt.Sprintf("%s: record says port %d, families/%s.json says %d", f, port, f, rc.Fams[f].Endpoint.Port))
+		}
+	}
+	if len(candFam) != len(rc.Serve) {
+		problems = append(problems, fmt.Sprintf("record has %d candidates, expected exactly the %d served families", len(candFam), len(rc.Serve)))
+	}
+	if !r.Add("", "provision", "record", Pass, got(len(problems) == 0, Pass, Fail), strings.Join(problems, "; "),
+		map[string]any{"server_id": rec.ServerID, "public_ip": rec.PublicIP, "mgmt_port": rec.MgmtPort, "cover_sni": rec.CoverSNI,
+			"reality_public_key_in_record": rec.RealityPublicKey != "", "candidates": candFam}, t0) {
+		return false
+	}
+
+	box := p.Box(rec.ServerID)
+	// The one-shot SSH key must be gone from the cloud account.
+	t0 = time.Now()
+	created, deleted, notModelled := 0, 0, 0
+	for _, q := range CloudRequests(p) {
+		switch {
+		case q.Method == "POST" && q.Path == "/v1/ssh_keys" && q.Status == 201:
+			created++
+		case q.Method == "DELETE" && strings.HasPrefix(q.Path, "/v1/ssh_keys/") && q.Status == 204:
+			deleted++
+		case q.Status == 501:
+			notModelled++
+		}
+	}
+	r.Add("", "provision", "cloud.ssh_key_removed", Pass, got(created > 0 && created == deleted, Pass, Fail),
+		fmt.Sprintf("created=%d deleted=%d", created, deleted), nil, t0)
+	r.Add("", "provision", "cloud.api_fully_modelled", Pass, got(notModelled == 0, Pass, Fail),
+		fmt.Sprintf("%d cloud API calls hit an endpoint the lab does not model (grep 501 cloud-requests.jsonl)", notModelled), nil, t0)
+
+	// What the box is actually running is what the release pins.
+	t0 = time.Now()
+	ev := map[string]any{}
+	pinsOK := true
+	for inst, art := range map[string]string{"sing-box": "sing-box-*-linux-amd64", "daal-relay-mgmt": "daal-relay-mgmt-*-linux-amd64", "daal-relay-health": "daal-relay-health-*-linux-amd64"} {
+		installed := fileSum(filepath.Join(box, "rootfs", "usr", "local", "bin", inst))
+		ev[inst] = installed
+		matches, _ := filepath.Glob(filepath.Join(p.Repo, "dist-release", "relay-v1.5.0", art))
+		same := false
+		for _, m := range matches {
+			same = same || (installed != "" && fileSum(m) == installed)
+		}
+		if _, err := os.Stat(filepath.Join(box, "state", "overrides", inst)); err == nil {
+			ev[inst+"_override"] = "TREE BUILD (unpinned)"
+			continue
+		}
+		pinsOK = pinsOK && same
+	}
+	r.Add("", "provision", "box.runs_pinned_artefacts", Pass, got(pinsOK, Pass, Fail), "", ev, t0)
+
+	// Per family: do BOTH firewalls let it in? (Whether anything LISTENS
+	// is checked after the first recipient exists — several inbounds are
+	// only created by the mgmt daemon on the first /users/provision.)
+	ufw, _ := sh(rc.Ctx, inNS(NSRelay1, "nft", "list", "table", "inet", "wb_ufw")...)
+	cfw, _ := sh(rc.Ctx, inNS(NSRelay1, "nft", "list", "table", "inet", "wb_cloudfw")...)
+	_ = os.WriteFile(filepath.Join(box, "state", "ufw.nft"), []byte(ufw), 0o644)
+	allOK := true
+	for _, name := range rc.Serve {
+		f := rc.Fams[name]
+		t0 = time.Now()
+		rule := f.Endpoint.Proto + " dport " + strconv.Itoa(f.Endpoint.Port) + " accept"
+		boxOpen, cloudOpen := nftAllows(ufw, f.Endpoint.Proto, f.Endpoint.Port), nftAllows(cfw, f.Endpoint.Proto, f.Endpoint.Port)
+		allOK = r.Add(name, "provision", "firewalls.open", Pass, got(boxOpen && cloudOpen, Pass, Fail),
+			fmt.Sprintf("want %q in both firewalls: box-side ufw=%v cloud firewall=%v", rule, boxOpen, cloudOpen),
+			map[string]any{"box_ufw": boxOpen, "cloud_firewall": cloudOpen}, t0) && allOK
+	}
+	// The mgmt port must be SHUT to the client side of the world.
+	t0 = time.Now()
+	open := rc.tcpFrom(NSClient, Relay1IP, rec.MgmtPort)
+	r.Add("", "provision", "mgmt_port_closed_to_strangers", Blocked, got(open, Pass, Blocked),
+		"the cloud firewall should only open the mgmt port to the helper IP, and only during a verb", map[string]any{"port": rec.MgmtPort}, t0)
+	_ = allOK // a shut firewall is that family's finding; the rest of the run still has value
+	return true
+}
+
+// nftAllows reports whether an `nft list table` dump accepts proto/port.
+func nftAllows(dump, proto string, port int) bool {
+	p := strconv.Itoa(port)
+	for _, line := range strings.Split(dump, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasSuffix(line, "accept") || !strings.Contains(line, proto+" dport ") {
+			continue
+		}
+		after := strings.TrimSuffix(strings.SplitN(line, proto+" dport ", 2)[1], " accept")
+		after = strings.Trim(after, "{} ")
+		for _, tok := range strings.Split(after, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == p {
+				return true
+			}
+			if lo, hi, ok := strings.Cut(tok, "-"); ok {
+				l, _ := strconv.Atoi(lo)
+				h, _ := strconv.Atoi(hi)
+				if l <= port && port <= h {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func fileSum(path string) string {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := sha256.Sum256(body)
+	return hex.EncodeToString(s[:])
+}
+
+// ---- phase: mint -----------------------------------------------------
+
+func (rc *RunCtx) mint() bool {
+	r := rc.R
+	fmt.Fprintln(r.human, "phase: mint (bind-and-sign → users-provision → users-pack-sbp)")
+	t0 := time.Now()
+	v := rc.Pub.BindAndSign(rc.Ctx, "base.sbp")
+	if !r.Add("", "mint", "verb.bind-and-sign", Pass, got(v.OK(), Pass, Fail), v.Tail(), nil, t0) {
+		return false
+	}
+	pack, _ := rc.MintRecipient("r1", "mint")
+	rc.Pack = pack
+	// Not fatal: a family the relay does not serve is a finding about
+	// that family, and the others still deserve their session.
+	rc.relayListens()
+	if pack != "" {
+		rc.packChecks("mint", pack)
+	}
+	rc.MgmtWindowClosed("mint")
+	return pack != ""
+}
+
+// relayListens checks, per served family, that something in the relay
+// namespace is actually bound to the family's port. Run after the first
+// recipient exists.
+func (rc *RunCtx) relayListens() bool {
+	listen, _ := sh(rc.Ctx, inNS(NSRelay1, "ss", "-Hltnu")...)
+	_ = os.WriteFile(filepath.Join(rc.P.Box(rc.Rec.ServerID), "state", "listeners.txt"), []byte(listen), 0o644)
+	allOK := true
+	for _, name := range rc.Serve {
+		f := rc.Fams[name]
+		t0 := time.Now()
+		port := strconv.Itoa(f.Endpoint.Port)
+		listening := false
+		for _, line := range strings.Split(listen, "\n") {
+			fld := strings.Fields(line)
+			if len(fld) >= 5 && fld[0] == f.Endpoint.Proto && strings.HasSuffix(fld[4], ":"+port) {
+				listening = true
+			}
+		}
+		allOK = rc.R.Add(name, "mint", "relay.listens", Pass, got(listening, Pass, Fail),
+			got(listening, "", fmt.Sprintf("nothing listening on %s/%s in the relay namespace", port, f.Endpoint.Proto)),
+			map[string]any{"port": f.Endpoint.Port, "proto": f.Endpoint.Proto}, t0) && allOK
+	}
+	return allOK
+}
+
+// MintRecipient provisions one recipient on the relay and mints their
+// pack. Ops reuse it for extra recipients.
+func (rc *RunCtx) MintRecipient(name, phase string) (string, bool) {
+	r := rc.R
+	t0 := time.Now()
+	v := rc.Pub.UsersProvision(rc.Ctx, name)
+	if !r.Add("", phase, "verb.users-provision."+name, Pass, got(v.OK(), Pass, Fail), v.Tail(), nil, t0) {
+		return "", false
+	}
+	// The verb exits 0 while telling the operator a family it offers has
+	// no credential. Exit status alone would hide that.
+	if warn := strings.Count(v.Stderr, "warning:"); warn > 0 {
+		r.Add("", phase, "users-provision."+name+".no_warnings", Pass, Fail, v.Tail(), nil, t0)
+	}
+	t0 = time.Now()
+	out := "pack-" + name + ".sbp"
+	v = rc.Pub.PackSBP(rc.Ctx, "base.sbp", "creds-"+name+".json", out)
+	ok := r.Add("", phase, "verb.users-pack-sbp."+name, Pass, got(v.OK(), Pass, Fail), v.Tail(), map[string]any{"stdout": strings.TrimSpace(v.Stdout)}, t0)
+	if ok && strings.Contains(v.Stderr, "NOT connectable") {
+		// The verb exits 0 while dropping routes; that is a finding, not a pass.
+		r.Add("", phase, "pack."+name+".no_dropped_routes", Pass, Fail, v.Tail(), nil, t0)
+	}
+	if !ok {
+		return "", false
+	}
+	return rc.Pub.Path(out), true
+}
+
+// ---- phase: family ---------------------------------------------------
+
+// family runs one family under the applied scenario with recipient r1.
+func (rc *RunCtx) family(f Family) {
+	expect, _ := rc.Scn.ExpectFor(f.Name)
+	fmt.Fprintf(rc.R.human, "family: %s (scenario expects %s)\n", f.Name, expect)
+	outcome := rc.Session(f, rc.Pack, "family", expect)
+	rc.wrongCreds(f, "family", expect, outcome)
+	rc.wrongServer(f, "family", expect, outcome)
+}
+
+// Session is one complete insider session for one family with one pack:
+// control → import → connect → verified fetch → path proof → disconnect →
+// control. It returns the observed tunnel outcome. Ops call it too.
+//
+// If the engine PROCESS dies mid-session (not: refuses, not: is blocked —
+// dies), that is recorded as a red `engine.survived` with the crash
+// signature, the dead VPN's routing is reaped as Android would, and the
+// session is repeated once, so one crash costs one red check and not a
+// cascade of misattributed ones (the first crash the rig saw read as "DNS
+// blocked" on naive and "ip rule: File exists" on the next family).
+func (rc *RunCtx) Session(f Family, pack, phase, expect string) string {
+	outcome, died := rc.session(f, pack, phase, expect, true)
+	if died {
+		outcome, _ = rc.session(f, pack, phase, expect, false)
+	}
+	return outcome
+}
+
+// engineDied records the death. It returns true when the caller should
+// abandon this attempt (a retry follows).
+func (rc *RunCtx) engineDied(f Family, phase string, c *Client, retry bool, t0 time.Time) bool {
+	if !c.Died() {
+		return false
+	}
+	sig := c.CrashSignature()
+	rc.R.Add(f.Name, phase, "engine.survived", Pass, Fail,
+		"the engine process died mid-session: "+sig+got(retry, " — the session is repeated once", " — second death in a row; the checks below are what a user would see"),
+		map[string]any{"client_dir": c.Dir, "stderr": filepath.Join(c.Dir, "stderr.log"), "signature": sig}, t0)
+	ReapDeadVPN(rc.Ctx)
+	return retry
+}
+
+func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (string, bool) {
+	p, r := rc.P, rc.R
+	if f.Skip != "" {
+		r.Add(f.Name, phase, "tunnel", Skipped, Skipped, f.Skip, nil, time.Now())
+		return Skipped, false
+	}
+	// Negative control BEFORE: with no tunnel the target must be out of reach.
+	t0 := time.Now()
+	pre := Probe(rc.Ctx, p, false, 2*time.Second)
+	r.Add(f.Name, phase, "control.before", Blocked, got(pre.OK, Pass, Blocked), pre.Error, nil, t0)
+
+	t0 = time.Now()
+	_, _ = WireReset(rc.Ctx) // the wire tap's window for this session starts here
+	c, err := StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental})
+	if err != nil {
+		r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
+		return Fail, false
+	}
+	ev, err := c.Wait(rc.Ctx, 20*time.Second, "connected")
+	if err != nil && rc.engineDied(f, phase, c, retry, t0) {
+		return Fail, true
+	}
+	importEv := c.Event("import")
+	routesEv := c.Event("routes")
+	if routesEv == nil {
+		// Never got as far as a route list: the pack itself was not accepted.
+		c.Stop()
+		r.Add(f.Name, phase, "import", Pass, Refused, errStr(err), map[string]any{"import": importEv, "trust": c.Event("trust")}, t0)
+		r.Add(f.Name, phase, "tunnel", expect, Refused, "pack not imported", nil, t0)
+		rc.established(f, phase, expect, nil, ProbeResult{}, "the pack was not imported", false, t0)
+		return Refused, false
+	}
+	r.Add(f.Name, phase, "import", Pass, Pass, "", map[string]any{"verdict": verdictKind(importEv), "trust": verdictKind(c.Event("trust"))}, t0)
+	if err != nil {
+		c.Stop()
+		outcome := Blocked
+		stage, _ := ev["stage"].(string)
+		if stage == "pick" || stage == "set_route" {
+			outcome = Refused
+		}
+		r.Add(f.Name, phase, "tunnel", expect, outcome, "engine did not connect: "+err.Error(), map[string]any{"client_dir": c.Dir}, t0)
+		if outcome == Blocked {
+			wire, werr := WireReset(rc.Ctx)
+			rc.wireCheck(f, phase, expect, wire, werr, 0, t0)
+		}
+		rc.established(f, phase, expect, nil, ProbeResult{}, "the engine did not connect: "+err.Error(), false, t0)
+		rc.EngineCategory(f, phase, c, nil)
+		return outcome, false
+	}
+
+	// The fetch, through whatever the kernel routes it into.
+	t0 = time.Now()
+	budget := 10 * time.Second
+	if expect == Blocked {
+		budget = 5 * time.Second // long enough for any handshake that is going to happen
+	}
+	pr := ProbeApp(rc.Ctx, p, f.UDP != "", f.DNS != "", SessionBurst, budget)
+	if rc.engineDied(f, phase, c, retry, t0) {
+		return Fail, true
+	}
+	if !pr.OK {
+		// Whatever is red from here to the end of this session carries
+		// what the engine process itself said (Cronet logs to stderr and
+		// nowhere else): the cause, not only the symptom.
+		if said := c.StderrTail(); said != "" {
+			r.note = " | engine stderr: " + said
+			defer func() { r.note = "" }()
+		}
+	}
+	wire, werr := WireReset(rc.Ctx)
+	outcome := got(pr.OK, Pass, Blocked)
+	detail := pr.Error
+	if pr.OK && pr.Remote != Relay1EgressIP {
+		outcome, detail = Fail, "fetch succeeded but the target saw "+pr.Remote+", not the relay ("+Relay1EgressIP+"): this is not the tunnel"
+	}
+	r.Add(f.Name, phase, "tunnel", expect, outcome, detail, map[string]any{
+		"route_id": ev["route_id"], "target_saw": pr.Remote, "nonce_ok": pr.NonceOK,
+		"blob_bytes": pr.BlobBytes, "blob_sha256_ok": pr.BlobOK, "upload_bytes": pr.UploadBytes, "upload_sha256_ok": pr.UploadOK,
+		"burst_connections": pr.BurstN, "burst_ok": pr.BurstOK,
+		"fetch_ms": pr.Ms, "client_dir": c.Dir}, t0)
+	// Where the bytes actually went: this family's endpoint, and nowhere else.
+	// The bar is the payload the probe ASKED for, not what it got: a
+	// censor that lets the TCP handshake through and kills the flow after
+	// the ClientHello (sni-rst, sni-drop, tcp-reset-mid-handshake) returns
+	// a few packets and zero payload, and "a SYN-ACK came back" must not
+	// read as the family having carried the fetch.
+	wantDown := int64(pr.BlobBytes)
+	if !pr.OK {
+		wantDown = ProbeBlobBytes
+	}
+	rc.wireCheck(f, phase, expect, wire, werr, wantDown, t0)
+	if rc.established(f, phase, expect, c, pr, "", retry, t0) && rc.engineDied(f, phase, c, retry, t0) {
+		return Fail, true
+	}
+	if outcome == Pass && f.UDP != "" {
+		// Both sizes must make it: a tunnel that carries a DNS-sized
+		// datagram and loses a 1400-byte one resolves names and then
+		// cannot carry a single QUIC packet.
+		udp, udpDetail := Pass, ""
+		switch {
+		case !pr.UDPOK:
+			udp, udpDetail = Blocked, "small datagram: "+pr.UDPError
+		case pr.UDPRemote != Relay1EgressIP:
+			udp, udpDetail = Fail, "the datagram reached the target from "+pr.UDPRemote+", not from the relay: this is not the tunnel"
+		case !pr.UDPBigOK:
+			udp, udpDetail = Blocked, fmt.Sprintf("the small datagram round-tripped, the %d-byte one did not: %s", BigDatagram, pr.UDPBigError)
+		}
+		r.Add(f.Name, phase, "udp", f.UDP, udp, udpDetail, map[string]any{"target_saw": pr.UDPRemote, "small_ok": pr.UDPOK, "big_ok": pr.UDPBigOK, "big_bytes": BigDatagram}, t0)
+	}
+	if outcome == Pass && f.DNS != "" {
+		// The phone's resolver: UDP/53 to the servers the VpnService set.
+		dns, dnsDetail := Pass, ""
+		switch {
+		case !pr.DNSOK:
+			dns, dnsDetail = Blocked, "UDP/53 lookup got no answer: "+pr.DNSError
+		case pr.DNSAsker != Relay1EgressIP:
+			dns, dnsDetail = Fail, "the resolver saw the query come from "+pr.DNSAsker+", not from the relay: the lookup did not go through the tunnel"
+		case !pr.NameFetchOK:
+			dns, dnsDetail = Blocked, "the name resolved but the fetch by name failed: "+pr.NameFetchErr
+		}
+		if dns != Pass && pr.DNSTCPOK {
+			dnsDetail += " (the same lookup over TCP/53 succeeded)"
+		}
+		r.Add(f.Name, phase, "dns", f.DNS, dns, dnsDetail, map[string]any{"resolver_saw": pr.DNSAsker, "udp53_ok": pr.DNSOK,
+			"tcp53_ok": pr.DNSTCPOK, "tcp53_error": pr.DNSTCPError, "fetch_by_name_ok": pr.NameFetchOK, "servers": []string{PublicDNS1, PublicDNS2}}, t0)
+	}
+
+	t0 = time.Now()
+	bye := c.Stop()
+	calls := 0
+	if bye != nil {
+		if n, ok := bye["protect_calls"].(float64); ok {
+			calls = int(n)
+		}
+	}
+	// Negative control AFTER: disconnecting must take the path away again.
+	post := Probe(rc.Ctx, p, false, 2*time.Second)
+	r.Add(f.Name, phase, "control.after", Blocked, got(post.OK, Pass, Blocked), post.Error,
+		map[string]any{"engine_protect_calls": calls, "clean_disconnect": bye != nil}, t0)
+	// What the ENGINE said happened, against what the censor did (censor.go).
+	rc.EngineCategory(f, phase, c, bye)
+	return outcome, false
+}
+
+// EstablishBudget is how long a family gets to show it connected at all
+// under a scenario that degrades the path instead of cutting it.
+// EstablishAttempt is one try. A healthy family answers the session's own
+// probe and costs nothing here; only a family that has not yet answered
+// (30% loss: a handshake that needed its third SYN) is asked again.
+//
+// The budget is sized for naive under heavy-loss, the worst case seen:
+// its attempts fail fast with EOF (FINDINGS CEN-O4) about every other
+// time, and at 20 s (five attempts) one full-matrix run in three had a
+// naive that never got its nonce through. A family that is really dead
+// costs the whole budget once, then is red.
+const (
+	EstablishBudget  = 60 * time.Second
+	EstablishAttempt = 5 * time.Second
+)
+
+// established records family/established where the scenario demands it
+// (Scenario.MustEstablish): expected "blocked" because the payload cannot
+// finish in the probe's budget, NOT because the family is stopped. That
+// expectation is satisfied by a family that is simply dead — no user on
+// the relay, a wrong port, a broken config — so it needs this second,
+// positive claim: one fresh nonce went out through the tunnel and came
+// back, and the target saw it arrive from the relay's egress address.
+// That takes a completed handshake AND an accepted credential.
+//
+// Its negative controls are the session's own: control.before (with no
+// tunnel the same nonce round trip fails) and the source address (a
+// reply from anywhere but the relay is not this tunnel).
+//
+// c is the live client (nil: the session never got one — why says so).
+// It returns true, recording nothing, when the engine died while being
+// asked again and the session is going to be repeated (retry).
+func (rc *RunCtx) established(f Family, phase, expect string, c *Client, pr ProbeResult, why string, retry bool, t0 time.Time) (died bool) {
+	if phase != "family" || expect != Blocked || !rc.Scn.MustEstablish(f.Name) {
+		return false
+	}
+	attempts := 1
+	if c != nil {
+		deadline := time.Now().Add(EstablishBudget)
+		for !establishedBy(pr) && pr.Remote == "" && time.Now().Before(deadline) && rc.Ctx.Err() == nil {
+			started := time.Now()
+			pr = ProbeWhoami(rc.Ctx, rc.P, EstablishAttempt)
+			attempts++
+			if d := time.Second - time.Since(started); d > 0 && !establishedBy(pr) {
+				time.Sleep(d) // an instant refusal is not a reason to spin
+			}
+			if c.Died() {
+				if retry {
+					return true // the caller records the death and repeats the session
+				}
+				pr.Error = "the engine process died: " + c.CrashSignature()
+				break
+			}
+		}
+	}
+	outcome, detail := Pass, ""
+	switch {
+	case c == nil:
+		outcome, detail = Blocked, why
+	case pr.NonceOK && pr.Remote != Relay1EgressIP:
+		outcome, detail = Fail, "the nonce came back, but the target saw "+pr.Remote+", not the relay ("+Relay1EgressIP+"): this is not the tunnel"
+	case !establishedBy(pr):
+		outcome, detail = Blocked, fmt.Sprintf("the scenario says %s still connects and only then crawls, but in %d attempt(s) not one nonce made the round trip through it (%s): the family is dead here, not slow",
+			f.Name, attempts, pr.Error)
+	}
+	ev := map[string]any{"nonce_ok": pr.NonceOK, "target_saw": pr.Remote, "attempts": attempts}
+	if c != nil {
+		ev["client_dir"] = c.Dir
+	}
+	rc.R.Add(f.Name, phase, "established", Pass, outcome, detail, ev, t0)
+	return false
+}
+
+// establishedBy: the probe's nonce round trip succeeded, through the relay.
+func establishedBy(pr ProbeResult) bool { return pr.NonceOK && pr.Remote == Relay1EgressIP }
+
+func verdictKind(ev map[string]any) any {
+	if ev == nil {
+		return nil
+	}
+	return ev["kind"]
+}
+
+func runProbeCmd(ctx context.Context, argv []string) ProbeResult {
+	out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+	return parseProbe(out, err)
+}
+
+// activeFamilies are the families under test that the rig can exercise.
+func (rc *RunCtx) activeFamilies() []Family {
+	var out []Family
+	for _, n := range rc.Want {
+		if f := rc.Fams[n]; f.Skip == "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// sub runs a Session whose checks are namespaced "<label>.<check>", so an
+// op can run several sessions per family without their rows colliding.
+func (rc *RunCtx) sub(f Family, phase, label, pack, expect string) string {
+	saved := rc.R.prefix
+	rc.R.prefix = label + "."
+	defer func() { rc.R.prefix = saved }()
+	// Under a blocking scenario nothing an op expects to pass can pass;
+	// the scenario's own expectation wins.
+	if scn, _ := rc.Scn.ExpectFor(f.Name); scn == Blocked {
+		expect = Blocked
+	}
+	return rc.Session(f, pack, phase, expect)
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// MgmtWindowClosed asserts that no verb left its ephemeral cloud-firewall
+// window behind: after a mgmt call returns, the cloud firewall must not
+// accept the mgmt port from anyone. Ops should call it after their verbs.
+func (rc *RunCtx) MgmtWindowClosed(phase string) bool {
+	t0 := time.Now()
+	cfw, _ := sh(rc.Ctx, inNS(NSRelay1, "nft", "list", "table", "inet", "wb_cloudfw")...)
+	open := nftAllows(cfw, "tcp", rc.Rec.MgmtPort)
+	return rc.R.Add("", phase, "cloud.mgmt_window_closed", Pass, got(!open, Pass, Fail),
+		got(!open, "", "the cloud firewall still accepts the mgmt port after the verb returned"),
+		map[string]any{"mgmt_port": rc.Rec.MgmtPort}, t0)
+}

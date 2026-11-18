@@ -1,0 +1,18 @@
+{
+  "name": "throttle-56k",
+  "description": "Everything is forwarded, nothing is dropped, and the path is capped at 56 kbit/s in each direction with 50 ms of delay. Every handshake completes and every family connects — and none can move the probe's 256 KiB each way within its budget. Blocked in the only sense the user cares about, with no failure for the client to see. Because a family that never connected looks exactly the same from the payload's side, each family must first prove it did connect: one nonce through the tunnel and back, seen by the target as coming from the relay (family/established).",
+  "analogue": "Throttling as a blocking tool: Iran's bandwidth shaping at the TIC gateways, and the GFW's reported throttling of suspected tunnels to a few tens of kbit/s instead of dropping them. Model: a symmetric rate cap on the whole client (netem rate), not keyed on destination or protocol. The real thing is selective and often asymmetric.",
+  "censor": {
+    "tc": [
+      {"dev": "$DEV_RELAY", "args": "netem delay 50ms rate 56kbit"},
+      {"dev": "$DEV_CLIENT", "args": "netem delay 50ms rate 56kbit"}
+    ]
+  },
+  "prove": [
+    {"name": "handshake-still-completes", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "bulk-is-slow", "probe": "bulk", "to": "elsewhere", "port": 80, "expect": "slow"}
+  ],
+  "expect": {"*": "blocked"},
+  "category": {"*": "none"},
+  "established": {"*": "pass"}
+}
