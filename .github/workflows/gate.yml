@@ -58,6 +58,17 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
           sudo chmod 0666 /dev/net/tun || true
+      # The rig boots a relay from the artefacts recipients' relays really
+      # download. Their hashes are pinned in publisher/deploy/cloudinit/
+      # artifacts.go and checked by the box's own verifier, so a tampered
+      # or mismatched download fails the run rather than passing quietly.
+      - name: Published relay artefacts (end-to-end rig)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist-release/relay-v1.5.0
+          gh release download relay-v1.5.0 --repo "$GITHUB_REPOSITORY" --dir dist-release/relay-v1.5.0
+          chmod +x dist-release/relay-v1.5.0/*-linux-amd64
       - name: Rig dependencies (libcronet for the naive family)
         run: go mod download
         working-directory: test-rigs/worldbox/labclient
