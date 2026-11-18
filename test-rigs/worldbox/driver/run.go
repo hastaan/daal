@@ -718,9 +718,16 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 // time, and at 20 s (five attempts) one full-matrix run in three had a
 // naive that never got its nonce through. A family that is really dead
 // costs the whole budget once, then is red.
+//
+// One attempt is 15 s, not 5: every attempt is a NEW connection, and
+// under 30% loss in each direction a handshake needs TCP's own
+// retransmissions (1 s, then 3 s, then 7 s) to finish. With 5 s attempts
+// a slow machine — the 4-core CI runner, 15 worlds side by side — threw
+// each connection away just before its retransmit landed, and the first
+// CI run had a vless-reality that made 13 attempts and completed none.
 const (
-	EstablishBudget  = 60 * time.Second
-	EstablishAttempt = 5 * time.Second
+	EstablishBudget  = 90 * time.Second
+	EstablishAttempt = 15 * time.Second
 )
 
 // established records family/established where the scenario demands it
