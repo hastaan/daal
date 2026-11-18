@@ -125,7 +125,12 @@ func TestBindAndSign_EmitsSignedMirrorSet(t *testing.T) {
 	// And the pack itself still verifies: the mirror document is
 	// an extra archive entry, so it must not disturb the manifest
 	// signature or require a spec_version bump.
-	if err := bundle.VerifyBundle(parsed); err != nil {
+	// Verified at the instant it was signed, not at the wall clock. This
+	// test went red on its own three months after it was written, because
+	// a pack signed at a fixed date expires — the third time-bomb fixture
+	// in this repo. A test that pins its signing time must pin its
+	// verification time too.
+	if err := bundle.VerifyBundleAt(parsed, now); err != nil {
 		t.Fatalf("pack with a mirror document must still verify: %v", err)
 	}
 	if parsed.Manifest.SpecVersion != 3 {
@@ -233,8 +238,9 @@ func TestBindAndSign_SetsRevocationURL(t *testing.T) {
 	revPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	revPubHex := strings.ToLower(hexOf(revPub))
 
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	res, err := BindAndSign(freshnessRecord(pub), priv, BindOpts{
-		Now:              time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
+		Now:              now,
 		Phase:            relaypackvalidate.CurrentPhase,
 		RevocationURL:    "https://frp.example.com/revocation.json",
 		RevocationPubHex: revPubHex,
@@ -252,7 +258,7 @@ func TestBindAndSign_SetsRevocationURL(t *testing.T) {
 	if parsed.Manifest.Publisher.RevocationFingerprintHex != revPubHex {
 		t.Fatalf("revocation key = %q", parsed.Manifest.Publisher.RevocationFingerprintHex)
 	}
-	if err := bundle.VerifyBundle(parsed); err != nil {
+	if err := bundle.VerifyBundleAt(parsed, now); err != nil {
 		t.Fatalf("pack must still verify: %v", err)
 	}
 }

@@ -84,6 +84,19 @@ func TestPublisherDeployHasNoTelemetry(t *testing.T) {
 		// Helper keystore, REST call to FRP-supplied provider
 		// API, never from box or recipient.
 		isStarkProviderClient := strings.HasSuffix(filepath.ToSlash(path), "/deploy/providers/stark/client.go")
+		// publisher/deploy/providers/vultr/live_client.go is the
+		// Vultr API v2 REST client. Same trust model as the Stark
+		// wrapper and the Helper-side Cloudflare client: the token
+		// lives in the Helper keystore, the calls go to the operator's
+		// own cloud account, and nothing on the box or the recipient
+		// ever runs this code.
+		//
+		// It is hand-written rather than govultr/v3-backed precisely
+		// so this allowlist stays enumerable: ONE file, whose every
+		// outbound host is the constant DefaultEndpoint, instead of a
+		// transitive SDK dependency this test cannot see inside. See
+		// the package doc for the full argument.
+		isVultrProviderClient := strings.HasSuffix(filepath.ToSlash(path), "/deploy/providers/vultr/live_client.go")
 		// publisher/deploy/mgmt is the Helper-side TLS-pinned
 		// HTTPS client for daal-relay-mgmt running on the
 		// FRP-owned box. It only ever connects to
@@ -108,6 +121,9 @@ func TestPublisherDeployHasNoTelemetry(t *testing.T) {
 			}
 			if isStarkProviderClient {
 				continue // providers/stark/client.go is the FRP-10 REST wrapper (no SDK exists)
+			}
+			if isVultrProviderClient {
+				continue // providers/vultr/live_client.go is the Vultr API v2 REST client
 			}
 			if isMgmtClient {
 				continue // deploy/mgmt is the Helper-side TLS-pinned mgmt-plane client

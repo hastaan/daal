@@ -79,6 +79,41 @@ type hcloudClient interface {
 	FloatingIPAssign(ctx context.Context, fipID, serverID string) error
 	FloatingIPUnassign(ctx context.Context, fipID string) error
 
+	// FloatingIPList returns every reserved address on the account
+	// with the labels and the current attachment.
+	//
+	// Enumeration, not lookup, and that distinction is the whole
+	// reason it exists. Every other floating-IP call here starts
+	// from an id somebody already knew. The addresses that cost this
+	// project's operator money are precisely the ones nobody knows
+	// the id of any more: reserved by an L3 whose record was never
+	// written back, or detached by a release that then failed. There
+	// is no id to look up, so nothing could ever see them. Account
+	// audit (provider.AccountAuditor) is the only caller.
+	FloatingIPList(ctx context.Context) ([]*FloatingIPInfo, error)
+
+	// FirewallList returns every firewall on the account with its
+	// name and the server ids currently behind it.
+	//
+	// AppliedToServerIDs is the load-bearing field. A firewall is
+	// one relay's only protection for a random mgmt port, so the
+	// audit refuses to call one an orphan while anything is still
+	// behind it — the same rule FirewallDeleteForServer's SharedWith
+	// guard already enforces on the teardown path, applied to a
+	// firewall whose server id no longer resolves to anything.
+	FirewallList(ctx context.Context) ([]FirewallInfo, error)
+
+	// FirewallDeleteByID deletes one firewall outright.
+	// Idempotent: an absent id is success.
+	//
+	// Separate from FirewallDeleteForServer because that verb keys
+	// off a LIVE server id — it derives the name from it and checks
+	// what else is attached to it. The orphan case is exactly the
+	// one where that server does not exist, so the caller has
+	// already had to prove emptiness itself and there is nothing
+	// left for the name derivation to key on.
+	FirewallDeleteByID(ctx context.Context, firewallID string) error
+
 	// FirewallApplyCloudflareRule creates or updates a firewall
 	// rule allowing inbound 443/tcp ONLY from the supplied edge
 	// ranges. firewallID is "" on first call (creates a new
@@ -186,6 +221,26 @@ type SSHKeyInfo struct {
 	ID     string
 	Name   string
 	Labels map[string]string
+}
+
+// FirewallInfo is one firewall as the account audit sees it.
+//
+// AppliedToServerIDs carries every server currently behind this
+// firewall. Empty means nothing is protected by it right now, which is
+// half of the orphan proof; the other half is that the server its name
+// was derived from no longer exists.
+type FirewallInfo struct {
+	ID     string
+	Name   string
+	Labels map[string]string
+	// AppliedToServerIDs is servers only. Hetzner firewalls can also
+	// be applied by label selector, and such a firewall protects
+	// whatever matches the selector at any given moment — including
+	// servers that do not exist yet. LabelSelectors being non-empty
+	// therefore means "this firewall's blast radius is not a list we
+	// can read", and the audit must refuse to call it an orphan.
+	AppliedToServerIDs []string
+	LabelSelectors     []string
 }
 
 // FirewallTeardownResult is what FirewallDeleteForServer did.

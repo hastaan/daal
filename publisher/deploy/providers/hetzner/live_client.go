@@ -725,6 +725,14 @@ func NewLiveClientForListing(token string) *ListingClient {
 }
 
 // ServerTypeEntry is a single server type with pricing for a region.
+//
+// Currency is stated even though this adapter only ever bills in euro,
+// and the reason is the screen at the other end: the L5 sheet lists
+// Hetzner and Vultr plans through the SAME component, and Vultr prices
+// in USD (providers/vultr/live_client.go). A shape that says nothing
+// about currency is one the renderer has to guess about, and the guess
+// it made was a euro sign in front of a dollar figure. Say it here so
+// neither side has to assume.
 type ServerTypeEntry struct {
 	ID          string  `json:"id"`
 	Description string  `json:"description"`
@@ -735,6 +743,7 @@ type ServerTypeEntry struct {
 	HourlyEUR   float64 `json:"hourly_eur"`
 	Location    string  `json:"location"`
 	Arch        string  `json:"arch"`
+	Currency    string  `json:"currency,omitempty"`
 }
 
 // ListServerTypes returns all shared-CPU server types that are
@@ -784,6 +793,7 @@ func (l *ListingClient) ListServerTypes(ctx context.Context, region string) ([]S
 				HourlyEUR:   hourly,
 				Location:    region,
 				Arch:        arch,
+				Currency:    "EUR",
 			})
 		}
 	}
@@ -846,4 +856,82 @@ func (l *ListingClient) ListServers(ctx context.Context) ([]ExistingServerEntry,
 		result = append(result, entry)
 	}
 	return result, nil
+}
+
+// FloatingIPList enumerates every reserved address on the account.
+//
+// hcloud's All() paginates internally, so a large account does not
+// silently return page one — which would make the audit report "no
+// orphans" on exactly the accounts most likely to have some.
+func (l *liveClient) FloatingIPList(ctx context.Context) ([]*FloatingIPInfo, error) {
+	fips, err := l.c.FloatingIP.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*FloatingIPInfo, 0, len(fips))
+	for _, f := range fips {
+		if f == nil {
+			continue
+		}
+		out = append(out, floatingIPInfoFromHcloud(f))
+	}
+	return out, nil
+}
+
+// FirewallList enumerates every firewall on the account.
+//
+// Both applied-to shapes are read, and they are kept apart. A firewall
+// applied to servers has a knowable blast radius; one applied by label
+// selector protects whatever matches at any moment, and the audit has
+// to treat that as unprovable rather than as empty.
+func (l *liveClient) FirewallList(ctx context.Context) ([]FirewallInfo, error) {
+	fws, err := l.c.Firewall.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FirewallInfo, 0, len(fws))
+	for _, f := range fws {
+		if f == nil {
+			continue
+		}
+		info := FirewallInfo{
+			ID:     strconv.FormatInt(f.ID, 10),
+			Name:   f.Name,
+			Labels: f.Labels,
+		}
+		for _, ap := range f.AppliedTo {
+			switch ap.Type {
+			case hcloud.FirewallResourceTypeServer:
+				if ap.Server != nil {
+					info.AppliedToServerIDs = append(info.AppliedToServerIDs, strconv.FormatInt(ap.Server.ID, 10))
+				}
+			case hcloud.FirewallResourceTypeLabelSelector:
+				if ap.LabelSelector != nil {
+					info.LabelSelectors = append(info.LabelSelectors, ap.LabelSelector.Selector)
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+// FirewallDeleteByID deletes one firewall. Absent is success, so a
+// reclaim that runs twice does not report a failure the second time.
+//
+// This call performs NO safety check of its own, deliberately: it is
+// the narrow verb, and the emptiness + dead-server proof belongs one
+// layer up in the audit where it can be re-verified against fresh
+// reads and reported to the operator by name. A guard here as well
+// would be a second, weaker copy of that reasoning.
+func (l *liveClient) FirewallDeleteByID(ctx context.Context, firewallID string) error {
+	fwInt, err := strconv.ParseInt(firewallID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
+	}
+	_, err = l.c.Firewall.Delete(ctx, &hcloud.Firewall{ID: fwInt})
+	if hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
+		return nil
+	}
+	return err
 }

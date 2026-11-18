@@ -799,6 +799,33 @@ fn wizard_list_server_types(
     wcmd::list_server_types(&wstate.0, operator_id, &region).map_err(|e| e.to_string())
 }
 
+/// L5's catalogue lookup: a DIFFERENT provider, with a credential the
+/// operator has just typed and Daal has not stored.
+///
+/// The token crosses this boundary inbound only, for one read-only
+/// call. It is persisted exactly once and only on success, in the L5
+/// arm of `rotate_execute`, after the replacement relay exists.
+#[tauri::command]
+fn wizard_list_server_types_for(
+    wstate: State<'_, WizardStateMgr>,
+    provider: String,
+    region: String,
+    token: String,
+) -> Result<Vec<daal_wizard::cli_bridge::ServerTypeOption>, String> {
+    wcmd::list_server_types_for(&wstate.0, &provider, &region, &token).map_err(|e| e.to_string())
+}
+
+/// Read-only: what is left on this relay's cloud account. Never
+/// deletes. Its counterpart `account-reclaim` is deliberately NOT
+/// exposed here.
+#[tauri::command]
+fn wizard_account_audit(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::cli_bridge::AccountAuditReport, String> {
+    wcmd::account_audit(&wstate.0, operator_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn wizard_pricing_lookup(
     wstate: State<'_, WizardStateMgr>,
@@ -1233,6 +1260,15 @@ fn wizard_rotate_execute(
     // can explain it to the operator.
     new_region: Option<String>,
     new_provider: Option<String>,
+    // L5's other two halves. The credential is the load-bearing one:
+    // an operator row stores a single cloud token and it belongs to
+    // the provider being LEFT, so without this the rebuild leg
+    // authenticates against the wrong account and the rung deletes a
+    // relay it cannot replace. Refused in `rotate_execute` before the
+    // provider is touched, not defaulted here — same rule as the two
+    // fields above.
+    new_provider_token: Option<String>,
+    new_server_type: Option<String>,
     cdn_front_id: Option<i64>,
     cdn_account_id: Option<String>,
     cdn_new_public_path: Option<String>,
@@ -1256,6 +1292,8 @@ fn wizard_rotate_execute(
         new_toolbox_profile,
         new_region,
         new_provider,
+        new_provider_token,
+        new_server_type,
         cdn_front_id,
         cdn_account_id,
         cdn_new_public_path,
@@ -2550,6 +2588,8 @@ pub fn run() {
             wizard_store_cloud_token,
             wizard_list_existing_servers,
             wizard_list_server_types,
+            wizard_list_server_types_for,
+            wizard_account_audit,
             wizard_pricing_lookup,
             wizard_select_profile,
             wizard_publisher_keygen,

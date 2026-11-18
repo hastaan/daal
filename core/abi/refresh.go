@@ -246,11 +246,11 @@ func DiagnosticsExplain() (string, error) {
 	skipped, _ := json.Marshal(w.SkippedFamilies)
 	_ = c.store.PutDiagnosticsExplain(w.Bucket, w.WhyChoseRoute, string(skipped))
 
+	now := time.Now().UTC()
 	exp := selection.NewExplanation("diagnostics-"+w.Bucket, selection.CurrentPhase)
 	exp.Reason = w.WhyChoseRoute
 	if w.ActiveRoute != "" {
 		if row, err := c.store.GetRoute(w.ActiveRoute); err == nil {
-			now := time.Now().UTC()
 			out := selection.Decide(selection.Input{
 				Routes:         []routestore.RouteRow{row},
 				NetworkSignals: activeNetworkSignals(c, now),
@@ -269,6 +269,12 @@ func DiagnosticsExplain() (string, error) {
 			}
 		}
 	}
+	// Failures come from the durable columns, not from Decide — see
+	// activeRouteFailures. Decide plans a race; it has no failures to
+	// report, which is why this field was empty in every blob until now.
+	// Assigned AFTER the block above because that block replaces `exp`
+	// wholesale with the selector's own Explanation.
+	exp.Failures = activeRouteFailures(c, now)
 
 	var payload map[string]any
 	expBody, _ := json.Marshal(exp)
@@ -405,6 +411,25 @@ const signalWindow = 2
 // the diagnostics export, both from closed vocabularies. The output is
 // a set of at most 5 enum values.
 func activeNetworkSignals(c *Core, now time.Time) []selection.NetworkSignal {
+	rows := liveFailedRoutes(c, now)
+	cats := make([]string, 0, len(rows))
+	for _, r := range rows {
+		cats = append(cats, r.LastFailureCategory)
+	}
+	return selection.SignalsFromCategories(cats)
+}
+
+// liveFailedRoutes returns the route rows whose most recent recorded
+// outcome was a failure, classified, and inside the freshness window.
+//
+// It is the single predicate behind BOTH derived views of the durable
+// failure columns — the NetworkSignal set and the per-route
+// FailureRecord list. They were written a wave apart and the recovery
+// rule is subtle enough (see the comment above activeNetworkSignals)
+// that two copies of it would drift, and the two surfaces would then
+// disagree about whether the same route is currently failing while both
+// claimed to be reading the same column.
+func liveFailedRoutes(c *Core, now time.Time) []routestore.RouteRow {
 	if c == nil || c.store == nil {
 		return nil
 	}
@@ -419,7 +444,7 @@ func activeNetworkSignals(c *Core, now time.Time) []selection.NetworkSignal {
 	for i := 0; i < signalWindow; i++ {
 		fresh[routestore.HourBucket(now.Add(-time.Duration(i)*time.Hour))] = true
 	}
-	cats := make([]string, 0, len(rows))
+	out := make([]routestore.RouteRow, 0, len(rows))
 	for _, r := range rows {
 		if r.LastFailureCategory == "" || !fresh[r.LastFailureBucket] {
 			continue
@@ -429,7 +454,43 @@ func activeNetworkSignals(c *Core, now time.Time) []selection.NetworkSignal {
 		if r.ConsecutiveFailures == 0 {
 			continue
 		}
-		cats = append(cats, r.LastFailureCategory)
+		out = append(out, r)
 	}
-	return selection.SignalsFromCategories(cats)
+	return out
+}
+
+// activeRouteFailures projects the same rows onto Explanation.Failures.
+//
+// WHY THIS EXISTS. Explanation.Failures had no producer: selection.Decide
+// never writes it (it returns a race PLAN, and no candidate has failed
+// yet at plan time), so the field was an empty list in every diagnostics
+// blob this app has ever emitted. Everything downstream that reasons
+// about "what is failing" — the publisher's rotation recommender most of
+// all — therefore saw nothing and fell through to its no-evidence
+// default, whatever was actually wrong.
+//
+// The durable per-route columns DO carry the answer, in the same closed
+// vocabulary FailureRecord.Classification is specified in
+// (diagnostics.Category). So this is a projection of measured data, not
+// a new measurement.
+//
+// TAG IS DELIBERATELY LEFT EMPTY. FailureRecord.Tag means "the risk tag
+// that drove cooldown PROPAGATION" — an attribution produced by
+// selection.PropagateCooldown, which has no production caller. A route
+// carrying a public_asn:* tag and a cooldown is NOT evidence that the
+// ASN is burned; it is evidence that one route failed. Filling Tag from
+// the route's own tags would manufacture exactly that inference, and the
+// consumer that acts on it (rotation.recommend rule 6) answers "destroy
+// this server and rebuild it in another datacenter". An absent
+// attribution stays absent.
+func activeRouteFailures(c *Core, now time.Time) []selection.FailureRecord {
+	rows := liveFailedRoutes(c, now)
+	out := make([]selection.FailureRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, selection.FailureRecord{
+			RouteID:        r.RouteID,
+			Classification: r.LastFailureCategory,
+		})
+	}
+	return out
 }

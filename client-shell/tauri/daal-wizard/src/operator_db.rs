@@ -24,6 +24,11 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("operator not found: id={0}")]
     NotFound(i64),
+    /// V014: a revert was asked for on a rotation that cannot be undone
+    /// by re-activating the previous pack, because the relay that pack
+    /// names is gone. Carries the stored, operator-facing reason.
+    #[error("E_ROTATION_IRREVERSIBLE: this rotation cannot be undone by going back to the previous pack — {reason}. The way back is another rotation")]
+    Irreversible { operator_id: i64, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -100,6 +105,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         name: "freshness_endpoints",
         sql: include_str!("../migrations/V013__freshness_endpoints.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "signed_sbps_reversibility",
+        sql: include_str!("../migrations/V014__signed_sbps_reversibility.sql"),
     },
 ];
 
@@ -200,6 +210,56 @@ pub struct FreshnessEndpointRow {
     pub last_published_url: String,
 }
 
+/// V014: what a rotation did to the relay the PREVIOUS pack names.
+///
+/// This is the input to [`OperatorDb::revert_to_previous_sbp`]'s refusal,
+/// and it is recorded at rotation time because it cannot be recovered
+/// afterwards. "Revert" on this ladder means re-activating the
+/// superseded history row so the wizard hands that .sbp out again; that
+/// is only ever a recovery if the thing the .sbp dials is still there.
+///
+/// Deliberately an enum rather than a `(bool, String)`: a dead pack with
+/// no explanation is a state the operator cannot act on, and this makes
+/// it unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriorPackFate {
+    /// The endpoint the superseded pack names still answers, so
+    /// re-activating that pack is a genuine recovery.
+    ///
+    /// Exactly one rung produces this today: an L3 that moved off the
+    /// server's own PRIMARY address. That address cannot be released —
+    /// the provider owns it for the life of the server — so it keeps
+    /// serving after the swap, deliberately, and the previous pack keeps
+    /// connecting. Every other rung either deletes the box, hands the
+    /// address back, or re-points the CDN.
+    StillServes,
+    /// The endpoint the superseded pack names is gone. The string is the
+    /// operator-facing sentence saying what happened to it, shown when a
+    /// revert is refused.
+    Dead(String),
+}
+
+impl PriorPackFate {
+    fn still_serves(&self) -> bool {
+        matches!(self, PriorPackFate::StillServes)
+    }
+
+    /// The stored reason. Empty iff [`PriorPackFate::StillServes`]. A
+    /// `Dead` with an empty string would be a refusal the operator
+    /// cannot act on, so it is normalised to a sentence that at least
+    /// says the wizard does not know.
+    fn dead_reason(&self) -> &str {
+        match self {
+            PriorPackFate::StillServes => "",
+            PriorPackFate::Dead(r) if r.trim().is_empty() => {
+                "this rotation did not record what became of the previous pack's relay, so the wizard cannot promise it still answers"
+            }
+            PriorPackFate::Dead(r) => r,
+        }
+    }
+}
+
+
 /// `SignedSbpRow` mirrors a row of the V003 `signed_sbps` history
 /// table. `active = true` ⇒ the currently-published bundle.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -219,6 +279,22 @@ pub struct SignedSbpRow {
     /// "cdn_hostname", "cdn_origin".
     #[serde(default)]
     pub rotation_kind: String,
+    /// V014: did the pack this rotation SUPERSEDED still reach a live
+    /// relay at the moment this row was committed?
+    ///
+    /// False for every destroy-and-rebuild rung (L1/L2/L4/L5/L6 all run
+    /// reprovision + provision), for an L3 that released the address it
+    /// moved off, and for the CDN rungs that re-pointed a path or a
+    /// hostname. True for exactly one shape on the current ladder: an
+    /// L3 that moved off the server's own PRIMARY address, which the
+    /// provider will not let anyone release, so the old pack keeps
+    /// connecting. See [`OperatorDb::revert_to_previous_sbp`].
+    #[serde(default)]
+    pub prior_pack_still_serves: bool,
+    /// V014: the operator-facing sentence for why the superseded pack
+    /// is dead. Empty iff `prior_pack_still_serves`.
+    #[serde(default)]
+    pub prior_pack_dead_reason: String,
 }
 
 /// `SubkeyRow` mirrors a row of the V004 `subkeys` history
@@ -540,6 +616,43 @@ impl OperatorDb {
 
     /// FRP-4b: flip an operator row to `provisioned` and record
     /// the cloud-side completion timestamp.
+    /// The relay's server was DELETED and the replacement was never
+    /// built. Records that fact where every screen can see it.
+    ///
+    /// # Why a status and not just an error
+    ///
+    /// L4/L5/L6 delete the old server before building the new one
+    /// (`reprovision` deliberately does not re-create). When the second
+    /// leg fails, the rotation returns an error and nothing else
+    /// changes: `update_record_json` and `mark_provisioned` are never
+    /// reached, so the row stays byte-identical — still
+    /// `status='provisioned'`, still naming the deleted server's id and
+    /// its old public address, still `decommissioned_at_unix` unset.
+    ///
+    /// The app then shows a live relay that does not exist. The
+    /// operator's next action is a management call to a dead address,
+    /// which fails as a transport error and reads as "network trouble"
+    /// rather than "your relay was destroyed". Every subsequent screen
+    /// — recipients, address swap, rotate credentials, decommission —
+    /// offers an action against a machine that is gone.
+    ///
+    /// The record itself is deliberately LEFT INTACT. It names the
+    /// server id, region and address the failed rebuild destroyed, and
+    /// that is the evidence an operator needs when cross-checking the
+    /// provider console against what Daal thinks happened. Losing it
+    /// would make the orphan harder to find, not easier.
+    pub fn mark_rebuild_failed(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET status = 'rebuild_failed' WHERE id = ?1",
+            params![id],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(id));
+        }
+        Ok(())
+    }
+
     pub fn mark_provisioned(&self, id: i64, provisioned_at_unix: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
@@ -581,8 +694,24 @@ impl OperatorDb {
     /// inserts the new row at active=1, and updates the V002
     /// projection columns on the operator. Returns the new row id.
     ///
-    /// Invariant 24 ("rotation is reversible"): a rollback path
-    /// is the inverse of this op via [`revert_to_previous_sbp`].
+    /// THIS IS THE ROTATION TRANSACTION, and it is the whole of it. The
+    /// three statements below either all land or none do; SQLite gives
+    /// that, and this process is the database's only writer. What it
+    /// does NOT and cannot cover is the provider mutation that came
+    /// before it — the server was already deleted and rebuilt, or the
+    /// address already swapped, by the time this opens. Rolling this
+    /// back does not un-delete a box. The caller's unwind for the part
+    /// that is not transactional is `rotate_execute`'s L3 unwind
+    /// (commands.rs); for the destroy-and-rebuild rungs there is no
+    /// unwind, and saying so is the point of `fate`.
+    ///
+    /// `fate` records what this rotation did to the relay the PREVIOUS
+    /// pack names. V003's header called Revert "the FRP-side undo
+    /// button" and invariant 24 called rotation "reversible"; both were
+    /// written before the ladder grew rungs that delete the server.
+    /// See [`PriorPackFate`] and [`Self::revert_to_previous_sbp`] for
+    /// what reversible now means, and
+    /// docs/decisions/0004-one-rotation-executor.md for why.
     #[allow(clippy::too_many_arguments)]
     pub fn record_rotated_sbp(
         &self,
@@ -593,6 +722,7 @@ impl OperatorDb {
         relay_pack_id: &str,
         route_count: i64,
         rotation_reason: &str,
+        fate: &PriorPackFate,
     ) -> Result<i64> {
         let mut conn = self.conn.lock().unwrap();
         // Pre-check: operator must exist; return a clean NotFound
@@ -622,8 +752,8 @@ impl OperatorDb {
             "INSERT INTO signed_sbps (
                 operator_id, signed_at_unix, sbp_path, sbp_sha256,
                 relay_pack_id, route_count, rotation_reason, active,
-                rotation_kind
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+                rotation_kind, prior_pack_still_serves, prior_pack_dead_reason
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
             params![
                 operator_id,
                 signed_at_unix,
@@ -633,6 +763,8 @@ impl OperatorDb {
                 route_count,
                 rotation_reason,
                 rotation_kind,
+                i64::from(fate.still_serves()),
+                fate.dead_reason(),
             ],
         )?;
         let new_id = tx.last_insert_rowid();
@@ -696,8 +828,8 @@ impl OperatorDb {
             "INSERT INTO signed_sbps (
                 operator_id, signed_at_unix, sbp_path, sbp_sha256,
                 relay_pack_id, route_count, rotation_reason, active,
-                rotation_kind
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+                rotation_kind, prior_pack_still_serves, prior_pack_dead_reason
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, 0, ?9)",
             params![
                 operator_id,
                 signed_at_unix,
@@ -707,6 +839,13 @@ impl OperatorDb {
                 route_count,
                 rotation_reason,
                 rotation_kind,
+                // An L9 row is an AUDIT entry, not a superseded pack: it
+                // carries a copy of the still-active bundle's identity and
+                // was never active itself. `revert_to_previous_sbp` skips
+                // cdn_origin rows when picking a target, and this reason is
+                // the belt to that braces — a target it somehow reached
+                // would restore a duplicate of the row already active.
+                "an origin-only rotation records history without superseding a pack; there is no previous pack to go back to",
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -946,22 +1085,98 @@ impl OperatorDb {
         Ok(out)
     }
 
-    /// FRP-7: revert to the most recent inactive history row for
-    /// the given operator. Flips that row to active=1, marks the
-    /// current active=0, and updates the V002 projection columns
-    /// inside one transaction. Errors if no inactive history row
-    /// exists.
+    /// Re-activate the pack the current rotation superseded — WHEN, AND
+    /// ONLY WHEN, that pack still reaches a live relay.
+    ///
+    /// # THIS IS NOT AN UNDO, AND IT USED TO PRETEND TO BE
+    ///
+    /// V003 shipped this as "the FRP-side undo button" and FRP-7's
+    /// invariant 24 called rotation "reversible". Both were written
+    /// before the ladder had rungs that destroy the relay. What this
+    /// method actually does is flip a history row back to active=1, so
+    /// the wizard hands that .sbp out again and the projection columns
+    /// name it. Nothing here touches the cloud, and nothing here can:
+    /// re-activating a pack cannot un-delete a server, cannot reclaim a
+    /// floating IP that has gone back to the provider's pool, and cannot
+    /// put a CDN hostname back.
+    ///
+    /// On the current ladder that makes the honest answer "no" almost
+    /// everywhere. L1, L2, L4, L5 and L6 all run reprovision + provision
+    /// — the box the previous pack names was deleted. L3 releases the
+    /// address it moved off in the same call. L7 and L8 re-point the
+    /// CDN. In each case the row this would restore is a correctly
+    /// signed, in-date .sbp that connects to nothing, offered under a
+    /// button labelled "revert".
+    ///
+    /// So the verdict is recorded at rotation time ([`PriorPackFate`],
+    /// V014) and enforced here: if the CURRENTLY ACTIVE row says the
+    /// pack it superseded is dead, this refuses and returns that row's
+    /// stored reason. The one shape that survives is an L3 off the
+    /// server's own primary address, which no one can release.
+    ///
+    /// The way back from everything else is another rotation, not this.
+    /// See docs/decisions/0004-one-rotation-executor.md.
     pub fn revert_to_previous_sbp(&self, operator_id: i64) -> Result<SignedSbpRow> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+
+        // THE REFUSAL COMES FIRST, inside the transaction, before
+        // anything is flipped. The question is about the row that is
+        // active NOW: it is the rotation that superseded the target, so
+        // it is the one that knows what happened to the target's relay.
+        let current: Option<SignedSbpRow> = tx
+            .query_row(
+                "SELECT id, operator_id, signed_at_unix, sbp_path, sbp_sha256,
+                        relay_pack_id, route_count, rotation_reason, active,
+                        rotation_kind, prior_pack_still_serves,
+                        prior_pack_dead_reason
+                 FROM signed_sbps
+                 WHERE operator_id = ?1 AND active = 1
+                 LIMIT 1",
+                params![operator_id],
+                row_to_signed_sbp,
+            )
+            .optional()?;
+        if let Some(cur) = &current {
+            if !cur.prior_pack_still_serves {
+                // The fallback is on the READ side deliberately. A row
+                // can reach `still_serves = 0` with an empty reason
+                // without any writer choosing that: the V014 column
+                // default is `''`, and the migration's backfill only
+                // touched rows that existed when it ran. A refusal with
+                // no sentence attached is one the operator cannot act
+                // on, so the substitution happens where the refusal is
+                // produced rather than at each place that writes.
+                let reason = if cur.prior_pack_dead_reason.trim().is_empty() {
+                    "this rotation did not record what became of the previous pack's relay, so the wizard cannot promise it still answers"
+                        .to_string()
+                } else {
+                    cur.prior_pack_dead_reason.clone()
+                };
+                return Err(DbError::Irreversible {
+                    operator_id,
+                    reason,
+                });
+            }
+        }
+
         // Pick the most recent inactive row (largest signed_at_unix).
+        //
+        // `rotation_kind <> 'cdn_origin'` because an L9 row is an AUDIT
+        // entry: it was inserted at active=0 and never superseded
+        // anything, carrying a copy of the then-active bundle's path and
+        // digest. Without this filter a revert taken after an L9 would
+        // pick that copy, deactivate the row it was copied FROM, and
+        // leave two rows describing one pack with the wrong one live.
         let target = tx
             .query_row(
                 "SELECT id, operator_id, signed_at_unix, sbp_path, sbp_sha256,
                         relay_pack_id, route_count, rotation_reason, active,
-                        rotation_kind
+                        rotation_kind, prior_pack_still_serves,
+                        prior_pack_dead_reason
                  FROM signed_sbps
                  WHERE operator_id = ?1 AND active = 0
+                   AND rotation_kind <> 'cdn_origin'
                  ORDER BY signed_at_unix DESC, id DESC LIMIT 1",
                 params![operator_id],
                 row_to_signed_sbp,
@@ -1005,7 +1220,8 @@ impl OperatorDb {
         let mut stmt = conn.prepare(
             "SELECT id, operator_id, signed_at_unix, sbp_path, sbp_sha256,
                     relay_pack_id, route_count, rotation_reason, active,
-                    rotation_kind
+                    rotation_kind, prior_pack_still_serves,
+                    prior_pack_dead_reason
              FROM signed_sbps
              WHERE operator_id = ?1
              ORDER BY signed_at_unix DESC, id DESC",
@@ -1025,7 +1241,8 @@ impl OperatorDb {
             .query_row(
                 "SELECT id, operator_id, signed_at_unix, sbp_path, sbp_sha256,
                         relay_pack_id, route_count, rotation_reason, active,
-                        rotation_kind
+                        rotation_kind, prior_pack_still_serves,
+                        prior_pack_dead_reason
                  FROM signed_sbps
                  WHERE operator_id = ?1 AND active = 1
                  LIMIT 1",
@@ -2104,6 +2321,11 @@ fn row_to_signed_sbp(row: &rusqlite::Row<'_>) -> rusqlite::Result<SignedSbpRow> 
     // queries that don't request it pass through the
     // OptionalExtension fallback ("" empty string).
     let rotation_kind: String = row.get::<_, Option<String>>(9)?.unwrap_or_default();
+    // V014. Same fallback shape as rotation_kind: a query that does not
+    // request the columns reads as "not provably revertible", which is
+    // the safe answer rather than the optimistic one.
+    let prior_pack_still_serves: i64 = row.get::<_, Option<i64>>(10)?.unwrap_or(0);
+    let prior_pack_dead_reason: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
     Ok(SignedSbpRow {
         id: row.get(0)?,
         operator_id: row.get(1)?,
@@ -2115,6 +2337,8 @@ fn row_to_signed_sbp(row: &rusqlite::Row<'_>) -> rusqlite::Result<SignedSbpRow> 
         rotation_reason: row.get(7)?,
         active: active_int == 1,
         rotation_kind,
+        prior_pack_still_serves: prior_pack_still_serves == 1,
+        prior_pack_dead_reason,
     })
 }
 
@@ -2288,7 +2512,7 @@ mod tests {
         let op = db
             .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
             .unwrap();
-        db.record_rotated_sbp(op, 1_000, "/staging/a.sbp", "sha-a", "rp-a", 3, "L1 first")
+        db.record_rotated_sbp(op, 1_000, "/staging/a.sbp", "sha-a", "rp-a", 3, "L1 first", &PriorPackFate::StillServes)
             .unwrap();
         db.insert_subkey_rotation(
             op, "fp-1", "/s/sub.pub", "/s/sub.priv", "/s/cert.json", "{}", "label", 1, 2, 3,
@@ -2407,11 +2631,11 @@ mod tests {
             .unwrap();
         // First rotation
         let row1_id = db
-            .record_rotated_sbp(op, 1_000, "/staging/a.sbp", "sha-a", "rp-a", 3, "L1 first")
+            .record_rotated_sbp(op, 1_000, "/staging/a.sbp", "sha-a", "rp-a", 3, "L1 first", &PriorPackFate::StillServes)
             .unwrap();
         // Second rotation flips the first row to inactive
         let row2_id = db
-            .record_rotated_sbp(op, 2_000, "/staging/b.sbp", "sha-b", "rp-b", 4, "L3 swap")
+            .record_rotated_sbp(op, 2_000, "/staging/b.sbp", "sha-b", "rp-b", 4, "L3 swap", &PriorPackFate::StillServes)
             .unwrap();
         assert_ne!(row1_id, row2_id);
 
@@ -2441,7 +2665,7 @@ mod tests {
         let op = db
             .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
             .unwrap();
-        db.record_rotated_sbp(op, 1, "/a.sbp", "sa", "rp-a", 1, "")
+        db.record_rotated_sbp(op, 1, "/a.sbp", "sa", "rp-a", 1, "", &PriorPackFate::StillServes)
             .unwrap();
         // Manually trying to insert a second active row outside the
         // transactional helper must fail the partial-unique-index.
@@ -2462,9 +2686,9 @@ mod tests {
         let op = db
             .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
             .unwrap();
-        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "L1")
+        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "L1", &PriorPackFate::StillServes)
             .unwrap();
-        db.record_rotated_sbp(op, 2_000, "/b.sbp", "sb", "rp-b", 1, "L3")
+        db.record_rotated_sbp(op, 2_000, "/b.sbp", "sb", "rp-b", 1, "L3", &PriorPackFate::StillServes)
             .unwrap();
         // Revert: the prior row "rp-a" should be active again
         let restored = db.revert_to_previous_sbp(op).unwrap();
@@ -2485,7 +2709,7 @@ mod tests {
             .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
             .unwrap();
         // Single rotation: no prior inactive row to restore
-        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "")
+        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "", &PriorPackFate::StillServes)
             .unwrap();
         let err = db.revert_to_previous_sbp(op).unwrap_err();
         match err {
@@ -2498,7 +2722,7 @@ mod tests {
     fn record_rotated_sbp_unknown_operator_rolls_back() {
         let db = OperatorDb::open_in_memory().unwrap();
         let err = db
-            .record_rotated_sbp(999, 1, "/a.sbp", "sa", "rp-a", 1, "")
+            .record_rotated_sbp(999, 1, "/a.sbp", "sa", "rp-a", 1, "", &PriorPackFate::StillServes)
             .unwrap_err();
         match err {
             DbError::NotFound(999) => (),
@@ -2510,6 +2734,206 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM signed_sbps", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "rolled-back tx must leave 0 rows");
+    }
+
+    /// THE ROTATION TRANSACTION IS ALL-OR-NOTHING, AND THE HALF THAT
+    /// MATTERS IS THE FIRST STATEMENT.
+    ///
+    /// `record_rotated_sbp` marks the prior pack inactive, THEN inserts
+    /// the new one. If the insert fails and the mark survives, the
+    /// operator is left with no active pack at all — the wizard exports
+    /// nothing, and the pack the family is actually using is flagged
+    /// superseded. The existing unknown-operator test exercises the
+    /// pre-check, which returns before the transaction opens; this one
+    /// fails INSIDE it.
+    #[test]
+    fn the_rotation_transaction_is_all_or_nothing() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        db.record_rotated_sbp(
+            op,
+            1_000,
+            "/a.sbp",
+            "sha-a",
+            "rp-a",
+            1,
+            "L1 | first",
+            &PriorPackFate::StillServes,
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON signed_sbps
+                 BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END;",
+            )
+            .unwrap();
+        }
+        let err = db
+            .record_rotated_sbp(
+                op,
+                2_000,
+                "/b.sbp",
+                "sha-b",
+                "rp-b",
+                1,
+                "L3 | swap",
+                &PriorPackFate::StillServes,
+            )
+            .unwrap_err();
+        assert!(matches!(err, DbError::Sqlite(_)), "got {err:?}");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("DROP TRIGGER boom;").unwrap();
+        }
+
+        let history = db.list_signed_sbps_history(op).unwrap();
+        assert_eq!(history.len(), 1, "the failed insert must leave no row");
+        assert!(
+            history[0].active,
+            "a failed rotation must leave the pack the family is using ACTIVE — \
+             deactivating it and then failing to insert its replacement leaves the operator with nothing to hand out"
+        );
+        assert_eq!(
+            db.active_signed_sbp(op).unwrap().unwrap().relay_pack_id,
+            "rp-a"
+        );
+    }
+
+    /// Revert refuses when the rotation that is currently active
+    /// destroyed what the previous pack names, and says what happened.
+    #[test]
+    fn revert_refuses_when_the_previous_packs_relay_is_gone() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        db.record_rotated_sbp(
+            op,
+            1_000,
+            "/a.sbp",
+            "sha-a",
+            "rp-a",
+            1,
+            "L1 | first",
+            &PriorPackFate::StillServes,
+        )
+        .unwrap();
+        db.record_rotated_sbp(
+            op,
+            2_000,
+            "/b.sbp",
+            "sha-b",
+            "rp-b",
+            1,
+            "L4 | region burned",
+            &PriorPackFate::Dead("the box was deleted and rebuilt in another region".into()),
+        )
+        .unwrap();
+
+        match db.revert_to_previous_sbp(op).unwrap_err() {
+            DbError::Irreversible { operator_id, reason } => {
+                assert_eq!(operator_id, op);
+                assert!(reason.contains("deleted and rebuilt"), "{reason}");
+            }
+            e => panic!("expected a refusal, got {e:?}"),
+        }
+        // Untouched: rp-b is still the pack to hand out.
+        assert_eq!(
+            db.active_signed_sbp(op).unwrap().unwrap().relay_pack_id,
+            "rp-b"
+        );
+    }
+
+    /// A `Dead` fate with no sentence is still refused, and still says
+    /// something an operator can act on. The empty string would be a
+    /// refusal with no reason attached.
+    #[test]
+    fn an_unexplained_dead_fate_still_produces_a_readable_refusal() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "L1 | x", &PriorPackFate::StillServes)
+            .unwrap();
+        db.record_rotated_sbp(op, 2_000, "/b.sbp", "sb", "rp-b", 1, "L1 | y", &PriorPackFate::Dead(String::new()))
+            .unwrap();
+        match db.revert_to_previous_sbp(op).unwrap_err() {
+            DbError::Irreversible { reason, .. } => assert!(!reason.trim().is_empty()),
+            e => panic!("expected a refusal, got {e:?}"),
+        }
+    }
+
+    /// AN L9 AUDIT ROW IS NOT A REVERT TARGET.
+    ///
+    /// `record_origin_only_rotation` inserts at active=0 carrying a COPY
+    /// of the then-active bundle's path and digest — it supersedes
+    /// nothing. It is also, by timestamp, the most recent inactive row,
+    /// so an unfiltered revert would pick it, deactivate the row it was
+    /// copied from, and leave two rows describing one pack with the
+    /// wrong one live.
+    #[test]
+    fn revert_skips_the_audit_only_origin_rotation_row() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sha-a", "rp-a", 1, "L1 | first", &PriorPackFate::StillServes)
+            .unwrap();
+        db.record_rotated_sbp(op, 2_000, "/b.sbp", "sha-b", "rp-b", 1, "L3 | swap", &PriorPackFate::StillServes)
+            .unwrap();
+        // The L9 lands LAST, so it wins any naive "most recent inactive".
+        db.record_origin_only_rotation(op, 3_000, "L9_CDN_ORIGIN | rebuilt vps")
+            .unwrap();
+
+        let restored = db.revert_to_previous_sbp(op).unwrap();
+        assert_eq!(
+            restored.relay_pack_id, "rp-a",
+            "revert must go back to the real superseded pack, not the L9 audit copy"
+        );
+        let history = db.list_signed_sbps_history(op).unwrap();
+        assert_eq!(history.iter().filter(|r| r.active).count(), 1);
+        assert!(history
+            .iter()
+            .find(|r| r.rotation_kind == "cdn_origin")
+            .is_some_and(|r| !r.active));
+    }
+
+    /// V014 backfill: rows written before the wizard tracked
+    /// reversibility are marked not-revertible, with a reason that says
+    /// why rather than claiming a finding. A wrong `1` here would be a
+    /// dead pack offered as a working one.
+    #[test]
+    fn legacy_history_rows_are_not_assumed_revertible() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "L1 | x", &PriorPackFate::StillServes)
+            .unwrap();
+        // A row inserted the way a pre-V014 build would have: the two
+        // new columns left to their defaults.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE signed_sbps SET active = 0 WHERE operator_id = ?1",
+                params![op],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO signed_sbps (operator_id, signed_at_unix, sbp_path, sbp_sha256,
+                                          relay_pack_id, route_count, rotation_reason, active, rotation_kind)
+                 VALUES (?1, 2000, '/legacy.sbp', 'sl', 'rp-legacy', 1, 'L3 | legacy', 1, 'direct_l3')",
+                params![op],
+            )
+            .unwrap();
+        }
+        match db.revert_to_previous_sbp(op).unwrap_err() {
+            DbError::Irreversible { reason, .. } => assert!(!reason.trim().is_empty(), "{reason}"),
+            e => panic!("a legacy row must not be assumed revertible, got {e:?}"),
+        }
     }
 
     #[test]
@@ -2661,7 +3085,7 @@ mod tests {
         let op = db
             .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
             .unwrap();
-        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "L7_CDN_PATH | path")
+        db.record_rotated_sbp(op, 1_000, "/a.sbp", "sa", "rp-a", 1, "L7_CDN_PATH | path", &PriorPackFate::StillServes)
             .unwrap();
         db.record_origin_only_rotation(op, 2_000, "L9_CDN_ORIGIN | rebuilt")
             .unwrap();

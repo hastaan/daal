@@ -54,6 +54,15 @@ SCAN_PATHS=(
     # lane in AddSheet is the headline change of the wave.
     "client-ui/src/components/AddSheet.tsx"
     "client-ui/src/publisher/QrSendSheet.tsx"
+    # Wave 6's rotation surfaces. These are the screens that DELETE a
+    # relay and the panel that explains why, so an untranslated string
+    # here reaches a Farsi operator at the moment they are deciding
+    # whether to destroy something. Clean today; without them listed,
+    # nothing keeps them that way.
+    "client-ui/src/publisher/RelayRebuild.tsx"
+    "client-ui/src/publisher/RotationAdvice.tsx"
+    "client-ui/src/publisher/RelayGonePanel.tsx"
+    "client-ui/src/publisher/AddressSwap.tsx"
 )
 # Pattern: a string literal of >= 12 ASCII letters (with spaces),
 # wrapped in double or single quotes. The search is conservative

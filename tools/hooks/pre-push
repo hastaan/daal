@@ -109,6 +109,24 @@ done
 # encoding/json both ignore unknown keys. Nothing else can see this seam.
 [[ -f tools/check-creds-mirror.mjs ]] && step "check-creds-mirror.mjs" node tools/check-creds-mirror.mjs
 
+# The L4/L6 confirm sheets decide whether their own button is pressable
+# from TS mirrors of four Go tables (the toolbox profiles, the region →
+# peering-neighbourhood map, the per-provider region lists, and the
+# recommender's wall-clock column). They have to be mirrors, not copies:
+# the profile table is what tells the operator a profile change would
+# remove nothing before they delete a server for it, and the region
+# table is what stops the sheet offering a datacentre the provider does
+# not have — reprovision deletes the box before provision finds out.
+[[ -f tools/check-toolbox-profiles.mjs ]] && step "check-toolbox-profiles.mjs" node tools/check-toolbox-profiles.mjs
+
+# Every rung of the rotation ladder is reachable from a screen, and the
+# rungs that DELETE the relay refuse before they delete it. Neither
+# property is visible to check-plumbing.mjs: the rung is a string
+# argument, so a gate that checks commands sees one green
+# `wizard_rotate_execute` whether it drives one rung or six — which is
+# how L4, L5 and L6 sat fully coded and callable by nothing.
+[[ -f tools/check-rotation-ladder.mjs ]] && step "check-rotation-ladder.mjs" node tools/check-rotation-ladder.mjs
+
 # The QR sender has no camera in CI, so this gate tests everything up to
 # the glass: the vendored QR encoder against an independent one
 # (skip2/go-qrcode), the rendered symbols against a real scanner (jsQR),

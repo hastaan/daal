@@ -127,6 +127,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runListServerTypes(ctx, rest, stdout, stderr)
 	case "list-servers":
 		return runListServers(ctx, rest, stdout, stderr)
+	case "account-audit":
+		return runAccountAudit(ctx, rest, stdout, stderr)
+	case "account-reclaim":
+		return runAccountReclaim(ctx, rest, stdout, stderr)
 	case "users-provision":
 		return runUsersProvision(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-revoke":
@@ -176,6 +180,18 @@ Subcommands:
                 cannot bind an address, before anything is reserved.
   floating-ip   Assign, unassign or release a floating IP. release unbinds the
                 address on the relay before handing it back to the provider.
+  account-audit  Read-only. Ask the cloud account what daal-deploy actually
+                owns there, join it to the OperatorRecords you still have
+                (--record-file, REPEATABLE, optional), and say which resources
+                are in use, which are provably orphaned, and which could not be
+                proven either way. Never mutates anything. Run it after a
+                provision or rotation that failed.
+  account-reclaim  Delete what account-audit PROVED orphaned: an unattached
+                address whose relay is gone, a one-shot SSH key that will block
+                the next provision, a firewall behind which nothing exists.
+                Prints the plan and stops unless --yes. Never deletes a server,
+                never touches a resource a --record-file names, and refuses
+                everything if the account's server list cannot be read.
   verify        Validate OperatorRecord JSON.
   bind-and-sign Bind OperatorRecord -> signed RelayPack .sbp (FRP-4b).
                 --freshness-mirror provider=url (REPEAT, min 2, distinct
@@ -790,15 +806,15 @@ func runAssignFIP(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return 1
 	}
 
-	// THE POST-CONDITION, AND WHY IT LIVES HERE RATHER THAN IN THE
-	// GO ROTATION EXECUTOR.
+	// THE POST-CONDITION, AND WHY IT LIVES ON THIS SEAM.
 	//
-	// rotation.Executor has exactly this check (checkAddressMoved,
-	// checkRecordAddressConsistent) and it is correct — and it has no
-	// production caller. The shipped rotation path is the wizard's
-	// Rust re-implementation, and the ONLY provider mutation it makes
-	// for L3 is this subprocess. So a guard that is not on this seam
-	// is not on any seam a user can reach.
+	// The shipped rotation path is the wizard's rotate_execute, and the
+	// ONLY provider mutation it makes for L3 is this subprocess. So a
+	// guard that is not on this seam is not on any seam a user can
+	// reach. Wave 6 deleted the caller-less Go executor that carried a
+	// copy of this check; the check survived it, as
+	// rotation.CheckAddressMoved / CheckRecordAddressConsistent, called
+	// right here.
 	//
 	// What it catches is the bug Step 9 exists to end, in its two live
 	// forms. (1) An adapter that records the floating-IP id and stops:
@@ -1267,12 +1283,16 @@ type ServerTypeInfo struct {
 	HourlyEUR   float64 `json:"hourly_eur"`
 	Location    string  `json:"location"`
 	Arch        string  `json:"arch"`
+	// Which currency MonthlyEUR/HourlyEUR are actually in. The field
+	// names are the frozen wire contract; this is what keeps them from
+	// being a lie on the one provider that does not bill in euro.
+	Currency string `json:"currency,omitempty"`
 }
 
 func runListServerTypes(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("list-server-types", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	providerName := fs.String("provider", "hetzner", "cloud provider (hetzner)")
+	providerName := fs.String("provider", "hetzner", "cloud provider (hetzner, vultr)")
 	tokenFile := fs.String("token-file", "", "API token file")
 	region := fs.String("region", "fsn1", "region for pricing lookup")
 	if rc := parseFlags(fs, args); rc >= 0 {
@@ -1295,10 +1315,36 @@ func runListServerTypes(ctx context.Context, args []string, stdout, stderr io.Wr
 	switch *providerName {
 	case "hetzner":
 		return listHetznerServerTypes(ctx, token, *region, stdout, stderr)
+	case "vultr":
+		return listVultrServerTypes(ctx, token, *region, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "list-server-types not yet supported for %q\n", *providerName)
 		return 1
 	}
+}
+
+// listVultrServerTypes is the Vultr half of the wizard's "pick a box"
+// screen. It exists because L5 is only a rotation the operator can
+// actually take if the second provider is offerable in the same UI: a
+// provider you cannot list plans for is a provider you can only reach
+// by typing a plan id you had to find elsewhere.
+//
+// The entries carry Currency:"USD" — Vultr does not bill in euro and
+// the field names on this wire shape say EUR.
+func listVultrServerTypes(ctx context.Context, token, region string, stdout, stderr io.Writer) int {
+	client := vultr.NewLiveClientForListing(token)
+	types, err := client.ListServerTypes(ctx, region)
+	if err != nil {
+		fmt.Fprintf(stderr, "list server types: %v\n", err)
+		return 1
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(types); err != nil {
+		fmt.Fprintf(stderr, "marshal: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func listHetznerServerTypes(ctx context.Context, token, region string, stdout, stderr io.Writer) int {
@@ -1320,7 +1366,7 @@ func listHetznerServerTypes(ctx context.Context, token, region string, stdout, s
 func runListServers(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("list-servers", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	providerName := fs.String("provider", "hetzner", "cloud provider (hetzner)")
+	providerName := fs.String("provider", "hetzner", "cloud provider (hetzner, vultr)")
 	tokenFile := fs.String("token-file", "", "API token file")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -1342,6 +1388,20 @@ func runListServers(ctx context.Context, args []string, stdout, stderr io.Writer
 	switch *providerName {
 	case "hetzner":
 		client := hetzner.NewLiveClientForListing(token)
+		servers, err := client.ListServers(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "list servers: %v\n", err)
+			return 1
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(servers); err != nil {
+			fmt.Fprintf(stderr, "marshal: %v\n", err)
+			return 1
+		}
+		return 0
+	case "vultr":
+		client := vultr.NewLiveClientForListing(token)
 		servers, err := client.ListServers(ctx)
 		if err != nil {
 			fmt.Fprintf(stderr, "list servers: %v\n", err)
@@ -1377,6 +1437,8 @@ func buildProvider(providerName, tokenFile string, dryRun bool) (providerFace, e
 		case "hetzner":
 			return hetzner.New(hetzner.NewDryRunClient()), nil
 		case "vultr":
+			// DryRun returns before the client is touched, so an
+			// empty token never reaches the wire.
 			return vultr.New(vultr.NewLiveClient("")), nil
 		case "stark":
 			return stark.New(stark.NewClient(), func() string { return "" }), nil

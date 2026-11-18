@@ -6,223 +6,73 @@ import (
 
 	"daal/publisher/deploy/profiles"
 	"daal/publisher/deploy/provider"
+	"daal/publisher/deploy/relayconf"
 	"daal/publisher/deploy/relayports"
-	"daal/publisher/deploy/sni"
 )
+
+// This file used to BE the renderer. It is now four thin adapters onto
+// publisher/deploy/relayconf, which holds the one copy.
+//
+// The move happened in Wave 6, when Vultr became a real rotation target
+// for L5. Vultr had its own imitation of these functions — different
+// family names, no profile errors, a placeholder sing-box config — so
+// "rotate provider" would have moved the operator onto a box that was
+// not the same relay. Two renderers is how that happens; one renderer
+// is how it cannot. See relayconf's package comment.
+//
+// The wrappers stay because the error text an operator reads should
+// name the cloud they are on, and because everything in this package
+// already calls these names.
 
 // candidatesForProfile produces the unsigned []CandidateMeta the
 // FRP-4b binder will fold into the per-route _relaypack sub-object.
-//
-// At V1.5 every candidate is direct_vps. The PublicIP supplies the
-// public_ip:* tag; family-specific defaults supply port +
-// probing_risk_class + udp_gated.
-//
-// FRP-8 will widen this to include cdn_fronted candidates.
-//
-// IT RETURNS AN ERROR NOW, and that is the entire fix for L6.
-//
-// This function used to swallow a profile load error and return nil.
-// The caller could not tell that apart from "this profile enables no
-// families", so a typo'd or missing profile slug produced an
-// OperatorRecord with zero candidates: a record that provisions
-// happily, signs happily, and yields a pack with no routes in it. L6 —
-// the rung whose whole content is "move to a different toolbox
-// profile" — is the one operation that passes a NEW profile name here,
-// so it is the operation the silent nil was guaranteed to hit, and it
-// is why L6 has been invisible. A wrong profile name must be an error
-// at the moment it is read, not a shape that looks like an empty
-// choice three layers downstream.
+// See relayconf.CandidatesForProfile, including why an unresolvable
+// profile is an error rather than an empty slice (the L6 fix).
 func candidatesForProfile(profileName string, publicIP net.IP, enabledFamilies []string) ([]provider.CandidateMeta, error) {
-	p, err := loadProfile(profileName)
+	out, err := relayconf.CandidatesForProfile(profileName, publicIP, enabledFamilies)
 	if err != nil {
-		return nil, fmt.Errorf("hetzner: toolbox profile %q: %w", profileName, err)
-	}
-	selected := map[string]bool{}
-	for _, family := range enabledFamilies {
-		selected[family] = true
-	}
-	tags := []string{}
-	if publicIP != nil {
-		tags = append(tags, fmt.Sprintf("public_ip:%s", publicIP.String()))
-	}
-
-	out := make([]provider.CandidateMeta, 0, len(p.Candidates))
-	for _, pc := range p.Candidates {
-		if len(selected) == 0 && !pc.DefaultEnabled {
-			continue
-		}
-		if len(selected) > 0 && !selected[pc.Family] {
-			continue
-		}
-		port := defaultPortForFamily(pc.Family)
-		candidateTags := append([]string{}, tags...)
-		candidateTags = append(candidateTags, fmt.Sprintf("public_port:%s%d", portProto(pc.Family), port))
-		out = append(out, provider.CandidateMeta{
-			Family:           pc.Family,
-			ExposureMode:     "direct_vps", // V1.5 invariant
-			FamilyClass:      "vps-native",
-			ProbingRiskClass: pc.ProbingRiskClass,
-			Port:             port,
-			PublicRiskTags:   candidateTags,
-			OriginRiskTags:   []string{}, // empty at V1.5
-		})
-	}
-	// A profile that loaded but selects nothing is also a record with
-	// no routes, just arrived at by a different path — an
-	// enabled-families list naming a family this profile does not
-	// carry. Same outcome for the recipient, same refusal here.
-	if len(out) == 0 {
-		return nil, fmt.Errorf("hetzner: toolbox profile %q yields no candidates for families %v", profileName, enabledFamilies)
+		return nil, fmt.Errorf("hetzner: %w", err)
 	}
 	return out, nil
 }
 
-// servedFamilies resolves the family set this relay will actually serve,
-// applying the same profile + enabled-families rules the candidate
-// renderer does. One resolver, so the sing-box inbounds, the box-side
-// ufw rules and the cloud-provider firewall cannot disagree about which
-// families exist on a box — a disagreement between any two of those
-// three is a route that mints and cannot be dialled.
+// servedFamilies resolves the family set this relay will actually
+// serve. One resolver for the sing-box inbounds, the box-side ufw rules
+// and the cloud firewall — see relayconf.ServedFamilies.
 func servedFamilies(profileName string, enabledFamilies []string) ([]string, error) {
-	cands, err := candidatesForProfile(profileName, nil, enabledFamilies)
+	out, err := relayconf.ServedFamilies(profileName, enabledFamilies)
 	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(cands))
-	for _, c := range cands {
-		out = append(out, c.Family)
+		return nil, fmt.Errorf("hetzner: %w", err)
 	}
 	return out, nil
 }
 
-// defaultSingBoxConfig produces a sing-box config skeleton
-// embedded in cloud-init. At FRP-14 the V2 boxes ship with the
-// vless-in inbound (the REALITY-fronted port-443 transport that
-// every recipient uses) carrying empty users[]; cloud-init injects
-// a real REALITY private_key on first boot (see v2.yaml.tmpl) and
-// the on-box mgmt service appends per-recipient user rows via
-// /users/provision, including a row on the single shared ws-in inbound.
-//
-// The hy2-in inbound ships alongside it (hysteria2 starts fine with an
-// empty users[]). Unlike REALITY, it needs a real certificate: cloud-init
-// generates a self-signed data-plane leaf at /etc/daal/tls-cert.pem (+ key)
-// before sing-box first starts, and the client pins it by SPKI SHA-256
-// rather than name-validating it (see relaypack/client_outbound.go
-// pinnedTLS). vless and hy2 share 443 on different L4 sockets (tcp vs udp).
-//
-// naive-in is NOT shipped here: sing-box's naive inbound FATALs with
-// "missing users" if users[] is empty (protocol/naive/inbound.go), so it
-// can't exist until it has a user. The mgmt service creates it — with its
-// first recipient — in appendNaiveUser (8444/tcp), the same way it creates
-// the single shared ws-in inbound (8445/tcp) that ALL recipients use.
-// Ports come from relayports (the canonical map).
-//
-// coverSNI is the per-relay REALITY cover host chosen at provision time
-// (publisher/deploy/sni). It is substituted into BOTH tls.server_name —
-// the name the client advertises and the censor sees — AND
-// reality.handshake.server — the dest this box actually completes a
-// stolen handshake against. Those two must be the same string. When they
-// disagree, an active prober gets a certificate from one site while the
-// SNI claimed another, which is precisely the mismatch REALITY exists to
-// prevent; both were hard-coded to "www.cloudflare.com" until Wave 2,
-// which also made the entire fleet blockable with one SNI rule.
-//
-// An empty coverSNI is a caller bug, not a config option: sing-box's
-// REALITY inbound needs a name, and an empty server_name is a box that
-// does not start. The provider resolves the value before calling here,
-// so this only ever falls back on a programming error — and it falls
-// back loudly-wrong-but-working rather than silently broken.
+// defaultSingBoxConfig produces the sing-box config skeleton embedded
+// in cloud-init for the profile's default-enabled families.
 func defaultSingBoxConfig(profileName, coverSNI string) string {
-	// Resolve the profile's own default-enabled family set. A profile
-	// that will not load is not a reason to refuse here — the caller
-	// (candidatesForProfile) already errors on that, loudly — so this
-	// falls back to the always-present families.
-	fams, err := servedFamilies(profileName, nil)
-	if err != nil {
-		fams = nil
-	}
-	return singBoxConfigForFamilies(coverSNI, fams)
+	return relayconf.DefaultSingBoxConfig(profileName, coverSNI)
 }
 
 // singBoxConfigForFamilies is defaultSingBoxConfig with the served
-// family set supplied explicitly, which is what the provisioner has
-// after it applies the wizard's enabled-families override.
-//
-// vless-in and hy2-in are unconditional: they are the two tiers every
-// Daal relay has, and both start with an empty users[]. naive-in (8444)
-// and ws-in (8445) are absent because sing-box will not start a naive
-// inbound with no users and the mgmt service creates them with their
-// first recipient.
-//
-// tuic-in is the first inbound that is CONDITIONAL on the profile, and
-// it is written here rather than created on first use for one reason:
-// binding 8443/udp is a visible, permanent property of the relay, and
-// the box-side ufw rule that has to accompany it is baked by cloud-init
-// at first boot and cannot be changed afterwards. Deciding the family
-// set once, at provision time, is the only way the inbound, the two
-// firewalls and the minted pack can all agree. Turning tuic on for an
-// existing relay is a reprovision.
+// family set supplied explicitly.
 func singBoxConfigForFamilies(coverSNI string, families []string) string {
-	if coverSNI == "" {
-		coverSNI = sni.LegacyCoverSNI
-	}
-	extra := ""
-	for _, f := range families {
-		if f != "tuic" {
-			continue
-		}
-		ep := relayports.For("tuic")
-		// alpn IS REQUIRED, and its absence is not a degradation.
-		// sing-quic defaults hysteria2's NextProtos to "h3" when the
-		// config omits it; its tuic service does not, and quic-go
-		// refuses a TLS config with no application protocol. An
-		// alpn-less tuic inbound fails every handshake. The client
-		// outbound sets the same single-element list — see
-		// relaypack/client_outbound.go tuicTLS.
-		//
-		// congestion_control must also match the client's ("bbr"): a
-		// mismatch does not fail, it stalls, which is harder to
-		// diagnose than a refusal.
-		extra = fmt.Sprintf(`,
-    {"type": "tuic", "tag": "tuic-in", "listen": "0.0.0.0", "listen_port": %d,
-     "users": [],
-     "congestion_control": "bbr",
-     "tls": {"enabled": true, "alpn": ["h3"],
-             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}`, ep.Port)
-		break
-	}
-	// %[1]q, twice: one value, two required sites.
-	return fmt.Sprintf(`{
-  "log": {"level": "info"},
-  "inbounds": [
-    {"type": "vless", "tag": "vless-in", "listen": "0.0.0.0", "listen_port": 443,
-     "users": [],
-     "tls": {"enabled": true, "server_name": %[1]q,
-             "reality": {"enabled": true, "private_key": "", "short_id": [],
-                         "handshake": {"server": %[1]q, "server_port": 443}}}},
-    {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 443,
-     "users": [],
-     "tls": {"enabled": true,
-             "certificate_path": "/etc/daal/tls-cert.pem", "key_path": "/etc/daal/tls-key.pem"}}%[2]s
-  ],
-  "outbounds": [{"type": "direct"}]
-}`, coverSNI, extra)
+	return relayconf.SingBoxConfigForFamilies(coverSNI, families)
 }
 
 // loadProfile dispatches on the profile name.
 //
-// The dispatch lives in the profiles package now rather than here, so
-// a profile added to the registry is reachable from every adapter at
+// The dispatch lives in the profiles package rather than here, so a
+// profile added to the registry is reachable from every adapter at
 // once. A per-adapter switch is how "the wizard offers a slug the
-// provisioner cannot resolve" gets introduced, and on L6 that costs
-// the relay: Reprovision has already deleted the box by the time an
+// provisioner cannot resolve" gets introduced, and on L6 that costs the
+// relay: Reprovision has already deleted the box by the time an
 // unresolvable slug is noticed.
 func loadProfile(name string) (*profiles.Profile, error) {
 	return profiles.ByName(name)
 }
 
 func defaultPortForFamily(family string) int {
-	return relayports.For(family).Port
+	return relayconf.DefaultPortForFamily(family)
 }
 
 func portProto(family string) string {

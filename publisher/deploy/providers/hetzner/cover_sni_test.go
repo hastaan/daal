@@ -353,6 +353,64 @@ func TestReprovision_RejectsBadSNIWithoutDeleting(t *testing.T) {
 	}
 }
 
+// A PROFILE THAT WOULD LEAVE THE RELAY WITH NOTHING TO SERVE IS
+// REFUSED BEFORE THE DELETE, not after it.
+//
+// The profile and the relay's family set intersect, so an L6 can only
+// shrink the set — and it can shrink it to empty. A relay serving only
+// UDP-gated families moved onto a TCP-only profile is the reachable
+// case. `provision` already refuses that ("yields no candidates"), but
+// `provision` runs after `Reprovision` has deleted the server and
+// Reprovision deliberately does not re-create, so that refusal arrives
+// when the operator has no relay left.
+//
+// Same property as TestReprovision_RejectsBadSNIWithoutDeleting, and
+// asserted the same way: the server must still be there afterwards.
+func TestReprovision_RejectsAnEmptyProfileIntersectionWithoutDeleting(t *testing.T) {
+	f := newFake()
+	p := New(f)
+	opts := seededOpts(0x77)
+	// A relay whose whole route set is UDP-gated.
+	opts.EnabledFamilies = []string{"hysteria2"}
+	rec, err := p.Provision(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := rec.ServerID
+
+	// iran-tcp443 carries no UDP-gated family, so the intersection with
+	// {hysteria2} is empty.
+	err = p.Reprovision(context.Background(), rec, provider.ReprovisionOpts{
+		NewToolboxProfile: "iran-tcp443",
+	})
+	if err == nil {
+		t.Fatal("Reprovision accepted a profile that leaves the relay with no routes at all")
+	}
+	if !strings.Contains(err.Error(), "has NOT been deleted") {
+		t.Errorf("the refusal must tell the operator the relay is still there, got: %v", err)
+	}
+	if _, err := f.ServerByID(context.Background(), id); err != nil {
+		t.Errorf("the server was deleted for a rebuild that could never have completed: %v", err)
+	}
+}
+
+// The guard must not refuse a rebuild that DOES leave routes. A relay
+// on the default profile keeps three families on iran-tcp443, which is
+// the ordinary L6 and has to stay ordinary.
+func TestReprovision_AcceptsAProfileChangeThatKeepsRoutes(t *testing.T) {
+	f := newFake()
+	p := New(f)
+	rec, err := p.Provision(context.Background(), seededOpts(0x66))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reprovision(context.Background(), rec, provider.ReprovisionOpts{
+		NewToolboxProfile: "iran-tcp443",
+	}); err != nil {
+		t.Fatalf("an ordinary L6 was refused: %v", err)
+	}
+}
+
 // TestNextCoverSNI_KeepsMovingAcrossRotations. Successive rotations of
 // the same relay must not oscillate between two hosts, which a
 // time-independent seed would do.
@@ -374,5 +432,51 @@ func TestNextCoverSNI_KeepsMovingAcrossRotations(t *testing.T) {
 	}
 	if len(seen) < 3 {
 		t.Errorf("8 rotations visited only %d hosts: %v", len(seen), seen)
+	}
+}
+
+// REPROVISION DELETES AND DOES NOT REBUILD.
+//
+// This is the property the whole destroy-and-rebuild half of the ladder
+// is balanced on, and until Wave 6 nothing pinned it. Three header
+// comments (provider/audit.go, vultr/audit.go, vultr/rollback.go) reason
+// from it: because Reprovision only deletes, and because the wizard runs
+// it BEFORE Provision, a failed L4/L5/L6 leaves the operator with NO
+// relay rather than two — which is why every guard has to fire before
+// this call, and why "two paid servers" is the retry shape rather than
+// the single-pass one.
+//
+// An adapter that quietly grew a re-create here would invert all of
+// that: the guards would still be correctly ordered, the ladder gate
+// would still pass, and the failure the audit subsystem was built for
+// would change shape underneath its own documentation.
+func TestReprovision_DeletesTheBoxAndBuildsNothingBack(t *testing.T) {
+	f := newFake()
+	p := New(f)
+	rec, err := p.Provision(context.Background(), seededOpts(0x5a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.servers) != 1 {
+		t.Fatalf("expected exactly one server after Provision, got %d", len(f.servers))
+	}
+
+	if err := p.Reprovision(context.Background(), rec, provider.ReprovisionOpts{}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+
+	// Zero, not one. A replacement built here would look like success to
+	// every caller and would silently make the comments above false.
+	if len(f.servers) != 0 {
+		t.Errorf("Reprovision left %d server(s) behind; it must delete and return, "+
+			"leaving the caller to compose Provision: %v", len(f.servers), f.servers)
+	}
+	// The record still names the box that was just deleted. This is the
+	// state the wizard is in between the two legs, and it is why a
+	// failure of the second leg is unrecoverable rather than merely
+	// expensive.
+	if rec.ServerID == "" {
+		t.Error("Reprovision cleared ServerID; the record must still name the deleted box " +
+			"so a failed rebuild can be reported against something")
 	}
 }

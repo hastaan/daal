@@ -529,8 +529,8 @@ These are what a censored device falls back to. All five re-verified true.
 - [ ] **W3-10. The L3 15-second budget was never measured, and the window
   it bounds grew in Wave 3c.** `L3_FAST_PATH_BUDGET`
   (`daal-wizard/src/commands.rs:2295`, asserted at `:5708`),
-  `rotation.L3FastPathBudget` (`publisher/deploy/rotation/executor.go:137`,
-  asserted at `executor_test.go:757`) and the soak rig's
+  `rotation.L3FastPathBudget` (`publisher/deploy/rotation/postconditions.go`,
+  asserted at `postconditions_test.go`) and the soak rig's
   `v1-5-l3-fast-path` scenario (`specs/blackout-soak-rig-v1.md:392`) all
   pin 15 s, and all three assert it against an *injected* `Duration`.
   The subprocess it bounds used to be reserve → attach → readback → TCP
@@ -547,6 +547,11 @@ These are what a censored device falls back to. All five re-verified true.
   the capability probe cannot join the bind's window (it must refuse
   *before* anything is reserved), but the bind re-probes capabilities inside
   its own window with the answer already in hand. Size: `½d` after W3-6.
+  **Wave 6 re-examined this and did not move it**, deliberately: collapsing
+  the two rotation executors did not measure anything, and moving an
+  unmeasured product promise in either direction is guessing. The exact
+  measurement that would settle it is written down in
+  `docs/decisions/0004-one-rotation-executor.md` ("The budget: verdict").
 - [ ] **W3-7. R2 and GH Pages are implemented and have never touched a real
   endpoint.** `publisher/deploy/freshness/backends/r2` (AWS SigV4) and
   `.../ghpages` (contents API) are on the live publish path, and every

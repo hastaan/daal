@@ -704,10 +704,11 @@ func TestFloatingIPRelease_ReportsAnAddressItMayNotDelete(t *testing.T) {
 
 // THE POST-CONDITION, ON THE SEAM THAT ACTUALLY SHIPS.
 //
-// The Go rotation.Executor has had this check since Step 9 and has no
-// production caller: the live rotation path is the wizard's Rust
-// re-implementation, whose ONLY provider mutation for L3 is this
-// subprocess. A guard that is not here is on no path a user can reach.
+// The live rotation path is the wizard's rotate_execute, whose ONLY
+// provider mutation for L3 is this subprocess. A guard that is not here
+// is on no path a user can reach — which is why, when Wave 6 deleted
+// the caller-less Go executor that also carried this check, the check
+// itself stayed (rotation.CheckAddressMoved) and this test with it.
 //
 // The failure it catches is the one Step 9 exists to end. An adapter
 // that records the floating-IP id and stops — Vultr and Stark, by their

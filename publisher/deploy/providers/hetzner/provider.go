@@ -16,6 +16,7 @@ import (
 	"daal/publisher/deploy/cloudinit"
 	"daal/publisher/deploy/health"
 	"daal/publisher/deploy/provider"
+	"daal/publisher/deploy/relayconf"
 	"daal/publisher/deploy/relayports"
 	"golang.org/x/crypto/ssh"
 )
@@ -435,7 +436,8 @@ func (p *Provider) afterServerFailure(ctx context.Context, opts provider.Provisi
 	if !opts.RollbackOnFailure {
 		progress("provision_orphan", fmt.Sprintf(
 			"Provisioning failed but the server is still running and still billing: %s. "+
-				"Remove the relay from Daal (delete the server) or destroy it in your provider console.", where))
+				"Remove the relay from Daal (delete the server) or destroy it in your provider console. "+
+				"%s", where, auditPointer))
 		return fmt.Errorf("%w [the server is still running and still billing: %s]", cause, where)
 	}
 	progress("provision_rollback", fmt.Sprintf("Provisioning failed — removing the server that was just created (%s)", where))
@@ -443,8 +445,13 @@ func (p *Provider) afterServerFailure(ctx context.Context, opts provider.Provisi
 	// whose cleanup must still reach the cloud API.
 	rep, err := p.Decommission(context.WithoutCancel(ctx), rec)
 	if err != nil {
+		// The worst outcome this adapter can produce: a box that
+		// bills, a record the caller may be about to discard, and a
+		// one-shot SSH key that will refuse the next attempt. Naming
+		// the verb that finds all three is the difference between a
+		// dead end and a recovery.
 		progress("provision_orphan", fmt.Sprintf(
-			"Rollback failed — the server is still running and still billing: %s (%v)", where, err))
+			"Rollback failed — the server is still running and still billing: %s (%v). %s", where, err, auditPointer))
 		return fmt.Errorf("%w [rollback failed, the server is still running and still billing: %s: %v]", cause, where, err)
 	}
 	if len(rep.Warnings) > 0 {
@@ -471,6 +478,9 @@ func (p *Provider) Reprovision(ctx context.Context, rec *provider.OperatorRecord
 	nextSNI, err := provider.NextCoverSNI(rec, opts.NewSNI, now)
 	if err != nil {
 		return fmt.Errorf("hetzner: %w", err)
+	}
+	if err := refuseEmptyProfileIntersection("hetzner", rec, opts); err != nil {
+		return err
 	}
 	if err := p.c.ServerDelete(ctx, rec.ServerID); err != nil {
 		return fmt.Errorf("hetzner: delete during reprovision: %w", err)
@@ -703,7 +713,7 @@ func (p *Provider) sweepEphemeralKeys(ctx context.Context, rec *provider.Operato
 
 	keys, err := p.c.SSHKeyList(ctx)
 	if err != nil {
-		rep.Warnf("could not list SSH keys (%v) — a key named %q may still be on the account; it will block the next provision until removed", err, relay+"-ephemeral")
+		rep.Warnf("could not list SSH keys (%v) — a key named %q may still be on the account; it will block the next provision until removed. %s", err, relay+"-ephemeral", auditPointer)
 		rep.Preserve("ssh-key:" + relay + "-ephemeral*")
 		return
 	}
@@ -748,6 +758,25 @@ func ownsEphemeralKey(k SSHKeyInfo, relay string) bool {
 	}
 	return k.Labels[labelManagedBy] == labelManagedByValue && k.Labels[labelRelay] == relay
 }
+
+// auditPointer is the one sentence every "something survived and it is
+// still costing you" message ends with.
+//
+// It is here because of a gap this adapter cannot close on its own.
+// Every message above is emitted at the moment an OperatorRecord is
+// about to be lost — a provision that failed before the wizard
+// persisted it, a rollback that could not finish, a teardown that
+// could not prove what it left behind. After that moment, no
+// record-driven surface can find the resource: `decommission` needs a
+// record, and the record is the thing that just went missing. The
+// account audit is record-OPTIONAL by construction, so it is the only
+// verb that still works from here.
+//
+// Naming it costs one sentence. Not naming it costs the operator a
+// billing server they have no handle on, which has already happened.
+const auditPointer = "To see exactly what is left on your cloud account " +
+	"— and what can safely be removed — run `daal-deploy account-audit --token-file <token>`; " +
+	"it needs no record and never deletes anything."
 
 // firewallNameForServer mirrors the name liveClient.
 // FirewallEnsureForServer mints, so teardown messages can name the
@@ -1153,4 +1182,56 @@ func (p *Provider) RemoveEphemeralFirewallRule(ctx context.Context, rule *provid
 		return nil
 	}
 	return p.c.FirewallRemoveEphemeralRule(ctx, rule.ID)
+}
+
+// familiesFromRecord is the family set a rebuild will be fed, derived
+// from the record the way the wizard derives it (rotation_families in
+// commands.rs): the record's own candidate list, deduplicated.
+//
+// A provisioned record has no enabled-families field — `provision`
+// overwrites the stored record wholesale with the Go OperatorRecord,
+// which does not carry one — so the candidates ARE the family set.
+func familiesFromRecord(rec *provider.OperatorRecord) []string {
+	if rec == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(rec.Candidates))
+	out := make([]string, 0, len(rec.Candidates))
+	for _, c := range rec.Candidates {
+		if c.Family == "" || seen[c.Family] {
+			continue
+		}
+		seen[c.Family] = true
+		out = append(out, c.Family)
+	}
+	return out
+}
+
+// refuseEmptyProfileIntersection is the pre-delete half of the check
+// `provision` already performs after the delete.
+//
+// A toolbox profile and a family set INTERSECT — relayconf
+// .CandidatesForProfile keeps a profile candidate only when the
+// supplied family list also names it — so a profile change can only
+// ever shrink the set, and it can shrink it to nothing. A relay serving
+// only UDP-gated families (hysteria2, tuic) moved onto a TCP-only
+// profile has an empty intersection. `provision` refuses that with
+// "yields no candidates", which is the right refusal at the wrong end
+// of the sequence: Reprovision has already deleted the server, and
+// deliberately does not re-create, so the operator is left with no
+// relay over a combination that was knowable before anything was
+// touched.
+//
+// Costs a map lookup and no API call. Same reasoning as resolving the
+// cover host before the destructive call.
+func refuseEmptyProfileIntersection(providerName string, rec *provider.OperatorRecord, opts provider.ReprovisionOpts) error {
+	if opts.NewToolboxProfile == "" {
+		return nil
+	}
+	if _, err := relayconf.ServedFamilies(opts.NewToolboxProfile, familiesFromRecord(rec)); err != nil {
+		return fmt.Errorf("%s: refusing to rebuild onto toolbox profile %q: %w — the server has NOT been "+
+			"deleted; going ahead would have destroyed it and then failed to build a relay with no routes at all",
+			providerName, opts.NewToolboxProfile, err)
+	}
+	return nil
 }

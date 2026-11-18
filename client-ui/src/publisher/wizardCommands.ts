@@ -188,6 +188,20 @@ export interface OperatorSummary {
      *  one cannot). This is what decides whether "leave it empty" is an
      *  offer the UI can make. */
     can_reserve_address: boolean;
+    /** The toolbox profile slug this relay was built with. L6 rotates
+     *  to a DIFFERENT one and the wizard refuses the rung when they
+     *  match, so a screen without this can only offer a choice that
+     *  contains a guaranteed error. */
+    toolbox_profile: string;
+    /** The transport families this relay actually serves — computed on
+     *  the Rust side by the same rule the rebuild uses.
+     *
+     *  This is what an L4/L6 rebuild is handed, and the Go side keeps
+     *  only the ones the TARGET profile also carries. Intersection only
+     *  shrinks, so an L6 can drop a family and can never add one back;
+     *  the confirm sheet projects the result from this array and
+     *  refuses a profile change that would remove nothing. */
+    served_families: string[];
 }
 
 /**
@@ -379,16 +393,55 @@ export interface Pricing {
     bandwidth_tib: number;
 }
 
+/** One resource `account-audit` found carrying Daal's ownership marks. */
+export interface AuditedResourceRow {
+    kind: string;
+    id: string;
+    name: string;
+    verdict: string;
+    reason: string;
+    hint: string;
+    reclaimable: boolean;
+    /** Whether this resource costs money for as long as it exists.
+     *
+     *  Mirrors provider.AuditedResource.Billing. This used to be a
+     *  `monthly_eur` the Go auditor never emits — always 0.00, and it
+     *  displaced the one field the gone-panel exists to report. */
+    billing: boolean;
+}
+
+export interface AccountAuditReport {
+    provider: string;
+    resources: AuditedResourceRow[];
+    /** Whether the account's servers could be enumerated at all.
+     *
+     *  Carried, never dropped: a resource is an orphan because NO
+     *  server stands behind it, so if the server list could not be read
+     *  the claim cannot be made about anything. A UI that ignores this
+     *  turns "could not look" into "nothing found". */
+    server_list_complete: boolean;
+    warnings: string[];
+}
+
 export interface ServerTypeOption {
     id: string;
     description: string;
     cpus: number;
     memory_gb: number;
     disk_gb: number;
+    /** DESPITE THE NAME, this is the plan's price in `currency`, which
+     *  is not always EUR. The field name is the frozen wire contract
+     *  with `daal-deploy`; `currency` is the part that makes it true.
+     *  Never render this behind a hard-coded symbol. */
     monthly_eur: number;
     hourly_eur: number;
     location: string;
     arch: string;
+    /** "EUR" (Hetzner) or "USD" (Vultr). Optional because a
+     *  `daal-deploy` older than Wave 6 does not send it; absent means
+     *  EUR, which is what every build that predates the second provider
+     *  could possibly have meant. */
+    currency?: string;
 }
 
 export interface ExistingServer {
@@ -430,9 +483,48 @@ export interface CdnFrontRow {
 }
 
 export interface RotationRecommendation {
+    /** "L1".."L6". */
     level: string;
-    confidence: number;
+    /** "high" | "medium" | "low".
+     *
+     *  This was typed `number` and never was one: the Go side emits
+     *  `rotation.Confidence`, a three-value string enum. Nothing read
+     *  it, so the lie cost nothing — until a screen rendered it. */
+    confidence: string;
     reason: string;
+    /** The rule that fired, as a stable code from the Go side's closed
+     *  vocabulary — `reason`'s machine-readable parallel.
+     *
+     *  `reason` is English prose built in Go and is the most decisive
+     *  sentence the advice panel renders. Key this to say it in the
+     *  operator's own language; fall back to `reason` when the catalog
+     *  has no key, so a new rule degrades to English, never to
+     *  silence. Optional because an older daal-deploy emits neither. */
+    reason_code?: string;
+    /** The machine-specific fragment some reason codes interpolate —
+     *  the concrete blocker behind a refused address swap, or the
+     *  inputs that matched no rung. Substituted for `{detail}`, and
+     *  deliberately untranslated: provider notes and closed-vocabulary
+     *  identifiers. */
+    reason_detail?: string;
+    /** The rung's wall-clock estimate AS THE RECOMMENDER COMPUTED IT.
+     *
+     *  Render this string; never look the figure up again from the
+     *  level. The Go side deliberately overrides the optimistic column
+     *  when the relay can only reach the same outcome by
+     *  destroy-and-rebuild ("~3min (reprovision fallback: …)") or when
+     *  the rung will refuse outright ("not available on this relay"). A
+     *  UI-side table would quote 90 seconds for a 3-minute rebuild. */
+    est_wallclock: string;
+    /** Other rungs that would also address what was observed. Advice
+     *  for the operator's own choice — never buttons: L4/L5/L6 destroy
+     *  and rebuild the relay. */
+    override?: string[];
+    /** False means the recommender chose `level` from NOTHING and this
+     *  is not a recommendation. Render the reason as a refusal. */
+    grounded?: boolean;
+    /** What the recommender saw — and what it could not see. */
+    evidence?: RotationEvidence;
     /** Step 7: the concrete operation behind the named rung. Optional
      *  because an older daal-deploy emits no `action` at all.
      *
@@ -442,6 +534,29 @@ export interface RotationRecommendation {
      *  never as a confident one-tap button. The rotation's own
      *  capability interlock is what refuses an old relay. */
     action?: RotationAction;
+}
+
+export interface RotationEvidence {
+    /** "explanation" (a selector record) | "context" (typed by hand). */
+    source: string;
+    classifications: string[];
+    signals: string[];
+    cooldown_tags: string[];
+    /** Present inputs that no rung addresses. */
+    unrecognised: string[];
+    /** Structurally unavailable inputs, each with the reason. This is
+     *  the half a renderer must not drop: leaving it out turns
+     *  "unmeasured" into "measured and fine". */
+    absent: string[];
+    /** One stable code per `absent` entry, same order and same length
+     *  (pinned by TestAbsentCodesParallelAbsentProse on the Go side).
+     *
+     *  The panel keys these so a Farsi operator reads the absences in
+     *  their own language. `absent` stays as the fallback for a code
+     *  this catalog does not carry yet — a new absence must degrade to
+     *  English, never to silence, because these sentences are what
+     *  separate "measured and fine" from "never measured". */
+    absent_codes?: string[];
 }
 
 export interface RotationAction {
@@ -636,6 +751,45 @@ export const Wizard = {
         invoke<ServerTypeOption[]>('wizard_list_server_types', {
             operatorId: operator_id,
             region,
+        }),
+
+    /**
+     * What is left on this relay's cloud account, with no record
+     * needed. READ-ONLY — its destructive counterpart
+     * (`account-reclaim`) is deliberately not exposed to the app.
+     *
+     * This is the answer to the failure with the worst outcome on the
+     * ladder: a rebuild that deleted the server and could not build the
+     * replacement can leave a half-built box billing and an SSH key
+     * that blocks the next attempt. The record-driven screens cannot
+     * find either — the record write is exactly what did not happen.
+     */
+    accountAudit: (operator_id: number) =>
+        invoke<AccountAuditReport>('wizard_account_audit', {
+            operatorId: operator_id,
+        }),
+
+    /**
+     * The catalogue of a provider this relay does NOT live on.
+     *
+     * L5's sheet needs it: the destination is an account Daal has never
+     * talked to, so there is no stored credential to look anything up
+     * with and no stored provider to look it up on. One read-only call
+     * answers all three of the questions that otherwise kill the rung —
+     * does the credential authenticate, is that a region this provider
+     * has, is that plan sold there — and all three are otherwise
+     * discovered by the create leg, which runs after the old relay has
+     * been deleted.
+     *
+     * The token is passed, used once, and NOT stored. Daal only takes
+     * custody of a second provider's credential after the rebuild has
+     * produced a live server.
+     */
+    listServerTypesFor: (provider: string, region: string, token: string) =>
+        invoke<ServerTypeOption[]>('wizard_list_server_types_for', {
+            provider,
+            region,
+            token,
         }),
 
     pricingLookup: (operator_id: number, region: string, server_type: string) =>
@@ -873,15 +1027,39 @@ export const Wizard = {
      * the wizard REFUSES the rung without them rather than quietly
      * rebuilding into the same place: an L4 with no new region and an
      * L5 with no new provider are both L1 wearing a bigger warning.
-     * No screen drives L4/L5 yet — they are passed here so the
-     * boundary carries them the day one does, not so the UI can omit
-     * them and get a silent no-op.
+     *
+     * `newToolboxProfile` is L6's whole payload, and it was the one
+     * field this wrapper dropped. `wizard_rotate_execute` has taken it
+     * since FRP-7 (src-tauri/src/lib.rs) and `rotate_execute` refuses
+     * an L6 without it (commands.rs:2559) — but the argument object
+     * built here never carried the key, so Tauri passed `undefined`,
+     * serde saw `None`, and the rung was unreachable from this side of
+     * the boundary no matter what a screen asked for. A missing key in
+     * an object literal is invisible in a way a missing parameter is
+     * not, which is how a fully-implemented rung sat dark.
      */
     rotateExecute: (
         operator_id: number,
         level: string,
         reason: string,
-        opts?: { newFloatingIpId?: string; newRegion?: string; newProvider?: string },
+        opts?: {
+            newFloatingIpId?: string;
+            newRegion?: string;
+            newProvider?: string;
+            /**
+             * L5 only, and required by the backend before it touches
+             * the provider. The operator row holds ONE cloud token and
+             * it belongs to the provider being left; the rebuild leg
+             * runs against the one being moved to. Omitting this is
+             * refused rather than defaulted, because the leg it feeds
+             * runs after the old relay has already been deleted.
+             */
+            newProviderToken?: string;
+            /** L5 only: server types are provider-scoped ("cx22" is
+             *  Hetzner's, Vultr sells "vc2-1c-1gb"). */
+            newServerType?: string;
+            newToolboxProfile?: string;
+        },
     ) =>
         invoke<RotateExecuteOutput>('wizard_rotate_execute', {
             operatorId: operator_id,
@@ -890,6 +1068,9 @@ export const Wizard = {
             newFloatingIpId: opts?.newFloatingIpId ?? null,
             newRegion: opts?.newRegion ?? null,
             newProvider: opts?.newProvider ?? null,
+            newProviderToken: opts?.newProviderToken ?? null,
+            newServerType: opts?.newServerType ?? null,
+            newToolboxProfile: opts?.newToolboxProfile ?? null,
         }),
     rotateRevert: (operator_id: number) =>
         invoke<SignedSbpRow>('wizard_rotate_revert', { operatorId: operator_id }),

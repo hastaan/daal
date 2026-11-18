@@ -102,3 +102,15 @@ func (dryRunClient) FirewallDeleteForServer(_ context.Context, _ string) (Firewa
 // suppress unused-import warning; net is referenced by other files
 // in the package and Go vets each file independently.
 var _ = net.IP(nil)
+
+func (dryRunClient) FloatingIPList(_ context.Context) ([]*FloatingIPInfo, error) {
+	return nil, errors.New("hetzner: dry-run client cannot FloatingIPList")
+}
+
+func (dryRunClient) FirewallList(_ context.Context) ([]FirewallInfo, error) {
+	return nil, errors.New("hetzner: dry-run client cannot FirewallList")
+}
+
+func (dryRunClient) FirewallDeleteByID(_ context.Context, _ string) error {
+	return errors.New("hetzner: dry-run client cannot FirewallDeleteByID")
+}

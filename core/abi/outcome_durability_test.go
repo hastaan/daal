@@ -286,3 +286,106 @@ func TestDiagnosticsExplain_CarriesTheRealSignalSet(t *testing.T) {
 		t.Fatalf("network_signals = %v, want [sni_rst]; body=%s", payload.NetworkSignals, body)
 	}
 }
+
+// Wave 6 (rotation ladder). Explanation.Failures had no producer:
+// selection.Decide returns a race PLAN, so no candidate has failed at
+// plan time and the field was `[]` in every blob this app has ever
+// emitted. The publisher's rotation recommender reads exactly that
+// field, so on real data it had nothing to reason from and answered its
+// no-evidence default whatever was actually wrong.
+func TestDiagnosticsExplain_CarriesTheRecordedFailures(t *testing.T) {
+	dir := t.TempDir()
+	if err := Init(dir, "warn"); err != nil {
+		t.Fatal(err)
+	}
+	defer Shutdown()
+	c := mustCore()
+	seedStableRoute(t, c, "r-st")
+
+	if err := SetRoute("r-st"); err != nil {
+		t.Fatalf("SetRoute: %v", err)
+	}
+
+	// Before any failure the list is empty — and empty is the honest
+	// answer, not a placeholder.
+	body, err := DiagnosticsExplain()
+	if err != nil {
+		t.Fatalf("DiagnosticsExplain: %v", err)
+	}
+	if got := explainFailures(t, body); len(got) != 0 {
+		t.Fatalf("failures before any recorded failure = %v, want none", got)
+	}
+
+	if err := c.store.RecordFailure("r-st", "tcp_reset", time.Time{}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	body, err = DiagnosticsExplain()
+	if err != nil {
+		t.Fatalf("DiagnosticsExplain: %v", err)
+	}
+	got := explainFailures(t, body)
+	if len(got) != 1 {
+		t.Fatalf("failures = %v, want one; body=%s", got, body)
+	}
+	if got[0].RouteID != "r-st" || got[0].Classification != "tcp_reset" {
+		t.Fatalf("failure = %+v, want {r-st tcp_reset}", got[0])
+	}
+	// Tag is the cooldown-PROPAGATION attribution, and nothing in the
+	// tree produces one. A tag here would make the publisher's rule 6
+	// fire and answer "destroy this server and rebuild it in another
+	// datacenter" on the evidence of one reset.
+	if got[0].Tag != "" {
+		t.Fatalf("failure carried tag %q; an absent attribution must stay absent", got[0].Tag)
+	}
+}
+
+// The recovery rule is shared with the signal set, so it must hold on
+// this surface too: a route that failed and then connected is not
+// currently failing, whatever its (deliberately retained) failure
+// columns still say.
+func TestDiagnosticsExplain_FailuresSuppressedAfterRecovery(t *testing.T) {
+	dir := t.TempDir()
+	if err := Init(dir, "warn"); err != nil {
+		t.Fatal(err)
+	}
+	defer Shutdown()
+	c := mustCore()
+	seedStableRoute(t, c, "r-st")
+	if err := SetRoute("r-st"); err != nil {
+		t.Fatalf("SetRoute: %v", err)
+	}
+
+	at := time.Now().UTC()
+	if err := c.store.RecordFailure("r-st", "tcp_reset", time.Time{}, at); err != nil {
+		t.Fatal(err)
+	}
+	body, err := DiagnosticsExplain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(explainFailures(t, body)) != 1 {
+		t.Fatalf("precondition: expected one failure; body=%s", body)
+	}
+
+	if err := c.store.RecordSuccess("r-st", at.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	body, err = DiagnosticsExplain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := explainFailures(t, body); len(got) != 0 {
+		t.Fatalf("failures after recovery = %v, want none", got)
+	}
+}
+
+func explainFailures(t *testing.T, body string) []selection.FailureRecord {
+	t.Helper()
+	var payload struct {
+		Failures []selection.FailureRecord `json:"failures"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("unmarshal explain body: %v", err)
+	}
+	return payload.Failures
+}

@@ -3,491 +3,662 @@ package vultr
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
-	"strconv"
+	"net/http"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"daal/publisher/deploy/provider"
+	"daal/publisher/deploy/sni"
 )
 
-// fakeClient is an in-memory vultrClient for unit tests.
-type fakeClient struct {
-	mu             sync.Mutex
-	instances      map[string]*InstanceInfo
-	sshKeys        map[string][]byte
-	idCount        int64
-	priceM         map[string]struct{ hourly, monthly float64 }
-	floating       map[string]string
-	ephemeralRules map[string]ephemeralRuleEntry
-}
-
-type ephemeralRuleEntry struct {
-	InstanceID string
-	CallerIP   string
-	Port       int
-	ExpiresAt  time.Time
-}
-
-func newFake() *fakeClient {
-	return &fakeClient{
-		instances: map[string]*InstanceInfo{},
-		sshKeys:   map[string][]byte{},
-		priceM:    map[string]struct{ hourly, monthly float64 }{"fra/vc2-1c-1gb": {0.007, 5.00}},
-		floating:  map[string]string{},
-	}
-}
-
-func (f *fakeClient) InstanceCreate(_ context.Context, opts InstanceCreateOpts) (*InstanceInfo, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, s := range f.instances {
-		if s.Label == opts.Label {
-			return nil, errors.New("instance with same label already exists")
-		}
-	}
-	f.idCount++
-	id := strconv.FormatInt(f.idCount, 10)
-	s := &InstanceInfo{
-		ID: id, Label: opts.Label, Status: "active",
-		Plan: opts.Plan, Region: opts.Region,
-		MainIP: net.ParseIP("78.141.0." + id),
-		Tags:   opts.Tags,
-	}
-	f.instances[id] = s
-	return s, nil
-}
-
-func (f *fakeClient) InstanceByID(_ context.Context, id string) (*InstanceInfo, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if s, ok := f.instances[id]; ok {
-		return s, nil
-	}
-	return nil, errInstanceNotFound
-}
-
-func (f *fakeClient) InstanceByLabel(_ context.Context, label string) (*InstanceInfo, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, s := range f.instances {
-		if s.Label == label {
-			return s, nil
-		}
-	}
-	return nil, errInstanceNotFound
-}
-
-func (f *fakeClient) InstanceDelete(_ context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.instances, id)
-	return nil
-}
-
-func (f *fakeClient) PlanPrice(_ context.Context, region, plan string) (float64, float64, error) {
-	if p, ok := f.priceM[region+"/"+plan]; ok {
-		return p.hourly, p.monthly, nil
-	}
-	return 0, 0, errors.New("no pricing")
-}
-
-func (f *fakeClient) SSHKeyCreate(_ context.Context, name string, publicKey []byte) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.idCount++
-	id := strconv.FormatInt(f.idCount, 10)
-	f.sshKeys[id] = publicKey
-	_ = name
-	return id, nil
-}
-
-func (f *fakeClient) SSHKeyDelete(_ context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.sshKeys, id)
-	return nil
-}
-
-func (f *fakeClient) ReservedIPAttach(_ context.Context, ipID, instanceID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.floating[ipID] = instanceID
-	return nil
-}
-
-func (f *fakeClient) ReservedIPDetach(_ context.Context, ipID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.floating, ipID)
-	return nil
-}
-
-func (f *fakeClient) FirewallAddEphemeralRule(_ context.Context, instanceID, callerIP string, port int, expiresAt time.Time) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.ephemeralRules == nil {
-		f.ephemeralRules = map[string]ephemeralRuleEntry{}
-	}
-	id := "vultr-eph-" + instanceID + "-" + callerIP + "-" + strconv.Itoa(port) + "-" + strconv.FormatInt(expiresAt.Unix(), 10)
-	f.ephemeralRules[id] = ephemeralRuleEntry{InstanceID: instanceID, CallerIP: callerIP, Port: port, ExpiresAt: expiresAt}
-	return id, nil
-}
-
-func (f *fakeClient) FirewallRemoveEphemeralRule(_ context.Context, ruleID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.ephemeralRules, ruleID)
-	return nil
-}
-
-// --- helpers ---
-
 func mkOpts() provider.ProvisionOpts {
-	pub, priv, _ := ed25519.GenerateKey(nil)
+	_, priv, _ := ed25519.GenerateKey(nil)
+	// A real 32-byte publisher key: cloud-init writes it to
+	// /etc/daal/mgmt/pubkey and the mgmt plane verifies every token
+	// against it, so RenderV2 refuses anything shorter.
+	pub := make([]byte, ed25519.PublicKeySize)
+	for i := range pub {
+		pub[i] = byte(i + 1)
+	}
 	return provider.ProvisionOpts{
 		PublisherPubKey: pub,
-		Region:          "fra",
-		ServerType:      "vc2-1c-1gb",
+		Region:          testRegion,
+		ServerType:      testPlan,
 		ToolboxProfile:  "iran-default",
-		HelperIP:        net.ParseIP("1.2.3.4"),
+		HelperIP:        net.ParseIP("203.0.113.9"),
 		EphemeralSSHKey: priv,
-		DryRun:          true,
+		MgmtPort:        20000,
 	}
 }
 
-// --- tests ---
-
-func TestProvision_DryRunReturnsSyntheticRecord(t *testing.T) {
-	p := New(newFake())
-	rec, err := p.Provision(context.Background(), mkOpts())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.Provider != "vultr" {
-		t.Errorf("Provider = %q want vultr", rec.Provider)
-	}
-	if rec.Region != "fra" {
-		t.Errorf("Region = %q want fra", rec.Region)
-	}
-	for _, c := range rec.Candidates {
-		if c.ExposureMode != "direct_vps" {
-			t.Errorf("V1.5 invariant: candidate %s has exposure_mode=%q", c.Family, c.ExposureMode)
-		}
-		if len(c.OriginRiskTags) != 0 {
-			t.Errorf("V1.5 invariant: candidate %s has origin tags", c.Family)
-		}
-	}
+func relayLabel() string {
+	o := mkOpts()
+	return derivedInstanceLabel(o.PublisherPubKey, o.Region)
 }
 
-func TestProvision_RejectsMissingFields(t *testing.T) {
-	p := New(newFake())
-	cases := []struct {
-		name string
-		mut  func(*provider.ProvisionOpts)
-	}{
-		{"no-pubkey", func(o *provider.ProvisionOpts) { o.PublisherPubKey = nil }},
-		{"no-region", func(o *provider.ProvisionOpts) { o.Region = "" }},
-		{"no-server-type", func(o *provider.ProvisionOpts) { o.ServerType = "" }},
-		{"no-toolbox", func(o *provider.ProvisionOpts) { o.ToolboxProfile = "" }},
-		{"no-helper-ip", func(o *provider.ProvisionOpts) { o.HelperIP = nil }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			opts := mkOpts()
-			tc.mut(&opts)
-			if _, err := p.Provision(context.Background(), opts); err == nil {
-				t.Fatalf("expected error for %s", tc.name)
-			}
-		})
-	}
-}
-
-func TestProvision_TwiceIsIdempotent(t *testing.T) {
-	p := New(newFake())
-	opts := mkOpts()
-	r1, err := p.Provision(context.Background(), opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r2, err := p.Provision(context.Background(), opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r1.ServerID != r2.ServerID {
-		t.Errorf("dry-run Provision must be deterministic; got %s vs %s", r1.ServerID, r2.ServerID)
-	}
-}
-
-func TestProvision_ExistingInstanceRequiresPersistedMgmtPort(t *testing.T) {
-	p := New(newFake())
-	opts := mkOpts()
-	opts.DryRun = false
-	opts.MgmtPort = 42424
-	if _, err := p.Provision(context.Background(), opts); err != nil {
-		t.Fatalf("initial Provision: %v", err)
-	}
-
-	retry := opts
-	retry.MgmtPort = 0
-	if _, err := p.Provision(context.Background(), retry); err == nil {
-		t.Fatal("expected existing instance retry without persisted MgmtPort to fail")
-	}
-
-	retry.MgmtPort = 42424
-	// The adopt path refuses to invent a cover host for a box it cannot
-	// inspect, so state one. Same shape as MgmtPort two lines up.
-	retry.CoverSNI = "mirror.init7.net"
-	rec, err := p.Provision(context.Background(), retry)
-	if err != nil {
-		t.Fatalf("retry with persisted MgmtPort: %v", err)
-	}
-	if rec.MgmtPort != 42424 {
-		t.Fatalf("MgmtPort = %d, want 42424", rec.MgmtPort)
-	}
-	if rec.CoverSNI != "mirror.init7.net" {
-		t.Fatalf("CoverSNI = %q, want the persisted value verbatim", rec.CoverSNI)
-	}
-}
-
-func TestDecommission_AbsentIsNoOp(t *testing.T) {
-	p := New(newFake())
-	if _, err := p.Decommission(context.Background(), &provider.OperatorRecord{ServerID: "9999"}); err != nil {
-		t.Errorf("Decommission of absent must be nil; got %v", err)
-	}
-	rep, err := p.Decommission(context.Background(), nil)
-	if err != nil {
-		t.Errorf("Decommission(nil) must be nil; got %v", err)
-	}
-	if !rep.Clean() {
-		t.Errorf("Decommission(nil) must report a clean teardown; got %+v", rep)
-	}
-}
-
-// TestDecommission_ReportsWhatItCannotProve pins the honesty
-// contract: this adapter deletes the instance, creates no firewall
-// group of its own, and has no key-lookup call — so it must not claim
-// the one-shot SSH key is gone.
-func TestDecommission_ReportsWhatItCannotProve(t *testing.T) {
-	f := newFake()
-	p := New(f)
-	opts := mkOpts()
-	opts.DryRun = false
+// mustProvision runs a provision that is expected to succeed.
+func mustProvision(t *testing.T, f *fakeVultr, opts provider.ProvisionOpts) (*Provider, *provider.OperatorRecord) {
+	t.Helper()
+	p := f.provider(t)
 	rec, err := p.Provision(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if len(f.sshKeys) != 0 {
-		t.Errorf("provision left %d one-shot ssh key(s) behind", len(f.sshKeys))
+	return p, rec
+}
+
+// TestProvision_BuildsARealRelay is the "same standard as Hetzner"
+// test: the box is created behind its firewall, with the relay's real
+// sing-box config, its real family set, and the ownership tags every
+// later refusal depends on.
+func TestProvision_BuildsARealRelay(t *testing.T) {
+	f := newFakeVultr(t)
+	_, rec := mustProvision(t, f, mkOpts())
+
+	if rec.Provider != "vultr" || rec.ServerID == "" {
+		t.Fatalf("record does not name a Vultr instance: %+v", rec)
 	}
-	rec.FloatingIPID = "rip-7"
+	if rec.PublicIP.String() != "78.141.10.5" {
+		t.Errorf("record public ip = %v", rec.PublicIP)
+	}
+	if rec.MgmtPort != 20000 {
+		t.Errorf("mgmt port = %d, want the persisted 20000", rec.MgmtPort)
+	}
+
+	// THE FIREWALL EXISTS BEFORE THE INSTANCE. Hetzner cannot do this
+	// and therefore has a window where a booting relay's random mgmt
+	// port faces the internet. If this ordering ever regresses, the
+	// window comes back silently.
+	if !f.sawBefore("POST /firewalls", "POST /instances") {
+		t.Errorf("instance was created before its firewall: %v", f.calls)
+	}
+
+	// The instance carries BOTH ownership tags. Every refusal in this
+	// package keys off them.
+	inst := f.instances[rec.ServerID]
+	if inst == nil {
+		t.Fatal("instance vanished")
+	}
+	if !ownsInstance(&InstanceInfo{Tags: inst.Tags}, relayLabel()) {
+		t.Errorf("instance tags do not prove ownership: %v", inst.Tags)
+	}
+	if inst.FirewallGroupID == "" {
+		t.Error("instance was created with no firewall group attached")
+	}
+
+	// The cloud-init is the REAL relay config, not a placeholder. The
+	// pre-Wave-6 adapter shipped `{"profile":"iran-default"}` here,
+	// which boots a box that serves nothing while the record claims
+	// four families.
+	raw, err := base64.StdEncoding.DecodeString(f.lastUserData)
+	if err != nil {
+		t.Fatalf("user_data is not base64: %v", err)
+	}
+	body := string(raw)
+	if strings.Contains(body, `{"profile":"iran-default"}`) {
+		t.Error("cloud-init still carries the placeholder sing-box config")
+	}
+	for _, want := range []string{`"type": "vless"`, `"reality"`, rec.CoverSNI} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cloud-init does not contain %q", want)
+		}
+	}
+	if f.lastOSID != 2284 {
+		t.Errorf("os_id = %d, want the id resolved from the catalogue for %q", f.lastOSID, imageName)
+	}
+
+	// Candidates come from the profile, with this relay's address.
+	if len(rec.Candidates) != 4 {
+		t.Fatalf("iran-default default-enabled families = %d candidates, want 4: %+v", len(rec.Candidates), rec.Candidates)
+	}
+	for _, c := range rec.Candidates {
+		if !hasTag(c.PublicRiskTags, "public_ip:78.141.10.5") {
+			t.Errorf("candidate %s does not carry the relay's address: %v", c.Family, c.PublicRiskTags)
+		}
+	}
+}
+
+// TestProvision_FirewallOpensExactlyTheServedPorts. The ruleset is
+// rendered from THIS relay's family set, and both address families get
+// a rule: Vultr splits v4 and v6 into separate rules, so writing only
+// one produces a quietly v4-only relay.
+func TestProvision_FirewallOpensExactlyTheServedPorts(t *testing.T) {
+	f := newFakeVultr(t)
+	_, rec := mustProvision(t, f, mkOpts())
+
+	rules := f.rulesFor(t, rec.ServerID)
+	for _, want := range []string{"v4|tcp|0.0.0.0|0|443", "v6|tcp|::|0|443", "v4|udp|0.0.0.0|0|443", "v6|udp|::|0|443", "v4|tcp|0.0.0.0|0|80"} {
+		if !rules[want] {
+			t.Errorf("baseline rule %q missing; have %v", want, keys(rules))
+		}
+	}
+	// naive (8444) and websocket-tls (8445) are default-enabled in
+	// iran-default, so their ports are open.
+	for _, want := range []string{"v4|tcp|0.0.0.0|0|8444", "v4|tcp|0.0.0.0|0|8445"} {
+		if !rules[want] {
+			t.Errorf("data-plane rule %q missing; have %v", want, keys(rules))
+		}
+	}
+	// tuic is opt-in and NOT enabled, so 8443/udp must stay shut. An
+	// open port serving nothing is a free fingerprint.
+	if rules["v4|udp|0.0.0.0|0|8443"] {
+		t.Error("8443/udp is open on a relay that does not serve tuic")
+	}
+}
+
+// TestReRenderFirewall_IsTheL5L6Call. Moving a relay to a new provider
+// or profile changes its family set; if the firewall is not re-rendered
+// the box listens on a port its own firewall drops, and every route in
+// the freshly minted pack that uses it is dead.
+func TestReRenderFirewall_IsTheL5L6Call(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+
+	if rules := f.rulesFor(t, rec.ServerID); rules["v4|udp|0.0.0.0|0|8443"] {
+		t.Fatal("precondition: tuic port already open")
+	}
+	if err := p.ReRenderFirewall(context.Background(), rec,
+		[]string{"vless-reality", "websocket-tls", "naive", "hysteria2", "tuic"}); err != nil {
+		t.Fatalf("ReRenderFirewall: %v", err)
+	}
+	rules := f.rulesFor(t, rec.ServerID)
+	for _, want := range []string{"v4|udp|0.0.0.0|0|8443", "v6|udp|::|0|8443"} {
+		if !rules[want] {
+			t.Errorf("after re-render, %q is still missing: %v", want, keys(rules))
+		}
+	}
+}
+
+// TestProvision_RefusesToAdoptAForeignInstance. The derived label is a
+// pure function of (publisher key, region), so a collision is possible
+// on a shared account — and adopting an untagged box writes somebody
+// else's server into the operator's record, which teardown would then
+// destroy.
+func TestProvision_RefusesToAdoptAForeignInstance(t *testing.T) {
+	f := newFakeVultr(t)
+	f.instances["foreign"] = &wireInstance{
+		ID: "foreign", Label: relayLabel(), Status: "active",
+		Plan: testPlan, Region: testRegion, MainIP: "1.2.3.4",
+		Tags: []string{"someone-elses"},
+	}
+	_, err := f.provider(t).Provision(context.Background(), mkOpts())
+	if err == nil {
+		t.Fatal("adopted an instance that carries no daal ownership tags")
+	}
+	if !strings.Contains(err.Error(), "did not create") {
+		t.Errorf("refusal does not explain itself: %v", err)
+	}
+}
+
+// TestProvision_OneShotKeyIsAlwaysDeleted. An orphaned SSH key is the
+// failure that has already wedged this project's operator: the name was
+// a pure function of (publisher key, region), so one survivor made every
+// later attempt fail forever.
+func TestProvision_OneShotKeyIsAlwaysDeleted(t *testing.T) {
+	f := newFakeVultr(t)
+	mustProvision(t, f, mkOpts())
+	if len(f.sshKeys) != 0 {
+		t.Errorf("one-shot SSH key survived a SUCCESSFUL provision: %v", f.sshKeys)
+	}
+
+	// ...and after a failure too.
+	g := newFakeVultr(t)
+	g.failOn = failPath(http.MethodPost, "/instances")
+	if _, err := g.provider(t).Provision(context.Background(), mkOpts()); err == nil {
+		t.Fatal("expected the injected create failure")
+	}
+	if len(g.sshKeys) != 0 {
+		t.Errorf("one-shot SSH key survived a FAILED provision: %v", g.sshKeys)
+	}
+}
+
+// --- rollback ---
+
+// TestRollback_NothingBillingCleansUpUnconditionally. The firewall
+// group is created before the instance, so a create failure leaves a
+// resource behind. It protects nothing, so it goes — regardless of
+// RollbackOnFailure, which is about a billing box.
+func TestRollback_NothingBillingCleansUpUnconditionally(t *testing.T) {
+	f := newFakeVultr(t)
+	f.failOn = failPath(http.MethodPost, "/instances")
+
+	_, err := f.provider(t).Provision(context.Background(), mkOpts())
+	if err == nil {
+		t.Fatal("expected the injected create failure")
+	}
+	if len(f.groups) != 0 {
+		t.Errorf("orphaned firewall group after a failed create: %v", f.groups)
+	}
+	if !strings.Contains(err.Error(), "nothing was created that is still running or billing") {
+		t.Errorf("error does not say the account is clean: %v", err)
+	}
+}
+
+// TestRollback_ReportsWhatItCouldNotClean. Where cleanup is impossible,
+// the operator gets the resource, where it is, and the command that
+// removes it — not a shrug.
+func TestRollback_ReportsWhatItCouldNotClean(t *testing.T) {
+	f := newFakeVultr(t)
+	f.failOn = func(method, path string) (int, bool) {
+		if method == http.MethodPost && path == "/instances" {
+			return http.StatusInternalServerError, true
+		}
+		if method == http.MethodDelete && strings.HasPrefix(path, "/firewalls/") {
+			return http.StatusInternalServerError, true
+		}
+		return 0, false
+	}
+	_, err := f.provider(t).Provision(context.Background(), mkOpts())
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(err.Error(), "cleanup incomplete") {
+		t.Errorf("error hides the leftover: %v", err)
+	}
+	if !strings.Contains(err.Error(), "curl -s -X DELETE") || !strings.Contains(err.Error(), "/firewalls/") {
+		t.Errorf("error does not carry the removal command: %v", err)
+	}
+}
+
+// TestRollback_HealthFailureWithRollbackDestroysTheBox. The unattended
+// case: nothing may be left on the meter.
+func TestRollback_HealthFailureWithRollbackDestroysTheBox(t *testing.T) {
+	f := newFakeVultr(t)
+	p := f.provider(t)
+	p.setHealthWaiter(func(context.Context, *provider.OperatorRecord, string, provider.ProvisionOpts, func(string, string)) error {
+		return errors.New("cloud-init never went healthy")
+	})
+	opts := mkOpts()
+	opts.WaitForHealth = true
+	opts.RollbackOnFailure = true
+
+	_, err := p.Provision(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected the health failure")
+	}
+	if len(f.instances) != 0 {
+		t.Errorf("a billing instance survived a rollback: %v", f.instances)
+	}
+	if len(f.groups) != 0 {
+		t.Errorf("firewall group survived a rollback: %v", f.groups)
+	}
+	if !strings.Contains(err.Error(), "rolled back") || !strings.Contains(err.Error(), "nothing is billing") {
+		t.Errorf("error does not state the outcome: %v", err)
+	}
+}
+
+// TestRollback_HealthFailureWithoutRollbackNamesTheOrphan. The default:
+// a slow boot is recoverable and the idempotent retry reuses the box —
+// but the user must be told what is running, and how to kill it.
+func TestRollback_HealthFailureWithoutRollbackNamesTheOrphan(t *testing.T) {
+	f := newFakeVultr(t)
+	p := f.provider(t)
+	p.setHealthWaiter(func(context.Context, *provider.OperatorRecord, string, provider.ProvisionOpts, func(string, string)) error {
+		return errors.New("timed out")
+	})
+	var events []string
+	opts := mkOpts()
+	opts.WaitForHealth = true
+	opts.OnProgress = func(step, msg string) { events = append(events, step+": "+msg) }
+
+	_, err := p.Provision(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected the health failure")
+	}
+	if len(f.instances) != 1 {
+		t.Fatalf("the instance should have been left alone: %v", f.instances)
+	}
+	for _, want := range []string{"still running and still billing", "78.141.10.5", "curl -s -X DELETE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not contain %q: %v", want, err)
+		}
+	}
+	if !hasPrefixIn(events, "provision_orphan:") {
+		t.Errorf("no provision_orphan event for the UI to render: %v", events)
+	}
+}
+
+// TestRollback_FailedInstanceDeleteLeavesTheFirewallAlone. If the box
+// survives, its firewall must survive too: stripping a live relay's
+// firewall exposes its random mgmt port.
+func TestRollback_FailedInstanceDeleteLeavesTheFirewallAlone(t *testing.T) {
+	f := newFakeVultr(t)
+	p := f.provider(t)
+	p.setHealthWaiter(func(context.Context, *provider.OperatorRecord, string, provider.ProvisionOpts, func(string, string)) error {
+		return errors.New("timed out")
+	})
+	f.failOn = func(method, path string) (int, bool) {
+		if method == http.MethodDelete && strings.HasPrefix(path, "/instances/") {
+			return http.StatusInternalServerError, true
+		}
+		return 0, false
+	}
+	opts := mkOpts()
+	opts.WaitForHealth = true
+	opts.RollbackOnFailure = true
+
+	_, err := p.Provision(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if len(f.groups) != 1 {
+		t.Errorf("the surviving box lost its firewall: %v", f.groups)
+	}
+	if !strings.Contains(err.Error(), "STILL BILLING") {
+		t.Errorf("error does not shout about the surviving box: %v", err)
+	}
+}
+
+// --- decommission ---
+
+func TestDecommission_RemovesEverythingAndSaysSo(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	// A key from an earlier crashed attempt, of the kind that blocks
+	// every retry.
+	f.sshKeys["stale"] = ephemeralKeyPrefix(relayLabel()) + "deadbeef"
 
 	rep, err := p.Decommission(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("Decommission: %v", err)
 	}
-	if !rep.ServerDeleted {
-		t.Errorf("instance not deleted: %+v", rep)
+	if !rep.Clean() {
+		t.Errorf("report is not clean: %+v", rep)
 	}
-	if !rep.FirewallDeleted {
-		t.Errorf("adapter creates no firewall group; nothing of ours is left behind")
-	}
-	// Provision deletes the one-shot key by id on every exit path (the
-	// assertion above proves it for this run) and the name carries
-	// random bytes per attempt, so nothing is left that can bite the
-	// user. A ✗ on every clean teardown was training users to ignore
-	// the same mark where it is real.
-	if !rep.SSHKeyDeleted {
-		t.Errorf("one-shot key is deleted by id at the end of every provision: %+v", rep)
-	}
-	if len(f.instances) != 0 {
-		t.Errorf("instance survived teardown")
-	}
-	wantMentions := []string{
-		"rip-7",
-	}
-	for _, want := range wantMentions {
-		found := false
-		for _, w := range rep.Warnings {
-			if strings.Contains(w, want) {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("warnings %v do not mention %q", rep.Warnings, want)
-		}
+	if len(f.instances) != 0 || len(f.groups) != 0 || len(f.sshKeys) != 0 {
+		t.Errorf("resources survived: instances=%v groups=%v keys=%v", f.instances, f.groups, f.sshKeys)
 	}
 }
 
-// A record with no ServerID is the shape a failed provision leaves —
-// the wizard only writes the OperatorRecord back on success — so an
-// empty id must not be read as "nothing to delete" while a real,
-// billing instance runs under the derived label.
-func TestDecommission_FindsOrphanInstanceByDerivedLabel(t *testing.T) {
-	f := newFake()
-	p := New(f)
-	opts := mkOpts()
-	opts.DryRun = false
-	if _, err := p.Provision(context.Background(), opts); err != nil {
-		t.Fatalf("Provision: %v", err)
-	}
+// TestDecommission_RefusesAForeignInstance. Ownership tags, not the id
+// alone. A record can point at a box this tooling did not build — a
+// copied record, a recycled id — and destroying it is unrecoverable.
+func TestDecommission_RefusesAForeignInstance(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	f.instances[rec.ServerID].Tags = []string{"managed-by:someone-else"}
 
-	stale := &provider.OperatorRecord{
-		Provider:        "vultr",
-		Region:          opts.Region,
-		PublisherPubKey: opts.PublisherPubKey,
+	rep, err := p.Decommission(context.Background(), rec)
+	if err == nil {
+		t.Fatal("deleted an instance that carries no daal ownership tags")
 	}
-	rep, err := p.Decommission(context.Background(), stale)
+	if len(f.instances) != 1 {
+		t.Error("the foreign instance was destroyed anyway")
+	}
+	if rep.ServerDeleted {
+		t.Error("report claims the server is gone")
+	}
+	if !containsSubstr(rep.Preserved, "instance:") {
+		t.Errorf("the preserved resource is not reported: %+v", rep)
+	}
+}
+
+// TestDecommission_FindsTheBoxWhenTheRecordHasNoID. The commonest way
+// to arrive here: a provision that created the box and then failed its
+// health wait persists an empty server_id while a real instance carries
+// the derived label. Claiming "deleted" on that record tells the user
+// the billing stopped and throws away the only handle on the box.
+func TestDecommission_FindsTheBoxWhenTheRecordHasNoID(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	rec.ServerID = ""
+
+	rep, err := p.Decommission(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("Decommission: %v", err)
 	}
-	if !rep.ServerDeleted {
-		t.Errorf("orphan instance must be reported deleted: %+v", rep)
-	}
-	if len(f.instances) != 0 {
-		t.Errorf("the billing orphan survived a teardown that claimed server_deleted=%v", rep.ServerDeleted)
+	if !rep.ServerDeleted || len(f.instances) != 0 {
+		t.Errorf("the instance was not found by its derived label: %+v / %v", rep, f.instances)
 	}
 }
 
-func TestEphemeralSSHKeyName_UniquePerAttempt(t *testing.T) {
-	a, err := ephemeralSSHKeyName("daal-fra-0011223344556677")
+// TestDecommission_PreservesAFirewallProtectingAnotherBox.
+func TestDecommission_PreservesAFirewallProtectingAnotherBox(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	// A sibling relay behind the same group. Vultr decrements the
+	// counter asynchronously, so this is deliberately set to survive
+	// our own instance's delete.
+	for _, g := range f.groups {
+		g.Instances = 2
+	}
+
+	rep, err := p.Decommission(context.Background(), rec)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Decommission: %v", err)
 	}
-	b, err := ephemeralSSHKeyName("daal-fra-0011223344556677")
-	if err != nil {
-		t.Fatal(err)
+	if rep.FirewallDeleted {
+		t.Error("deleted a firewall another relay is still behind")
 	}
-	if a == b {
-		t.Fatalf("two attempts produced the same key name (%q)", a)
+	if !containsSubstr(rep.Preserved, "firewall-group:") {
+		t.Errorf("preservation not reported: %+v", rep)
 	}
-}
-
-func TestAssignFloatingIP_SameIDIsNoOp(t *testing.T) {
-	f := newFake()
-	p := New(f)
-	rec := &provider.OperatorRecord{ServerID: "1", FloatingIPID: "rip-100"}
-	if err := p.AssignFloatingIP(context.Background(), rec, "rip-100"); err != nil {
-		t.Errorf("idempotent assign must be nil; got %v", err)
-	}
-	if len(f.floating) != 0 {
-		t.Errorf("idempotent path must not call API")
+	if !containsSubstr(rep.Warnings, "curl -s -X DELETE") {
+		t.Errorf("no removal command for the preserved group: %+v", rep.Warnings)
 	}
 }
 
-func TestAssignFloatingIP_NewIDUpdatesRecord(t *testing.T) {
-	f := newFake()
-	p := New(f)
-	rec := &provider.OperatorRecord{ServerID: "1"}
-	if err := p.AssignFloatingIP(context.Background(), rec, "rip-200"); err != nil {
-		t.Fatal(err)
-	}
-	if rec.FloatingIPID != "rip-200" || f.floating["rip-200"] != "1" {
-		t.Errorf("attach not recorded")
+func TestDecommission_NilRecordIsVacuouslyClean(t *testing.T) {
+	f := newFakeVultr(t)
+	rep, err := f.provider(t).Decommission(context.Background(), nil)
+	if err != nil || !rep.Clean() {
+		t.Fatalf("nil record: %+v, %v", rep, err)
 	}
 }
 
-func TestPricing_ReturnsHourlyAndMonthly(t *testing.T) {
-	p := New(newFake())
-	rec := &provider.OperatorRecord{Region: "fra", ServerType: "vc2-1c-1gb"}
+// --- pricing ---
+
+func TestPricing_SaysWhichCurrency(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
 	pr, err := p.Pricing(context.Background(), rec)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Pricing: %v", err)
 	}
-	if pr.HourlyEUR != 0.007 || pr.MonthlyEUR != 5.00 {
-		t.Errorf("pricing wrong: %+v", pr)
+	if pr.Currency != "USD" {
+		t.Errorf("currency = %q; Vultr bills in USD and the field is named EUR", pr.Currency)
 	}
-	if pr.Provider != "vultr" {
-		t.Errorf("Provider field missing in Pricing: %q", pr.Provider)
+	if pr.MonthlyEUR != 5.0 || pr.HourlyEUR != 0.007 {
+		t.Errorf("pricing = %+v", pr)
 	}
 }
 
-func TestSetEphemeralFirewallRule_OpensCorrectTuple(t *testing.T) {
-	f := newFake()
-	p := New(f)
-	pin := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
-	p.SetClock(func() time.Time { return pin })
+// TestPricing_RefusesAPlanTheRegionDoesNotCarry. Quoting a price for a
+// box that cannot be created there invites the operator to pick it.
+func TestPricing_RefusesAPlanTheRegionDoesNotCarry(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	rec.ServerType = "vc2-2c-4gb" // ewr only
+	if _, err := p.Pricing(context.Background(), rec); err == nil {
+		t.Fatal("quoted a price for a plan the region does not offer")
+	}
+}
 
-	rule, err := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 12345, 300)
+// --- cover SNI ---
+
+func TestProvision_RecordCarriesAPerRelayCoverSNI(t *testing.T) {
+	f := newFakeVultr(t)
+	_, rec := mustProvision(t, f, mkOpts())
+	if rec.CoverSNI == "" {
+		t.Fatal("Vultr record has no cover SNI")
+	}
+	if rec.CoverSNI == sni.LegacyCoverSNI {
+		t.Fatalf("record carries the fleet-wide constant %q", rec.CoverSNI)
+	}
+	inZone := false
+	for _, e := range sni.InZone(sni.ZoneEUCentral) {
+		if e.Host == rec.CoverSNI {
+			inZone = true
+		}
+	}
+	if !inZone {
+		t.Errorf("fra relay got %q, which is not in eu-central", rec.CoverSNI)
+	}
+}
+
+func TestReprovision_MovesTheCoverSNIAndDeletesTheBox(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	before := rec.CoverSNI
+
+	if err := p.Reprovision(context.Background(), rec, provider.ReprovisionOpts{}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+	if rec.CoverSNI == before {
+		t.Errorf("re-provision kept the burned cover host %q", before)
+	}
+	if len(f.instances) != 0 {
+		t.Error("the old instance was not destroyed")
+	}
+	// The firewall group SURVIVES: the next Provision finds it by
+	// description, so the rebuilt box is protected from its first
+	// instant.
+	if len(f.groups) != 1 {
+		t.Errorf("the relay's firewall group was destroyed by a reprovision: %v", f.groups)
+	}
+}
+
+// TestProvision_ReusesTheFirewallGroupOnRebuild closes the loop above:
+// no second group, and the rules are not duplicated.
+func TestProvision_ReusesTheFirewallGroupOnRebuild(t *testing.T) {
+	f := newFakeVultr(t)
+	p, rec := mustProvision(t, f, mkOpts())
+	firstGroup := f.instances[rec.ServerID].FirewallGroupID
+	ruleCount := len(f.groups[firstGroup].Rules)
+
+	if err := p.Reprovision(context.Background(), rec, provider.ReprovisionOpts{}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+	opts := mkOpts()
+	opts.CoverSNI = rec.CoverSNI
+	rec2, err := p.Provision(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("SetEphemeralFirewallRule: %v", err)
+		t.Fatalf("re-Provision: %v", err)
 	}
-	if rule.Port != 12345 || rule.CallerIP != "2.3.4.5" {
-		t.Errorf("(port, IP) tuple wrong: %+v", rule)
+	if got := f.instances[rec2.ServerID].FirewallGroupID; got != firstGroup {
+		t.Errorf("rebuild made a second firewall group (%s -> %s)", firstGroup, got)
 	}
-	if !rule.ExpiresAt.Equal(pin.Add(300 * time.Second).UTC()) {
-		t.Errorf("ExpiresAt drift")
-	}
-	if len(f.ephemeralRules) != 1 {
-		t.Errorf("rule not recorded")
+	if got := len(f.groups[firstGroup].Rules); got != ruleCount {
+		t.Errorf("rebuild duplicated firewall rules: %d -> %d", ruleCount, got)
 	}
 }
 
-func TestSetEphemeralFirewallRule_RejectsBadInputs(t *testing.T) {
-	p := New(newFake())
-	if _, err := p.SetEphemeralFirewallRule(context.Background(), "", "2.3.4.5", 12345, 300); err == nil {
-		t.Errorf("missing serverID must error")
-	}
-	if _, err := p.SetEphemeralFirewallRule(context.Background(), "1", "", 12345, 300); err == nil {
-		t.Errorf("missing callerIP must error")
-	}
-	if _, err := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 0, 300); err == nil {
-		t.Errorf("port=0 must error")
-	}
-	if _, err := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 8443, 300); err == nil {
-		t.Errorf("fixed low port 8443 must error")
-	}
-	if _, err := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 65001, 300); err == nil {
-		t.Errorf("port > 65000 must error")
-	}
-	if _, err := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 12345, 0); err == nil {
-		t.Errorf("durationSec=0 must error")
+// --- helpers ---
+
+func failPath(method, path string) func(string, string) (int, bool) {
+	return func(m, p string) (int, bool) {
+		if m == method && p == path {
+			return http.StatusInternalServerError, true
+		}
+		return 0, false
 	}
 }
 
-func TestRemoveEphemeralFirewallRule_Idempotent(t *testing.T) {
-	f := newFake()
-	p := New(f)
-	if err := p.RemoveEphemeralFirewallRule(context.Background(), nil); err != nil {
-		t.Errorf("nil rule must be nil; got %v", err)
+// rulesFor returns the rule keys attached to an instance's group.
+func (f *fakeVultr) rulesFor(t *testing.T, instanceID string) map[string]bool {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inst := f.instances[instanceID]
+	if inst == nil {
+		t.Fatalf("no instance %s", instanceID)
 	}
-	rule, _ := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 12345, 300)
-	if err := p.RemoveEphemeralFirewallRule(context.Background(), rule); err != nil {
-		t.Fatal(err)
+	g := f.groups[inst.FirewallGroupID]
+	if g == nil {
+		t.Fatalf("instance %s has no firewall group", instanceID)
 	}
-	if len(f.ephemeralRules) != 0 {
-		t.Errorf("rule not removed")
+	out := map[string]bool{}
+	for _, r := range g.Rules {
+		out[ruleKey(r.IPType, r.Protocol, r.Subnet, r.SubnetSize, r.Port)] = true
 	}
-	// Second remove: idempotent.
-	if err := p.RemoveEphemeralFirewallRule(context.Background(), rule); err != nil {
-		t.Errorf("second remove must be nil; got %v", err)
-	}
+	return out
 }
 
-func TestPricing_MonthlyToHourlyHelper(t *testing.T) {
-	if got := monthlyToHourly(7.30); got < 0.0099 || got > 0.0101 {
-		t.Errorf("monthlyToHourly(7.30) = %v want ~0.01", got)
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-	if got := monthlyToHourly(0); got != 0 {
-		t.Errorf("monthlyToHourly(0) must be 0; got %v", got)
-	}
+	return out
 }
 
-func TestRegions_IsSupported(t *testing.T) {
-	if !IsSupportedRegion(DefaultRegion) {
-		t.Errorf("DefaultRegion %q not in SupportedRegions", DefaultRegion)
+func hasTag(tags []string, want string) bool {
+	for _, t := range tags {
+		if t == want {
+			return true
+		}
 	}
-	if IsSupportedRegion("nowhere") {
-		t.Errorf("unknown region should not be reported supported")
-	}
+	return false
 }
 
-func TestNewLiveClient_ReturnsErrLiveNotImplemented(t *testing.T) {
-	c := NewLiveClient("dummy-token")
-	if _, err := c.InstanceByID(context.Background(), "1"); err != ErrLiveNotImplemented {
-		t.Errorf("live client must return ErrLiveNotImplemented; got %v", err)
+func containsSubstr(haystack []string, want string) bool {
+	for _, h := range haystack {
+		if strings.Contains(h, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPrefixIn(list []string, prefix string) bool {
+	for _, s := range list {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+var _ = fmt.Sprintf
+
+// TestProvision_TheRecordMovesAsAWhole is the L5 invariant: provider,
+// region, server id and the dialled address either all move to the new
+// cloud or none of them do.
+//
+// The failure it forbids is a record that still says "hetzner" beside a
+// Vultr instance id — the next rotation would build the provider
+// adapter from the stale field and target the wrong box, on the wrong
+// account, with a token that cannot see it. Provision never mutates the
+// caller's record; it returns a new one built in a single literal, so
+// there is no window in which half of it has moved.
+func TestProvision_TheRecordMovesAsAWhole(t *testing.T) {
+	f := newFakeVultr(t)
+	// What the operator holds before an L5: a record on the old cloud.
+	old := &provider.OperatorRecord{
+		Provider: "hetzner", ServerID: "9999", Region: "fsn1",
+		ServerType: "cx22", PublicIP: net.ParseIP("5.75.1.1"),
+		FloatingIPID: "hetzner-fip-1",
+		Candidates: []provider.CandidateMeta{
+			{Family: "vless-reality", PublicRiskTags: []string{"public_ip:5.75.1.1"}},
+		},
+	}
+	_, rec := mustProvision(t, f, mkOpts())
+
+	if rec == old {
+		t.Fatal("Provision handed back the caller's own record")
+	}
+	if old.Provider != "hetzner" || old.ServerID != "9999" {
+		t.Error("Provision mutated the record the operator still needs to tear the old relay down")
+	}
+	if rec.Provider != "vultr" || rec.Region != testRegion {
+		t.Errorf("new record is not wholly on the new cloud: provider=%q region=%q", rec.Provider, rec.Region)
+	}
+	if rec.ServerID == old.ServerID || rec.PublicIP.Equal(old.PublicIP) {
+		t.Error("new record carries the old cloud's identity")
+	}
+	// A floating-IP id from the OLD provider must not travel: it is
+	// meaningless on Vultr, and a release or teardown aimed at it would
+	// hit an id this account has never heard of.
+	if rec.FloatingIPID != "" {
+		t.Errorf("the old cloud's reserved-address id followed the relay: %q", rec.FloatingIPID)
+	}
+	for _, c := range rec.Candidates {
+		if hasTag(c.PublicRiskTags, "public_ip:5.75.1.1") {
+			t.Errorf("candidate %s still advertises the old cloud's address: %v", c.Family, c.PublicRiskTags)
+		}
 	}
 }

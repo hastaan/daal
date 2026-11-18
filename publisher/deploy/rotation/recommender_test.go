@@ -3,7 +3,9 @@ package rotation
 import (
 	"net"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"daal/bundle-go/phase"
 	"daal/publisher/deploy/provider"
@@ -58,7 +60,22 @@ func TestFromExplanation_TCPResetWithPublicIP_FastPathL3(t *testing.T) {
 	}
 }
 
-func TestFromExplanation_TCPResetNoFloatingIP_FallbackL4(t *testing.T) {
+// REPLACES TestFromExplanation_TCPResetNoFloatingIP_FallbackL4, which
+// pinned behaviour that had become wrong and dangerous.
+//
+// That test asserted "no floating IP attached ⇒ recommend L4", i.e.
+// destroy the server and rebuild it in another datacenter. It was
+// written before the Hetzner adapter could RESERVE an address, when an
+// empty FloatingIPID really did mean "L3 is impossible". Since then an
+// empty id means "L3 will mint one" — and since no relay provisioned
+// before that step has a floating IP, the old rule pointed every relay
+// in the field at a rebuild for a problem a ten-second address swap
+// fixes. Provisioning has no rollback, so being wrong in that direction
+// can leave a second billing server behind.
+//
+// Whether L3 is possible is now asked of ActionForProvider, which
+// weighs the adapter AND the relay's mgmt vintage.
+func TestFromExplanation_TCPResetNoFloatingIP_StillL3(t *testing.T) {
 	exp := Explanation{
 		Pick: ExplPicked{ExposureMode: "direct_vps"},
 		Failures: []ExplFailure{
@@ -67,11 +84,36 @@ func TestFromExplanation_TCPResetNoFloatingIP_FallbackL4(t *testing.T) {
 		Phase: currentPhase,
 	}
 	got := FromExplanation(exp, fakeRecord(false))
-	if got.Level != L4 {
-		t.Errorf("level = %s, want L4 (no floating IP attached)", got.Level)
+	if got.Level != L3 {
+		t.Errorf("level = %s, want L3 (the adapter reserves an address; nothing needs rebuilding)", got.Level)
 	}
-	if got.Confidence != ConfidenceHigh {
-		t.Errorf("confidence = %s, want high", got.Confidence)
+	if got.Action.DestroysServer {
+		t.Error("recommended action destroys the server for an address-level block")
+	}
+}
+
+// The rebuild is still recommended when the address swap is KNOWN to be
+// impossible — which is a property of the adapter, not of whether an
+// address happens to be attached today. Stark attaches a reserved IP
+// without moving the record onto it, so an L3 there would re-sign a
+// pack aimed at the address being rotated away from. (Vultr was in this
+// case until Wave 6 finished its adapter.)
+func TestFromExplanation_TCPResetOnAdapterThatCannotSwap_FallsToL4(t *testing.T) {
+	rec := fakeRecord(false)
+	rec.Provider = "stark"
+	exp := Explanation{
+		Pick: ExplPicked{ExposureMode: "direct_vps"},
+		Failures: []ExplFailure{
+			{Classification: "tcp_reset", Tag: "public_ip:198.51.100.10"},
+		},
+		Phase: currentPhase,
+	}
+	got := FromExplanation(exp, rec)
+	if got.Level != L4 {
+		t.Fatalf("level = %s, want L4 (this adapter cannot move the record onto a new address)", got.Level)
+	}
+	if !got.Action.DestroysServer {
+		t.Error("L4 action does not report that it destroys the server")
 	}
 }
 
@@ -118,8 +160,12 @@ func TestFromExplanation_ProviderSuspended_L5(t *testing.T) {
 	if got.Level != L5 {
 		t.Errorf("level = %s, want L5", got.Level)
 	}
-	if got.EstWallClock != "~2min" {
-		t.Errorf("wallclock = %s, want ~2min", got.EstWallClock)
+	// L5 is quoted at L4's figure, not below it. It deletes a server
+	// and builds another on a SECOND cloud with a cold account, so it
+	// strictly contains L4's work; the old "~2min" made the bigger rung
+	// look like the cheaper one on the panel that renders this verbatim.
+	if got.EstWallClock != "~3min" {
+		t.Errorf("wallclock = %s, want ~3min", got.EstWallClock)
 	}
 }
 
@@ -241,20 +287,40 @@ func TestFromContext_OperatorAssertedCredentialLeak_L1Medium(t *testing.T) {
 	}
 }
 
-func TestFromContext_TCPResetCappedAtMedium(t *testing.T) {
+// REPLACES TestFromContext_TCPResetCappedAtMedium, which pinned "a
+// reset with no public_ip:* cooldown tag falls through to the L1
+// default".
+//
+// The tag it waited for has no producer anywhere in the tree:
+// selection.PropagateCooldown, the only thing that would attribute a
+// cooldown to a shared risk tag, has no production caller, so
+// Explanation.ActiveCooldowns is `[]` in every real blob. The rule was
+// therefore unreachable from measured data, and the ladder's cheapest
+// and most common rung could only be reached by an operator typing the
+// tag in by hand.
+//
+// A reset is address-level evidence on its own. What the missing tag
+// costs is the ATTRIBUTION, and that is paid in confidence and in a
+// reason that says which half is missing — not by recommending a
+// different rung.
+func TestFromContext_TCPResetAloneReachesL3(t *testing.T) {
 	ctx := RotationContext{
 		FailureClassifications: []string{"tcp_reset"},
 		ExposureMode:           "direct_vps",
 		OperatorRecord:         fakeRecord(true),
 	}
-	// Without an active cooldown tag, the recommender doesn't have
-	// enough to call L3 — it falls through to L1 default.
 	got := FromContext(ctx)
-	if got.Level != L1 {
-		t.Errorf("level = %s, want L1 (tcp_reset alone with no public_ip:* cooldown)", got.Level)
+	if got.Level != L3 {
+		t.Errorf("level = %s, want L3", got.Level)
 	}
 	if got.Confidence != ConfidenceMedium {
 		t.Errorf("confidence = %s, want medium", got.Confidence)
+	}
+	if !got.Grounded {
+		t.Error("grounded = false; a recorded reset IS evidence")
+	}
+	if !strings.Contains(got.Reason, "no address-level attribution") {
+		t.Errorf("reason does not say the attribution is missing: %q", got.Reason)
 	}
 }
 
@@ -322,11 +388,53 @@ func TestEstWallClockV15Pinned(t *testing.T) {
 		L2: "~90s",
 		L3: "~10s",
 		L4: "~3min",
-		L5: "~2min",
+		L5: "~3min",
 		L6: "~3min",
 	}
 	if !reflect.DeepEqual(estWallClockV15, want) {
 		t.Errorf("V1.5 wallclock table drift: %+v", estWallClockV15)
+	}
+}
+
+// A rung must never be quoted as cheaper than a rung whose work it
+// strictly contains. L5 deletes a server and builds another — L4's
+// whole job — and additionally does the build on a different cloud
+// against a cold account. The table said "~2min" for L5 and "~3min"
+// for L4, so the panel that renders these verbatim offered the larger
+// outage as the shorter one.
+//
+// Compared as parsed durations rather than strings: the point is the
+// ordering, and a future table that writes "180s" must not pass by
+// being textually different.
+func TestDestroyingRungsAreNotQuotedBelowTheRungTheyContain(t *testing.T) {
+	// The table writes "min" where Go's duration grammar wants "m";
+	// normalise rather than change the table, because the strings are
+	// rendered to operators and "~3m" reads as a typo.
+	parse := func(t *testing.T, s string) time.Duration {
+		t.Helper()
+		norm := strings.Replace(strings.TrimPrefix(s, "~"), "min", "m", 1)
+		d, err := time.ParseDuration(norm)
+		if err != nil {
+			t.Fatalf("wallclock %q is not a parseable duration: %v", s, err)
+		}
+		return d
+	}
+	l4 := parse(t, estWallClockV15[L4])
+	l5 := parse(t, estWallClockV15[L5])
+	if l5 < l4 {
+		t.Errorf("L5 (%s) is quoted below L4 (%s), but L5 does L4's work on a second cloud",
+			estWallClockV15[L5], estWallClockV15[L4])
+	}
+	// And every destroying rung must be quoted above every in-place
+	// one: the cheapest thing a rebuild can do is still a rebuild.
+	for _, inPlace := range []Level{L1, L2, L3} {
+		ip := parse(t, estWallClockV15[inPlace])
+		for _, d := range []Level{L4, L5, L6} {
+			if parse(t, estWallClockV15[d]) < ip {
+				t.Errorf("%s (destroys the relay, %s) is quoted below in-place %s (%s)",
+					d, estWallClockV15[d], inPlace, estWallClockV15[inPlace])
+			}
+		}
 	}
 }
 
