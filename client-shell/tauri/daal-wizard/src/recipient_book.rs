@@ -280,6 +280,9 @@ pub fn recipient_repack_sbpx(
             "this recipient is revoked — add them again to give them access".into(),
         ));
     }
+    // PB-1: a person restored from a backup whom the relay does not know
+    // is not re-created before someone says they still should have access.
+    crate::restore_settle::refuse_if_unanswered(ctx, operator_id, recipient_id)?;
 
     let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
     let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;

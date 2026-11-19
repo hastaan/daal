@@ -159,6 +159,12 @@ export type PublisherErrorCode =
     | 'E_RESTORE_FAILED'
     | 'E_HOSTING_KEY_REJECTED'
     | 'E_HOSTING_KEY_WRONG_ACCOUNT'
+    // After a restore (PB-1 / PB-2).
+    | 'E_RESTORE_UNANSWERED'
+    | 'E_RESTORE_NOT_ASKED'
+    | 'E_RESTORE_ALREADY_ANSWERED'
+    | 'E_RELAY_USER_INVALID'
+    | 'E_RELAY_USER_IN_LIST'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -223,6 +229,17 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     // key this phone had is still the one in use.
     'E_HOSTING_KEY_REJECTED',
     'E_HOSTING_KEY_WRONG_ACCOUNT',
+    // After a restore. UNANSWERED: a per-person action on someone who
+    // still waits for the "removed or keep" answer, refused, nothing
+    // done. NOT_ASKED / ALREADY_ANSWERED: an answer for someone not
+    // waiting, or the other answer a second time. RELAY_USER_*: a
+    // relay-only removal for a name that is not a relay user, or that
+    // IS in this phone's list (those go through their own row).
+    'E_RESTORE_UNANSWERED',
+    'E_RESTORE_NOT_ASKED',
+    'E_RESTORE_ALREADY_ANSWERED',
+    'E_RELAY_USER_INVALID',
+    'E_RELAY_USER_IN_LIST',
 ];
 
 /** The server id carried by an `E_SERVER_EXISTS: <id> ...` rejection,
@@ -320,6 +337,9 @@ export interface OperatorSummary {
     /** Live people whose credentials were minted on a server that is no
      *  longer this relay's (D2). */
     people_needing_renewal?: number;
+    /** People restored from a backup who wait for the "removed or keep"
+     *  answer on this relay (PB-1). */
+    people_needing_answer?: number;
     /** Addresses Daal reserved for this relay that a delete could not
      *  release; they still cost money (D4). */
     unreleased_addresses?: string[];
@@ -1013,7 +1033,10 @@ export interface RenewItem {
     recipient_id: number | null;
     name: string;
     display_name: string;
-    status: 'done' | 'already_done' | 'failed' | 'not_attempted' | 'removed_from_server';
+    /** `needs_answer`: restored from a backup, the relay did not know
+     *  them, and the person has not yet said whether they were removed
+     *  (PB-1). Not created, no file. */
+    status: 'done' | 'already_done' | 'failed' | 'not_attempted' | 'removed_from_server' | 'needs_answer';
     reason:
         | ''
         | 'relay_unreachable'
@@ -1021,6 +1044,7 @@ export interface RenewItem {
         | 'relay_too_old'
         | 'file_write_failed'
         | 'signing_failed'
+        | 'restore_unanswered'
         | 'other';
     /** "" for the everyone file / failures */
     sbpx_path: string;
@@ -1062,8 +1086,38 @@ export interface RelayHealth {
     /** People the relay lets in that this phone's list never had (added
      *  on another phone after the backup restored here). */
     people_unknown?: number | null;
+    /** PB-2. Their relay names (`r7`, ...), from the same read as
+     *  `people_unknown` and cached with it. The People list shows them
+     *  from here, so the page never asks the relay a second time. */
+    relay_only?: string[] | null;
+    /** People restored from a backup whom the relay did not know, waiting
+     *  for the "removed or keep" answer (PB-1). The shell already leaves
+     *  them OUT of `people_missing`. Absent from a shell built before the
+     *  wave. */
+    people_needing_answer?: number;
     ways: { family: string; state: HealthWayState }[];
     details: string[];
+}
+
+// ---- After a restore (PB-1 / PB-2) ----
+
+/** PB-1. People in this phone's list whom the relay no longer knows,
+ *  on a relay restored from a backup and not yet settled. Each must be
+ *  answered by name before anything re-creates them. `checked: false`
+ *  with a `check_error` means the relay could not be asked: nothing is
+ *  assumed either way (`people` is then empty). `checked: true` with no
+ *  people: nothing to ask (never restored, or settled). */
+export interface RestoreUnsettledPerson {
+    recipient_id: number;
+    /** The name the person gave them, else their relay name. */
+    name: string;
+    /** Their relay name (`r3`). Details only. */
+    relay_user?: string;
+}
+export interface RestoreUnsettled {
+    people: RestoreUnsettledPerson[];
+    checked: boolean;
+    check_error: string | null;
 }
 
 // ---- D5: which file a QR / paste carries ----
@@ -1118,15 +1172,18 @@ export const Wizard = {
             sbpxPath: sbpx_path,
             friendlyName: friendly_name,
         }),
-    /** Save the operator's shared `.sbp` into the phone's Downloads. */
+    /** Save the operator's shared `.sbp` into the phone's Downloads.
+     *  Resolves to the name it was STORED under (PB-3: Android may store
+     *  "x (1).sbp"); a shell built before that resolves to nothing. */
     saveSharedSbpToDownloads: (operator_id: number, file_name: string) =>
-        invoke<void>('save_shared_sbp_to_downloads', {
+        invoke<string | null>('save_shared_sbp_to_downloads', {
             operatorId: operator_id,
             fileName: file_name,
         }),
-    /** Save a per-recipient `.sbpx` into the phone's Downloads. */
+    /** Save a per-recipient `.sbpx` into the phone's Downloads.
+     *  Resolves to the name it was stored under (see above). */
     saveSbpxToDownloads: (sbpx_path: string, file_name: string) =>
-        invoke<void>('save_sbpx_to_downloads', {
+        invoke<string | null>('save_sbpx_to_downloads', {
             sbpxPath: sbpx_path,
             fileName: file_name,
         }),
@@ -1701,6 +1758,38 @@ export const Wizard = {
             operatorId: operator_id,
             address,
         }),
+
+    // ---- After a restore (PB-1 / PB-2) -------------------------------
+
+    /** PB-1. Who in this phone's list the relay does not know, while the
+     *  relay is "restored, not yet settled". Read-only. */
+    restoreUnsettled: (operator_id: number) =>
+        invoke<RestoreUnsettled>('wizard_restore_unsettled', { operatorId: operator_id }),
+    /** PB-1. The person's answer for one of them: `keep` = they should
+     *  still have access (renew may now re-create them); otherwise they
+     *  are marked removed on this phone and never created. Stored, so it
+     *  is asked once. */
+    restoreAnswer: (operator_id: number, recipient_id: number, keep: boolean) =>
+        invoke<void>('wizard_restore_answer', {
+            operatorId: operator_id,
+            recipientId: recipient_id,
+            keep,
+        }),
+    /** PB-2. Remove ONE such relay user's access, by relay user name.
+     *  The shell refuses a name that is in this phone's list. */
+    relayOnlyRevoke: (operator_id: number, relay_user: string) =>
+        invoke<void>('wizard_relay_only_revoke', {
+            operatorId: operator_id,
+            relayUser: relay_user,
+        }),
+};
+
+/** PB-20. The platform side of screens that show secrets. */
+export const Platform = {
+    /** Android: FLAG_SECURE on the activity window (no screenshots, no
+     *  screen recording, a blank recent-apps thumbnail). Desktop: a
+     *  no-op that succeeds. Use through `useSecureScreen`. */
+    secureScreen: (on: boolean) => invoke<void>('platform_secure_screen', { on }),
 };
 
 // ---- Streaming events ----
@@ -1725,3 +1814,11 @@ export const onQrFrame = (
 /** D2: one line per person while `renewEveryone` runs. */
 export const onRenewEvent = (cb: (ev: RenewEvent) => void): Promise<UnlistenFn> =>
     listen<RenewEvent>('wizard://renew-event', (e) => cb(e.payload));
+
+/** PB-3. The name to tell the person after a save to Downloads: the one
+ *  the file was stored under when the shell reports it (Android may
+ *  de-duplicate "Maman.sbpx" to "Maman (1).sbpx"), else the one asked
+ *  for (a shell built before PB-3 reports nothing). */
+export function storedFileName(stored: unknown, asked: string): string {
+    return typeof stored === 'string' && stored.trim() !== '' ? stored : asked;
+}

@@ -88,6 +88,20 @@ pub struct VpnStatusResponse {
     pub running: bool,
 }
 
+/// Arguments of the Kotlin `secureScreen` command (PB-20): `on` while a
+/// screen showing the recovery words is mounted.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecureScreenRequest {
+    pub on: bool,
+}
+
+/// What the Kotlin side answers; `on` is the flag as now set.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecureScreenResponse {
+    #[serde(default)]
+    pub on: bool,
+}
+
 /// See `VpnStatusResponse::last_switch`. Ids and closed codes only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwitchNote {
@@ -115,6 +129,17 @@ pub struct SwitchNote {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_secure_screen_request_is_one_boolean_named_on() {
+        // The Kotlin @InvokeArg SecureScreenArgs reads exactly `on`.
+        assert_eq!(
+            serde_json::to_string(&SecureScreenRequest { on: true }).unwrap(),
+            r#"{"on":true}"#
+        );
+        let r: SecureScreenResponse = serde_json::from_str("{}").unwrap();
+        assert!(!r.on);
+    }
 
     #[test]
     fn a_start_with_no_route_is_an_automatic_connect() {

@@ -219,6 +219,24 @@ pub const E_RESTORE_FAILED: &str = "E_RESTORE_FAILED";
 pub const E_HOSTING_KEY_REJECTED: &str = "E_HOSTING_KEY_REJECTED";
 pub const E_HOSTING_KEY_WRONG_ACCOUNT: &str = "E_HOSTING_KEY_WRONG_ACCOUNT";
 
+// ---- After a restore (`restore_settle`, PB-1 / PB-2) ---------------
+
+/// This person came from a restored backup and the relay does not know
+/// them: nothing re-creates them until the person using the phone says
+/// whether they still should have access.
+pub const E_RESTORE_UNANSWERED: &str = "E_RESTORE_UNANSWERED";
+/// There is no question about this person (never asked, or the relay has
+/// not been checked yet).
+pub const E_RESTORE_NOT_ASKED: &str = "E_RESTORE_NOT_ASKED";
+/// This person was already answered for, the other way.
+pub const E_RESTORE_ALREADY_ANSWERED: &str = "E_RESTORE_ALREADY_ANSWERED";
+/// A relay-only remove named someone who is in this phone's list; they
+/// are removed through their own row.
+pub const E_RELAY_USER_IN_LIST: &str = "E_RELAY_USER_IN_LIST";
+/// A relay-only remove named something that is not a person's name on
+/// the relay (`r<n>`, n >= 1).
+pub const E_RELAY_USER_INVALID: &str = "E_RELAY_USER_INVALID";
+
 /// Build a [`WizardError::Coded`] from a code constant and a tail.
 pub(crate) fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
     WizardError::Coded(format!("{code}: {tail}"))
@@ -579,6 +597,11 @@ pub struct OperatorSummary {
     /// longer runs on (D2).
     #[serde(default)]
     pub people_needing_renewal: i64,
+    /// People restored from a backup whom the relay did not know, waiting
+    /// for the person to say whether they still should have access
+    /// (PB-1, `wizard_restore_unsettled`).
+    #[serde(default)]
+    pub people_needing_answer: i64,
     /// Addresses still reserved (and billing) after the server was
     /// deleted (D4).
     #[serde(default)]
@@ -1731,6 +1754,7 @@ pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
             has_cloud_token: !row.cloud_token_keystore_alias.is_empty(),
             setup_interrupted,
             people_needing_renewal: ctx.db.count_people_needing_renewal(row.id)?,
+            people_needing_answer: crate::restore_settle::count_needing_answer(ctx, row.id)?,
             unreleased_addresses: ctx.db.unreleased_addresses(row.id)?,
             id: row.id,
             status: row.status,

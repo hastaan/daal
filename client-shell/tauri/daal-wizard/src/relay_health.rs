@@ -61,6 +61,20 @@ pub struct RelayHealth {
     /// restored from. `None` when the users list was not read.
     #[serde(default)]
     pub people_unknown: Option<i64>,
+    /// Their relay names (`r<n>`, in number order), from the same read
+    /// as `people_unknown` and cached with it: the relay page lists them
+    /// under People from here, so opening the page never reaches the
+    /// relay (or opens a firewall window) a second time. `None` when the
+    /// users list was not read.
+    #[serde(default)]
+    pub relay_only: Option<Vec<String>>,
+    /// People restored from a backup whom the relay did not know when it
+    /// was first checked, waiting for the person to say whether they
+    /// still should have access (`wizard_restore_unsettled`). They are
+    /// NOT counted in `people_missing`: renewing them is exactly what
+    /// must wait for the answer.
+    #[serde(default)]
+    pub people_needing_answer: i64,
     pub ways: Vec<HealthWay>,
     /// Raw text, for a Details disclosure only.
     pub details: Vec<String>,
@@ -209,6 +223,8 @@ pub(crate) fn assess(
         people_missing,
         everyone_missing,
         people_unknown: None,
+        relay_only: None,
+        people_needing_answer: 0,
         ways,
         details,
     }
@@ -269,11 +285,18 @@ pub fn relay_health(ctx: &WizardCtx, operator_id: i64, force: bool) -> Result<Re
         Err(e) => return Err(WizardError::Subprocess(e.to_string())),
     };
 
+    // The first read of the relay's people after a restore settles who
+    // it knows; whom it does not know waits for an answer and is not
+    // "missing" (which would invite a renew that re-creates them).
+    if let Some(users) = report.management.users.as_ref() {
+        crate::restore_settle::settle_with(ctx, operator_id, users)?;
+    }
+    let waiting = crate::restore_settle::unanswered_ids(ctx, operator_id)?;
     let live_names: Vec<String> = ctx
         .db
         .list_recipients(operator_id)?
         .into_iter()
-        .filter(|r| r.revoked_at_unix == 0)
+        .filter(|r| r.revoked_at_unix == 0 && !waiting.contains(&r.id))
         .map(|r| r.name)
         .collect();
     let committed = crate::relay_identity::committed(ctx, operator_id)?;
@@ -303,34 +326,22 @@ pub fn relay_health(ctx: &WizardCtx, operator_id: i64, force: bool) -> Result<Re
             .into_iter()
             .map(|r| r.name)
             .collect();
-        let numbered: Vec<(i64, &String)> = users
-            .iter()
-            .filter_map(|u| {
-                u.strip_prefix('r')
-                    .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
-                    .and_then(|d| d.parse::<i64>().ok())
-                    .filter(|n| *n >= 1)
-                    .map(|n| (n, u))
-            })
-            .collect();
-        let unknown: Vec<&String> = numbered
-            .iter()
-            .filter(|(_, u)| !book.contains(*u))
-            .map(|(_, u)| *u)
-            .collect();
+        let (unknown, max) = crate::restore_settle::relay_only_names(users, &book);
         health.people_unknown = Some(unknown.len() as i64);
         if !unknown.is_empty() {
             health.details.push(format!(
                 "on the relay, not in this phone's list: {}",
-                unknown.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", ")
+                unknown.join(", ")
             ));
         }
+        health.relay_only = Some(unknown);
         // The next person added here must not take a name the relay
         // already has, or the relay answers "already exists".
-        if let Some(max) = numbered.iter().map(|(n, _)| *n).max() {
+        if let Some(max) = max {
             ctx.db.advance_recipient_name_counter(operator_id, max)?;
         }
     }
+    health.people_needing_answer = crate::restore_settle::count_needing_answer(ctx, operator_id)?;
     let json = serde_json::to_string(&health).unwrap_or_default();
     ctx.db.set_last_health(operator_id, &json, now)?;
     Ok(health)

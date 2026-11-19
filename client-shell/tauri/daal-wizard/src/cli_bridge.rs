@@ -3706,6 +3706,9 @@ pub struct MockRunner {
     pub users_revoke_calls: Mutex<Vec<String>>,
     /// FRP-14: count of list calls.
     pub users_list_calls: Mutex<usize>,
+    /// Make `run_users_list` fail (exit code, stderr): a relay that does
+    /// not answer.
+    pub users_list_error: Mutex<Option<(i32, String)>>,
     /// FRP-14 Layer 3b.5: recorded pack-sbpx calls.
     pub users_pack_sbpx_calls: Mutex<Vec<MockPackSbpxCall>>,
     /// Wave 3 Step 7: recorded rotate-credentials calls (name).
@@ -3931,6 +3934,7 @@ impl MockRunner {
             users_provision_calls: Mutex::new(Vec::new()),
             users_revoke_calls: Mutex::new(Vec::new()),
             users_list_calls: Mutex::new(0),
+            users_list_error: Mutex::new(None),
             users_pack_sbpx_calls: Mutex::new(Vec::new()),
             rotate_credentials_calls: Mutex::new(Vec::new()),
             rotate_credentials_result: Mutex::new(None),
@@ -5159,10 +5163,23 @@ impl CliRunner for MockRunner {
         _priv_key: &[u8],
     ) -> Result<Vec<UserMetaResult>> {
         *self.users_list_calls.lock().unwrap() += 1;
+        if let Some((rc, stderr)) = self.users_list_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
         if let Some(r) = self.users_list_result.lock().unwrap().clone() {
             return Ok(r);
         }
-        Ok(vec![])
+        // The same box `users-renew` and `relay-health` see.
+        Ok(self
+            .box_users
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|n| UserMetaResult {
+                name: n.clone(),
+                provisioned_at_unix: 0,
+            })
+            .collect())
     }
 
     fn run_users_pack_sbpx(&self, args: UsersPackSbpxArgs<'_>) -> Result<UsersPackSbpxResult> {

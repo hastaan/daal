@@ -3044,14 +3044,14 @@ the list), PA-25 (PB-18).
 
 ### Open
 
-- [ ] **PB-1 (medium). Restoring an older backup can bring a removed person back.**
+- [~] **PB-1 (medium). Restoring an older backup can bring a removed person back.** Done in code, not run on a phone (restore-gaps): restore marks every live person "unchecked" in its commit transaction (V018 `restore_unsettled`, per phone, never in a backup); the first relay read turns the ones the relay lacks into questions asked by name on the relay page ("still should have access" / "was removed", `wizard_restore_unsettled` / `wizard_restore_answer`); until answered, renew, repack and rotation skip or refuse them (`needs_answer`, `E_RESTORE_UNANSWERED`) and renew is never "all done"; an unreachable relay assumes nothing. End to end: `bk_after_a_restore_nobody_removed_since_the_backup_comes_back_and_a_newer_person_can_be_removed`. See section 20 (RG-1 to RG-6).
   - The restored list has a person who was removed on the old phone after the backup was made. "Renew everyone" then plans them as `--ensure` and creates them on the relay again with a fresh working file.
   - The notice now says that changes after the backup day are not in the backup, and that anyone removed since must be removed again. Nothing stops the renew, though.
   - Fix: on the first check after a restore, a person in the list whom the relay lacks is not re-created without the person confirming them by name.
-- [ ] **PB-2 (medium). People added after the backup cannot be removed from the new phone.**
+- [~] **PB-2 (medium). People added after the backup cannot be removed from the new phone.** Done in code, not run on a phone: People lists them ("Someone added from your other phone…") with Remove access behind a sheet naming the relay user; `wizard_relay_only_users` / `wizard_relay_only_revoke` (the signed `users-revoke --name`; refuses any name in the list). Repair: the page takes the names from the health check's own users read (`RelayHealth.relay_only`, cached with the count), so opening the page no longer opens a second firewall window; `wizard_relay_only_users` is no longer a command (gate: `check-plumbing.mjs` found nothing calling it); `restore_settle::relay_only_users` stays for the Rust tests. See section 20.
   - The relay check now counts them (`people_unknown`), names them under Details, and moves the name counter past them. There is still no remove action.
   - Fix: the remove action needs a revoke by relay user name with no book row (the Go `users-revoke` takes a name; the shell has no path without a recipient row).
-- [ ] **PB-3 (low). Android may save a second backup in a minute under another name.**
+- [~] **PB-3 (low). Android may save a second backup in a minute under another name.** Done in code, not run on a phone: the plugin's `DownloadsSaver.save` reads the stored DISPLAY_NAME back and `save_path_to_downloads` reports it (falls back to `MainActivity.saveToDownloads` with the asked-for name if the class is missing). The MainActivity patch can drop `saveToDownloads` once no older build needs it. Repair: `save_sbpx_to_downloads` and `save_shared_sbp_to_downloads` now return the stored name too, and the "Saved to your Downloads folder as …" line names it (`storedFileName`). See section 20 (RG-9, RG-13).
   - `saveToDownloads` keeps the requested name, but MediaStore may store a de-duplicated one ("… (1)"). The default name now carries the hour and minute, so only two backups made in the same minute collide.
   - Fix: return the final display name from `MainActivity.saveToDownloads` and report that name. This needs the native patch.
 - [ ] **PB-4 (low). On desktop, "Send to another app" only opens the folder.**
@@ -3062,8 +3062,8 @@ the list), PA-25 (PB-18).
   to stop an old phone (or anyone with the file and the words) making
   files the family's phones trust. The notice says so and offers the
   only way out there is (a new relay, new files, delete the old one).
-- [ ] **PB-20. The words and restore screens can be captured.**
-  FLAG_SECURE needs a native patch.
+- [~] **PB-20. The words and restore screens can be captured.**
+  Done in code, not run on a phone: `platform_secure_screen {on}` sets FLAG_SECURE through the daal-platform plugin while the words, type-back, check-words and restore words-entry screens are mounted (`useSecureScreen`, one app-wide count); cleared when the plugin loads and once at page start. Repair: the page sends one call at a time (the next only after the last answered; a refused "on" is sent again by the next screen), and the plugin decides and applies each change in one UI-thread task, so on/off cannot reach the window out of order. See section 20 (RG-8).
 - [ ] **PB-21. The plaintext `.daalkey` export is still there,** beside
   a backup that now does the same job encrypted.
 - [ ] **PB-22. Plaintext copies in freed memory.** `serde_json` keeps
@@ -3278,3 +3278,189 @@ app on anything but the Samsung.
   death. Test: `TestAGivenUpSessionIsNotAnEngineDeath`. Twelve isolated
   runs of that world were clean before the fix, which is what pointed at
   load rather than at the engine.
+
+## 20. After a restore: nobody comes back unasked (2026-11-19)
+
+Branch `restore-gaps`. A backup is a snapshot: a person removed on the
+old phone after it was made is still in the restored list, and a person
+added after it is on the relay but not in the list. Before this, "Renew
+everyone's files" quietly gave the first kind a fresh working file, and
+nothing on the new phone could remove the second kind. Also here: the
+words screens could be captured (PB-20), and a saved file could be
+reported under a name Downloads did not use (PB-3).
+
+Nothing in this section has been run on a phone.
+
+### Built
+
+- [x] **RG-1. A restore remembers that it has not been checked.** In the
+  tree, not seen on a phone. The restore's own commit transaction marks
+  every person not removed as "unchecked" (V018 `restore_unsettled`,
+  per relay and per person). The table is per phone: never in a backup,
+  never touched by the roll-forward, so an app kill after the commit
+  keeps it. Tests: `a_kill_between_the_restore_commit_and_the_settling_keeps_the_marker`
+  (killed before the commit: no marker; after: the marker, and renew
+  still held).
+- [x] **RG-2. The first relay read turns the gap into questions.** In
+  the tree, not seen on a phone. People the relay knows are dropped from
+  the marker; the rest become "ask". The health check settles from the
+  users read it already makes, and counts them as `people_needing_answer`,
+  not as "missing on the relay", so nothing invites a renew for them.
+  Tests: `the_health_check_settles_who_the_relay_knows_and_does_not_count_the_question_as_missing`;
+  UI "waiting people are a question, not "missing on the relay"" and
+  "the shell already leaves the people it counts as waiting out of
+  people_missing: never subtracted twice".
+- [x] **RG-3. Nobody unanswered is created.** In the tree, not seen on a
+  phone. Renew skips them as "needs your answer" (`needs_answer`,
+  `restore_unanswered`), opens no firewall window when only they are
+  left, and is never "all done" while anyone waits; repack and rotation
+  refuse them (`E_RESTORE_UNANSWERED`). If anyone is still unchecked,
+  renew reads the relay first and sends nothing when that read fails.
+  Tests: `a_person_removed_after_the_backup_is_not_created_again_before_an_answer`,
+  the rig-level `bk_after_a_restore_nobody_removed_since_the_backup_comes_back_and_a_newer_person_can_be_removed`
+  (real daal-deploy, fake provider: relay users and management writes
+  unchanged by the renew).
+- [x] **RG-4. The person is asked by name, once.** In the tree, not seen
+  on a phone. A card above People names each one: "Still should have
+  access" (stored as keep; only then can renew create them, with a new
+  file, and the card says their old file does not work yet) or "Was
+  removed" (marked removed locally in the same transaction, the leftover
+  file deleted, never created). The opposite answer later is refused
+  (`E_RESTORE_ALREADY_ANSWERED`). After either answer the relay is
+  checked again. Tests: `a_person_answered_as_removed_is_marked_removed_and_never_created`;
+  UI "PB-1: the first check asks about Sara by name…" and "PB-1: "was
+  removed" marks her removed and the relay is checked again".
+- [x] **RG-5. An unreachable relay assumes nothing.** In the tree, not
+  seen on a phone. Renew, repack, rotation and the relay-only removal
+  all refuse; the markers stay unchecked; the card says the relay could
+  not be checked and offers Check again. Tests:
+  `an_unreachable_relay_after_a_restore_assumes_nothing`; UI "PB-1: a
+  relay that cannot be asked…".
+- [x] **RG-6. A person added after the restore is not a question.** In
+  the tree, not seen on a phone. Test: `a_person_added_after_the_restore_is_not_a_question`.
+- [x] **RG-7. People only the relay knows can be removed (PB-2).** In the
+  tree, not seen on a phone. People lists each one as "Someone added
+  from your other phone; this phone does not have their name", with the
+  relay name under it and Remove access. The sheet names the relay user
+  and says their file stops working and this cannot be undone from this
+  phone; Back cancels it. `wizard_relay_only_revoke` goes through the
+  existing signed `users-revoke --name` (no Go change) and refuses any
+  name in this phone's list, removed ones included, and r0 or anything
+  not `r<n>`. The names come from the health check's own users read
+  (`RelayHealth.relay_only`, cached with the count), so opening the page
+  reads the relay once. Tests: `a_relay_only_person_is_removed_by_name_and_a_listed_one_never`,
+  `relay_names_are_read_strictly`, `relay_only_names_skip_the_book_and_the_everyone_file`,
+  `after_restoring_an_older_backup_people_added_later_are_seen_and_their_names_skipped`,
+  the `bk_after_a_restore…` rig test (only Kian leaves the relay; Bahar's
+  and the removed Dara's names refused); UI "PB-2: …" (four mounted tests).
+- [x] **RG-8. The words screens cannot be captured (PB-20).** In the
+  tree, not seen on a phone. `platform_secure_screen {on}` sets or
+  clears FLAG_SECURE through the daal-platform plugin (decision in
+  `vpn/SecureScreen.kt`, applied on the UI thread in the same task; a
+  no-op on desktop). `useSecureScreen` holds it while the words, the
+  type-back, the check-words sheet and the restore words-entry are on
+  screen; one app-wide count, one call at a time. Cleared when the
+  plugin loads (an app kill) and once at page start (a reload). Tests:
+  `SecureScreenTest` (JVM), UI "PB-20, the secure screen" (ten tests:
+  mount/unmount, two holders, an error tearing the screen down, order of
+  calls, a refused "on" sent again, the full backup and restore flows).
+- [x] **RG-9. A saved file is named as Downloads stored it (PB-3).** In
+  the tree, not seen on a phone. The generated MainActivity cannot carry
+  it (gen/android is not tracked), so the plugin does the copy itself:
+  `platform/DownloadsSaver.save` reads the stored DISPLAY_NAME back
+  (`vpn/SavedName.kt`) and deletes the pending entry on failure. Backup,
+  recovery key, `.sbpx` and shared `.sbp` all report that name; an older
+  shell falls back to the asked name. Tests: `SavedNameTest` (JVM); UI
+  "PB-3: a saved file is named as Downloads stored it…".
+- [x] **RG-10. Gate.** `check-plumbing.mjs` was red on the finished
+  tree: after the repair nothing in the UI called
+  `wizard_relay_only_users`. The command is unregistered; the Rust
+  function stays for the tests. `./daal test`, vitest, the JVM suite,
+  `go vet` and every pre-push gate green; `./daal e2e full` green.
+
+### Open
+
+- [ ] **RG-11. Nothing above has run on a phone.** The new Kotlin
+  (`DaalPlatformPlugin.secureScreen`, `DownloadsSaver`) is reached only
+  on a device; `DownloadsSaver` is found over JNI from a worker thread,
+  as the old MainActivity call is.
+- [ ] **RG-12. The desktop shell is still not built here** (PB-23): the
+  desktop no-op of `platform_secure_screen` and the plugin's model test
+  have not been compiled. The Android target checks clean.
+- [ ] **RG-13. `tools/patch-android-mainactivity.sh` still writes
+  `saveToDownloads`.** Only the fallback uses it; drop it once no older
+  build is installed.
+- [ ] **RG-14. Right after a restore the relay address is empty**, so
+  the first check fails with "address missing" until the address step
+  is done. The card says the relay could not be checked; whether it
+  leads the person to the address step plainly enough needs a look on
+  the phone.
+- [ ] **RG-15. `libdaal_deploy.so` was not rebuilt.** No file under
+  `publisher/**` changed in this wave, so the phone's copy does not need
+  it for this; the APK does need rebuilding (shell, plugin and UI).
+
+### To check on the phones
+
+The main phone holds the real relay; the spare one can be wiped.
+
+1. On the main phone: add a test person "A", make a backup, then remove
+   "A" and add "B". Move the backup to the spare phone (wiped) and
+   restore it there with the words.
+2. On the spare phone: set the relay address, open the relay page.
+   Expect a question naming "A", no "Renew everyone's files" invitation
+   for them, and under People "Someone added from your other phone…"
+   for "B".
+3. Press "Renew everyone's files" before answering: "A" is listed as
+   needing your answer and gets no file; the result is not "all done".
+4. Answer "Was removed" for "A": they show as removed, and a second
+   renew does not create them. (Optionally repeat with "Still should
+   have access" on another person: renew then makes a new file.)
+5. Remove "B" from People: the sheet names the relay user; after
+   confirming, "B" leaves the list and their file stops connecting.
+6. On the backup words, the type-back and the restore words-entry
+   screens: a screenshot is refused, a screen recording shows black,
+   and the recent-apps thumbnail is blank. Elsewhere, screenshots work.
+   Kill the app on the words screen and reopen: screenshots work.
+7. Save two backups within the same minute: the second "Saved as …"
+   line names the "(1)" file Downloads really holds.
+
+## 21. Farsi that reads as Farsi (2026-11-19)
+
+The owner read the app in Farsi on a phone: "Translation is not natural",
+with «ضربه بزنید» as the example. The text was grammatical but read as
+translated English, and it mixed words (نشانی/آدرس, تلفن/گوشی,
+پاک کردن/حذف, three names for one mode).
+
+- [x] **FA-1. A full pass over every Farsi string.** 1,852 strings read,
+  900 rewritten from the meaning, against a written style guide (plain
+  product Persian, short sentences, a fixed word list, calques to
+  remove, placeholders and Latin tokens untouched). Short labels were
+  done first so that longer texts quote buttons by their final names.
+  The pass also restored sentences the Farsi had dropped (the
+  wipe-everything warning had lost "this cannot be undone") and removed
+  informal «تو» forms. Seen on the Xperia: connection, network and
+  first-run screens. Checked by script: every placeholder and line break
+  kept; none of the replaced words left.
+- [x] **FA-2. Persian labels were letter-spaced**, which pulls a joined
+  script apart («عیب‌یابی» read as separate letters). No tracking on any
+  text when the page is right-to-left. Test in `mix.test.ts`. Not yet
+  seen on a phone.
+- [ ] **FA-3. The owner has not read the new text yet.** It is their
+  language: anything they mark goes into the style guide, not only into
+  the one string.
+- [ ] **FA-4. English that the pass found unclear or wrong** (the Farsi
+  follows the intended meaning where it was clear): "Provider revoked" /
+  "Provider key changed" should say Publisher; "Access key" is used for
+  both the hosting key and a one-time SSH key; the monthly cost is given
+  as 4 to 5, 5 and 5 to 7 euros in three places; "costs you nothing"
+  on rebuild confirmations means nobody loses a file, not money;
+  developer wording visible to people ("Harness preview", "Stats
+  (redacted)", "rate-limited", "duress shield", "login keyring",
+  "sockets"); sentences split around a number
+  (`status_valid_pre`/`_post`) that Persian word order cannot follow.
+- [ ] **FA-5. No Persian font is shipped.** The page asks for Vazirmatn
+  and falls back to whatever the phone has. It looked fine on the
+  Xperia; an old phone with a poor system font would not.
+- The style guide is `docs/style/farsi.md`: every change that writes
+  Farsi follows it.
+

@@ -1563,6 +1563,340 @@ fn after_restoring_an_older_backup_people_added_later_are_seen_and_their_names_s
     let h = crate::relay_health::relay_health(&b.ctx, pop_live, true).unwrap();
     assert_eq!(h.people_unknown, Some(1), "{h:?}");
     assert!(h.details.iter().any(|d| d.contains("r4")));
+    // The names come with the count, from the same read, and the cached
+    // answer carries them without reaching the relay again (the relay
+    // page lists them under People from here, RG review finding 1).
+    assert_eq!(h.relay_only, Some(vec!["r4".to_string()]), "{h:?}");
+    let lists = *b.mock.users_list_calls.lock().unwrap();
+    let checks = b.mock.relay_health_calls.lock().unwrap().len();
+    let cached = crate::relay_health::relay_health(&b.ctx, pop_live, false).unwrap();
+    assert!(cached.from_cache);
+    assert_eq!(cached.relay_only, Some(vec!["r4".to_string()]));
+    assert_eq!(*b.mock.users_list_calls.lock().unwrap(), lists, "no second read");
+    assert_eq!(b.mock.relay_health_calls.lock().unwrap().len(), checks, "no second check");
     let next = recipient_provision(&b.ctx, pop_live, &address(9), "Later").unwrap();
     assert_eq!(next.name, "r5", "the name the relay already has is skipped");
+}
+
+// ------------------------------------------------- after a restore (PB-1/2)
+
+struct Restored {
+    b: Phone,
+    op: i64,
+    maman: i64,
+    bob: i64,
+}
+
+/// The backup has Maman (r1), Bob (r2) and Carol (r3, removed). On the
+/// old phone, after the backup, Maman was removed: the relay now has only
+/// Bob. The new phone restores the backup and knows its address.
+fn restored_after_maman_left() -> Restored {
+    let (a, b, file, words) = restore_rig();
+    let op = list_operators(&a.ctx)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.status == "provisioned")
+        .unwrap()
+        .id;
+    let rows = a.ctx.db.list_recipients(op).unwrap();
+    let id_of = |n: &str| rows.iter().find(|r| r.display_name == n).unwrap().id;
+    let (maman, bob) = (id_of(PERSON), id_of("Bob"));
+    backup_restore(&b.ctx, &file, &words, None).unwrap();
+    {
+        let mut u = b.mock.box_users.lock().unwrap();
+        u.clear();
+        u.insert("r2".into());
+    }
+    set_helper_ip(&b.ctx, op, "198.51.100.9", "manual").unwrap();
+    Restored { b, op, maman, bob }
+}
+
+fn states(p: &Phone, op: i64) -> Vec<(i64, String)> {
+    p.ctx.db.with_conn(|c| {
+        let mut s = c
+            .prepare(
+                "SELECT recipient_id, state FROM restore_unsettled WHERE operator_id = ?1
+                 ORDER BY recipient_id",
+            )
+            .unwrap();
+        let v = s
+            .query_map([op], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        v
+    })
+}
+
+fn renew(p: &Phone, op: i64) -> crate::renew::RenewReport {
+    crate::renew::renew_everyone(&p.ctx, op, &mut |_| {}).unwrap()
+}
+
+fn provisioned(p: &Phone, name: &str) -> bool {
+    p.mock
+        .renew_box_writes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|w| w == &format!("provision {name}"))
+}
+
+#[test]
+fn a_person_removed_after_the_backup_is_not_created_again_before_an_answer() {
+    let r = restored_after_maman_left();
+    let b = &r.b;
+    assert_eq!(
+        states(b, r.op),
+        vec![(r.maman, "unchecked".into()), (r.bob, "unchecked".into())],
+        "the restore marks everyone not removed"
+    );
+
+    // Renew before anyone was asked: the relay is read first, Maman is
+    // skipped with a reason, and nothing about her reaches the relay.
+    let report = renew(b, r.op);
+    let by = |rep: &crate::renew::RenewReport, id: i64| {
+        rep.items.iter().find(|i| i.recipient_id == Some(id)).unwrap().clone()
+    };
+    assert_eq!(by(&report, r.maman).status, "needs_answer");
+    assert_eq!(by(&report, r.maman).reason, "restore_unanswered");
+    assert_eq!(by(&report, r.bob).status, "already_done");
+    assert!(!report.all_done, "{report:?}");
+    let call = b.mock.users_renew_calls.lock().unwrap()[0].clone();
+    for list in [&call.ensure, &call.replace, &call.revoke] {
+        assert!(!list.contains(&"r1".to_string()), "{call:?}");
+    }
+    assert!(!provisioned(b, "r1"));
+    assert_eq!(
+        states(b, r.op),
+        vec![(r.maman, "ask".into())],
+        "Bob is on the relay: nothing to settle"
+    );
+
+    // Pressing it again changes nothing for her.
+    let again = renew(b, r.op);
+    assert_eq!(by(&again, r.maman).status, "needs_answer");
+    assert!(!again.all_done);
+    assert!(!provisioned(b, "r1"));
+
+    // Asked by name.
+    let q = crate::restore_settle::restore_unsettled(&b.ctx, r.op).unwrap();
+    assert!(q.checked && q.check_error.is_none());
+    assert_eq!(q.people.len(), 1);
+    assert_eq!(q.people[0].recipient_id, r.maman);
+    assert_eq!(q.people[0].name, PERSON);
+    assert_eq!(
+        list_operators(&b.ctx)
+            .unwrap()
+            .iter()
+            .find(|o| o.id == r.op)
+            .unwrap()
+            .people_needing_answer,
+        1
+    );
+
+    // "Still should have access": only now is she created, with a file.
+    crate::restore_settle::restore_answer(&b.ctx, r.op, r.maman, true).unwrap();
+    let after = renew(b, r.op);
+    assert_eq!(by(&after, r.maman).status, "done", "{after:?}");
+    assert!(provisioned(b, "r1"));
+    assert!(after.all_done, "{after:?}");
+    assert!(crate::restore_settle::restore_unsettled(&b.ctx, r.op)
+        .unwrap()
+        .people
+        .is_empty());
+    // Asked once: the same answer again is fine, the other one is not.
+    crate::restore_settle::restore_answer(&b.ctx, r.op, r.maman, true).unwrap();
+    let e = crate::restore_settle::restore_answer(&b.ctx, r.op, r.maman, false).unwrap_err();
+    assert_eq!(code(e), crate::commands::E_RESTORE_ALREADY_ANSWERED);
+    // Bob was never a question.
+    let e = crate::restore_settle::restore_answer(&b.ctx, r.op, r.bob, true).unwrap_err();
+    assert_eq!(code(e), crate::commands::E_RESTORE_NOT_ASKED);
+}
+
+#[test]
+fn a_person_answered_as_removed_is_marked_removed_and_never_created() {
+    let r = restored_after_maman_left();
+    let b = &r.b;
+    let q = crate::restore_settle::restore_unsettled(&b.ctx, r.op).unwrap();
+    assert_eq!(q.people.len(), 1);
+    let file = b.ctx.staging_dir.join(format!("{}.r1.sbpx", r.op));
+    assert!(file.exists(), "her file came with the backup");
+    let before = backup_status(&b.ctx).unwrap();
+
+    crate::restore_settle::restore_answer(&b.ctx, r.op, r.maman, false).unwrap();
+    let row = b.ctx.db.get_recipient(r.op, r.maman).unwrap().unwrap();
+    assert_ne!(row.revoked_at_unix, 0, "marked removed on this phone");
+    assert!(!file.exists(), "her dead file is not kept to hand out");
+    assert_ne!(
+        backup_status(&b.ctx).unwrap(),
+        before,
+        "a person removed makes the backup out of date"
+    );
+
+    for _ in 0..2 {
+        let report = renew(b, r.op);
+        assert!(report.all_done, "{report:?}");
+        assert!(report.items.iter().all(|i| i.recipient_id != Some(r.maman)));
+        assert!(!provisioned(b, "r1"));
+    }
+    let calls = b.mock.users_renew_calls.lock().unwrap().clone();
+    assert!(calls.iter().all(|c| c.revoke.contains(&"r1".to_string())
+        && !c.ensure.contains(&"r1".to_string())
+        && !c.replace.contains(&"r1".to_string())));
+    assert!(crate::recipient_book::recipient_repack_sbpx(&b.ctx, r.op, r.maman).is_err());
+    assert!(!b
+        .mock
+        .users_provision_calls
+        .lock()
+        .unwrap()
+        .contains(&"r1".to_string()));
+}
+
+#[test]
+fn an_unreachable_relay_after_a_restore_assumes_nothing() {
+    let r = restored_after_maman_left();
+    let b = &r.b;
+    *b.mock.users_list_error.lock().unwrap() = Some((1, "users/list: mgmt answered 502".into()));
+
+    let q = crate::restore_settle::restore_unsettled(&b.ctx, r.op).unwrap();
+    assert!(!q.checked);
+    assert!(q.people.is_empty(), "nobody is called removed or kept");
+    assert!(q
+        .check_error
+        .as_deref()
+        .unwrap()
+        .starts_with(crate::commands::E_RELAY_UNREACHABLE));
+
+    let e = crate::renew::renew_everyone(&b.ctx, r.op, &mut |_| {}).unwrap_err();
+    assert_eq!(code(e), crate::commands::E_RELAY_UNREACHABLE);
+    assert!(b.mock.users_renew_calls.lock().unwrap().is_empty(), "nothing sent");
+    assert!(crate::recipient_book::recipient_repack_sbpx(&b.ctx, r.op, r.maman).is_err());
+    assert!(crate::relay_rotation::rotate_credentials(&b.ctx, r.op, "r1").is_err());
+    assert!(b.mock.users_provision_calls.lock().unwrap().is_empty());
+    assert!(b.mock.rotate_credentials_calls.lock().unwrap().is_empty());
+    let o = crate::restore_settle::relay_only_users(&b.ctx, r.op).unwrap();
+    assert!(!o.checked && o.users.is_empty() && o.check_error.is_some());
+    assert_eq!(
+        states(b, r.op),
+        vec![(r.maman, "unchecked".into()), (r.bob, "unchecked".into())],
+        "still unsettled, still nothing assumed"
+    );
+
+    // Reachable again: the check runs and asks about Maman.
+    *b.mock.users_list_error.lock().unwrap() = None;
+    let q = crate::restore_settle::restore_unsettled(&b.ctx, r.op).unwrap();
+    assert!(q.checked);
+    assert_eq!(q.people.iter().map(|p| p.recipient_id).collect::<Vec<_>>(), vec![r.maman]);
+}
+
+#[test]
+fn the_health_check_settles_who_the_relay_knows_and_does_not_count_the_question_as_missing() {
+    let r = restored_after_maman_left();
+    let b = &r.b;
+    let h = crate::relay_health::relay_health(&b.ctx, r.op, true).unwrap();
+    assert_eq!(h.people_needing_answer, 1, "{h:?}");
+    assert_eq!(h.people_missing, Some(0), "her renew must wait for the answer");
+    assert_eq!(states(b, r.op), vec![(r.maman, "ask".into())]);
+    // The repack of the one person waiting refuses without a round trip;
+    // Bob's goes ahead.
+    let lists = *b.mock.users_list_calls.lock().unwrap();
+    let e = crate::recipient_book::recipient_repack_sbpx(&b.ctx, r.op, r.maman).unwrap_err();
+    assert_eq!(code(e), crate::commands::E_RESTORE_UNANSWERED);
+    let e = crate::relay_rotation::rotate_credentials(&b.ctx, r.op, "r1").unwrap_err();
+    assert_eq!(code(e), crate::commands::E_RESTORE_UNANSWERED);
+    assert_eq!(*b.mock.users_list_calls.lock().unwrap(), lists);
+    assert!(!b.mock.users_provision_calls.lock().unwrap().contains(&"r1".to_string()));
+    crate::recipient_book::recipient_repack_sbpx(&b.ctx, r.op, r.bob).unwrap();
+}
+
+#[test]
+fn a_person_added_after_the_restore_is_not_a_question() {
+    let r = restored_after_maman_left();
+    let b = &r.b;
+    let kian = recipient_provision(&b.ctx, r.op, &address(9), "Kian").unwrap();
+    // Kian is not on the mock box yet; renew creates him as anyone else.
+    let report = renew(b, r.op);
+    let k = report.items.iter().find(|i| i.recipient_id == Some(kian.id)).unwrap();
+    assert_ne!(k.status, "needs_answer", "{report:?}");
+    assert!(states(b, r.op).iter().all(|(id, _)| *id != kian.id));
+    let q = crate::restore_settle::restore_unsettled(&b.ctx, r.op).unwrap();
+    assert_eq!(q.people.iter().map(|p| p.recipient_id).collect::<Vec<_>>(), vec![r.maman]);
+}
+
+#[test]
+fn a_kill_between_the_restore_commit_and_the_settling_keeps_the_marker() {
+    // Killed before the commit: no marker.
+    let (_a, b, path, words) = restore_rig();
+    set_fault(Some(RestoreFault::BeforeCommit));
+    assert!(backup_restore(&b.ctx, &path, &words, None).is_err());
+    list_operators(&b.ctx).unwrap();
+    assert_eq!(
+        b.ctx
+            .db
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM restore_unsettled", [], |r| r
+                .get::<_, i64>(0)))
+            .unwrap(),
+        0
+    );
+
+    // Killed right after the commit: the marker was in the commit's own
+    // transaction, and the roll-forward on the next start keeps it.
+    let (a, b, path, words) = restore_rig();
+    set_fault(Some(RestoreFault::AfterCommit));
+    assert!(backup_restore(&b.ctx, &path, &words, None).is_err());
+    let op = list_operators(&a.ctx)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.status == "provisioned")
+        .unwrap()
+        .id;
+    let marked = states(&b, op);
+    assert_eq!(marked.len(), 2, "{marked:?}");
+    assert!(marked.iter().all(|(_, s)| s == "unchecked"));
+    list_operators(&b.ctx).unwrap();
+    assert!(read_meta(&b.ctx).unwrap().restore_pending_nonce.is_empty(), "finished");
+    assert_eq!(states(&b, op), marked, "the roll-forward did not settle anyone");
+    // And it still stops a renew from creating an unknown person.
+    b.mock.box_users.lock().unwrap().clear();
+    set_helper_ip(&b.ctx, op, "198.51.100.9", "manual").unwrap();
+    let report = renew(&b, op);
+    assert!(report.items.iter().all(|i| i.status == "needs_answer"), "{report:?}");
+    assert!(b.mock.renew_box_writes.lock().unwrap().iter().all(|w| !w.starts_with("provision r")
+        || w == "provision r0"));
+}
+
+#[test]
+fn a_relay_only_person_is_removed_by_name_and_a_listed_one_never() {
+    let r = restored_after_maman_left();
+    let b = &r.b;
+    {
+        let mut u = b.mock.box_users.lock().unwrap();
+        u.insert("r1".into());
+        u.insert("r4".into());
+        u.insert("r0".into());
+    }
+    let o = crate::restore_settle::relay_only_users(&b.ctx, r.op).unwrap();
+    assert!(o.checked && o.check_error.is_none());
+    assert_eq!(o.users, vec!["r4".to_string()]);
+    assert!(states(b, r.op).is_empty(), "that read settled the restore too");
+
+    for (name, want) in [
+        ("r1", crate::commands::E_RELAY_USER_IN_LIST),
+        ("r2", crate::commands::E_RELAY_USER_IN_LIST),
+        ("r3", crate::commands::E_RELAY_USER_IN_LIST), // Carol, removed, still in the list
+        ("r0", crate::commands::E_RELAY_USER_INVALID),
+        ("r04", crate::commands::E_RELAY_USER_INVALID),
+        ("bob", crate::commands::E_RELAY_USER_INVALID),
+        ("", crate::commands::E_RELAY_USER_INVALID),
+    ] {
+        let e = crate::restore_settle::relay_only_revoke(&b.ctx, r.op, name).unwrap_err();
+        assert_eq!(code(e), want, "{name:?}");
+    }
+    assert!(b.mock.users_revoke_calls.lock().unwrap().is_empty(), "nothing sent");
+
+    crate::restore_settle::relay_only_revoke(&b.ctx, r.op, "r4").unwrap();
+    assert_eq!(*b.mock.users_revoke_calls.lock().unwrap(), vec!["r4".to_string()]);
+    let rows = b.ctx.db.list_recipients(r.op).unwrap();
+    assert!(rows.iter().all(|x| x.name != "r4"), "no row is invented for them");
+    assert!(rows.iter().filter(|x| x.revoked_at_unix == 0).count() == 2);
 }

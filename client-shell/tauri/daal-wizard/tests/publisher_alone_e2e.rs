@@ -732,6 +732,127 @@ fn bk_a_backup_restored_on_an_empty_phone_keeps_serving_the_family() {
     assert_eq!(len(&w.state(), "unmodelled"), 0);
 }
 
+/// PB-1 / PB-2 end to end: the backup is a snapshot, and phone A keeps
+/// changing the relay after it is made. Phone B, restored from it, must
+/// not give a removed person access back, must ask about each by name,
+/// and can remove a person it has no name for.
+#[test]
+fn bk_after_a_restore_nobody_removed_since_the_backup_comes_back_and_a_newer_person_can_be_removed() {
+    use daal_wizard::restore_settle as rs;
+    let Some(w) = World::start() else { return };
+    let a = w.phone("phone-a");
+    let op = provisioned(&w, &a);
+    let mut people = Vec::new();
+    let mut phones = Vec::new();
+    for n in ["Bahar", "Dara", "Sima", "Taraneh"] {
+        let (p, addr) = person(&w, n);
+        people.push(recipient_provision(&a, op, &addr, n).expect("add a person"));
+        phones.push(p);
+    }
+    let (bahar, dara, sima, taraneh) = (&people[0], &people[1], &people[2], &people[3]);
+
+    let words = pb::words_new(&a).unwrap().words;
+    let answers: Vec<pb::WordAnswer> =
+        [0u32, 6, 11].iter().map(|&i| pb::WordAnswer { index: i, word: words[i as usize].clone() }).collect();
+    pb::words_confirm(&a, &answers).expect("confirm the words");
+    let made = pb::backup_make_file(&a, None).expect("make the backup");
+    pb::backup_mark_made(&a, &made).unwrap();
+
+    // AFTER the backup, on phone A: Dara and Sima are removed, Kian added.
+    recipient_revoke(&a, op, dara.id).expect("remove Dara on phone A");
+    recipient_revoke(&a, op, sima.id).expect("remove Sima on phone A");
+    let (_kian_phone, kian_addr) = person(&w, "Kian");
+    let kian = recipient_provision(&a, op, &kian_addr, "Kian").expect("add Kian on phone A");
+    let mut on_relay = vec![bahar.name.clone(), taraneh.name.clone(), kian.name.clone()];
+    on_relay.sort();
+    assert_eq!(users_on(&w.state()), on_relay);
+
+    // Phone B restores the older backup.
+    let b = w.phone("phone-b");
+    let file = b.staging_dir.join("picked.bin");
+    std::fs::copy(&made.path, &file).unwrap();
+    let typed = words.join(" ");
+    pb::backup_restore(&b, &file, &typed, None).expect("restore");
+    set_helper_ip(&b, op, "127.0.0.1", "manual").unwrap();
+
+    // "Renew everyone's files", pressed first thing: nobody is created,
+    // Dara and Sima wait for an answer, and it is not "all done".
+    let writes0 = server_of(&w.state())["mgmt_writes"].clone();
+    let rep = daal_wizard::renew::renew_everyone(&b, op, &mut |_| {}).expect("renew from phone B");
+    assert!(!rep.all_done, "{rep:#?}");
+    for p in [dara, sima] {
+        let it = rep.items.iter().find(|i| i.recipient_id == Some(p.id)).expect("listed");
+        assert_eq!((it.status.as_str(), it.reason.as_str()), ("needs_answer", "restore_unanswered"), "{it:?}");
+        assert!(it.sbpx_path.is_empty(), "no file for someone waiting: {it:?}");
+    }
+    let st = w.state();
+    assert_eq!(users_on(&st), on_relay, "renew created nobody the relay did not know");
+    assert_eq!(server_of(&st)["mgmt_writes"], writes0, "and wrote nothing to the relay");
+
+    // The health check says two answers are needed, nobody "missing",
+    // and one person on the relay this phone has no name for.
+    let h = daal_wizard::relay_health::relay_health(&b, op, true).expect("health from phone B");
+    assert_eq!(h.people_needing_answer, 2, "{h:#?}");
+    assert_eq!(h.people_missing, Some(0), "a question is not an invitation to renew: {h:#?}");
+    assert_eq!(h.people_unknown, Some(1), "{h:#?}");
+    let summary = list_operators(&b).unwrap().into_iter().find(|s| s.id == op).unwrap();
+    assert_eq!(summary.people_needing_answer, 2);
+
+    // Asked about BY NAME.
+    let u = rs::restore_unsettled(&b, op).expect("who to ask about");
+    assert!(u.checked && u.check_error.is_none(), "{u:?}");
+    let asked: Vec<(i64, &str)> = u.people.iter().map(|p| (p.recipient_id, p.name.as_str())).collect();
+    assert_eq!(asked, vec![(dara.id, "Dara"), (sima.id, "Sima")]);
+
+    // Dara "was removed": marked removed here and never created.
+    rs::restore_answer(&b, op, dara.id, false).expect("Dara was removed");
+    assert!(b.db.get_recipient(op, dara.id).unwrap().unwrap().revoked_at_unix > 0);
+    // Sima "still should have access".
+    rs::restore_answer(&b, op, sima.id, true).expect("Sima keeps access");
+    let e = rs::restore_answer(&b, op, sima.id, false).expect_err("asked once");
+    assert!(e.to_string().starts_with("E_RESTORE_ALREADY_ANSWERED"), "{e}");
+    assert!(rs::restore_unsettled(&b, op).unwrap().people.is_empty());
+
+    let rep = daal_wizard::renew::renew_everyone(&b, op, &mut |_| {}).expect("renew after the answers");
+    assert!(rep.all_done, "{rep:#?}");
+    let it = rep.items.iter().find(|i| i.recipient_id == Some(sima.id)).expect("Sima listed");
+    assert_eq!(it.status, "done", "{it:?}");
+    assert!(
+        rep.items.iter().all(|i| i.recipient_id != Some(dara.id) || i.status == "removed_from_server"),
+        "{rep:#?}"
+    );
+    let mut want = vec![bahar.name.clone(), sima.name.clone(), taraneh.name.clone(), kian.name.clone()];
+    want.sort();
+    assert_eq!(users_on(&w.state()), want, "Sima is back, Dara is not");
+    // Sima's new file opens on Sima's phone and verifies.
+    let sent = phones[2].staging_dir.join("from-b.sbpx");
+    std::fs::copy(&it.sbpx_path, &sent).unwrap();
+    verify_plain(&import_sbpx(&phones[2], &sent).expect("Sima's phone opens it"));
+
+    // Kian, added on phone A after the backup, shows as relay-only.
+    let ro = rs::relay_only_users(&b, op).expect("relay-only");
+    assert!(ro.checked, "{ro:?}");
+    assert_eq!(ro.users, vec![kian.name.clone()]);
+    // A name in this phone's list is never removed this way.
+    let e = rs::relay_only_revoke(&b, op, &bahar.name).expect_err("Bahar is in the list");
+    assert!(e.to_string().starts_with("E_RELAY_USER_IN_LIST"), "{e}");
+    let e = rs::relay_only_revoke(&b, op, &dara.name).expect_err("Dara is in the list, removed");
+    assert!(e.to_string().starts_with("E_RELAY_USER_IN_LIST"), "{e}");
+    rs::relay_only_revoke(&b, op, &kian.name).expect("remove Kian by relay name");
+    let mut want = vec![bahar.name.clone(), sima.name.clone(), taraneh.name.clone()];
+    want.sort();
+    assert_eq!(users_on(&w.state()), want, "only Kian left the relay");
+    assert!(rs::relay_only_users(&b, op).unwrap().users.is_empty());
+    let h = daal_wizard::relay_health::relay_health(&b, op, true).unwrap();
+    assert_eq!((h.people_needing_answer, h.people_missing, h.people_unknown), (0, Some(0), Some(0)), "{h:#?}");
+
+    // A person added from phone B afterwards does not take Kian's name.
+    let (_z, zaddr) = person(&w, "Ziba");
+    let ziba = recipient_provision(&b, op, &zaddr, "Ziba").expect("add from phone B");
+    assert!(![&bahar.name, &dara.name, &sima.name, &taraneh.name, &kian.name].contains(&&ziba.name), "{}", ziba.name);
+    assert_eq!(len(&w.state(), "unmodelled"), 0);
+}
+
 /// PA-1: an address an earlier try could not give back, on a relay that
 /// then finished, is given back on its own; the live server is not
 /// touched.

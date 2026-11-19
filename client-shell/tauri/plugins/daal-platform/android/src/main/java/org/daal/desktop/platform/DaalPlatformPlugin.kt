@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.graphics.Color
 import android.view.View
+import android.view.WindowManager
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -21,6 +22,8 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.daal.desktop.vpn.BACK_JS
 import org.daal.desktop.vpn.DaalVpnService
+import org.daal.desktop.vpn.SecureFlagChange
+import org.daal.desktop.vpn.SecureScreen
 import org.daal.desktop.vpn.backWasHandled
 
 @InvokeArg
@@ -30,6 +33,12 @@ class VpnStartArgs {
    * service asks the engine to pick a route, try it and move on.
    */
   var routeId: String? = null
+}
+
+@InvokeArg
+class SecureScreenArgs {
+  /** true while a screen showing the recovery words is mounted. */
+  var on: Boolean = false
 }
 
 /**
@@ -71,6 +80,9 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     keepClearOfSystemBars(webView)
+    DownloadsSaver.context = activity.applicationContext
+    // A page that loads has asked for nothing yet (PB-20).
+    applySecureFlag(synchronized(secure) { secure.atLoad() })
     val host = activity as? ComponentActivity ?: return
     val callback = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
@@ -123,6 +135,49 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       WindowInsetsCompat.CONSUMED
     }
     ViewCompat.requestApplyInsets(host)
+  }
+
+  private val secure = SecureScreen()
+
+  /** On the UI thread only. */
+  private fun setSecureFlag(change: SecureFlagChange) {
+    when (change) {
+      SecureFlagChange.ADD -> activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+      SecureFlagChange.CLEAR -> activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+      SecureFlagChange.NONE -> {}
+    }
+  }
+
+  private fun applySecureFlag(change: SecureFlagChange) {
+    activity.runOnUiThread { setSecureFlag(change) }
+  }
+
+  /**
+   * PB-20: keep the recovery words out of screenshots, screen recording
+   * and the recent-apps thumbnail. The page sets it while the words
+   * screen, the type-back screen or the restore words entry is mounted
+   * and clears it when none is (`platform_secure_screen` in src-tauri).
+   */
+  @Command
+  fun secureScreen(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(SecureScreenArgs::class.java)
+      // Decide and apply in the same UI-thread task: the window then
+      // gets the changes in the order they were decided. (The page also
+      // sends one call at a time; see useSecureScreen.ts.)
+      activity.runOnUiThread {
+        try {
+          setSecureFlag(synchronized(secure) { secure.request(args.on) })
+          invoke.resolve(JSObject().apply { put("on", args.on) })
+        } catch (t: Throwable) {
+          Logger.error("DaalPlatformPlugin.secureScreen failed: ${t.message}")
+          invoke.reject(t.message ?: "secureScreen failed")
+        }
+      }
+    } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.secureScreen failed: ${t.message}")
+      invoke.reject(t.message ?: "secureScreen failed")
+    }
   }
 
   private var pendingStartArgs: VpnStartArgs? = null

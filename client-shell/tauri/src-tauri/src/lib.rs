@@ -1313,6 +1313,88 @@ async fn wizard_relay_health(
     )
 }
 
+// ---- After a restore (PB-1, PB-2) ----------------------------------
+
+/// PB-1: people restored from a backup whom the relay did not know when
+/// it was first checked, to be asked about by name. Checks the relay
+/// first if it has not been checked since the restore; a check that
+/// fails is `checked: false` with `check_error`, and nothing is assumed.
+#[tauri::command]
+async fn wizard_restore_unsettled(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::restore_settle::RestoreUnsettled, String> {
+    cmdlog::result(
+        "wizard_restore_unsettled",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::restore_settle::restore_unsettled(ctx, operator_id)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// PB-1: the answer for one of them. `keep` = still should have access
+/// (renew may now create them with a new file); otherwise they were
+/// removed (marked removed here, never created).
+#[tauri::command]
+async fn wizard_restore_answer(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    recipient_id: i64,
+    keep: bool,
+) -> Result<(), String> {
+    cmdlog::result(
+        "wizard_restore_answer",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::restore_settle::restore_answer(ctx, operator_id, recipient_id, keep)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// PB-2: the relay-only names reach the UI inside `wizard_relay_health`
+/// (`RelayHealth.relay_only`, one users read shared with the count), so
+/// `daal_wizard::restore_settle::relay_only_users` is not a command; the
+/// Rust tests drive it directly.
+///
+/// PB-2, DESTRUCTIVE: remove one relay-only person by relay name. The UI
+/// confirms first, naming them. Refuses a name in this phone's list.
+#[tauri::command]
+async fn wizard_relay_only_revoke(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    relay_user: String,
+) -> Result<(), String> {
+    cmdlog::result(
+        "wizard_relay_only_revoke",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::restore_settle::relay_only_revoke(ctx, operator_id, &relay_user)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// PB-20: keep the window out of screenshots, screen recording and the
+/// recent-apps thumbnail while `on` (Android FLAG_SECURE, through the
+/// daal-platform plugin). Desktop: succeeds and does nothing.
+/// Each call runs on its own blocking task, so two calls in flight could
+/// reach the plugin in either order: the page never has two in flight
+/// (useSecureScreen.ts sends the next only after this one returns).
+#[tauri::command]
+async fn platform_secure_screen(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    cmdlog::result("platform_secure_screen", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_daal_platform::PlatformExt;
+            app.platform().secure_screen(on).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("platform_secure_screen: {e}"))?
+    }.await)
+}
+
 // ---- FRP-4b live operations ----------------------------------------
 
 /// `wizard_provision_run`: runs `daal-deploy provision` on a
@@ -2193,10 +2275,13 @@ async fn publisher_backup_make(
             }
             let made = pbackup::backup_make_file(ctx, file_name.as_deref()).map_err(|e| e.to_string())?;
             let path = made.path.to_string_lossy().to_string();
+            // PB-3: the name the file was stored under, which may not be
+            // the one asked for.
+            let mut stored_name = made.file_name.clone();
             let handed = if destination == "downloads" {
                 let r = save_path_to_downloads(&path, &made.file_name);
                 let _ = std::fs::remove_file(&made.path);
-                r
+                r.map(|n| stored_name = n)
             } else {
                 let title = chooser_title
                     .as_deref()
@@ -2218,7 +2303,7 @@ async fn publisher_backup_make(
                 pbackup::backup_note_shared(ctx, &made).map_err(|e| e.to_string())?;
             }
             Ok(pbackup::MadeBackup {
-                file_name: made.file_name.clone(),
+                file_name: stored_name,
                 made_at_unix: made.made_at_unix,
                 contents: made.contents.clone(),
                 destination,
@@ -2396,8 +2481,8 @@ fn publisher_save_recovery_key(
     // The staged copy is a plaintext signing key; unlink it whether or
     // not the Downloads write succeeded.
     let _ = std::fs::remove_file(&staged);
-    res?;
-    Ok(name)
+    // PB-3: the name it was stored under.
+    res
     })
 }
 
@@ -3053,45 +3138,81 @@ fn share_path(path: &str, mime: &str, chooser_title: &str) -> Result<String, Str
     }
 }
 
-/// Copy a staged file into the phone's public Downloads via the Kotlin
-/// MainActivity.saveToDownloads (MediaStore). Lets the user keep/manage
-/// the connection file and re-import it later. Desktop: copies next to the
-/// user's home Downloads dir.
-fn save_path_to_downloads(src: &str, display_name: &str) -> Result<(), String> {
+/// Copy a staged file into the phone's public Downloads (MediaStore) and
+/// return the name it was STORED under (PB-3): MediaStore may store a
+/// de-duplicated name ("x (1).daalbackup") when the one asked for is
+/// taken, and the screen must name the file that is there. Android goes
+/// through the plugin's `DownloadsSaver.save` (which reads the stored
+/// name back), falling back to the older `MainActivity.saveToDownloads`
+/// (requested name only) if that class is missing. Desktop: copies into
+/// the home Downloads dir under the requested name.
+fn save_path_to_downloads(src: &str, display_name: &str) -> Result<String, String> {
     if !std::path::Path::new(src).exists() {
         return Err(format!("file not found: {src}"));
     }
     #[cfg(target_os = "android")]
     {
-        use jni::objects::JValue;
+        use jni::objects::{JString, JValue};
         let ctx = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
             .map_err(|e| format!("attach JavaVM: {e}"))?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| format!("attach thread: {e}"))?;
-        let class = env
-            .find_class("org/daal/desktop/MainActivity")
-            .map_err(|e| format!("find_class: {e}"))?;
         let j_src = env.new_string(src).map_err(|e| format!("j_src: {e}"))?;
         let j_name = env
             .new_string(display_name)
             .map_err(|e| format!("j_name: {e}"))?;
-        let ok: bool = env
-            .call_static_method(
-                &class,
-                "saveToDownloads",
-                "(Ljava/lang/String;Ljava/lang/String;)Z",
-                &[JValue::Object(&j_src), JValue::Object(&j_name)],
-            )
-            .and_then(|v| v.z())
-            .map_err(|e| format!("call saveToDownloads: {e}"))?;
+        let saved: Result<String, String> =
+            match env.find_class("org/daal/desktop/platform/DownloadsSaver") {
+                Ok(class) => {
+                    let ret = env
+                        .call_static_method(
+                            &class,
+                            "save",
+                            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                            &[JValue::Object(&j_src), JValue::Object(&j_name)],
+                        )
+                        .and_then(|v| v.l());
+                    match ret {
+                        Ok(obj) if !obj.is_null() => {
+                            let js = JString::from(obj);
+                            env.get_string(&js)
+                                .map(|s| String::from(s))
+                                .map_err(|e| format!("read saved name: {e}"))
+                        }
+                        Ok(_) => Err("could not write to Downloads".into()),
+                        Err(e) => {
+                            let _ = env.exception_clear();
+                            Err(format!("call DownloadsSaver.save: {e}"))
+                        }
+                    }
+                }
+                Err(_) => {
+                    // An app built before PB-3: the older entry point.
+                    let _ = env.exception_clear();
+                    let class = env
+                        .find_class("org/daal/desktop/MainActivity")
+                        .map_err(|e| format!("find_class: {e}"))?;
+                    let ok: bool = env
+                        .call_static_method(
+                            &class,
+                            "saveToDownloads",
+                            "(Ljava/lang/String;Ljava/lang/String;)Z",
+                            &[JValue::Object(&j_src), JValue::Object(&j_name)],
+                        )
+                        .and_then(|v| v.z())
+                        .map_err(|e| format!("call saveToDownloads: {e}"))?;
+                    if ok {
+                        Ok(display_name.to_string())
+                    } else {
+                        Err("could not write to Downloads".into())
+                    }
+                }
+            };
         drop(env);
         std::mem::forget(vm);
-        if !ok {
-            return Err("could not write to Downloads".into());
-        }
-        Ok(())
+        saved
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -3109,7 +3230,7 @@ fn save_path_to_downloads(src: &str, display_name: &str) -> Result<(), String> {
             let _ = std::fs::remove_file(&tmp);
             format!("rename: {e}")
         })?;
-        Ok(())
+        Ok(display_name.to_string())
     }
 }
 
@@ -3122,13 +3243,15 @@ fn dirs_downloads() -> std::path::PathBuf {
 }
 
 /// Save the operator's shared `.sbp` (produced by wizard_produce_shared_sbp)
-/// into the phone's Downloads folder under a friendly name.
+/// into the phone's Downloads folder under a friendly name. Returns the
+/// name it was STORED under (PB-3: Android may de-duplicate it to
+/// "x (1).sbp"), which is the name the screen must tell the person.
 #[tauri::command]
 fn save_shared_sbp_to_downloads(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
     file_name: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     cmdlog::logged("save_shared_sbp_to_downloads", || {
     let shared = wstate
         .0
@@ -3147,9 +3270,10 @@ fn save_shared_sbp_to_downloads(
 }
 
 /// Save a per-recipient `.sbpx` (from a recipient row's sbpx_path) into the
-/// phone's Downloads folder.
+/// phone's Downloads folder. Returns the name it was STORED under (PB-3),
+/// which may differ from the one asked for.
 #[tauri::command]
-fn save_sbpx_to_downloads(sbpx_path: String, file_name: String) -> Result<(), String> {
+fn save_sbpx_to_downloads(sbpx_path: String, file_name: String) -> Result<String, String> {
     cmdlog::logged("save_sbpx_to_downloads", || {
     let name = sanitize_filename(&file_name);
     let name = if name.is_empty() {
@@ -3431,6 +3555,10 @@ pub fn run() {
             wizard_account_cleanup,
             wizard_renew_everyone,
             wizard_relay_health,
+            wizard_restore_unsettled,
+            wizard_restore_answer,
+            wizard_relay_only_revoke,
+            platform_secure_screen,
             wizard_provision_run,
             wizard_sign_relaypack,
             wizard_qr_render,

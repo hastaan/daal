@@ -15,6 +15,7 @@ import { Button, Card, Section, Textarea } from '../design/primitives';
 import type { BackupPreview, RestoreNotice } from './wizardCommands';
 import { PickedFile } from '../recipient/recipientCommands';
 import { useBack } from '../lib/useBack';
+import { useSecureScreen } from './useSecureScreen';
 import { backupFailure, fill, previewText, relayNames, wordCount, WORD_COUNT } from './backup';
 import type { BackupFailure } from './backup';
 import { backupApi } from './backupHarness';
@@ -164,6 +165,8 @@ export default function RestorePage({
         else if (a === 'back') onBack();
     };
     useBack(true, goBack, 'page');
+    // PB-20: no screenshot, recording or thumbnail of the words typed.
+    useSecureScreen(flow.step === 'words');
 
     const fail = (e: unknown, at: RestoreStep) => {
         const f = backupFailure(e, 'restore');

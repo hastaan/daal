@@ -54,4 +54,8 @@ describe('colours every web view understands', () => {
             .map(([path]) => path);
         expect(used).toEqual([]);
     });
+    it('Persian text is never letter-spaced', () => {
+        const css: string = readFileSync(cssPath('../styles.css'), 'utf8');
+        expect(css).toMatch(/:root\[dir="rtl"\] \*\s*\{\s*letter-spacing:\s*0\s*!important;/);
+    });
 });

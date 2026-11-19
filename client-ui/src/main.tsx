@@ -4,6 +4,7 @@ import App from './App';
 import { ContractProvider } from './contract/ContractProvider';
 import { DevPicker } from './harness/DevPicker';
 import { DensityProvider } from './design/DensityProvider';
+import { secureScreenClearAtStart } from './publisher/useSecureScreen';
 import './design/tokens.css';
 import './styles.css';
 
@@ -27,6 +28,9 @@ function bootstrapTheme() {
     }
 }
 bootstrapTheme();
+// PB-20: a page that reloads in the same window starts with the
+// screenshot block off; screens showing the recovery words turn it on.
+secureScreenClearAtStart();
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('root element missing');

@@ -70,7 +70,7 @@ describe('rotate-tls result copy', () => {
 
     it('names the step that stays the operator\'s when a note went out', () => {
         expect(en['pub.danger.rotate_tls.done.upload']).toMatch(/download address/i);
-        expect(fa['pub.danger.rotate_tls.done.upload']).toContain('نشانی دانلود');
+        expect(fa['pub.danger.rotate_tls.done.upload']).toContain('آدرس دانلود');
         for (const why of ['no_refresh_address', 'note_not_published', 'not_signed']) {
             expect(en[`pub.danger.rotate_tls.done.why.${why}`], why).toBeTruthy();
             expect(fa[`pub.danger.rotate_tls.done.why.${why}`], why).toBeTruthy();
