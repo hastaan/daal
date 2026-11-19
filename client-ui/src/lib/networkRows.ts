@@ -231,6 +231,14 @@ export function resolvePending(
     return now;
 }
 
+/** The route to pin after a tap on the Connections page ended, or
+ *  `undefined` for none. A route picked by hand becomes "the one the
+ *  main button connects" only when it is CONNECTED: a tap that failed,
+ *  was refused, timed out or was cancelled chose nothing. */
+export function pinAfterTap(routeId: string, outcome: PendingOutcome): string | undefined {
+    return outcome === 'connected' && routeId ? routeId : undefined;
+}
+
 /** i18n key of the sentence for a tap that ended 'failed' or 'timeout'
  *  on the Connections page, or `undefined` to use the sentence the
  *  engine's own verdict selects (lib/routeCheck.ts connectFailedKey).

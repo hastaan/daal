@@ -8,10 +8,10 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **60 release symbols** (verified 2026-11-19
+Current surface count: **61 release symbols** (verified 2026-11-19
 with `nm` against a library built from the tree — see the ABI ledger at
 the end of this document, which is the authoritative count). The source
-tree carries **63** `//export engine_*` declarations; the extra three
+tree carries **64** `//export engine_*` declarations; the extra three
 are `//go:build cshared && soak` and are never present in a release
 build.
 
@@ -516,6 +516,154 @@ A route is connected only once it has carried one real round trip
   irreversible before it can call `engine_set_route` — the Android VPN
   service asks first, so that a switch to a route that would be refused
   touches nothing.
+- **Automatic connect** — `engine_connect_auto(out, out_len)` (added
+  2026-11-19; `core/abi/connect_auto.go`, `connect_auto_verdict.go`).
+  Connects on the first route that carries a round trip, the engine
+  choosing; no route id. Blocking, like `engine_set_route`, and it uses
+  the TUN fd already set exactly as `engine_set_route` does. It writes
+
+  ```
+  {"connected":true|false,"route_id":"r2","family":"websocket-tls",
+   "tried":[{"route_id":"r1","family":"vless-reality",
+             "result":"carried|not_carrying|start_failed|refused|cancelled",
+             "category":"<failure category or empty>",
+             "refined":"","refused":"","why":"ranked","relay":1}],
+   "verdict":"<code>","candidates":4,"already_connected":false}
+  ```
+
+  and returns the bytes written, or -1 only when the engine is not
+  initialised. A pass in which nothing carried is not an error.
+  - **Candidates**: every imported route that `engine_set_route` would
+    not refuse right now (same function: not revoked, not expired, not
+    needing a new file, not cooling down, endpoint guard), minus
+    experimental families while that gate is off (`refused:
+    "experimental_off"`) and bulk-capable routes in `lifeline-strict`
+    (`refused: "mode"`). Routes left out are listed after the tried
+    ones with `result: "refused"`; nothing is written to
+    `connect_refused`. `candidates` counts the routes that could be
+    tried.
+  - **Order** (`why`): `carried_here` — the route's last outcome on this
+    network was a round trip, most recent first; then `ranked` — the
+    path manager's ranking for the current mode; then `mode_other` — a
+    route the ranking leaves out for the mode alone, tried rather than
+    not at all; then `failed_here` — failed on this network in the last
+    24 h and has not carried here since. "This network" is the hashed
+    id of the last `engine_network_changed`, or one shared bucket when
+    the host has reported none. The memory is `route_memory` in the
+    per-network snapshot (`specs/network-memory-v1.md`): hour buckets, a
+    counter for exact order, a category; written on a connect outcome
+    and on a change in the liveness of the connected route, never on a
+    read.
+  - **One at a time.** Each candidate is started and checked exactly as
+    `engine_set_route` does it, with one difference in the check's
+    budget: a relay whose address never answered is not asked a second
+    time (the second attempt differs only in the far-side target).
+    Worst case per dead candidate with the default configuration: 4 s
+    (address silent), 8 s (first flight swallowed), 12 s (relay answers,
+    carries nothing); a path seen moving can still take the slow budget.
+  - **What a failed candidate is charged with** (revised 2026-11-19
+    after review). Each failed candidate cools its own route down as a
+    failed connect does, but does NOT feed the family's
+    three-failures-in-an-hour count (a pass walks every route the
+    person holds; counting it tripped every family at once and then
+    climbed the 5 min … 24 h ladder for as long as an outage lasted).
+    Its durable failure row and this network's memory of it are written
+    when the pass ends — unless NOTHING AT ALL ANSWERED: no route
+    carried and every failure was silence (`tcp_connect_timeout`,
+    `udp_no_reply`, `dns_timeout`, `network_offline`). Such a pass saw
+    a device with no usable network, not broken routes: the cooldowns
+    are lifted again, nothing durable is written, and the next
+    `engine_connect_auto` (or `engine_set_route`) may try every route
+    at once. If the route a fall-over pass was moving away from had
+    gone silent too, its cooldown is lifted with the rest.
+  - **Already connected**: nothing is started; `already_connected: true`
+    and the running route — and the engine TAKES CHARGE of that route
+    (`auto.mode` true, `auto.state` "connected"), also when it was
+    picked by hand. A route with a check in flight is replaced. If the
+    call arrives while an engine-started pass is moving away from a
+    route, it takes that pass over and inherits the route it was moving
+    away from (put back if nothing carries).
+  - **A route store that cannot be listed** is `verdict:
+    "store_unreadable"`, never `no_routes`; nothing is started.
+  - **Cancel**: `engine_clear_route`, an `engine_set_route` that gets
+    past its refusals, or a newer `engine_connect_auto` abandons the
+    pass, a check in flight included; the abandoned call returns
+    `verdict: "cancelled"` with the last entry `result: "cancelled"`
+    and records nothing about that route.
+  - **`verdict`** (closed; a consumer shows its generic line for a code
+    it does not know): `""` connected on the first route tried;
+    `moved_on`; `no_routes`; `all_need_new_file`;
+    `all_expired_or_revoked`; `all_cooling_down`; `network_down` (every
+    route tried was told by the device that there is no network — the
+    engine has no reachability probe, so silence alone is never called
+    this); `relay_unreachable` (every TCP connect to the server's
+    address unanswered, UDP routes to it silent — the address is dead or
+    blocked, or the network has no way out, which silence cannot be told
+    from); `udp_blocked_here` (every UDP route silent while a TCP route
+    to the same address was answered); `name_blocked` / `address_blocked`
+    (two different names to the same address AND port: one got through /
+    both stopped at the same point); `all_failed`; and four beyond the
+    first design: `none_usable`, `cancelled`, `no_data_plane`,
+    `store_unreadable`. `udp_blocked_here` keeps the contract's name
+    and says more than is proved: the two observations show that THIS
+    route's UDP port was silent while the server's address was alive —
+    a network dropping UDP, a stopped UDP service on the relay and a
+    provider firewall on that port are indistinguishable. A consumer
+    must not word it as "this network blocks UDP".
+  - **`refined`** on a tried route is what a second route of the same
+    pass adds to its `category` (which is never rewritten):
+    `udp_blocked_here` (its UDP was silent and a TCP route to the same
+    address was answered or carried), `relay_unreachable` (its UDP was
+    silent and a TCP connect to the same address went unanswered),
+    `name_blocked`, `address_blocked`, or `""`. `relay` numbers the
+    server addresses of the pass (same number = same address; the
+    address is never reported).
+  - **Staying in charge** (`auto.mode`): true from a pass that starts
+    anything until an explicit `engine_clear_route` or an
+    `engine_set_route` that gets past its refusals. While it is true and
+    the connected route fails a liveness check (the engine's own timer:
+    `liveness_interval_s` ±25 %, `recheck_interval_s` while failed, and
+    at once on `engine_network_changed` to a different network), the
+    engine tries the other candidates by itself; the host does not
+    replace the TUN. Precisely: one failed check does not move it —
+    the route is checked again after 5 s (never later than
+    `recheck_interval_s`), and a SECOND failure in a row starts the
+    pass. It does not move at all for `path_too_slow`,
+    `relay_no_egress` or `network_offline` (the instance may still be
+    carrying, or no route would fare better); a route that fails with
+    one of those and later gets no answer at all is recorded as a new
+    failure and is then moved away from. If none carries, the instance
+    of the route that was connected is put back unchecked
+    (`route_check: "failed"`, `route_running: true`) and re-checked as
+    before; the next pass the engine starts BY ITSELF in the same
+    outage waits 5, 10, 20, 40, then 60 minutes (reset when a route
+    carries again or the automatic connect is stopped). An explicit
+    `engine_connect_auto` is not held to that wait.
+  - **Tunnelled refresh follows the engine.** Every instance has its
+    own inlet, so after any instance the engine starts — a candidate
+    that carries, the instance put back after a pass, the way back from
+    a failed switch — it re-points `engine_set_tunnel_refresh` itself
+    when the host's last call was `enabled=1`. A host need not (and on
+    a same-route restart cannot) notice.
+  - **`engine_shutdown` during a pass** ends it: no further candidate
+    is started (`verdict: "cancelled"`).
+  - `engine_export_diagnostics` member `auto` (always present, from
+    memory): `{"state":"idle|trying|connected|failed","mode":bool,
+    "trying":"r2","index":2,"total":4,"tried":[…],"verdict":"…",
+    "route_id":"r2","family":"…"}`. While `state` is `trying`,
+    `route_check` moves between `verifying` and `failed` per candidate:
+    a consumer shows the pass, not each candidate's failure. A failed
+    pass's block survives an `engine_clear_route` that finds nothing
+    running, with `mode` false.
+- **A switch that fails goes back** (added 2026-11-19, the end-to-end
+  rig's SW-1): `engine_set_route(B)` while route A is carrying, where B
+  then carries nothing, still returns the error and records B's failure
+  — and the engine starts and checks A again. Diagnostics member
+  `switch_back` (always present): `{"failed_route":"B",
+  "failed_family":"…","category":"…","restored_route":"A",
+  "restored":true|false}`; `failed_route` is `""` when there is nothing
+  to report. A host must read `active_route` / `route_running` after a
+  failed `engine_set_route` before tearing anything down.
 - `engine_export_diagnostics` carries four more always-present members
   (added 2026-11-19):
   - `active_route: string` and `active_route_family: string` — the
@@ -975,9 +1123,10 @@ nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_
 grep -rh '^//export engine_' core/ | wc -l
 ```
 
-**Release surface: 60.  Source surface: 63.** (2026-11-19. It was 58 /
-61 on 2026-08-17; `engine_set_tunnel_refresh` and `engine_route_precheck`
-were added since, the first without this ledger being updated.)
+**Release surface: 61.  Source surface: 64.** (2026-11-19. It was 58 /
+61 on 2026-08-17; `engine_set_tunnel_refresh`, `engine_route_precheck`
+and `engine_connect_auto` were added since, the first without this
+ledger being updated.)
 
 ### Caveat on `./daal release-check`
 
@@ -1012,6 +1161,7 @@ Added after that pass (append-only, no existing signature changed):
 |---|---|---|
 | `engine_set_tunnel_refresh` | `(int enabled, void *out, int out_len) -> int` | puts the engine's own scheduled fetches on its in-process loopback inlet, or takes them off; -1 when there is no live inlet (before `engine_set_route` has succeeded) — refresh then stays fail-closed, never direct |
 | `engine_route_precheck` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; see "Connection check" above |
+| `engine_connect_auto` | `(void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; blocking; see "Automatic connect" above |
 
 The TUN triplet was specified only in
 `development-phases/45-gap-dataplane-and-delivery.md` and never merged
@@ -1033,8 +1183,9 @@ client.
 ### Downstream copies of the count
 
 Every one of these was stale before the 2026-08-17 pass. If the surface
-grows again, update the live ones together (the count is 60 in each as
-of 2026-11-19; the last three are dated history and keep the number
+grows again, update the live ones together (the count was 60 in each as
+of 2026-11-19; `engine_connect_auto` made it 61 the same day, and only
+`daal` `EXPECTED_ABI` and this document were updated with it; the last three are dated history and keep the number
 they were written with):
 
 - `daal` `EXPECTED_ABI`

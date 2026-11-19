@@ -89,21 +89,18 @@ type Core struct {
 	// cleared only by an explicit user toggle through
 	// engine_set_experimental_families_enabled.
 	//
-	// AS DESIGNED, the pathmanager consults the flag through
-	// ExperimentalFamiliesEnabled() at the family_filter step BEFORE
-	// trust / budget / network-memory. AS BUILT it does not: nothing
-	// outside pathmanager's own tests calls ExperimentalFilter or
-	// RankWithExperimentalGate, and nothing outside abi's tests calls
-	// SetExperimentalRoutesSkipped. So this flag is currently a
-	// persisted preference that no rank pass reads, and the skip count
-	// below is always 0 in production. Corrected in the Wave-1 honesty
-	// pass after the comment was found asserting wiring that does not
-	// exist; wiring it is selection work, not a comment fix.
+	// ONE rank pass reads the flag: the automatic connect
+	// (connect_auto.go, autoCandidatesLocked →
+	// pathmanager.RankWithExperimentalGate), which leaves experimental
+	// routes out of its candidates while the flag is off and writes the
+	// number it left out to experimentalRoutesSkipped. A route the
+	// person picks by hand (engine_set_route) is NOT gated, as before:
+	// until the automatic connect existed nothing read the flag at all,
+	// and this comment said so.
 	//
-	// The skip count is meant to be the per-rank-pass tally surfaced as
-	// `experimental_routes_skipped` in diagnostics, reset by the
-	// pathmanager at the start of every rank pass (a snapshot, not a
-	// cumulative counter).
+	// The skip count is the tally of the LAST automatic pass, surfaced
+	// as `experimental_routes_skipped` in diagnostics (a snapshot, not a
+	// cumulative counter). 0 until a pass has run.
 	experimentalFamiliesEnabled bool
 	experimentalRoutesSkipped   int
 
@@ -200,6 +197,12 @@ type Core struct {
 	activeFamily string
 	routeEpoch   uint64
 	check        routeCheck
+	// auto: the automatic connect (connect_auto.go). Its own lock for
+	// the readers; `gen` inside it is guarded by mu.
+	auto autoState
+	// shuttingDown: Shutdown has taken this core. Nothing starts an
+	// engine instance after it is set. Guarded by mu.
+	shuttingDown bool
 
 	// activeSnap mirrors activeRoute/activeFamily for readers that must
 	// not wait for mu (SetRoute holds it across driver.Start): the
@@ -396,9 +399,23 @@ func Shutdown() error {
 	// A proof in flight and the liveness loop both hold the driver;
 	// let go of them before it is stopped.
 	c.check.abandon()
+	// Under the lock, so a connect that holds it between two candidates
+	// of an automatic pass (or on its way back to a route) has either
+	// not begun its next instance — and will not: shuttingDown — or has
+	// registered the check that the second abandon cancels. Without
+	// this a pass went on to start, prove and watch a route on a core
+	// whose store this call is about to close (and whose state
+	// directory PanicWipe is about to delete). The lock is never held
+	// across a connection check, so this does not wait for one.
+	c.mu.Lock()
+	c.shuttingDown = true
+	c.routeEpoch++
+	c.auto.gen++
+	c.check.abandon()
 	if c.driver != nil {
 		_ = c.driver.Stop()
 	}
+	c.mu.Unlock()
 	resetSchedulerForShutdown()
 	resetBudgetForShutdown()
 	resetRefreshForShutdown()
@@ -442,6 +459,16 @@ func VersionString() string { return Version }
 // down, endpoint guard, config build — changes nothing: the route that
 // was connected stays connected and stays watched by its liveness loop,
 // and a connection check in flight for another SetRoute goes on.
+//
+// A switch AWAY from a route that was carrying, to a route that then
+// carries nothing, still returns the error — and the engine goes back
+// to the route that was carrying (see `switch_back`, and the end-to-end
+// rig's finding SW-1). A host must therefore read `active_route` /
+// `route_running` after a failed SetRoute before it tears anything
+// down.
+//
+// A SetRoute that gets past its refusals is the person choosing a route
+// by hand: it ends the automatic connect (`auto.mode` false).
 func SetRoute(routeID string) error {
 	c := mustCore()
 	// Fail closed before anything else. On a build with no data plane
@@ -455,18 +482,113 @@ func SetRoute(routeID string) error {
 		return ErrNoDataPlane
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	// What was connected before this call, for the way back (below).
+	prev := c.activeRoute
+	st, _, running := c.check.snapshot()
+	prevCarrying := prev != "" && prev != routeID && running && (st == RouteCheckOK || st == RouteCheckDegraded)
+
+	out := c.connectRouteLocked(routeID, connectOpts{manual: true, record: true})
+	if (out.result == AutoResultNotCarrying || out.result == AutoResultStartFailed) && prevCarrying {
+		// The end-to-end rig's finding SW-1: the person was connected,
+		// switched, and the new route carries nothing. The switch has
+		// failed and is reported as that (the error below, the route's
+		// failure row and cooldown) — and the route that was carrying a
+		// moment ago is started and checked again rather than leaving
+		// them with nothing. `switch_back` in the diagnostics says so.
+		sb := SwitchBack{FailedRoute: routeID, FailedFamily: out.family, Category: string(out.category), RestoredRoute: prev}
+		back := c.connectRouteLocked(prev, connectOpts{restore: true})
+		switch back.result {
+		case AutoResultCancelled:
+			// Somebody else took the engine meanwhile; the state is
+			// theirs.
+			return out.err
+		case AutoResultCarried:
+			sb.Restored = true
+		default:
+			// The way back failed too. What the person asked for was
+			// the switch, so the failure they are shown is the switch's.
+			c.check.setFailed(out.category, false)
+			c.check.mu.Lock()
+			c.check.failedRoute, c.check.failedFamily = routeID, out.family
+			c.check.failedCooled = !pmCooldownUntil(c, routeID).IsZero() && out.category != diagnostics.PathTooSlow
+			c.check.mu.Unlock()
+		}
+		c.check.setSwitchBack(sb)
+		engine.LogInfo(fmt.Sprintf("route switch_back failed=%s category=%s back_to=%s restored=%t",
+			engine.LogID(routeID), engine.LogID(string(out.category)), engine.LogID(prev), sb.Restored))
+	}
+	return out.err
+}
+
+// connectOpts says on whose behalf connectRouteLocked runs.
+type connectOpts struct {
+	// manual: the person picked this route (engine_set_route). Getting
+	// past the refusals ends the automatic connect: its pass in flight
+	// is abandoned and `auto.mode` goes false.
+	manual bool
+	// record: a refusal is kept in connect_refused and logged.
+	record bool
+	// auto: a candidate of an automatic pass. The connection check is
+	// given the shorter budget (ProofConfig.StopAtUnreachedRelay), and
+	// a failure is charged as a candidate's (routeDownOptsLocked): the
+	// pass settles the durable record once it knows what the whole set
+	// of results says (autoSettleLocked).
+	auto bool
+	// restore: going back to the route that was connected before a
+	// switch that failed. Leaves the switch_back record alone.
+	restore bool
+}
+
+// connectOutcome is what one attempt at one route came to. result is
+// the vocabulary of the automatic connect's `tried` list.
+type connectOutcome struct {
+	result   string
+	family   string
+	category diagnostics.Category
+	// refused: the connect_refused code, when result is "refused".
+	refused string
+	// obs: the last failed attempt of the connection check, when result
+	// is "not_carrying". In memory only; it can carry addresses.
+	obs diagnostics.Observation
+	err error
+}
+
+// connectRouteLocked is one attempt to connect one route: the refusals,
+// the engine instance, the connection check, and the record of how it
+// went. engine_set_route is one call of it; the automatic connect is one
+// call per candidate.
+//
+// Called with Core.mu held and returns with it held. The lock is
+// RELEASED for the connection check (seconds), so the diagnostics
+// pollers, SetMode and — above all — ClearRoute do not wait for it; a
+// ClearRoute, a manual SetRoute or a newer automatic connect during it
+// takes the engine, and this call comes back "cancelled" having recorded
+// nothing.
+func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome {
 	// Every way out of this function before anything is started goes
-	// through prepareRouteLocked, which keeps the reason (as a closed
+	// through prepareRouteOpts, which keeps the reason (as a closed
 	// code) for the diagnostics blob: on Android the returned error
 	// reaches nobody.
-	row, body, err := c.prepareRouteLocked(routeID)
+	row, body, err := c.prepareRouteOpts(routeID, o.record, false)
 	if err != nil {
-		active := c.activeRoute
-		c.mu.Unlock()
-		logRouteRefused(routeID, err, active)
-		return err
+		code := ConnectRefusedOther
+		var rr *routeRefusal
+		if errors.As(err, &rr) {
+			code = rr.code
+		}
+		if o.record {
+			logRouteRefused(routeID, err, c.activeRoute)
+		}
+		return connectOutcome{result: AutoResultRefused, refused: code, err: err}
 	}
 	family := row.TransportFamily
+	if c.shuttingDown {
+		return connectOutcome{result: AutoResultCancelled, family: family, err: ErrConnectCancelled}
+	}
+	if o.manual {
+		c.autoStopLocked(false)
+	}
 	// Every refusal is behind us: from here this call REPLACES whatever
 	// is running, so whatever was being proved or watched belongs to the
 	// route it replaces. Not a line earlier — a refused SetRoute leaves
@@ -475,6 +597,9 @@ func SetRoute(routeID string) error {
 	// checking it again.
 	c.check.abandon()
 	c.check.setRefused(ConnectRefusedNone, "")
+	if !o.restore {
+		c.check.setSwitchBack(SwitchBack{})
+	}
 	c.routeEpoch++
 	epoch := c.routeEpoch
 	if prev := c.activeRoute; prev != "" && prev != routeID {
@@ -484,10 +609,10 @@ func SetRoute(routeID string) error {
 	if err := c.driver.Start(context.Background(), body); err != nil {
 		// Start failed: there is no instance. Classified from the error
 		// text alone — a config or start-up error has no phase.
+		cat := diagnostics.Classify(err.Error())
 		c.setActiveLocked(routeID, family)
-		c.routeDownLocked(routeID, family, diagnostics.Classify(err.Error()), err.Error(), true)
-		c.mu.Unlock()
-		return err
+		c.routeDownOptsLocked(routeID, family, cat, err.Error(), true, o.auto)
+		return connectOutcome{result: AutoResultStartFailed, family: family, category: cat, err: err}
 	}
 	// The instance is up and has dialled nothing. From here until
 	// ClearRoute (or the teardown of a failed proof), any refresh that
@@ -505,28 +630,38 @@ func SetRoute(routeID string) error {
 	c.check.cancelProof = cancel
 	c.check.mu.Unlock()
 	proofCfg := c.proofCfg
+	if o.auto {
+		proofCfg.StopAtUnreachedRelay = true
+	}
 	c.mu.Unlock()
 
 	res := c.driver.Prove(pctx, proofCfg)
 	cancel()
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.routeEpoch != epoch || res.Cancelled {
-		// ClearRoute or another SetRoute took the engine while this
+		// ClearRoute or another connect took the engine while this
 		// proof ran. The state is theirs; nothing was learned about the
 		// route, and nothing is recorded.
-		return ErrConnectCancelled
+		return connectOutcome{result: AutoResultCancelled, family: family, err: ErrConnectCancelled}
 	}
 	if !res.OK {
 		cat := res.Category()
 		reason := proofFailureText(res)
-		c.routeDownLocked(routeID, family, cat, reason, true)
-		return &routeFailure{routeID: routeID, category: cat, reason: reason}
+		c.routeDownOptsLocked(routeID, family, cat, reason, true, o.auto)
+		if !o.auto {
+			c.rememberRoute(routeID, false, cat)
+		}
+		return connectOutcome{result: AutoResultNotCarrying, family: family, category: cat, obs: res.Observation,
+			err: &routeFailure{routeID: routeID, category: cat, reason: reason}}
 	}
 	c.routeUpLocked(routeID, family, res)
 	c.startLivenessLocked()
-	return nil
+	c.rememberRoute(routeID, true, "")
+	// A host that turned tunnelled refresh on is pointed at THIS
+	// instance's inlet: it may not know this instance exists.
+	rearmTunnelRefresh()
+	return connectOutcome{result: AutoResultCarried, family: family}
 }
 
 // ClearRoute is engine_clear_route. It stops whatever is running or
@@ -543,14 +678,24 @@ func ClearRoute() error {
 	c.check.abandon()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Again, now that the lock is held: a connect that was between "the
+	// instance is up" and "the check has started" when the line above
+	// ran has registered its check since, and would otherwise run it to
+	// the end against an engine this call is about to stop.
+	c.check.abandon()
 	c.routeEpoch++
+	// An explicit disconnect ends the automatic connect, whatever else
+	// this call finds. A pass in flight is abandoned (and counts as
+	// something stopped); the verdict of a pass that already FAILED is
+	// kept, for the same reason the failed connect's verdict is.
+	autoWasTrying := c.autoStopLocked(true)
 	// Did this call find anything to stop? Read before the driver is
 	// stopped, under Core.mu (every transition out of "nothing running"
 	// is made under it). A check that was in flight a moment ago still
 	// reads verifying here — the SetRoute it belonged to records nothing
 	// once it is cancelled — so it counts as something stopped.
 	st, _, running := c.check.snapshot()
-	nothingRunning := st == RouteCheckNone || (st == RouteCheckFailed && !running)
+	nothingRunning := !autoWasTrying && (st == RouteCheckNone || (st == RouteCheckFailed && !running))
 	stopped, stoppedFamily := c.activeRoute, c.activeFamily
 	if err := c.driver.Stop(); err != nil {
 		return err
@@ -588,6 +733,8 @@ func ClearRoute() error {
 	// that window was the person's own Disconnect, after which the
 	// refusal stood for good.)
 	c.check.setRefused(ConnectRefusedNone, "")
+	c.check.setSwitchBack(SwitchBack{})
+	c.auto.reset()
 	c.pm.Disconnect()
 	// Posture axis: a user-initiated disconnect always returns to
 	// PostureNoRoute. The transition `EventDisconnected → NoRoute`
@@ -863,6 +1010,18 @@ func ExportDiagnostics() (string, error) {
 		// tunnel the moment the store cannot answer. Always present.
 		"active_route":        activeRoute,
 		"active_route_family": activeFamily,
+		// `auto`: the automatic connect (engine_connect_auto,
+		// connect_auto.go) — {state, mode, trying, index, total, tried,
+		// verdict, route_id, family, order}. From memory only; always
+		// present. `state` is "idle", "trying", "connected" or "failed";
+		// `mode` is true while the engine is the one choosing the route.
+		"auto": c.auto.block(),
+		// `switch_back`: the last manual switch went to a route that
+		// carried nothing and the engine went back to the route that was
+		// connected — {failed_route, failed_family, category,
+		// restored_route, restored}. failed_route "" when there is
+		// nothing to report. Always present.
+		"switch_back": c.check.getSwitchBack(),
 		// `store_recovered`: true when the route store was found damaged
 		// at start, was set aside (kept on disk under a dated name) and
 		// replaced by an empty one — the person must import their file
@@ -914,17 +1073,12 @@ func ExportDiagnostics() (string, error) {
 		// `experimental_families_enabled` field is always present
 		// (default false).
 		//
-		// `experimental_routes_skipped` is MEANT to be the
-		// per-rank-pass tally of routes the gate filtered — a
-		// snapshot, not a cumulative counter. Read it as 0 and
-		// nothing more: as built, no rank pass consults the gate
-		// (pathmanager's ExperimentalFilter / RankWithExperimentalGate
-		// have no production caller) and nothing outside abi's own
-		// tests calls SetExperimentalRoutesSkipped, so the value is 0
-		// in every install regardless of what selection did. A helper
-		// reading a shared diagnostics blob must NOT conclude from a
-		// 0 here that the gate ran and skipped nothing. See the
-		// matching note on Core.experimentalFamiliesEnabled.
+		// `experimental_routes_skipped` is how many experimental-family
+		// routes the LAST automatic connect left out because the gate
+		// was off — a snapshot, not a cumulative counter, and 0 until
+		// an automatic pass has run. A route picked by hand is never
+		// gated and never counted. See the matching note on
+		// Core.experimentalFamiliesEnabled.
 		"experimental_families_enabled": c.experimentalFamiliesEnabled,
 		"experimental_routes_skipped":   c.experimentalRoutesSkipped,
 		// Phase 3B. The rendezvous-priority override is the

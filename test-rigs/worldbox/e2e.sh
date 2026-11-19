@@ -11,14 +11,18 @@
 #
 # quick   no censor × all 7 families (tree daemon) with a live route switch
 #         (TCP family ↔ QUIC family), revoke, L1 rotation, mgmt-auth and
-#         tamper; the pinned RELEASE artefacts × the default
+#         tamper; the automatic connect (the one button: pick, try, move
+#         on, remember, explain, fall over) on a default relay's four
+#         routes; the pinned RELEASE artefacts × the default
 #         families; and every censor scenario × one TCP and one QUIC family.
 # full    every censor scenario × all 7 families; the whole lifecycle
 #         (recipients, revoke, L1, L2, L3, freshness, mgmt-auth, capability
 #         honesty, tamper, wrong credentials, repeated relay restarts) on the
 #         tree daemon and again (bar the restarts) on
 #         the pinned release artefacts; rotation under a censor; a live
-#         route switch between every ordered pair of families; and the
+#         route switch between every ordered pair of families; the
+#         automatic connect on all 7 families' routes and under the
+#         scenarios where nothing, or only QUIC, is stopped; and the
 #         pinned artefacts × all 7 families (FINDINGS F-002, kept visible);
 #         and a relay provisioned with two opt-in families only (FAM-4).
 #
@@ -43,7 +47,7 @@ while (($#)); do
     -j) jobs="$2"; shift ;;
     --only) only="$2"; shift ;;
     --plan) plan_only=1 ;;
-    -h|--help) sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "e2e: unknown argument $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -57,6 +61,7 @@ fi
 scenarios=(); for f in "$RIG"/scenarios/*.json; do s="$(basename "$f" .json)"; [[ "$s" == clean ]] || scenarios+=("$s"); done
 plan=()
 if [[ "$mode" == quick ]]; then
+  plan+=("auto"$'\t'"--mgmt=tree --ops auto clean vless-reality hysteria2")   # the one button, on the four routes a default relay serves: ~70 s, the longest world of this mode, so it is its own and first
   plan+=("clean"$'\t'"--mgmt=tree --ops switch,revoke,l1,mgmtauth,tamper clean")   # switch first: it uses r1's pack as minted
   plan+=("release"$'\t'"--ops revoke,mgmtauth clean @default")
   for s in "${scenarios[@]}"; do plan+=("$s"$'\t'"--mgmt=tree $s vless-reality hysteria2"); done
@@ -65,9 +70,12 @@ else
   plan+=("clean.rotation"$'\t'"--mgmt=tree --ops l1,l2,l3,freshness,caps clean")   # l2 THEN l3: the cover host moves, then the address (naive, FINDINGS LC-3); the other order runs under udp-blackhole and in release.lifecycle
   plan+=("clean.recipients"$'\t'"--mgmt=tree --ops recipients,revoke,wrongcreds,tamper,mgmtauth,restarts clean")
   plan+=("clean.switch"$'\t'"--mgmt=tree --ops switch,switch-all clean")   # one phone, many routes: every ordered pair of families (FINDINGS SW-0, SW-1, SW-2)
+  plan+=("clean.auto"$'\t'"--mgmt=tree --ops auto clean")   # the one button: pick, try, move on, remember, explain, fall over
   for s in "${scenarios[@]}"; do
     if [[ "$s" == udp-blackhole ]]; then
       plan+=("$s"$'\t'"--mgmt=tree --ops recipients,l1,l3,l2,caps $s")   # rotation under a censor
+    elif [[ "$s" == relay-ip-block || "$s" == total-blackout || "$s" == quic-drop ]]; then
+      plan+=("$s"$'\t'"--mgmt=tree --ops auto $s")   # the one button where nothing can carry (and the verdict it must give), and where only the QUIC routes are stopped
     else
       plan+=("$s"$'\t'"--mgmt=tree $s")
     fi

@@ -22,7 +22,8 @@ use daal_desktop_core::DesktopError;
 const NO_CORE_NEEDED: &[&str] = &["load", "init", "shutdown", "version_str", "heartbeat"];
 
 /// Methods of `impl Engine` that make no engine call at all.
-const NOT_A_CALL: &[&str] = &["is_ready", "unavailable_reason", "ensure_ready", "failed", "call_buf"];
+const NOT_A_CALL: &[&str] =
+    &["is_ready", "unavailable_reason", "ensure_ready", "failed", "call_buf", "has_connect_auto"];
 
 #[test]
 fn every_core_call_is_gated() {
@@ -65,6 +66,7 @@ fn every_core_call_is_gated() {
         let call = text
             .find("(self.")
             .or_else(|| text.find("self.route_precheck"))
+            .or_else(|| text.find("self.connect_auto"))
             .unwrap_or_else(|| panic!("{name}: expected an engine call"));
         let gate = text
             .find("self.ensure_ready()?;")
@@ -192,6 +194,57 @@ fn failed_init_leaves_a_usable_process() {
         assert_eq!(v["route_id"], "no-such-route");
         assert!(!v["refused"].as_str().unwrap_or("").is_empty(), "{answer}");
         assert!(v["active_route"].is_string(), "{answer}");
+    }
+
+    // The automatic connect on an empty store: nothing to try is an
+    // ANSWER (connected:false, a verdict code), never an error and
+    // never a crash. A library that predates the call answers None.
+    // Nothing was imported, so no route is started and no network is
+    // touched.
+    assert_eq!(engine.has_connect_auto(), engine.connect_auto().expect("connect_auto").is_some());
+    match engine.connect_auto().expect("connect_auto") {
+        Some(answer) => {
+            let v: serde_json::Value = serde_json::from_str(&answer).expect("connect_auto json");
+            assert_eq!(v["connected"], false, "{answer}");
+            // Which code depends on the build: "no_routes" on an engine
+            // that can carry traffic, and the engine's own code for a
+            // library built without a data plane (the one `./daal test`
+            // builds). Either way it is a closed code, and it reaches
+            // the host unchanged.
+            let verdict = v["verdict"].as_str().unwrap_or("").to_string();
+            assert!(!verdict.is_empty(), "{answer}");
+            assert!(
+                verdict.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{answer}"
+            );
+            assert_eq!(v["route_id"], "", "{answer}");
+            assert!(v["tried"].as_array().map(|a| a.is_empty()).unwrap_or(false), "{answer}");
+            let s = daal_desktop_core::engine::connect_auto_summary_json(&answer).expect("summary");
+            let s: serde_json::Value = serde_json::from_str(&s).unwrap();
+            assert_eq!(s["connected"], false);
+            assert_eq!(s["verdict"], verdict.as_str());
+            // The diagnostics the Android service follows carry the
+            // engine's `auto` object: mode is reported, as a boolean.
+            let state = daal_desktop_core::engine::connection_state_json(
+                &engine.export_diagnostics().expect("diagnostics"),
+            )
+            .expect("state");
+            let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+            assert!(state["auto_mode"].is_boolean(), "{state}");
+            assert!(!state["auto_state"].as_str().unwrap_or("").is_empty(), "{state}");
+        }
+        None => {
+            // `./daal test` builds the library from this tree, which has
+            // the call: there its absence is a failure, not a skip.
+            assert!(
+                std::env::var("DAAL_REQUIRE_ENGINE_LIB").as_deref() != Ok("1"),
+                "DAAL_REQUIRE_ENGINE_LIB=1 but the engine library has no engine_connect_auto"
+            );
+            eprintln!(
+                "SKIPPED (not a pass): this engine library has no engine_connect_auto; \
+                 the automatic-connect binding was not exercised"
+            );
+        }
     }
     let _ = engine.shutdown();
     assert!(!engine.is_ready());

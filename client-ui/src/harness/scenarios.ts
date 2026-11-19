@@ -269,6 +269,88 @@ export const SCENARIOS: Scenario[] = [
         availableRoutes: [],
     },
 
+    // Automatic connect, as the engine's `auto` block describes it
+    // (lib/autoConnect.ts). Canned moments; pressing the main control in
+    // any disconnected scenario runs the harness's own small version.
+    {
+        id: 'connection-auto-trying',
+        title: 'Connection · automatic, trying way 2 of 4',
+        screen: 'connection',
+        state: 'connecting',
+        connection: {
+            ...CONN_BASE,
+            state: 'connecting',
+            routeRunning: true,
+            routeCheck: 'verifying',
+            activeRoute: ROUTE_FRIEND_MAY6,
+            auto: {
+                state: 'trying',
+                mode: true,
+                trying: ROUTE_FRIEND_MAY6.routeId,
+                index: 2,
+                total: 4,
+                tried: [
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'hysteria2', result: 'not_carrying', category: 'udp_no_reply' },
+                ],
+                verdict: '',
+                routeId: '',
+            },
+        },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+    {
+        id: 'connection-auto-moved',
+        title: 'Connection · automatic, connected after moving on',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: ROUTE_PARS_RESCUE_03,
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 2,
+                total: 4,
+                tried: [
+                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: 'hysteria2', result: 'not_carrying', category: 'udp_no_reply' },
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'vless-reality', result: 'carried', category: '' },
+                ],
+                verdict: 'moved_on',
+                routeId: ROUTE_PARS_RESCUE_03.routeId,
+            },
+        },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+    {
+        id: 'connection-auto-failed',
+        title: 'Connection · automatic, nothing worked',
+        screen: 'connection',
+        state: 'error',
+        connection: {
+            ...CONN_BASE,
+            state: 'error',
+            routeRunning: false,
+            auto: {
+                state: 'failed',
+                mode: false,
+                trying: '',
+                index: 0,
+                total: 2,
+                tried: [
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'vless-reality', result: 'start_failed', category: 'tcp_connect_timeout' },
+                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: 'websocket-tls', result: 'start_failed', category: 'tcp_connect_timeout' },
+                ],
+                verdict: 'relay_unreachable',
+                routeId: '',
+            },
+        },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+
     // --- Routes ---
     {
         id: 'routes-populated',

@@ -71,3 +71,42 @@ func TestFailed_SlowPathAndRelayNoEgressNeverCoolDown(t *testing.T) {
 		}
 	}
 }
+
+// A candidate of an automatic pass cools its own route down and never
+// feeds the three-in-an-hour family count; a family-class category
+// still cools the family at once.
+func TestFailedCandidate_CoolsTheRouteNotTheFamilyCount(t *testing.T) {
+	m := New()
+	now := time.Date(2026, 4, 26, 19, 0, 0, 0, time.UTC)
+	m.SetNow(func() time.Time { return now })
+	for _, id := range []string{"a", "b", "c", "d"} {
+		m.FailedCandidate(id, "vless-reality", diagnostics.TCPConnectTimeout)
+	}
+	if ok, _ := m.CanAttempt("a", "vless-reality"); ok {
+		t.Fatal("the route itself must cool down")
+	}
+	if ok, why := m.CanAttempt("other", "vless-reality"); !ok {
+		t.Fatalf("four candidate failures cooled the whole family: %s", why)
+	}
+	if len(m.SkippedFamilies()) != 0 {
+		t.Fatalf("family cooldown: %+v", m.SkippedFamilies())
+	}
+	m.FailedCandidate("u", "hysteria2", diagnostics.UDPUnavailable)
+	if ok, _ := m.CanAttempt("other-u", "hysteria2"); ok {
+		t.Fatal("a family-class category must still cool the family")
+	}
+}
+
+// Forgive lifts the route's cooldown and keeps the reason.
+func TestForgive_LiftsTheCooldownAndKeepsTheReason(t *testing.T) {
+	m := New()
+	m.Failed("r1", "vless-reality", diagnostics.TCPConnectTimeout)
+	m.Forgive("r1")
+	if ok, why := m.CanAttempt("r1", "vless-reality"); !ok {
+		t.Fatalf("still cooling: %s", why)
+	}
+	h := m.RouteHealth()
+	if len(h) != 1 || h[0].InCooldown || h[0].CooldownReason != diagnostics.TCPConnectTimeout {
+		t.Fatalf("health: %+v", h)
+	}
+}

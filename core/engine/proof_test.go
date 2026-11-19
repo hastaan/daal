@@ -443,3 +443,38 @@ func TestProofOrderStartsAnywhere(t *testing.T) {
 		t.Fatalf("only %d of %d targets can be drawn first", len(first), len(DefaultProofTargets))
 	}
 }
+
+// The automatic connect's budget: a relay whose address never answered
+// is not asked a second time (the second attempt differs only in the
+// far-side target, which is never consulted), while a relay that DID
+// answer still gets every attempt — there a second target can rescue a
+// working route.
+func TestRunProof_StopAtUnreachedRelay(t *testing.T) {
+	syn := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+	hello := errors.New("read tcp: i/o timeout")
+	for _, tc := range []struct {
+		name     string
+		stop     bool
+		err      error
+		phase    diagnostics.Phase
+		progress bool
+		want     int
+	}{
+		{"unreached relay, flag on: one attempt", true, syn, diagnostics.PhaseReach, false, 1},
+		{"unreached relay, flag off: every attempt", false, syn, diagnostics.PhaseReach, false, 2},
+		{"relay swallowed the first flight: every attempt", true, hello, diagnostics.PhaseHandshake, false, 2},
+		{"relay answered, target silent: every attempt", true, hello, diagnostics.PhaseCarry, false, 2},
+	} {
+		cfg := cfgFor("a.example:443", "b.example:443", "c.example:443")
+		cfg.StopAtUnreachedRelay = tc.stop
+		res := runProof(context.Background(), cfg, func(int) int { return 0 },
+			func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+				o := diagnostics.Observe(tc.err, tc.phase, false, true)
+				o.Progress = tc.progress
+				return o, tc.err
+			})
+		if res.OK || res.Attempts != tc.want {
+			t.Errorf("%s: attempts = %d, want %d (%+v)", tc.name, res.Attempts, tc.want, res)
+		}
+	}
+}

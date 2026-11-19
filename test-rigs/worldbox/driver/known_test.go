@@ -520,7 +520,11 @@ func TestKnownEntriesArePinnedToTheirDefect(t *testing.T) {
 			case "CEN-1":
 				t.Errorf("CEN-1 is fixed (FINDINGS.md); it must not come back as an excuse: %+v", m)
 			case "CEN-4":
-				if m.Got != "udp_no_reply" && m.Got != "tls_sni_or_cert_block_suspected" {
+				// …and, in a pass of the automatic connect, to the one
+				// refinement that is coarser than the truth (ops_auto.go
+				// quicOnly).
+				inPass := m.Phase == "op:auto" && m.Check == "quic-only.connect.refined" && m.Got == "udp_blocked_here"
+				if m.Got != "udp_no_reply" && m.Got != "tls_sni_or_cert_block_suspected" && !inPass {
 					t.Errorf("CEN-4 must be pinned to the coarser category the engine reports: %+v", m)
 				}
 			}

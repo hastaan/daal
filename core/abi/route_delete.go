@@ -11,7 +11,14 @@ func RouteDelete(routeID string) error {
 	if loadedCore() == nil {
 		return errors.New("abi: not initialized")
 	}
-	return loadedCore().store.DeleteRoute(routeID)
+	if err := loadedCore().store.DeleteRoute(routeID); err != nil {
+		return err
+	}
+	// The per-network memory of the route goes with it (best effort).
+	if st := netmemStore(); st != nil {
+		_ = st.ForgetRoute(routeID)
+	}
+	return nil
 }
 
 // PublisherDelete is engine_publisher_delete: hard-remove a publisher and
@@ -20,5 +27,22 @@ func PublisherDelete(publisherID string) (int, error) {
 	if loadedCore() == nil {
 		return 0, errors.New("abi: not initialized")
 	}
-	return loadedCore().store.DeletePublisher(publisherID)
+	c := loadedCore()
+	var ids []string
+	if rows, err := c.store.ListRoutes(); err == nil {
+		for _, r := range rows {
+			if r.PublisherID == publisherID {
+				ids = append(ids, r.RouteID)
+			}
+		}
+	}
+	n, err := c.store.DeletePublisher(publisherID)
+	if err == nil {
+		if st := netmemStore(); st != nil {
+			for _, id := range ids {
+				_ = st.ForgetRoute(id)
+			}
+		}
+	}
+	return n, err
 }

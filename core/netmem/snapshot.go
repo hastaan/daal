@@ -118,6 +118,44 @@ type Snapshot struct {
 	// device. See specs/network-memory-v1.md "Phase 3C widening"
 	// and specs/masque-ladder-v1.md.
 	LastUsedMasqueSubmode string `json:"last_used_masque_submode,omitempty"`
+
+	// RouteMemory — what each route did the last times it was tried on
+	// THIS network, for the automatic connect's ordering ("the route
+	// that carried here last goes first; a route that failed here
+	// recently goes last"). Keyed by route id. RouteMemorySeq is the
+	// counter the entries are ordered by. See RouteMemory.
+	RouteMemory    map[string]RouteMemory `json:"route_memory,omitempty"`
+	RouteMemorySeq uint64                 `json:"route_memory_seq,omitempty"`
+}
+
+// RouteMemory is one route's record on one network.
+//
+// PRIVACY SHAPE. Times are HOUR BUCKETS (unix seconds, truncated), the
+// resolution the route store keeps its own outcomes at: a seized device
+// must not show the minute its owner connected. Hour buckets cannot
+// order a success and a failure inside one hour — the hour in which a
+// recovery matters most — so every record also takes the next value of
+// the snapshot's counter (RouteMemorySeq). The counter orders events
+// exactly and says nothing about when they happened. The failure is a
+// category from the closed taxonomy, never an error text.
+type RouteMemory struct {
+	CarriedHour    int64  `json:"carried_hour,omitempty"`
+	CarriedSeq     uint64 `json:"carried_seq,omitempty"`
+	FailedHour     int64  `json:"failed_hour,omitempty"`
+	FailedSeq      uint64 `json:"failed_seq,omitempty"`
+	FailedCategory string `json:"failed_category,omitempty"`
+}
+
+// CarriedLast reports whether the route's most recent recorded outcome
+// on this network was a round trip.
+func (m RouteMemory) CarriedLast() bool { return m.CarriedSeq > m.FailedSeq }
+
+// FailedSince reports whether the route's most recent recorded outcome
+// on this network was a failure no older than the hour bucket of
+// `cutoff`. An older failure is history, not a reason to try the route
+// last.
+func (m RouteMemory) FailedSince(cutoff time.Time) bool {
+	return m.FailedSeq > m.CarriedSeq && m.FailedHour >= cutoff.UTC().Truncate(time.Hour).Unix()
 }
 
 // Empty reports whether the snapshot has no observed data. A fresh
@@ -133,7 +171,8 @@ func (s Snapshot) Empty() bool {
 		!s.UDPProbeOK && s.UDPProbeAt.IsZero() &&
 		!s.DNSPoisoned &&
 		s.LastWinningRendezvousChannel == "" &&
-		s.LastUsedMasqueSubmode == ""
+		s.LastUsedMasqueSubmode == "" &&
+		len(s.RouteMemory) == 0 && s.RouteMemorySeq == 0
 }
 
 // MarshalCanonical returns the canonical-JSON encoding (sorted keys

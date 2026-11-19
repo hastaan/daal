@@ -171,6 +171,83 @@ func (s *Store) LookupLastUsedMasqueSubmode(networkID string) string {
 	return snap.LastUsedMasqueSubmode
 }
 
+// RecordRouteCarried notes that routeID carried a round trip on
+// networkID. The rest of the snapshot is kept as it is; a network seen
+// for the first time gets a snapshot holding only this.
+func (s *Store) RecordRouteCarried(networkID, routeID string, now time.Time) error {
+	return s.recordRoute(networkID, routeID, now, func(m *RouteMemory, seq uint64, hour int64) {
+		m.CarriedSeq, m.CarriedHour = seq, hour
+	})
+}
+
+// RecordRouteFailed notes that routeID failed on networkID, and the
+// taxonomy category it failed with.
+func (s *Store) RecordRouteFailed(networkID, routeID, category string, now time.Time) error {
+	return s.recordRoute(networkID, routeID, now, func(m *RouteMemory, seq uint64, hour int64) {
+		m.FailedSeq, m.FailedHour, m.FailedCategory = seq, hour, category
+	})
+}
+
+func (s *Store) recordRoute(networkID, routeID string, now time.Time, set func(*RouteMemory, uint64, int64)) error {
+	if networkID == "" || routeID == "" {
+		return errors.New("netmem: empty networkID or routeID")
+	}
+	snap, err := s.Get(networkID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if snap.RouteMemory == nil {
+		snap.RouteMemory = map[string]RouteMemory{}
+	}
+	snap.RouteMemorySeq++
+	m := snap.RouteMemory[routeID]
+	set(&m, snap.RouteMemorySeq, now.UTC().Truncate(time.Hour).Unix())
+	snap.RouteMemory[routeID] = m
+	return s.Put(networkID, snap, now)
+}
+
+// LookupRouteMemory returns what is remembered about every route on
+// networkID; nil when nothing is. Pure read.
+func (s *Store) LookupRouteMemory(networkID string) map[string]RouteMemory {
+	if networkID == "" {
+		return nil
+	}
+	snap, err := s.Get(networkID)
+	if err != nil {
+		return nil
+	}
+	return snap.RouteMemory
+}
+
+// ForgetRoute removes routeID from the memory of every network. For a
+// route the person deleted.
+func (s *Store) ForgetRoute(routeID string) error {
+	ids, err := s.All()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		snap, err := s.Get(id)
+		if err != nil {
+			continue
+		}
+		if _, ok := snap.RouteMemory[routeID]; !ok {
+			continue
+		}
+		delete(snap.RouteMemory, routeID)
+		// LastSeen is kept: forgetting a route is not a visit to the
+		// network and must not extend its retention.
+		body, err := snap.MarshalCanonical()
+		if err != nil {
+			return err
+		}
+		if err := s.kv.PutSecret(keyPrefix+id, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Sweep deletes snapshots older than TTL. Returns the IDs deleted
 // in deterministic order. Callers are expected to call Sweep on
 // the scheduler's hourly tick.

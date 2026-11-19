@@ -481,3 +481,71 @@ func contains(haystack, needle []byte) bool {
 	}
 	return false
 }
+
+// Per-route memory of one network: recorded without disturbing the rest
+// of the snapshot, ordered exactly inside one hour, and kept apart per
+// network.
+func TestRouteMemory_RecordOrderAndIsolation(t *testing.T) {
+	kv := newFakeKV()
+	st := New(kv)
+	now := time.Date(2026, 11, 19, 12, 10, 0, 0, time.UTC)
+	home := HashID(KindWiFi, "", "Home")
+	cell := HashID(KindCell, "carrier", "")
+
+	if err := st.Put(home, Snapshot{Mode: "lifeline", LastWinningRendezvousChannel: "sqs"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRouteFailed(home, "r1", "tcp_connect_timeout", now); err != nil {
+		t.Fatal(err)
+	}
+	// Same hour: the bucket cannot order these two, the counter does.
+	if err := st.RecordRouteCarried(home, "r1", now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRouteCarried(home, "r2", now.Add(6*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRouteFailed(home, "r2", "udp_no_reply", now.Add(7*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	mem := st.LookupRouteMemory(home)
+	if !mem["r1"].CarriedLast() || mem["r1"].FailedSince(now.Add(-time.Hour)) {
+		t.Fatalf("r1 failed and then carried in the same hour; it must read as carried: %+v", mem["r1"])
+	}
+	if mem["r2"].CarriedLast() || !mem["r2"].FailedSince(now.Add(-time.Hour)) || mem["r2"].FailedCategory != "udp_no_reply" {
+		t.Fatalf("r2 carried and then failed; it must read as failed: %+v", mem["r2"])
+	}
+	if mem["r2"].FailedSince(now.Add(48 * time.Hour)) {
+		t.Fatal("a failure older than the cutoff is history")
+	}
+	// Hour buckets only: nothing finer than the hour is stored.
+	if mem["r1"].CarriedHour%3600 != 0 || mem["r2"].FailedHour%3600 != 0 {
+		t.Fatalf("times are not hour buckets: %+v %+v", mem["r1"], mem["r2"])
+	}
+	snap, _ := st.Get(home)
+	if snap.Mode != "lifeline" || snap.LastWinningRendezvousChannel != "sqs" {
+		t.Fatalf("recording a route rewrote the rest of the snapshot: %+v", snap)
+	}
+	if got := st.LookupRouteMemory(cell); len(got) != 0 {
+		t.Fatalf("another network knows about these routes: %v", got)
+	}
+	// A network never seen before gets a snapshot.
+	if err := st.RecordRouteCarried(cell, "r9", now); err != nil {
+		t.Fatal(err)
+	}
+	if !st.LookupRouteMemory(cell)["r9"].CarriedLast() {
+		t.Fatal("first record on a new network was lost")
+	}
+	if err := st.ForgetRoute("r1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.LookupRouteMemory(home)["r1"]; ok {
+		t.Fatal("ForgetRoute left the route in the memory")
+	}
+	if _, ok := st.LookupRouteMemory(home)["r2"]; !ok {
+		t.Fatal("ForgetRoute removed another route")
+	}
+	if (Snapshot{RouteMemory: map[string]RouteMemory{"r": {}}}).Empty() {
+		t.Fatal("a snapshot holding route memory is not empty")
+	}
+}

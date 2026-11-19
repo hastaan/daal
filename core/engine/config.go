@@ -146,6 +146,11 @@ func MarshalSingBox(cfg *SingBoxConfig) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
+// IsUDPFamily reports whether a route of this transport family reaches
+// its relay over UDP. The automatic connect uses it to tell a silent
+// UDP route from a silent address (core/abi/connect_auto.go).
+func IsUDPFamily(family string) bool { return isUDPFamily(bundle.TransportFamily(family)) }
+
 func isUDPFamily(f bundle.TransportFamily) bool {
 	switch f {
 	case bundle.TransportHysteria2, bundle.TransportTUIC, bundle.TransportMASQUE,

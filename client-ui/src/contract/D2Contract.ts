@@ -115,6 +115,85 @@ export interface ConnectionSummary {
    *  the reason reaches the page: the connect call resolves as soon as
    *  the VPN service is started. */
   connectRefused?: 'needs_new_file' | 'cooldown' | 'revoked' | 'expired' | 'other';
+  /** What "Automatic" is doing (the `auto` block of the diagnostics
+   *  blob, parsed by lib/autoConnect.ts). `undefined` = the engine sent
+   *  no such block (an engine that predates automatic connect) — the
+   *  page then claims nothing about it. */
+  auto?: AutoStatus;
+  /** Android only: the VPN service's note that an automatic connect
+   *  found nothing — a verdict code ('' when it had none). `undefined`
+   *  = no such note. Read through lib/autoConnect.ts autoFailure. */
+  autoFailedNote?: string;
+  /** Android only: the VPN service is keeping the VPN interface up with
+   *  nothing behind it (the engine ran out of ways while connected; the
+   *  service retries on a timer). Every other app is cut off meanwhile.
+   *  Read through lib/autoConnect.ts isHolding. */
+  holding?: boolean;
+  /** `route_count` from the diagnostics blob: a HINT only (the engine
+   *  reads it with the store error dropped, so 0 can mean "could not
+   *  read"). Pages use a change in it as the cue to re-read the real
+   *  list; "nothing imported" is never concluded from it. */
+  routeCountHint?: number;
+}
+
+/** One route automatic connect tried, as the engine reports it. Ids and
+ *  closed codes only. `family` and `category` are engine vocabulary:
+ *  shown only inside a Details fold, for the person helping. */
+export interface AutoTried {
+  routeId: string;
+  family: string;
+  /** 'carried' | 'not_carrying' | 'start_failed' | 'refused' |
+   *  'cancelled'; anything else an engine newer than this app sent is
+   *  kept as the string it is and shown only under Details. */
+  result: string;
+  category: string;
+  /** What ANOTHER route of the same pass adds to this one's own
+   *  category (the engine's `tried[].refined`): 'udp_blocked_here',
+   *  'relay_unreachable', 'name_blocked', 'address_blocked'. Absent when
+   *  the engine said nothing. While connected this — not `verdict`,
+   *  which is then 'moved_on' — is where "this network stops some ways"
+   *  is said. */
+  refined?: string;
+}
+
+/** The engine's own account of automatic connect, from memory.
+ *
+ *    state  'idle'       nothing asked
+ *           'trying'     working through the candidates (`index` of
+ *                        `total`, 1-based; 0 = not said)
+ *           'connected'  one carried and is up (`routeId`)
+ *           'failed'     none did; `verdict` says the most that the
+ *                        observations prove
+ *    mode   true from a running or successful automatic connect until
+ *           an explicit disconnect or a connect by hand. While true the
+ *           engine moves to the next candidate by itself when the
+ *           running one stops carrying. */
+export interface AutoStatus {
+  state: 'idle' | 'trying' | 'connected' | 'failed';
+  mode: boolean;
+  /** Route being tried right now ('' when none). */
+  trying: string;
+  index: number;
+  total: number;
+  tried: AutoTried[];
+  /** A closed code ('' = nothing to add). Turned into ONE sentence by
+   *  lib/autoConnect.ts; an unknown code gets the generic sentence. */
+  verdict: string;
+  /** The route that is up ('' when none). */
+  routeId: string;
+}
+
+/** What `connectAuto()` resolved with, when the host hands the engine's
+ *  answer back (the desktop shell does; on Android the call resolves as
+ *  soon as the VPN service is started and this is `null` — the answer
+ *  then arrives through `ConnectionSummary.auto`). */
+export interface AutoConnectResult {
+  connected: boolean;
+  routeId: string;
+  family: string;
+  tried: AutoTried[];
+  verdict: string;
+  candidates: number;
 }
 
 export interface SkippedRouteEntry {
@@ -443,6 +522,16 @@ export interface D2Contract {
 
   // ---- connection actions
   connect(routeId: string): Promise<void>;
+  /** "Connect" with no route named: the engine picks among every usable
+   *  route, tries them in order and keeps the first that carries
+   *  traffic. Resolves with the engine's answer where the host returns
+   *  it, `null` where it does not (see AutoConnectResult). `disconnect`
+   *  cancels it at any moment. */
+  connectAuto(): Promise<AutoConnectResult | null>;
+  /** The routes this device holds, read strictly: `undefined` when
+   *  the list could not be read — which is NOT an empty list. "Add
+   *  your file" is offered only on a list that was read and is empty. */
+  routesStrict(): Promise<RouteDisplayRow[] | undefined>;
   disconnect(): Promise<void>;
   setMode(mode: ConnMode): Promise<void>;
   panicWipe(): Promise<void>;

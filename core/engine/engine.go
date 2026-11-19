@@ -59,6 +59,17 @@ type Stub struct {
 	proofs    []ProofResult
 	proofHook func(ctx context.Context, cfg ProofConfig) ProofResult
 	proved    int
+	// startHook, when set, is called on every successful Start (tests:
+	// what a real driver does at that moment — publish a new inlet).
+	startHook func()
+}
+
+// SetStartHook installs f to be called, with the stub's lock released,
+// each time Start succeeds. nil removes it.
+func (s *Stub) SetStartHook(f func()) {
+	s.mu.Lock()
+	s.startHook = f
+	s.mu.Unlock()
 }
 
 // NewStub returns a fresh Stub.
@@ -66,6 +77,17 @@ func NewStub() *Stub { return &Stub{} }
 
 // Start "starts" the stub tunnel.
 func (s *Stub) Start(ctx context.Context, configJSON []byte) error {
+	err := s.start(configJSON)
+	s.mu.Lock()
+	hook := s.startHook
+	s.mu.Unlock()
+	if err == nil && hook != nil {
+		hook()
+	}
+	return err
+}
+
+func (s *Stub) start(configJSON []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failure != nil {

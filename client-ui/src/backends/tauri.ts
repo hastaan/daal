@@ -19,9 +19,13 @@ import {
     type ConnectionSummaryPlus,
 } from '../lib/activeRoute';
 import { errorText } from '../lib/errorText';
+import { parseAuto, parseAutoNote, parseAutoResult, parseHolding, stateWithAuto } from '../lib/autoConnect';
+import { clearLocalTraces, forgetPublisher, forgetRoute } from '../lib/localTraces';
+import { MissingRoutes } from '../lib/missingRoutes';
 import { invoke } from '@tauri-apps/api/core';
 import type {
     AddSubscriptionRequest,
+    AutoConnectResult,
     BootstrapStatus,
     BurnpressureVerdict,
     ConnMode,
@@ -66,6 +70,7 @@ import {
     pointerRotationStatus,
     exportDiagnostics as bridgeExportDiag,
     connect as bridgeConnect,
+    connectAuto as bridgeConnectAuto,
     disconnect as bridgeDisconnect,
     setMode as bridgeSetMode,
     parseExplanation,
@@ -217,7 +222,11 @@ function rawToRow(r: RawRouteSummary): RouteDisplayRow {
 
 // ---- raw command wrappers
 
-async function rawRouteSummary(routeId: string): Promise<RawRouteSummary | null> {
+// One read of `route_summary`. null = it could not be read (the route
+// is not in the store, or the store did not answer); the caller cannot
+// tell which, and TauriContract.rawRouteSummary below is what decides
+// whether to ask again.
+async function invokeRouteSummary(routeId: string): Promise<RawRouteSummary | null> {
     try {
         const body = await invoke<string>('route_summary', { routeId });
         if (!body) return null;
@@ -297,6 +306,40 @@ async function rawThroughputSnapshot(): Promise<ThroughputSnapshot> {
 // ---- backend implementation
 
 export class TauriContract implements D2Contract {
+    // Routes whose summary could not be read, and when to ask again
+    // (lib/missingRoutes.ts). Second phone pass: after the store was
+    // reset the engine still named the route it had last been asked
+    // for, and every 2 s poll of every page asked the store for its
+    // summary — `sql: no rows in result set`, logged each time, for a
+    // route that was never coming back.
+    private missing = new MissingRoutes();
+
+    private async rawRouteSummary(routeId: string): Promise<RawRouteSummary | null> {
+        if (!this.missing.shouldAsk(routeId, Date.now())) return null;
+        const r = await invokeRouteSummary(routeId);
+        if (r && r.route_id) {
+            this.missing.found(routeId);
+            return r;
+        }
+        // Could not be read. Is the route gone, or did the store not
+        // answer? The list says: read once, and if it answers without
+        // this route there is nothing left to ask for.
+        let listed: string[] | undefined;
+        try {
+            listed = (await rawAvailableRoutesStrict()).map((x) => x.route_id);
+        } catch {
+            listed = undefined;
+        }
+        this.missing.failed(routeId, Date.now(), listed);
+        return r;
+    }
+
+    /** The route set may have changed (an import, a removal): whatever
+     *  was concluded about missing routes is asked afresh. */
+    private routesChanged(): void {
+        this.missing.clear();
+    }
+
     async connectionSummary(): Promise<ConnectionSummaryPlus> {
         const d = await bridgeDiagnostics();
         // The posture does not advance until the engine has PROVED the
@@ -306,10 +349,17 @@ export class TauriContract implements D2Contract {
         // after a failed connect the posture is Recovery ('connecting')
         // with the engine stopped.
         const routeRunning = parseRouteRunning(d.route_running);
-        const state = connStateWithCheck(
-            postureToConnState(d.posture ?? ''),
-            routeCheck,
-            routeRunning,
+        // ...and `auto` what automatic connect is doing: while it works
+        // through its candidates every in-between reading (the failed
+        // one torn down, nothing active for a moment) is "connecting".
+        const auto = parseAuto(d.auto);
+        const state = stateWithAuto(
+            connStateWithCheck(
+                postureToConnState(d.posture ?? ''),
+                routeCheck,
+                routeRunning,
+            ),
+            auto,
         );
         const mode = ((d.mode as ConnMode) ?? 'normal');
         // The active route comes from the engine's MEMORY first
@@ -325,13 +375,19 @@ export class TauriContract implements D2Contract {
             } catch { /* the store-backed fallback failed; `d` still speaks */ }
         }
         let activeRoute: RouteDisplayRow | undefined;
-        const activeId = pickActiveRouteId(d, explain);
+        // While automatic connect is trying a route, THAT is the route
+        // to name; once one is up, the one it reports. The engine's
+        // `active_route` is the first answer for everything else.
+        const activeId =
+            (auto?.state === 'trying' && auto.trying) ||
+            (auto?.state === 'connected' && auto.mode && auto.routeId) ||
+            pickActiveRouteId(d, explain);
         if (activeId) {
             // The display details (names, trust) do live in the store.
             // When they cannot be read the id still stands: an id-only
             // row marks the connected row and keeps the Connection page
             // from contradicting itself.
-            const r = await rawRouteSummary(activeId);
+            const r = await this.rawRouteSummary(activeId);
             activeRoute =
                 r && r.route_id
                     ? rawToRow(r)
@@ -349,6 +405,9 @@ export class TauriContract implements D2Contract {
                 (await pointerRotationStatus()) as RawPointerRotationStatus,
             );
         } catch { /* engine not up yet; claim nothing */ }
+
+        // Android only (null elsewhere). Never throws.
+        const vpnStatus = await bridgeVpnServiceStatus();
 
         return {
             state,
@@ -373,9 +432,13 @@ export class TauriContract implements D2Contract {
                     ? d.connect_refused_route
                     : undefined,
             storeRecovered: d.store_recovered === true,
+            auto,
+            routeCountHint: typeof d.route_count === 'number' ? d.route_count : undefined,
             // Android only (null elsewhere): the VPN service's note
             // about a switch that did not take. Never throws.
-            lastSwitch: parseLastSwitch(await bridgeVpnServiceStatus()),
+            lastSwitch: parseLastSwitch(vpnStatus),
+            autoFailedNote: parseAutoNote(vpnStatus),
+            holding: parseHolding(vpnStatus),
             // Only 'none' and 'singbox' are meaningful. Anything else —
             // including the absent field an older engine emits — stays
             // undefined so the UI claims nothing rather than accusing a
@@ -391,7 +454,7 @@ export class TauriContract implements D2Contract {
         try {
             const exp = parseExplanation(await diagnosticsExplain());
             if (!exp) return null;
-            const active = await rawRouteSummary(exp.pick.route_id);
+            const active = await this.rawRouteSummary(exp.pick.route_id);
             if (!active) return null;
 
             // Did the selector actually compare anything?
@@ -418,7 +481,7 @@ export class TauriContract implements D2Contract {
             if (comparisonRan) {
                 skipped = [];
                 for (const f of exp.failures ?? []) {
-                    const r = await rawRouteSummary(f.route_id);
+                    const r = await this.rawRouteSummary(f.route_id);
                     if (r) {
                         skipped.push({
                             route: rawToRow(r),
@@ -469,7 +532,7 @@ export class TauriContract implements D2Contract {
         const d = await bridgeDiagnostics();
         const out: RouteHealthDisplayRow[] = [];
         for (const r of d.route_health ?? []) {
-            const summary = await rawRouteSummary(r.route_id);
+            const summary = await this.rawRouteSummary(r.route_id);
             const label = summary
                 ? `${summary.publisher_name} · ${summary.route_nickname}`
                 : r.route_id;
@@ -499,7 +562,7 @@ export class TauriContract implements D2Contract {
     }
 
     async routeSummary(routeId: string): Promise<RouteDisplayRow | null> {
-        const r = await rawRouteSummary(routeId);
+        const r = await this.rawRouteSummary(routeId);
         return r ? rawToRow(r) : null;
     }
 
@@ -528,6 +591,20 @@ export class TauriContract implements D2Contract {
         return bridgeConnect(routeId);
     }
 
+    async connectAuto(): Promise<AutoConnectResult | null> {
+        return parseAutoResult(await bridgeConnectAuto());
+    }
+
+    async routesStrict(): Promise<RouteDisplayRow[] | undefined> {
+        try {
+            const raw = await rawAvailableRoutesStrict();
+            this.missing.listed(raw.map((r) => r.route_id));
+            return raw.map(rawToRow);
+        } catch {
+            return undefined;
+        }
+    }
+
     async disconnect(): Promise<void> {
         return bridgeDisconnect();
     }
@@ -537,6 +614,12 @@ export class TauriContract implements D2Contract {
     }
 
     async panicWipe(): Promise<void> {
+        this.routesChanged();
+        // The webview's own records of what this phone held (publisher
+        // fingerprints, the hand-picked route id) first: the engine's
+        // wipe does not reach them, and they must be gone even if the
+        // call below fails or the app is killed in the middle of it.
+        clearLocalTraces();
         await invoke<void>('panic_wipe');
     }
 
@@ -584,6 +667,7 @@ export class TauriContract implements D2Contract {
     }
 
     async subscriptionAdd(req: AddSubscriptionRequest): Promise<string> {
+        this.routesChanged();
         return bridgeSubAdd({
             publisher_fingerprint: req.publisherFingerprint,
             url: req.url,
@@ -592,18 +676,28 @@ export class TauriContract implements D2Contract {
     }
 
     async subscriptionRemove(subscriptionId: string): Promise<void> {
+        this.routesChanged();
         return bridgeSubRemove(subscriptionId);
     }
 
     async routeDelete(routeId: string): Promise<void> {
-        return bridgeRouteDelete(routeId);
+        this.routesChanged();
+        await bridgeRouteDelete(routeId);
+        forgetRoute(routeId);
     }
 
     async publisherDelete(publisherId: string): Promise<number> {
-        return bridgePublisherDelete(publisherId);
+        this.routesChanged();
+        const n = await bridgePublisherDelete(publisherId);
+        // The fingerprint written down at import says whose file this
+        // phone held; it goes with the publisher. (A pin on one of its
+        // routes is dropped by the page: effectivePin.)
+        forgetPublisher(publisherId);
+        return n;
     }
 
     async subscriptionRefresh(subscriptionId: string, timeoutMs: number): Promise<string> {
+        this.routesChanged();
         return bridgeSubRefresh(subscriptionId, timeoutMs);
     }
 
@@ -622,16 +716,19 @@ export class TauriContract implements D2Contract {
     }
 
     async importSbp(path: string): Promise<string> {
+        this.routesChanged();
         return bridgeImportSbp(path);
     }
 
     // Step 11: pasted text. Same verification, same verdict JSON —
     // the only difference is how the bytes reached the phone.
     async importSbpBytes(text: string): Promise<string> {
+        this.routesChanged();
         return bridgeImportSbpBytes(text);
     }
 
     async resolveTrustPrompt(fingerprintHex: string, decision: TrustDecision): Promise<string> {
+        this.routesChanged();
         return bridgeResolveTrustPrompt(fingerprintHex, decision);
     }
 
@@ -799,6 +896,7 @@ export class TauriContract implements D2Contract {
         }
     }
     async uriImport(rawUri: string): Promise<UriImportResult> {
+        this.routesChanged();
         const raw = await invoke<string>('uri_import', { rawUri });
         try {
             const parsed = JSON.parse(raw) as {
@@ -834,7 +932,13 @@ export class TauriContract implements D2Contract {
         // phone pass a failed subscription_list blanked the whole page
         // while every route was still usable.
         const [routes, subs, skipped] = await Promise.all([
-            rawAvailableRoutesStrict().then((raw) => raw.map(rawToRow)),
+            rawAvailableRoutesStrict().then((raw) => {
+                // Also the page's refresh after an import that did not
+                // go through this class (the QR lane): what is listed
+                // exists.
+                this.missing.listed(raw.map((r) => r.route_id));
+                return raw.map(rawToRow);
+            }),
             this.subscriptionList().catch((e): SubscriptionRow[] => {
                 console.warn('daal: subscription list unavailable:', errorText(e));
                 return [];

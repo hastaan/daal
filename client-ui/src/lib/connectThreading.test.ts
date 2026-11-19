@@ -48,6 +48,12 @@ describe('Android: no engine call on the service main thread', () => {
     // StartSequence.kt (pure, unit tested on a JVM) and the service
     // supplies each step through StartSequence.Host. The properties
     // pinned here are the same as before; the anchors moved.
+    //
+    // Since the selection wave a start is either of one route or
+    // AUTOMATIC (no route id: the engine picks — `connectAuto`), and
+    // both are queued by beginStart(), which onStartCommand, the
+    // system's own starts and the service's retry all go through. The
+    // properties are again the same, now pinned for both engine calls.
 
     it('setRoute is called in exactly one place, reached only from start() on the control thread', () => {
         expect(kt.match(/DaalCoreBridge\.setRoute\(/g)).toHaveLength(1);
@@ -57,9 +63,23 @@ describe('Android: no engine call on the service main thread', () => {
         expect(kt.match(/checkedSetRoute\(/g)).toHaveLength(2);
         const start = body(kt, 'private fun start(', nextFun);
         expect(start).toContain('checkedSetRoute(routeId, gen)');
-        expect(start).toContain('StartSequence(host).run(routeId)');
+        expect(start).toContain('StartSequence(host)');
+        expect(start).toContain('sequence.run(routeId)');
         // The sequence reaches the engine only through its Host.
         expect(seq).not.toContain('DaalCoreBridge');
+    });
+
+    it('connectAuto — which blocks for one check per route tried — likewise: one place, reached only from start()', () => {
+        expect(kt.match(/DaalCoreBridge\.connectAuto\(/g)).toHaveLength(1);
+        expect(body(kt, 'private fun checkedConnectAuto(', nextFun)).toContain('DaalCoreBridge.connectAuto(');
+        // Its definition, and one use — the Host that start() builds.
+        expect(kt.match(/checkedConnectAuto\(/g)).toHaveLength(2);
+        const start = body(kt, 'private fun start(', nextFun);
+        expect(start).toContain('override fun connectAuto() = checkedConnectAuto(gen)');
+        expect(start).toContain('sequence.runAuto(reconnect)');
+        // start() itself has one caller, inside beginStart's control.execute.
+        expect(kt.match(/[^.\w]start\(routeId, gen, reconnect\)/g)).toHaveLength(1);
+        expect((kt.match(/[^.\w]start\(/g) ?? []).length).toBe(2); // definition + that call
     });
 
     it('the lifecycle callbacks touch the engine only through the control thread', () => {
@@ -76,32 +96,51 @@ describe('Android: no engine call on the service main thread', () => {
             }
         }
         for (const b of callbacks.slice(1)) expect(b).not.toContain('teardownEngine(');
-        // start() and the teardown after a start that threw are reached
-        // only from inside control.execute { … }, which runs to the end
-        // of the ACTION_START branch.
-        const exec = onStart.indexOf('control.execute');
-        const branchEnd = onStart.indexOf('return START_STICKY');
+        // The callbacks only QUEUE: a start goes through beginStart,
+        // a stop through requestStop.
+        expect(onStart).toContain('beginStart(');
+        expect(onStart).not.toContain('control.execute');
+        expect(onStart).not.toMatch(/[^.\w]start\(/);
+        expect(onStart).not.toContain('teardownEngine(');
+        // beginStart runs on the caller's (main) thread. start() and
+        // the teardown after a start that threw are reached only from
+        // inside its control.execute { … }, which runs to the end of
+        // the function.
+        const begin = body(kt, 'private fun beginStart(', nextFun);
+        const exec = begin.indexOf('control.execute');
         expect(exec).toBeGreaterThanOrEqual(0);
-        expect(branchEnd).toBeGreaterThan(exec);
-        const before = onStart.slice(0, exec);
-        const after = onStart.slice(branchEnd);
-        expect(onStart.indexOf('start(routeId')).toBeGreaterThan(exec);
-        expect(onStart.indexOf('start(routeId')).toBeLessThan(branchEnd);
+        const before = begin.slice(0, exec);
+        expect(begin.indexOf('start(routeId, gen, reconnect)')).toBeGreaterThan(exec);
         expect(before).not.toMatch(/[^.\w]start\(/);
-        for (const part of [before, after]) {
-            expect(part).not.toContain('teardownEngine(');
-            expect(part).not.toMatch(/[^.\w]start\(/);
+        expect(before).not.toContain('teardownEngine(');
+        for (const call of ['DaalCoreBridge.', 'setRoute(', 'connectAuto(', 'setTunFd(', 'clearTunFd(', 'setTunnelRefresh(', 'establishTun(']) {
+            expect(before, call).not.toContain(call);
         }
         // The one thing that MUST be on the main thread, promptly.
         expect(before).toContain('promoteToForeground(');
+        // The service's own retry re-enters through beginStart too.
+        expect(body(kt, 'private fun scheduleRetry(', nextFun)).toMatch(/mainHandler\.postDelayed\(\{[\s\S]*beginStart\(null, reconnect = true/);
         // Every teardownEngine call in the file is on the control
         // thread: the two control.execute blocks, and the Host the
         // sequence runs with (itself on the control thread).
         const calls = kt.match(/[^\w]teardownEngine\(/g) ?? [];
         expect(calls).toHaveLength(4); // definition + 3 call sites
-        expect(onStart.slice(exec, branchEnd)).toContain('teardownEngine(');
+        expect(begin.slice(exec)).toContain('teardownEngine(');
         expect(body(kt, 'private fun start(', nextFun)).toMatch(/override fun teardown\(why: String\) = teardownEngine\(/);
         expect(body(kt, 'private fun requestStop(', nextFun)).toMatch(/control\.execute\s*\{\s*teardownEngine\(/);
+    });
+
+    it('following the engine when it moves by itself happens on the control thread', () => {
+        // While connected automatically the engine may move to another
+        // route; the service looks (engineState, setTunnelRefresh) in
+        // followOnce — reached only through queueFollow's
+        // control.execute, whoever pokes it (the pump, a vpnStatus call
+        // from the page's thread).
+        expect(kt.match(/[^\w]followOnce\(/g)).toHaveLength(2); // definition + one call
+        const queue = body(kt, 'private fun queueFollow(', nextFun);
+        expect(queue).toMatch(/control\.execute\s*\{[\s\S]*followOnce\(\)/);
+        expect(queue.slice(0, queue.indexOf('control.execute'))).not.toContain('DaalCoreBridge.');
+        expect(queue.slice(0, queue.indexOf('control.execute'))).not.toContain('engineView(');
     });
 
     it('a stop cancels a check in flight instead of queueing behind it', () => {
@@ -125,14 +164,22 @@ describe('Android: no engine call on the service main thread', () => {
     });
 
     it('a newer start cancels the check of the one it replaces', () => {
-        const onStart = body(kt, 'override fun onStartCommand(', nextFun);
-        expect(onStart).toMatch(/if \(finishedStartGen < previousStart\) \{[\s\S]*cancelInFlight\(previousStart, stopping = false\)/);
+        const begin = body(kt, 'private fun beginStart(', nextFun);
+        expect(begin).toMatch(/if \(finishedStartGen < previousStart\) \{[\s\S]*cancelInFlight\(previousStart, stopping = false\)/);
+        // ...before the new one is queued behind it.
+        expect(begin.indexOf('cancelInFlight(previousStart')).toBeLessThan(begin.indexOf('control.execute'));
         // Only while the old start is inside its connection check:
         // clearRoute would otherwise disconnect a working route.
         expect(code(policySource)).toMatch(/checkingGen in 1\.\.pendingStart -> CancelStep\.CANCEL/);
         const checked = body(kt, 'private fun checkedSetRoute(', nextFun);
         expect(checked).toMatch(/checkingGen = gen/);
         expect(checked).toMatch(/finally \{[\s\S]*checkingGen = 0/);
+        // An automatic connect in flight is marked the same way, so the
+        // same cancel abandons it — Cancel on the page works at any moment.
+        const auto = body(kt, 'private fun checkedConnectAuto(', nextFun);
+        expect(auto).toMatch(/checkingGen = gen/);
+        expect(auto).toMatch(/finally \{[\s\S]*checkingGen = 0/);
+        expect(auto).toMatch(/if \(generation\.get\(\) != gen\)/);
     });
 
     it('a superseded start does not leave a tunnel up', () => {

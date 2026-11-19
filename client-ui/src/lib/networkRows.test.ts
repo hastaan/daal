@@ -307,3 +307,28 @@ describe('a connected route that stopped carrying traffic', () => {
         }
     });
 });
+
+// A tap on the Connections page pins the route — only once it is up.
+import { pinAfterTap, resolvePending as resolveTap, startPending as startTap, acceptPending as acceptTap } from './networkRows';
+
+describe('picking a route by hand pins it only when it connected', () => {
+    it('connected → pinned; failed, refused, timed out or still waiting → nothing', () => {
+        expect(pinAfterTap('r4', 'connected')).toBe('r4');
+        for (const o of ['failed', 'refused', 'timeout', 'waiting'] as const) {
+            expect(pinAfterTap('r4', o), o).toBeUndefined();
+        }
+    });
+    it('a switch to a way that carries nothing, after which the old one is back: no pin', () => {
+        // Automatic is connected on r2; the person taps r4; the engine
+        // fails r4 and goes back to r2 (the service's note says so).
+        const before = sum({ state: 'connected', activeRoute: on('r2'), routeRunning: true, routeCheck: 'ok' });
+        const p = acceptTap(startTap('r4', 0, before), 0);
+        const after = {
+            ...before,
+            lastSwitch: { routeId: 'r4', keptRouteId: 'r2', outcome: 'failed', reason: 'udp_no_reply' },
+        } as ConnectionSummary;
+        const outcome = resolveTap(p, after, 10_000);
+        expect(outcome).toBe('failed');
+        expect(pinAfterTap(p.routeId, outcome)).toBeUndefined();
+    });
+});

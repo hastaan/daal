@@ -41,6 +41,16 @@ class StartSequence(private val host: Host) {
      * the engine is carrying).
      */
     SUPERSEDED,
+
+    /**
+     * Automatic reconnect only: nothing is connected, but the TUN is
+     * KEPT and the service will ask the engine to search again. The
+     * person was connected and did not ask to be disconnected; letting
+     * go of the TUN here would put their traffic back on the open
+     * network without a word, so it stays closed until a route carries
+     * again or they disconnect.
+     */
+    HOLDING,
   }
 
   /** Everything the sequence needs from the service and the engine. */
@@ -79,6 +89,21 @@ class StartSequence(private val host: Host) {
      * whether that was a cancellation.
      */
     fun setRoute(routeId: String): Int
+
+    /**
+     * `engine_connect_auto`: the engine picks among every usable route,
+     * tries them in order and keeps the first that carries. Blocks for
+     * all of it; a stop or a newer start makes it return promptly
+     * ([superseded] then says so). Null when the engine cannot be asked
+     * or has no such call.
+     */
+    fun connectAuto(): SwitchPolicy.AutoResult?
+
+    /**
+     * Nothing is connected but the TUN stays: stop saying a route is
+     * up. A retry of the automatic connect follows.
+     */
+    fun hold(verdict: String)
 
     /** What the engine says about the connection now, or null. */
     fun engineView(): SwitchPolicy.EngineView?
@@ -165,6 +190,131 @@ class StartSequence(private val host: Host) {
 
     // 5. It did not come up, and nobody asked for anything else.
     return settleFailure(routeId, host.engineView(), "set_route_rc=$routeRc")
+  }
+
+  /**
+   * Connect with no route named: the engine chooses.
+   *
+   *   protect callback → (only when no TUN is held) build one →
+   *   connectAuto() → publish the route the engine ended on.
+   *
+   * No pre-check: there is no single route to ask about, and the
+   * engine leaves out the routes it would refuse by itself.
+   *
+   * When nothing connects ([SwitchPolicy.afterFailedAuto]): a route
+   * that was connected before the call and still is, is kept;
+   * otherwise everything is released and the engine's verdict is left
+   * in the note for vpnStatus — except on a [reconnect], which keeps
+   * the TUN ([Outcome.HOLDING]).
+   *
+   * @param reconnect the service is asking again by itself, after the
+   *   engine ran out of routes while the person was connected. False
+   *   when a person (or the system, for always-on VPN) asked.
+   */
+  fun runAuto(reconnect: Boolean = false): Outcome {
+    host.log(
+      "begin auto reconnect=$reconnect tun_held=${host.tunHeld()} last_good=${host.lastGood() ?: "-"}",
+    )
+    if (host.superseded()) {
+      host.log("auto superseded before it began")
+      return Outcome.SUPERSEDED
+    }
+    // As in run(): a note about an earlier request says nothing about
+    // this one. A reconnect is not a new request — its note is the
+    // reason the person is not connected, and stays until a route is up
+    // or this attempt writes its own.
+    if (!reconnect) host.note(null)
+
+    val protectRc = host.registerProtect()
+
+    // An engine that cannot be asked cannot choose a route. Found out
+    // BEFORE a TUN is built: this is also the path a start by the
+    // system takes (always-on VPN, a restart after the process was
+    // killed), where the engine may not be loaded at all, and a TUN
+    // nobody reads from would only cut the phone off.
+    val before = host.engineView()
+    host.log("auto register_protect_rc=$protectRc engine=${if (before == null) "unavailable" else "ok"}")
+    if (before == null && !host.tunHeld()) {
+      host.teardown("auto: the engine cannot be asked; nothing was built")
+      return Outcome.DOWN
+    }
+
+    if (!host.tunHeld()) {
+      val ended = host.establishTun()
+      if (ended != null) return ended
+    } else {
+      // Unlike a switch, the engine's own fetches are left where they
+      // are: when a route is connected the engine answers "already
+      // connected" and replaces nothing.
+      host.log("auto reusing the TUN held (on ${host.lastGood() ?: "-"})")
+    }
+
+    val res = host.connectAuto()
+    host.log(
+      if (res == null) {
+        "auto: no answer from the engine"
+      } else {
+        "auto connected=${res.connected} route=${res.routeId.ifEmpty { "-" }} " +
+          "verdict=${res.verdict.ifEmpty { "-" }} tried=${res.tried} candidates=${res.candidates}"
+      },
+    )
+    if (res != null && res.connected && res.routeId.isNotEmpty()) {
+      // The engine is carrying this route now, whoever asked last.
+      host.setLastGood(res.routeId)
+      val up = host.routeIsUp(res.routeId)
+      if (up == Outcome.UP) host.note(null)
+      return up
+    }
+    if (host.superseded()) {
+      host.log("auto superseded while the engine was trying routes; leaving the rest to the newer request")
+      return Outcome.SUPERSEDED
+    }
+
+    val verdict = when {
+      res == null -> SwitchPolicy.VERDICT_UNAVAILABLE
+      // An answer with no verdict: only the general one can be said.
+      res.verdict.isEmpty() -> "all_failed"
+      else -> res.verdict
+    }
+    val engine = host.engineView()
+    val lastGood = host.lastGood()
+    val decision = SwitchPolicy.afterFailedAuto(lastGood, engine)
+    host.log(
+      "auto found no route (verdict=$verdict): " +
+        "engine_active=${engine?.activeRoute ?: "unknown"} running=${engine?.routeRunning ?: "unknown"} " +
+        "last_good=${lastGood ?: "-"} decision=${decision.javaClass.simpleName}",
+    )
+    when (decision) {
+      is SwitchPolicy.AfterFailure.Keep -> {
+        host.note(SwitchPolicy.describeAutoFailure(decision.routeId, verdict))
+        host.log("staying on route=${decision.routeId}; the engine still carries it")
+        host.setLastGood(decision.routeId)
+        return host.routeIsUp(decision.routeId)
+      }
+      is SwitchPolicy.AfterFailure.Restore -> {
+        host.note(SwitchPolicy.describeAutoFailure(decision.routeId, verdict))
+        val backRc = host.setRoute(decision.routeId)
+        host.log("auto: going back to route=${decision.routeId} set_route_rc=$backRc")
+        if (backRc == 0) {
+          host.setLastGood(decision.routeId)
+          return host.routeIsUp(decision.routeId)
+        }
+        if (host.superseded()) {
+          host.log("superseded while going back to route=${decision.routeId}")
+          return Outcome.SUPERSEDED
+        }
+      }
+      SwitchPolicy.AfterFailure.TearDown -> {}
+    }
+    // Nothing is connected. The verdict is what the person is told.
+    host.note(SwitchPolicy.describeAutoFailure(null, verdict))
+    if (reconnect && res != null) {
+      host.hold(verdict)
+      host.log("auto: still no route; keeping the TUN closed and trying again later")
+      return Outcome.HOLDING
+    }
+    host.teardown("auto found no route that carries (verdict=$verdict)")
+    return Outcome.DOWN
   }
 
   /**

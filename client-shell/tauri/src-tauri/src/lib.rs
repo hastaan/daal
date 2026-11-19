@@ -512,6 +512,49 @@ async fn connect(app: tauri::AppHandle, route_id: String) -> Result<(), String> 
     }.await)
 }
 
+/// Connect without naming a route: the engine picks, tries, moves on
+/// (`engine_connect_auto`). Async for the reason `connect` is: the call
+/// blocks for the connection check of every route it tries.
+///
+/// Returns a JSON string.
+///
+///  * Desktop: the engine's own answer —
+///    `{"connected","route_id","family","tried":[…],"verdict","candidates"}`.
+///    Nothing connected is `connected:false` with a verdict code, not
+///    an error. `disconnect` abandons it (`"cancelled"` entries).
+///  * Android: `{"pending":true,"platform":"android"}`. The connect is
+///    run by the VPN service (the plugin's `vpn_start` with no route
+///    id, which also runs the system's VPN permission prompt) and has
+///    only been STARTED when this returns: the page reads progress from
+///    the diagnostics `auto` object and the result from `vpn_status`.
+#[tauri::command]
+async fn connect_auto(app: tauri::AppHandle) -> Result<String, String> {
+    cmdlog::result("connect_auto", async move {
+    tauri::async_runtime::spawn_blocking(move || connect_auto_blocking(&app))
+        .await
+        .map_err(|e| format!("connect_auto: {e}"))?
+    }.await)
+}
+
+#[cfg(not(target_os = "android"))]
+fn connect_auto_blocking(app: &tauri::AppHandle) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    cmd::connect_auto(&state).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn connect_auto_blocking(app: &tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_daal_platform::PlatformExt;
+    // "" = no route named = automatic (see VpnStartRequest::route_id).
+    let started = app.platform().vpn_start("").map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "pending": true,
+        "platform": started.platform,
+        "applied": started.applied,
+    })
+    .to_string())
+}
+
 #[tauri::command]
 fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     cmdlog::logged("disconnect", || cmd::disconnect(&state).map_err(|e| e.to_string()))
@@ -2924,6 +2967,7 @@ pub fn run() {
             recipient_qr_cancel,
             recipient_qr_finalize,
             // D-2.1 display-summary surface
+            connect_auto,
             route_summary,
             available_routes,
             throughput_snapshot,
@@ -3107,6 +3151,7 @@ pub fn run() {
 //   schedulerTick(): Int
 //   engineState(): String?
 //   routePrecheck(routeId: String): String?
+//   connectAuto(): String?
 //
 // We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
 // (Kotlin's class-mangling rule for object companions), reach the
@@ -3329,6 +3374,53 @@ mod jni_bridge {
                 log::warn!("DaalCoreBridge.routePrecheck({s}) failed: {e}");
                 null
             }
+        }
+    }
+
+    /// `engine_connect_auto`: the engine picks among every usable
+    /// route, tries them in order and keeps the first that carries.
+    /// BLOCKS like `setRoute` (longer: one connection check per route
+    /// tried); `clearRoute` abandons it.
+    ///
+    /// Returns a small JSON object — NOT the engine's whole answer —
+    ///
+    ///   {"connected": bool, "route_id": "<id>" | "",
+    ///    "verdict": "<closed code>" | "", "tried": n, "candidates": n}
+    ///
+    /// or null when the engine cannot be asked (not loaded, not started,
+    /// the call failed) or this library has no such call. Ids, closed
+    /// codes and counts only cross to the JVM; the list of what was
+    /// tried stays in the engine's diagnostics, where the page reads it.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_connectAuto<'local>(
+        env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) -> jstring {
+        let null = std::ptr::null_mut();
+        let Some(eng) = engine() else { return null };
+        let body = match eng.connect_auto() {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                log::warn!("DaalCoreBridge.connectAuto: this engine library has no automatic connect");
+                return null;
+            }
+            Err(e) => {
+                // The scrubbed text: an engine error can quote a dial
+                // failure, and no address goes to logcat.
+                log::error!(
+                    "DaalCoreBridge.connectAuto failed: {}",
+                    daal_desktop_core::cmdlog::scrub(&e.to_string())
+                );
+                return null;
+            }
+        };
+        let Some(summary) = daal_desktop_core::engine::connect_auto_summary_json(&body) else {
+            log::warn!("DaalCoreBridge.connectAuto: the engine's answer was not a JSON object");
+            return null;
+        };
+        match env.new_string(summary) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null,
         }
     }
 

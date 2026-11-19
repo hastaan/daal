@@ -61,13 +61,36 @@ func TestSwitchFindingsExcuseOnlyTheirOwnCells(t *testing.T) {
 		red("op:switch", "", "rotate.session.fd_trap_armed", Pass, Fail),
 		red("op:switch", "vless-reality", "check-rotate.refused.vless-reality>hysteria2.old_route_still_connected", Pass, "disconnected"),
 		red("op:switch", "hysteria2", "check-rotate.unreachable.vless-reality>hysteria2.dead_route_not_connected", Blocked, Pass),
+		// SW-1 (a failed switch left nothing connected) is fixed in the
+		// engine: the same.
+		red("op:switch", "vless-reality", "check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected", Pass, "disconnected"),
+		red("op:switch", "vless-reality", "check-rotate.unreachable.vless-reality>hysteria2.switch_back_recorded", Pass, Fail),
+		// The automatic connect: what is open is two cells (below), and
+		// nothing beside them.
+		red("op:auto", "hysteria2", "memory.udp.refined", "udp_blocked_here", "none"),
+		red("op:auto", "hysteria2", "memory.udp.refined", "udp_blocked_here", "relay_unreachable"),
+		red("op:auto", "hysteria2", "all-blocked.connect.refined", "relay_unreachable", "udp_blocked_here"),
+		red("op:auto", "hysteria2", "quic-only.connect.refined", AutoRefinedQUICOnly, "none"),
+		red("op:auto", "hysteria2", "quic-only.connect.refined", AutoRefinedQUICOnly, "relay_unreachable"),
+		red("op:auto", "", "all-blocked.connect.verdict", "relay_unreachable", "all_failed"),
+		red("op:auto", "", "all-blocked.connect.verdict", "relay_unreachable", "network_down"),
+		red("op:auto", "vless-reality", "fall-over.moved.engine_moved_by_itself", Pass, Blocked),
+		red("op:auto", "websocket-tls", "blocked.again.remembered_route_first", Pass, Fail),
+		chk("total-blackout", BoxTree, "op:auto", "", "scenario.connect.verdict", "network_down", "all_failed"),
+		chk("total-blackout", BoxTree, "op:auto", "", "scenario.connect.not_connected", Blocked, Pass),
+		chk("relay-ip-block", BoxTree, "op:auto", "", "scenario.connect.verdict", "relay_unreachable", "all_failed"),
+		chk("relay-ip-block", BoxTree, "op:auto", "", "scenario.connect.verdict", "relay_unreachable", "network_down"),
 	} {
 		if id := knownFor(ks, c); id != "" {
 			t.Errorf("%s %s got=%s is excused by %s; it must be an unexpected red", c.Phase, c.Check, c.Got, id)
 		}
 	}
 	for want, c := range map[string]Check{
-		"SW-1": red("op:switch", "vless-reality", "check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected", Pass, "disconnected"),
+		// CEN-4, what is left of it in a pass: a QUIC-only filter gets the
+		// answer all-UDP-dropped gets.
+		"CEN-4": red("op:auto", "hysteria2", "quic-only.connect.refined", AutoRefinedQUICOnly, "udp_blocked_here"),
+		// AUTO-1: a border that forwards nothing reads as one relay.
+		"AUTO-1": chk("total-blackout", BoxTree, "op:auto", "", "scenario.connect.verdict", "network_down", "relay_unreachable"),
 	} {
 		if id := knownFor(ks, c); id != want {
 			t.Errorf("%s got=%s: excused by %q, want %s (fixed? then delete this case with the entry)", c.Check, c.Got, id, want)

@@ -55,8 +55,8 @@ func init() {
 // both orders, then the two switches that must NOT take:
 //
 //	unreachable  B's endpoint is dropped at the censor. The engine tries
-//	             B and gives it up; what it leaves running is recorded as
-//	             it is (FINDINGS SW-1), and going back to A must work
+//	             B, gives it up and goes back to A by itself (FINDINGS
+//	             SW-1, fixed): A is connected, says so, and carries
 //	refused      B is now cooling down: the switch is refused before
 //	             anything is touched, A is still connected and still
 //	             carries verified bytes on its own endpoint, and the
@@ -459,23 +459,32 @@ func (s *switchSession) unreachableThenRefused(b Family) {
 	aID, _ := ev["from"].(string)
 	// What is left running after the engine gave B up. The person was
 	// connected on A and asked for something that turned out not to
-	// work: A should still be carrying them. Today the engine has
-	// already stopped A to try B (FINDINGS SW-1); the host goes back.
+	// work: A must still be carrying them. The engine stops A to try B
+	// (one TUN, one instance); since FINDINGS SW-1 was fixed it goes back
+	// to A by itself, re-proves it, and says so in `switch_back`. The
+	// host here does nothing between the failed engine_set_route and this
+	// look.
 	left := Pass
 	if diag["active_route"] != aID || diag["route_running"] != true {
 		left = "disconnected"
 	}
+	back, _ := diag["switch_back"].(map[string]any)
 	s.add(step, a, "old_route_still_connected", Pass, left,
 		got(left == Pass, "", "the engine stopped the connected route to try the new one and, when that carried nothing, left nothing running"),
 		map[string]any{"active_route": diag["active_route"], "route_running": diag["route_running"], "route_check": diag["route_check"],
-			"route_check_category": diag["route_check_category"], "was_on": aID}, t0)
+			"route_check_category": diag["route_check_category"], "was_on": aID, "switch_back": back}, t0)
+	bID, _ := ev["to"].(string)
+	said := back["restored"] == true && back["restored_route"] == aID && back["failed_route"] == bID && back["category"] != "" && back["category"] != nil
+	s.add(step, a, "switch_back_recorded", Pass, got(said, Pass, Fail),
+		got(said, "", fmt.Sprintf("the diagnostics do not say that the switch to %s failed and %s was put back: %v", bID, aID, back)),
+		map[string]any{"switch_back": back}, t0)
 	if outcome != Blocked {
 		s.dead = true
 		return
 	}
 	if left != Pass {
-		// What the Android service does next (SwitchPolicy "Restore"):
-		// set the old route again. B is still unreachable.
+		// What a host would have to do then (SwitchPolicy "Restore"): set
+		// the old route again. B is still unreachable.
 		if !s.toAs("restore."+a.Name, s.label, a) {
 			return
 		}
@@ -504,8 +513,8 @@ func (s *switchSession) unreachableThenRefused(b Family) {
 		return
 	}
 	diag = diagOf(ev)
-	bID, _ := ev["to"].(string)
-	said := diag["connect_refused"] == code && diag["connect_refused_route"] == bID
+	bID, _ = ev["to"].(string)
+	said = diag["connect_refused"] == code && diag["connect_refused_route"] == bID
 	s.add(step, b, "refusal_recorded", Pass, got(said, Pass, Fail),
 		got(said, "", "the diagnostics do not say why the switch did not happen"),
 		map[string]any{"connect_refused": diag["connect_refused"], "connect_refused_route": diag["connect_refused_route"], "want_code": code}, t0)
