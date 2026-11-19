@@ -156,6 +156,10 @@ func runRotateCredentials(ctx context.Context, args []string, stdin io.Reader, s
 // for the burned host, and the failure would show up only as recipients
 // who cannot connect. --record-out redirects the write; the path
 // actually written is echoed in the JSON.
+// rotateTLSFn is the box call, replaceable in tests; production always
+// leaves it pointing at mgmt.RotateTLSWithFW.
+var rotateTLSFn = mgmt.RotateTLSWithFW
+
 func runRotateTLS(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("rotate-tls", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -187,13 +191,13 @@ func runRotateTLS(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return 1
 	}
 	defer zeroBytes(priv)
-	prov, err := buildProvider(rec.Provider, *tokenFile, false)
+	prov, err := buildProviderFn(rec.Provider, *tokenFile, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
 		return 1
 	}
 	previousCoverSNI := rec.CoverSNI
-	resp, rotErr := mgmt.RotateTLSWithFW(ctx, prov, rec, priv, *helperIP, mgmt.TLSProfile{
+	resp, rotErr := rotateTLSFn(ctx, prov, rec, priv, *helperIP, mgmt.TLSProfile{
 		NewSNI:    *newSNI,
 		NewWSPath: *newWSPath,
 	})
@@ -213,14 +217,22 @@ func runRotateTLS(ctx context.Context, args []string, stdin io.Reader, stdout, s
 
 	// `warnings` is always present, possibly empty, and rendered
 	// verbatim by the wizard — same contract as the decommission report.
-	// The standing one is the honest tail of this operation: the relay
-	// has moved and every already-distributed pack still pins the old
-	// cover host. Step 8 (freshness delivery) is what will make that
-	// redistribution automatic; until it lands it is manual, and the
-	// operator must not learn it from silence.
-	warnings := []string{
-		"relay now advertises " + rec.CoverSNI + "; every recipient needs a re-minted pack before it will connect again",
-	}
+	//
+	// It used to open with a standing entry: "every recipient needs a
+	// re-minted pack before it will connect again". That was measured
+	// to be false (finding LC-O1): the cover host is on the wire for
+	// vless-reality only, so a file already handed out keeps connecting
+	// on every other route, and a phone whose pack carries refresh
+	// addresses gets the new cover host by itself once the pack is
+	// signed again and published. Telling an operator to hand-deliver
+	// files to everyone during a blackout, when nobody is cut off, is
+	// not erring on the safe side. What is true and still needs doing
+	// is `next_step`, which is not a warning.
+	warnings := []string{}
+	nextStep := "the relay's cover host is now " + rec.CoverSNI + ". Files already handed out keep connecting on every " +
+		"route except vless-reality; sign the pack again (bind-and-sign) and publish it (publish-freshness) " +
+		"so that route comes back by itself on phones that check for updates. Only a phone whose file has no " +
+		"refresh address, or carries no other route, needs a new file by hand"
 	if resp.AppliedSNI == "" {
 		warnings = append(warnings,
 			"relay did not echo the cover host it applied — the value recorded is what was requested, not what was verified")
@@ -228,6 +240,10 @@ func runRotateTLS(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	if rotErr != nil {
 		warnings = append(warnings, rotErr.Error())
 	}
+	// What the relay itself wants said about a rotation that applied —
+	// today, that it could not re-issue its TLS certificate for the new
+	// cover host. Verbatim.
+	warnings = append(warnings, resp.Warnings...)
 	// Follow the box, not the request. The shared ws path belongs to the
 	// WHOLE relay (one ws-in inbound, every recipient dialling the same
 	// path), and the box is the only place a rotated one exists: the
@@ -250,8 +266,19 @@ func runRotateTLS(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		"ws_path":            wsPath,
 		"applied_sni":        resp.AppliedSNI,
 		"applied_handshake":  resp.AppliedHandshake,
-		"record_written":     outPath,
-		"warnings":           warnings,
+		// changed is the relay's own list of what moved. It names
+		// "tls_certificate" when the relay re-issued its TLS
+		// certificate for the new cover host (same key: no pin moves).
+		"changed": resp.Changed,
+		// tls_cert_pem is the re-issued certificate, present only when
+		// "tls_certificate" is in changed. It is public (the relay
+		// presents it to anyone). A naive file minted from now on should
+		// install THIS one: a caller that keeps a relay certificate
+		// beside each recipient's credentials replaces it with this.
+		"tls_cert_pem":   resp.TLSCertPEM,
+		"record_written": outPath,
+		"warnings":       warnings,
+		"next_step":      nextStep,
 	}
 	if err := json.NewEncoder(stdout).Encode(out); err != nil {
 		fmt.Fprintf(stderr, "encode: %v\n", err)
@@ -263,7 +290,7 @@ func runRotateTLS(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	if writeRC != 0 {
 		return writeRC
 	}
-	fmt.Fprintf(stderr, "rotate-tls: %s\n", warnings[0])
+	fmt.Fprintf(stderr, "rotate-tls: %s\n", nextStep)
 	return 0
 }
 

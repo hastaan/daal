@@ -87,6 +87,110 @@ type routeCheck struct {
 	// checkMu serialises proofs of the connected route (timer, network
 	// change, an explicit CheckActiveRoute).
 	checkMu sync.Mutex
+	// failedRoute / failedFamily / failedCooled describe the route a
+	// FAILED CONNECT was about (state failed, running false): which
+	// route, and whether the failure put it in a cooldown. When that
+	// cooldown has run out the error has nothing left to say and is
+	// cleared (expireFailedConnect).
+	failedRoute, failedFamily string
+	failedCooled              bool
+	// refused / refusedRoute: the last SetRoute that was REFUSED before
+	// anything was tried, as a closed code (ConnectRefused*). Cleared by
+	// the next SetRoute that gets past its refusals and by a ClearRoute
+	// that stops something (one that finds nothing running keeps it).
+	refused, refusedRoute string
+}
+
+// Why a SetRoute was refused before anything was started. A closed
+// vocabulary: `connect_refused` in the diagnostics blob. On Android the
+// error SetRoute returns never reaches the app (the VpnService calls it
+// on a worker thread long after the connect command has resolved), so
+// this field is the only way the person learns why nothing happened.
+const (
+	ConnectRefusedNone = ""
+	// The route was imported from a pack made before packs carried
+	// signed endpoints. Only a new file fixes it.
+	ConnectRefusedNeedsNewFile = "needs_new_file"
+	// The route is cooling down after a failure.
+	ConnectRefusedCooldown = "cooldown"
+	// The route's publisher revoked it, or it expired.
+	ConnectRefusedRevoked = "revoked"
+	ConnectRefusedExpired = "expired"
+	// Anything else (unknown route, unreadable profile, an outbound
+	// that does not match what was signed).
+	ConnectRefusedOther = "other"
+)
+
+func (rc *routeCheck) setRefused(code, routeID string) {
+	rc.mu.Lock()
+	rc.refused, rc.refusedRoute = code, routeID
+	rc.mu.Unlock()
+}
+
+func (rc *routeCheck) refusal() (code, routeID string) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.refused, rc.refusedRoute
+}
+
+// refusedCode maps the error of a refused SetRoute onto the vocabulary.
+func refusedCode(err error) string {
+	switch {
+	case errors.Is(err, ErrRouteNeedsNewFile):
+		return ConnectRefusedNeedsNewFile
+	case errors.Is(err, errRouteCooling):
+		return ConnectRefusedCooldown
+	case errors.Is(err, errRouteRevoked):
+		return ConnectRefusedRevoked
+	case errors.Is(err, errRouteExpired):
+		return ConnectRefusedExpired
+	}
+	return ConnectRefusedOther
+}
+
+var (
+	errRouteCooling = errors.New("abi: route is cooling down")
+	errRouteRevoked = errors.New("abi: route is revoked")
+	errRouteExpired = errors.New("abi: route is expired")
+)
+
+// expireFailedConnect clears the error a failed connect left behind
+// once the cooldown that failure started has run out.
+//
+// After a failed connect nothing is running and nothing retries: the
+// state is `failed`, the posture Recovery, and the app says "Could not
+// connect on this route". That is true for as long as the route is
+// cooling down — and then it is just an old error on a route that may
+// be tried again, which the app kept showing until the person picked a
+// route (the end-to-end rig's CEN-5 remainder). A
+// failure with NO cooldown (wrong credentials, a path that is only
+// slow, a relay with no way out) is left alone: nothing about it
+// changes with time.
+//
+// Called from the read paths, so no timer has to outlive a route. It
+// never waits for Core.mu: a poll that arrives mid-SetRoute simply
+// looks again next time.
+func (c *Core) expireFailedConnect() {
+	st, _, running := c.check.snapshot()
+	if st != RouteCheckFailed || running {
+		return
+	}
+	if !c.mu.TryLock() {
+		return
+	}
+	defer c.mu.Unlock()
+	c.check.mu.Lock()
+	route, family, cooled := c.check.failedRoute, c.check.failedFamily, c.check.failedCooled
+	stillFailed := c.check.state == RouteCheckFailed && !c.check.running
+	c.check.mu.Unlock()
+	if !stillFailed || !cooled || route == "" {
+		return
+	}
+	if ok, _ := c.pm.CanAttempt(route, family); !ok {
+		return
+	}
+	c.check.set(RouteCheckNone, "")
+	c.advancePosture(pathmanager.EventDisconnected, pathmanager.PostureNoRoute)
 }
 
 // set records a state other than failed; whether an instance is running
@@ -103,6 +207,7 @@ func (rc *routeCheck) set(state string, cat diagnostics.Category) {
 func (rc *routeCheck) setFailed(cat diagnostics.Category, running bool) {
 	rc.mu.Lock()
 	rc.state, rc.category, rc.running = RouteCheckFailed, cat, running
+	rc.failedRoute, rc.failedFamily, rc.failedCooled = "", "", false
 	rc.mu.Unlock()
 }
 
@@ -149,6 +254,7 @@ type engineConfigFile struct {
 		AttemptTimeoutMs  int      `json:"attempt_timeout_ms"`
 		Attempts          int      `json:"attempts"`
 		SlowAfterMs       int      `json:"slow_after_ms"`
+		SlowBudgetMs      int      `json:"slow_budget_ms"`
 		LivenessIntervalS int      `json:"liveness_interval_s"`
 		RecheckIntervalS  int      `json:"recheck_interval_s"`
 	} `json:"connection_check"`
@@ -175,13 +281,14 @@ func loadProofConfig(stateDir string) (engine.ProofConfig, error) {
 		return cfg, fmt.Errorf("abi: %s: %w", EngineConfigFile, err)
 	}
 	if cc := f.ConnectionCheck; cc != nil {
-		if cc.AttemptTimeoutMs < 0 || cc.Attempts < 0 || cc.SlowAfterMs < 0 || cc.LivenessIntervalS < 0 || cc.RecheckIntervalS < 0 {
+		if cc.AttemptTimeoutMs < 0 || cc.Attempts < 0 || cc.SlowAfterMs < 0 || cc.SlowBudgetMs < 0 || cc.LivenessIntervalS < 0 || cc.RecheckIntervalS < 0 {
 			return cfg, fmt.Errorf("abi: %s: connection_check values must not be negative", EngineConfigFile)
 		}
 		cfg.Targets = cc.Targets
 		cfg.AttemptTimeout = time.Duration(cc.AttemptTimeoutMs) * time.Millisecond
 		cfg.Attempts = cc.Attempts
 		cfg.SlowAfter = time.Duration(cc.SlowAfterMs) * time.Millisecond
+		cfg.SlowBudget = time.Duration(cc.SlowBudgetMs) * time.Millisecond
 		cfg.LivenessInterval = time.Duration(cc.LivenessIntervalS) * time.Second
 		cfg.RecheckInterval = time.Duration(cc.RecheckIntervalS) * time.Second
 	}
@@ -260,12 +367,28 @@ func (c *Core) routeDownLocked(routeID, family string, cat diagnostics.Category,
 	}
 	c.pm.Resume(routeID, family)
 	c.pm.Failed(routeID, family, cat)
-	// Persist the outcome the FSM just computed (privacy shape: hour
-	// bucket + closed category vocabulary, one row per route — see
-	// routestore.RecordFailure).
-	_ = c.store.RecordFailure(routeID, string(cat), pmCooldownUntil(c, routeID), nowUTC())
+	until := pmCooldownUntil(c, routeID)
+	if cat == diagnostics.PathTooSlow {
+		// Nothing completed on a path that was seen moving. That is not
+		// a failure OF THE ROUTE (specs/failure-taxonomy-v1.md:
+		// path_too_slow is never a failure row, never a cooldown, never
+		// a network signal) — and it is not a success either, so the
+		// route's durable record is left exactly as it was.
+		until = time.Time{}
+	} else {
+		// Persist the outcome the FSM just computed (privacy shape: hour
+		// bucket + closed category vocabulary, one row per route — see
+		// routestore.RecordFailure).
+		_ = c.store.RecordFailure(routeID, string(cat), until, nowUTC())
+	}
 	c.advancePosture(pathmanager.EventActiveFailed, pathmanager.PostureRecovery)
 	c.check.setFailed(cat, !teardown)
+	if teardown {
+		c.check.mu.Lock()
+		c.check.failedRoute, c.check.failedFamily = routeID, family
+		c.check.failedCooled = !until.IsZero()
+		c.check.mu.Unlock()
+	}
 }
 
 // ---- liveness ---------------------------------------------------------

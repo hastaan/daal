@@ -51,10 +51,22 @@ type RawProbe struct {
 	Ms     int64  `json:"ms"`
 }
 
-const (
+// How long a raw probe waits for a SYN to be answered and for a first
+// flight to be answered. Variables only because a scenario whose whole
+// point is DELAY (deep-queue: 2.4 s per round trip) would otherwise be
+// "proved" a dead address by the probe's own impatience: such a
+// scenario declares `probe_patience_ms`, which is added to both
+// (--patience-ms; rawPatience on the driver's side).
+var (
 	rawConnectTimeout = 2 * time.Second
 	rawAnswerTimeout  = 2500 * time.Millisecond
+)
 
+// rawPatience is the running scenario's probe_patience_ms, set once by
+// the run (run.go) and passed to every `wb rawprobe` it starts.
+var rawPatience time.Duration
+
+const (
 	tapSportPlain = 40001 // source port of a plain-UDP probe datagram
 	tapSportQUIC  = 40002 // source port of a QUIC-Initial-shaped probe datagram
 )
@@ -68,7 +80,13 @@ func cmdRawProbe(args []string) int {
 	fs.StringVar(&p.SNI, "sni", "", "tls: server_name to send (empty = none)")
 	fs.BoolVar(&p.Split, "split", false, "tls: split the ClientHello across two TCP segments")
 	fs.StringVar(&p.Shape, "shape", "plain", "udp: plain | quic")
+	patience := fs.Int("patience-ms", 0, "extra time to wait for a connect and for an answer (a scenario that delays)")
 	_ = fs.Parse(args)
+	if *patience > 0 {
+		extra := time.Duration(*patience) * time.Millisecond
+		rawConnectTimeout += extra
+		rawAnswerTimeout += extra
+	}
 	t0 := time.Now()
 	switch p.Kind {
 	case "tcp", "tls", "bytes":

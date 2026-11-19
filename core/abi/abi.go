@@ -400,41 +400,45 @@ func SetRoute(routeID string) error {
 		return ErrNoDataPlane
 	}
 	c.mu.Lock()
+	// refuse is every way out of this function before anything is
+	// started: the reason is kept (as a closed code) for the diagnostics
+	// blob, because on Android the returned error reaches nobody.
+	refuse := func(err error) error {
+		c.check.setRefused(refusedCode(err), routeID)
+		c.mu.Unlock()
+		return err
+	}
 	row, err := c.store.GetRoute(routeID)
 	if err != nil {
-		c.mu.Unlock()
-		return fmt.Errorf("abi: route %s not found: %w", routeID, err)
+		return refuse(fmt.Errorf("abi: route %s not found: %w", routeID, err))
 	}
-	if row.TrustState == "revoked" || row.TrustState == "expired" {
-		c.mu.Unlock()
-		return fmt.Errorf("abi: route %s is %s and cannot be activated", routeID, row.TrustState)
+	switch row.TrustState {
+	case "revoked":
+		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteRevoked))
+	case "expired":
+		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteExpired))
 	}
 	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok {
-		c.mu.Unlock()
-		return fmt.Errorf("abi: %s", reason)
+		return refuse(fmt.Errorf("abi: %s%.0w", reason, errRouteCooling))
 	}
 	profile, err := c.store.GetSecret("route:" + routeID)
 	if err != nil {
-		c.mu.Unlock()
-		return fmt.Errorf("abi: load profile for %s: %w", routeID, err)
+		return refuse(fmt.Errorf("abi: load profile for %s: %w", routeID, err))
 	}
 	// Defence in depth behind the importer (endpoint_guard.go): the
 	// outbound about to be dialled must still point where its publisher
 	// signed. Refused BEFORE pm.Attempt, so a refusal is never filed as
 	// a network failure of the route.
 	if err := routeEndpointGuard(c.store, row, profile); err != nil {
-		c.mu.Unlock()
-		return err
+		return refuse(err)
 	}
 	cfg, err := engine.BuildSingBoxConfig(row, profile)
 	if err != nil {
-		c.mu.Unlock()
-		return err
+		return refuse(err)
 	}
 	body, err := engine.MarshalSingBox(cfg)
 	if err != nil {
-		c.mu.Unlock()
-		return err
+		return refuse(err)
 	}
 	family := row.TransportFamily
 	// Every refusal is behind us: from here this call REPLACES whatever
@@ -444,6 +448,7 @@ func SetRoute(routeID string) error {
 	// left it "Connected" (or "failed", for good) with nothing ever
 	// checking it again.
 	c.check.abandon()
+	c.check.setRefused(ConnectRefusedNone, "")
 	c.routeEpoch++
 	epoch := c.routeEpoch
 	c.pm.Attempt(routeID, family)
@@ -495,7 +500,11 @@ func SetRoute(routeID string) error {
 	return nil
 }
 
-// ClearRoute is engine_clear_route.
+// ClearRoute is engine_clear_route. It stops whatever is running or
+// being checked and resets the connection state to "no route" — and
+// when it finds nothing to stop it changes nothing a reader can see:
+// the verdict of a connect that already failed or was refused stays in
+// the diagnostics (see below).
 func ClearRoute() error {
 	c := mustCore()
 	// Before taking the lock: a connection check in flight must be
@@ -506,14 +515,37 @@ func ClearRoute() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.routeEpoch++
+	// Did this call find anything to stop? Read before the driver is
+	// stopped, under Core.mu (every transition out of "nothing running"
+	// is made under it). A check that was in flight a moment ago still
+	// reads verifying here — the SetRoute it belonged to records nothing
+	// once it is cancelled — so it counts as something stopped.
+	st, _, running := c.check.snapshot()
+	nothingRunning := st == RouteCheckNone || (st == RouteCheckFailed && !running)
 	if err := c.driver.Stop(); err != nil {
 		return err
 	}
 	c.activeRoute, c.activeFamily = "", ""
-	c.check.set(RouteCheckNone, "")
 	// No route: there is no tunnel to betray, so direct egress is
 	// permitted again (bootstrap has to start somewhere).
 	refresh.SetTunnelRequired(false)
+	if nothingRunning {
+		// Nothing was running and nothing was being checked, so there is
+		// nothing this call disconnected — and what the diagnostics say
+		// about the LAST connect (it failed, and why; or it was refused,
+		// and why) is still the truth. It must survive this call: a host
+		// that tears its own plumbing down after a connect that did not
+		// come up calls ClearRoute as part of that (the Android VPN
+		// service does, on every such connect, before the page has
+		// polled once), and wiping the verdict there left the person
+		// with "Press to connect." and no reason. The verdict ends where
+		// it always did: at the next SetRoute that gets past its
+		// refusals, and when the cooldown the failure started runs out
+		// (expireFailedConnect).
+		return nil
+	}
+	c.check.set(RouteCheckNone, "")
+	c.check.setRefused(ConnectRefusedNone, "")
 	c.pm.Disconnect()
 	// Posture axis: a user-initiated disconnect always returns to
 	// PostureNoRoute. The transition `EventDisconnected → NoRoute`
@@ -731,7 +763,9 @@ func StatsRedacted() (string, error) {
 func ExportDiagnostics() (string, error) {
 	c := mustCore()
 	routes, _ := c.store.ListRoutes()
+	c.expireFailedConnect()
 	routeCheckState, routeCheckCat, routeRunning := c.check.snapshot()
+	connectRefused, connectRefusedRoute := c.check.refusal()
 	out := map[string]any{
 		"version": Version,
 		"mode":    c.mode,
@@ -760,6 +794,15 @@ func ExportDiagnostics() (string, error) {
 		// route stopped carrying, its instance is up and is re-checked
 		// every recheck_interval_s. Always present.
 		"route_running": routeRunning,
+		// `connect_refused`: why the last engine_set_route was refused
+		// before anything was started — "" (it was not), or one of
+		// "needs_new_file" (the route came from a file made before
+		// files carried signed server addresses), "cooldown", "revoked",
+		// "expired", "other". Closed vocabulary, always present; cleared
+		// by the next set_route that is not refused and by clear_route.
+		// `connect_refused_route` is the route id it was about.
+		"connect_refused":       connectRefused,
+		"connect_refused_route": connectRefusedRoute,
 		// Which data plane this binary actually links: "singbox" (real,
 		// can carry traffic) or "none" (the deterministic Stub — this
 		// binary CANNOT tunnel and SetRoute refuses). A GUI reading

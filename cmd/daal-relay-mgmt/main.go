@@ -56,10 +56,12 @@
 // contract requires; specs/daal-relay-mgmt-v1.md §4 needs the matching
 // amendment.
 //
-// Auth: every state-changing endpoint requires a per-request
-// Ed25519 signature in the Authorization: Daal-Mgmt-Token header,
-// verified against the per-deploy mgmt-plane public key persisted
-// at /etc/daal/mgmt/pubkey by cloud-init.
+// Auth: every endpoint but /health requires a per-request Ed25519
+// signature in the Authorization: Daal-Mgmt-Token header, verified
+// against the per-deploy mgmt-plane public key persisted at
+// /etc/daal/mgmt/pubkey by cloud-init. The signature covers the op,
+// the HTTP method, the path and the SHA-256 of the body
+// (tokenSigningInput), so a token is good for one request only.
 //
 // TLS: self-signed leaf cert generated at first boot; the SHA-256
 // fingerprint of the DER bytes is exposed via the (still-running,
@@ -69,6 +71,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -173,6 +176,12 @@ func run(paths configPaths) error {
 	}
 
 	srv := newServer(pubkey, paths.singboxConf)
+	// A token names the relay it is for (tokenSigningInput), and this is
+	// the name: the certificate this listener is about to serve.
+	srv.audience, err = tokenAudienceOf(cert)
+	if err != nil {
+		return fmt.Errorf("mgmt certificate: %w", err)
+	}
 	httpSrv := &http.Server{
 		Addr:      ":" + strconv.Itoa(port),
 		Handler:   srv.routes(),
@@ -194,7 +203,15 @@ func run(paths configPaths) error {
 
 // server is the routing + auth state.
 type server struct {
-	pubkey        ed25519.PublicKey
+	pubkey ed25519.PublicKey
+	// audience is this relay's own name in a token: the lower-case hex
+	// SHA-256 of the management TLS certificate it serves, i.e. exactly
+	// the value the publisher pins the session on. It is under every
+	// token's signature (tokenSigningInput), so a token minted for
+	// another relay that trusts the same publisher key does not verify
+	// here. Empty = this process does not know which relay it is, and
+	// verifyToken refuses everything.
+	audience      string
 	singboxConfig string
 	// cfgMu serializes every read-modify-write of singboxConfig.
 	//
@@ -223,6 +240,7 @@ type server struct {
 	cfgMu          sync.Mutex
 	realityPubPath string // /etc/daal/reality.pub (FRP-14 Tier-2)
 	tlsCertPath    string // /etc/daal/tls-cert.pem (self-signed leaf, ws/hy2/naive)
+	tlsKeyPath     string // /etc/daal/tls-key.pem (its key; read only to re-issue the leaf — tlscert.go)
 	coverSNIPath   string // /etc/daal/cover-sni (the box's own statement of its cover host)
 	familiesPath   string // /etc/daal/families (the family set this relay was provisioned to serve; see families.go)
 	rotateCredCnt  atomic.Int64
@@ -293,9 +311,10 @@ const maxSeenAddrNonces = 4096
 // verb (singleUseOp); the text below is the original reasoning, written
 // when it covered the two address verbs only.
 //
-// WHY IT STARTED WITH THESE TWO VERBS. The token signs `nonce:ts:op` and NOT the
-// request body, so one captured token authorises any number of calls to
-// its route for the rest of the ±window. That was tolerable when the
+// WHY IT STARTED WITH THESE TWO VERBS. The token then signed
+// `nonce:ts:op` and NOT the request body (it signs the whole request
+// now — tokenSigningInput), so one captured token authorised any number
+// of calls to its route for the rest of the ±window. That was tolerable when the
 // bodies named a recipient; it is weaker for a verb whose body chooses
 // which address this host configures, where the same token can be
 // replayed with a different "ip" each time until the 4-address cap is
@@ -315,16 +334,15 @@ const maxSeenAddrNonces = 4096
 // singleUseOp names.
 //
 // LIMITS. The set is in memory and is not persisted, so single use
-// holds for the life of this process only: after a restart (or a
-// reboot) a token captured earlier is presentable once more until its
-// timestamp leaves the accept window. And the nonce is consumed as
-// soon as the token verifies, before the handler reads the body, so a
-// request rejected with 400/405/500 has still spent its token. Both
-// are stated in the spec (§4.8).
-//
-// The proper fix — signing sha256(body) into the token — is a wire
-// change on both ends and is recorded in the spec (§4.8) as the next
-// step; this is the box-local half that needs no coordinated release.
+// holds for the life of this process only. That used to be the whole
+// defence against a replay with a different body; it no longer is — a
+// v2 token signs the method, the path and the body's digest
+// (tokenSigningInput), so after a restart a captured token can at most
+// repeat the identical request once more until its timestamp leaves the
+// accept window. And the nonce is consumed as soon as the token
+// verifies, before the handler parses the body, so a request rejected
+// with 400/405/500 has still spent its token. Both are stated in the
+// spec (§3, §4.8).
 func (s *server) consumeAddressNonce(nonce string, ts int64) bool {
 	s.nonceMu.Lock()
 	defer s.nonceMu.Unlock()
@@ -361,7 +379,8 @@ func newServer(pubkey ed25519.PublicKey, singboxConfig string) *server {
 		pubkey:         pubkey,
 		singboxConfig:  singboxConfig,
 		realityPubPath: "/etc/daal/reality.pub",
-		tlsCertPath:    "/etc/daal/tls-cert.pem",
+		tlsCertPath:    tlsCertPath,
+		tlsKeyPath:     tlsKeyPath,
 		coverSNIPath:   "/etc/daal/cover-sni",
 		familiesPath:   defaultFamiliesPath,
 		now:            time.Now,
@@ -497,6 +516,7 @@ func (s *server) routes() http.Handler {
 	// entire change.
 	mux.HandleFunc("/bind-address", s.requireAuth(s.handleBindAddress))
 	mux.HandleFunc("/unbind-address", s.requireAuth(s.handleUnbindAddress))
+	mux.HandleFunc("/identity", s.requireAuth(s.handleIdentity)) // read-only; see identity.go
 	return mux
 }
 
@@ -513,24 +533,62 @@ func (s *server) routeNames() []string {
 		"/whoami",
 		"/bind-address",
 		"/unbind-address",
+		"/identity",
 	}
 }
 
+// maxAuthedBody bounds the request body an authenticated route will
+// read. Every body this API accepts is a few dozen bytes of JSON; the
+// bound exists because the body is now read IN FULL before the token is
+// verified (its digest is part of what the token signs), so it is read
+// from callers who have proved nothing yet.
+const maxAuthedBody = 64 << 10
+
 // requireAuth verifies the Authorization: Daal-Mgmt-Token header.
-// The token format is "<nonce>:<ts>:<op>:<base64-sig>" where the
-// signature covers "<nonce>:<ts>:<op>".
+//
+// The token is "v2:<nonce>:<ts>:<op>:<base64-sig>" and the signature
+// covers the REQUEST, not just the op: see tokenSigningInput. The body
+// is read here, hashed, checked against the signature, and handed to the
+// handler as the same bytes — a handler can never act on a body the
+// publisher did not sign.
+//
+// The signature covers the path without a query string, so a request
+// with one (even a bare "?") is 400 whatever its token says.
 func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The token signs the path, and the path only. A query string
+		// would be the one part of the request the publisher did not
+		// sign, so a request that carries one is not a request any
+		// token is for: refused here, before the token is read, rather
+		// than left for the first handler that reads a parameter.
+		if r.URL.RawQuery != "" || r.URL.ForceQuery {
+			http.Error(w, "the management API takes no query string", http.StatusBadRequest)
+			return
+		}
 		hdr := r.Header.Get("Authorization")
 		if !strings.HasPrefix(hdr, "Daal-Mgmt-Token ") {
 			http.Error(w, "unauthorized: missing Daal-Mgmt-Token", http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		if err := s.verifyToken(token, opFromPath(r.URL.Path)); err != nil {
+		var body []byte
+		if r.Body != nil {
+			b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAuthedBody))
+			if err != nil {
+				// Nothing has been verified yet, so this says nothing
+				// about the caller: an oversized or broken body is
+				// refused before any signature work.
+				http.Error(w, "request body unreadable or larger than the management API accepts", http.StatusRequestEntityTooLarge)
+				return
+			}
+			body = b
+		}
+		if err := s.verifyToken(token, opFromPath(r.URL.Path), r.Method, r.URL.Path, sha256.Sum256(body)); err != nil {
 			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
+		// The handler reads exactly the bytes whose digest was signed.
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		next(w, r)
 	}
 }
@@ -557,21 +615,99 @@ func opFromPath(p string) string {
 		return "bind-address"
 	case "/unbind-address":
 		return "unbind-address"
+	case "/identity":
+		return identityOp
 	default:
 		return ""
 	}
 }
 
-// verifyToken decodes "<nonce>:<ts>:<op>:<sig>" and verifies the
-// Ed25519 signature against s.pubkey. Reject tokens older than 5
-// minutes to bound replay window.
-func (s *server) verifyToken(token, expectedOp string) error {
-	parts := strings.Split(token, ":")
-	if len(parts) != 4 {
-		return errors.New("malformed token (need nonce:ts:op:sig)")
+// tokenVersion is the first field of every token this service accepts.
+//
+// v1 ("<nonce>:<ts>:<op>:<sig>", signature over "nonce:ts:op") signed
+// neither the body nor the method, and is REFUSED: there is no
+// compatibility path, because accepting the weaker shape from anybody
+// would hand it to everybody. Mirrors mgmt.TokenVersion.
+const tokenVersion = "v2"
+
+// tokenContext is the first line of what a token signs. It names the
+// protocol and the format, so a signature made for this purpose can
+// never be mistaken for one over some other document the same publisher
+// key signs. Mirrors mgmt.TokenContext.
+const tokenContext = "daal-mgmt-token-v2"
+
+// tokenSigningInput is the exact byte string a v2 token signs:
+//
+//	daal-mgmt-token-v2 \n <relay> \n <nonce> \n <ts> \n <op> \n <METHOD> \n <path> \n <hex sha256(body)>
+//
+// Eight lines, joined by a single "\n", no trailing newline.
+//
+// WHY THE RELAY IS IN THE SIGNATURE. <relay> is the lower-case hex
+// SHA-256 of the management TLS certificate of the relay the token is
+// FOR (server.audience; the publisher signs the fingerprint it pins the
+// session on). One publisher key can be trusted by more than one relay
+// - an imported key, or the old and the new box around a rebuild - and
+// without this line a token was good on every one of them: a relay that
+// received a request could present the identical request to a sibling
+// inside the accept window, and the sibling's nonce set, being per
+// process, had never seen it. With it a token is good for one request
+// on ONE relay.
+//
+// WHY THE REQUEST IS IN THE SIGNATURE. Until this format the token
+// signed "nonce:ts:op" only, so a captured token authorised ANY body on
+// its route for the rest of the accept window: revoke somebody else,
+// rotate somebody else, bind another address. The service answered that
+// with a single-use nonce set (consumeAddressNonce) — but the set lives
+// in memory, so a restart of this process inside the window re-opened
+// every captured token (finding LC-1, residual). With the body's digest,
+// the method and the path under the signature, a token is good for ONE
+// request, byte for byte, whatever this process remembers: the worst a
+// replay after a restart can do is repeat the identical request the
+// publisher already made. The nonce set stays, as defence in depth
+// against exactly that repeat.
+//
+// No field can smuggle a separator: nonce, ts and op arrive in one HTTP
+// header value split on ":", which cannot contain a newline; the method
+// is net/http's token; the path is one of the nine registered literals
+// (anything else has no op and is refused before this is built); the
+// digest is hex, and so is the relay's name (this process computed it).
+//
+// This is a wire contract with publisher/deploy/mgmt (signingInput in
+// token.go). The two modules share no symbol; the shared fixture
+// testdata/token_v2_vector.json pins both ends to the same bytes.
+func tokenSigningInput(audience, nonce, ts, op, method, path string, bodySum [sha256.Size]byte) []byte {
+	return []byte(strings.Join([]string{
+		tokenContext, audience, nonce, ts, op, method, path, hex.EncodeToString(bodySum[:]),
+	}, "\n"))
+}
+
+// tokenAudienceOf is the name a token must carry to be for the relay
+// serving cert: the lower-case hex SHA-256 of the leaf's DER bytes. It
+// is computed from the certificate in hand rather than read from the
+// fingerprint file, which is written once, when the certificate is
+// first generated, and is not what the listener serves.
+func tokenAudienceOf(cert tls.Certificate) (string, error) {
+	if len(cert.Certificate) == 0 || len(cert.Certificate[0]) == 0 {
+		return "", errors.New("no leaf certificate to name this relay by")
 	}
-	nonce, tsStr, op, sigB64 := parts[0], parts[1], parts[2], parts[3]
-	if op != expectedOp {
+	sum := sha256.Sum256(cert.Certificate[0])
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// verifyToken decodes "v2:<nonce>:<ts>:<op>:<sig>" and verifies the
+// Ed25519 signature — over this relay's name, the op AND the request it
+// arrived on (method, path, body digest) — against s.pubkey. Tokens older than 5 minutes are
+// refused to bound the replay window.
+func (s *server) verifyToken(token, expectedOp, method, path string, bodySum [sha256.Size]byte) error {
+	parts := strings.Split(token, ":")
+	if len(parts) != 5 || parts[0] != tokenVersion {
+		return errors.New("malformed or unsupported token (need v2:nonce:ts:op:sig; this relay refuses the older format, which did not sign the request body)")
+	}
+	nonce, tsStr, op, sigB64 := parts[1], parts[2], parts[3], parts[4]
+	if nonce == "" {
+		return errors.New("malformed token (empty nonce)")
+	}
+	if expectedOp == "" || op != expectedOp {
 		return fmt.Errorf("op %q does not match endpoint %q", op, expectedOp)
 	}
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
@@ -586,17 +722,22 @@ func (s *server) verifyToken(token, expectedOp string) error {
 	if err != nil {
 		return fmt.Errorf("bad sig: %w", err)
 	}
-	msg := []byte(nonce + ":" + tsStr + ":" + op)
-	if !ed25519.Verify(s.pubkey, msg, sig) {
-		return errors.New("signature verification failed")
+	if s.audience == "" {
+		// Fail closed: without its own name this relay could only
+		// verify a token that names nobody, which is a token for every
+		// relay.
+		return errors.New("this relay does not know its own management certificate, so it cannot tell which relay a token is for")
 	}
-	// Every verb that MUTATES is single-use. The signature covers
-	// nonce:ts:op and not the body, so a token that could be presented
-	// twice would authorise a second call with a different body: a
-	// different address for the two address verbs, a different
-	// recipient for /users/revoke and /rotate-credentials, another
-	// cover-host move for /rotate-tls. See consumeAddressNonce and
-	// singleUseOp for the two verbs that stay replayable and why.
+	if !ed25519.Verify(s.pubkey, tokenSigningInput(s.audience, nonce, tsStr, op, method, path, bodySum), sig) {
+		return errors.New("signature verification failed (the token must be signed for this relay and this exact method, path and body)")
+	}
+	// Every verb that MUTATES is also single-use. The signature already
+	// ties the token to one request, so this no longer protects against
+	// a different body — it stops the SAME request being applied twice
+	// (a second rotation of the same recipient is a second outage for
+	// them). In memory only; see consumeAddressNonce for what that does
+	// and does not cover, and singleUseOp for the two verbs that stay
+	// replayable and why.
 	if singleUseOp(op) {
 		if !s.consumeAddressNonce(nonce, ts) {
 			return errors.New("token already used (mutating verbs are single-use; mint a fresh one)")
@@ -630,7 +771,7 @@ func (s *server) verifyToken(token, expectedOp string) error {
 // the reason for the exemption applies only to the GET.
 func singleUseOp(op string) bool {
 	switch op {
-	case "users-list", "whoami":
+	case "users-list", "whoami", identityOp:
 		return false
 	}
 	return true
@@ -977,6 +1118,15 @@ type rotateTLSResp struct {
 	AppliedHandshake string   `json:"applied_handshake"`
 	AppliedWSPath    string   `json:"applied_ws_path,omitempty"`
 	Changed          []string `json:"changed"`
+	// TLSCertPEM is the data-plane certificate after this call, present
+	// only when it was re-issued ("tls_certificate" in Changed): same
+	// key, the new cover host as its first name (tlscert.go). It is what
+	// a naive pack minted from now on must install; the key pin every
+	// other family carries has not moved.
+	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
+	// Warnings is whatever this box wants said out loud about a rotation
+	// that DID apply. Today: the certificate could not be re-issued.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // handleRotateTLS moves the box's cover identity and/or the shared ws path.
@@ -1041,6 +1191,32 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	// cover host in its record, so an orphaned config would put the box on
 	// a name no pack will ever carry, at whatever unrelated moment
 	// something else reloads sing-box.
+	//
+	// The certificate follows the cover host (tlscert.go), and it is
+	// replaced BEFORE the reload so one reload applies both. A failed
+	// reload puts both back.
+	var warnings []string
+	certPEM := ""
+	if applied.SNI != "" && contains(applied.Changed, "cover_sni") {
+		newPEM, restoreCert, reissued, cerr := s.reissueDataPlaneCert(applied.SNI)
+		switch {
+		case errors.Is(cerr, errNoDataPlaneCert):
+			// A relay with no data-plane certificate serves no family
+			// that reads one. Nothing to say.
+		case cerr != nil:
+			warnings = append(warnings, "the cover host moved, but the relay's TLS certificate could not be re-issued for it ("+cerr.Error()+"): the naive route keeps the names it had")
+		case reissued:
+			certPEM = newPEM
+			applied.Changed = append(applied.Changed, "tls_certificate")
+			configRollback := rollback
+			rollback = func() {
+				restoreCert()
+				if configRollback != nil {
+					configRollback()
+				}
+			}
+		}
+	}
 	if err := s.applyReload(rollback); err != nil {
 		http.Error(w, "singbox reload: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1069,6 +1245,8 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 		AppliedHandshake: applied.Handshake,
 		AppliedWSPath:    applied.WSPath,
 		Changed:          applied.Changed,
+		TLSCertPEM:       certPEM,
+		Warnings:         warnings,
 	})
 }
 

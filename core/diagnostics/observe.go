@@ -72,6 +72,17 @@ type Observation struct {
 	Reset   bool // RST after the connection was open
 	Refused bool // RST in answer to the SYN
 	Closed  bool // the far end closed cleanly (EOF) where an answer was due
+	// Progress: the engine SAW the path moving while this attempt ran
+	// out of time — bytes came back from the far side, or the relay's
+	// own answer took seconds to arrive. A timeout with Progress is a
+	// path that is slow, not one that is silent, and is never read as
+	// a block (the end-to-end rig's observation CEN-O5).
+	Progress bool
+	// RelayNoEgress: the relay answered its own handshake on a
+	// connection opened for this check, and every far-side host tried
+	// through it stayed silent. Set by the connection proof only, after
+	// at least two hosts run by different operators.
+	RelayNoEgress bool
 	// Message is the error text, for the locked string table.
 	Message string
 }
@@ -141,6 +152,16 @@ func ClassifyObservation(o Observation) Category {
 		RouteExpired, PublisherRevoked, PublisherKeyChanged,
 		BundleSignatureInvalid, BundleCorrupted, OriginUnhealthy:
 		return legacy
+	}
+	// What the engine measured outranks what the silence looks like.
+	// A timeout on a path that was visibly moving is slowness; and a
+	// relay that answered and then carried nothing to anyone has no way
+	// out. Neither is a claim about a filter.
+	if o.Timeout && o.Progress {
+		return PathTooSlow
+	}
+	if o.RelayNoEgress {
+		return RelayNoEgress
 	}
 	if o.UDP {
 		if o.Phase != PhaseCarry && (o.Timeout || legacy == QUICUnavailable || legacy == UDPUnavailable) {

@@ -40,7 +40,24 @@ object DaalCoreBridge {
   external fun setTunFd(fd: Int): Int
   external fun clearTunFd(): Int
   external fun registerProtectCallback(): Int
+  /**
+   * `engine_set_route`. BLOCKS until the engine has proved the route by
+   * one real round trip through it, or given up: milliseconds on a good
+   * route, about 8 s on a dead one, up to ~30 s on a link that is
+   * crawling, minutes on a cold tor route. 0 = connected; -1 = refused,
+   * failed, or cancelled by clearRoute.
+   *
+   * MUST NOT be called from the main thread (it froze the app and
+   * raised an ANR on exactly the routes that do not work).
+   * DaalVpnService calls it on its control thread.
+   */
   external fun setRoute(routeId: String): Int
+
+  /**
+   * `engine_clear_route`. Safe from any thread and idempotent. It is
+   * also the CANCEL of a setRoute in flight: the engine abandons its
+   * connection check at once and the blocked setRoute returns -1.
+   */
   external fun clearRoute(): Int
 
   /**

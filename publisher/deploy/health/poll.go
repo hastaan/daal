@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,15 +18,46 @@ import (
 // endpoint. The wizard (FRP-5) calls Wait() during the 60-second
 // provisioning window to confirm the box came up cleanly.
 //
-// Endpoint shape: http://<box_ip>:9876/healthz/<token>. We do NOT
-// use HTTPS at V1.5 because the only client is us, the network path
-// is the IP-bound ufw rule we just opened, and FRP-7 will swap in
-// a sealed-channel verifier shim (out of FRP-4a scope).
+// Endpoint shape: http://<box_ip>:9876/healthz/<PathToken(Token)>.
+// Plain HTTP: the box has no certificate the publisher could verify
+// yet — this exchange is where it learns one. The path between the
+// two is NOT trusted (the ufw rule limits who may ask, not who may
+// answer), so Token itself is never sent, and the one value later
+// trust rests on, the management-TLS fingerprint, is accepted only
+// with a MAC under Token (bootstrap.go). Every other Status field is
+// a progress hint and must not be used for a security decision.
 type Poller struct {
-	BoxIP   net.IP
-	Port    int
+	BoxIP net.IP
+	Port  int
+	// Token is the health token the publisher put in the box's
+	// cloud-init user-data. A shared secret; it stays on this side.
 	Token   string
 	Timeout time.Duration // per-request timeout; default 5 s
+}
+
+// refusalPatience is how long a run of 404 answers must last before a
+// wait ends early on it. One 404 is not enough: on a rebuild the
+// machine's previous install can answer for a moment before the
+// re-image takes it down. It is a duration, not a count, because a
+// caller's loop may spend most of a minute between polls.
+var refusalPatience = 10 * time.Second
+
+// RefusalCounter tells a retry loop when a run of ErrBootstrapRefused
+// answers has lasted long enough to stop on. The zero value is ready.
+type RefusalCounter struct{ since time.Time }
+
+// Final reports whether err extends a run of refusals past
+// refusalPatience. Any other outcome ends the run.
+func (c *RefusalCounter) Final(err error) bool {
+	if !errors.Is(err, ErrBootstrapRefused) {
+		c.since = time.Time{}
+		return false
+	}
+	if c.since.IsZero() {
+		c.since = time.Now()
+		return false
+	}
+	return time.Since(c.since) >= refusalPatience
 }
 
 // Wait polls the box up to maxAttempts times, waiting interval
@@ -81,16 +114,22 @@ func (p *Poller) WaitForMgmtFingerprint(ctx context.Context, maxAttempts int, in
 		interval = 5 * time.Second
 	}
 	var lastErr error
+	var refused RefusalCounter
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		st, err := p.poll(ctx)
+		if refused.Final(err) {
+			return "", err
+		}
 		if err == nil && st.Healthy {
+			// poll has already verified the MAC on a non-empty
+			// fingerprint; this is only the shape check.
 			fp := strings.ToLower(strings.TrimSpace(st.MgmtTLSFingerprint))
 			raw, decErr := hex.DecodeString(fp)
 			if decErr == nil && len(raw) == 32 {
 				return fp, nil
 			}
 			lastErr = fmt.Errorf("mgmt_tls_fingerprint not ready")
-		} else {
+		} else if err != nil {
 			lastErr = err
 		}
 		select {
@@ -108,6 +147,10 @@ func (p *Poller) WaitForMgmtFingerprint(ctx context.Context, maxAttempts int, in
 // PollOnce makes a single health check request and returns the
 // status. Exported so callers can implement their own retry loop
 // with progress callbacks.
+//
+// A Status it returns either has no MgmtTLSFingerprint or has one
+// whose MAC verified; a reply with an unauthenticated fingerprint is
+// ErrFingerprintUnauthenticated and no Status at all.
 func (p *Poller) PollOnce(ctx context.Context) (*Status, error) {
 	if p.Timeout == 0 {
 		p.Timeout = 5 * time.Second
@@ -126,7 +169,7 @@ func (p *Poller) poll(ctx context.Context) (*Status, error) {
 	if port == 0 {
 		port = 9876
 	}
-	url := fmt.Sprintf("http://%s:%d/healthz/%s", p.BoxIP.String(), port, p.Token)
+	url := fmt.Sprintf("http://%s/healthz/%s", net.JoinHostPort(p.BoxIP.String(), strconv.Itoa(port)), PathToken(p.Token))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -137,12 +180,22 @@ func (p *Poller) poll(ctx context.Context) (*Status, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrBootstrapRefused
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("health poll: status %d", resp.StatusCode)
 	}
 	var st Status
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st); err != nil {
 		return nil, err
+	}
+	// The fingerprint is what the publisher pins and then believes
+	// every later reply on. One a machine on the path could have
+	// written never leaves this function.
+	if strings.TrimSpace(st.MgmtTLSFingerprint) != "" &&
+		!VerifyFingerprintMAC(p.Token, st.MgmtTLSFingerprint, st.MgmtTLSFingerprintMAC) {
+		return nil, ErrFingerprintUnauthenticated
 	}
 	return &st, nil
 }

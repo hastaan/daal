@@ -89,9 +89,7 @@ func capableBox(t *testing.T, pub ed25519.PublicKey, routes map[string]http.Hand
 	for path, h := range routes {
 		p, fn := path, h
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
-			tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Daal-Mgmt-Token ")
-			nonce, tsStr, op, sig, err := ParseToken(tok)
-			if err != nil || !ed25519.Verify(pub, []byte(nonce+":"+tsStr+":"+op), sig) {
+			if _, ok := boxVerifies(pub, r); !ok {
 				http.Error(w, "auth", 401)
 				return
 			}

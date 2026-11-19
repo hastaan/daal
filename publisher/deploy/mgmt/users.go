@@ -4,13 +4,11 @@
 package mgmt
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 
 	"daal/publisher/deploy/provider"
@@ -133,17 +131,14 @@ type UserMeta struct {
 // only time the secrets ever leave the box — the publisher app
 // MUST persist them immediately (operator_recipients row).
 func (c *Client) ProvisionUser(ctx context.Context, rec *provider.OperatorRecord, priv ed25519.PrivateKey, name string) (*UserCreds, error) {
-	tok, err := MintToken(priv, "users-provision", c.now())
+	body, err := json.Marshal(map[string]string{"name": name})
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(map[string]string{"name": name})
-	req, err := http.NewRequestWithContext(ctx, "POST", c.boxURL(rec, "/users/provision"), bytes.NewReader(body))
+	req, err := c.signedRequest(ctx, rec, priv, "users-provision", body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mgmt: users/provision: %w", err)
@@ -167,17 +162,14 @@ type RevokeResp struct {
 }
 
 func (c *Client) RevokeUser(ctx context.Context, rec *provider.OperatorRecord, priv ed25519.PrivateKey, name string) (*RevokeResp, error) {
-	tok, err := MintToken(priv, "users-revoke", c.now())
+	body, err := json.Marshal(map[string]string{"name": name})
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(map[string]string{"name": name})
-	req, err := http.NewRequestWithContext(ctx, "POST", c.boxURL(rec, "/users/revoke"), bytes.NewReader(body))
+	req, err := c.signedRequest(ctx, rec, priv, "users-revoke", body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mgmt: users/revoke: %w", err)
@@ -198,15 +190,10 @@ func (c *Client) RevokeUser(ctx context.Context, rec *provider.OperatorRecord, p
 // the box currently honors (canonical source: the VLESS inbound's
 // users[] table).
 func (c *Client) ListUsers(ctx context.Context, rec *provider.OperatorRecord, priv ed25519.PrivateKey) ([]UserMeta, error) {
-	tok, err := MintToken(priv, "users-list", c.now())
+	req, err := c.signedRequest(ctx, rec, priv, "users-list", nil)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", c.boxURL(rec, "/users/list"), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mgmt: users/list: %w", err)

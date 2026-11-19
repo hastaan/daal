@@ -11,10 +11,13 @@ import (
 	"time"
 )
 
-// Status is the JSON body returned by GET /healthz/<token>. The
-// schema is locked at FRP-4a and consumed by the Helper-side
-// poller in poll.go and (later) by FRP-5's wizard for the
-// "Helper is up" indicator.
+// Status is the JSON body returned by GET /healthz/<path token>. It
+// is consumed by the Helper-side poller in poll.go.
+//
+// The reply travels over plain HTTP. MgmtTLSFingerprint is the one
+// field anything is later trusted on, and it is believed only with
+// MgmtTLSFingerprintMAC (bootstrap.go). Every other field is a
+// progress hint a machine on the path could have written.
 type Status struct {
 	Healthy            bool      `json:"healthy"`
 	BoxBootedAt        time.Time `json:"box_booted_at"`
@@ -22,7 +25,10 @@ type Status struct {
 	DaalVersion        string    `json:"daal_version"`
 	UptimeSec          int64     `json:"uptime_sec"`
 	MgmtTLSFingerprint string    `json:"mgmt_tls_fingerprint,omitempty"`
-	DebugLog           string    `json:"debug_log,omitempty"`
+	// MgmtTLSFingerprintMAC is FingerprintMAC(health token,
+	// MgmtTLSFingerprint). The handler fills it; a Probe does not.
+	MgmtTLSFingerprintMAC string `json:"mgmt_tls_fingerprint_mac,omitempty"`
+	DebugLog              string `json:"debug_log,omitempty"`
 }
 
 // Probe is the box-local hook the handler calls to compute the
@@ -33,9 +39,10 @@ type Probe interface {
 }
 
 // HandlerConfig is the input to NewHandler. Token is the one-time
-// secret cloud-init wrote to /etc/daal/health-token; the handler
-// rejects every request whose path token does not match this
-// constant-time.
+// secret cloud-init wrote into the health config. It is never sent on
+// the wire: the handler answers only the path token derived from it
+// (PathToken, compared in constant time) and uses it to authenticate
+// the management-TLS fingerprint it returns (FingerprintMAC).
 type HandlerConfig struct {
 	Token           string
 	AllowedClientIP net.IP // optional; nil disables binary-level IP check
@@ -43,9 +50,9 @@ type HandlerConfig struct {
 }
 
 // NewHandler returns the box-side http.Handler for the health
-// endpoint. The single route is GET /healthz/<token>; everything
-// else returns 404 (NOT 401, to avoid leaking that a token-shaped
-// route is the right path).
+// endpoint. The single route is GET /healthz/<PathToken(token)>;
+// everything else — the raw token included — returns 404 (NOT 401, to
+// avoid leaking that a token-shaped route is the right path).
 func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	if cfg.Token == "" {
 		return nil, errors.New("health: empty token")
@@ -53,11 +60,12 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	if cfg.Probe == nil {
 		return nil, errors.New("health: nil probe")
 	}
-	return &handler{cfg: cfg}, nil
+	return &handler{cfg: cfg, pathToken: PathToken(cfg.Token)}, nil
 }
 
 type handler struct {
-	cfg HandlerConfig
+	cfg       HandlerConfig
+	pathToken string
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +83,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got := r.URL.Path[len(prefix):]
-	if subtle.ConstantTimeCompare([]byte(got), []byte(h.cfg.Token)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(got), []byte(h.pathToken)) != 1 {
 		http.NotFound(w, r)
 		return
 	}
@@ -83,6 +91,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "probe failed", http.StatusInternalServerError)
 		return
+	}
+	// The MAC is the handler's to make, whatever the probe returned.
+	st.MgmtTLSFingerprintMAC = ""
+	if fp := canonicalFingerprint(st.MgmtTLSFingerprint); fp != "" {
+		st.MgmtTLSFingerprint = fp
+		st.MgmtTLSFingerprintMAC = FingerprintMAC(h.cfg.Token, fp)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(st)

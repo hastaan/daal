@@ -8,12 +8,20 @@
 //!     person's connection file dies; everybody else keeps connecting
 //!     with the file they already have.
 //!
-//!   * [`rotate_tls`] moves the relay's cover hostname and TLS
-//!     parameters. Every recipient's pinned parameters go stale at
-//!     once, so EVERY connection file ever handed out stops working —
-//!     the everyone-pack and each person's own `.sbpx` alike.
+//!   * [`rotate_tls`] moves the relay's cover hostname. It is
+//!     relay-wide — but what it costs is ONE ROUTE, not every file.
+//!     The cover host is on the wire for vless-reality only; every
+//!     other route in a file already handed out keeps connecting
+//!     exactly as before (measured: rig finding LC-O1, six of seven
+//!     families). And the one route it does break heals itself: the
+//!     wizard signs the pack again and publishes the refresh note, and
+//!     a phone whose file carries refresh addresses picks the new cover
+//!     host up with nobody touching it. This module's summary says
+//!     which of those is true for THIS relay — see [`NeedsFile`] — and
+//!     no longer tells an operator to hand-deliver files to people who
+//!     are not cut off.
 //!
-//! Those two blast radii differ by three orders of magnitude, and the
+//! Those two operations still differ in kind, and the
 //! relay's mgmt service used to conflate them: one handler rotated
 //! per-recipient credentials *and* the box-wide REALITY keypair in a
 //! single call. Wave 3 splits them on the box; this module is the
@@ -40,11 +48,14 @@
 //!     configured since. A pack minted before the publisher added any
 //!     endpoint still needs a courier, forever. The UI branches on the
 //!     signed pack (`mirrorsInPack`), never on configuration.
-//!   * Neither operation here publishes anything. `rotate_execute`
-//!     (commands.rs) re-signs and re-publishes the freshness document
-//!     inside one transaction; these two do not. After a TLS rotation
-//!     the operator must rebuild the packs and press Publish under
-//!     Refresh addresses, and the result copy says so.
+//!   * [`rotate_tls`] signs the pack again and publishes the refresh
+//!     note itself, as `rotate_execute` (commands.rs) does for the
+//!     address swap. What it cannot do is put the newly signed file at
+//!     the download address the note points to: Daal publishes the
+//!     note, never the file, so that one step stays the operator's and
+//!     the result copy says so. [`rotate_credentials`] publishes
+//!     nothing — it changes one person's access, which is never
+//!     published — unless the relay turned out to have moved.
 //!
 //! Both summaries below still carry the counts, because the screen has
 //! to be able to state the consequence rather than imply it.
@@ -118,11 +129,74 @@ pub struct RotateTlsSummary {
     /// True when the new cover host was written back to the stored
     /// OperatorRecord, so the pack minter's fallback is current.
     pub record_updated: bool,
-    /// How many people are holding a file that just stopped working.
+    /// How many people hold a file from this relay. NOT "how many are
+    /// cut off" — see `needs_file`.
     pub live_recipients: i64,
-    /// Whether an everyone-pack exists and is now dead too.
+    /// Whether an everyone-pack built before this change is on disk.
+    /// It still connects (on every route but the disguised one); it
+    /// should be rebuilt before it is sent to anyone new.
     pub shared_pack_stale: bool,
+    /// Who, if anyone, has to be sent a new file — the answer the
+    /// result panel leads with.
+    pub needs_file: NeedsFile,
+    /// The pack was signed again from the relay's new identity.
+    pub pack_resigned: bool,
+    /// The refresh note naming the newly signed file reached enough
+    /// mirrors.
+    pub refresh_note_published: bool,
+    /// Where the newly signed file is, for the one step that stays the
+    /// operator's: putting it at the download address.
+    pub signed_pack_path: String,
     pub warnings: Vec<String>,
+}
+
+/// After a disguise change: who has to be sent a new file?
+///
+/// Decided from four facts, none of them a guess: did the cover host
+/// actually move; does this relay have the one route that carries it;
+/// does it have any OTHER route; and can the files people hold learn
+/// about the change over the network (they carry refresh addresses AND
+/// the new note went out).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NeedsFile {
+    /// Nothing in anybody's file changed (the cover host did not move,
+    /// or this relay has no route that uses it).
+    #[default]
+    Nobody,
+    /// Nobody: apps pick the change up by themselves once the newly
+    /// signed file is at the download address — and keep connecting on
+    /// the relay's other routes until then.
+    NobodyHealsItself,
+    /// Nobody, but this relay has ONLY the disguised route, so people
+    /// cannot connect until their app has picked the change up.
+    NobodyHealsItselfOfflineMeanwhile,
+    /// Nobody is cut off — the other routes keep working — but the
+    /// disguised route stays dead for the files people hold until they
+    /// are sent new ones, because those files cannot learn about it.
+    OneRouteUntilNewFile,
+    /// Everyone: the only route is the disguised one and the files
+    /// people hold cannot learn about the change.
+    Everyone,
+}
+
+/// The decision table behind [`NeedsFile`], split out so every cell of
+/// it is testable without a relay.
+pub fn who_needs_a_file(
+    cover_moved: bool,
+    has_disguised_route: bool,
+    has_other_route: bool,
+    files_can_learn: bool,
+) -> NeedsFile {
+    if !cover_moved || !has_disguised_route {
+        return NeedsFile::Nobody;
+    }
+    match (files_can_learn, has_other_route) {
+        (true, true) => NeedsFile::NobodyHealsItself,
+        (true, false) => NeedsFile::NobodyHealsItselfOfflineMeanwhile,
+        (false, true) => NeedsFile::OneRouteUntilNewFile,
+        (false, false) => NeedsFile::Everyone,
+    }
 }
 
 /// `rotate_credentials` re-keys ONE recipient on the box and rebuilds
@@ -255,6 +329,17 @@ pub fn rotate_credentials(
         );
     }
 
+    // If the relay is no longer what the signed pack commits to, sign
+    // again before building from it. Not an error to return, for the
+    // reason given below for the rebuild itself: the box has moved.
+    if let Err(e) =
+        crate::relay_identity::heal_after_reply(ctx, operator_id, &(&creds).into(), &mut |_| {})
+    {
+        warnings.push(format!(
+            "this relay has changed since its file was last signed, and signing it again              failed: {e}"
+        ));
+    }
+
     // The `.sbpx` rebuild is the deliverable, but its failure is NOT a
     // reason to return Err. By this point the box has already moved:
     // the recipient's old file is dead whether or not we managed to
@@ -293,12 +378,15 @@ pub fn rotate_credentials(
     })
 }
 
-/// `rotate_tls` moves the relay's cover hostname / TLS parameters.
+/// `rotate_tls` moves the relay's cover hostname, then signs the pack
+/// again and republishes the refresh note so the change reaches people
+/// without a courier.
 ///
-/// It touches no user credentials and no REALITY keypair. What it does
-/// touch is every already-distributed pack, because each one pins the
-/// cover host it was minted with — so the summary carries the count of
-/// people who now need a new file by hand.
+/// It touches no user credentials and no REALITY keypair. Of the routes
+/// in a file already handed out it affects exactly one — the disguised
+/// (vless-reality) route, the only one that puts the cover host on the
+/// wire — and the summary says who, if anyone, has to be sent a new
+/// file because of that ([`NeedsFile`]).
 pub fn rotate_tls(ctx: &WizardCtx, operator_id: i64) -> Result<RotateTlsSummary, WizardError> {
     let helper_ip = require_helper_ip(ctx, operator_id)?;
     let op_row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
@@ -406,6 +494,85 @@ pub fn rotate_tls(ctx: &WizardCtx, operator_id: i64) -> Result<RotateTlsSummary,
         .join(format!("{operator_id}.shared.sbp"))
         .exists();
 
+    let previous_cover_sni = if applied.previous_cover_sni.is_empty() {
+        record_cover_sni
+    } else {
+        applied.previous_cover_sni.clone()
+    };
+
+    // SIGN AGAIN, FROM THE RELAY AS IT NOW IS, AND TELL PEOPLE'S APPS.
+    //
+    // The relay has moved; the signed pack still commits the disguised
+    // route to the old cover host. Until this ran, the operator was
+    // told to rebuild every file and deliver each by hand. Neither half
+    // of that was needed: the pack is re-signed here (the relay is
+    // asked who it is first, so the new cover host comes from the box
+    // and not from what was requested), and the refresh note is
+    // published, so a phone holding a file with refresh addresses heals
+    // by itself.
+    //
+    // None of it is a reason to return Err. The rotation HAS happened;
+    // a failure here changes what the operator must do next, which is
+    // exactly what the summary is for.
+    let signed_before = crate::relay_identity::committed(ctx, operator_id)
+        .ok()
+        .flatten();
+    let have_signed_pack =
+        crate::freshness::default_signed_pack_path(ctx, operator_id).exists() || signed_before.is_some();
+    let mut pack_resigned = false;
+    let mut refresh_note_published = false;
+    let mut prior_pack_had_refresh_addresses = false;
+    let mut signed_pack_path = String::new();
+    if have_signed_pack {
+        match crate::relay_identity::resign_and_republish(
+            ctx,
+            operator_id,
+            crate::relay_identity::Freshness::Fresh,
+            &mut |_| {},
+        ) {
+            Ok(r) => {
+                pack_resigned = true;
+                refresh_note_published = r.refresh_note_published;
+                prior_pack_had_refresh_addresses = r.prior_pack_had_refresh_addresses;
+                signed_pack_path = r.signed_pack_path;
+                if !r.refresh_note_problem.is_empty() {
+                    warnings.push(format!(
+                        "the relay's file was signed again, but the note that tells people's                          apps about it was not published: {}",
+                        r.refresh_note_problem
+                    ));
+                }
+            }
+            Err(e) => warnings.push(format!(
+                "the disguise was changed, but signing the relay's file again failed, so                  nothing was published: {e}"
+            )),
+        }
+    }
+
+    // WHO NEEDS A NEW FILE. From what the pack commits to (after the
+    // re-sign when it worked, before it otherwise): the disguised route
+    // exists iff a REALITY key is committed, and "another route" is any
+    // other family with a signed endpoint.
+    let signed_now = crate::relay_identity::committed(ctx, operator_id)
+        .ok()
+        .flatten()
+        .or(signed_before);
+    let (has_disguised_route, has_other_route) = match signed_now.as_ref() {
+        Some(c) => (
+            c.families.iter().any(|f| f == "vless-reality"),
+            c.families.iter().any(|f| f != "vless-reality"),
+        ),
+        // Nothing signed yet: nobody holds a file, and the first one
+        // will be built from the relay as it now is.
+        None => (false, false),
+    };
+    let cover_moved = !applied.cover_sni.is_empty() && applied.cover_sni != previous_cover_sni;
+    let needs_file = who_needs_a_file(
+        cover_moved,
+        has_disguised_route,
+        has_other_route,
+        prior_pack_had_refresh_addresses && refresh_note_published,
+    );
+
     Ok(RotateTlsSummary {
         applied_at_unix: if applied.applied_at_unix > 0 {
             applied.applied_at_unix
@@ -413,15 +580,15 @@ pub fn rotate_tls(ctx: &WizardCtx, operator_id: i64) -> Result<RotateTlsSummary,
             (ctx.clock)()
         },
         cover_sni: applied.cover_sni,
-        previous_cover_sni: if applied.previous_cover_sni.is_empty() {
-            record_cover_sni
-        } else {
-            applied.previous_cover_sni
-        },
+        previous_cover_sni,
         cover_sni_unknown,
         record_updated,
         live_recipients,
         shared_pack_stale,
+        needs_file,
+        pack_resigned,
+        refresh_note_published,
+        signed_pack_path,
         warnings,
     })
 }

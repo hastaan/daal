@@ -1,0 +1,19 @@
+{
+  "name": "deep-queue",
+  "description": "Everything is forwarded and nothing is dropped, but every packet waits 1.2 s in each direction: a round trip to the relay costs 2.4 s. That is what a link with seconds of standing queue looks like from one connection's seat (FINDINGS CEN-O5 met it by accident, as the previous phone's packets still draining through a 56 kbit/s cap). A SYN is answered after 2.4 s, a TLS handshake to the relay after 4.8 s, and the engine's ordinary connection check — two attempts of 4 s — finishes nothing. The path is slow, not blocked: the engine must see that it is moving (the relay's answers arrive late, they do arrive), give the route its one long attempt, connect, and say \"slow\" — not \"could not connect\", and no cooldown.",
+  "analogue": "Bufferbloat behind a throttled or saturated uplink: a shaped mobile link at peak hours, a shared satellite or long-haul microwave hop, a congested international gateway. Model: a fixed netem delay on the whole client, both ways, with a generous rate so that delay and not capacity is the limit. A real queue's delay varies with load; a fixed one is its steady state.",
+  "censor": {
+    "tc": [
+      {"dev": "$DEV_RELAY", "args": "netem delay 1200ms rate 2mbit"},
+      {"dev": "$DEV_CLIENT", "args": "netem delay 1200ms rate 2mbit"}
+    ]
+  },
+  "probe_patience_ms": 4000,
+  "prove": [
+    {"name": "handshake-still-completes", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"},
+    {"name": "bulk-is-slow", "probe": "bulk", "to": "elsewhere", "port": 80, "expect": "slow"}
+  ],
+  "expect": {"*": "blocked"},
+  "category": {"*": "path_too_slow"},
+  "established": {"*": "pass"}
+}

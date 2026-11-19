@@ -756,6 +756,24 @@ naive route follow the relay to a new address (L3) without the
 certificate changing. A relay provisioned earlier has no such name and
 loses naive on L3.
 
+The certificate's **first** DNS name is the relay's current cover host:
+when `rotate-tls` moves the cover host the relay re-issues the
+certificate on the same key with the new host first and the earlier
+names kept after it (`specs/daal-relay-mgmt-v1.md` §4.2 step 5). The key
+pin — the only thing this commitment says about naive's certificate —
+does not move, so no endpoint needs re-signing for it. A pack minted
+after the rotation installs the new certificate and so verifies, and
+presents, the current cover host; a device that keeps the certificate it
+was handed keeps the name that certificate leads with, which the relay
+still answers to. Carrying the name in the commitment, so that such a
+device follows without a new file, is not specified.
+
+A naive outbound may carry `udp_over_tcp` (packs minted since 2026-11-18
+do: `{"enabled": true, "version": 2}`). It is not covered by the
+commitment and does not need to be: it changes what the committed stream
+carries, not where the stream goes or what proves who answered. A merge
+keeps the device's value.
+
 ### Why the credentials may stay unsigned
 
 The per-recipient credentials (uuid, passwords, REALITY short id, ws
@@ -874,13 +892,34 @@ dialled. A refusal there is not recorded as a failure of the route.
 ### Publisher rules
 
 - `bind-and-sign` commits every candidate whose family is in the table.
-  Material comes from the OperatorRecord (address, ports, cover host,
-  and — when provisioning read them — REALITY public key and TLS pin)
-  and from `--endpoint-creds <file>`: any `users-provision` /
-  `rotate-credentials` reply, of which only the relay-wide fields are
-  read. The record wins wherever it speaks: it is what every rotation
-  verb rewrites, while a saved reply is a snapshot. No recipient secret
-  and no shadowsocks key (only its digest) is written to the pack.
+  Material comes from three places, in this order of authority:
+  1. `--relay-identity <file>` — the relay's own statement of who it is
+     (`daal-deploy relay-identity`, mgmt `GET /identity`,
+     `specs/daal-relay-mgmt-v1.md` §4.9). **This is the path**: it needs
+     no recipient and no provider-specific SSH read, so a pack can be
+     signed before the first recipient exists, on every provider. Where
+     it speaks — REALITY public key, TLS pin, cover host, shadowsocks
+     method and server-key digest — it outranks the record, and every
+     disagreement is reported (`identity_warnings`). An identity older
+     than 15 minutes does not outrank the record on the cover host
+     (`rotate-tls` rewrites the record; an old identity cannot know).
+  2. the OperatorRecord — always the source of the address and the
+     ports; of the cover host, REALITY public key and TLS pin only where
+     the relay's identity is silent.
+  3. `--endpoint-creds <file>` — any `users-provision` /
+     `rotate-credentials` reply, of which only the relay-wide fields are
+     read; for a relay too old to state its identity. It fills what is
+     still empty and never overrides the record: the record is what
+     every rotation verb rewrites, while a saved reply is a snapshot.
+
+  No recipient secret and no shadowsocks key (only its digest) is
+  written to the pack. The summary's `committed_identity` is what the
+  signed endpoints commit the relay to, read back out of the pack.
+- A relay's shadowsocks key does not exist until its first recipient
+  (`pending_families` in its identity). A pack signed before that has no
+  shadowsocks commitment, and the publisher MUST sign again once the key
+  exists — the publisher app does so as soon as a relay reply disagrees
+  with the `committed_identity` it stored.
 - A candidate whose material is missing is signed **without** a
   commitment, named on stderr and in `uncommitted_families` on stdout;
   no recipient can use it. If no committable candidate got one, nothing
@@ -889,8 +928,13 @@ dialled. A refusal there is not recorded as a failure of the route.
   route's commitment. A route with no commitment is dropped and
   reported like any other unrenderable route. A mismatch — the relay
   moved since the pack was signed — fails the verb: sign again first.
-- After any rotation that moves an endpoint (L2, L3) the publisher MUST
-  run `bind-and-sign` again before minting or announcing.
+- After any rotation that moves an endpoint (L2, L3) or replaces the
+  relay (L4–L6) the publisher MUST run `bind-and-sign` again — from a
+  fresh `relay-identity` after L2 and after a rebuild — before minting
+  or announcing, and MUST republish freshness. The publisher app does
+  all three itself and tells the operator who, if anyone, still needs a
+  new file (the table below); it does not say "every recipient" after
+  an L2.
 
 ### Freshness delivers the signed endpoint; what still needs a file
 
@@ -901,7 +945,7 @@ be hosted publicly. Recipients merge it (rule 3). Consequently:
 | rung | what changes | per-recipient credentials | a recipient that polls |
 |---|---|---|---|
 | L1 `rotate-credentials` | one recipient's credentials | changed for that recipient | **that recipient needs a new file** |
-| L2 `rotate-tls` | cover host | unchanged | recovers, no new file. (If the shared ws path was moved as well, the websocket route alone needs a new file: the path travels with the credentials.) |
+| L2 `rotate-tls` | cover host | unchanged | recovers, no new file. (If the shared ws path was moved as well, the websocket route alone needs a new file: the path travels with the credentials.) **A recipient that does not poll** (a pack with no freshness mirrors) keeps connecting on every route except vless-reality — the only one that puts the cover host on the wire — and needs a new file for that route alone. |
 | L3 `assign-fip` | address | unchanged | recovers, no new file |
 | L4–L6 rebuild | new box: new REALITY key, new TLS key, new credentials | changed for everyone | **every recipient needs a new file** |
 
@@ -943,8 +987,9 @@ opts)` function — added at FRP-4b, not here — reads the
 - `shared_risk_graph`: derived from each candidate's
   `public_risk_tags[]` per supplement §12.3.
 - per route, the signed `_endpoint` commitment (see "Endpoint
-  commitment" above), from the record plus
-  `BindOpts.Endpoint` / `--endpoint-creds`. The profile the binder
+  commitment" above), from the relay's identity
+  (`BindOpts.RelayIdentity` / `--relay-identity`), the record, and
+  `BindOpts.Endpoint` / `--endpoint-creds`, in that order of authority. The profile the binder
   writes for each route still holds no outbound and no secret: its
   output is the signed, credential-less pack.
 

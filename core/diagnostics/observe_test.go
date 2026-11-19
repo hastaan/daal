@@ -127,3 +127,48 @@ func TestObserveReadsWrappedErrors(t *testing.T) {
 		t.Fatalf("a wrapped dial timeout was not recognised: %+v", o)
 	}
 }
+
+// A timeout on a path the engine saw moving is slowness, in every phase
+// and for every kind of route — never a handshake failure, a dead
+// address, or anything a recommender reads as a block (backlog TW-10).
+func TestClassifyObservation_TimeoutWithProgressIsNeverABlock(t *testing.T) {
+	for _, phase := range []Phase{PhaseReach, PhaseHandshake, PhaseCarry} {
+		for _, udp := range []bool{false, true} {
+			o := Observe(context.DeadlineExceeded, phase, udp, true)
+			o.Progress = true
+			if got := ClassifyObservation(o); got != PathTooSlow {
+				t.Errorf("phase %s udp=%v: %s, want path_too_slow", phase, udp, got)
+			}
+		}
+	}
+	// Progress does not launder a failure that is not a timeout.
+	o := Observe(errors.New("read: connection reset by peer"), PhaseHandshake, false, true)
+	o.Progress = true
+	if got := ClassifyObservation(o); got != TLSSNIOrCertBlockSuspected {
+		t.Errorf("a reset with progress = %s, want tls_sni_or_cert_block_suspected", got)
+	}
+	// And a credential the relay refused stays that.
+	o = Observe(errors.New("authentication failed"), PhaseCarry, false, true)
+	o.Timeout, o.Progress = true, true
+	if got := ClassifyObservation(o); got != AuthFailed {
+		t.Errorf("auth failure with progress = %s", got)
+	}
+}
+
+// relay_no_egress: the relay answered and nothing beyond it did. Not a
+// censorship class — no cooldown follows from it (backlog TW-14).
+func TestClassifyObservation_RelayNoEgress(t *testing.T) {
+	for _, udp := range []bool{false, true} {
+		o := Observe(context.DeadlineExceeded, PhaseCarry, udp, true)
+		if got := ClassifyObservation(o); got != Unknown {
+			t.Fatalf("udp=%v: a bare carry-phase timeout = %s, want unknown", udp, got)
+		}
+		o.RelayNoEgress = true
+		if got := ClassifyObservation(o); got != RelayNoEgress {
+			t.Fatalf("udp=%v: %s, want relay_no_egress", udp, got)
+		}
+	}
+	if IsCensorshipClass(RelayNoEgress) {
+		t.Fatal("relay_no_egress is the relay's problem, not the network's: it must never trigger a cooldown")
+	}
+}

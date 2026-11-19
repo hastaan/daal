@@ -180,3 +180,266 @@ func TestStubProveNeedsARunningInstance(t *testing.T) {
 		t.Fatal("with nothing injected the stub proves")
 	}
 }
+
+// ---- slow is not silent (backlog TW-10, the rig's CEN-O5) ---------------
+
+func timeoutObs(phase diagnostics.Phase, progress bool) (diagnostics.Observation, error) {
+	o := diagnostics.Observe(context.DeadlineExceeded, phase, false, true)
+	o.Progress = progress
+	return o, context.DeadlineExceeded
+}
+
+func slowCfg(targets ...string) ProofConfig {
+	c := cfgFor(targets...)
+	c.SlowBudget = 2 * time.Second
+	return c
+}
+
+// Every ordinary attempt runs out of time on a path that was seen
+// moving: the proof makes ONE more attempt with the long budget, and a
+// route that completes it is connected and slow — not "could not
+// connect", and not a cooldown.
+func TestRunProof_SlowPathGetsTheLongAttemptAndConnectsSlow(t *testing.T) {
+	var budgets []time.Duration
+	res := runProof(context.Background(), slowCfg("a.example:443", "b.example:443", "c.example:443"), func(int) int { return 0 },
+		func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+			dl, _ := ctx.Deadline()
+			budgets = append(budgets, time.Until(dl).Round(100*time.Millisecond))
+			if len(budgets) <= 2 {
+				return timeoutObs(diagnostics.PhaseCarry, true)
+			}
+			return diagnostics.Observation{}, nil
+		})
+	if !res.OK || !res.Slow || !res.Extended || res.Attempts != 3 {
+		t.Fatalf("want connected-and-slow after the long attempt, got %+v", res)
+	}
+	if len(budgets) != 3 || budgets[2] != 2*time.Second || budgets[0] != 200*time.Millisecond {
+		t.Fatalf("attempt budgets = %v; the third must be the slow budget", budgets)
+	}
+}
+
+// A path on which nothing was seen moving gets no extra time: a dead
+// route still fails within attempts × attempt_timeout.
+func TestRunProof_SilentPathGetsNoExtraTime(t *testing.T) {
+	n := 0
+	res := runProof(context.Background(), slowCfg("a.example:443", "b.example:443"), func(int) int { return 0 },
+		func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+			n++
+			return timeoutObs(diagnostics.PhaseHandshake, false)
+		})
+	if res.OK || res.Extended || n != 2 {
+		t.Fatalf("a silent path was given %d attempts (extended=%v)", n, res.Extended)
+	}
+	if got := res.Category(); got != diagnostics.TLSHandshakeFailed {
+		t.Fatalf("category = %s, want tls_handshake_failed", got)
+	}
+}
+
+// A moving path that does not finish even the long attempt is
+// path_too_slow — whatever phase the last timeout was in. In particular
+// a timeout after the ClientHello on a slow path is NOT
+// tls_handshake_failed (30 min of cooldown) and nothing a recommender
+// could read as a name-keyed block.
+func TestRunProof_SlowPathThatNeverFinishesIsPathTooSlow(t *testing.T) {
+	n := 0
+	res := runProof(context.Background(), slowCfg("a.example:443", "b.example:443"), func(int) int { return 0 },
+		func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+			n++
+			// Only the first attempt saw the path move; the evidence
+			// must carry to the verdict.
+			return timeoutObs(diagnostics.PhaseHandshake, n == 1)
+		})
+	if res.OK || !res.Extended || n != 3 {
+		t.Fatalf("got %+v after %d attempts", res, n)
+	}
+	if got := res.Category(); got != diagnostics.PathTooSlow {
+		t.Fatalf("category = %s, want path_too_slow", got)
+	}
+}
+
+// The reach check's finding (aids.settle) counts as evidence too: a SYN
+// answered late is a slow path.
+func TestRunProof_SettleCanSupplyTheEvidence(t *testing.T) {
+	n := 0
+	res := runProofWith(context.Background(), slowCfg("a.example:443", "b.example:443"), func(int) int { return 0 },
+		func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+			n++
+			if n <= 2 {
+				return timeoutObs(diagnostics.PhaseHandshake, false)
+			}
+			return diagnostics.Observation{}, nil
+		},
+		proofAids{settle: func(_ context.Context, o *diagnostics.Observation) { o.Progress = true }})
+	if !res.OK || !res.Slow || n != 3 {
+		t.Fatalf("got %+v after %d attempts", res, n)
+	}
+}
+
+// ---- the carry-phase timeout is asked again on a fresh connection ------
+
+// A timeout after the outbound handed over a connection says nothing
+// about the relay when the outbound answered from a session it already
+// held — every dial on a route that has been connected for a while. The
+// driver's fresh-connection attempt is believed instead: a mid-session
+// block is classified as the connect-time proof would classify it.
+func TestRunProof_CarryTimeoutIsAskedAgainOnAFreshConnection(t *testing.T) {
+	carry := func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+		return timeoutObs(diagnostics.PhaseCarry, false)
+	}
+	cases := []struct {
+		name string
+		diag func() (diagnostics.Observation, error, bool)
+		want diagnostics.Category
+	}{
+		{"ClientHello swallowed", func() (diagnostics.Observation, error, bool) {
+			o, err := timeoutObs(diagnostics.PhaseHandshake, false)
+			return o, err, true
+		}, diagnostics.TLSHandshakeFailed},
+		{"address dead", func() (diagnostics.Observation, error, bool) {
+			err := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+			return diagnostics.Observe(err, diagnostics.PhaseHandshake, false, true), err, true
+		}, diagnostics.TCPConnectTimeout},
+		{"reset after the ClientHello", func() (diagnostics.Observation, error, bool) {
+			err := errors.New("read: connection reset by peer")
+			return diagnostics.Observe(err, diagnostics.PhaseHandshake, false, true), err, true
+		}, diagnostics.TLSSNIOrCertBlockSuspected},
+		{"relay answers, nothing beyond it does", func() (diagnostics.Observation, error, bool) {
+			o, err := timeoutObs(diagnostics.PhaseCarry, false)
+			o.RelayNoEgress = true
+			return o, err, true
+		}, diagnostics.RelayNoEgress},
+		{"no fresh connection to offer", func() (diagnostics.Observation, error, bool) {
+			return diagnostics.Observation{}, nil, false
+		}, diagnostics.Unknown},
+		{"the fresh connection works: a stale session, nothing known", func() (diagnostics.Observation, error, bool) {
+			return diagnostics.Observation{}, nil, true
+		}, diagnostics.Unknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			res := runProofWith(context.Background(), cfgFor("a.example:443", "b.example:443", "c.example:443"), func(int) int { return 0 }, carry,
+				proofAids{diagnose: func(_ context.Context, host string, _ uint16) (diagnostics.Observation, error, bool) {
+					asked = append(asked, host)
+					return tc.diag()
+				}})
+			if res.OK {
+				t.Fatal("proved")
+			}
+			if len(asked) != 1 || asked[0] != "c.example" {
+				t.Fatalf("diagnosis asked %v; want once, on a host the attempts did not use", asked)
+			}
+			if got := res.Category(); got != tc.want {
+				t.Fatalf("category = %s, want %s (%+v)", got, tc.want, res.Observation)
+			}
+		})
+	}
+}
+
+// Only the carry-phase timeout is ambiguous. A failure that already
+// names its phase is not asked again (no extra connection to the relay
+// on an ordinary dead route).
+func TestRunProof_DiagnosisIsOnlyForTheCarryTimeout(t *testing.T) {
+	for name, attempt := range map[string]proofAttempt{
+		"handshake timeout": func(context.Context, string, uint16) (diagnostics.Observation, error) {
+			return timeoutObs(diagnostics.PhaseHandshake, false)
+		},
+		"carry EOF": func(context.Context, string, uint16) (diagnostics.Observation, error) {
+			err := errors.New("EOF")
+			return diagnostics.Observe(err, diagnostics.PhaseCarry, false, true), err
+		},
+	} {
+		res := runProofWith(context.Background(), cfgFor("a.example:443", "b.example:443"), func(int) int { return 0 }, attempt,
+			proofAids{diagnose: func(context.Context, string, uint16) (diagnostics.Observation, error, bool) {
+				t.Errorf("%s: diagnosis was run", name)
+				return diagnostics.Observation{}, nil, false
+			}})
+		if res.OK || res.Attempts != 2 {
+			t.Fatalf("%s: %+v", name, res)
+		}
+	}
+}
+
+// ---- the default targets (backlog TW-14) ---------------------------------
+
+func proofOwner(op string) string {
+	if o, ok := proofOperatorOwner[op]; ok {
+		return o
+	}
+	return op
+}
+
+// Rule 4: no one company can fail a working route. The attempts of one
+// check go to neighbours in the list (proofOrder), so neighbours —
+// including the pair that wraps around — must belong to different
+// companies, and any three in a row to at least two.
+func TestDefaultProofTargets_NeighboursAreDifferentCompanies(t *testing.T) {
+	set := DefaultProofTargetSet
+	if len(set) < 5 {
+		t.Fatalf("%d default targets; want at least 5", len(set))
+	}
+	owners := map[string]bool{}
+	hosts := map[string]bool{}
+	for i, tg := range set {
+		next := set[(i+1)%len(set)]
+		if proofOwner(tg.Operator) == proofOwner(next.Operator) {
+			t.Errorf("%s and %s are neighbours and both depend on %s", tg.Addr, next.Addr, proofOwner(tg.Operator))
+		}
+		owners[proofOwner(tg.Operator)] = true
+		if hosts[tg.Addr] {
+			t.Errorf("%s is listed twice", tg.Addr)
+		}
+		hosts[tg.Addr] = true
+	}
+	if len(owners) < 5 {
+		t.Fatalf("the default targets depend on %d companies; want at least 5", len(owners))
+	}
+	// And the order the attempts really take them in obeys it for every
+	// starting point.
+	for start := range set {
+		order := proofOrder(DefaultProofTargets, DefaultProofConfig().Attempts, func(int) int { return start })
+		seen := map[string]bool{}
+		for _, addr := range order {
+			for _, tg := range set {
+				if tg.Addr == addr {
+					if seen[proofOwner(tg.Operator)] {
+						t.Errorf("start %d: two attempts of one check depend on %s", start, proofOwner(tg.Operator))
+					}
+					seen[proofOwner(tg.Operator)] = true
+				}
+			}
+		}
+	}
+}
+
+// Rule 3: TLS on 443 to a name, and nothing that could carry a request.
+// (That no request is sent is proveOnce's property: it never writes to
+// the connection. This pins the list's half.)
+func TestDefaultProofTargets_AreNamesOnPort443(t *testing.T) {
+	for _, tg := range DefaultProofTargetSet {
+		host, port, err := splitProofTarget(tg.Addr)
+		if err != nil || port != 443 {
+			t.Errorf("%s: want a name on port 443 (%v)", tg.Addr, err)
+		}
+		if net.ParseIP(host) != nil {
+			t.Errorf("%s is an address: a ClientHello with no name in it is rarer than one with", tg.Addr)
+		}
+		if tg.Operator == "" {
+			t.Errorf("%s has no operator recorded", tg.Addr)
+		}
+	}
+	if len(DefaultProofTargets) != len(DefaultProofTargetSet) {
+		t.Fatal("DefaultProofTargets is not DefaultProofTargetSet")
+	}
+}
+
+// The choice is random: every target is some check's first.
+func TestProofOrderStartsAnywhere(t *testing.T) {
+	first := map[string]bool{}
+	for i := range DefaultProofTargets {
+		first[proofOrder(DefaultProofTargets, 2, func(n int) int { return i % n })[0]] = true
+	}
+	if len(first) != len(DefaultProofTargets) {
+		t.Fatalf("only %d of %d targets can be drawn first", len(first), len(DefaultProofTargets))
+	}
+}

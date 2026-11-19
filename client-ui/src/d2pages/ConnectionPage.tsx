@@ -12,7 +12,7 @@
 // ticker live in the active shell (lifted state); this page only renders the
 // center hero + right rail and dispatches actions.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type {
     ConnectionSummary,
@@ -33,7 +33,13 @@ import WhyThisRoute from '../components/connection/WhyThisRoute';
 import RouteHealthBars from '../components/connection/RouteHealthBars';
 import PointerBanner from '../components/connection/PointerBanner';
 import ModePickerSheet from '../components/connection/ModePickerSheet';
-import { checkHeadlineKey, checkStateLabelKey } from '../lib/routeCheck';
+import {
+    checkHeadlineKey,
+    checkStateLabelKey,
+    connectRefusedKey,
+    tapAction,
+    tapLabelKey,
+} from '../lib/routeCheck';
 import RecoverySheet from '../components/RecoverySheet';
 import type { SectionId } from '../shell/Sidebar';
 
@@ -88,6 +94,16 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     const [showMode, setShowMode] = useState(false);
     const [showRecovery, setShowRecovery] = useState(false);
     const [busy, setBusy] = useState(false);
+    // A connect this page asked for and has not heard back from. On
+    // desktop the call returns only when the engine has finished
+    // checking the route (seconds; longer on a slow link), so a tap
+    // meanwhile must be able to cancel it — `busy` alone used to
+    // swallow that tap.
+    const [connectInFlight, setConnectInFlight] = useState(false);
+    // Set when the user cancelled the connect in flight: its rejection
+    // ("connection attempt cancelled") is then the expected outcome and
+    // must not open the recovery sheet.
+    const cancelledRef = useRef(false);
     // Phone-only: the right rail (why-this-route + health + pointer
     // banner) collapses behind a single disclosure header so the first
     // paint is the Daal mark and route chip only.
@@ -198,19 +214,39 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         return () => clearTimeout(id);
     }, [optimistic]);
 
+    // "In flight" includes the seconds after a tap in which the page
+    // is still showing its own optimistic "connecting": on Android the
+    // connect call has already resolved by then (the VPN service does
+    // the work), and a second tap must cancel, not start a second one.
+    // The category lets a tap try the same route again after the two
+    // failed connects whose headline says to (too slow, the server has
+    // no internet): the engine rests nothing for those and the error
+    // never clears by itself.
+    const action = tapAction(
+        state,
+        routeCheck,
+        connectInFlight || optimistic === 'connecting',
+        conn?.routeCheckCategory,
+    );
+
     const onDaalClick = async () => {
-        if (busy) return;
-        if (state === 'connected') {
+        if (action === 'disconnect') {
+            // Whatever is running stops: a connected route, a route the
+            // engine is still checking (this cancels the check — the
+            // engine abandons it at once), or a lost connection it is
+            // retrying. Not gated on `busy`: the connect in flight is
+            // exactly what this tap is for.
+            if (connectInFlight) cancelledRef.current = true;
             // Optimistic: immediately render disconnected so the eagle
             // greys out the moment the user taps; the next poll
             // confirms.
             setOptimistic('disconnected');
-            setBusy(true);
             try { await contract.disconnect(); }
-            finally { setBusy(false); }
+            catch { setOptimistic(null); }
             return;
         }
-        if (state === 'error') {
+        if (busy) return;
+        if (action === 'recovery') {
             setShowRecovery(true);
             return;
         }
@@ -221,8 +257,8 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
             setNotice(t('conn.no_data_plane.title'));
             return;
         }
-        // disconnected/connecting → if no active route, navigate to Routes;
-        // otherwise reconnect to the active one.
+        // Nothing is running → if no active route, navigate to Routes;
+        // otherwise connect to the active one.
         if (!conn?.activeRoute) {
             onNavigate('network');
             return;
@@ -233,13 +269,28 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         // resolves in <50 ms (Stub) or several seconds (real driver).
         setOptimistic('connecting');
         setBusy(true);
+        setConnectInFlight(true);
+        cancelledRef.current = false;
         try {
             await contract.connect(conn.activeRoute.routeId);
         } catch {
             setOptimistic(null);
-            setShowRecovery(true);
+            if (!cancelledRef.current) {
+                // A connect the engine REFUSED (an old file, a route
+                // still cooling down) has its own sentence on the page;
+                // the generic recovery sheet on top of it would hide
+                // the one thing the person can act on.
+                let refused = false;
+                try {
+                    const c = await contract.connectionSummary();
+                    setConn(c);
+                    refused = !!c.connectRefused;
+                } catch { /* the poll will catch up */ }
+                if (!refused) setShowRecovery(true);
+            }
         } finally {
             setBusy(false);
+            setConnectInFlight(false);
         }
     };
 
@@ -269,10 +320,14 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         }
     };
 
-    const daalLabel =
-        state === 'connected'
-            ? t('conn.disconnect_action')
-            : t('conn.connect_action');
+    const daalLabel = t(tapLabelKey(action, state, routeCheck));
+    // The engine refused the last connect before trying anything. Shown
+    // only while nothing is running: once a route is up (or being
+    // checked) the refusal is about a tap that no longer matters.
+    const refusedKey =
+        conn?.connectRefused && !optimistic && (state === 'disconnected' || state === 'error')
+            ? connectRefusedKey(conn.connectRefused)
+            : undefined;
 
     // Layout: phone → single column, rail stacks under hero.
     // tablet  → single column with wider hero, rail collapses to
@@ -358,6 +413,25 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     </div>
                 )}
 
+                {refusedKey && (
+                    <div
+                        role="alert"
+                        style={{
+                            maxWidth: 520,
+                            marginBlockEnd: 20,
+                            padding: '12px 16px',
+                            borderRadius: 12,
+                            border: '1px solid var(--danger, #c0392b)',
+                            background: 'var(--surface-2, transparent)',
+                            color: 'var(--fg)',
+                            textAlign: 'center',
+                            fontSize: 14,
+                        }}
+                    >
+                        {t(refusedKey)}
+                    </div>
+                )}
+
                 <div className={`d2-conn-state-label ${state}`}>
                     {t(checkStateLabelKey(state, routeCheck) ?? STATE_LABEL_KEY[state])}
                 </div>
@@ -372,7 +446,10 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     className="d2-conn-headline"
                     style={{ marginBlockStart: 24, marginBlockEnd: 10 }}
                 >
-                    {t(checkHeadlineKey(state, routeCheck) ?? HEADLINE_KEY[state])}
+                    {t(
+                        checkHeadlineKey(state, routeCheck, conn?.routeCheckCategory) ??
+                            HEADLINE_KEY[state],
+                    )}
                 </h1>
 
                 <RouteChip

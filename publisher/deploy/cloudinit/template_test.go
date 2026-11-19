@@ -275,7 +275,9 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	//     in the same order; only the comment above them moved;
 	//   - INT-O1: sing-box.service gained `ExecReload=/bin/kill -HUP
 	//     $MAINPID`, so applying a config is an in-process reload.
-	const want = "83d3171becd1ac7806c5e52dbd7aac41d5fd6976bb9807b9d49d2232c0cfb7df"
+	//   - 2026-11-19: the pin bump to relay-v1.5.1 (artefact URLs and
+	//     hashes in the rendered user-data).
+	const want = "141280b3108d0127d75b83879095857235ae63b8305519712538b928f18de9e4"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}
@@ -373,7 +375,7 @@ func TestArtifacts_FieldFormats(t *testing.T) {
 func TestArtifacts_AllSigsVerifyAgainstPubkey(t *testing.T) {
 	dir := os.Getenv("DAAL_ARTIFACT_TESTDATA_DIR")
 	if dir == "" {
-		dir = filepath.Clean("../../../dist-release/relay-v1.5.0")
+		dir = filepath.Clean("../../../dist-release/relay-v1.5.1")
 	}
 	if _, err := os.Stat(filepath.Join(dir, V2Artifacts.Artefacts[0].Name)); err != nil {
 		t.Skipf("release artifacts not staged under %s", dir)

@@ -50,5 +50,9 @@ pub mod recipient_identity;
 // it, and takes the same verification afterwards.
 pub mod recipient_paste;
 pub mod recipient_sbpx;
+// What the relay says it is, and keeping the signed pack true to it:
+// the relay is asked before every signature, and a reply that no longer
+// matches what the pack commits to signs again.
+pub mod relay_identity;
 pub mod relay_rotation;
 pub mod staging;

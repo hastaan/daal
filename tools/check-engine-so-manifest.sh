@@ -33,10 +33,21 @@
 # Exit 0 and skip when no artefact is checked in, or when `nm` is
 # unavailable — a source checkout that has never built the engine is not
 # broken. The skip is announced, never silent.
+#
+# ANDROID
+# -------
+# The Android engines (gen/android/.../jniLibs/<abi>/libdaalcore.so) are
+# held to the same export rule, and to two more that only exist there:
+# each must be a PAIR with the libcronet.so beside it (same cronet-go, or
+# the naive tier is undefined behaviour), and everything must be linked
+# for 16 KB pages. That is tools/check-android-so-manifest.sh, run first
+# so that a missing desktop artefact does not skip it.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+bash tools/check-android-so-manifest.sh
 
 ABI_DIR="core/abi"
 RES_DIR="${DAAL_ENGINE_RES_DIR:-client-shell/tauri/src-tauri/resources}"

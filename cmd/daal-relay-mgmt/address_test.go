@@ -108,7 +108,7 @@ func doAddrCall(t *testing.T, srv *server, priv ed25519.PrivateKey, path, ip str
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("POST", path, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, op, srv.now().Unix()))
+	signReq(req, priv, op, srv.now().Unix())
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
 	return rec
@@ -444,29 +444,44 @@ func TestUnbindReportsStillConfiguredMachineReadably(t *testing.T) {
 	}
 }
 
-// TestAddressTokenIsSingleUse. The token signs nonce:ts:op and NOT the
-// body, so one captured token would otherwise authorise an unbounded
-// number of binds of ARBITRARY addresses for the rest of its window —
-// each of them persisted across reboot.
+// TestAddressTokenIsSingleUse. One captured token must not authorise an
+// unbounded number of binds of ARBITRARY addresses for the rest of its
+// window — each of them persisted across reboot. The v1 token signed
+// nonce:ts:op and NOT the body, so only the in-memory single-use set
+// stood in the way; the v2 token signs the body, which holds without it.
 func TestAddressTokenIsSingleUse(t *testing.T) {
 	srv, priv, _, _ := newAddrTestServer(t)
-	tok := mintToken(priv, "bind-address", srv.now().Unix())
+	body := func(ip string) []byte {
+		b, _ := json.Marshal(map[string]string{"ip": ip})
+		return b
+	}
+	tok := mintToken(priv, "bind-address", "POST", "/bind-address", body("5.161.100.7"), srv.now().Unix())
 
 	call := func(ip string) int {
-		body, _ := json.Marshal(map[string]string{"ip": ip})
-		req := httptest.NewRequest("POST", "/bind-address", bytes.NewReader(body))
+		req := httptest.NewRequest("POST", "/bind-address", bytes.NewReader(body(ip)))
 		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, req)
 		return rec.Code
 	}
+	// The replay that matters is not a repeat of the same request: it
+	// is the SAME token pointed at a DIFFERENT address. Since the v2
+	// token the signature refuses that by itself — before the token was
+	// ever used, and (below) after the nonce set is gone.
+	if code := call("5.161.100.8"); code != 401 {
+		t.Fatalf("a token signed for one address bound another (%d)", code)
+	}
 	if code := call("5.161.100.7"); code != 200 {
 		t.Fatalf("first use = %d, want 200", code)
 	}
-	// The replay that matters is not a repeat of the same request: it
-	// is the SAME token pointed at a DIFFERENT address.
+	if code := call("5.161.100.7"); code != 401 {
+		t.Fatalf("second use of the same token = %d, want 401 (single use)", code)
+	}
+	srv.nonceMu.Lock()
+	srv.seenAddrNonces = nil // what a restart of this process does
+	srv.nonceMu.Unlock()
 	if code := call("5.161.100.8"); code != 401 {
-		t.Fatalf("replayed token bound a second address (%d) — one captured token must not configure the host repeatedly", code)
+		t.Fatalf("after a restart the replayed token bound a second address (%d) — one captured token must not configure the host repeatedly", code)
 	}
 	recs, _, _ := listBoundRecords(srv.boundAddrDir)
 	if len(recs) != 1 {
@@ -1277,7 +1292,7 @@ func TestAddressRoutesRequireSignature(t *testing.T) {
 		}
 		// A valid signature for a DIFFERENT op.
 		req = httptest.NewRequest("POST", path, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "users-list", srv.now().Unix()))
+		signReq(req, priv, "users-list", srv.now().Unix())
 		rec = httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, req)
 		if rec.Code != 401 {
@@ -1295,7 +1310,7 @@ func TestAddressRoutesRejectNonPOST(t *testing.T) {
 	for _, path := range []string{"/bind-address", "/unbind-address"} {
 		op := strings.TrimPrefix(path, "/")
 		req := httptest.NewRequest("GET", path, nil)
-		req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, op, srv.now().Unix()))
+		signReq(req, priv, op, srv.now().Unix())
 		rec := httptest.NewRecorder()
 		srv.routes().ServeHTTP(rec, req)
 		if rec.Code != 405 {

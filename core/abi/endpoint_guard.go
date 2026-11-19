@@ -29,6 +29,13 @@ import (
 // failure and is never recorded as one.
 var ErrRouteEndpoint = errors.New("abi: route does not match the endpoint its publisher signed")
 
+// ErrRouteNeedsNewFile is wrapped (beside ErrRouteEndpoint) by the one
+// refusal a person can do something about: the route came from a pack
+// made before packs carried signed endpoints, so the file itself has to
+// be replaced. The diagnostics blob reports it as
+// connect_refused = "needs_new_file".
+var ErrRouteNeedsNewFile = errors.New("abi: this route was imported from a file made by an older version; a new file is needed")
+
 // endpointSecrets is the slice of the store the guard reads.
 type endpointSecrets interface {
 	GetSecret(key string) ([]byte, error)
@@ -47,7 +54,7 @@ func routeEndpointGuard(st endpointSecrets, row routestore.RouteRow, profile []b
 	raw, err := st.GetSecret(trust.RouteEndpointKey(row.RouteID))
 	if err != nil || len(raw) == 0 {
 		if row.RelayPackID != "" {
-			return fmt.Errorf("%w: route %s has no signed endpoint", ErrRouteEndpoint, row.RouteID)
+			return fmt.Errorf("%w: route %s has no signed endpoint: %w", ErrRouteEndpoint, row.RouteID, ErrRouteNeedsNewFile)
 		}
 		return nil
 	}

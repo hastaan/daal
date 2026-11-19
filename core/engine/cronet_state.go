@@ -6,15 +6,16 @@ import "sync/atomic"
 //
 // The naive tier is the only family whose dialability depends on a
 // SECOND artifact shipping next to the engine: libcronet.so, which
-// cannot be produced by tools/build-engine-android.sh (it needs
-// cronet-go's Chromium toolchain) and is only copied in when a
-// prebuilt one is found. So there are three ways to end up with an
-// engine that cannot dial naive, and two of them are silent:
+// tools/build-engine-android.sh relinks from the archive of the
+// cronet-go module this module pins and refuses to finish without
+// (tools/check-android-so-manifest.sh checks the pair again before a
+// push). So there are three ways to end up with an engine that cannot
+// dial naive, and the build can only rule out the second:
 //
 //  1. built with DAAL_NAIVE=0 → the outbound is not compiled in;
 //  2. built with the tags but no libcronet.so for that ABI → the build
-//     prints a warning to stderr and continues;
-//  3. libcronet.so present but unloadable (wrong ABI, stripped).
+//     script fails; an APK assembled some other way can still lack it;
+//  3. libcronet.so present but unloadable on the device.
 //
 // In all three the family table still grades `naive` MaturityStable
 // and the UI draws it exactly like a vless-reality route, right up

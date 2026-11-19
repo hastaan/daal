@@ -137,6 +137,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runUsersRevoke(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-list":
 		return runUsersList(ctx, rest, os.Stdin, stdout, stderr)
+	case "relay-identity":
+		return runRelayIdentity(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-pack-sbp":
 		return runUsersPackSbp(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-pack-sbpx":
@@ -203,6 +205,18 @@ Subcommands:
                 --revocation-url + --revocation-pub-hex set the publisher's
                 revocation endpoint. Without them recipients never poll a
                 revocation list and a leaked pack can never be withdrawn.
+                --relay-identity <file> completes the signed endpoints from the
+                relay's own identity (see relay-identity); this is how a pack is
+                signed before the first recipient exists, on every provider.
+                --endpoint-creds <users-provision reply> does the same for a
+                relay too old to state its identity.
+  relay-identity
+                Read-only. Ask the relay for its public identity (REALITY key,
+                TLS key pin, cover host, shadowsocks server-key digest, served
+                families and ports) and print it as JSON. Run it before
+                bind-and-sign, and again after anything that changes the relay
+                (rotate-tls, a rebuild, the first recipient on a relay that
+                serves shadowsocks). Exit 3: the relay's software predates it.
   qr-fountain   Stream LT-fountain frames for a .sbp (FRP-4b).
   rotate-recommend
                 Read an Explanation JSON on stdin (or a context flag set)
@@ -218,8 +232,10 @@ Subcommands:
                 recipient's credentials are untouched. Omit --new-sni to draw a
                 fresh admissible host from the relay's zone. REWRITES the
                 OperatorRecord (--record-out to redirect) because the record's
-                cover host is what the pack minter reads. Every distributed pack
-                pins the old host and must be re-minted afterwards.
+                cover host is what the pack minter reads. Files already handed
+                out keep connecting on every route except vless-reality; sign
+                again (relay-identity, bind-and-sign) and publish-freshness so
+                that route heals by itself on phones that check for updates.
                 Exit 3 from either verb means the relay's daal-relay-mgmt is too
                 old for in-place rotation — reprovision or re-release.
   cdn-provision Provision Cloudflare fronting + firewall and emit FrontRecord JSON (FRP-8).
@@ -2245,6 +2261,14 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	// it are read. No recipient secret reaches the pack from here.
 	endpointCreds := fs.String("endpoint-creds", "",
 		"a users-provision reply for THIS relay; its relay-wide fields (REALITY key, TLS pin, cover host, shadowsocks server key) complete the signed endpoints")
+	// The relay's own statement of who it is (`daal-deploy
+	// relay-identity`). This is the path: it works before the first
+	// recipient exists and on every provider, and where it speaks it
+	// outranks the record. --endpoint-creds remains for a relay whose
+	// software predates the identity route, and then fills only what is
+	// still empty.
+	relayIdentity := fs.String("relay-identity", "",
+		"the relay's identity, as `daal-deploy relay-identity` printed it; its keys and cover host complete (and outrank the record in) the signed endpoints")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
@@ -2341,8 +2365,40 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		endpoint = &m
 	}
 
+	var relayID *relaypack.EndpointMaterial
+	identityWarnings := []string{}
+	if *relayIdentity != "" {
+		id, err := readRelayIdentityFile(*relayIdentity)
+		if err != nil {
+			fmt.Fprintf(stderr, "bind-and-sign: --relay-identity: %v\n", err)
+			return 2
+		}
+		m := relaypack.EndpointMaterialFromIdentity(id)
+		identityWarnings = identityDisagreements(rec, id)
+		// An identity is a statement made at a moment. Its keys cannot
+		// change under it (a relay with other keys is another relay,
+		// with another record), but its cover host can: rotate-tls
+		// moves it and REWRITES THE RECORD. So an identity read a while
+		// ago that disagrees with the record about the cover host is
+		// the stale one, and the record's host is signed. A fresh one
+		// that disagrees is the relay contradicting a stale record, and
+		// the relay's host is signed.
+		if age := now.Unix() - id.GeneratedAtUnix; staleCoverHost(rec, id, age) {
+			m.CoverSNI = ""
+			identityWarnings = []string{fmt.Sprintf(
+				"the relay identity is %d minutes old and names the cover host %s, but the record now says %s; "+
+					"rotate-tls rewrites the record, so the record's is signed — run relay-identity again",
+				age/60, id.CoverSNI, rec.CoverSNI)}
+		}
+		relayID = &m
+		for _, w := range identityWarnings {
+			fmt.Fprintf(stderr, "bind-and-sign: warning: %s\n", w)
+		}
+	}
+
 	res, err := relaypack.BindAndSign(rec, priv, relaypack.BindOpts{
 		Endpoint:             endpoint,
+		RelayIdentity:        relayID,
 		Now:                  now,
 		Expiry:               time.Duration(*expiryDays) * 24 * time.Hour,
 		Phase:                ph,
@@ -2396,6 +2452,14 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		// Always present, possibly empty: the families whose route was
 		// signed without an endpoint and therefore cannot be used.
 		"uncommitted_families": uncommitted,
+		// What the signed endpoints commit the relay to, read back out
+		// of the pack. The wizard keeps it to notice, later, that the
+		// relay has moved away from what was signed.
+		"committed_identity": res.Committed,
+		// Always present, possibly empty: where the relay's own
+		// identity and the record disagreed (the relay's word was
+		// signed).
+		"identity_warnings": identityWarnings,
 	}
 	body, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {

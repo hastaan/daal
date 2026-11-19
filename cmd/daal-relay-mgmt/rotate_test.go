@@ -82,6 +82,7 @@ func threeRecipientServer(t *testing.T) (*server, ed25519.PrivateKey, string) {
 		t.Fatal(err)
 	}
 	srv := newServer(pub, configPath)
+	srv.audience = testAudience
 	srv.singboxControl = func(string) error { return nil }
 	srv.singboxCheck = func(string) error { return nil }
 	srv.realityPubPath = filepath.Join(tmp, "reality.pub")
@@ -543,10 +544,9 @@ func TestRotateTLS_ReloadFailureLeavesNothingBehind(t *testing.T) {
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	tok := mintToken(priv, "rotate-tls", srv.now().Unix())
 	body, _ := json.Marshal(rotateTLSReq{NewSNI: "ftp.plusline.net", NewDests: []string{"ftp.plusline.net:443"}})
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-tls", srv.now().Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -589,9 +589,8 @@ func TestMutatingEndpointsSerializeOnTheConfig(t *testing.T) {
 	defer ts.Close()
 
 	post := func(verb, path, body string) int {
-		tok := mintToken(priv, verb, srv.now().Unix())
 		req, _ := http.NewRequest("POST", ts.URL+path, strings.NewReader(body))
-		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		signReq(req, priv, verb, srv.now().Unix())
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

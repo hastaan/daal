@@ -51,11 +51,45 @@ func TestKnownFindingsAreOpenFindings(t *testing.T) {
 	}
 }
 
+// The mechanisms below — an entry restricted to the pinned box, and an
+// intermittent entry with a budget — are tested on the two findings
+// that first needed them, F-002 and INT-2. Both are "fixed in the tree,
+// open on released relays", so both leave known-findings.json in the
+// pin-bump commit (tools/release/README.md), and these tests must not
+// go red with them: where the file no longer carries an entry it is
+// rebuilt here, exactly as it stood, so the mechanism stays tested
+// after the finding that motivated it is closed.
+func withReleasedRelayFixtures(ks []KnownFinding) []KnownFinding {
+	has := map[string]bool{}
+	for _, k := range ks {
+		has[k.ID] = true
+	}
+	out := append([]KnownFinding{}, ks...)
+	if !has["F-002"] {
+		f := KnownFinding{ID: "F-002", Severity: "high", Title: "the pinned release cannot provision shadowsocks, anytls and tuic",
+			Match: []KnownMatch{
+				{Phase: "mint", Family: "anytls,shadowsocks,tuic", Check: "relay.listens,pack.route"},
+				{Phase: "family", Family: "anytls,shadowsocks,tuic", Check: "tunnel,engine.category"},
+			}}
+		f.When.Box = BoxPinned
+		out = append(out, f)
+	}
+	if !has["INT-2"] {
+		f := KnownFinding{ID: "INT-2", Severity: "medium", Title: "naive on a released relay: the start-up ALPN race",
+			Intermittent: true, Max: 4,
+			Match: []KnownMatch{{Phase: "*", Family: "naive", Check: "*tunnel,*wire", DetailContains: "net_error -107"}}}
+		f.When.Box = BoxPinned
+		out = append(out, f)
+	}
+	return out
+}
+
 func TestJudge(t *testing.T) {
 	ks, err := LoadKnown(rigDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
+	ks = withReleasedRelayFixtures(ks)
 	// A red check nothing explains fails the run.
 	v := Judge(ks, []Check{chk("clean", BoxTree, "family", "tuic", "tunnel", Pass, Blocked)})
 	if v.OK() || len(v.Unexpected) != 1 {
@@ -502,6 +536,7 @@ func TestIntermittentIsNotExcusedInASingleWorld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ks = withReleasedRelayFixtures(ks)
 	tun := chk("clean", BoxPinned, "family", "naive", "tunnel", Pass, Blocked)
 	tun.Detail = "probe: net_error -107 (ERR_SSL_PROTOCOL_ERROR)"
 	wire := chk("clean", BoxPinned, "family", "naive", "wire", Pass, Fail)

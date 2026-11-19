@@ -36,7 +36,8 @@
 import { useState } from 'react';
 import RecipientImport from '../recipient/RecipientImport';
 import TrustPrompt from './TrustPrompt';
-import { Sheet } from '../design/primitives';
+import { Button, Sheet } from '../design/primitives';
+import UnavailableRoutes from './UnavailableRoutes';
 import type { PreviewedBundle } from '../contract/D2Contract';
 import {
     KIND_REJECTED,
@@ -45,6 +46,8 @@ import {
     parseVerdict,
     trustFailure,
     trustFromVerdict,
+    unavailableLines,
+    type ImportVerdict,
     type TrustResolution,
 } from '../lib/importVerdict';
 
@@ -60,6 +63,21 @@ interface Props {
 export default function ScanSheet({ t, onClose, onImported }: Props) {
     const [awaitingTrust, setAwaitingTrust] = useState<PreviewedBundle | null>(null);
     const [rejected, setRejected] = useState<string | null>(null);
+    /** Set when the import SUCCEEDED but the file gave this device
+     *  fewer ways to connect than it lists: the sheet stays open to say
+     *  which, instead of closing on a silent partial import. */
+    const [leftOut, setLeftOut] = useState<ImportVerdict | null>(null);
+
+    /** Close after a successful import — unless there is something the
+     *  person should read first. */
+    const finish = (v: ImportVerdict | null) => {
+        onImported?.();
+        if (unavailableLines(t, v).length > 0) {
+            setLeftOut(v);
+            return;
+        }
+        onClose();
+    };
 
     /** The decoded bundle's verdict, read exactly as the paste and file
      *  lanes read theirs. */
@@ -77,8 +95,7 @@ export default function ScanSheet({ t, onClose, onImported }: Props) {
             return;
         }
         // Imported, or accepted via a valid rotation chain.
-        onImported?.();
-        onClose();
+        finish(v);
     };
 
     /** TrustPrompt has called resolveTrustPrompt and is handing us what
@@ -97,14 +114,25 @@ export default function ScanSheet({ t, onClose, onImported }: Props) {
             setRejected(failure);
             return;
         }
-        if (r.decision !== 2) onImported?.();
-        onClose();
+        if (r.decision === 2) {
+            onClose();
+            return;
+        }
+        finish(r.verdict);
     };
 
     return (
         <Sheet title={t('scan.title')} onClose={onClose} width={560}>
             {awaitingTrust ? (
                 <TrustPrompt t={t} preview={awaitingTrust} onResolve={onTrustResolved} />
+            ) : leftOut ? (
+                <div style={{ marginTop: 18 }}>
+                    <p style={{ fontSize: 14, margin: 0 }}>{t('add.done')}</p>
+                    <UnavailableRoutes t={t} verdict={leftOut} />
+                    <div style={{ marginTop: 16, textAlign: 'end' }}>
+                        <Button onClick={onClose}>{t('common.continue')}</Button>
+                    </div>
+                </div>
             ) : rejected ? (
                 <div role="alert" style={{ marginTop: 18 }}>
                     <h3

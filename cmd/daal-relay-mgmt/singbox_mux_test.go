@@ -119,7 +119,7 @@ func TestAddUserToSingbox_StampsMuxOnExistingRelay(t *testing.T) {
 // it is not present (a clean checkout without dist-release, CI).
 func singboxBinaryForTest(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "..", "dist-release", "relay-v1.5.0", "sing-box-1.13.12-linux-amd64"))
+	p, err := filepath.Abs(filepath.Join("..", "..", "dist-release", "relay-v1.5.1", "sing-box-1.13.12-linux-amd64"))
 	if err != nil {
 		return ""
 	}
@@ -187,6 +187,7 @@ func TestGeneratedConfigLoadsInRealSingBox(t *testing.T) {
 	provision("r2", "66666666-7777-8888-9999-000000000000", "11223344")
 
 	srv := newServer(nil, path)
+	srv.audience = testAudience
 	srv.singboxCheck = func(p string) error {
 		out, err := exec.Command(bin, "check", "-c", p).CombinedOutput()
 		if err != nil {

@@ -455,6 +455,30 @@ func ClientOutboundForFamily(family string, port int, p ClientConnParams) ([]byt
 			"username": p.Name,
 			"password": p.NaivePassword,
 			"tls":      naiveTLS,
+			// UDP. naive is HTTP/2 CONNECT — a TCP stream — and without
+			// this sing-box builds the outbound with networks=[tcp]
+			// (protocol/naive/outbound.go): every app datagram is
+			// refused inside the engine while the route says Connected.
+			// Calls, games and QUIC-only clients got nothing; names
+			// resolved only because the engine answers UDP/53 itself
+			// for a UDP-less outbound (core/engine/config.go).
+			//
+			// With it the outbound carries datagrams inside a CONNECT
+			// stream to sing's UDP-over-TCP magic address. The relay
+			// needs nothing: sing-box 1.13.12's naive INBOUND wraps its
+			// router in uot.NewRouter unconditionally
+			// (protocol/naive/inbound.go, NewInbound) — exactly what the
+			// shadowsocks inbound does for the outbound minted above.
+			// Version 2 for the same reason as there: it is the version
+			// with a per-connection handshake, and the one both ends of
+			// 1.13 speak. The engine sees udp_over_tcp and stops
+			// answering DNS itself for this route (outboundCarriesUDP),
+			// so lookups ride the tunnel like every other datagram.
+			//
+			// What it is not: UDP. Datagrams share one TCP stream, so a
+			// lost segment delays every datagram behind it. A call
+			// works; it does not get better than the TCP path under it.
+			"udp_over_tcp": map[string]any{"enabled": true, "version": 2},
 		}
 	default:
 		return nil, fmt.Errorf("no client outbound renderer for family %q", family)

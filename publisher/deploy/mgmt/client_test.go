@@ -40,6 +40,7 @@ func startTLSServer(t *testing.T, handler http.Handler) (*httptest.Server, strin
 	cert := ts.Certificate()
 	sum := sha256.Sum256(cert.Raw)
 	fp := hex.EncodeToString(sum[:])
+	fakeBoxFingerprints.Store(ts.Listener.Addr().String(), fp)
 	return ts, fp
 }
 
@@ -47,11 +48,12 @@ func startTLSServer(t *testing.T, handler http.Handler) (*httptest.Server, strin
 
 func TestMintToken_RoundTripsThroughParse(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	tok, err := MintToken(priv, "rotate-credentials", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC))
+	body := []byte(`{"name":"r1"}`)
+	tok, err := MintToken(priv, testRelayFP, "rotate-credentials", body, time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
-	nonce, tsStr, op, sig, err := ParseToken(tok)
+	_, tsStr, op, _, err := ParseToken(tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,21 +63,20 @@ func TestMintToken_RoundTripsThroughParse(t *testing.T) {
 	if tsStr == "" {
 		t.Errorf("ts lost")
 	}
-	msg := []byte(nonce + ":" + tsStr + ":" + op)
-	if !ed25519.Verify(pub, msg, sig) {
-		t.Errorf("signature does not verify against pub key")
+	if _, err := VerifyToken(pub, testRelayFP, tok, "POST", "/rotate-credentials", body); err != nil {
+		t.Errorf("signature does not verify against pub key: %v", err)
 	}
 }
 
 func TestMintToken_RejectsUnknownOp(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	if _, err := MintToken(priv, "rotate-everything", time.Now()); err == nil {
+	if _, err := MintToken(priv, testRelayFP, "rotate-everything", nil, time.Now()); err == nil {
 		t.Errorf("expected error for unknown op")
 	}
 }
 
 func TestMintToken_RejectsBadKey(t *testing.T) {
-	if _, err := MintToken(nil, "rotate-credentials", time.Now()); err == nil {
+	if _, err := MintToken(nil, testRelayFP, "rotate-credentials", nil, time.Now()); err == nil {
 		t.Errorf("expected error for nil key")
 	}
 }
@@ -168,19 +169,8 @@ func TestClient_RotateCredentials_SignedTokenRequired(t *testing.T) {
 			http.Error(w, "no auth", 401)
 			return
 		}
-		tok := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		nonce, tsStr, op, sig, err := ParseToken(tok)
-		if err != nil {
+		if op, ok := boxVerifies(pub, r); !ok || op != "rotate-credentials" {
 			http.Error(w, "bad token", 401)
-			return
-		}
-		if op != "rotate-credentials" {
-			http.Error(w, "wrong op", 401)
-			return
-		}
-		msg := []byte(nonce + ":" + tsStr + ":" + op)
-		if !ed25519.Verify(pub, msg, sig) {
-			http.Error(w, "sig fail", 401)
 			return
 		}
 		var req struct {
@@ -276,21 +266,13 @@ func TestClient_RotateTLS_SendsProfile(t *testing.T) {
 	var sawSNI string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rotate-tls", func(w http.ResponseWriter, r *http.Request) {
-		var body TLSProfile
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		sawSNI = body.NewSNI
-		hdr := r.Header.Get("Authorization")
-		tok := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		nonce, tsStr, op, sig, err := ParseToken(tok)
-		if err != nil || op != "rotate-tls" {
+		if op, ok := boxVerifies(pub, r); !ok || op != "rotate-tls" {
 			http.Error(w, "bad token", 401)
 			return
 		}
-		msg := []byte(nonce + ":" + tsStr + ":" + op)
-		if !ed25519.Verify(pub, msg, sig) {
-			http.Error(w, "sig fail", 401)
-			return
-		}
+		var body TLSProfile
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sawSNI = body.NewSNI
 		_ = json.NewEncoder(w).Encode(RotateTLSResp{AppliedAtUnix: time.Now().Unix()})
 	})
 	ts, fp := startTLSServer(t, mux)

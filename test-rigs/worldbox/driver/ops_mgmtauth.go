@@ -25,6 +25,15 @@ func init() { Ops["mgmtauth"] = opMgmtAuth }
 //	                   endpoint (a users-list token presented to
 //	                   /users/revoke)
 //	stale / future     the publisher's signature, outside the time window
+//	another body       the publisher's signature for THIS endpoint, made
+//	                   for a different body (a token is for one request:
+//	                   method, path and body are under the signature)
+//	another relay      the publisher's signature for THIS request, made
+//	                   for a different relay (one publisher key can be
+//	                   trusted by several; the relay's own name is under
+//	                   the signature)
+//	v1 token           the retired token shape, correctly signed by the
+//	                   publisher: it did not sign the request
 //	replay             a token the relay has already honoured once,
 //	                   presented again with a DIFFERENT body: for an
 //	                   address verb, and for /users/revoke (the same token
@@ -63,7 +72,11 @@ func opMgmtAuth(rc *RunCtx) {
 		{ID: "unsigned", Method: "POST", Path: "/users/revoke", Body: revoke},
 		{ID: "wrong_scheme", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "users-revoke", Scheme: "Bearer"},
 		{ID: "garbage", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "raw:not-a-token"},
-		{ID: "empty_signature", Method: "POST", Path: "/users/revoke", Body: revoke, Token: fmt.Sprintf("raw:00112233445566778899aabbccddeeff:%d:users-revoke:", time.Now().Unix())},
+		{ID: "empty_signature", Method: "POST", Path: "/users/revoke", Body: revoke, Token: fmt.Sprintf("raw:v2:00112233445566778899aabbccddeeff:%d:users-revoke:", time.Now().Unix())},
+		{ID: "signed_for_another_body", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "users-revoke", SignBody: `{"name":"r43"}`},
+		{ID: "signed_for_no_body", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "users-revoke", SignBody: " "},
+		{ID: "signed_for_another_relay", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "users-revoke", SignRelay: otherRelayFingerprint(rc.Rec.MgmtTLSFingerprint)},
+		{ID: "v1_token", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "users-revoke", Format: "v1"},
 		{ID: "stranger_key", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Key: "stranger", Op: "users-revoke"},
 		{ID: "wrong_op", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "users-list"},
 		{ID: "wrong_op.rotate_as_revoke", Method: "POST", Path: "/users/revoke", Body: revoke, Token: "sign", Op: "rotate-credentials"},
@@ -95,7 +108,7 @@ func opMgmtAuth(rc *RunCtx) {
 	a := ans["control.signed"]
 	rc.R.Add("", phase, "control.signed_request_honoured", Pass, got(a.Status == 200 && strings.Contains(a.Body, `"`+victim+`"`), Pass, Fail),
 		strings.TrimSpace(a.Body)+a.Error, map[string]any{"http_status": a.Status}, t0)
-	for _, id := range []string{"unsigned", "wrong_scheme", "garbage", "empty_signature", "stranger_key", "wrong_op", "wrong_op.rotate_as_revoke",
+	for _, id := range []string{"unsigned", "wrong_scheme", "garbage", "empty_signature", "signed_for_another_body", "signed_for_no_body", "signed_for_another_relay", "v1_token", "stranger_key", "wrong_op", "wrong_op.rotate_as_revoke",
 		"stale", "future", "unsigned.rotate_tls", "unsigned.bind_address"} {
 		add(id, Refused)
 	}
@@ -174,6 +187,14 @@ func opMgmtAuth(rc *RunCtx) {
 	rc.R.Add("", phase, "victim_still_on_roster", Pass, got(lv.OK() && strings.Contains(lv.Stdout, `"`+victim+`"`) && strings.Contains(lv.Stdout, `"r1"`), Pass, Fail),
 		strings.TrimSpace(lv.Stdout)+" "+lv.Tail(), nil, t0)
 	rc.MgmtWindowClosed(phase)
+}
+
+// otherRelayFingerprint is a well-formed mgmt TLS fingerprint that is not
+// this relay's: the name of a sibling relay a token could have been
+// minted for.
+func otherRelayFingerprint(own string) string {
+	h := sha256.Sum256([]byte("another relay than " + own))
+	return hex.EncodeToString(h[:])
 }
 
 // healthCaps is Health() for callers that only branch on it.

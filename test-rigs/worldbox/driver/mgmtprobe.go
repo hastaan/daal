@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,11 +29,19 @@ import (
 // never through here.
 //
 // It reads a JSON list of requests on stdin and prints a JSON list of
-// answers. Token shape is the product's wire contract,
-// "<nonce>:<unix ts>:<op>:<base64 ed25519 sig over nonce:ts:op>"
-// (publisher/deploy/mgmt/token.go) — re-stated here on purpose: a probe
-// that imported the product's minter could not mint a token the product
-// refuses to mint.
+// answers. Token shape is the product's wire contract
+// (specs/daal-relay-mgmt-v1.md §3, publisher/deploy/mgmt/token.go):
+//
+//	v2:<nonce>:<unix ts>:<op>:<base64 ed25519 sig>
+//
+// where the signature covers eight lines joined by "\n":
+// "daal-mgmt-token-v2", relay, nonce, ts, op, METHOD, path, hex
+// sha256(body) - relay being the lower-case hex SHA-256 of the mgmt TLS
+// certificate of the relay the token is for (--fpr).
+// Re-stated here on purpose: a probe that imported the product's minter
+// could not mint a token the product refuses to mint — one signed for
+// another body (SignBody), for another relay (SignRelay), or the retired v1 shape that did not sign the
+// request at all (Format "v1": "<nonce>:<ts>:<op>:<sig over nonce:ts:op>").
 //
 // TLS: the box's certificate is self-signed and the publisher pins its
 // SHA-256. The probe pins the same fingerprint (--fpr) and reports a
@@ -54,6 +63,18 @@ type MgmtReq struct {
 	TSOffset int64  `json:"ts_offset,omitempty"` // seconds added to now before signing
 	// Scheme overrides the Authorization scheme word ("Daal-Mgmt-Token").
 	Scheme string `json:"scheme,omitempty"`
+	// SignBody, when set, is the body the token is signed FOR while Body
+	// is what is sent: a token minted for one request, presented with
+	// another. Empty = sign what is sent.
+	SignBody string `json:"sign_body,omitempty"`
+	// SignRelay, when set, is the relay the token is signed FOR (a mgmt
+	// TLS fingerprint) while it is presented to this one: a token the
+	// publisher minted for another relay that trusts the same key.
+	// Empty = sign for the relay being talked to (--fpr).
+	SignRelay string `json:"sign_relay,omitempty"`
+	// Format "v1" mints the retired token shape (signature over
+	// nonce:ts:op only). Default: v2.
+	Format string `json:"format,omitempty"`
 }
 
 // MgmtAns is the box's answer.
@@ -132,8 +153,22 @@ func cmdMgmtProbe(args []string) int {
 			_, _ = rand.Read(nb[:])
 			nonce := hex.EncodeToString(nb[:])
 			ts := strconv.FormatInt(time.Now().Unix()+q.TSOffset, 10)
-			msg := nonce + ":" + ts + ":" + q.Op
-			token = msg + ":" + base64.StdEncoding.EncodeToString(ed25519.Sign(key, []byte(msg)))
+			if q.Format == "v1" {
+				msg := nonce + ":" + ts + ":" + q.Op
+				token = msg + ":" + base64.StdEncoding.EncodeToString(ed25519.Sign(key, []byte(msg)))
+				break
+			}
+			signed := q.Body
+			if q.SignBody != "" {
+				signed = q.SignBody
+			}
+			sum := sha256.Sum256([]byte(signed))
+			relay := strings.ToLower(strings.TrimSpace(*fpr))
+			if q.SignRelay != "" {
+				relay = q.SignRelay
+			}
+			msg := strings.Join([]string{"daal-mgmt-token-v2", relay, nonce, ts, q.Op, q.Method, q.Path, hex.EncodeToString(sum[:])}, "\n")
+			token = "v2:" + nonce + ":" + ts + ":" + q.Op + ":" + base64.StdEncoding.EncodeToString(ed25519.Sign(key, []byte(msg)))
 		case len(q.Token) > 4 && q.Token[:4] == "raw:":
 			token = q.Token[4:]
 		case len(q.Token) > 6 && q.Token[:6] == "reuse:":

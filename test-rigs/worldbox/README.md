@@ -7,8 +7,8 @@ middle. Every hop runs the **production binary or the production code path**
 and a rig that re-implements a seam cannot see them.
 
 ```
-../../daal e2e            # quick: 15 worlds, ~1450 checks, ~1 minute. The pre-push hook runs this.
-../../daal e2e full       # everything: 18 worlds, ~4450 checks, 4–5 minutes.
+../../daal e2e            # quick: 16 worlds, ~1450 checks, ~1 minute. The pre-push hook runs this.
+../../daal e2e full       # everything: 19 worlds, ~4450 checks, 4–5 minutes.
 ```
 
 That is the entry point (`./e2e.sh [quick|full] [-j N] [--only world,…] [--plan]`
@@ -18,7 +18,7 @@ is the same thing without the wrapper). One world at a time, for digging:
 ./run.sh clean vless-reality            # one family, pinned release artefacts   (~7 s)
 ./run.sh clean                          # every family the product can provision
 ./run.sh clean @default                 # the families a relay serves by default
-./run.sh --mgmt=tree clean              # …with THIS TREE's daal-relay-mgmt on the box
+./run.sh --mgmt=tree clean              # …with THIS TREE's daal-relay-mgmt and daal-relay-health on the box
 ./run.sh --ops revoke,wrongcreds clean  # + publisher-side operations
 ./run.sh --mgmt=tree --ops lifecycle clean   # everything that happens AFTER first contact (see "Lifecycle ops")
 ./run.sh udp-blackhole                  # another censor
@@ -35,17 +35,17 @@ No sudo, no network, no VPS, no phone.
 |---|---|---|
 | **quick** (~1 min) | `clean` | no censor × all 7 families on the tree's mgmt daemon, plus the ops `revoke`, `l1`, `mgmtauth`, `tamper` |
 | | `release` | the **pinned release artefacts** (what a relay provisioned today really downloads) × the default families, plus `revoke`, `mgmtauth` |
-| | one per censor scenario (13) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
-| **full** (4–5 min) | one per censor scenario (13) | every scenario × all 7 families |
-| | `clean.recipients`, `clean.rotation` | the whole lifecycle on the tree daemon × all 7 families: recipients, revoke, wrong credentials, tamper, mgmt-auth, repeated relay restarts; then L1, L3, L2, freshness, capability honesty |
+| | one per censor scenario (14) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
+| **full** (4–5 min) | one per censor scenario (14) | every scenario × all 7 families |
+| | `clean.recipients`, `clean.rotation` | the whole lifecycle on the tree daemon × all 7 families: recipients, revoke, wrong credentials, tamper, mgmt-auth, repeated relay restarts; then L1, **L2 then L3** (the cover host moves, then the address — the order in which naive's certificate matters), freshness, capability honesty |
 | | `release.lifecycle` | the whole lifecycle again on the pinned release artefacts × the default families |
-| | `udp-blackhole` (+ops) | recipients and the three rotation rungs **under a censor** |
-| | `release.all-families` | the pinned artefacts × all 7 families — FINDINGS F-002, kept visible until the release |
+| | `udp-blackhole` (+ops) | recipients and the three rotation rungs (L1, L3, L2 — the other order) **under a censor** |
+| | `release.all-families` | the pinned artefacts × all 7 families — FINDINGS F-002, kept visible until the release. **Until the pin moves, every pinned world stops at `provision`: this tree's publisher will not pin a management fingerprint the pinned health binary cannot authenticate (FINDINGS BOOT-1), and could not authenticate to the pinned daemon if it did (REL-1)** |
 | | `narrow-relay` | a relay provisioned with `--families shadowsocks,anytls` only — FINDINGS FAM-4 |
 
 Which daemon a world's box runs is in its plan line (`./e2e.sh quick
 --plan`) and in every check's `box` field. In quick, **every world except
-`release` runs this tree's `daal-relay-mgmt`**: a green quick run is about
+`release` runs this tree's `daal-relay-mgmt` and `daal-relay-health`**: a green quick run is about
 the tree, not about relays already deployed (Known gaps).
 
 `driver/known_test.go` fails if a scenario, family or op exists that no
@@ -134,9 +134,13 @@ Linux with unprivileged user namespaces, a subordinate uid range for
 your user (`/etc/subuid`, `newuidmap`), `/dev/net/tun`, nftables with
 conntrack and NFQUEUE usable inside a user namespace, and `go gcc ip nft tc
 ss python3(+PyYAML) openssl flock timeout`. `run.sh --preflight` checks all
-of it and says what is missing (exit 77). The release artefacts must be
-staged in `dist-release/relay-v1.5.0/` (`tools/release/relay-v1.5.0.sh`, no
-`--upload`).
+of it and says what is missing (exit 77). The release artefacts this
+tree PINS must be staged in `dist-release/relay-v1.5.1/` (`gh release
+download relay-v1.5.1 --dir dist-release/relay-v1.5.1`, as CI does). The
+release script builds a release FROM THIS TREE into its own tag's
+directory and, without `--upload`, publishes nothing;
+`tools/release/README.md` says how the "pinned" box is pointed at such a
+candidate to prove it before anything is uploaded.
 
 ## Topology
 
@@ -171,7 +175,7 @@ again after disconnecting.
 |---|---|---|
 | world | namespaces, veths, routes; target / cloud / mirror / DNS / cover site start | rig |
 | provision | `daal-deploy provision --provider hetzner …` → hcloud-go → HTTPS → the lab cloud API. Creating the server **boots a box**: the user-data, byte for byte, is executed by `box/init.py` (bootcmd, write_files, runcmd). The runcmd downloads the three artefacts from the lab mirror with the unmodified `daal-fetch-verify`, which checks the real SHA-256 pins and the real Ed25519 release signature, generates the REALITY keypair and TLS cert, and starts `sing-box`, `daal-relay-health`, `daal-relay-mgmt` from the unit files the template wrote. The publisher then polls the real health endpoint and pins the mgmt TLS fingerprint. | **product**, end to end |
-| mint | `users-provision` (opens the cloud firewall window through the cloud API, signs an op-bound token, calls the real mgmt API over pinned TLS) → `bind-and-sign --endpoint-creds <that reply>` (every route is committed to a signed endpoint; this lab's record has no REALITY key or TLS pin because there is no sshd to read them over) → `users-pack-sbp` | **product** verbs; the ORDER is the rig's (the app signs first — FINDINGS F-005) |
+| mint | **the app's order**: `relay-identity` (opens the cloud firewall window through the cloud API, signs a request-bound token, calls the real mgmt `GET /identity` over pinned TLS) → `bind-and-sign --relay-identity <that answer>` with nobody on the relay (this lab's record has no REALITY key or TLS pin because there is no sshd to read them over — the record the Vultr adapter writes) → `users-provision` → `bind-and-sign` again iff the reply disagrees with what was signed (it must, exactly when the relay said a family was pending: shadowsocks) → `users-pack-sbp`. On the pinned release artefact, which predates the route, `relay-identity` must exit 3 and the old order (`users-provision` → `bind-and-sign --endpoint-creds`) is used | **product** verbs in the order the wizard drives them (FINDINGS F-005); the wizard's own Rust is proven separately, against its fake relay |
 | family | `wb-client`: the real engine (`daal/core/abi`, sing-box data plane) imports the pack, answers the trust prompt, is handed a TUN fd, `SetRoute`s the family's route. `wb probe` (an ordinary process under another uid) fetches the target. | **product** engine; rig plays the Android shell |
 | ops | scripted publisher operations with insider-side assertions | **product** verbs |
 
@@ -297,10 +301,10 @@ mechanism), one adds `families/*.json` and client build tags, one adds
   It is also where the wire tap looks.
 * `udp`: expected outcome of an app's UDP through the tunnel — a small
   datagram **and** a 1400-byte one (`pass` | `blocked` | omitted = not
-  asserted). naive is `blocked`: as minted it is TCP-only. That cell is a
-  **declared product limitation, not a pass** (FINDINGS FAM-6, open: no app
-  UDP except DNS on naive); it is asserted so that the day a pack carries
-  UDP there the check goes red and the declaration has to be flipped.
+  asserted). Every family declares `pass`. naive declared `blocked`
+  until its pack carried `udp_over_tcp` (FINDINGS FAM-6, fixed): a
+  declared product limitation printed as a green cell, which is why the
+  note in `families/naive.json` says what the cell means.
 * `dns`: expected outcome of the phone's own name resolution — plain
   UDP/53 to the two resolvers `DaalVpnService.kt` configures (1.1.1.1,
   9.9.9.9; in this world they live next to the target) — followed by a
@@ -331,7 +335,7 @@ Per family the matrix has these columns (ids are stable):
 | `import` | pass | pack verified, trust prompt answered, routes listed |
 | `import.unconnectable_not_listed` | pass | no route the pack cannot connect on (dropped by the minter, or holding no outbound) is in the engine's route list |
 | `tunnel` | *the scenario's expectation* | fresh nonce echoed; 256 KiB downloaded and SHA-256-verified; 96 KiB **uploaded** and verified by the far end; 32 simultaneous connections; **the target saw the relay's egress IP** |
-| `wire` | *same as `tunnel`* | at the censor: the session's packets went to **this family's** port/proto, at least the payload came back, and the client opened no flow to anything else on the relay. A "tuic" route that is really a vless outbound passes `tunnel` and fails here. Under a blocking scenario: the client did try (blocked ≠ never attempted) |
+| `wire` | *same as `tunnel`* | at the censor: the session's packets went to **this family's** port/proto, at least the payload came back, and the client opened no flow to anything else on the relay. A "tuic" route that is really a vless outbound passes `tunnel` and fails here. Under a blocking scenario: the client did try (blocked ≠ never attempted) The tap counts what was SENT, ahead of the censor's filter; under a scenario declared `"random_loss": true` (heavy-loss) a session whose probe did not receive its payload is `blocked` whatever the byte count — packets dropped after the tap, and their retransmissions, are not delivery (`wireUnderRandomLoss`) |
 | `udp` | the family's `udp` | both datagram sizes round-trip, seen by the target from the relay |
 | `dns` | the family's `dns` | the resolver saw the query arrive from the relay; the name then fetches |
 | `control.after` | blocked | disconnecting really takes the path away |
@@ -488,6 +492,7 @@ running side by side never relink what another is executing.
 | `heavy-loss` | 30% random loss on TCP only | protocol-selective shaping | nft |
 | `lossy-throttle` | 60 ms, 1% loss, 4 Mbit/s | a bad mobile path | tc |
 | `throttle-56k` | 56 kbit/s, nothing dropped | throttling as blocking | tc |
+| `deep-queue` | 1.2 s of delay each way (2.4 s per round trip), nothing dropped | seconds of standing queue: the engine's ordinary connection check finishes nothing, and it must still connect and say "slow" (FINDINGS CEN-O5). Sets `probe_patience_ms` so the raw probes outwait the delay | tc |
 
 Expected outcome per family (`pass`, or `blocked:<category>`), as asserted
 — the scenario rows of `./e2e.sh full` on 2026-11-18, every cell green
@@ -642,7 +647,7 @@ nothing).
 | `l1` | `rotate-credentials --name r21` | every secret of r21 changed and none of the old ones is left in the box's config; no box-wide key moved; the relay names every inbound it rewrote; **old pack blocked, new pack connects** | two bystanders' rows are byte-identical and their packs still connect |
 | `l3` | `assign-fip`, `bind-and-sign`, `users-pack-sbp`, `publish-freshness`, `floating-ip release` | the real `/bind-address`: record moved, box holds and persists the address; re-minted pack connects **while the censor blocks the old address**; **a phone holding a pre-move file polls the mirrors and connects with no new file** (`no-new-file.address-blocked.*`); then the real `/unbind-address`: record, box and cloud account are clean | new address dead before the swap; old pack still works until the block (grace), then does not; the released address stops serving. (`refused_before_reserving` — a relay that does not advertise `bind-address` is refused before anything is reserved — is coded but **runs in no world**: every daemon here advertises it, see "Known gaps: privilege on the box") |
 | `l2` | `rotate-tls`, `bind-and-sign`, `publish-freshness`, then Rebuild | cover host moved in the record and in both places on the box; no key, no user row changed; **old pack per family = `l2OldPackExpect`** (vless-reality blocked, the rest pass); **a phone holding a pre-rotation file polls the mirrors and connects on every family with no new file** (`no-new-file.cover-host-moved.*`); rebuilt pack connects everywhere | the pre-rotation session passed |
-| `mgmtauth` | (hand-built requests, `mgmtprobe.go`) | unsigned, wrong scheme, garbage, empty signature, stranger's key, wrong op, stale, future, replayed address token, **replayed `users-revoke` token aimed at a second recipient** are all refused | a correctly signed request is honoured; afterwards the config is byte-identical and the targeted recipient still connects |
+| `mgmtauth` | (hand-built requests, `mgmtprobe.go`) | unsigned, wrong scheme, garbage, empty signature, stranger's key, wrong op, stale, future, signed for another body, signed for another relay, replayed address token, **replayed `users-revoke` token aimed at a second recipient** are all refused | a correctly signed request is honoured; afterwards the config is byte-identical and the targeted recipient still connects |
 | `freshness` | `bind-and-sign --freshness-mirror`, `publish-freshness`, `rotate-tls`; engine: `abi.SchedulerTick` | what the app publishes — the digest of the SIGNED, credential-less pack, with that file at the pack URL — is **merged** by a polling phone: with nothing changed it still connects and keeps every route; after an L2 it connects **with no new file** (nothing is minted for it); the published file holds no credential (`published.*.holds_no_credentials`) | no poll → still blocked; a document signed by another key → refused, no pack downloaded; a pack whose digest does not match → refused; the signed pack handed as a file to a phone that holds nothing → refused; the signed pack from BEFORE the rotation handed as a file to a phone that has already moved on → not merged, routes kept, still connects (`rotated.stale-signed-pack-by-file.*`) |
 | `caps` | — (reads this run's results) | every token `/health` advertises was observed to work in this run, and nothing that worked is unadvertised; a token with no evidence is `skipped` with the op that would produce it; a token the rig has no proof for fails. **It judges the binary's claim against the binary's behaviour, not the box's privilege**: `bind-address` is advertised because the daemon holds `CAP_NET_ADMIN`, which in this world every process does. It does not show that the systemd unit grants it, nor that a relay with an older unit advertises nothing | — |
 | `restarts` | `users-provision`, `users-revoke` (N cycles, `WB_RESTART_CYCLES`, default 6) | the relay comes back serving **every** family after every restart of its data plane: each cycle restarts sing-box three times and then runs a bystander's session on each family | the bystander's pack is r1's, never touched by the verbs |
@@ -730,10 +735,13 @@ Family work added two product fixes, each with a test in the default build
 * `core/engine/config.go` — a TCP-only outbound gets one route rule that
   hands UDP/53 to the engine's own DNS-over-TCP server; without it no name
   resolves. `TestBuildSingBoxConfigHijacksDNSForUDPLessOutbounds`,
-  `TestTCPOnlyOutboundTypesMatchSingBox`. The rule applies to naive, http,
-  tor, ssh, shadowtls and any profile pinned to `network:tcp`; **the rig
-  exercises it on naive only** — no rig family dials tor, so tor's DNS is
-  unit-tested, not carried.
+  `TestTCPOnlyOutboundTypesMatchSingBox`. The rule applies to http, tor, ssh,
+  shadowtls, any profile pinned to `network:tcp`, and a naive outbound
+  minted without `udp_over_tcp`. **The rig no longer exercises it**: the
+  one family it ran on, naive, carries UDP now (FAM-6) and its lookups
+  ride the tunnel; no rig family dials tor. It is unit-tested, and
+  parsed/started by the linked sing-box under `-tags singbox`, not
+  carried.
 * `core/engine/cronet_loader_naive.go`, `cronet_state.go` — off Android,
   load Cronet through cronet-go's own search (executable directory first)
   instead of by soname. Android is unchanged. `TestCronetLibraryArg`.
@@ -832,9 +840,13 @@ the `nf_conntrack` module, which `nft … ct state` loads or finds loaded.
   relay that has been up for a month.
 * **No reboot of the box, and no restart of the mgmt daemon.** The
   `restarts` op restarts sing-box only. `daal-relay-mgmt` starts once per
-  world and lives to the end, so nothing shows what a restart does to its
-  in-memory single-use nonce set (is a token used just before the restart
-  honoured again just after it?) or that a bound address is re-applied at
+  world and lives to the end, so nothing here shows what a restart does to its
+  in-memory single-use nonce set. (Since token format v2 a token signs
+  its request body, so a token replayed after a restart can only repeat
+  the identical request — unit-tested in `cmd/daal-relay-mgmt`,
+  `TestTokenIsBoundToTheRequest`; `mgmtauth` presents a never-used token
+  signed for another body, and a v1 token, and both are refused.) Nor
+  does anything show that a bound address is re-applied at
   boot (the persistence record and the boot unit are asserted to exist;
   the unit is never run).
 * **Families a self-hosted relay does not serve are absent**: the family

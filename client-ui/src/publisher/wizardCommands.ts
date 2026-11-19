@@ -83,12 +83,37 @@ export interface RotateTlsSummary {
     /** Whether the new cover host was written back to the stored relay
      *  record, so packs built from here on name the right host. */
     record_updated: boolean;
-    /** How many people are now holding a file that stopped working. */
+    /** How many people hold a file from this relay. NOT "how many are
+     *  cut off" — that is `needs_file`. */
     live_recipients: number;
-    /** Whether an everyone-pack exists and is now dead too. */
+    /** Whether an everyone-pack built before this change is on disk. It
+     *  still connects; it should be rebuilt before it is sent to anyone
+     *  new. */
     shared_pack_stale: boolean;
+    /** Who, if anyone, has to be sent a new file. The result panel
+     *  leads with this. A disguise change costs ONE route (the only one
+     *  that carries the cover host), and that route heals by itself on
+     *  phones whose file carries refresh addresses — so "everyone" is
+     *  true in exactly one case, and the app says which case this is. */
+    needs_file: RotateTlsNeedsFile;
+    /** The relay's file was signed again from its new identity. */
+    pack_resigned: boolean;
+    /** The refresh note naming the newly signed file reached enough
+     *  mirrors. */
+    refresh_note_published: boolean;
+    /** Where the newly signed file is — for the one step that stays the
+     *  operator's: putting it at the download address. */
+    signed_pack_path: string;
     warnings: string[];
 }
+
+/** Mirrors `relay_rotation::NeedsFile`. */
+export type RotateTlsNeedsFile =
+    | 'nobody'
+    | 'nobody_heals_itself'
+    | 'nobody_heals_itself_offline_meanwhile'
+    | 'one_route_until_new_file'
+    | 'everyone';
 
 // ---- Stable error codes -------------------------------------------
 //
@@ -108,6 +133,7 @@ export type PublisherErrorCode =
     | 'E_HELPER_IP_MISSING'
     | 'E_HELPER_IP_STALE'
     | 'E_RELAY_TOO_OLD'
+    | 'E_RELAY_KEYS_CHANGED'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -125,6 +151,13 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     // a human re-release moves it. The UI must say that plainly rather
     // than showing a raw Go error, and must not offer a retry.
     'E_RELAY_TOO_OLD',
+    // The relay stated a different REALITY key or TLS key than the one
+    // the signed file commits to, without having been rebuilt — which
+    // nothing legitimate does. The app signed and published NOTHING.
+    // Not retryable and not a network problem: the UI must say what it
+    // means (the server, or the path to it, may be someone else's) and
+    // that the way forward is a rebuild.
+    'E_RELAY_KEYS_CHANGED',
 ];
 
 /**
@@ -1204,7 +1237,7 @@ export const Wizard = {
      * Touches no credentials and no REALITY keypair. It DOES invalidate
      * every connection file already handed out, and Step 8 (remote pack
      * replacement) is not built — so nothing repairs itself over the
-     * network and every recipient needs a new file delivered by hand.
+     * network; the result says who, if anyone, needs a new file.
      * The returned counts exist so the UI can say that with numbers.
      */
     rotateTls: (operator_id: number) =>

@@ -1,9 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Daal relay artefact release — tag relay-v1.5.1.
+#
+# WHY THE TAG MOVED FROM relay-v1.5.0. The artefact FILE NAMES did not
+# change (daal-relay-mgmt-0.1.0-linux-amd64, …) but the mgmt daemon's
+# bytes did, and a pin is a (URL, sha256, signature) triple. Uploading
+# new bytes over the old URL (`gh release upload --clobber`) would
+#
+#   * break every build that still pins the old hash — CI stages the
+#     published artefacts by exactly those URLs — and
+#   * let any cache or mirror that still holds the old bytes answer a NEW
+#     pin with them, which the box refuses ("artifact verification
+#     failed") on a server somebody is already paying for.
+#
+# A release that changes bytes therefore gets a new tag, so the pinned
+# URL changes with the hash. relay-v1.5.0 and relay-v1.5.0-mirror stay
+# published, untouched, for the builds that pin them. NEVER re-upload
+# under a tag that is already pinned anywhere: copy this script to the
+# next tag instead.
+#
+# Without --upload this only builds, signs and stages under
+# dist-release/$TAG/ — nothing leaves the machine. tools/release/README.md
+# says what to do with the result.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TAG="relay-v1.5.0"
-MIRROR_TAG="relay-v1.5.0-mirror"
+TAG="relay-v1.5.1"
+MIRROR_TAG="relay-v1.5.1-mirror"
 REPO="${DAAL_RELEASE_REPO:-hastaan/daal}"
 KEY="${DAAL_RELEASE_KEY:-$ROOT/release-keys/release.key}"
 OUT="$ROOT/dist-release/$TAG"
@@ -207,6 +229,28 @@ do
 done
 
 emit_snippet
+
+# The hashes above are a function of the source AND of the Go toolchain
+# (relay-v1.5.0 was built with go1.26.0; the same source under go1.26.8
+# gives different bytes). "Reproducible" therefore means: same tree, same
+# `go version`. Written down beside the artefacts so a later rebuild that
+# does not match can be told from a source change.
+"$GO_BIN" version > "$OUT/toolchain.txt"
+
+# The same commit that pastes the snippet has more to change, and the
+# order matters (prove, upload, then push). It is written down once, in
+# tools/release/README.md; say so here, every time.
+cat >&2 <<NEXT
+
+Staged under $OUT (nothing was uploaded$([[ "$UPLOAD" -eq 1 ]] && echo " yet")).
+Toolchain: $(cat "$OUT/toolchain.txt")
+
+The pin bump is ONE commit, and this snippet is only its first line.
+Follow tools/release/README.md ("The pin bump") — it lists every constant
+and file that moves with the pin, how to prove the candidate before
+anything is uploaded, and when to run:  $0 --upload
+
+NEXT
 
 if [[ "$UPLOAD" -eq 1 ]]; then
   upload_release "$TAG" \

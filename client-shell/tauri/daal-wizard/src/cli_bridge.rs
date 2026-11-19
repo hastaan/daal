@@ -89,6 +89,66 @@ pub struct BindResult {
     pub lint_warnings: Vec<serde_json::Value>,
     #[serde(default)]
     pub shared_risk_edges: i64,
+    /// Families whose route was signed WITHOUT an endpoint, so no
+    /// recipient can use it from this pack. The usual one is
+    /// shadowsocks on a relay nobody has been added to yet — the relay
+    /// makes that key together with its first recipient — and the
+    /// wizard signs again when the key exists.
+    #[serde(default, deserialize_with = "null_default")]
+    pub uncommitted_families: Vec<String>,
+    /// What the signed endpoints commit the relay to, read back out of
+    /// the pack by the signer. `None` from a `daal-deploy` that
+    /// predates the field. The wizard stores it and compares later
+    /// relay replies against it — see `relay_identity`.
+    #[serde(default)]
+    pub committed_identity: Option<CommittedIdentity>,
+    /// Where the relay's own identity and the stored record disagreed.
+    /// The relay's word was signed; these say a recorded value is stale.
+    #[serde(default, deserialize_with = "null_default")]
+    pub identity_warnings: Vec<String>,
+}
+
+/// The relay identity a signed pack commits its routes to — the Rust
+/// mirror of `relaypack.CommittedIdentity`. Nothing in it is secret: it
+/// is all in the signed manifest. Every field is `#[serde(default)]`
+/// for the reason every transport struct here is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CommittedIdentity {
+    #[serde(default)]
+    pub server: String,
+    #[serde(default)]
+    pub cover_sni: String,
+    #[serde(default)]
+    pub reality_public_key: String,
+    /// The data-plane TLS key pin (the name is shared with the relay's
+    /// replies, where it is historical).
+    #[serde(default)]
+    pub tls_cert_sha256: String,
+    #[serde(default)]
+    pub ss_method: String,
+    #[serde(default)]
+    pub ss_server_key_sha256: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub families: Vec<String>,
+}
+
+/// What `daal-deploy relay-identity` came back with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelayIdentityFetch {
+    /// The relay stated its identity; this is the JSON document,
+    /// verbatim, in the shape `bind-and-sign --relay-identity` reads.
+    Stated(String),
+    /// The relay's software (or this app's bundled `daal-deploy`)
+    /// predates the identity route. Not a failure and not transient:
+    /// the caller falls back to the older sources of the same material.
+    Unsupported,
+}
+
+/// Args for `daal-deploy relay-identity`.
+pub struct RelayIdentityArgs<'a> {
+    pub record_path: &'a Path,
+    pub helper_ip: &'a str,
+    pub token: &'a str,
 }
 
 /// `ProgressEvent` is the JSON-line shape emitted by
@@ -501,6 +561,19 @@ pub trait CliRunner: Send + Sync {
         on_progress: &mut dyn FnMut(ProgressEvent),
     ) -> Result<BindResult>;
 
+    /// Ask the relay who it is: `daal-deploy relay-identity`.
+    ///
+    /// Read-only on the relay. This is what makes a signature possible
+    /// before the first recipient exists, on every provider — the
+    /// record carries the relay's keys only where a provider adapter
+    /// happened to read them over SSH. An older relay is
+    /// [`RelayIdentityFetch::Unsupported`], never an error.
+    fn run_relay_identity(
+        &self,
+        args: RelayIdentityArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RelayIdentityFetch>;
+
     /// FRP-4b: invoke `daal-deploy qr-fountain` and call
     /// `on_frame` for each JSON-line frame on stdout. The runner
     /// reads up to `max_frames` frames (0 means unbounded — the
@@ -747,6 +820,10 @@ pub struct RotateTlsResult {
     pub record_written: String,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The CLI's own account of what is left to do (sign again,
+    /// publish). Informational: this app does both itself.
+    #[serde(default)]
+    pub next_step: String,
 }
 
 /// FRP-14: args for `daal-deploy users-provision`.
@@ -1320,6 +1397,11 @@ pub struct BindAndSignArgs<'a> {
     /// recovery mechanism a censor disables with one DNS entry while
     /// the publisher believes they are covered.
     pub freshness_mirrors: &'a [String],
+    /// The relay's identity document (`--relay-identity`), staged in a
+    /// file. `None` only for a relay that cannot state one and has
+    /// never answered a recipient request; the signer then has the
+    /// record alone, which on some providers is not enough to sign.
+    pub relay_identity_path: Option<&'a Path>,
 }
 
 /// Extension trait so `.apply_env()` can be chained on `Command`.
@@ -2143,6 +2225,9 @@ impl CliRunner for SubprocessRunner {
         for m in args.freshness_mirrors {
             cmd.arg("--freshness-mirror").arg(m);
         }
+        if let Some(path) = args.relay_identity_path {
+            cmd.arg("--relay-identity").arg(path);
+        }
         let mut child = cmd
             .apply_env()
             .stdin(Stdio::piped())
@@ -2194,6 +2279,26 @@ impl CliRunner for SubprocessRunner {
         }
         let res: BindResult = serde_json::from_str(&stdout_text)?;
         Ok(res)
+    }
+
+    fn run_relay_identity(
+        &self,
+        args: RelayIdentityArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RelayIdentityFetch> {
+        match run_users_subprocess(
+            &self.binary,
+            "relay-identity",
+            args.record_path,
+            args.helper_ip,
+            args.token,
+            None,
+            priv_key,
+        ) {
+            Ok(stdout) => Ok(RelayIdentityFetch::Stated(stdout.trim().to_string())),
+            Err(e) if relay_identity_unsupported(&e) => Ok(RelayIdentityFetch::Unsupported),
+            Err(e) => Err(e),
+        }
     }
 
     fn run_qr_fountain(
@@ -2684,8 +2789,108 @@ fn run_users_subprocess(
     Ok(stdout_text)
 }
 
+/// Is this `relay-identity` failure the "cannot say" answer rather than
+/// a failure? Exit 3 is the verb's reserved code for a relay whose
+/// software predates the route; exit 2 with `unknown subcommand` is
+/// this app's own bundled `daal-deploy` predating the verb. Everything
+/// else — a refused token, a timeout — is a real failure and must stay
+/// one: falling back there would sign from a stale source while the
+/// actual problem went unreported.
+fn relay_identity_unsupported(e: &BridgeError) -> bool {
+    match e {
+        BridgeError::SubprocessFailed { rc: 3, .. } => true,
+        BridgeError::SubprocessFailed { rc: 2, stderr } => {
+            stderr.to_ascii_lowercase().contains("unknown subcommand")
+        }
+        _ => false,
+    }
+}
+
+/// The relay the mock stands in for: what `run_relay_identity` says,
+/// and how the other verbs move it. A real relay's identity is not a
+/// constant — its shadowsocks key appears with the first recipient and
+/// its cover host moves on rotate-tls — and a mock that answered the
+/// same thing forever could not tell a wizard that re-signs from one
+/// that does not.
+#[derive(Debug, Clone)]
+pub struct MockRelay {
+    pub reality_public_key: String,
+    pub tls_cert_sha256: String,
+    pub cover_sni: String,
+    /// Does the relay serve shadowsocks at all?
+    pub serves_shadowsocks: bool,
+    /// The box-wide shadowsocks key, once a recipient has caused it to
+    /// be made. Empty before that.
+    pub ss_server_key: String,
+}
+
+impl Default for MockRelay {
+    fn default() -> Self {
+        Self {
+            reality_public_key: "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into(),
+            tls_cert_sha256: "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into(),
+            cover_sni: "ftp.plusline.net".into(),
+            serves_shadowsocks: true,
+            ss_server_key: String::new(),
+        }
+    }
+}
+
+impl MockRelay {
+    /// The `/identity` document this relay would state right now.
+    pub fn identity_json(&self) -> String {
+        let mut families = vec![
+            serde_json::json!({"family": "hysteria2", "port": 443, "listening": true}),
+            serde_json::json!({"family": "vless-reality", "port": 443, "listening": true}),
+        ];
+        let mut doc = serde_json::json!({
+            "identity_version": 1,
+            "reality_public_key": self.reality_public_key,
+            "tls_cert_sha256": self.tls_cert_sha256,
+            "cover_sni": self.cover_sni,
+            "pending_families": [],
+            "generated_at_unix": 1_700_000_000,
+        });
+        if self.serves_shadowsocks {
+            let minted = !self.ss_server_key.is_empty();
+            families.insert(
+                1,
+                serde_json::json!({"family": "shadowsocks", "port": 8446, "listening": minted}),
+            );
+            if minted {
+                doc["ss_method"] = "2022-blake3-aes-128-gcm".into();
+                doc["ss_server_key_sha256"] =
+                    crate::relay_identity::ss_server_key_digest(&self.ss_server_key).into();
+            } else {
+                doc["pending_families"] = serde_json::json!(["shadowsocks"]);
+            }
+        }
+        doc["families"] = serde_json::Value::Array(families);
+        doc.to_string()
+    }
+}
+
+/// One `run_bind_and_sign` call as the mock saw it.
+#[derive(Debug, Clone, Default)]
+pub struct MockBindCall {
+    /// The OperatorRecord the signer was handed.
+    pub record_json: String,
+    /// The `--relay-identity` document, if one was passed.
+    pub relay_identity_json: Option<String>,
+}
+
 /// `MockRunner` is the in-process stand-in for tests.
 pub struct MockRunner {
+    /// The relay behind `run_relay_identity`; see [`MockRelay`].
+    pub relay: Mutex<MockRelay>,
+    /// How many times the relay was asked who it is.
+    pub relay_identity_calls: Mutex<usize>,
+    /// Model a relay whose software predates the identity route.
+    pub relay_identity_unsupported: Mutex<bool>,
+    /// Make the identity call FAIL (as opposed to "cannot say").
+    pub relay_identity_error: Mutex<Option<String>>,
+    /// Every signature, in order, with what it was signed from.
+    pub bind_calls: Mutex<Vec<MockBindCall>>,
     pub fixture: Pricing,
     pub last_call: Mutex<Option<MockCall>>,
     /// FRP-4b/FRP-7: count live provision calls.
@@ -2976,6 +3181,11 @@ pub struct MockDecommissionCall {
 impl MockRunner {
     pub fn new(fixture: Pricing) -> Self {
         Self {
+            relay: Mutex::new(MockRelay::default()),
+            relay_identity_calls: Mutex::new(0),
+            relay_identity_unsupported: Mutex::new(false),
+            relay_identity_error: Mutex::new(None),
+            bind_calls: Mutex::new(Vec::new()),
             fixture,
             last_call: Mutex::new(None),
             provision_calls: Mutex::new(0),
@@ -3596,13 +3806,108 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(args.freshness_mirrors.to_vec());
+        // What a real signer works from: the record, completed and
+        // outranked by the relay's own identity when one is passed.
+        let record_json = std::fs::read_to_string(args.operator_record_path).unwrap_or_default();
+        let relay_identity_json = args
+            .relay_identity_path
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        self.bind_calls.lock().unwrap().push(MockBindCall {
+            record_json: record_json.clone(),
+            relay_identity_json: relay_identity_json.clone(),
+        });
+        let rec: serde_json::Value =
+            serde_json::from_str(&record_json).unwrap_or(serde_json::Value::Null);
+        let id: serde_json::Value = relay_identity_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let text = |v: &serde_json::Value, k: &str| -> String {
+            v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+        };
+        let prefer = |k: &str| -> String {
+            let live = text(&id, k);
+            if live.is_empty() {
+                text(&rec, k)
+            } else {
+                live
+            }
+        };
+        let reality = prefer("reality_public_key");
+        let tls_pin = prefer("tls_cert_sha256");
+        let ss_digest = text(&id, "ss_server_key_sha256");
+        // THE F-005 REFUSAL, as the real signer makes it: with neither
+        // a REALITY key nor a TLS pin nor a shadowsocks key, not one
+        // route can be committed and the pack is not signed (exit 1).
+        if reality.is_empty() && tls_pin.is_empty() && ss_digest.is_empty() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: "bind-and-sign: relaypack: no route could be given a signed endpoint — \
+                         the OperatorRecord carries neither the relay's REALITY public key nor its \
+                         TLS key pin"
+                    .into(),
+            });
+        }
+        let record_families: Vec<String> = rec
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c.get("family").and_then(|f| f.as_str()))
+                    .map(|f| f.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut families: Vec<String> = Vec::new();
+        if !reality.is_empty() {
+            families.push("vless-reality".into());
+        }
+        if !tls_pin.is_empty() {
+            families.push("hysteria2".into());
+        }
+        if !ss_digest.is_empty() {
+            families.push("shadowsocks".into());
+        }
+        families.sort();
+        // A relay that serves shadowsocks and has no key for it yet:
+        // that route is signed without an endpoint.
+        let ss_expected = record_families.iter().any(|f| f == "shadowsocks")
+            || id
+                .get("pending_families")
+                .and_then(|p| p.as_array())
+                .map(|a| a.iter().any(|f| f.as_str() == Some("shadowsocks")))
+                .unwrap_or(false);
+        let uncommitted: Vec<String> = if ss_expected && ss_digest.is_empty() {
+            vec!["shadowsocks".into()]
+        } else {
+            vec![]
+        };
+        let committed = CommittedIdentity {
+            server: text(&rec, "public_ip"),
+            cover_sni: if reality.is_empty() {
+                String::new()
+            } else {
+                prefer("cover_sni")
+            },
+            reality_public_key: reality,
+            tls_cert_sha256: tls_pin,
+            ss_method: text(&id, "ss_method"),
+            ss_server_key_sha256: ss_digest,
+            families,
+        };
         on_progress(ProgressEvent {
             step: "bind_done".into(),
             message: "signed".into(),
             ts: String::new(),
             extra: Default::default(),
         });
-        if let Some(res) = self.bind_result.lock().unwrap().clone() {
+        if let Some(mut res) = self.bind_result.lock().unwrap().clone() {
+            // A canned result describes the pack's bytes; what the pack
+            // COMMITS TO still follows from what it was signed from.
+            if res.committed_identity.is_none() {
+                res.committed_identity = Some(committed);
+                res.uncommitted_families = uncommitted;
+            }
             return Ok(res);
         }
         Ok(BindResult {
@@ -3614,7 +3919,27 @@ impl CliRunner for MockRunner {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            uncommitted_families: uncommitted,
+            committed_identity: Some(committed),
+            identity_warnings: vec![],
         })
+    }
+
+    fn run_relay_identity(
+        &self,
+        _args: RelayIdentityArgs<'_>,
+        _priv_key: &[u8],
+    ) -> Result<RelayIdentityFetch> {
+        *self.relay_identity_calls.lock().unwrap() += 1;
+        if let Some(msg) = self.relay_identity_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc: 1, stderr: msg });
+        }
+        if *self.relay_identity_unsupported.lock().unwrap() {
+            return Ok(RelayIdentityFetch::Unsupported);
+        }
+        Ok(RelayIdentityFetch::Stated(
+            self.relay.lock().unwrap().identity_json(),
+        ))
     }
 
     fn run_qr_fountain(
@@ -3685,8 +4010,25 @@ impl CliRunner for MockRunner {
             .unwrap()
             .push(args.name.to_string());
         if let Some(r) = self.users_provision_result.lock().unwrap().clone() {
+            // The relay makes its shadowsocks key with its first
+            // recipient; from then on its identity carries the digest.
+            if let Some((server_key, _)) = r.ss_password.split_once(':') {
+                self.relay.lock().unwrap().ss_server_key = server_key.to_string();
+            }
             return Ok(r);
         }
+        let (reality_public_key, tls_cert_sha256, cover_sni, serves_ss) = {
+            let mut relay = self.relay.lock().unwrap();
+            if relay.serves_shadowsocks && relay.ss_server_key.is_empty() {
+                relay.ss_server_key = "bW9jay1ib3gtaXBzay0xNg==".into();
+            }
+            (
+                relay.reality_public_key.clone(),
+                relay.tls_cert_sha256.clone(),
+                relay.cover_sni.clone(),
+                relay.serves_shadowsocks,
+            )
+        };
         Ok(UserCredsResult {
             name: args.name.to_string(),
             vless_uuid: "00000000-0000-0000-0000-000000000000".into(),
@@ -3695,17 +4037,25 @@ impl CliRunner for MockRunner {
             naive_password: "mocknaivepassword00000".into(),
             ws_path: format!("/{}/cafebabe", args.name),
             provisioned_at_unix: 1_700_000_000,
-            reality_public_key: "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into(),
-            tls_cert_sha256: "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into(),
+            reality_public_key,
+            tls_cert_sha256,
             tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
-            cover_sni: "ftp.plusline.net".into(),
+            cover_sni,
             mux_inbound: true,
             // A box that DOES serve shadowsocks-2022: the password is
             // already the colon-joined "<iPSK>:<uPSK>" the outbound
             // wants, both halves padded base64-std of 16 bytes, which is
             // what the method requires.
-            ss_password: "bW9jay1ib3gtaXBzay0xNg==:bW9jay11c2VyLXVwc2sxNg==".into(),
-            ss_method: "2022-blake3-aes-128-gcm".into(),
+            ss_password: if serves_ss {
+                "bW9jay1ib3gtaXBzay0xNg==:bW9jay11c2VyLXVwc2sxNg==".into()
+            } else {
+                String::new()
+            },
+            ss_method: if serves_ss {
+                "2022-blake3-aes-128-gcm".into()
+            } else {
+                String::new()
+            },
             // A box that DOES serve tuic. A relay whose profile left the
             // family off sends both of these empty, and the minter then
             // refuses the route — see the field docs.
@@ -3807,7 +4157,13 @@ impl CliRunner for MockRunner {
             ws_path: String::new(),
             record_written: args.record_path.to_string_lossy().to_string(),
             warnings: vec![],
+            next_step: String::new(),
         });
+        // The relay itself moved: its identity names the new cover host
+        // from here on.
+        if !res.cover_sni.is_empty() && self.rotate_tls_err.lock().unwrap().is_none() {
+            self.relay.lock().unwrap().cover_sni = res.cover_sni.clone();
+        }
         // The real CLI REWRITES --record-file in place with the updated
         // OperatorRecord and does not put it on stdout. Callers read that
         // file back, so the mock has to move it too or the read-back path

@@ -49,6 +49,42 @@ No app-facing label MAY refer to identity, occupation, politics, or social group
 - Daal-core runs in the service process so the UI process stays lean.
 - Phase 1B's engine driver is the Go stub; Phase 1B-Polish wires the real sing-box driver and TUN file descriptor handoff.
 
+### Threading (binding)
+
+`engine_set_route` returns only when the engine has proved the route by a
+real round trip, or given up (`engine-abi-v1.md`, "Connection check"):
+milliseconds on a good route, about 8 s on a dead one, up to about 30 s
+on a link that is crawling. Service callbacks run on the application's
+main thread, which also draws the WebView. Therefore:
+
+- No engine call is made from `onStartCommand`, `onRevoke` or
+  `onDestroy`. Each of them does only what Android requires on that
+  thread at once (`startForeground`, `stopForeground`, `stopSelf`) and
+  hands the rest to one dedicated control thread, which makes every
+  engine lifecycle call in order: protect callback, TUN fd, route,
+  tunnel refresh, scheduler pump; and the reverse on the way down.
+- A stop request never waits for a connection check. It supersedes the
+  start in flight, calls `engine_clear_route` from a thread of its own
+  (the engine's cancel: the blocked `engine_set_route` returns at once),
+  and queues the teardown behind the start it has just cancelled. A start
+  that finds itself superseded undoes what it did, including when the
+  check had just succeeded.
+- `vpn_start` resolves when the service has been asked to start, not when
+  the route is connected. The page learns the outcome from the engine's
+  diagnostics, which it polls: `route_check: "verifying"` ("Checking the
+  connection…"), then `ok` / `degraded`, or `failed` with
+  `route_running: false`, or a `connect_refused` code when the engine
+  refused the route before trying it.
+- A start that fails stops the service, and the service's teardown calls
+  `engine_clear_route`. That call MUST NOT cost the page the outcome it
+  has not read yet, and does not: `engine_clear_route` leaves the verdict
+  of a connect that already failed or was refused in place when it finds
+  nothing running (`engine-abi-v1.md`, "Connection check"; pinned by
+  `core/abi` `TestClearRoute_KeepsTheVerdictOfAConnectThatAlreadyFailed`).
+
+Pinned at the source level by `client-ui/src/lib/connectThreading.test.ts`
+(the service cannot be unit-tested off a device). Not yet run on a phone.
+
 ## Privacy invariants
 
 - `android:allowBackup="false"` and full-backup excludes everything (`data_extraction_rules.xml`).

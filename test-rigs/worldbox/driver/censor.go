@@ -373,6 +373,9 @@ func RawProbeRun(ctx context.Context, p Paths, q RawProbe) RawProbe {
 	if q.Split {
 		args = append(args, "--split")
 	}
+	if rawPatience > 0 {
+		args = append(args, "--patience-ms", strconv.FormatInt(rawPatience.Milliseconds(), 10))
+	}
 	counter := "plain"
 	if q.Kind == "udp" {
 		if q.Shape == "quic" {

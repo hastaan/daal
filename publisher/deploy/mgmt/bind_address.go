@@ -67,7 +67,6 @@ package mgmt
 //     the point.
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -75,7 +74,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"strings"
 
 	"daal/publisher/deploy/provider"
@@ -464,22 +462,16 @@ func (c *Client) UnbindAddress(ctx context.Context, rec *provider.OperatorRecord
 // canonical address, decode. Kept in one place so the two cannot drift
 // in how they authenticate or how they render the body.
 func (c *Client) addressVerb(ctx context.Context, rec *provider.OperatorRecord, privKey ed25519.PrivateKey, op string, addr net.IP, out any) error {
-	tok, err := MintToken(privKey, op, c.now())
-	if err != nil {
-		return err
-	}
 	// The address is re-rendered from the bytes BindableAddress
 	// returned. Nothing a caller typed reaches the wire.
 	body, err := json.Marshal(bindAddressReq{IP: addr.String()})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.boxURL(rec, "/"+op), bytes.NewReader(body))
+	req, err := c.signedRequest(ctx, rec, privKey, op, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("mgmt: %s: %w", op, err)

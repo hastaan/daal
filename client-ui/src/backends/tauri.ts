@@ -5,7 +5,12 @@
 // This is the ONLY file in client-ui/ that imports from
 // @tauri-apps/api/core. Screens never call invoke() directly.
 
-import { connStateWithCheck, parseRouteCheck, parseRouteRunning } from '../lib/routeCheck';
+import {
+    connStateWithCheck,
+    parseConnectRefused,
+    parseRouteCheck,
+    parseRouteRunning,
+} from '../lib/routeCheck';
 import { invoke } from '@tauri-apps/api/core';
 import type {
     AddSubscriptionRequest,
@@ -285,10 +290,11 @@ export class TauriContract implements D2Contract {
         // ...and `route_running` whether anything is running at all:
         // after a failed connect the posture is Recovery ('connecting')
         // with the engine stopped.
+        const routeRunning = parseRouteRunning(d.route_running);
         const state = connStateWithCheck(
             postureToConnState(d.posture ?? ''),
             routeCheck,
-            parseRouteRunning(d.route_running),
+            routeRunning,
         );
         const mode = ((d.mode as ConnMode) ?? 'normal');
         let activeRoute: RouteDisplayRow | undefined;
@@ -322,6 +328,14 @@ export class TauriContract implements D2Contract {
             pointerValidDays: pointer?.validForDays,
             netStatusLine: undefined,
             routeCheck,
+            // A closed engine vocabulary, used only to pick one of our
+            // own sentences; '' (no failure) is "nothing to say".
+            routeCheckCategory:
+                typeof d.route_check_category === 'string' && d.route_check_category
+                    ? d.route_check_category
+                    : undefined,
+            routeRunning,
+            connectRefused: parseConnectRefused(d.connect_refused),
             // Only 'none' and 'singbox' are meaningful. Anything else —
             // including the absent field an older engine emits — stays
             // undefined so the UI claims nothing rather than accusing a

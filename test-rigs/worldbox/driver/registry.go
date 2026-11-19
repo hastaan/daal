@@ -106,6 +106,22 @@ type Scenario struct {
 	// family looks like too. Ignored for a family expected to pass (its
 	// tunnel check already demands more).
 	Established map[string]string `json:"established,omitempty"`
+	// ProbePatienceMs is added to the raw probes' own timeouts (a SYN
+	// answered within 2 s, a first flight within 2.5 s). Only for a
+	// scenario that delays packets by more than those: there the probe's
+	// impatience, not the censor, would be what "blocks".
+	ProbePatienceMs int `json:"probe_patience_ms,omitempty"`
+	// RandomLoss: the censor drops a share of the packets at random
+	// instead of by a rule a packet either matches or does not. The wire
+	// tap sits BEFORE the censor's filter and counts what each side SENT
+	// (wire.go), so under such a censor "the relay sent a payload's worth
+	// of bytes" no longer means the client received the payload: some of
+	// them were dropped after being counted, and every retransmission is
+	// counted again. For a session whose probe did not receive its
+	// payload the wire check then asserts what the tap can still witness
+	// — the family's own endpoint was tried, and nothing else was — and
+	// not the byte count. See wireUnderRandomLoss.
+	RandomLoss bool `json:"random_loss,omitempty"`
 }
 
 // MustEstablish: the scenario claims this family still connects, and only

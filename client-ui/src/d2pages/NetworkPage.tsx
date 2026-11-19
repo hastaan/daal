@@ -16,11 +16,18 @@ import { useContract } from '../contract/ContractProvider';
 import type {
     BurnpressureVerdict,
     CellRow,
+    ConnectionSummary,
     FamilyChip,
     PublisherTreeRow,
     RouteDisplayRow,
 } from '../contract/D2Contract';
 import { Button, Card } from '../design/primitives';
+import {
+    connectFailedKey,
+    connectRefusedKey,
+    refusedToShow,
+    type ConnectRefused,
+} from '../lib/routeCheck';
 
 interface Props {
     t: (k: string) => string;
@@ -80,6 +87,17 @@ export default function NetworkPage({ t }: Props) {
     // build instruction. `undefined` is "unknown", not "none": an older
     // engine emits no field and must not be accused.
     const [noDataPlane, setNoDataPlane] = useState(false);
+    // Why the engine refused the last connect, as a closed code. On
+    // Android it is the only way the reason arrives (the connect call
+    // resolves when the VPN service starts, before the engine decides).
+    const [refused, setRefused] = useState<ConnectRefused | undefined>(undefined);
+    // The refusal that answered a Connect tap made on THIS page. Kept
+    // apart from the polled one because it must be shown even while
+    // another route stays connected (the engine refuses before touching
+    // the running route): the poll-driven sentence is hidden then, and
+    // the tap used to end in silence. Cleared by the next tap.
+    const [tapRefused, setTapRefused] = useState<ConnectRefused | undefined>(undefined);
+    const refusedShown = refusedToShow(refused, tapRefused, activeRouteId !== null);
 
     const load = async () => {
         try {
@@ -108,11 +126,19 @@ export default function NetworkPage({ t }: Props) {
             try {
                 const s = await contract.connectionSummary();
                 if (!alive) return;
+                // "Active" is whatever the engine has RUNNING, not only
+                // what it has finished proving: a route still being
+                // checked, or lost and being retried, must offer
+                // Disconnect here too. Offering Connect for it called
+                // connect on a route in its cooldown (refused) and left
+                // no way to stop it from this page.
                 setActiveRouteId(
-                    s.state === 'connected'
+                    s.state === 'connected' ||
+                        (s.state === 'connecting' && s.routeRunning === true)
                         ? s.activeRoute?.routeId ?? null
                         : null,
                 );
+                setRefused(s.connectRefused);
                 setNoDataPlane(s.dataPlane === 'none');
             } catch {
                 /* transient read failure — keep last known state */
@@ -129,6 +155,7 @@ export default function NetworkPage({ t }: Props) {
 
     const onDisconnect = async () => {
         setError(null);
+        setTapRefused(undefined);
         // Optimistic: clear the active route immediately so the button flips
         // to "Connect" without waiting for the next poll; the poll reconciles.
         setActiveRouteId(null);
@@ -247,6 +274,23 @@ export default function NetworkPage({ t }: Props) {
                 </div>
             )}
 
+            {refusedShown && !error && (
+                <div
+                    role="alert"
+                    style={{
+                        background: 'rgba(200,85,61,0.10)',
+                        border: '1px solid rgba(200,85,61,0.40)',
+                        color: 'var(--red)',
+                        padding: 12,
+                        borderRadius: 'var(--radius-md)',
+                        marginBottom: 16,
+                        fontSize: 13,
+                    }}
+                >
+                    {t(connectRefusedKey(refusedShown))}
+                </div>
+            )}
+
             {error && (
                 <div
                     style={{
@@ -286,6 +330,7 @@ export default function NetworkPage({ t }: Props) {
                             onDisconnect={onDisconnect}
                             onConnectRoute={async (routeId) => {
                                 setError(null);
+                                setTapRefused(undefined);
                                 // Optimistic feedback: flag the row so
                                 // its button reads "Connecting…" and
                                 // disables, instantly. Cleared in
@@ -307,17 +352,37 @@ export default function NetworkPage({ t }: Props) {
                                     // once; the 2 s poll reconciles.
                                     setActiveRouteId(routeId);
                                     await load();
-                                } catch (e) {
-                                    // Engine connect errors are usually
-                                    // either route-not-found or the
-                                    // sing-box runner not running. Show
-                                    // the raw message — better than a
-                                    // dead-feeling button.
-                                    setError(
-                                        (e as Error).message ||
-                                            String(e) ||
-                                            'connect failed',
-                                    );
+                                } catch {
+                                    // A refusal the engine can name gets
+                                    // its own sentence, shown whether or
+                                    // not another route is still
+                                    // connected. A route that started and
+                                    // failed its connection check gets
+                                    // the sentence the Connection page
+                                    // shows for the same event. The
+                                    // host's own error text ("engine call
+                                    // returned -1") is for a log, never
+                                    // for this banner.
+                                    let summary: ConnectionSummary | undefined;
+                                    try {
+                                        summary = await contract.connectionSummary();
+                                    } catch {
+                                        /* the plain sentence below */
+                                    }
+                                    const code = summary?.connectRefused;
+                                    if (code) {
+                                        setRefused(code);
+                                        setTapRefused(code);
+                                    } else {
+                                        setError(
+                                            t(
+                                                connectFailedKey(
+                                                    summary?.routeCheck,
+                                                    summary?.routeCheckCategory,
+                                                ),
+                                            ),
+                                        );
+                                    }
                                 } finally {
                                     setConnectingId(null);
                                 }

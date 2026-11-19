@@ -146,6 +146,21 @@ pub const E_HELPER_IP_STALE: &str = "E_HELPER_IP_STALE";
 /// publisher fails closed on it rather than guessing.
 pub const E_RELAY_TOO_OLD: &str = "E_RELAY_TOO_OLD";
 
+/// The relay answered with a different REALITY key or TLS key pin than
+/// the one the signed pack commits to — and it is the same machine (its
+/// management certificate has not changed), on which neither can change:
+/// nothing in the management API replaces them, only a rebuild does, and
+/// a rebuild gives the machine a new management certificate.
+///
+/// So this is not "the relay moved, sign again". It is either a relay
+/// somebody has tampered with or an answer that did not come from the
+/// relay, and what it would have the publisher do is sign a pack telling
+/// every recipient's app to trust the new key. The wizard refuses
+/// (`relay_identity::refuse_keys_changed_in_place`), signs nothing and
+/// publishes nothing; the way forward is a rebuild, which the user
+/// chooses. Not retryable.
+pub const E_RELAY_KEYS_CHANGED: &str = "E_RELAY_KEYS_CHANGED";
+
 /// Build a [`WizardError::Coded`] from a code constant and a tail.
 pub(crate) fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
     WizardError::Coded(format!("{code}: {tail}"))
@@ -1937,6 +1952,19 @@ fn persist_mgmt_plane_if_present(
 /// On success the wizard records the .sbp's sha256 + relay_pack_id
 /// on the operator row (V002 columns) and returns the BindResult
 /// summary so the Tauri shim can populate Screen 5/6.
+///
+/// # What it signs FROM
+///
+/// Every route in the pack is committed to a signed endpoint, and the
+/// relay's half of that commitment — its keys, its cover host — is not
+/// reliably in the stored record: it is there only where a provider
+/// adapter read it over SSH, and the shadowsocks key is never there.
+/// So the relay is ASKED, here, before the signature
+/// (`relay_identity::stage_for_signing`). This is the fix for the
+/// finding that the app could not sign at all on one provider and
+/// dropped a route on the other; it also means this function now needs
+/// the publisher's address on file (the ask opens a firewall window),
+/// which the provision step that precedes it already required.
 pub fn sign_relaypack(
     ctx: &WizardCtx,
     operator_id: i64,
@@ -1945,6 +1973,36 @@ pub fn sign_relaypack(
     publisher_name: &str,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<BindResult> {
+    sign_relaypack_with(
+        ctx,
+        operator_id,
+        phase,
+        output_dir,
+        publisher_name,
+        crate::relay_identity::Freshness::Fresh,
+        on_progress,
+    )
+}
+
+/// [`sign_relaypack`] with a say in how current the relay's identity
+/// must be. Only the address swap passes `AllowCached`; see
+/// [`crate::relay_identity::Freshness`].
+pub fn sign_relaypack_with(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    phase: &str,
+    output_dir: &std::path::Path,
+    publisher_name: &str,
+    identity_freshness: crate::relay_identity::Freshness,
+    on_progress: &mut dyn FnMut(ProgressEvent),
+) -> Result<BindResult> {
+    // Ask the relay who it is BEFORE any key material is read: this is
+    // the step that can fail for reasons the operator can fix (their
+    // address changed, the relay is unreachable), and failing it with
+    // the signing key already decrypted in memory would be backwards.
+    let identity_path =
+        crate::relay_identity::stage_for_signing(ctx, operator_id, identity_freshness)?;
+
     let row = ctx.db.get(operator_id)?;
 
     let active_subkey = ctx.db.active_subkey(operator_id)?;
@@ -1995,17 +2053,25 @@ pub fn sign_relaypack(
                 // freshness::mirror_args for why one is worse than
                 // none.
                 freshness_mirrors: &mirrors,
+                relay_identity_path: identity_path.as_deref(),
             },
             priv_buf.as_slice(),
             on_progress,
-        )
-        .map_err(|e| WizardError::Pricing(e.to_string()))?;
-    // Wipe priv-buf and the staged record JSON immediately.
+        );
+    // Wipe priv-buf and the staged files immediately — on the failure
+    // path too.
     priv_buf.zeroize();
     let _ = std::fs::remove_file(&record_path);
+    if let Some(p) = identity_path.as_ref() {
+        let _ = std::fs::remove_file(p);
+    }
+    let res = res.map_err(|e| WizardError::Pricing(e.to_string()))?;
 
     ctx.db
         .record_signed_sbp(operator_id, &res.sbp_sha256, &res.relay_pack_id, now)?;
+    // What this pack commits the relay to. Every later reply from the
+    // relay is compared against it, and a difference signs again.
+    crate::relay_identity::record_committed(ctx, operator_id, &res, now)?;
     // Stamp what actually went INTO this pack, not what is configured.
     // The distinction is the whole point: a publisher who adds mirrors
     // tomorrow has not repaired the bundle somebody imported today, and
@@ -3549,12 +3615,25 @@ fn rotate_execute_inner(
     // was literal "V1.5" here while the wizard's first sign was
     // "V1.6", so every rotation silently downgraded the pack's phase
     // and re-closed RP004 / RP021 on the recipient.
-    let bind = sign_relaypack(
+    //
+    // The relay is asked who it is before the signature on every rung
+    // but one. The address swap moves the ADDRESS, which the record
+    // carries and the relay's identity does not, and its 15-second
+    // budget (below) is its whole value — so it may reuse the identity
+    // already learned from this relay. The rebuild rungs get a new
+    // relay with new keys and must ask.
+    let identity_freshness = if input.level == "L3" {
+        crate::relay_identity::Freshness::AllowCached
+    } else {
+        crate::relay_identity::Freshness::Fresh
+    };
+    let bind = sign_relaypack_with(
         ctx,
         operator_id,
         crate::phase::RELAYPACK_PHASE,
         &ctx.staging_dir,
-        "Family Relay Publisher",
+        crate::relay_identity::RESIGN_PUBLISHER_NAME,
+        identity_freshness,
         on_progress,
     )?;
 
@@ -5786,6 +5865,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let (ctx, _dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind);
         let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
@@ -5831,6 +5911,7 @@ mod tests {
             fingerprint_fa: "a b c d".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let (ctx, _dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind);
         let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
@@ -5869,6 +5950,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 1,
+            ..Default::default()
         };
         let (ctx, dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind.clone());
         let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
@@ -5925,6 +6007,7 @@ mod tests {
             fingerprint_fa: "a b c d".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let dir = tempdir().unwrap();
         let db = Arc::new(OperatorDb::open_in_memory().unwrap());
@@ -5991,6 +6074,7 @@ mod tests {
             fingerprint_fa: "a b c d".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -6073,6 +6157,7 @@ mod tests {
             fingerprint_fa: "a b c d".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let (ctx, dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind);
         let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
@@ -6517,6 +6602,19 @@ mod tests {
         ctx.db
             .set_helper_ip(id, "1.2.3.4", "manual", 1_700_000_000)
             .unwrap();
+        // A provisioned relay's record also carries what provisioning
+        // learned about the box: its management plane. Signing asks the
+        // relay who it is over that plane — a record without one is a
+        // relay nobody can ask, and (since a pack's routes are committed
+        // to signed endpoints) one nobody can sign for either.
+        let row = ctx.db.get(id).unwrap();
+        let mut rec: serde_json::Value = serde_json::from_str(&row.operator_record_json).unwrap();
+        if rec.get("mgmt_port").and_then(|p| p.as_i64()).unwrap_or(0) == 0 {
+            rec["mgmt_port"] = 42424.into();
+            rec["mgmt_tls_fingerprint"] =
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
+            ctx.db.update_record_json(id, &rec.to_string()).unwrap();
+        }
         // Mark provisioned so rotate_execute's sign_relaypack succeeds.
         ctx.db.mark_provisioned(id, 1_700_000_000).unwrap();
         id
@@ -6831,6 +6929,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 2,
+            ..Default::default()
         };
         let mock = Arc::new(
             MockRunner::new(Pricing {
@@ -6954,6 +7053,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 2,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -6987,7 +7087,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(out.bind_result, bind);
+        // The pack the signer produced is the one reported. (What it
+        // COMMITS the relay to is filled in from what it was signed
+        // from, so the canned bytes-level result is compared on its own
+        // fields.)
+        assert_eq!(out.bind_result.sbp_sha256, bind.sbp_sha256);
+        assert_eq!(out.bind_result.relay_pack_id, bind.relay_pack_id);
+        assert_eq!(out.bind_result.sbp_path, bind.sbp_path);
+        assert_eq!(out.bind_result.shared_risk_edges, bind.shared_risk_edges);
         assert_eq!(mock.assign_fip_calls.lock().unwrap().len(), 1);
         assert_eq!(mock.assign_fip_calls.lock().unwrap()[0].fip_id, "fip-new");
         // WAVE 3c. The swap is not a pure cloud-API call any more: the
@@ -7186,6 +7293,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -7338,6 +7446,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 2,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -7386,6 +7495,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 2,
+            ..Default::default()
         };
         let mock = Arc::new(
             MockRunner::new(Pricing {
@@ -7464,6 +7574,7 @@ mod tests {
                     fingerprint_fa: "یک دو سه چهار".into(),
                     lint_warnings: vec![],
                     shared_risk_edges: 2,
+                    ..Default::default()
                 }),
             ),
         );
@@ -7535,6 +7646,7 @@ mod tests {
                     fingerprint_fa: "یک دو سه چهار".into(),
                     lint_warnings: vec![],
                     shared_risk_edges: 2,
+                    ..Default::default()
                 }),
             ),
         );
@@ -7635,6 +7747,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 3,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -8110,6 +8223,7 @@ mod tests {
                     fingerprint_fa: "یک دو سه چهار".into(),
                     lint_warnings: vec![],
                     shared_risk_edges: 3,
+                    ..Default::default()
                 }),
             ),
         );
@@ -8215,6 +8329,7 @@ mod tests {
                     fingerprint_fa: "یک دو سه چهار".into(),
                     lint_warnings: vec![],
                     shared_risk_edges: 3,
+                    ..Default::default()
                 }),
             ),
         );
@@ -8396,6 +8511,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 3,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -8475,6 +8591,7 @@ mod tests {
             fingerprint_fa: "یک دو سه چهار".into(),
             lint_warnings: vec![],
             shared_risk_edges: 3,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -8771,6 +8888,7 @@ mod tests {
             fingerprint_fa: "ل م ن س".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -8851,6 +8969,7 @@ mod tests {
             fingerprint_fa: "پ ق ر س".into(),
             lint_warnings: vec![],
             shared_risk_edges: 0,
+            ..Default::default()
         };
         let pricing = Pricing {
             provider: "hetzner".into(),
@@ -9005,5 +9124,543 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, WizardError::Cdn(_)));
+    }
+
+    // ================================================================
+    // Signing a relay from what the RELAY says it is (rig finding
+    // F-005), and signing again when it moves (LC-O1).
+    //
+    // The mock relay is not a constant: it refuses to sign a pack for
+    // which it was handed no key material (as the real signer does),
+    // its shadowsocks key appears with its first recipient, and its
+    // cover host moves on a disguise change. See `MockRelay`.
+    // ================================================================
+
+    /// A relay whose provider adapter read NOTHING at provision time —
+    /// the record the Vultr adapter writes. It names the relay's
+    /// address, its management plane and its routes, and not one key.
+    fn vultr_shaped_record() -> String {
+        r#"{
+            "provider":"vultr","server_id":"v-1","region":"fra",
+            "server_type":"vc2-1c-1gb","public_ip":"203.0.113.10",
+            "toolbox_profile":"iran-default",
+            "enabled_families":["vless-reality","hysteria2","shadowsocks"],
+            "publisher_pub_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "mgmt_port":42424,
+            "mgmt_tls_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "cover_sni":"ftp.plusline.net",
+            "candidates":[{"family":"vless-reality","port":443},
+                          {"family":"hysteria2","port":443},
+                          {"family":"shadowsocks","port":8446}],
+            "provisioned_at":"2026-11-18T00:00:00Z",
+            "freshness_url":""
+        }"#
+        .to_string()
+    }
+
+    /// A provisioned relay holding `record`, and the mock behind it.
+    fn relay_with_record(record: &str) -> (WizardCtx, tempfile::TempDir, Arc<MockRunner>, i64) {
+        let mock = Arc::new(MockRunner::new(test_pricing()));
+        let (ctx, dir, mock) = ctx_with_mock(1_700_000_000, mock);
+        let id = make_provisioned_op(&ctx);
+        // Keep the publisher key the fixture generated; everything else
+        // is the record under test.
+        let mut rec: serde_json::Value = serde_json::from_str(record).unwrap();
+        let old: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        rec["publisher_pub_key"] = old["publisher_pub_key"].clone();
+        ctx.db.update_record_json(id, &rec.to_string()).unwrap();
+        (ctx, dir, mock, id)
+    }
+
+    fn sign(ctx: &WizardCtx, id: i64) -> Result<BindResult> {
+        sign_relaypack(
+            ctx,
+            id,
+            crate::phase::RELAYPACK_PHASE,
+            &ctx.staging_dir,
+            "pub",
+            &mut |_| {},
+        )
+    }
+
+    /// The signer writes the pack; the mock does not, and the pack
+    /// steps look for the file.
+    fn put_signed_file(ctx: &WizardCtx, id: i64) {
+        std::fs::create_dir_all(&ctx.staging_dir).unwrap();
+        std::fs::write(ctx.staging_dir.join(format!("{id}.sbp")), b"signed-bundle").unwrap();
+    }
+
+    fn identity_of(call: &crate::cli_bridge::MockBindCall) -> serde_json::Value {
+        serde_json::from_str(call.relay_identity_json.as_deref().unwrap_or("null")).unwrap()
+    }
+
+    /// F-005, the half that failed outright. With a record that carries
+    /// no key the signer refuses (exit 1) — that is what the app met on
+    /// this provider at the Sign step. It signs now because the relay
+    /// is asked who it is first, with no recipient in existence.
+    #[test]
+    fn a_relay_whose_record_has_no_keys_is_signed_from_what_the_relay_says() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+
+        let bind = sign(&ctx, id).expect("the Sign step must work on a record with no keys");
+
+        assert_eq!(*mock.relay_identity_calls.lock().unwrap(), 1, "the relay was not asked");
+        assert!(
+            mock.users_provision_calls.lock().unwrap().is_empty(),
+            "signing must not need a recipient"
+        );
+        let calls = mock.bind_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let identity = identity_of(&calls[0]);
+        assert_eq!(identity["reality_public_key"], "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi");
+        assert_eq!(identity["tls_cert_sha256"], "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2");
+        drop(calls);
+        // What the pack commits to is remembered, for later comparison.
+        let committed = crate::relay_identity::committed(&ctx, id).unwrap().unwrap();
+        assert_eq!(committed, bind.committed_identity.unwrap());
+        assert_eq!(committed.server, "203.0.113.10");
+        // Nothing staged is left behind.
+        assert!(!ctx.staging_dir.join(format!("{id}.relay-identity.json")).exists());
+        assert!(!ctx.staging_dir.join(format!("{id}.identity-record.json")).exists());
+    }
+
+    /// F-005, the half that failed silently: shadowsocks was never
+    /// committed, because its key does not exist until the relay has a
+    /// recipient and the pack is signed before that. The first recipient
+    /// now makes the wizard sign again — before it builds their file.
+    #[test]
+    fn the_first_recipient_makes_the_wizard_sign_again_so_shadowsocks_is_committed() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+
+        let first = sign(&ctx, id).unwrap();
+        assert_eq!(first.uncommitted_families, vec!["shadowsocks".to_string()]);
+        put_signed_file(&ctx, id);
+
+        // The app's own order: the shared file is made right after.
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+
+        let calls = mock.bind_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "the pack was not signed again after the first recipient");
+        let identity = identity_of(&calls[1]);
+        assert_eq!(
+            identity["ss_server_key_sha256"],
+            crate::relay_identity::ss_server_key_digest("bW9jay1ib3gtaXBzay0xNg==")
+        );
+        drop(calls);
+        let committed = crate::relay_identity::committed(&ctx, id).unwrap().unwrap();
+        assert!(committed.families.iter().any(|f| f == "shadowsocks"), "{committed:?}");
+
+        // And it is not signed AGAIN for the next person: their reply
+        // carries the same relay.
+        put_signed_file(&ctx, id);
+        crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x11u8; 32]),
+            "Bahar",
+        )
+        .unwrap();
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), 2);
+    }
+
+    /// The automatic re-sign failing once (the relay could not be
+    /// reached for a moment) must not be remembered as "already dealt
+    /// with". The next reply that shows the same relay has to try
+    /// again: otherwise every file from then on is built from a pack
+    /// known to be wrong, and nothing says so.
+    #[test]
+    fn a_failed_automatic_resign_is_tried_again_on_the_next_reply() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        let first = sign(&ctx, id).unwrap();
+        assert_eq!(first.uncommitted_families, vec!["shadowsocks".to_string()]);
+        put_signed_file(&ctx, id);
+
+        *mock.relay_identity_error.lock().unwrap() =
+            Some("relay-identity: mgmt: identity: dial tcp 203.0.113.10:42424: i/o timeout".into());
+        crate::recipient_book::produce_shared_sbp(&ctx, id)
+            .expect_err("a file was built from a pack that could not be made true");
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), 1);
+
+        // The blip is over. Same relay, same reply.
+        *mock.relay_identity_error.lock().unwrap() = None;
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+
+        assert_eq!(
+            mock.bind_calls.lock().unwrap().len(),
+            2,
+            "one failed re-sign stopped the pack from ever being signed again"
+        );
+        let committed = crate::relay_identity::committed(&ctx, id).unwrap().unwrap();
+        assert!(committed.families.iter().any(|f| f == "shadowsocks"), "{committed:?}");
+    }
+
+    /// The other side: a reply the pack can never be made to match
+    /// costs ONE signature, not one per recipient. The re-sign worked;
+    /// it just could not commit what the reply shows.
+    #[test]
+    fn a_reply_the_pack_cannot_be_made_to_match_is_signed_for_once() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        let first = sign(&ctx, id).unwrap();
+        put_signed_file(&ctx, id);
+        // Every later signature commits exactly what the first one did:
+        // no shadowsocks key, whatever the relay says.
+        *mock.bind_result.lock().unwrap() = Some(first.clone());
+
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), 2, "the reply was not signed for");
+        let committed = crate::relay_identity::committed(&ctx, id).unwrap().unwrap();
+        assert!(!committed.families.iter().any(|f| f == "shadowsocks"), "{committed:?}");
+
+        put_signed_file(&ctx, id);
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x11u8; 32]),
+            "Bahar",
+        )
+        .unwrap();
+        assert_eq!(
+            mock.bind_calls.lock().unwrap().len(),
+            2,
+            "an unmatchable reply cost a signature per recipient"
+        );
+    }
+
+    /// A relay whose software predates the identity route, on the
+    /// provider whose record has no keys: the worst case, and the one
+    /// the app must still get through. The relay's keys are read off
+    /// the reply to adding the shared user — and nothing of that reply
+    /// but the relay's own half is kept.
+    #[test]
+    fn an_older_relay_with_an_empty_record_is_learned_from_its_first_reply() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        *mock.relay_identity_unsupported.lock().unwrap() = true;
+
+        let bind = sign(&ctx, id).expect("an older relay must still be signable");
+
+        assert_eq!(*mock.users_provision_calls.lock().unwrap(), vec!["r0".to_string()]);
+        let calls = mock.bind_calls.lock().unwrap();
+        let doc = calls[0].relay_identity_json.clone().expect("an identity was passed");
+        let identity: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(identity["identity_version"], 1);
+        assert_eq!(identity["reality_public_key"], "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi");
+        // The shadowsocks key exists by now (the shared user caused
+        // it), so the very first signature commits that route too.
+        assert!(bind.uncommitted_families.is_empty(), "{:?}", bind.uncommitted_families);
+        // No recipient secret, and not the shadowsocks key itself, is in
+        // the document or in the database.
+        let stored = ctx.db.relay_identity(id).unwrap();
+        for secret in [
+            "bW9jay1ib3gtaXBzay0xNg==",
+            "bW9jay11c2VyLXVwc2sxNg==",
+            "mockhy2password0000000",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(!doc.contains(secret), "{secret} reached the identity document");
+            assert!(
+                !stored.identity_json.contains(secret) && !stored.committed_json.contains(secret),
+                "{secret} was stored"
+            );
+        }
+        drop(calls);
+
+        // A second signature does not add the shared user again (it
+        // exists; re-keying it would cut off whoever holds the file).
+        sign(&ctx, id).unwrap();
+        assert_eq!(mock.users_provision_calls.lock().unwrap().len(), 1);
+        assert!(mock.users_revoke_calls.lock().unwrap().is_empty());
+    }
+
+    /// An older relay whose record DOES carry the keys signs from the
+    /// record, as before — and then heals when a reply shows the
+    /// shadowsocks key the record could never have had.
+    #[test]
+    fn an_older_relay_with_a_read_record_signs_then_heals_on_its_first_reply() {
+        let mut rec: serde_json::Value = serde_json::from_str(&vultr_shaped_record()).unwrap();
+        rec["reality_public_key"] = "bW9jay1yZWFsaXR5LXB1YmtleS1iYXNlNjQtMzJi".into();
+        rec["tls_cert_sha256"] = "bW9jay10bHMtc3BraS1zaGEyNTYtcGluLWJhc2U2".into();
+        let (ctx, _dir, mock, id) = relay_with_record(&rec.to_string());
+        *mock.relay_identity_unsupported.lock().unwrap() = true;
+
+        let first = sign(&ctx, id).unwrap();
+        assert!(mock.users_provision_calls.lock().unwrap().is_empty());
+        assert!(mock.bind_calls.lock().unwrap()[0].relay_identity_json.is_none());
+        assert_eq!(first.uncommitted_families, vec!["shadowsocks".to_string()]);
+
+        put_signed_file(&ctx, id);
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        let calls = mock.bind_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            identity_of(&calls[1])["ss_server_key_sha256"],
+            crate::relay_identity::ss_server_key_digest("bW9jay1ib3gtaXBzay0xNg==")
+        );
+    }
+
+    /// "Cannot say" and "could not be reached" are different answers.
+    /// The first falls back. The second must NOT: a pack quietly signed
+    /// from an older source is one route short and nothing says so.
+    #[test]
+    fn a_relay_that_cannot_be_reached_fails_the_sign_instead_of_falling_back() {
+        let mut rec: serde_json::Value = serde_json::from_str(&vultr_shaped_record()).unwrap();
+        rec["reality_public_key"] = "rk".into();
+        rec["tls_cert_sha256"] = "tp".into();
+        let (ctx, _dir, mock, id) = relay_with_record(&rec.to_string());
+        *mock.relay_identity_error.lock().unwrap() =
+            Some("relay-identity: mgmt: identity: dial tcp 203.0.113.10:42424: i/o timeout".into());
+
+        let err = sign(&ctx, id).unwrap_err();
+        // The code the UI answers by re-detecting the publisher's
+        // address and retrying — the usual cause.
+        assert!(format!("{err:?}").contains(E_HELPER_IP_STALE), "{err:?}");
+        assert!(mock.bind_calls.lock().unwrap().is_empty(), "it signed anyway");
+        assert!(ctx.db.get(id).unwrap().signed_sbp_sha256.is_none());
+    }
+
+    /// The address swap moves the address, not the relay's keys, and
+    /// has 15 seconds: it reuses what the relay already said. A rebuild
+    /// is a new relay and asks.
+    #[test]
+    fn the_address_swap_reuses_the_relays_identity_and_a_rebuild_asks_again() {
+        let (ctx, _dir, mock) = l3_ctx();
+        let id = make_provisioned_op(&ctx);
+        sign(&ctx, id).unwrap();
+        assert_eq!(*mock.relay_identity_calls.lock().unwrap(), 1);
+
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L3".into(),
+                reason: "ip burned".into(),
+                new_floating_ip_id: Some("fip-new".into()),
+                ..Default::default()
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            *mock.relay_identity_calls.lock().unwrap(),
+            1,
+            "the address swap spent a round trip it has no budget for"
+        );
+        // …and it was still signed FROM an identity.
+        assert!(mock.bind_calls.lock().unwrap().last().unwrap().relay_identity_json.is_some());
+
+        rotate_execute(
+            &ctx,
+            id,
+            RotateExecuteInput {
+                level: "L4".into(),
+                reason: "region burned".into(),
+                new_region: Some("hel1".into()),
+                ..Default::default()
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            *mock.relay_identity_calls.lock().unwrap(),
+            2,
+            "a rebuilt relay has new keys and must be asked"
+        );
+    }
+
+    /// An identity learned from a relay that has since been rebuilt is
+    /// about a machine that no longer exists, whatever the caller is
+    /// willing to reuse.
+    #[test]
+    fn an_identity_learned_from_a_rebuilt_relay_is_not_reused() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        sign(&ctx, id).unwrap();
+        let mut rec: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        rec["mgmt_tls_fingerprint"] =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        ctx.db.update_record_json(id, &rec.to_string()).unwrap();
+
+        sign_relaypack_with(
+            &ctx,
+            id,
+            crate::phase::RELAYPACK_PHASE,
+            &ctx.staging_dir,
+            "pub",
+            crate::relay_identity::Freshness::AllowCached,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(*mock.relay_identity_calls.lock().unwrap(), 2);
+    }
+
+    /// LC-O1. A disguise change used to end with "every file you have
+    /// handed out is dead; rebuild each and deliver it by hand". The
+    /// wizard now signs again from the relay's NEW identity and says
+    /// what is true for this relay: with other routes and no refresh
+    /// address in people's files, nobody is cut off and one route waits
+    /// for a new file.
+    #[test]
+    fn changing_the_disguise_signs_again_and_does_not_say_everyone_needs_a_file() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        sign(&ctx, id).unwrap();
+
+        let out = crate::relay_rotation::rotate_tls(&ctx, id).unwrap();
+
+        assert!(out.pack_resigned, "{:?}", out.warnings);
+        let calls = mock.bind_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(identity_of(&calls[1])["cover_sni"], "mirror.hetzner.com");
+        drop(calls);
+        assert_eq!(
+            crate::relay_identity::committed(&ctx, id).unwrap().unwrap().cover_sni,
+            "mirror.hetzner.com"
+        );
+        assert_eq!(out.needs_file, crate::relay_rotation::NeedsFile::OneRouteUntilNewFile);
+        assert!(!out.refresh_note_published);
+        assert!(mock.publish_freshness_calls.lock().unwrap().is_empty());
+        for w in &out.warnings {
+            let low = w.to_lowercase();
+            assert!(
+                !low.contains("every recipient") && !low.contains("everyone"),
+                "a clean disguise change still warns about everyone: {w}"
+            );
+        }
+    }
+
+    /// A relay's REALITY key and TLS key cannot change without a
+    /// rebuild, and a rebuild changes its management certificate. A
+    /// relay on the SAME certificate that states a different key is
+    /// therefore not followed: every reply is believed on that one pin,
+    /// and following it would end in a signed pack — and a published
+    /// note — telling every recipient's app to trust the new key.
+    /// Neither the Sign step nor the automatic re-sign after a
+    /// recipient's reply may do that.
+    #[test]
+    fn a_relay_that_states_new_keys_without_a_rebuild_is_refused_not_signed() {
+        for which in ["reality_public_key", "tls_cert_sha256"] {
+            let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+            stage_two_freshness_mirrors(&ctx, id);
+            sign(&ctx, id).unwrap();
+            put_signed_file(&ctx, id);
+            let before = crate::relay_identity::committed(&ctx, id).unwrap().unwrap();
+            let notes_before = mock.publish_freshness_calls.lock().unwrap().len();
+
+            {
+                let mut relay = mock.relay.lock().unwrap();
+                match which {
+                    "reality_public_key" => relay.reality_public_key = "c29tZWJvZHktZWxzZXMta2V5".into(),
+                    _ => relay.tls_cert_sha256 = "c29tZWJvZHktZWxzZXMtcGlu".into(),
+                }
+            }
+
+            // The relay's reply to adding a recipient (the automatic
+            // path: heal_after_reply). Adding a named recipient keeps
+            // the roster row and builds NO file from a pack it could
+            // not make true; making the shared file says why. Twice,
+            // because the refusal must not be a once-per-reply courtesy.
+            let added = crate::recipient_book::recipient_provision(
+                &ctx,
+                id,
+                &daal_recipient_addr::encode(&[0x11u8; 32]),
+                "Bahar",
+            )
+            .unwrap();
+            assert!(added.sbpx_path.is_empty(), "{which}: a file was built: {added:?}");
+            for _ in 0..2 {
+                let err = crate::recipient_book::produce_shared_sbp(&ctx, id)
+                    .expect_err("a file was built for a relay whose keys changed in place");
+                assert!(format!("{err:?}").contains(E_RELAY_KEYS_CHANGED), "{which}: {err:?}");
+            }
+            // The Sign step, asking the relay directly.
+            let err = sign(&ctx, id).expect_err("signed the changed key");
+            assert!(format!("{err:?}").contains(E_RELAY_KEYS_CHANGED), "{which}: {err:?}");
+            assert!(format!("{err:?}").contains(which), "the error does not name {which}: {err:?}");
+
+            assert_eq!(mock.bind_calls.lock().unwrap().len(), 1, "{which}: something was signed");
+            assert_eq!(
+                mock.publish_freshness_calls.lock().unwrap().len(),
+                notes_before,
+                "{which}: a refresh note was published"
+            );
+            assert_eq!(crate::relay_identity::committed(&ctx, id).unwrap().unwrap(), before);
+        }
+    }
+
+    /// The other side of the rule above: a REBUILT relay has new keys
+    /// and a new management certificate (provisioning writes it into
+    /// the record), and its new keys are exactly what must be signed.
+    #[test]
+    fn a_rebuilt_relay_is_signed_with_its_new_keys() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        sign(&ctx, id).unwrap();
+        put_signed_file(&ctx, id);
+
+        let mut rec: serde_json::Value =
+            serde_json::from_str(&ctx.db.get(id).unwrap().operator_record_json).unwrap();
+        rec["mgmt_tls_fingerprint"] =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        ctx.db.update_record_json(id, &rec.to_string()).unwrap();
+        mock.relay.lock().unwrap().reality_public_key = "dGhlLXJlYnVpbHQtcmVsYXlzLWtleQ==".into();
+
+        sign(&ctx, id).expect("a rebuilt relay must be signable");
+        let calls = mock.bind_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            identity_of(&calls[1])["reality_public_key"],
+            "dGhlLXJlYnVpbHQtcmVsYXlzLWtleQ=="
+        );
+    }
+
+    /// The same change on a relay whose files carry refresh addresses:
+    /// the note goes out, and nobody needs a new file.
+    #[test]
+    fn changing_the_disguise_republishes_so_phones_heal_by_themselves() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        stage_two_freshness_mirrors(&ctx, id);
+        sign(&ctx, id).unwrap();
+        assert!(!crate::freshness::status(&ctx, id).unwrap().mirrors_in_pack.is_empty());
+
+        let out = crate::relay_rotation::rotate_tls(&ctx, id).unwrap();
+
+        assert!(out.pack_resigned && out.refresh_note_published, "{:?}", out.warnings);
+        assert_eq!(mock.publish_freshness_calls.lock().unwrap().len(), 1);
+        assert_eq!(out.needs_file, crate::relay_rotation::NeedsFile::NobodyHealsItself);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// The disguise changed and the re-sign failed. The rotation is
+    /// still reported as the success it was — the relay HAS moved — and
+    /// the summary does not claim a healing that did not happen.
+    #[test]
+    fn a_disguise_change_whose_resign_fails_says_so_and_claims_no_healing() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        stage_two_freshness_mirrors(&ctx, id);
+        sign(&ctx, id).unwrap();
+        *mock.bind_error.lock().unwrap() = Some("bind-and-sign: disk full".into());
+
+        let out = crate::relay_rotation::rotate_tls(&ctx, id).unwrap();
+
+        assert!(!out.pack_resigned && !out.refresh_note_published);
+        assert_eq!(out.cover_sni, "mirror.hetzner.com");
+        assert_eq!(out.needs_file, crate::relay_rotation::NeedsFile::OneRouteUntilNewFile);
+        assert!(out.warnings.iter().any(|w| w.contains("signing the relay's file again failed")));
+        assert!(mock.publish_freshness_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn who_needs_a_file_after_a_disguise_change() {
+        use crate::relay_rotation::{who_needs_a_file as who, NeedsFile::*};
+        // The cover host did not move, or no route uses it: nothing in
+        // anybody's file changed.
+        assert_eq!(who(false, true, true, false), Nobody);
+        assert_eq!(who(true, false, true, false), Nobody);
+        // It moved and files can learn about it.
+        assert_eq!(who(true, true, true, true), NobodyHealsItself);
+        assert_eq!(who(true, true, false, true), NobodyHealsItselfOfflineMeanwhile);
+        // It moved and files cannot learn about it.
+        assert_eq!(who(true, true, true, false), OneRouteUntilNewFile);
+        // "Everyone" is true in exactly one cell.
+        assert_eq!(who(true, true, false, false), Everyone);
     }
 }

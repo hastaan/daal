@@ -31,6 +31,14 @@ import (
 // the three things singBox.Start keeps.
 func startTestBox(t *testing.T, profile string) (*box.Box, outboundKind, context.CancelFunc) {
 	t.Helper()
+	sub, cancel := startTestSubject(t, profile)
+	return sub.inst, sub.kind, cancel
+}
+
+// startTestSubject is startTestBox with the twin the driver keeps too:
+// everything singBox.Prove proves with.
+func startTestSubject(t *testing.T, profile string) (proofSubject, context.CancelFunc) {
+	t.Helper()
 	cfg, err := BuildSingBoxConfig(routestore.RouteRow{RouteID: "r1", TransportFamily: "vless-reality"}, []byte(profile))
 	if err != nil {
 		t.Fatalf("BuildSingBoxConfig: %v", err)
@@ -64,7 +72,7 @@ func startTestBox(t *testing.T, profile string) (*box.Box, outboundKind, context
 		cancel()
 		t.Fatalf("Start: %v", err)
 	}
-	return inst, kindOfActive(raw), cancel
+	return proofSubject{inst: inst, kind: kindOfActive(raw), twin: makeTwin(ctx, inst, options.Outbounds)}, cancel
 }
 
 // connectProxy is a minimal HTTP CONNECT proxy: the "relay" for an

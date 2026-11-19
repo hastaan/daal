@@ -39,6 +39,15 @@ func init() { Ops["l3"] = opL3 }
 //     the freshness mirrors, where the publisher has put nothing but
 //     the re-signed, credential-less pack, and connects — with the old
 //     address still blocked                              → pass
+//     9c. AFTER AN L2 (only when op l2 ran earlier in this world): the
+//     cover host moved, then the address did. naive is the one family
+//     that puts a name from the relay's certificate on the wire once
+//     the address is not in it, so:
+//     - the NEW file's naive route verifies — and presents — the
+//     CURRENT cover host, not the one the relay was provisioned
+//     with;
+//     - a phone that holds a file from before BOTH rotations, and is
+//     handed nothing, still connects on every family     → pass
 //  10. the censor's block is lifted
 //  11. `floating-ip release`                             (detach → unbind → release)
 //  12. the record is back on the primary address; the box no longer holds
@@ -196,6 +205,38 @@ func opL3(rc *RunCtx) {
 	// is all a phone is missing — and that is public.
 	if armed {
 		fc.noNewFile("l3", "address-blocked", fams, heldPack)
+	}
+
+	// 9c. the cover host moved before the address did.
+	if rc.PreL2.Pack != "" {
+		hasNaive := false
+		for _, f := range fams {
+			hasNaive = hasNaive || f.Name == "naive"
+		}
+		if hasNaive {
+			t0 = time.Now()
+			name, cert, perr := packNaive(newPack)
+			problems = nil
+			switch {
+			case perr != nil:
+				problems = append(problems, perr.Error())
+			default:
+				if name != rc.Rec.CoverSNI {
+					problems = append(problems, fmt.Sprintf("the new file's naive route verifies and presents %q; the relay's cover host is %q", name, rc.Rec.CoverSNI))
+				}
+				if name == rc.PreL2.CoverSNI {
+					problems = append(problems, "that is the cover host the operator rotated AWAY from")
+				}
+				if contains(cert.IPs, newIP) {
+					problems = append(problems, "fixture: the certificate names the new address, so no name is on the wire and this check proves nothing")
+				}
+			}
+			rc.R.Add("naive", phase, "after-l2.new-file.presents_current_cover_host", Pass, got(len(problems) == 0, Pass, Fail), strings.Join(problems, "; "),
+				map[string]any{"server_name": name, "cover_host_now": rc.Rec.CoverSNI, "cover_host_before_l2": rc.PreL2.CoverSNI, "certificate_dns": cert.DNS}, t0)
+		}
+		if armed {
+			fc.noNewFile("l3-pre-l2", "after-l2.address-blocked", fams, rc.PreL2.Pack)
+		}
 	}
 
 	// 10. lift the block: what follows is about the box, not the censor.

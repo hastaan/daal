@@ -48,3 +48,26 @@ func TestFamilyCooldownAfterThreeFailures(t *testing.T) {
 		t.Fatalf("expected family cooldown, got OK with reason %q", reason)
 	}
 }
+
+// Revisions 2 and 3 of the failure taxonomy: a path that is only slow,
+// and a relay that answers but reaches nothing, are never held against
+// the route — and three of them in an hour must not cool the family
+// down either (every route to one relay shares a relay_no_egress).
+func TestFailed_SlowPathAndRelayNoEgressNeverCoolDown(t *testing.T) {
+	for _, cat := range []diagnostics.Category{diagnostics.PathTooSlow, diagnostics.RelayNoEgress} {
+		m := New()
+		for i := 0; i < 5; i++ {
+			m.Attempt("r1", "vless-reality")
+			m.Failed("r1", "vless-reality", cat)
+			if ok, why := m.CanAttempt("r1", "vless-reality"); !ok {
+				t.Fatalf("%s, failure %d: %s", cat, i+1, why)
+			}
+		}
+		if ok, why := m.CanAttempt("r2", "vless-reality"); !ok {
+			t.Fatalf("%s cooled the whole family down: %s", cat, why)
+		}
+		if got := m.RouteHealth(); len(got) != 1 || got[0].InCooldown || got[0].CooldownReason != cat {
+			t.Fatalf("%s: route health %+v; want the reason recorded and no cooldown", cat, got)
+		}
+	}
+}

@@ -117,6 +117,44 @@ export function friendlyReason(t: (k: string) => string, reason: string): string
     return t('add.err.rejected');
 }
 
+/** The reasons a pack route is left out, as the engine names them
+ *  (bundle/go/importer: UnavailableNotOffered …). CLOSED: the sentence a
+ *  person reads is chosen from OUR strings by one of these codes, and by
+ *  nothing else.
+ *
+ *  Why that matters here in particular: `not_offered` is decided by a
+ *  marker inside the route's profile, and profile bytes are not covered
+ *  by the publisher's signature. Whoever can alter the file in transit
+ *  can therefore choose the CODE — which only selects between two
+ *  harmless sentences of ours — but must never be able to choose the
+ *  WORDS. The marker also carries a free-text reason; it is not in the
+ *  verdict, and nothing here would show it if it were. */
+const UNAVAILABLE_REASONS = new Set([
+    'not_offered',
+    'no_credentials',
+    'needs_new_file',
+    'older_than_device',
+]);
+
+/** The transport families a route can name. The family in a verdict
+ *  comes from the signed manifest, but it is still a string from a
+ *  file: only a name from this list is ever put on the screen, and
+ *  anything else is described instead of quoted. */
+const KNOWN_FAMILIES = new Set([
+    'vless-reality',
+    'websocket-tls',
+    'naive',
+    'hysteria2',
+    'shadowsocks',
+    'anytls',
+    'tuic',
+    'tor',
+    'wireguard',
+    'masque',
+    'psiphon',
+    'conjure',
+]);
+
 /** One plain-language line per pack route that was NOT added, for the
  *  surface that shows an import's result. Empty when the pack gave this
  *  device everything it lists.
@@ -124,21 +162,27 @@ export function friendlyReason(t: (k: string) => string, reason: string): string
  *  These routes do not exist on the device — the engine never stores a
  *  route it cannot connect on — so this is the only place a person can
  *  learn that the file held fewer ways to connect than it could have,
- *  and whether that is something to ask the sender about. An unknown
- *  reason token gets the least alarming true statement rather than the
- *  token itself. */
+ *  and whether that is something to ask the sender about.
+ *
+ *  Nothing from the file is displayed. The reason must be one of the
+ *  closed codes above or the line is the generic sentence; the family
+ *  must be a known family name or it is described generically. */
 export function unavailableLines(
     t: (k: string) => string,
     v: ImportVerdict | null,
     familyLabel: (family: string) => string = (f) => f,
 ): string[] {
-    const rows = v?.Unavailable ?? [];
+    const rows = Array.isArray(v?.Unavailable) ? v!.Unavailable! : [];
     return rows.map((r) => {
-        const key = `add.unavailable.${r.Reason}`;
+        const reason = typeof r?.Reason === 'string' && UNAVAILABLE_REASONS.has(r.Reason) ? r.Reason : 'other';
+        const key = `add.unavailable.${reason}`;
         const copy = t(key);
-        const template =
-            copy && copy !== key ? copy : t('add.unavailable.no_credentials');
-        return template.replace('{family}', familyLabel(r.Family));
+        const template = copy && copy !== key ? copy : t('add.unavailable.other');
+        const family =
+            typeof r?.Family === 'string' && KNOWN_FAMILIES.has(r.Family)
+                ? familyLabel(r.Family)
+                : t('add.unavailable.family_other');
+        return template.replace('{family}', family);
     });
 }
 

@@ -84,6 +84,10 @@
           "server_name": "78.47.152.16"
         },
         "type": "naive",
+        "udp_over_tcp": {
+          "enabled": true,
+          "version": 2
+        },
         "username": "r1"
       }
     },

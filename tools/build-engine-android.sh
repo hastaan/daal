@@ -9,53 +9,60 @@
 #   ANDROID_API_LEVEL  minSdkVersion the .so will target (default 24 — Android 7.0)
 #   OUT_DIR            where to drop jniLibs/<abi>/libdaalcore.so
 #                      (default: gen/android/app/src/main/jniLibs)
-#   CRONET_LIB_DIR     where to find prebuilt libcronet.so per ABI, as
-#                      <CRONET_LIB_DIR>/<abi>/libcronet.so (default:
-#                      $ROOT/vendor/cronet). See "naive" below.
+#   CRONET_LIB_DIR     optional: a directory of ALREADY-BUILT libraries, as
+#                      <CRONET_LIB_DIR>/<abi>/libcronet.so with its
+#                      .stamp beside it (default: $ROOT/vendor/cronet,
+#                      which normally does not exist). Without one the
+#                      library is built here; see "naive" below.
 #   DAAL_NAIVE         1 (default) build with the naive/Cronet outbound,
 #                      0 leave it out.
 #
-# Outputs:
-#   <OUT_DIR>/arm64-v8a/libdaalcore.so
-#   <OUT_DIR>/armeabi-v7a/libdaalcore.so
-#   <OUT_DIR>/x86_64/libdaalcore.so
-#   plus <OUT_DIR>/<abi>/libcronet.so when one was found (see below)
+# Outputs, for each of arm64-v8a, armeabi-v7a, x86_64:
+#   <OUT_DIR>/<abi>/libdaalcore.so
+#   <OUT_DIR>/<abi>/libcronet.so  and  libcronet.so.stamp   (unless DAAL_NAIVE=0)
 #
 # ---------------------------------------------------------------------
-# naive / Cronet — what a fresh machine actually needs
+# naive / Cronet — the engine and libcronet.so are ONE unit
 #
-# The naive tier is field-proven on device, but that APK was built by
-# hand during the Cronet work and this script used to omit the tag, so a
-# clean rebuild from main silently produced an engine where every naive
-# route dies at connect with "naive outbound is not included in this
-# build". Two things are needed to reproduce the hand-built engine, and
-# they are independent:
+# Two things make the naive tier work on a phone, and they are pinned in
+# different places, which is how they came apart once already:
 #
 #  1. BUILD TAGS: `with_naive_outbound,with_purego`. The tag alone does
-#     NOT build — verified: cronet-go's default path is cgo and links
-#     the prebuilt libcronet.a, whose Chromium-produced relocations the
-#     NDK linker cannot process (the same "relocation 315" wall that
-#     tools/cronet/build-libcronet-android.sh exists to work around).
-#     `with_purego` switches cronet-go to dlopen()ing libcronet.so at
-#     runtime instead, so nothing is linked at build time. That is why
-#     both tags go together and why core/engine/cronet_loader_naive.go
-#     is gated on `with_naive_outbound && with_purego`.
+#     NOT build — cronet-go's default path is cgo and links the prebuilt
+#     libcronet.a, whose Chromium-produced relocations the NDK linker
+#     cannot process on arm64 ("relocation 315"). `with_purego` switches
+#     cronet-go to dlopen()ing libcronet.so at runtime instead, so
+#     nothing of Cronet is linked into the engine. That is why both tags
+#     go together and why core/engine/cronet_loader_naive.go is gated on
+#     `with_naive_outbound && with_purego`.
 #
-#  2. RUNTIME LIBRARY: libcronet.so in the APK's lib/<abi>/. This is
-#     the part a fresh machine will not have. Producing it needs
-#     cronet-go's Chromium toolchain (a multi-GB one-time download) and
-#     tools/cronet/build-libcronet-android.sh. Nothing here can bootstrap
-#     that, so this script only *copies* an already-built one from
-#     CRONET_LIB_DIR.
+#  2. RUNTIME LIBRARY: libcronet.so in the APK's lib/<abi>/, relinked
+#     from the libcronet.a inside the cronet-go Go module that
+#     core/go.mod pins. The Go wrapper compiled into the engine (1) calls
+#     into it by symbol with the argument lists of ITS cronet-go version;
+#     a library from another version exports the same names with
+#     different arguments. Nothing fails at load. It is undefined
+#     behaviour inside the VPN service.
 #
-# Because (1) alone always links cleanly, the tags are on by default:
-# a machine without libcronet.so still gets a working engine for the
-# other tiers, and gets a loud warning that the naive tier will fail at
-# connect (core/engine/cronet_loader_naive.go deliberately treats a
-# missing library as non-fatal — only naive routes need it). Set
-# DAAL_NAIVE=0 to build the engine without the naive outbound at all,
-# which trades the runtime cronet error for sing-box's clearer
-# "not included in this build" error.
+# So this script does not treat the library as an optional extra. For
+# every ABI, after the engine is built:
+#
+#   * a staged libcronet.so that verifies against core/go.mod is kept;
+#   * a missing, unstamped or mismatched one is REBUILT in place by
+#     tools/cronet/build-libcronet-android.sh (a relink of the pinned
+#     archive: about a second per ABI, no Chromium toolchain — see that
+#     script for which linker it needs and why);
+#   * then the finished pair is checked against each other — the engine
+#     binary records which cronet-go it was compiled from — and the build
+#     FAILS if they disagree or the library could not be made. There is
+#     no warning-and-continue: an APK whose naive routes cannot work is
+#     not a build that succeeded. DAAL_NAIVE=0 is the explicit way to
+#     build without the naive outbound.
+#
+# 16 KB PAGES. Everything here is linked with max-page-size=16384.
+# Android 15+ devices may run a 16 KB-page kernel, where a library whose
+# LOAD segments are 4 KB-aligned (the NDK r27 and Go default) is refused
+# by the loader. The alignment is verified after each link.
 # ---------------------------------------------------------------------
 
 set -euo pipefail
@@ -87,56 +94,74 @@ if [ ! -d "$NDK_BIN" ]; then
   exit 1
 fi
 
-# stage_cronet copies a prebuilt libcronet.so next to the engine for one
-# ABI, or explains why the naive tier will not work without it.
-#
-# A MISSING library is not fatal: every other tier builds and runs fine
-# without Cronet, and naive routes then fail cleanly at connect.
-#
-# A library that does not MATCH is fatal. libcronet.so is relinked by
-# hand from the libcronet.a inside a cronet-go Go module and then reused
-# across engine builds, while the Go wrapper that calls into it is
-# compiled fresh from whatever core/go.mod pins — so after a cronet-go
-# bump an old .so would be packaged beside a wrapper with a different C
-# ABI. tools/cronet/check-libcronet-stamp.sh compares the two; a .so that
-# fails it is never copied and never left in place.
 CRONET_STAMP_CHECK="$ROOT/tools/cronet/check-libcronet-stamp.sh"
+CRONET_BUILD="$ROOT/tools/cronet/build-libcronet-android.sh"
+READELF="$NDK_BIN/llvm-readelf"
+
+# require_16k fails the build when a LOAD segment of $1 is aligned to
+# less than 16 KB. See "16 KB PAGES" above.
+require_16k() {
+  local f="$1" small
+  small="$("$READELF" -lW "$f" | awk '$1 == "LOAD" { print $NF }' | sort -u \
+    | while read -r a; do if [ "$((a))" -lt 16384 ]; then printf '%s ' "$a"; fi; done)"
+  if [ -n "$small" ]; then
+    echo "FATAL: $f has LOAD segments aligned to ${small}— below 16 KB." >&2
+    echo "       It would not load on an Android 15+ device with 16 KB pages." >&2
+    exit 1
+  fi
+}
+
+# stage_cronet makes <OUT_DIR>/<abi>/libcronet.so the library this
+# engine's cronet-go expects, or fails the build. See "naive" above.
 stage_cronet() {
   local abi="$1"
   local dest="$OUT_DIR/$abi/libcronet.so"
   local src="$CRONET_LIB_DIR/$abi/libcronet.so"
   if [ "$DAAL_NAIVE" = "0" ]; then
+    if [ -f "$dest" ]; then
+      echo "    note: DAAL_NAIVE=0 — $dest is left where it is and is never loaded." >&2
+    fi
     return 0
   fi
   if [ -f "$src" ]; then
+    # A prebuilt library was supplied. It is used only if it matches;
+    # it is never silently replaced by a locally built one.
     if ! "$CRONET_STAMP_CHECK" "$src" "$abi"; then
       echo "FATAL: refusing to package $src for $abi (see above)." >&2
-      echo "       Rebuild it, or set DAAL_NAIVE=0 to build without naive." >&2
+      echo "       Remove it to have the library built here, or set DAAL_NAIVE=0." >&2
       exit 1
     fi
     cp -f "$src" "$dest"
-    cp -f "$src.cronet-lib-version" "$dest.cronet-lib-version"
-    echo "    libcronet.so <- $src ($(stat -c%s "$dest" 2>/dev/null || echo ?) bytes, cronet-go lib $(cat "$dest.cronet-lib-version"))"
-    return 0
-  fi
-  if [ -f "$dest" ]; then
-    # Already staged by a previous run (or by hand — this is how the
-    # field-proven APK got one). Keep it only if it is the library this
-    # engine's cronet-go expects.
-    if ! "$CRONET_STAMP_CHECK" "$dest" "$abi"; then
-      echo "FATAL: $dest is already staged and does not match (see above)." >&2
-      echo "       Rebuild it into $src, delete the stale file, or set DAAL_NAIVE=0." >&2
+    cp -f "$src.stamp" "$dest.stamp"
+    echo "    libcronet.so <- $src"
+  elif [ -f "$dest" ] && "$CRONET_STAMP_CHECK" "$dest" "$abi" 2>/dev/null; then
+    echo "    libcronet.so already staged and matching"
+  else
+    if [ -f "$dest" ]; then
+      echo "    libcronet.so staged at $dest does not match this engine's cronet-go:"
+      "$CRONET_STAMP_CHECK" "$dest" "$abi" 2>&1 | sed 's/^/      /' || true
+      echo "    rebuilding it"
+    else
+      echo "    libcronet.so not staged for $abi — building it"
+    fi
+    if ! ANDROID_API_LEVEL="$ANDROID_API_LEVEL" "$CRONET_BUILD" "$abi" "$dest"; then
+      rm -f "$dest" "$dest.stamp"
+      echo "FATAL: could not build libcronet.so for $abi (see above)." >&2
+      echo "       The engine has the naive outbound compiled in and would be packaged" >&2
+      echo "       without the library it calls. Fix what the message above names and" >&2
+      echo "       re-run this script, or build without naive: DAAL_NAIVE=0 $0" >&2
       exit 1
     fi
-    echo "    libcronet.so already present at $dest (cronet-go lib $(cat "$dest.cronet-lib-version"))"
-    return 0
   fi
-  echo "    WARNING: no libcronet.so for $abi." >&2
-  echo "             The engine has the naive outbound compiled in, but naive routes" >&2
-  echo "             will fail at connect until $dest exists." >&2
-  echo "             Build one with tools/cronet/build-libcronet-android.sh (needs" >&2
-  echo "             cronet-go's Chromium toolchain, multi-GB one-time download) and" >&2
-  echo "             drop it at $src, or set DAAL_NAIVE=0 to build without naive." >&2
+  rm -f "$dest.cronet-lib-version"   # the pre-2026-11 stamp name
+  # The pair, as built: the engine binary says which cronet-go lib it was
+  # compiled against; the library says which one it was linked from.
+  if ! "$CRONET_STAMP_CHECK" --pair "$OUT_DIR/$abi/libdaalcore.so" "$dest" "$abi"; then
+    echo "FATAL: $OUT_DIR/$abi/libdaalcore.so and libcronet.so are not a pair (see above)." >&2
+    exit 1
+  fi
+  require_16k "$dest"
+  echo "    libcronet.so: $(wc -c < "$dest" | tr -d ' ') bytes, $(sed -n 's/^version=//p' "$dest.stamp")"
 }
 
 build_abi() {
@@ -151,11 +176,12 @@ build_abi() {
     GOOS=android \
     GOARCH="$goarch" \
     go build -buildmode=c-shared -tags "$TAGS" \
-      -ldflags "-s -w" \
+      -ldflags "-s -w -extldflags=-Wl,-z,max-page-size=16384" \
       -o "$out" \
       ./cmd/libdaalcore
   )
   ls -la "$out"
+  require_16k "$out"
   stage_cronet "$abi"
 }
 

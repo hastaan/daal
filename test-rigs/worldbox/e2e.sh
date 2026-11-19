@@ -60,7 +60,7 @@ if [[ "$mode" == quick ]]; then
   for s in "${scenarios[@]}"; do plan+=("$s"$'\t'"--mgmt=tree $s vless-reality hysteria2"); done
 else
   plan+=("release.lifecycle"$'\t'"--ops lifecycle,tamper,wrongcreds clean @default")
-  plan+=("clean.rotation"$'\t'"--mgmt=tree --ops l1,l3,l2,freshness,caps clean")
+  plan+=("clean.rotation"$'\t'"--mgmt=tree --ops l1,l2,l3,freshness,caps clean")   # l2 THEN l3: the cover host moves, then the address (naive, FINDINGS LC-3); the other order runs under udp-blackhole and in release.lifecycle
   plan+=("clean.recipients"$'\t'"--mgmt=tree --ops recipients,revoke,wrongcreds,tamper,mgmtauth,restarts clean")
   for s in "${scenarios[@]}"; do
     if [[ "$s" == udp-blackhole ]]; then
