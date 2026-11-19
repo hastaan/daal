@@ -50,12 +50,21 @@ jobs:
       # `./daal test` runs the Android VPN service's JVM unit tests
       # (tools/test-android-jvm.sh) and, with CI set, FAILS if they
       # cannot run. They need a Java the Kotlin compiler runs on (11–22),
-      # `kotlinc`, and junit-4 from a Gradle distribution; the runner
-      # image ships the last two.
+      # `kotlinc` (on the runner image) and junit-4 + hamcrest, which the
+      # image's Gradle no longer ships: fetched here, pinned by hash.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
+      - name: JUnit 4 for the Android service tests (pinned)
+        run: |
+          d="$RUNNER_TEMP/junit"; mkdir -p "$d"
+          curl -fsSL -o "$d/junit-4.13.2.jar" https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar
+          curl -fsSL -o "$d/hamcrest-core-1.3.jar" https://repo1.maven.org/maven2/org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar
+          printf '%s  %s\n' \
+            8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3 "$d/junit-4.13.2.jar" \
+            66fdef91e9739348df7a096aa384a5685f4e875584cce89386a7a47251c4d8e9 "$d/hamcrest-core-1.3.jar" | sha256sum -c -
+          echo "JUNIT_CP=$d/junit-4.13.2.jar:$d/hamcrest-core-1.3.jar" >> "$GITHUB_ENV"
       - name: Tools the gates shell out to
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep nftables iproute2 util-linux openssl
       # The end-to-end rig (test-rigs/worldbox) builds its world inside an
