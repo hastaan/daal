@@ -198,17 +198,9 @@ export default function SettingsPage({
         >
             {/* Page head */}
             <header style={{ marginBottom: 16 }}>
-                <div
-                    style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        letterSpacing: '0.18em',
-                        textTransform: 'uppercase',
-                        color: 'var(--dim)',
-                    }}
-                >
-                    Settings
-                </div>
+                {/* No small label above the title here: it was the
+                    hardcoded English word "Settings" over the same word
+                    as the title, in every language. */}
                 <h1
                     style={{
                         fontFamily: 'var(--font-display)',

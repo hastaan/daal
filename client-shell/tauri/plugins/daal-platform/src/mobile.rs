@@ -13,7 +13,10 @@ use tauri::{
 };
 
 use crate::error::Result;
-use crate::models::{VpnStartResponse, VpnStatusResponse, VpnStopResponse};
+use crate::models::{
+    SecureScreenRequest, SecureScreenResponse, VpnStartResponse, VpnStatusResponse,
+    VpnStopResponse,
+};
 
 #[cfg(target_os = "android")]
 const PLUGIN_IDENTIFIER: &str = "org.daal.desktop.platform";
@@ -68,5 +71,10 @@ impl<R: Runtime> Platform<R> {
     }
     pub fn vpn_status(&self) -> Result<VpnStatusResponse> {
         Ok(self.0.run_mobile_plugin::<VpnStatusResponse>("vpnStatus", ())?)
+    }
+    pub fn secure_screen(&self, on: bool) -> Result<SecureScreenResponse> {
+        Ok(self
+            .0
+            .run_mobile_plugin::<SecureScreenResponse>("secureScreen", SecureScreenRequest { on })?)
     }
 }

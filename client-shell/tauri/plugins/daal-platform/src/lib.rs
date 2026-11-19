@@ -20,6 +20,11 @@
 //!     `engine_clear_tun_fd`). Desktop is a no-op.
 //!   - `vpn_status()` → returns a small JSON status (connected /
 //!     idle / route_id).
+//!
+//! Also reached from the app's own commands (not invoked from the page
+//! as plugin commands): `PlatformHandle::secure_screen(on)` (PB-20,
+//! FLAG_SECURE while the recovery words are on screen; a no-op on
+//! desktop).
 
 use tauri::{
     plugin::{Builder, TauriPlugin},
@@ -80,6 +85,10 @@ impl<R: Runtime> PlatformHandle<R> {
     pub fn vpn_status(&self) -> Result<models::VpnStatusResponse> {
         self.inner.vpn_status()
     }
+    /// PB-20: FLAG_SECURE on the activity window while `on`.
+    pub fn secure_screen(&self, on: bool) -> Result<()> {
+        self.inner.secure_screen(on).map(|_| ())
+    }
 }
 
 #[cfg(not(mobile))]
@@ -104,6 +113,10 @@ impl<R: Runtime> PlatformHandle<R> {
             holding: false,
             running: false,
         })
+    }
+    /// PB-20: the desktop window has no capture flag; nothing to do.
+    pub fn secure_screen(&self, _on: bool) -> Result<()> {
+        Ok(())
     }
 }
 

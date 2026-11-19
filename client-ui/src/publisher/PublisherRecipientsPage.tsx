@@ -45,7 +45,7 @@
 //     explicitly. This page is told which relay it is.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Wizard, classifyPublisherError } from './wizardCommands';
+import { Wizard, classifyPublisherError, storedFileName } from './wizardCommands';
 import type {
     ArtifactInfo,
     OperatorSummary,
@@ -97,6 +97,18 @@ import { renewBannerText, renewBannerVisible } from './renew';
 import { recipientArtifact } from './wizardCommands';
 import type { BackupStatus, PackArtifact, RelayHealth } from './wizardCommands';
 import { BackupCard } from './BackupCard';
+// After a restore (PB-1 / PB-2).
+import {
+    RelayOnlyRemoveSheet,
+    RestoreQuestionCard,
+    healthWithoutWaiting,
+    relayOnlyRows,
+    withoutRelayOnly,
+    settleApi,
+    useRestoreSettle,
+    waitingLabel,
+} from './restoreSettle';
+import type { RestoreUnsettledPerson } from './wizardCommands';
 import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
 
@@ -273,6 +285,12 @@ export default function PublisherRecipientsPage({
     // D2: renew sheet, and "a rebuild just finished on this screen".
     const [renewOpen, setRenewOpen] = useState(false);
     const [justRebuilt, setJustRebuilt] = useState(false);
+    // PB-1 / PB-2: both lists are read after every health check (the
+    // check is what reaches the relay), never assumed.
+    const [settleTick, setSettleTick] = useState(0);
+    const [confirmRelayOnly, setConfirmRelayOnly] = useState<string | null>(null);
+    const [relayOnlyBusy, setRelayOnlyBusy] = useState(false);
+    const [relayOnlyError, setRelayOnlyError] = useState<string | null>(null);
 
     // Wave 3 Step 7 — the two rotations, kept apart all the way down to
     // their state. Per-recipient re-keying affects ONE person and lives
@@ -392,6 +410,7 @@ export default function PublisherRecipientsPage({
                 setHealthFailed(healthFailure(t, e));
             } finally {
                 setHealthBusy(false);
+                setSettleTick((n) => n + 1);
             }
         },
         [operatorId, t],
@@ -400,6 +419,10 @@ export default function PublisherRecipientsPage({
     // Once per opening, for a finished relay. Rust answers from its
     // cache when the last check is younger than ten minutes.
     const provisioned = operator?.status === 'provisioned';
+    const settle = useRestoreSettle(operatorId, provisioned, settleTick);
+    const { unsettled, reloadUnsettled } = settle;
+    const waiting: RestoreUnsettledPerson[] = useMemo(() => unsettled?.people ?? [], [unsettled]);
+    const waitingSet = useMemo(() => new Set(waiting.map((p) => p.recipient_id)), [waiting]);
     useEffect(() => {
         if (provisioned) void runHealth(false);
     }, [provisioned, runHealth]);
@@ -565,7 +588,7 @@ export default function PublisherRecipientsPage({
             'everyone:save',
             () => Wizard.saveSharedSbpToDownloads(operatorId, name),
             {
-                ok: t('pub.fb.save.ok').replace('{name}', name),
+                ok: (stored) => t('pub.fb.save.ok').replace('{name}', storedFileName(stored, name)),
                 fail: t('pub.fb.save.fail'),
             },
         );
@@ -686,7 +709,7 @@ export default function PublisherRecipientsPage({
                 `save:${path}`,
                 () => Wizard.saveSbpxToDownloads(path, name),
                 {
-                    ok: t('pub.fb.save.ok').replace('{name}', name),
+                    ok: (stored) => t('pub.fb.save.ok').replace('{name}', storedFileName(stored, name)),
                     fail: t('pub.fb.save.fail'),
                 },
             );
@@ -815,6 +838,53 @@ export default function PublisherRecipientsPage({
         }
     }, [action.report, confirmRemove, operatorId, recheckBackup, reloadArtifacts, t]);
 
+    // ---- after a restore (PB-1 / PB-2) ---------------------------------
+
+    /** PB-1: the person's answer for one restored person the relay does
+     *  not know. Stored by the shell, so it is asked once. */
+    const onSettleAnswer = useCallback(
+        async (p: RestoreUnsettledPerson, keep: boolean) => {
+            const name = waitingLabel(p, recipients);
+            const r = await action.run(
+                `settle:${keep ? 'keep' : 'removed'}:${p.recipient_id}`,
+                () => settleApi.restoreAnswer(operatorId, p.recipient_id, keep),
+                {
+                    ok: t(keep ? 'pub.restore_settle.done.keep' : 'pub.restore_settle.done.removed').replace(
+                        /\{name\}/g,
+                        name,
+                    ),
+                    fail: t('pub.restore_settle.failed'),
+                },
+            );
+            if (!r.ok) return;
+            await reloadUnsettled();
+            await reloadRecipients();
+            void recheckBackup();
+            // Either answer changes what the relay check counts: the shell
+            // leaves a waiting person out of "missing", so after "keep" she
+            // is missing (and the renew banner must appear), after "was
+            // removed" she is not expected at all. The shell dropped its
+            // cached result; ask the relay again.
+            void runHealth(true);
+        },
+        [action.run, operatorId, recheckBackup, recipients, reloadRecipients, reloadUnsettled, runHealth, t],
+    );
+
+    /** PB-2: remove a relay user this phone has no name for. */
+    const onRelayOnlyConfirm = useCallback(async () => {
+        if (!confirmRelayOnly) return;
+        const user = confirmRelayOnly;
+        setRelayOnlyBusy(true);
+        const ok = await runMgmt(() => settleApi.relayOnlyRevoke(operatorId, user), setRelayOnlyError);
+        setRelayOnlyBusy(false);
+        if (!ok) return;
+        setConfirmRelayOnly(null);
+        setHealth((h) => withoutRelayOnly(h, user));
+        action.report('relay-only:revoke', 'ok', t('pub.people.relay_only.done').replace(/\{user\}/g, user));
+        void recheckBackup();
+        void runHealth(true);
+    }, [action.report, confirmRelayOnly, operatorId, recheckBackup, runHealth, runMgmt, t]);
+
     // ---- Wave 3 Step 7: rotations ---------------------------------------
 
     /** Re-key ONE recipient. The relay issues them a fresh credential
@@ -936,7 +1006,11 @@ export default function PublisherRecipientsPage({
     // ---- render --------------------------------------------------------
 
     const badge = operator ? relayBadge(operator.status, checkedWorking(health, nowUnix())) : null;
-    const showRenew = renewBannerVisible(operator, health, justRebuilt);
+    // People waiting for an answer after a restore are a question, not
+    // "missing on the relay": neither the health line nor the banner may
+    // invite a renew on their account.
+    const healthShown = healthWithoutWaiting(health, waiting.length);
+    const showRenew = renewBannerVisible(operator, healthShown, justRebuilt);
     const tlsVerdict = rotateTlsDone
         ? rotateTlsVerdict(rotateTlsDone, mirrorsInPack)
         : null;
@@ -1083,7 +1157,7 @@ export default function PublisherRecipientsPage({
             {showRenew && (
                 <RenewBanner
                     t={t}
-                    text={renewBannerText(operator, health, justRebuilt)}
+                    text={renewBannerText(operator, healthShown, justRebuilt)}
                     onRenew={() => setRenewOpen(true)}
                 />
             )}
@@ -1092,7 +1166,7 @@ export default function PublisherRecipientsPage({
             {provisioned && (
                 <HealthPanel
                     t={t}
-                    health={health}
+                    health={healthShown}
                     busy={healthBusy}
                     failed={healthFailed}
                     now={nowUnix()}
@@ -1101,8 +1175,27 @@ export default function PublisherRecipientsPage({
                 />
             )}
 
+            {/* PB-1: restored from a backup, and the relay no longer knows
+                some people on the list. Asked by name, nothing chosen. */}
+            {provisioned && (
+                <RestoreQuestionCard
+                    t={t}
+                    unsettled={settle.unsettled}
+                    recipients={recipients}
+                    action={action}
+                    onAnswer={(p, keep) => void onSettleAnswer(p, keep)}
+                    onCheckAgain={() => void runHealth(true)}
+                />
+            )}
+
             {/* ---------------- 1. People ---------------- */}
             <PeopleSection
+                waiting={waitingSet}
+                relayOnly={relayOnlyRows(health, recipients)}
+                onRemoveRelayOnly={(u) => {
+                    setRelayOnlyError(null);
+                    setConfirmRelayOnly(u);
+                }}
                 t={t}
                 action={action}
                 loading={loading}
@@ -2014,9 +2107,21 @@ export default function PublisherRecipientsPage({
                 </Sheet>
             )}
 
+            {confirmRelayOnly && (
+                <RelayOnlyRemoveSheet
+                    t={t}
+                    user={confirmRelayOnly}
+                    busy={relayOnlyBusy}
+                    error={relayOnlyError}
+                    onCancel={() => setConfirmRelayOnly(null)}
+                    onConfirm={() => void onRelayOnlyConfirm()}
+                />
+            )}
+
             {renewOpen && (
                 <RenewSheet
                     t={t}
+                    waiting={waiting}
                     operatorId={operatorId}
                     recipients={recipients}
                     hasEveryoneFile={sharedArtifact?.exists === true}

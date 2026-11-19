@@ -3,10 +3,12 @@
 #
 # The decisions DaalVpnService makes at a connect, a route switch and a
 # cancel, and what it tells the engine about the phone's network, live
-# in three files with no Android and no JNI in them (vpn/SwitchPolicy.kt,
+# in files with no Android and no JNI in them (vpn/SwitchPolicy.kt,
 # vpn/StartSequence.kt, vpn/NetworkWatch.kt) so that they can be tested
 # on a plain JVM (src/test/.../SwitchPolicyTest.kt, StartSequenceTest.kt,
-# NetworkWatchTest.kt).
+# NetworkWatchTest.kt), plus the back answer, the screen-capture flag
+# (vpn/SecureScreen.kt, PB-20) and the saved-file name (vpn/SavedName.kt,
+# PB-3).
 # Until this script existed nothing ran those tests: the Gradle task
 # (`:tauri-plugin-daal-platform:testDebugUnitTest`) needs the generated
 # Android project, the Android SDK and a junit download, none of which
@@ -37,7 +39,7 @@ MAIN="$SRC/main/java/org/daal/desktop/vpn"
 TEST="$SRC/test/java/org/daal/desktop/vpn"
 
 # Pure sources only. A file that imports android.* does not belong here.
-SOURCES=("$MAIN/SwitchPolicy.kt" "$MAIN/StartSequence.kt" "$MAIN/NetworkWatch.kt" "$MAIN/BackAnswer.kt")
+SOURCES=("$MAIN/SwitchPolicy.kt" "$MAIN/StartSequence.kt" "$MAIN/NetworkWatch.kt" "$MAIN/BackAnswer.kt" "$MAIN/SecureScreen.kt" "$MAIN/SavedName.kt")
 TESTS=()
 CLASSES=()
 for f in "$TEST"/*Test.kt; do

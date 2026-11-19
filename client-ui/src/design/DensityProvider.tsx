@@ -81,9 +81,16 @@ export function DensityProvider({ children }: { children: ReactNode }) {
     }, []);
 
     useEffect(() => {
-        const obs = new MutationObserver(() => {
+        const read = () =>
             setIsRTL(document.documentElement.getAttribute('dir') === 'rtl');
-        });
+        const obs = new MutationObserver(read);
+        // The app sets the saved language's direction in an effect of a
+        // CHILD of this provider, and child effects run first: by the
+        // time this observer exists the attribute has already changed
+        // and no mutation will ever report it. Read it once now, or an
+        // app that starts in Farsi lays its rows out left-to-right
+        // (seen on a phone 2026-11-19: Settings after a restart).
+        read();
         obs.observe(document.documentElement, {
             attributes: true,
             attributeFilter: ['dir'],

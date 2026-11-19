@@ -27,6 +27,15 @@ html, body, #root {
     font-family: var(--font-fa);
 }
 
+/* Persian is a joined script. The small capital-style labels of the
+ * English design are spaced out letter by letter; on Persian that pulls
+ * the letters of one word apart so it reads as separate letters (seen on
+ * a phone 2026-11-19: «عیب‌یابی» and «وصل نیست» above the headline).
+ * No tracking on any Persian text, whatever a component asked for. */
+:root[dir="rtl"] * {
+    letter-spacing: 0 !important;
+}
+
 /* Phoenix-button breathing halos (D-2 §5C). The 3-D phoenix asset
  * appears only when state == Connected. */
 @keyframes daal-breathe {

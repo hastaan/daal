@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { Button, Card, Sheet } from '../design/primitives';
 import { onRenewEvent } from './wizardCommands';
-import type { RecipientSummary, RenewItem, RenewReport } from './wizardCommands';
+import type { RecipientSummary, RenewItem, RenewReport, RestoreUnsettledPerson } from './wizardCommands';
 import { WhatIsThis } from './Disclosure';
 import { personLabel } from './PeopleSection';
 import { explainFailure } from './failureText';
@@ -14,12 +14,15 @@ import {
     applyRenewEvent,
     progressKey,
     reasonKey,
+    renewResultKey,
     renewTargets,
+    renewWaiting,
     reportRows,
     rowOk,
     statusKey,
 } from './renew';
 import type { RenewBannerText, RenewProgress } from './renew';
+import { settleReport } from './restoreSettle';
 
 const BODY: React.CSSProperties = { fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 };
 const SUB: React.CSSProperties = { fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 };
@@ -91,6 +94,11 @@ export function RenewResultRow({
                 <span style={SUB}>{t(statusKey(item.status))}</span>
             </div>
             {item.status === 'failed' && why && <div style={{ ...SUB, color: 'var(--red)' }}>{t(why)}</div>}
+            {item.status === 'needs_answer' && (
+                <div style={{ ...SUB, color: 'var(--gold)' }} data-testid="renew-needs-answer">
+                    {t('pub.renew.reason.needs_answer')}
+                </div>
+            )}
             {ok && send && item.recipient_id != null && item.sbpx_path && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                     <Button size="sm" onClick={() => send.onSend(item.sbpx_path, label)}>
@@ -127,6 +135,7 @@ export function RenewSheet({
     send,
     onClose,
     initialReport,
+    waiting = [],
 }: {
     t: (k: string) => string;
     operatorId: number;
@@ -139,12 +148,18 @@ export function RenewSheet({
     onClose: (changed: boolean) => void;
     /** Tests and the harness: open straight on a result. */
     initialReport?: RenewReport;
+    /** PB-1: people waiting for an answer after a restore. Never
+     *  renewed from here; named as waiting, and while any waits the
+     *  result is not "all done". */
+    waiting?: RestoreUnsettledPerson[];
 }) {
     const [busy, setBusy] = useState(false);
     const [report, setReport] = useState<RenewReport | null>(initialReport ?? null);
     const [failure, setFailure] = useState<{ message: string; detail: string } | null>(null);
     const [progress, setProgress] = useState<RenewProgress>({});
-    const people = renewTargets(recipients);
+    const waitingSet = new Set(waiting.map((p) => p.recipient_id));
+    const people = renewTargets(recipients, waitingSet);
+    const asked = renewWaiting(recipients, waitingSet);
 
     useEffect(() => {
         if (!busy) return;
@@ -177,7 +192,9 @@ export function RenewSheet({
         }
     };
 
-    const rows = report ? reportRows(report) : [];
+    // What the shell said, with every waiting person shown as waiting.
+    const shown = report ? settleReport(report, waiting, recipients) : null;
+    const rows = shown ? reportRows(shown) : [];
 
     return (
         <Sheet
@@ -197,7 +214,7 @@ export function RenewSheet({
                         <>
                             {/* Safe to press again: only the people who
                                 still have no working file are touched. */}
-                            {!report.all_done && (
+                            {!shown!.all_done && (
                                 <Button variant="secondary" disabled={busy} onClick={() => void start()}>
                                     {busy ? t('pub.renew.working') : t('pub.renew.again')}
                                 </Button>
@@ -231,6 +248,14 @@ export function RenewSheet({
                                     )}
                                 </li>
                             ))}
+                            {asked.map((r) => (
+                                <li key={r.id} style={BODY} data-waiting={r.id}>
+                                    {personLabel(r)}
+                                    <span style={{ ...SUB, color: 'var(--gold)', marginInlineStart: 8 }}>
+                                        {t('pub.renew.status.needs_answer')}
+                                    </span>
+                                </li>
+                            ))}
                             {hasEveryoneFile && (
                                 <li style={BODY}>
                                     {t('pub.renew.everyone_file')}
@@ -242,6 +267,11 @@ export function RenewSheet({
                                 </li>
                             )}
                         </ul>
+                        {asked.length > 0 && (
+                            <div style={SUB} data-testid="renew-waiting-line">
+                                {t('pub.renew.waiting_line')}
+                            </div>
+                        )}
                         <div style={SUB}>{t('pub.renew.removed_stay_removed')}</div>
                         <div style={SUB}>{t('pub.renew.safe_twice')}</div>
                     </>
@@ -256,10 +286,10 @@ export function RenewSheet({
                     </div>
                 )}
 
-                {report && (
+                {shown && (
                     <>
-                        <div style={BODY}>
-                            {report.all_done ? t('pub.renew.result.all_done') : t('pub.renew.result.some_failed')}
+                        <div style={BODY} data-testid="renew-result-line">
+                            {t(renewResultKey(shown))}
                         </div>
                         <div style={SUB}>{t('pub.renew.result.hand_over')}</div>
                         <div data-testid="renew-results">

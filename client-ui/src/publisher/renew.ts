@@ -51,9 +51,27 @@ export function reasonKey(r: RenewItem['reason']): string {
     return r ? `pub.renew.reason.${r}` : '';
 }
 
-/** The people the confirm names: everyone whose access was not removed. */
-export function renewTargets(recipients: RecipientSummary[]): RecipientSummary[] {
-    return recipients.filter((r) => r.revoked_at_unix === 0);
+/** The people the confirm names: everyone whose access was not removed
+ *  and who is not waiting for an answer after a restore (PB-1). */
+export function renewTargets(
+    recipients: RecipientSummary[],
+    waiting: ReadonlySet<number> = new Set(),
+): RecipientSummary[] {
+    return recipients.filter((r) => r.revoked_at_unix === 0 && !waiting.has(r.id));
+}
+
+/** PB-1: the people the confirm names as "needs your answer": not
+ *  renewed, not removed. */
+export function renewWaiting(recipients: RecipientSummary[], waiting: ReadonlySet<number>): RecipientSummary[] {
+    return recipients.filter((r) => r.revoked_at_unix === 0 && waiting.has(r.id));
+}
+
+/** The sentence over a renew result. */
+export function renewResultKey(r: RenewReport): string {
+    if (r.all_done) return 'pub.renew.result.all_done';
+    const failed = r.items.some((i) => i.status === 'failed') || r.everyone_file?.status === 'failed';
+    if (!failed && r.items.some((i) => i.status === 'needs_answer')) return 'pub.renew.result.waiting';
+    return 'pub.renew.result.some_failed';
 }
 
 /** Live progress, keyed by recipient id ("everyone" for the shared file). */

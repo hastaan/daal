@@ -64,6 +64,15 @@ export function failureKey(e: unknown): string {
             return 'pub.fail.file_missing';
         case 'E_DEPLOY_TOO_OLD':
             return 'pub.fail.deploy_too_old';
+        case 'E_RESTORE_UNANSWERED':
+            return 'pub.fail.restore_unanswered';
+        case 'E_RESTORE_NOT_ASKED':
+        case 'E_RESTORE_ALREADY_ANSWERED':
+            return 'pub.fail.restore_answered';
+        case 'E_RELAY_USER_IN_LIST':
+            return 'pub.fail.relay_user_in_list';
+        case 'E_RELAY_USER_INVALID':
+            return 'pub.fail.relay_user_invalid';
         case 'E_RESTORE_UNFINISHED':
             // A restore committed and must finish before anything else.
             return 'pub.backup.err.unfinished';

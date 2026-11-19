@@ -20,6 +20,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button, Card, Section, Sheet, Textarea } from '../design/primitives';
 import type { BackupStatus, MadeBackup } from './wizardCommands';
 import { useBack } from '../lib/useBack';
+import { useSecureScreen } from './useSecureScreen';
 import { WhatIsThis } from './Disclosure';
 import {
     backupFailure,
@@ -299,6 +300,8 @@ export function BackupWords({
     words: string[];
     onWrote: () => void;
 }) {
+    // PB-20: the words are on the screen.
+    useSecureScreen(true);
     return (
         <div style={{ display: 'grid', gap: 10 }} data-state="words">
             <div style={BODY}>{t('pub.backup.words.body')}</div>
@@ -332,6 +335,8 @@ export function BackupConfirm({
     onCheck: () => void;
     onShowAgain: () => void;
 }) {
+    // PB-20: three of the words are typed here.
+    useSecureScreen(true);
     return (
         <div style={{ display: 'grid', gap: 10 }} data-state="confirm">
             <div style={BODY}>{t('pub.backup.confirm.body')}</div>
@@ -409,6 +414,8 @@ function CheckWordsSheet({
     const [busy, setBusy] = useState(false);
     const [result, setResult] = useState<boolean | null>(null);
     const [failure, setFailure] = useState<BackupFailure | null>(null);
+    // PB-20: all twelve words are typed here.
+    useSecureScreen(true);
     return (
         <Sheet
             title={t('pub.backup.words.check')}

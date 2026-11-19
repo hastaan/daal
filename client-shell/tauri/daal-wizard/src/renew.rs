@@ -17,6 +17,11 @@
 //!     alone if the relay knows them, created if it does not;
 //!   * anything else -> `--replace`: created fresh;
 //!   * a removed person -> only ever `--revoke`. Never re-created.
+//!   * a person restored from a backup whom the relay did not know when
+//!     it was first checked, and nobody has said "still should have
+//!     access" for -> skipped, reported as `needs_answer` (PB-1,
+//!     `restore_settle`). If the relay has not been checked since the
+//!     restore, its list is read first; if that fails nothing is done.
 //!
 //! The everyone file (`r0`) follows the same rule with
 //! `operators.shared_box_fp`, and only if it was ever made.
@@ -39,10 +44,12 @@ pub struct RenewItem {
     pub name: String,
     pub display_name: String,
     /// `done` | `already_done` | `failed` | `not_attempted` |
-    /// `removed_from_server`.
+    /// `removed_from_server` | `needs_answer` (restored from a backup,
+    /// unknown to the relay, not yet answered for: nothing was done).
     pub status: String,
     /// `""` | `relay_unreachable` | `relay_full` | `relay_too_old` |
-    /// `file_write_failed` | `signing_failed` | `other`.
+    /// `file_write_failed` | `signing_failed` | `restore_unanswered` |
+    /// `other`.
     pub reason: String,
     /// The person's file, "" for the everyone file and failures.
     pub sbpx_path: String,
@@ -162,6 +169,14 @@ pub fn renew_everyone(
     let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
 
     let rows = ctx.db.list_recipients(operator_id)?;
+    // PB-1: nobody the relay does not know is created before the person
+    // using the phone has said they still should have access.
+    let waiting = crate::restore_settle::blocked_before_create(ctx, operator_id)?;
+    let plan_rows: Vec<RecipientRow> = rows
+        .iter()
+        .filter(|r| r.revoked_at_unix != 0 || !waiting.contains(&r.id))
+        .cloned()
+        .collect();
     let markers = ctx.db.recipient_box_fps(operator_id)?;
     let current_fp = row.mgmt_tls_fingerprint.clone();
     let sbpx = |name: &str| ctx.staging_dir.join(format!("{operator_id}.{name}.sbpx"));
@@ -172,7 +187,7 @@ pub fn renew_everyone(
         None
     };
     let plan = plan(
-        &rows,
+        &plan_rows,
         &markers,
         &current_fp,
         &|n| sbpx(n).exists(),
@@ -204,6 +219,25 @@ pub fn renew_everyone(
         }
     };
 
+    let waiting_item = |r: &RecipientRow| RenewItem {
+        recipient_id: Some(r.id),
+        name: r.name.clone(),
+        display_name: r.display_name.clone(),
+        status: "needs_answer".into(),
+        reason: "restore_unanswered".into(),
+        ..Default::default()
+    };
+    if plan.ensure.is_empty() && plan.replace.is_empty() && plan.revoke.is_empty() && !waiting.is_empty() {
+        // Everyone left waits for an answer: no window is opened.
+        let items: Vec<RenewItem> = live.iter().map(|r| waiting_item(r)).collect();
+        return Ok(RenewReport {
+            operator_id,
+            items,
+            everyone_file: None,
+            all_done: false,
+        });
+    }
+
     let record_path =
         crate::recipient_book::write_record_staging(ctx, operator_id, &row.operator_record_json)?;
     let res = ctx.cli.run_users_renew(
@@ -228,12 +262,18 @@ pub fn renew_everyone(
 
     let mut items: Vec<RenewItem> = live
         .iter()
-        .map(|r| RenewItem {
-            recipient_id: Some(r.id),
-            name: r.name.clone(),
-            display_name: r.display_name.clone(),
-            status: "not_attempted".into(),
-            ..Default::default()
+        .map(|r| {
+            if waiting.contains(&r.id) {
+                waiting_item(r)
+            } else {
+                RenewItem {
+                    recipient_id: Some(r.id),
+                    name: r.name.clone(),
+                    display_name: r.display_name.clone(),
+                    status: "not_attempted".into(),
+                    ..Default::default()
+                }
+            }
         })
         .collect();
     let mut everyone = shared_marker.as_ref().map(|_| RenewItem {
@@ -278,7 +318,10 @@ pub fn renew_everyone(
                 None => continue,
             }
         } else {
-            match items.iter_mut().find(|i| i.name == res.name && i.recipient_id.is_some()) {
+            match items
+                .iter_mut()
+                .find(|i| i.name == res.name && i.recipient_id.is_some() && i.status != "needs_answer")
+            {
                 Some(i) => i,
                 None => continue,
             }

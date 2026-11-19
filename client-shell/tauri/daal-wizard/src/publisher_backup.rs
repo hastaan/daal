@@ -154,6 +154,8 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     "custody_events",
     "schema_migrations",
     "publisher_backup_meta",
+    // V018: per device, written by the restore itself (`restore_settle`).
+    "restore_unsettled",
 ];
 
 /// Columns holding a file path. Carried as a path relative to the
@@ -1168,7 +1170,8 @@ struct Parsed {
 
 /// A future data-rewriting migration adds a step here that turns an
 /// older payload's tables into the current shape. v1 has none: no
-/// backup older than V017 can exist.
+/// backup older than V017 can exist, and V018 added only a table a
+/// backup never carries.
 fn upgrade_payload(from: i64, _tables: &mut BTreeMap<String, TableDump>) -> Result<()> {
     let _ = from;
     Ok(())
@@ -2546,6 +2549,10 @@ pub fn backup_restore(
         }
         let tx = c.transaction()?;
         replace_tables(&tx, &parsed.snap, &staging)?;
+        // PB-1: in the same transaction, everyone not removed is
+        // "restored, not yet settled" until a relay check says the relay
+        // knows them or the person answers for them.
+        crate::restore_settle::mark_restored(&tx)?;
         tx.execute(
             "UPDATE publisher_backup_meta SET restore_pending_nonce = ?1, restored_at_unix = ?2,
                     restored_backup_made_at_unix = ?3, restore_notice_dismissed = 0 WHERE id = 1",

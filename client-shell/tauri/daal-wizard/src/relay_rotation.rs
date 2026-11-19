@@ -242,6 +242,8 @@ pub fn rotate_credentials(
             "this recipient is revoked — add them again to give them access".into(),
         ));
     }
+    // PB-1: nor is one restored from a backup whom the relay may not know.
+    crate::restore_settle::refuse_if_unanswered(ctx, operator_id, row.id)?;
 
     // Fail on a missing helper IP before doing any work: without it the
     // ephemeral firewall window can't be punched and the subprocess

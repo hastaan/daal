@@ -126,6 +126,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "publisher_backup",
         sql: include_str!("../migrations/V017__publisher_backup.sql"),
     },
+    Migration {
+        version: 18,
+        name: "restore_unsettled",
+        sql: include_str!("../migrations/V018__restore_unsettled.sql"),
+    },
 ];
 
 /// The highest migration version this build knows. A publisher backup

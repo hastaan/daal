@@ -109,6 +109,14 @@ interface Props {
     onReplace: (r: RecipientSummary) => void;
     onRemoveAccess: (r: RecipientSummary) => void;
     onRemoveFromList: (r: RecipientSummary) => void;
+    /** PB-1: people waiting for an answer after a restore. Their row
+     *  says so and offers nothing: the question card above is where
+     *  they are settled. */
+    waiting?: ReadonlySet<number>;
+    /** PB-2: relay user names the relay lets in that this phone's list
+     *  has no row for (added on the other phone after the backup). */
+    relayOnly?: string[];
+    onRemoveRelayOnly?: (relayUser: string) => void;
 }
 
 export function PeopleSection({
@@ -125,7 +133,11 @@ export function PeopleSection({
     onReplace,
     onRemoveAccess,
     onRemoveFromList,
+    waiting,
+    relayOnly = [],
+    onRemoveRelayOnly,
 }: Props) {
+    const isWaiting = (p: PersonRow) => !p.revoked && p.recipient != null && (waiting?.has(p.recipient.id) ?? false);
     return (
         <section style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <header
@@ -141,7 +153,7 @@ export function PeopleSection({
             </header>
             <div style={SUB}>{t('pub.people.line')}</div>
 
-            {people.length === 0 && !loading && (
+            {people.length === 0 && relayOnly.length === 0 && !loading && (
                 <Card>
                     <div style={SUB}>{t('pub.people.empty')}</div>
                 </Card>
@@ -173,16 +185,16 @@ export function PeopleSection({
                                 >
                                     {p.label}
                                 </div>
-                                <div style={SUB}>{personState(t, p)}</div>
+                                <div style={SUB}>{personState(t, p, isWaiting(p))}</div>
                             </div>
-                            <div style={ROW_BUTTONS}>{personButtons(p)}</div>
+                            {!isWaiting(p) && <div style={ROW_BUTTONS}>{personButtons(p)}</div>}
                             {/* The one per-person action that is not
                                 routine. Behind a tap, with its
                                 consequence, because on the row it was a
                                 button called "New key" next to one
                                 called "Resend" and nothing said which
                                 one cuts the person off. */}
-                            {p.recipient && !p.revoked && p.file?.exists && (
+                            {p.recipient && !p.revoked && !isWaiting(p) && p.file?.exists && (
                                 <WhatIsThis label={t('pub.people.more')}>
                                     <div>
                                         {t('pub.people.replace.line').replace(
@@ -219,6 +231,55 @@ export function PeopleSection({
                             )}
                         </div>
                     ))}
+                </Card>
+            )}
+
+            {/* PB-2: people the relay lets in that this phone has no
+                name for. Their relay name is the only handle there is,
+                so it is shown, small, as an identifier. */}
+            {relayOnly.length > 0 && (
+                <Card>
+                    <div data-testid="relay-only">
+                        {relayOnly.map((u, i) => (
+                            <div
+                                key={u}
+                                data-relay-user={u}
+                                style={{
+                                    display: 'grid',
+                                    gap: 8,
+                                    padding: '11px 0',
+                                    borderBottom:
+                                        i === relayOnly.length - 1 ? 'none' : '1px solid var(--line-soft)',
+                                }}
+                            >
+                                <div>
+                                    <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--fg)', lineHeight: 1.3 }}>
+                                        {t('pub.people.relay_only.row')}
+                                    </div>
+                                    <div style={SUB}>
+                                        {t('pub.people.relay_only.id').split('{user}')[0]}
+                                        <span dir="ltr" style={{ fontFamily: 'var(--font-mono)' }}>
+                                            {u}
+                                        </span>
+                                        {t('pub.people.relay_only.id').split('{user}')[1] ?? ''}
+                                    </div>
+                                </div>
+                                {onRemoveRelayOnly && (
+                                    <div style={ROW_BUTTONS}>
+                                        <Button
+                                            variant="danger"
+                                            size="sm"
+                                            disabled={action.busy !== null}
+                                            onClick={() => onRemoveRelayOnly(u)}
+                                            data-button={`relay-only-remove-${u}`}
+                                        >
+                                            {t('pub.people.remove_access')}
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
                 </Card>
             )}
         </section>
@@ -314,8 +375,9 @@ export function PeopleSection({
 }
 
 /** The one line under a person's name: where they stand. */
-export function personState(t: (k: string) => string, p: PersonRow): string {
+export function personState(t: (k: string) => string, p: PersonRow, waiting = false): string {
     if (p.revoked) return t('pub.people.state.removed');
+    if (waiting) return t('pub.people.state.needs_answer');
     if (!p.file?.exists) return t('pub.people.state.no_file');
     const day = dayLabel(p.recipient?.provisioned_at_unix ?? 0);
     return day

@@ -64,6 +64,7 @@ pub mod relay_health;
 pub mod relay_identity;
 pub mod relay_rotation;
 pub mod renew;
+pub mod restore_settle;
 pub mod setup_recovery;
 #[cfg(test)]
 mod publisher_alone_tests;
