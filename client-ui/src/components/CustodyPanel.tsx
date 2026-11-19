@@ -25,6 +25,7 @@ import {
 } from '../recipient/recipientCommands';
 import { useBack } from '../lib/useBack';
 import { Card, ListRow } from '../design/primitives';
+import { mix } from '../design/mix';
 
 interface Props {
     t: (k: string) => string;
@@ -447,10 +448,10 @@ function RotateDialog({ t, busy, onCancel, onConfirm }: RotateDialogProps) {
                         style={{
                             ...smallBtn(false),
                             background: confirmed
-                                ? 'color-mix(in oklab, var(--red) 22%, transparent)'
+                                ? mix('var(--red)', 22, 'transparent')
                                 : 'var(--surface-3)',
                             border:
-                                '1px solid color-mix(in oklab, var(--red) 60%, transparent)',
+                                `1px solid ${mix('var(--red)', 60, 'transparent')}`,
                             color: 'var(--red)',
                             opacity: !confirmed || busy ? 0.5 : 1,
                         }}

@@ -61,6 +61,7 @@ import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
 import type { Failure } from './failureText';
 import { OtherServerNote, otherServerId } from './OtherServerNote';
+import { mix } from '../design/mix';
 
 interface Props {
     t: (k: string) => string;
@@ -261,13 +262,13 @@ function DestroyOption({
                 font: 'inherit',
                 color: 'var(--fg)',
                 background: selected
-                    ? `color-mix(in oklab, ${accent} 12%, var(--surface-2))`
+                    ? mix(accent, 12, 'var(--surface-2)')
                     : 'var(--surface-2)',
                 border: `1px solid ${
                     selected
                         ? accent
                         : heavy
-                          ? 'color-mix(in oklab, var(--red) 40%, transparent)'
+                          ? mix('var(--red)', 40, 'transparent')
                           : 'var(--line)'
                 }`,
                 borderRadius: 'var(--radius-md)',

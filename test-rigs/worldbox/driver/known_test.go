@@ -618,3 +618,43 @@ func TestReportStatesEngineCategoryCoverage(t *testing.T) {
 		t.Errorf("0 of 2, both unexplained, and not coverage:\n%s", out)
 	}
 }
+
+// A client that said why it gave up and left with status 1 is a refusal
+// even when its exit outran the driver; a signal, the Go runtime's status
+// 2, or an exit with no "error" event is a death.
+func TestAGivenUpSessionIsNotAnEngineDeath(t *testing.T) {
+	errEv := []map[string]any{{"event": "init"}, {"event": "error", "stage": "proof"}}
+	quiet := []map[string]any{{"event": "init"}, {"event": "routes"}}
+	cases := []struct {
+		exit string
+		seen []map[string]any
+		want bool
+	}{
+		{"exit status 1", errEv, true},
+		{"exit status 1", quiet, false},
+		{"exit status 2", errEv, false},
+		{"signal: segmentation fault", errEv, false},
+		{"signal: killed", quiet, false},
+		{"exit status 0", quiet, false},
+		{"", errEv, false},
+	}
+	for _, c := range cases {
+		if got := gaveUpCleanly(c.exit, c.seen); got != c.want {
+			t.Errorf("gaveUpCleanly(%q, %d events) = %v, want %v", c.exit, len(c.seen), got, c.want)
+		}
+	}
+	done := make(chan struct{})
+	close(done)
+	refused := &Client{done: done, exit: "exit status 1", seen: errEv}
+	if refused.Died() {
+		t.Error("a refusal that outran the driver was called a death")
+	}
+	crashed := &Client{done: done, exit: "signal: segmentation fault", seen: errEv, Dir: t.TempDir()}
+	if !crashed.Died() {
+		t.Error("a crash was not called a death")
+	}
+	if sig := crashed.CrashSignature(); !strings.Contains(sig, "segmentation fault") {
+		t.Errorf("the crash signature does not carry how the process ended: %q", sig)
+	}
+}
+

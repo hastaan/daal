@@ -307,8 +307,21 @@ fn default_state_dir() -> PathBuf {
     // standard data location.
     #[cfg(target_os = "android")]
     {
-        if let Ok(p) = std::env::var("HOME") {
-            return PathBuf::from(p).join("files").join("daal");
+        // $HOME first, and only when it is usable: that is where every
+        // install so far keeps its state, and it must not move. Some
+        // devices give the app no HOME at all (seen on an Xperia with
+        // Android 12, 2026-11-19: the state fell through to
+        // /data/local/tmp, which an app cannot write, and the engine
+        // never started). There the app's own files directory is asked
+        // from Android.
+        if let Some(p) = std::env::var_os("HOME").map(PathBuf::from) {
+            let d = p.join("files").join("daal");
+            if daal_wizard::dir_is_writable(&d) {
+                return d;
+            }
+        }
+        if let Some(files) = android_app_dir("getFilesDir") {
+            return files.join("daal");
         }
     }
     #[cfg(target_os = "ios")]
@@ -324,6 +337,54 @@ fn default_state_dir() -> PathBuf {
         return d.join("daal");
     }
     std::env::temp_dir().join("daal")
+}
+
+/// One of the app's own directories from Android (`getFilesDir`,
+/// `getCacheDir`), or None when the context or the call is unavailable.
+#[cfg(target_os = "android")]
+fn android_app_dir(method: &str) -> Option<PathBuf> {
+    let ctx = ndk_context::android_context();
+    if ctx.vm().is_null() || ctx.context().is_null() {
+        return None;
+    }
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let context = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
+    let run = |env: &mut jni::JNIEnv| -> jni::errors::Result<String> {
+        let file = env.call_method(&context, method, "()Ljava/io/File;", &[])?.l()?;
+        let path = env
+            .call_method(&file, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let s: String = env.get_string(&jni::objects::JString::from(path))?.into();
+        Ok(s)
+    };
+    match run(&mut env) {
+        Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
+        _ => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            None
+        }
+    }
+}
+
+/// Make sure the process has a temp directory it can write. Without
+/// TMPDIR, `std::env::temp_dir()` is /data/local/tmp on Android, which
+/// an app cannot write: every staged file would fail. Leaves a working
+/// TMPDIR alone.
+#[cfg(target_os = "android")]
+fn ensure_android_temp_dir() {
+    if daal_wizard::dir_is_writable(&std::env::temp_dir()) {
+        return;
+    }
+    if let Some(cache) = android_app_dir("getCacheDir") {
+        if daal_wizard::dir_is_writable(&cache) {
+            // Called once at start, before any other thread is spawned
+            // by this crate.
+            std::env::set_var("TMPDIR", &cache);
+        }
+    }
 }
 
 #[tauri::command]
@@ -3239,6 +3300,8 @@ pub fn run() {
             android_logger::Config::default().with_max_level(log::LevelFilter::Info),
         );
     }
+    #[cfg(target_os = "android")]
+    ensure_android_temp_dir();
     let state_dir = default_state_dir();
     std::fs::create_dir_all(&state_dir).ok();
 

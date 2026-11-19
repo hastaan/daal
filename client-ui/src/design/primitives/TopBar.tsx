@@ -1,6 +1,7 @@
 // TopBar — section title strip used by Tablet + Desktop shells.
 
 import type { ReactNode } from 'react';
+import { mix } from '../mix';
 
 interface Props {
     title: ReactNode;
@@ -20,7 +21,7 @@ export function TopBar({ title, actions, eyebrow }: Props) {
                 padding: '14px var(--gutter)',
                 borderBottom: '1px solid var(--line-soft)',
                 background:
-                    'color-mix(in oklab, var(--bg-deep) 70%, transparent)',
+                    mix('var(--bg-deep)', 70, 'transparent'),
                 backdropFilter: 'blur(10px)',
                 WebkitBackdropFilter: 'blur(10px)',
             }}

@@ -3116,13 +3116,16 @@ W3 items: none moves with this wave.
   A command that returns nothing arrives as null, which the wizard read
   as failure. Fixed there and in the manual "my address" repair, which
   had the same mistake. Not yet seen fixed on the phone.
-- [ ] **PB-30. The draft cancel still uses the old system dialog** and
+- [x] **PB-30. (Wording fixed: when the setup made nothing and Daal could look, the question now says nothing was rented; test "forgetting an unfinished relay". It is still the system dialog, not a sheet.) The draft cancel still uses the old system dialog** and
   tells the person to delete a server "from your cloud provider's
   dashboard". With nothing rented it should just say nothing was rented.
 - [ ] **PB-31. The dearer server size was preselected.** Step 2 showed
   CPX02 (best value, 7.49/mo) and CPX12 (14.36/mo) with CPX12 selected.
   The cheapest size that is enough should be the default. (An hour
   earlier the same account offered CX23 at 6.86: the list is live.)
+  Not changed blind: nobody has yet run a relay on the 1 GB size, so
+  try CPX02 on a real account first, then make the cheapest the default
+  (the seed `cpx12` wins whenever it is on the list).
 
 ### Seen on the phone, 2026-11-19 (this tree, device key, real Hetzner account)
 
@@ -3214,3 +3217,64 @@ owner decides.
 12. PA-7: on an unfinished setup on the person's own server, delete from
     the relay list: it asks keep or delete; Keep leaves the server
     running.
+
+## 19. An older phone (Xperia XQ-AS52, Android 12, three-button navigation), 2026-11-19
+
+The owner's spare phone, empty, paired over Wi-Fi. First install of the
+app on anything but the Samsung.
+
+- [x] **OP-1. The engine never started.** "Daal could not start on this
+  device": Android gave the app no HOME there, so the state directory
+  fell through to /data/local/tmp/daal, which an app cannot write.
+  The state directory is now $HOME/files/daal only when that is
+  writable (unchanged for existing installs), otherwise the app's own
+  files directory asked from Android; the temp directory is pointed at
+  the app's cache directory when the default cannot be written. Seen
+  fixed on the phone: the connection page shows "Add your file to get
+  started". Tests: `writable_dir_tests` (the Android calls themselves
+  can only be seen on a device).
+- [x] **OP-2. The tab bar sat under Android's navigation buttons.** The
+  page relied on CSS safe-area insets, which that web view reports as
+  zero. The system bars and the keyboard are now taken off the web
+  view's parent as padding on every device. Seen fixed on the Xperia.
+  NOT yet seen on the Samsung (gesture navigation): check that the top
+  and bottom spacing still look right and that the keyboard still
+  leaves the focused field visible.
+- [x] **OP-3. First-run screens were from an older design.** "You'll
+  need a small VPS, an SSH key", "Read these four words to your contact"
+  with no words, a "paste a source URL" box, and a trust question whose
+  three buttons all did the same thing. Now: the first screen offers
+  فارسی and English as its two buttons; then "Who are you?"; a person
+  who wants to connect goes straight to the main screen (which asks for
+  their file); a person who wants to help gets one page saying what it
+  takes in plain words and lands on Publisher. Seen on the Xperia.
+  Tests: `onboarding.test.tsx`.
+- [ ] **OP-4. Wireless debugging on the Xperia switches itself off**
+  after a while (Android does this when Wi-Fi drops). USB is plugged in
+  but USB debugging is not authorised on it; the owner can allow it.
+- [x] **OP-5. Cards, borders and tinted backgrounds were missing.** The
+  Xperia's web view is version 103 (2022) and was never updated; in Iran
+  many phones cannot update it. It drops `oklch()` and `color-mix()`,
+  which the whole palette used. Every colour is now a plain sRGB value
+  (tokens.css keeps the design value in a comment) and blends are
+  computed by `design/mix.ts`. Seen fixed on the Xperia. Tests:
+  `mix.test.ts`, including one that fails if a source file uses those
+  functions again. Not yet compared on the Samsung: the colours are the
+  same to the eye in the converted values, but look once.
+- [ ] **OP-6. What is the oldest web view the app must work on?** 103
+  works after OP-5. Android 10 and 11 phones that never updated may be
+  on 74 to 90; nothing older than 103 has been tried.
+- [x] **OP-7. "The engine died" in the rig, twice in a row: it had not.**
+  2026-11-19 21:07 and 21:12, `./daal e2e quick`, world
+  `tcp-reset-mid-handshake`, hysteria2 with a forged secret:
+  `…engine.survived` red, "the process exited without a word on stderr".
+  The rig's client gives up on a session it cannot carry by emitting an
+  "error" event and leaving with status 1 at once. The driver learns of
+  the refusal from the event and then asks whether the process died; on
+  a busy machine the exit won that race and a correct refusal was
+  reported as a crash. Fixed in the driver: the exit status is recorded
+  (and printed in every crash signature), and status 1 after an "error"
+  event is a refusal. A signal or the Go runtime's status 2 is still a
+  death. Test: `TestAGivenUpSessionIsNotAnEngineDeath`. Twelve isolated
+  runs of that world were clean before the fix, which is what pointed at
+  load rather than at the engine.

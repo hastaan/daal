@@ -16,6 +16,7 @@
 //     instead of being eaten by it.
 
 import type { ReactNode } from 'react';
+import { mix } from '../mix';
 
 interface Item<Id extends string> {
     id: Id;
@@ -44,7 +45,7 @@ export function TabBar<Id extends string>({
                 gridTemplateColumns: `repeat(${items.length}, 1fr)`,
                 width: '100%',
                 borderTop: '1px solid var(--line-soft)',
-                background: 'color-mix(in oklab, var(--bg) 92%, transparent)',
+                background: mix('var(--bg)', 92, 'transparent'),
                 backdropFilter: 'blur(14px)',
                 WebkitBackdropFilter: 'blur(14px)',
                 paddingBlockStart: 8,

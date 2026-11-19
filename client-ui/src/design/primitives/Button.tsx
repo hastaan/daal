@@ -2,6 +2,7 @@
 // are touch-friendly (44px+ tap target by default thanks to padding).
 
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import { mix } from '../mix';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
 type Size = 'sm' | 'md' | 'lg';
@@ -53,7 +54,7 @@ export function Button({
         primary: {
             background: 'var(--gold)',
             border: 0,
-            color: 'oklch(20% 0.04 80)',
+            color: '#1f1401',
         },
         secondary: {
             background: 'var(--surface-2)',
@@ -67,7 +68,7 @@ export function Button({
         },
         danger: {
             background: 'transparent',
-            border: '1px solid color-mix(in oklab, var(--red) 50%, transparent)',
+            border: `1px solid ${mix('var(--red)', 50, 'transparent')}`,
             color: 'var(--red)',
         },
     };

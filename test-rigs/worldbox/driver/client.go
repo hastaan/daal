@@ -28,6 +28,10 @@ type Client struct {
 	Dir    string
 	// stopping: Stop was called. An exit before that is a death.
 	stopping bool
+	// exit: how the process ended ("exit status 2", "signal: killed",
+	// "exit status 0"), set before done closes. A death that leaves
+	// stderr empty is otherwise unexplained (seen 2026-11-19).
+	exit string
 }
 
 type ClientOpts struct {
@@ -179,7 +183,14 @@ func StartClient(p Paths, label string, o ClientOpts) (*Client, error) {
 		if evf != nil {
 			evf.Close()
 		}
-		_ = cmd.Wait()
+		werr := cmd.Wait()
+		c.mu.Lock()
+		if werr != nil {
+			c.exit = werr.Error()
+		} else {
+			c.exit = "exit status 0"
+		}
+		c.mu.Unlock()
 	}()
 	return c, nil
 }
@@ -249,15 +260,40 @@ func (c *Client) Stop() map[string]any {
 // Died reports whether the engine process is gone although nobody asked
 // it to stop: a crash. (A session the engine REFUSES ends with an error
 // event and a clean exit only after Stop.)
+//
+// The client gives up on a session it cannot carry by saying why (an
+// "error" event) and leaving with status 1 at once, without waiting for
+// Stop. The driver learns of the refusal from the event and usually asks
+// Died() before the process is gone; on a busy machine the exit can win
+// that race. That is still a refusal, not a death: a crash leaves by a
+// signal or with the Go runtime's status 2 and says nothing in an
+// "error" event. (Seen 2026-11-19: two quick runs red on
+// `wrongserver…engine.survived` with an empty stderr.)
 func (c *Client) Died() bool {
 	select {
 	case <-c.done:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return !c.stopping
+		if c.stopping {
+			return false
+		}
+		return !gaveUpCleanly(c.exit, c.seen)
 	default:
 		return false
 	}
+}
+
+// gaveUpCleanly: the process left with status 1 after an "error" event.
+func gaveUpCleanly(exit string, seen []map[string]any) bool {
+	if exit != "exit status 1" {
+		return false
+	}
+	for _, ev := range seen {
+		if ev["event"] == "error" {
+			return true
+		}
+	}
+	return false
 }
 
 // CrashSignature condenses the dead process's stderr into one line: the
@@ -285,10 +321,16 @@ func (c *Client) CrashSignature() string {
 			break
 		}
 	}
-	if len(sig) == 0 {
-		return "the process exited without a word on stderr"
+	c.mu.Lock()
+	exit := c.exit
+	c.mu.Unlock()
+	if exit != "" {
+		exit = " (" + exit + ")"
 	}
-	return strings.Join(sig, " | ")
+	if len(sig) == 0 {
+		return "the process exited without a word on stderr" + exit
+	}
+	return strings.Join(sig, " | ") + exit
 }
 
 // StderrTail is what the engine process itself last complained about:

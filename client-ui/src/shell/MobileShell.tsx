@@ -33,7 +33,9 @@ interface Props {
 }
 
 export default function MobileShell(props: Props) {
-    const [section, setSection] = useState<Section>('connection');
+    const [section, setSection] = useState<Section>(
+        () => Prefs.takeFirstSection() ?? 'connection',
+    );
     const [showDiagnostics, setShowDiagnostics] = useState(false);
     // Publisher is hidden behind a Settings → "I am a publisher" toggle
     // (matches desktop), so the tab only appears once the user opts in.
