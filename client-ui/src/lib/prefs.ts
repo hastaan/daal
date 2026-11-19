@@ -23,6 +23,17 @@ export const Prefs = {
     setLane(v: Lane): void {
         localStorage.setItem(NS + 'onboarding.lane', v);
     },
+    /** Where the app opens once, right after the first-run screens
+     *  (a person who said they want to help others lands on Publisher). */
+    setFirstSection(v: 'publisher'): void {
+        localStorage.setItem(NS + 'onboarding.first_section', v);
+    },
+    /** Reads that once and forgets it. */
+    takeFirstSection(): 'publisher' | null {
+        const v = localStorage.getItem(NS + 'onboarding.first_section');
+        if (v != null) localStorage.removeItem(NS + 'onboarding.first_section');
+        return v === 'publisher' ? 'publisher' : null;
+    },
     publisherEnabled(): boolean {
         return localStorage.getItem(NS + 'publisher.enabled') === '1';
     },

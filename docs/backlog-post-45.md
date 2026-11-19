@@ -3237,10 +3237,15 @@ app on anything but the Samsung.
   NOT yet seen on the Samsung (gesture navigation): check that the top
   and bottom spacing still look right and that the keyboard still
   leaves the focused field visible.
-- [ ] **OP-3. First-run screens for "I want to help others" are stale.**
-  "You'll need a small VPS (about 5/month), an SSH key, and 10 minutes":
-  no SSH key is needed and the words are jargon. The next screen says
-  "Read these four words to your contact" and shows no words.
+- [x] **OP-3. First-run screens were from an older design.** "You'll
+  need a small VPS, an SSH key", "Read these four words to your contact"
+  with no words, a "paste a source URL" box, and a trust question whose
+  three buttons all did the same thing. Now: the first screen offers
+  فارسی and English as its two buttons; then "Who are you?"; a person
+  who wants to connect goes straight to the main screen (which asks for
+  their file); a person who wants to help gets one page saying what it
+  takes in plain words and lands on Publisher. Seen on the Xperia.
+  Tests: `onboarding.test.tsx`.
 - [ ] **OP-4. Wireless debugging on the Xperia switches itself off**
   after a while (Android does this when Wi-Fi drops). USB is plugged in
   but USB debugging is not authorised on it; the owner can allow it.
@@ -3256,17 +3261,17 @@ app on anything but the Samsung.
 - [ ] **OP-6. What is the oldest web view the app must work on?** 103
   works after OP-5. Android 10 and 11 phones that never updated may be
   on 74 to 90; nothing older than 103 has been tried.
-- [ ] **OP-7. The engine died once in the rig, silently.** 2026-11-19
-  21:07, `./daal e2e quick`, world `tcp-reset-mid-handshake`, hysteria2
-  with a forged `tls_cert_sha256`: the engine reported the failed
-  connect correctly ("unrecognized remote public key"), went to
-  Disconnected, and 30 ms later the process was gone with nothing on
-  stderr (no Go panic text, so not an ordinary panic). The rig repeated
-  the attempt and it passed; six other quick runs the same evening were
-  clean, and the change under test touched no engine code. Not excused
-  as a known finding: the check stays red when it happens. To do: have
-  the rig record the exit status and signal of a dead engine, then loop
-  that one session (`--ops clean tcp-reset-mid-handshake hysteria2`)
-  a few hundred times, as was done for INT-1. Evidence of the one
-  sighting was under `test-rigs/worldbox/out/20261119-210738-825544/`.
-
+- [x] **OP-7. "The engine died" in the rig, twice in a row: it had not.**
+  2026-11-19 21:07 and 21:12, `./daal e2e quick`, world
+  `tcp-reset-mid-handshake`, hysteria2 with a forged secret:
+  `…engine.survived` red, "the process exited without a word on stderr".
+  The rig's client gives up on a session it cannot carry by emitting an
+  "error" event and leaving with status 1 at once. The driver learns of
+  the refusal from the event and then asks whether the process died; on
+  a busy machine the exit won that race and a correct refusal was
+  reported as a crash. Fixed in the driver: the exit status is recorded
+  (and printed in every crash signature), and status 1 after an "error"
+  event is a refusal. A signal or the Go runtime's status 2 is still a
+  death. Test: `TestAGivenUpSessionIsNotAnEngineDeath`. Twelve isolated
+  runs of that world were clean before the fix, which is what pointed at
+  load rather than at the engine.
