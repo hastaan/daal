@@ -3463,4 +3463,11 @@ translated English, and it mixed words (نشانی/آدرس, تلفن/گوشی,
   Xperia; an old phone with a poor system font would not.
 - The style guide is `docs/style/farsi.md`: every change that writes
   Farsi follows it.
+- [x] **FA-6. An app that STARTS in Farsi laid its rows out
+  left-to-right** (Settings: text on the left, the switch on the wrong
+  side), while switching the language live looked right. The provider
+  that tells rows the direction began listening after the direction had
+  already been set at start. It now reads the direction once when it
+  starts listening. Seen broken on the Xperia; the fix is to be looked
+  at there.
 
