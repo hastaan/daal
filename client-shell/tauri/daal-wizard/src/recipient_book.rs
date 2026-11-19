@@ -147,23 +147,16 @@ pub fn recipient_provision(
     };
     let relay_server_ip = field("public_ip");
     let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = creds_val.as_object_mut() {
-        // Prefer the record's box material; fall back to whatever the
-        // mgmt response provided (non-empty once a Tier-2 release ships).
-        let reality_pub = field("reality_public_key");
-        let tls_pin = field("tls_cert_sha256");
-        if !reality_pub.is_empty() {
-            obj.insert("reality_public_key".into(), reality_pub.into());
-        }
-        if !tls_pin.is_empty() {
-            obj.insert("tls_cert_sha256".into(), tls_pin.into());
-        }
-    }
+    fill_box_material_from_record(&mut creds_val, &rec_val);
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
     // The record's cover host, handed to the pack step as the fallback
     // for a box whose mgmt binary is too old to echo its own. See
     // UsersPackSbpxArgs::cover_sni.
     let record_cover_sni = field("cover_sni");
+
+    // The relay-wide half of the reply, kept for the comparison below
+    // (the insert moves the per-recipient fields out of `creds`).
+    let relay_said = RelaySaid::of(&creds);
 
     let inserted = ctx
         .db
@@ -196,8 +189,23 @@ pub fn recipient_provision(
     // closed and we leave sbpx_path empty; the box-side creds are still
     // live, so the operator can retry after the box is updated.
     let mut summary: RecipientSummary = row.into();
+    // THE RELAY MAY HAVE MOVED SINCE THE PACK WAS SIGNED. The usual case
+    // is the first recipient on a relay that serves shadowsocks: the
+    // relay made its shadowsocks key just now, the signed pack predates
+    // it, and a file built from that pack would have the route dropped.
+    // So the reply is compared with what the pack commits to and, if
+    // they differ, the pack is signed again first.
+    //
+    // Placed AFTER the roster insert on purpose: the box user and the
+    // row are the durable outcome, and a failure here must not orphan
+    // them. If the re-sign fails the pack is known to be wrong, so no
+    // file is built from it — `sbpx_path` stays empty, which is the
+    // state the existing "Rebuild" affordance repairs.
+    let pack_is_current =
+        crate::relay_identity::heal_after_reply(ctx, operator_id, &relay_said.view(), &mut |_| {})
+            .is_ok();
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
-    if in_sbp_path.exists() {
+    if pack_is_current && in_sbp_path.exists() {
         let out_path = ctx
             .staging_dir
             .join(format!("{operator_id}.{}.sbpx", summary.name));
@@ -325,6 +333,11 @@ pub fn recipient_repack_sbpx(
         )
         .map_err(WizardError::Db)?;
 
+    // Sign again first if the relay is no longer what the pack commits
+    // to (see recipient_provision). The credentials are already stored,
+    // so a failure here loses nothing and can simply be retried.
+    crate::relay_identity::heal_after_reply(ctx, operator_id, &(&creds).into(), &mut |_| {})?;
+
     // Unlike recipient_provision — which swallows a pack failure because
     // the recipient row and box user are the durable outcome — the pack
     // IS the outcome here, so a failure must surface.
@@ -415,6 +428,15 @@ pub fn produce_shared_sbp(
         .map_err(map_bridge_err)?;
     let _ = std::fs::remove_file(&record_path);
 
+    // Sign again first if the relay is no longer what the pack commits
+    // to. This is the path the app's first-run flow takes: the pack was
+    // signed with nobody on the relay, the shared user just minted is
+    // its first recipient, and on a relay that serves shadowsocks that
+    // is the moment its shadowsocks key came into existence. A failure
+    // surfaces — retrying re-mints `r0`, which is what this function
+    // does every time anyway.
+    crate::relay_identity::heal_after_reply(ctx, operator_id, &(&creds).into(), &mut |_| {})?;
+
     // Build the creds JSON the rewrite reads. Box-wide material
     // (reality pubkey, tls pin) falls back to the OperatorRecord when the
     // mgmt response omits it (pre-Tier-2 box); tls_cert_pem comes straight
@@ -431,16 +453,7 @@ pub fn produce_shared_sbp(
         ));
     }
     let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = creds_val.as_object_mut() {
-        let reality_pub = field("reality_public_key");
-        let tls_pin = field("tls_cert_sha256");
-        if !reality_pub.is_empty() {
-            obj.insert("reality_public_key".into(), reality_pub.into());
-        }
-        if !tls_pin.is_empty() {
-            obj.insert("tls_cert_sha256".into(), tls_pin.into());
-        }
-    }
+    fill_box_material_from_record(&mut creds_val, &rec_val);
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
     let record_cover_sni = field("cover_sni");
 
@@ -644,13 +657,12 @@ fn decode_recipient_address(s: &str) -> Result<[u8; 32], WizardError> {
 /// hand the box's response straight to the rewrite, and both have to
 /// apply the same precedence rule, so the rule lives here once.
 ///
-/// PRECEDENCE. The OperatorRecord's `reality_public_key` /
-/// `tls_cert_sha256` win over whatever the mgmt response carried,
-/// because those are read off the box over SSH at provision time and
-/// are present even when the relay runs a mgmt binary too old to echo
-/// them. `cover_sni` goes the other way and is passed as the
-/// **fallback** only — the box's own live value is authoritative,
-/// because `/rotate-tls` can move it after the record was written.
+/// PRECEDENCE. The relay's own reply is authoritative for everything
+/// it states — it is live, and it is what the pack was signed from.
+/// The OperatorRecord's `reality_public_key` / `tls_cert_sha256` (read
+/// off the box over SSH at provision time) and its `cover_sni` are
+/// passed as the **fallback** only, for a relay whose mgmt binary is
+/// too old to echo them. See [`fill_box_material_from_record`].
 pub(crate) fn merge_and_pack_sbpx<C: Serialize>(
     ctx: &WizardCtx,
     operator_id: i64,
@@ -678,16 +690,7 @@ pub(crate) fn merge_and_pack_sbpx<C: Serialize>(
         ));
     }
     let mut creds_val = serde_json::to_value(creds).unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = creds_val.as_object_mut() {
-        let reality_pub = field("reality_public_key");
-        let tls_pin = field("tls_cert_sha256");
-        if !reality_pub.is_empty() {
-            obj.insert("reality_public_key".into(), reality_pub.into());
-        }
-        if !tls_pin.is_empty() {
-            obj.insert("tls_cert_sha256".into(), tls_pin.into());
-        }
-    }
+    fill_box_material_from_record(&mut creds_val, &rec_val);
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
     let record_cover_sni = field("cover_sni");
 
@@ -708,6 +711,69 @@ pub(crate) fn merge_and_pack_sbpx<C: Serialize>(
     let _ = std::fs::remove_file(&creds_path);
     res.map_err(map_bridge_err)?;
     Ok(out_path)
+}
+
+/// The relay-wide fields of a reply, owned, for callers that have to
+/// give the reply's other fields away before they can compare.
+struct RelaySaid {
+    reality_public_key: String,
+    tls_cert_sha256: String,
+    cover_sni: String,
+    ss_password: String,
+    ss_method: String,
+}
+
+impl RelaySaid {
+    fn of(c: &crate::cli_bridge::UserCredsResult) -> Self {
+        Self {
+            reality_public_key: c.reality_public_key.clone(),
+            tls_cert_sha256: c.tls_cert_sha256.clone(),
+            cover_sni: c.cover_sni.clone(),
+            ss_password: c.ss_password.clone(),
+            ss_method: c.ss_method.clone(),
+        }
+    }
+    fn view(&self) -> crate::relay_identity::ReplyMaterial<'_> {
+        crate::relay_identity::ReplyMaterial {
+            reality_public_key: &self.reality_public_key,
+            tls_cert_sha256: &self.tls_cert_sha256,
+            cover_sni: &self.cover_sni,
+            ss_password: &self.ss_password,
+            ss_method: &self.ss_method,
+        }
+    }
+}
+
+/// Complete a relay reply's box-wide material from the stored record —
+/// for the fields the reply left EMPTY, and only those.
+///
+/// This used to go the other way: the record's REALITY key and TLS pin
+/// overwrote whatever the relay had just said, on the reasoning that
+/// the record's values were read over SSH at provision time and so
+/// exist even for a relay too old to echo them. That is still why the
+/// record is consulted at all. But where the relay DOES answer, its
+/// answer is the live one, and it is also what the pack was signed
+/// from (`relay_identity`): letting an older recorded value win would
+/// build an outbound the signed endpoint then refuses.
+fn fill_box_material_from_record(creds: &mut serde_json::Value, record: &serde_json::Value) {
+    let Some(obj) = creds.as_object_mut() else {
+        return;
+    };
+    for key in ["reality_public_key", "tls_cert_sha256"] {
+        let has = obj
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if has {
+            continue;
+        }
+        if let Some(v) = record.get(key).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                obj.insert(key.into(), v.into());
+            }
+        }
+    }
 }
 
 pub(crate) fn write_record_staging(

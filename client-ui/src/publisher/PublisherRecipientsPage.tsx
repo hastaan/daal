@@ -401,6 +401,11 @@ export default function PublisherRecipientsPage({
                     // it names which half was refused — that is the bit a
                     // maintainer needs and the bit a user can forward.
                     setErr(`${t('pub.rotate.too_old')}\n\n${String(e)}`);
+                } else if (code === 'E_RELAY_KEYS_CHANGED') {
+                    // The relay's keys changed without a rebuild, so
+                    // nothing was signed. Said in plain words first; the
+                    // raw tail names which key, for whoever is asked.
+                    setErr(`${t('pub.relay_keys_changed')}\n\n${String(e)}`);
                 } else {
                     setErr(String(e));
                 }
@@ -1363,13 +1368,14 @@ export default function PublisherRecipientsPage({
                             </Button>
                         }
                     />
-                    {/* Wave 3 Step 7 (L2). It is in the danger zone and
-                        not next to the per-recipient re-key because the
-                        two are not neighbours in consequence: this one
-                        invalidates every pack ever distributed, and with
-                        Step 8 unbuilt there is no redistribution path to
-                        soften it. The copy says so rather than implying
-                        a self-healing that does not exist. */}
+                    {/* Wave 3 Step 7 (L2). It is relay-wide, which is
+                        why it sits here and not next to the
+                        per-recipient re-key — but it does NOT invalidate
+                        every file: it costs the one route that carries
+                        the cover host, and the app signs the relay's
+                        file again and publishes the refresh note
+                        itself. The result panel says who, if anyone,
+                        needs a new file. */}
                     <ListRow
                         title={t('pub.danger.rotate_tls.title')}
                         subtitle={t('pub.danger.rotate_tls.body')}
@@ -1955,10 +1961,11 @@ export default function PublisherRecipientsPage({
                                 ? t('pub.danger.rotate_tls.confirm.body_fresh')
                                 : t('pub.danger.rotate_tls.confirm.body')}
                         </div>
-                        {/* Put a number on it. "Every file stops working"
-                            is abstract until it says how many people that
-                            is, and the roster already knows. */}
-                        <div style={{ fontSize: 13, color: 'var(--red)', lineHeight: 1.55 }}>
+                        {/* How many people hold a file — not how many
+                            are about to be cut off, which for most
+                            relays is nobody. Default colour for that
+                            reason. */}
+                        <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
                             {liveRecipientCount === 0
                                 ? t('pub.danger.rotate_tls.confirm.count_none')
                                 : t('pub.danger.rotate_tls.confirm.count').replace(
@@ -2027,19 +2034,58 @@ export default function PublisherRecipientsPage({
                                 )}
                             </div>
                         )}
-                        <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
-                            {mirrorsInPack > 0
-                                ? t('pub.danger.rotate_tls.done.next_fresh')
-                                : t('pub.danger.rotate_tls.done.next')}
+                        {/* WHO NEEDS A NEW FILE — the answer, first.
+                            This panel used to say "every file you have
+                            handed out is dead; rebuild each and deliver
+                            it by hand", whatever the relay. That was
+                            measured to be false: a disguise change costs
+                            the one route that carries the cover host,
+                            and the app now signs the relay's file again
+                            and publishes the note by itself. The backend
+                            decides which of five things is true for
+                            THIS relay; the copy never widens it. */}
+                        <div
+                            style={{
+                                fontSize: 13,
+                                lineHeight: 1.55,
+                                color:
+                                    rotateTlsDone.needs_file === 'everyone'
+                                        ? 'var(--red)'
+                                        : 'var(--fg)',
+                            }}
+                        >
+                            {t(
+                                `pub.danger.rotate_tls.done.verdict.${rotateTlsDone.needs_file}`,
+                            )}
                         </div>
-                        {/* PAST tense, not the confirm sheet's string. By
-                            the time this panel renders the files are
-                            already dead; "a file that will stop working"
-                            reads as though there is still time to act,
-                            and the count_none variant ("right now this
-                            costs you nothing") is worse still as the
-                            outcome of an operation that already ran. */}
-                        <div style={{ fontSize: 13, color: 'var(--red)', lineHeight: 1.55 }}>
+                        {/* The one step the app cannot take: Daal
+                            publishes the note, never the file. */}
+                        {rotateTlsDone.refresh_note_published &&
+                            rotateTlsDone.needs_file !== 'nobody' && (
+                                <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                                    {t('pub.danger.rotate_tls.done.upload')}
+                                    {rotateTlsDone.signed_pack_path && (
+                                        <div style={MONO}>{rotateTlsDone.signed_pack_path}</div>
+                                    )}
+                                </div>
+                            )}
+                        {/* Why the change is NOT reaching people by
+                            itself, when it is not — each with the thing
+                            that fixes it. */}
+                        {(rotateTlsDone.needs_file === 'one_route_until_new_file' ||
+                            rotateTlsDone.needs_file === 'everyone') && (
+                            <div style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.5 }}>
+                                {!rotateTlsDone.pack_resigned
+                                    ? t('pub.danger.rotate_tls.done.why.not_signed')
+                                    : mirrorsInPack > 0 && !rotateTlsDone.refresh_note_published
+                                      ? t('pub.danger.rotate_tls.done.why.note_not_published')
+                                      : t('pub.danger.rotate_tls.done.why.no_refresh_address')}
+                            </div>
+                        )}
+                        {/* A count of who HOLDS a file, in the default
+                            colour: it is not a count of who is cut off,
+                            and red would say that it is. */}
+                        <div style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.5 }}>
                             {rotateTlsDone.live_recipients === 0 &&
                             !rotateTlsDone.shared_pack_stale
                                 ? t('pub.danger.rotate_tls.done.count_none')
@@ -2048,6 +2094,13 @@ export default function PublisherRecipientsPage({
                                       String(rotateTlsDone.live_recipients),
                                   )}
                         </div>
+                        {(rotateTlsDone.live_recipients > 0 ||
+                            rotateTlsDone.shared_pack_stale) &&
+                            rotateTlsDone.needs_file !== 'nobody' && (
+                                <div style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.5 }}>
+                                    {t('pub.danger.rotate_tls.done.local_files')}
+                                </div>
+                            )}
                         <RotationWarnings t={t} warnings={rotateTlsDone.warnings} />
                     </div>
                 </Sheet>

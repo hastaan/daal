@@ -33,6 +33,21 @@ type RunCtx struct {
 	ExplicitFamilies bool
 	Rec              Record // the provisioned relay's OperatorRecord (read-only view)
 	Pack             string // recipient r1's pack, as handed to the insider
+	// PreL2 is set by op l2 for the ops that follow it: r1's file as it
+	// was in the field BEFORE the cover host moved (mirror set in it),
+	// and the cover host of that time. Op l3 uses it for the phone that
+	// sits out BOTH rotations without being handed anything.
+	PreL2 struct{ Pack, CoverSNI string }
+	// FreshAnnounced is every pack id announced on the freshness channel
+	// in this run, oldest first, across ops: the publisher keeps one
+	// history per relay, and a document must name the ids it replaces.
+	FreshAnnounced []string
+	// identity is what the relay last said it is (`relay-identity`),
+	// and signedPending the families the first signature had to leave
+	// without an endpoint because the relay said their key was not made
+	// yet. Both belong to the app's order of operations at mint.
+	identity      RelayIdentityDoc
+	signedPending []string
 }
 
 func cmdRun(args []string) int {
@@ -156,6 +171,7 @@ func cmdRun(args []string) int {
 			return 2
 		}
 	}
+	rawPatience = time.Duration(scn.ProbePatienceMs) * time.Millisecond
 	rc := &RunCtx{Ctx: ctx, P: p, R: res, Scn: scn, Fams: fams, Want: want, Serve: serve, ExplicitFamilies: explicit}
 	t0 := time.Now()
 	fmt.Fprintf(res.human, "worldbox: scenario=%s  under test: %s  relay serves: %s  ops: %s  box artefacts: %s\nworldbox: evidence in %s\n",
@@ -450,18 +466,35 @@ func fileSum(path string) string {
 
 func (rc *RunCtx) mint() bool {
 	r := rc.R
-	// The first recipient is created BEFORE the pack is signed: the
-	// relay's reply carries the relay-wide connection material
-	// (REALITY public key, TLS key pin, shadowsocks server key) that
-	// bind-and-sign commits each route's signed endpoint to. On a VPS
-	// the record already has the first two from provisioning; here it
-	// has neither (no sshd).
-	fmt.Fprintln(r.human, "phase: mint (users-provision → bind-and-sign → users-pack-sbp)")
-	if !rc.provisionRecipient("r1", "mint") {
-		return false
-	}
-	if !rc.Resign("mint") {
-		return false
+	// THE APP'S ORDER OF OPERATIONS. The wizard signs a relay's pack at
+	// its Sign step, BEFORE any recipient exists, and every route in
+	// that pack is committed to a signed endpoint — so the signature
+	// needs the relay's keys with nobody on the relay. The record here
+	// carries none of them (no sshd; the same record the Vultr adapter
+	// writes on a real VPS). The app therefore asks the relay who it is
+	// first, and signs from the answer (FINDINGS F-005).
+	fmt.Fprintln(r.human, "phase: mint (relay-identity → bind-and-sign → users-provision → bind-and-sign again if the relay moved → users-pack-sbp)")
+	if rc.askRelay("mint", "before-first-recipient") {
+		if !rc.signBeforeAnyRecipient("mint") {
+			return false
+		}
+		if !rc.provisionRecipient("r1", "mint") {
+			return false
+		}
+		if !rc.resignIfRelayMoved("mint", "r1") {
+			return false
+		}
+	} else {
+		// A relay too old to state its identity. The app's fallback for
+		// a record with no keys is to add a recipient and read the
+		// relay's keys off the reply; the CLI spelling of that is
+		// --endpoint-creds.
+		if !rc.provisionRecipient("r1", "mint") {
+			return false
+		}
+		if !rc.Resign("mint") {
+			return false
+		}
 	}
 	pack, _ := rc.packRecipient("r1", "mint")
 	rc.Pack = pack
@@ -473,6 +506,136 @@ func (rc *RunCtx) mint() bool {
 	}
 	rc.MgmtWindowClosed("mint")
 	return pack != ""
+}
+
+// askRelay runs `relay-identity` and reports whether the relay stated
+// its identity. A relay that cannot say (exit 3) does not stop the
+// world — the older order of operations is used, as the app does — and
+// is recorded as what it is.
+func (rc *RunCtx) askRelay(phase, when string) bool {
+	t0 := time.Now()
+	v, doc := rc.Pub.RelayIdentity(rc.Ctx)
+	rc.identity = doc
+	// Every relay must answer. A relay that cannot say (exit 3: its
+	// management service predates the route) is still told apart from
+	// one that failed — the app falls back on the first, and must not
+	// guess about the second — but it is a red check either way: on the
+	// box built from the pinned release it is FINDINGS F-005's
+	// released-relay half, excused in known-findings.json until the pin
+	// moves, and "did not reproduce" from that day on.
+	want, gotV := "stated", "failed"
+	switch {
+	case v.OK():
+		gotV = "stated"
+	case v.RC == exitRelayCannotSay:
+		gotV = "cannot-say"
+	}
+	rc.R.Add("", phase, "verb.relay-identity."+when, want, gotV, v.Tail(),
+		map[string]any{"rc": v.RC, "pending_families": doc.PendingFamilies}, t0)
+	return v.OK()
+}
+
+// signBeforeAnyRecipient is the app's Sign step: bind-and-sign with the
+// relay's identity and NO recipient on the relay.
+//
+// One kind of route may legitimately be left without an endpoint here:
+// a family whose key the relay has not made yet and SAID so
+// (`pending_families` — shadowsocks, whose key is minted with the first
+// recipient). Anything else uncommitted is a route the relay served and
+// the signer could not commit, which is the defect this order of
+// operations is here to catch.
+func (rc *RunCtx) signBeforeAnyRecipient(phase string) bool {
+	t0 := time.Now()
+	v := rc.Pub.BindAndSign(rc.Ctx, "base.sbp")
+	var ans struct {
+		Uncommitted []string `json:"uncommitted_families"`
+	}
+	_ = json.Unmarshal([]byte(v.Stdout), &ans)
+	ev := map[string]any{"uncommitted_families": ans.Uncommitted, "pending_families": rc.identity.PendingFamilies,
+		"record_has_reality_key": rc.Rec.RealityPublicKey != ""}
+	if !rc.R.Add("", phase, "verb.bind-and-sign.before-first-recipient", Pass, got(v.OK(), Pass, Fail), v.Tail(), ev, t0) {
+		return false
+	}
+	pending := map[string]bool{}
+	for _, f := range rc.identity.PendingFamilies {
+		pending[f] = true
+	}
+	var unexplained []string
+	for _, f := range ans.Uncommitted {
+		if !pending[f] {
+			unexplained = append(unexplained, f)
+		}
+	}
+	rc.R.Add("", phase, "bind-and-sign.before-first-recipient.only_pending_families_uncommitted", Pass,
+		got(len(unexplained) == 0, Pass, Fail),
+		got(len(unexplained) == 0, "", "signed without an endpoint, and the relay did not say it was pending: "+strings.Join(unexplained, ", ")),
+		ev, t0)
+	rc.signedPending = ans.Uncommitted
+	return true
+}
+
+// resignIfRelayMoved does what the app does with every reply the relay
+// gives: compare the relay it describes with what the signed pack
+// commits to, and sign again — from a fresh identity — when they
+// differ. On a relay that serves shadowsocks the first recipient is
+// exactly that case: its key did not exist when the pack was signed.
+func (rc *RunCtx) resignIfRelayMoved(phase, recipient string) bool {
+	t0 := time.Now()
+	moved := rc.replyDisagreesWithSignedPack("creds-" + recipient + ".json")
+	// What MUST have happened: a family signed as pending has its key
+	// now, so the pack has to be signed again; with nothing pending the
+	// relay is unchanged and a second signature would be churn.
+	want := "not-needed"
+	if len(rc.signedPending) > 0 {
+		want = "signed-again"
+	}
+	gotV := "not-needed"
+	if len(moved) > 0 {
+		gotV = "signed-again"
+	}
+	rc.R.Add("", phase, "resign.after-first-recipient", want, gotV,
+		got(want == gotV, "", "the reply disagreed with the signed pack on: "+strings.Join(moved, ", ")),
+		map[string]any{"moved": moved, "signed_pending": rc.signedPending}, t0)
+	if len(moved) == 0 {
+		return true
+	}
+	return rc.Resign(phase)
+}
+
+// replyDisagreesWithSignedPack lists the relay-wide fields of a
+// users-provision reply that are not what the signed pack commits to.
+func (rc *RunCtx) replyDisagreesWithSignedPack(credsFile string) []string {
+	body, err := os.ReadFile(rc.Pub.Path(credsFile))
+	if err != nil {
+		return nil
+	}
+	var reply struct {
+		RealityPublicKey string `json:"reality_public_key"`
+		TLSCertSHA256    string `json:"tls_cert_sha256"`
+		CoverSNI         string `json:"cover_sni"`
+		SSPassword       string `json:"ss_password"`
+	}
+	if json.Unmarshal(body, &reply) != nil {
+		return nil
+	}
+	c := rc.Pub.Committed
+	var moved []string
+	differs := func(said, signed string) bool { return said != "" && said != signed }
+	if differs(reply.RealityPublicKey, c.RealityPublicKey) {
+		moved = append(moved, "reality_public_key")
+	} else if c.RealityPublicKey != "" && differs(reply.CoverSNI, c.CoverSNI) {
+		moved = append(moved, "cover_sni")
+	}
+	if differs(reply.TLSCertSHA256, c.TLSCertSHA256) {
+		moved = append(moved, "tls_cert_sha256")
+	}
+	if key, _, ok := strings.Cut(reply.SSPassword, ":"); ok && key != "" {
+		sum := sha256.Sum256([]byte("daal/ss-server-key/v1\x00" + key))
+		if hex.EncodeToString(sum[:]) != c.SSServerKeySHA256 {
+			moved = append(moved, "ss_server_key")
+		}
+	}
+	return moved
 }
 
 // relayListens checks, per served family, that something in the relay
@@ -513,7 +676,14 @@ func (rc *RunCtx) MintRecipient(name, phase string) (string, bool) {
 // replaces base.sbp. Called at mint and after every rotation that moves
 // something the signed endpoints name (L2: the cover host; L3: the
 // address) — the app re-signs after a rotation for the same reason.
+//
+// The app asks the relay who it is before it signs, so this does too —
+// on a relay that can answer. After an L2 that is where the new cover
+// host comes from.
 func (rc *RunCtx) Resign(phase string) bool {
+	if rc.Pub.identityFile != "" {
+		rc.askRelay(phase, "before-resign")
+	}
 	t0 := time.Now()
 	v := rc.Pub.BindAndSign(rc.Ctx, "base.sbp")
 	var ans struct {
@@ -663,7 +833,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
 		return Fail, false
 	}
-	ev, err := c.Wait(rc.Ctx, 20*time.Second, "connected")
+	ev, err := c.Wait(rc.Ctx, EngineConnectWait, "connected")
 	if err != nil && rc.engineDied(f, phase, c, retry, t0) {
 		return Fail, true
 	}
@@ -690,7 +860,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 				r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
 				return Fail, false
 			}
-			ev, err = c.Wait(rc.Ctx, 20*time.Second, "connected")
+			ev, err = c.Wait(rc.Ctx, EngineConnectWait, "connected")
 			if err != nil && rc.engineDied(f, phase, c, retry, t0) {
 				return Fail, true
 			}
@@ -726,7 +896,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 			// was fetched, and a completed TCP handshake before the
 			// reset must not read as the family having carried anything.
 			wire, werr := WireReset(rc.Ctx)
-			rc.wireCheck(f, phase, expect, wire, werr, ProbeBlobBytes, t0)
+			rc.wireCheck(f, phase, expect, wire, werr, ProbeBlobBytes, false, t0)
 		}
 		rc.established(f, phase, expect, nil, ProbeResult{}, "the engine did not connect: "+err.Error(), false, t0)
 		rc.EngineCategory(f, phase, c, nil)
@@ -774,7 +944,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 	if !pr.OK {
 		wantDown = ProbeBlobBytes
 	}
-	rc.wireCheck(f, phase, expect, wire, werr, wantDown, t0)
+	rc.wireCheck(f, phase, expect, wire, werr, wantDown, pr.OK, t0)
 	if rc.established(f, phase, expect, c, pr, "", retry, t0) && rc.engineDied(f, phase, c, retry, t0) {
 		return Fail, true
 	}

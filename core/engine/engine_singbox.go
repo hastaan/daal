@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/include"
 	boxoption "github.com/sagernet/sing-box/option"
 	singjson "github.com/sagernet/sing/common/json"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 )
 
@@ -60,6 +61,9 @@ type singBox struct {
 	platform *androidPlatform
 	// kind describes the active outbound of `instance` (proof_singbox.go).
 	kind outboundKind
+	// twin opens a second outbound like the active one for one
+	// diagnostic attempt (proof_singbox.go, proofSubject.diagnose).
+	twin func() (N.Dialer, func(), error)
 	// cancel ends the context `instance` was built on. Close alone does
 	// not interrupt a dial that is already waiting on a dead address —
 	// sing-box lets it run out its own 5 s connect timeout, and Close
@@ -119,7 +123,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		// still live here. Tear it down and start the new one rather
 		// than failing "already started" (which left the switch dead).
 		closeInstance(s.instance, s.cancel)
-		s.instance, s.cancel = nil, nil
+		s.instance, s.cancel, s.twin = nil, nil, nil
 		s.Stub.mu.Lock()
 		s.Stub.connected = false
 		s.Stub.mu.Unlock()
@@ -263,6 +267,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	s.instance, s.cancel, started = inst, cancel, true
 	s.kind = kindOfActive(raw)
+	s.twin = makeTwin(bctx, inst, options.Outbounds)
 
 	// The instance is up, which means sing-box has bound every inbound
 	// in the config — including the loopback SOCKS5 refresh inlet. Only
@@ -293,7 +298,7 @@ func closeInstance(inst *box.Box, cancel context.CancelFunc) error {
 func (s *singBox) Stop() error {
 	s.mu.Lock()
 	inst, cancel := s.instance, s.cancel
-	s.instance, s.cancel = nil, nil
+	s.instance, s.cancel, s.twin = nil, nil, nil
 	s.mu.Unlock()
 	// Unconditionally — even on the no-instance path — so a stop can
 	// never leave a live inlet record behind a dead listener.

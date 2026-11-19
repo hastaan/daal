@@ -3,10 +3,19 @@
 //
 // It listens on 0.0.0.0:9876 and serves a single route:
 //
-//	GET /healthz/<one_time_token>
+//	GET /healthz/<path token>
 //
-// where <one_time_token> is the value cloud-init wrote to
-// /etc/daal/health-token at boot. Anything else returns 404.
+// where <path token> is DERIVED from the one-time secret cloud-init
+// wrote into this service's config (health.PathToken). The secret
+// itself is never accepted in a URL and never sent: the publisher that
+// put it in the user-data holds the other copy. Anything else returns
+// 404.
+//
+// The reply is plain HTTP, and it is where the publisher learns the
+// management-plane TLS fingerprint it pins for the life of the relay.
+// The handler therefore returns that fingerprint with a MAC under the
+// same secret (health.FingerprintMAC); a publisher refuses one without
+// it. See publisher/deploy/health/bootstrap.go.
 //
 // During the 60-second provisioning window the box's ufw rules
 // allow only the Helper's IP through; once the window closes

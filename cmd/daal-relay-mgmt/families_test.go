@@ -50,6 +50,7 @@ func familyServer(t *testing.T, declared bool, families ...string) (*server, ed2
 		t.Fatal(err)
 	}
 	srv := newServer(pub, configPath)
+	srv.audience = testAudience
 	srv.familiesPath = filepath.Join(tmp, "families")
 	if declared {
 		if err := os.WriteFile(srv.familiesPath, []byte(strings.Join(families, "\n")+"\n"), 0o644); err != nil {

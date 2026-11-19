@@ -80,5 +80,20 @@
         "detail_contains": "net_error -107"
       }
     ]
+  },
+  {
+    "id": "F-005",
+    "severity": "high",
+    "title": "the pinned daal-relay-mgmt release predates GET /identity: a relay built from it cannot say who it is, so the app signs on its fallback (fixed in the tree daemon; rides the re-release)",
+    "when": {
+      "box": "pinned"
+    },
+    "match": [
+      {
+        "phase": "*",
+        "check": "verb.relay-identity.*",
+        "got": "cannot-say"
+      }
+    ]
   }
 ]

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +65,7 @@ func newTestServer(t *testing.T) (*server, ed25519.PublicKey, ed25519.PrivateKey
 		t.Fatal(err)
 	}
 	srv := newServer(pub, configPath)
+	srv.audience = testAudience
 	srv.singboxControl = func(action string) error { return nil } // no-op
 	srv.singboxCheck = func(string) error { return nil }          // no sing-box binary in unit tests
 	srv.realityPubPath = filepath.Join(tmp, "reality.pub")
@@ -70,6 +74,11 @@ func newTestServer(t *testing.T) (*server, ed25519.PublicKey, ed25519.PrivateKey
 	srv.now = func() time.Time { return time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC) }
 	return srv, pub, priv, configPath
 }
+
+// testAudience is the name every test relay answers to (server.audience:
+// on a real relay, the SHA-256 of its management certificate), and the
+// one mintToken signs for. testServerAudience gives it to a server.
+const testAudience = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
 
 // mintCounter keeps test nonces unique across the whole package.
 var mintCounter atomic.Int64
@@ -85,13 +94,29 @@ var mintCounter atomic.Int64
 // actually carries; a fixture that reuses one is the thing that was
 // wrong. Tests that want to prove the replay refusal mint once and send
 // the same string twice — see TestAddressTokenIsSingleUse.
-func mintToken(priv ed25519.PrivateKey, op string, ts int64) string {
+//
+// A token is for ONE request (v2: the signature covers the method, the
+// path and the body's digest — tokenSigningInput), so minting takes the
+// request it will ride on.
+func mintToken(priv ed25519.PrivateKey, op, method, path string, body []byte, ts int64) string {
 	nonce := fmt.Sprintf("test-nonce-%d", mintCounter.Add(1))
 	tsStr := fmt.Sprintf("%d", ts)
-	msg := []byte(nonce + ":" + tsStr + ":" + op)
-	sig := ed25519.Sign(priv, msg)
-	sigB64 := base64.StdEncoding.EncodeToString(sig)
-	return nonce + ":" + tsStr + ":" + op + ":" + sigB64
+	sig := ed25519.Sign(priv, tokenSigningInput(testAudience, nonce, tsStr, op, method, path, sha256.Sum256(body)))
+	return "v2:" + nonce + ":" + tsStr + ":" + op + ":" + base64.StdEncoding.EncodeToString(sig)
+}
+
+// signReq authorises req the way the publisher's client does: it signs
+// the request AS IT WILL BE SENT — its method, its path, its body — for
+// op, and sets the Authorization header. The body is read and put back.
+func signReq(req *http.Request, priv ed25519.PrivateKey, op string, ts int64) {
+	var body []byte
+	if req.Body != nil {
+		body, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	}
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, op, req.Method, req.URL.Path, body, ts))
 }
 
 // --- tests ---
@@ -116,6 +141,7 @@ func TestExactlyNRoutes(t *testing.T) {
 		"/whoami",
 		"/bind-address",
 		"/unbind-address",
+		"/identity",
 	}
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
@@ -182,10 +208,9 @@ func TestRotateCreds_RejectsWrongPubkey(t *testing.T) {
 
 	// Sign with a different key than the server expects.
 	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
-	tok := mintToken(otherPriv, "rotate-credentials", srv.now().Unix())
 
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-credentials", nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, otherPriv, "rotate-credentials", srv.now().Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -203,10 +228,9 @@ func TestRotateCreds_RejectsExpiredTimestamp(t *testing.T) {
 
 	// Mint a token with timestamp 1 hour in the past.
 	old := srv.now().Add(-1 * time.Hour).Unix()
-	tok := mintToken(priv, "rotate-credentials", old)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-credentials", nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-credentials", old)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -348,13 +372,12 @@ func TestRotateCreds_RejectsUnloadableConfig(t *testing.T) {
 // and decodes the body on success.
 func rotateCreds(t *testing.T, ts *httptest.Server, priv ed25519.PrivateKey, body string, wantStatus int) rotateCredentialsResp {
 	t.Helper()
-	tok := mintToken(priv, "rotate-credentials", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Unix())
 	var rdr io.Reader
 	if body != "" {
 		rdr = strings.NewReader(body)
 	}
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-credentials", rdr)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-credentials", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Unix())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -393,10 +416,9 @@ func TestRotateTLS_RewritesConfig(t *testing.T) {
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	tok := mintToken(priv, "rotate-tls", srv.now().Unix())
 	body, _ := json.Marshal(rotateTLSReq{NewSNI: "example.com", NewDests: []string{"example.com:443"}, NewWSPath: "/r/abcdef"})
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-tls", srv.now().Unix())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -486,10 +508,9 @@ func TestRotateTLS_UpdatesTheDeclaredCoverSNIFile(t *testing.T) {
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	tok := mintToken(priv, "rotate-tls", srv.now().Unix())
 	body, _ := json.Marshal(rotateTLSReq{NewSNI: "mirror.init7.net", NewDests: []string{"mirror.init7.net:443"}})
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-tls", srv.now().Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -522,10 +543,9 @@ func TestRotateTLS_RejectsUnloadableConfig(t *testing.T) {
 	ts := httptest.NewServer(srv.routes())
 	defer ts.Close()
 
-	tok := mintToken(priv, "rotate-tls", srv.now().Unix())
 	body, _ := json.Marshal(rotateTLSReq{NewSNI: "example.com", NewDests: []string{"example.com:443"}})
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-tls", srv.now().Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -682,9 +702,8 @@ func TestRotateTLS_EmptyBodyWithNothingToRotateIsRefused(t *testing.T) {
 // decodes the body on success.
 func rotateTLS(t *testing.T, ts *httptest.Server, priv ed25519.PrivateKey, body string, wantStatus int) rotateTLSResp {
 	t.Helper()
-	tok := mintToken(priv, "rotate-tls", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Unix())
 	req, _ := http.NewRequest("POST", ts.URL+"/rotate-tls", strings.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "rotate-tls", time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Unix())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -759,8 +778,8 @@ func TestReadPort_FromFileOrEnv(t *testing.T) {
 // op and presenting on another endpoint is rejected.
 func TestVerifyToken_OpMustMatchEndpoint(t *testing.T) {
 	srv, _, priv, _ := newTestServer(t)
-	tok := mintToken(priv, "rotate-credentials", srv.now().Unix())
-	if err := srv.verifyToken(tok, "rotate-tls"); err == nil {
+	tok := mintToken(priv, "rotate-credentials", "POST", "/rotate-tls", nil, srv.now().Unix())
+	if err := srv.verifyToken(tok, "rotate-tls", "POST", "/rotate-tls", sha256.Sum256(nil)); err == nil {
 		t.Errorf("expected mismatch error; op-bound token must not work cross-endpoint")
 	}
 }
@@ -772,7 +791,7 @@ func TestVerifyToken_OpMustMatchEndpoint(t *testing.T) {
 func whoamiGet(t *testing.T, url string, priv ed25519.PrivateKey, ts int64) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest("GET", url+"/whoami", nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "whoami", ts))
+	signReq(req, priv, "whoami", ts)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -840,7 +859,7 @@ func TestWhoAmI_RejectsCrossOpToken(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest("GET", ts.URL+"/whoami", nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "users-list", srv.now().Unix()))
+	signReq(req, priv, "users-list", srv.now().Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -899,7 +918,7 @@ func TestWhoAmI_IgnoresForwardedHeaders(t *testing.T) {
 		{"X-Client-IP", "2001:db8::dead"},
 	}
 	req, _ := http.NewRequest("GET", ts.URL+"/whoami", nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "whoami", srv.now().Unix()))
+	signReq(req, priv, "whoami", srv.now().Unix())
 	for _, h := range spoofed {
 		req.Header.Set(h.header, h.value)
 	}
@@ -946,7 +965,7 @@ func TestWhoAmI_MethodGate(t *testing.T) {
 			defer ts.Close()
 
 			req, _ := http.NewRequest(tc.method, ts.URL+"/whoami", nil)
-			req.Header.Set("Authorization", "Daal-Mgmt-Token "+mintToken(priv, "whoami", srv.now().Unix()))
+			signReq(req, priv, "whoami", srv.now().Unix())
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -1074,16 +1093,14 @@ func TestHealthCapabilityConstantsMatchTheWire(t *testing.T) {
 	}
 }
 
-// TestMutatingTokensAreSingleUse: the token signs nonce:ts:op and NOT
-// the body, so a token that can be presented twice authorises a second
-// call with a different body. For /users/revoke that is "revoke somebody
-// else"; for /rotate-credentials, "rotate somebody else"; for
-// /rotate-tls, "move the cover host again". The one-machine end-to-end
-// rig did exactly that against a running relay (its finding LC-1).
-//
-// The replay that matters is never a repeat of the same request, so
-// each case re-presents the token with a DIFFERENT body and asserts both
-// the 401 and that the second body had no effect.
+// TestMutatingTokensAreSingleUse: a token for a mutating verb is
+// honoured once. Since the v2 token format the signature covers the
+// body, so the only thing a second presentation could do is repeat the
+// SAME request — and for /rotate-credentials a repeat is a second
+// outage for that recipient (their re-delivered file dies again). The
+// in-memory nonce set refuses it. (Before v2 this set was the only
+// thing between a captured token and a different body; that half is now
+// TestTokenIsBoundToTheRequest, which holds across a restart.)
 func TestMutatingTokensAreSingleUse(t *testing.T) {
 	srv, _, priv, configPath := newTestServer(t)
 	call := func(method, path, tok, body string) int {
@@ -1093,95 +1110,447 @@ func TestMutatingTokensAreSingleUse(t *testing.T) {
 		srv.routes().ServeHTTP(rec, req)
 		return rec.Code
 	}
-	fresh := func(op string) string { return mintToken(priv, op, srv.now().Unix()) }
-	hasUser := func(name string) bool {
+	fresh := func(op, method, path, body string) string {
+		return mintToken(priv, op, method, path, []byte(body), srv.now().Unix())
+	}
+	config := func() string {
 		body, err := os.ReadFile(configPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return strings.Contains(string(body), `"name": "`+name+`"`) || strings.Contains(string(body), `"name":"`+name+`"`)
+		return string(body)
 	}
 
-	// The fixture already carries r1 and r2.
-	if !hasUser("r1") || !hasUser("r2") {
-		t.Fatal("fixture: r1 and r2 should both be on the box")
-	}
-
-	// users-provision: one token, two names.
-	tok := fresh("users-provision")
-	if code := call("POST", "/users/provision", tok, `{"name":"r3"}`); code != 200 {
-		t.Fatalf("provision r3 = %d, want 200", code)
-	}
-	if code := call("POST", "/users/provision", tok, `{"name":"r4"}`); code != 401 {
-		t.Fatalf("replayed users-provision token = %d, want 401", code)
-	}
-	if hasUser("r4") {
-		t.Error("a replayed users-provision token created a second recipient")
-	}
-
-	// users-revoke: one token, two victims.
-	tok = fresh("users-revoke")
-	if code := call("POST", "/users/revoke", tok, `{"name":"r1"}`); code != 200 {
-		t.Fatalf("revoke r1 = %d, want 200", code)
-	}
-	if code := call("POST", "/users/revoke", tok, `{"name":"r2"}`); code != 401 {
-		t.Fatalf("replayed users-revoke token = %d, want 401", code)
-	}
-	if !hasUser("r2") {
-		t.Error("a replayed users-revoke token revoked a recipient the publisher never named")
-	}
-
-	// rotate-credentials: one token, two recipients.
-	before, _ := os.ReadFile(configPath)
-	tok = fresh("rotate-credentials")
-	if code := call("POST", "/rotate-credentials", tok, `{"name":"r2"}`); code != 200 {
-		t.Fatalf("rotate r2 = %d, want 200", code)
-	}
-	mid, _ := os.ReadFile(configPath)
-	if string(before) == string(mid) {
-		t.Fatal("fixture: the first rotation should have rewritten the config")
-	}
-	if code := call("POST", "/rotate-credentials", tok, `{"name":"r3"}`); code != 401 {
-		t.Fatalf("replayed rotate-credentials token = %d, want 401", code)
-	}
-	if after, _ := os.ReadFile(configPath); string(after) != string(mid) {
-		t.Error("a replayed rotate-credentials token rotated a second recipient")
-	}
-
-	// rotate-tls: one token, two moves.
-	tok = fresh("rotate-tls")
-	//
-	// The first move must really land, or "the config did not change on
-	// the replay" below is true of a box that never moves at all.
-	before, _ = os.ReadFile(configPath)
-	if code := call("POST", "/rotate-tls", tok, `{"new_sni":"mirror.example.net"}`); code != 200 {
-		t.Fatalf("rotate-tls to mirror.example.net = %d, want 200", code)
-	}
-	mid, _ = os.ReadFile(configPath)
-	if string(before) == string(mid) || !strings.Contains(string(mid), "mirror.example.net") {
-		t.Fatal("fixture: the first rotate-tls should have moved the cover host in the config")
-	}
-	if code := call("POST", "/rotate-tls", tok, `{"new_sni":"other.example.net"}`); code != 401 {
-		t.Fatalf("replayed rotate-tls token = %d, want 401", code)
-	}
-	after, _ := os.ReadFile(configPath)
-	if string(after) != string(mid) || strings.Contains(string(after), "other.example.net") {
-		t.Error("a replayed rotate-tls token moved the cover host again")
+	for _, c := range []struct{ op, path, body string }{
+		{"users-provision", "/users/provision", `{"name":"r3"}`},
+		{"rotate-credentials", "/rotate-credentials", `{"name":"r2"}`},
+		{"rotate-tls", "/rotate-tls", `{"new_sni":"mirror.example.net"}`},
+		{"users-revoke", "/users/revoke", `{"name":"r1"}`},
+	} {
+		before := config()
+		tok := fresh(c.op, "POST", c.path, c.body)
+		if code := call("POST", c.path, tok, c.body); code != 200 {
+			t.Fatalf("%s first use = %d, want 200", c.op, code)
+		}
+		mid := config()
+		if mid == before {
+			t.Fatalf("fixture: the first %s should have rewritten the config", c.op)
+		}
+		if code := call("POST", c.path, tok, c.body); code != 401 {
+			t.Fatalf("%s: the same token presented a second time = %d, want 401", c.op, code)
+		}
+		if config() != mid {
+			t.Errorf("%s: a replayed token was applied a second time", c.op)
+		}
 	}
 
 	// A token refused for a bad signature must NOT burn anything: the
 	// nonce set only ever holds tokens that verified.
-	if code := call("POST", "/users/revoke", "n:1:users-revoke:AAAA", `{"name":"r2"}`); code != 401 {
+	if code := call("POST", "/users/revoke", "v2:n:1:users-revoke:AAAA", `{"name":"r2"}`); code != 401 {
 		t.Fatalf("garbage token = %d, want 401", code)
+	}
+	if n := len(srv.seenAddrNonces); n != 4 {
+		t.Errorf("nonce set holds %d entries, want exactly the 4 tokens that verified", n)
 	}
 
 	// The read-only verb stays replayable: a GET may be re-sent by the
 	// transport with the same token, and refusing that would turn a
 	// connection hiccup into a failed operation.
-	tok = fresh("users-list")
+	tok := fresh("users-list", "GET", "/users/list", "")
 	for i := 0; i < 2; i++ {
 		if code := call("GET", "/users/list", tok, ""); code != 200 {
 			t.Fatalf("users-list use %d = %d, want 200 (GET tokens are deliberately replayable)", i+1, code)
 		}
+	}
+}
+
+// TestTokenIsBoundToTheRequest: a token authorises ONE request — this
+// method, this path, these body bytes — and nothing this process
+// remembers is needed to hold that.
+//
+// The v1 token signed "nonce:ts:op" only. A captured users-revoke token
+// could be re-presented naming another recipient, and the single-use
+// nonce set that refused it lives in memory: restart daal-relay-mgmt
+// inside the 300 s window and it was honoured (the end-to-end rig's
+// finding LC-1, residual). Each case below presents a valid token with
+// a DIFFERENT body, both never-used and after-a-restart, and asserts
+// the 401 and that nothing changed.
+func TestTokenIsBoundToTheRequest(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	call := func(method, path, tok, body string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	config := func() string {
+		body, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	// What a restart does to single use: the nonce set is gone.
+	restart := func() {
+		srv.nonceMu.Lock()
+		srv.seenAddrNonces = nil
+		srv.nonceMu.Unlock()
+	}
+
+	for _, c := range []struct{ op, path, signed, other string }{
+		{"users-revoke", "/users/revoke", `{"name":"r1"}`, `{"name":"r2"}`},
+		{"rotate-credentials", "/rotate-credentials", `{"name":"r2"}`, `{"name":"r1"}`},
+		{"users-provision", "/users/provision", `{"name":"r3"}`, `{"name":"r4"}`},
+		{"rotate-tls", "/rotate-tls", `{"new_sni":"mirror.example.net"}`, `{"new_sni":"other.example.net"}`},
+	} {
+		// 1. A token nobody has presented yet, with another body.
+		before := config()
+		tok := mintToken(priv, c.op, "POST", c.path, []byte(c.signed), srv.now().Unix())
+		if code := call("POST", c.path, tok, c.other); code != 401 {
+			t.Fatalf("%s: a token signed for %s was honoured with %s (%d)", c.op, c.signed, c.other, code)
+		}
+		if config() != before {
+			t.Fatalf("%s: a body the publisher did not sign changed the relay", c.op)
+		}
+		// A refused presentation spent nothing: the request it WAS
+		// signed for still goes through.
+		if code := call("POST", c.path, tok, c.signed); code != 200 {
+			t.Fatalf("%s: the signed request = %d, want 200", c.op, code)
+		}
+		// 2. The captured, used token after a restart, with another body.
+		mid := config()
+		restart()
+		if code := call("POST", c.path, tok, c.other); code != 401 {
+			t.Fatalf("%s: after a restart a used token was honoured with another body (%d)", c.op, code)
+		}
+		if config() != mid {
+			t.Fatalf("%s: after a restart a replayed token changed the relay", c.op)
+		}
+	}
+
+	// The method and the path are under the signature too.
+	body := `{"name":"r2"}`
+	tok := mintToken(priv, "users-revoke", "POST", "/users/revoke", []byte(body), srv.now().Unix())
+	if code := call("PUT", "/users/revoke", tok, body); code != 401 {
+		t.Errorf("a POST token presented as PUT = %d, want 401", code)
+	}
+	tok = mintToken(priv, "whoami", "GET", "/whoami", nil, srv.now().Unix())
+	if code := call("POST", "/whoami", tok, ""); code != 401 {
+		t.Errorf("a GET /whoami token presented as POST = %d, want 401", code)
+	}
+	if code := call("GET", "/whoami", tok, ""); code != 200 {
+		t.Errorf("the GET it was signed for = %d, want 200", code)
+	}
+	// One op, signed for another route's path: the op check passes for
+	// neither route.
+	tok = mintToken(priv, "users-revoke", "POST", "/rotate-credentials", []byte(body), srv.now().Unix())
+	for _, path := range []string{"/users/revoke", "/rotate-credentials"} {
+		if code := call("POST", path, tok, body); code != 401 {
+			t.Errorf("a users-revoke token signed for /rotate-credentials, sent to %s = %d, want 401", path, code)
+		}
+	}
+}
+
+// TestV1TokenIsRefused: the format that did not sign the request is not
+// accepted from anybody — a correctly signed v1 token, from the right
+// key, inside the window, is a 401.
+func TestV1TokenIsRefused(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	before, _ := os.ReadFile(configPath)
+	ts := fmt.Sprintf("%d", srv.now().Unix())
+	msg := "abcdef0123456789:" + ts + ":users-revoke"
+	v1 := msg + ":" + base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(msg)))
+	req := httptest.NewRequest("POST", "/users/revoke", strings.NewReader(`{"name":"r1"}`))
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+v1)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("a v1 token = %d, want 401", rec.Code)
+	}
+	if after, _ := os.ReadFile(configPath); string(after) != string(before) {
+		t.Error("a v1 token changed the relay")
+	}
+	// Nor with the version word bolted on: the signature is over the
+	// wrong bytes.
+	req = httptest.NewRequest("POST", "/users/revoke", strings.NewReader(`{"name":"r1"}`))
+	req.Header.Set("Authorization", "Daal-Mgmt-Token v2:"+v1)
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("a v1 signature in a v2 envelope = %d, want 401", rec.Code)
+	}
+}
+
+// TestQueryStringIsRefused: the token signs the path and nothing after
+// it, so a query string would be the one part of a request the
+// publisher never signed. No route takes one; a request carrying one is
+// refused before the token is looked at, correct token or not, and the
+// refusal spends nothing.
+func TestQueryStringIsRefused(t *testing.T) {
+	srv, _, priv, configPath := newTestServer(t)
+	before, _ := os.ReadFile(configPath)
+	ran := false
+	guarded := srv.requireAuth(func(http.ResponseWriter, *http.Request) { ran = true })
+	call := func(method, target, tok, body string) int {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	tok := mintToken(priv, "users-list", "GET", "/users/list", nil, srv.now().Unix())
+	for _, target := range []string{
+		"/users/list?anything=1",
+		"/users/list?name=r1&name=r2",
+		"/users/list?", // a bare "?" is still not the request that was signed
+	} {
+		if code := call("GET", target, tok, ""); code != 400 {
+			t.Errorf("GET %s with a token for /users/list = %d, want 400", target, code)
+		}
+		// The wrapper itself refuses, whatever it wraps.
+		req := httptest.NewRequest("GET", target, nil)
+		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		rec := httptest.NewRecorder()
+		guarded(rec, req)
+		if rec.Code != 400 || ran {
+			t.Errorf("requireAuth on %s = %d (handler ran: %v), want 400 and no handler", target, rec.Code, ran)
+		}
+	}
+	if code := call("GET", "/users/list", tok, ""); code != 200 {
+		t.Errorf("the request the token was signed for = %d, want 200", code)
+	}
+	// A mutating verb: refused, nothing changed, and the token is not
+	// spent - the signed request still goes through once.
+	body := `{"name":"r1"}`
+	tok = mintToken(priv, "users-revoke", "POST", "/users/revoke", []byte(body), srv.now().Unix())
+	if code := call("POST", "/users/revoke?name=r2", tok, body); code != 400 {
+		t.Errorf("POST /users/revoke?name=r2 = %d, want 400", code)
+	}
+	if after, _ := os.ReadFile(configPath); string(after) != string(before) {
+		t.Error("a request with a query string changed the relay")
+	}
+	if code := call("POST", "/users/revoke", tok, body); code != 200 {
+		t.Errorf("the signed revoke after a refused query-string presentation = %d, want 200", code)
+	}
+}
+
+// TestTokenFieldChecksHold pins the three checks verifyToken makes on a
+// token's fields before it looks at the signature. In each row the
+// SIGNATURE IS VALID - made by the publisher's key over exactly the
+// bytes this relay would rebuild - so the only thing that can refuse
+// the token is the field check itself. (None of them is the last line
+// of defence: the context line is under the signature and all three
+// need the publisher's key. They are pinned because the code states
+// them as checks.)
+func TestTokenFieldChecksHold(t *testing.T) {
+	srv, _, priv, _ := newTestServer(t)
+	ts := fmt.Sprintf("%d", srv.now().Unix())
+	// sign builds a token whose signature is over what the relay will
+	// verify for (nonce, op, GET path, empty body), under any label.
+	sign := func(label, nonce, op, path string) string {
+		sig := ed25519.Sign(priv, tokenSigningInput(testAudience, nonce, ts, op, "GET", path, sha256.Sum256(nil)))
+		return label + ":" + nonce + ":" + ts + ":" + op + ":" + base64.StdEncoding.EncodeToString(sig)
+	}
+	ran := false
+	guarded := srv.requireAuth(func(http.ResponseWriter, *http.Request) { ran = true })
+	present := func(path, tok string) int {
+		ran = false
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		rec := httptest.NewRecorder()
+		guarded(rec, req)
+		return rec.Code
+	}
+
+	// The control: the same construction, with nothing wrong, is
+	// honoured - so each refusal below is the check, not the helper.
+	if code := present("/whoami", sign("v2", "n-control", "whoami", "/whoami")); code != 200 || !ran {
+		t.Fatalf("control token = %d (handler ran: %v), want 200", code, ran)
+	}
+	for _, c := range []struct{ name, path, tok string }{
+		// The version word is not under the signature by itself (the
+		// context line is), so only the comparison refuses another one.
+		{"a valid signature under a v1 label", "/whoami", sign("v1", "n-v1", "whoami", "/whoami")},
+		{"a valid signature under a v3 label", "/whoami", sign("v3", "n-v3", "whoami", "/whoami")},
+		{"a valid signature under an empty label", "/whoami", sign("", "n-nolabel", "whoami", "/whoami")},
+		{"a valid signature over an empty nonce", "/whoami", sign("v2", "", "whoami", "/whoami")},
+		// A path with no op: the token's empty op "matches" the
+		// endpoint's empty op, and the signature is good for it.
+		{"a wrapped path that has no op", "/no-such-op", sign("v2", "n-noop", "", "/no-such-op")},
+	} {
+		if code := present(c.path, c.tok); code != 401 || ran {
+			t.Errorf("%s = %d (handler ran: %v), want 401 and no handler", c.name, code, ran)
+		}
+	}
+}
+
+// TestAuthedBodyIsBounded: the body is read before the token is
+// verified (its digest is signed), so it is bounded for everybody.
+func TestAuthedBodyIsBounded(t *testing.T) {
+	srv, _, priv, _ := newTestServer(t)
+	big := bytes.Repeat([]byte("a"), maxAuthedBody+1)
+	req := httptest.NewRequest("POST", "/users/revoke", bytes.NewReader(big))
+	signReq(req, priv, "users-revoke", srv.now().Unix())
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("a %d-byte body = %d, want 413", len(big), rec.Code)
+	}
+}
+
+// TestTokenV2Vector_BoxAcceptsWhatThePublisherSigns reads the fixture
+// the publisher's token minter is pinned to
+// (publisher/deploy/mgmt, TestTokenV2Vector_PublisherProducesTheFixture).
+// The two are separate Go modules that share no symbol; this file is the
+// seam that keeps "what is signed" one definition.
+func TestTokenV2Vector_BoxAcceptsWhatThePublisherSigns(t *testing.T) {
+	raw, err := os.ReadFile("../../publisher/deploy/mgmt/testdata/token_v2_vector.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs []struct {
+		PublicKeyHex string `json:"public_key_hex"`
+		Relay        string `json:"relay_mgmt_tls_fingerprint_hex"`
+		Nonce        string `json:"nonce"`
+		TS           int64  `json:"ts"`
+		Op           string `json:"op"`
+		Method       string `json:"method"`
+		Path         string `json:"path"`
+		Body         string `json:"body"`
+		SigningInput string `json:"signing_input"`
+		Token        string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &vs); err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) < 2 {
+		t.Fatalf("fixture has %d vectors", len(vs))
+	}
+	for _, v := range vs {
+		pub, err := hex.DecodeString(v.PublicKeyHex)
+		if err != nil || len(pub) != ed25519.PublicKeySize {
+			t.Fatalf("fixture public key: %v", err)
+		}
+		srv := newServer(ed25519.PublicKey(pub), "/nonexistent")
+		srv.audience = v.Relay
+		srv.now = func() time.Time { return time.Unix(v.TS, 0) }
+		sum := sha256.Sum256([]byte(v.Body))
+		if got := string(tokenSigningInput(v.Relay, v.Nonce, fmt.Sprintf("%d", v.TS), v.Op, v.Method, v.Path, sum)); got != v.SigningInput {
+			t.Errorf("%s: signing input\n got %q\nwant %q", v.Op, got, v.SigningInput)
+		}
+		if opFromPath(v.Path) != v.Op {
+			t.Errorf("%s: this box serves %s as op %q", v.Op, v.Path, opFromPath(v.Path))
+		}
+		if err := srv.verifyToken(v.Token, opFromPath(v.Path), v.Method, v.Path, sum); err != nil {
+			t.Errorf("%s: the publisher's token is refused: %v", v.Op, err)
+		}
+		other := sha256.Sum256([]byte(v.Body + " "))
+		if err := srv.verifyToken(v.Token, opFromPath(v.Path), v.Method, v.Path, other); err == nil {
+			t.Errorf("%s: the token verified for another body", v.Op)
+		}
+		// ... and for another relay that trusts the same key.
+		sibling := newServer(ed25519.PublicKey(pub), "/nonexistent")
+		sibling.audience = testAudience
+		sibling.now = srv.now
+		if v.Relay == testAudience {
+			t.Fatalf("%s: the fixture's relay must not be the test relay", v.Op)
+		}
+		if err := sibling.verifyToken(v.Token, opFromPath(v.Path), v.Method, v.Path, sum); err == nil {
+			t.Errorf("%s: the token verified on a relay it was not minted for", v.Op)
+		}
+	}
+}
+
+// TestTokenIsBoundToTheRelay: one publisher key can be trusted by more
+// than one relay (an imported key; the old and the new box around a
+// rebuild). A token minted for one of them must be refused by the other,
+// whose nonce set has never seen it - before the relay's name was under
+// the signature both answered 200 to the same users-revoke token and
+// body.
+func TestTokenIsBoundToTheRelay(t *testing.T) {
+	a, pub, priv, _ := newTestServer(t)
+	b, _, _, bConfig := newTestServer(t)
+	b.pubkey = pub // the same publisher
+	b.audience = "b1" + testAudience[2:]
+	call := func(s *server, method, path, tok, body string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+		rec := httptest.NewRecorder()
+		s.routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	before, err := os.ReadFile(bConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ op, method, path, body string }{
+		{"users-revoke", "POST", "/users/revoke", `{"name":"r1"}`},
+		{"rotate-tls", "POST", "/rotate-tls", `{"new_sni":"mirror.example.net"}`},
+		{"rotate-credentials", "POST", "/rotate-credentials", `{"name":"r2"}`},
+		{"users-list", "GET", "/users/list", ""},
+	} {
+		tok := mintToken(priv, c.op, c.method, c.path, []byte(c.body), a.now().Unix())
+		// Presented to the sibling first, so that nothing but the
+		// signature can be what refuses it.
+		if code := call(b, c.method, c.path, tok, c.body); code != 401 {
+			t.Errorf("%s: a token minted for one relay was answered %d by another, want 401", c.op, code)
+		}
+		if code := call(a, c.method, c.path, tok, c.body); code != 200 {
+			t.Errorf("%s: the relay the token was minted for answered %d, want 200", c.op, code)
+		}
+	}
+	after, err := os.ReadFile(bConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("a token minted for another relay changed this one")
+	}
+
+	// A relay that does not know its own name honours nothing.
+	b.audience = ""
+	nameless := ed25519.Sign(priv, tokenSigningInput("", "n-nameless", fmt.Sprintf("%d", b.now().Unix()), "users-list", "GET", "/users/list", sha256.Sum256(nil)))
+	tok := fmt.Sprintf("v2:n-nameless:%d:users-list:%s", b.now().Unix(), base64.StdEncoding.EncodeToString(nameless))
+	if code := call(b, "GET", "/users/list", tok, ""); code != 401 {
+		t.Errorf("a relay with no name honoured a token that names no relay (%d)", code)
+	}
+}
+
+// TestTokenAudienceIsTheServedCertificate: the name a relay answers to
+// is the SHA-256 of the certificate it serves - the value the publisher
+// pins - and it is the same after a restart, when the certificate is
+// loaded from disk rather than generated.
+func TestTokenAudienceIsTheServedCertificate(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath, fprPath := filepath.Join(dir, "c.pem"), filepath.Join(dir, "k.pem"), filepath.Join(dir, "log", "fpr")
+	first, err := ensureSelfSignedCert(certPath, keyPath, fprPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokenAudienceOf(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := os.ReadFile(fprPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != strings.TrimSpace(string(published)) {
+		t.Errorf("audience %s is not the fingerprint the relay publishes, %s", got, published)
+	}
+	sum := sha256.Sum256(first.Certificate[0])
+	if got != hex.EncodeToString(sum[:]) || got != strings.ToLower(got) {
+		t.Errorf("audience %s is not the lower-case hex SHA-256 of the leaf", got)
+	}
+	again, err := ensureSelfSignedCert(certPath, keyPath, fprPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded, _ := tokenAudienceOf(again); reloaded != got {
+		t.Errorf("after a restart the relay answers to %s, not %s", reloaded, got)
+	}
+	if _, err := tokenAudienceOf(tls.Certificate{}); err == nil {
+		t.Error("a relay with no certificate was given a name")
 	}
 }

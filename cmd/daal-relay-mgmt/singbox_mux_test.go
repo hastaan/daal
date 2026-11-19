@@ -187,6 +187,7 @@ func TestGeneratedConfigLoadsInRealSingBox(t *testing.T) {
 	provision("r2", "66666666-7777-8888-9999-000000000000", "11223344")
 
 	srv := newServer(nil, path)
+	srv.audience = testAudience
 	srv.singboxCheck = func(p string) error {
 		out, err := exec.Command(bin, "check", "-c", p).CombinedOutput()
 		if err != nil {

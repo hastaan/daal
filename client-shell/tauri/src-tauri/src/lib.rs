@@ -446,9 +446,26 @@ fn resolve_trust_prompt(
     cmd::resolve_trust_prompt(&state, &fingerprint, decision).map_err(|e| e.to_string())
 }
 
+/// `engine_set_route` does not return when the engine has started: it
+/// returns when the engine has PROVED the route by one real round trip
+/// through it (core/engine/proof.go) — milliseconds on a good route,
+/// about 8 s on a dead one, up to ~30 s on a link that is crawling.
+///
+/// A plain `#[tauri::command] fn` runs on the main thread, which is the
+/// thread that runs the window's event loop: the whole app froze for the
+/// length of the check, and `disconnect` — the one command that cancels
+/// it — queued behind it. So this one is async and does the blocking
+/// call on the blocking pool. `disconnect` stays a main-thread command:
+/// `engine_clear_route` abandons a check in flight at once, and this
+/// call then returns "connection attempt cancelled".
 #[tauri::command]
-fn connect(state: State<'_, AppState>, route_id: String) -> Result<(), String> {
-    cmd::connect(&state, ConnectRequest { route_id }).map_err(|e| e.to_string())
+async fn connect(app: tauri::AppHandle, route_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cmd::connect(&state, ConnectRequest { route_id }).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("connect: {e}"))?
 }
 
 #[tauri::command]

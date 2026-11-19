@@ -251,3 +251,59 @@ describe('unavailableLines — what the file did NOT give this person', () => {
         expect(faMap['add.unavailable.title']).toMatch(/[\u0600-\u06FF]/);
     });
 });
+
+// Backlog TW-6. `not_offered` is decided by a marker in the route's
+// PROFILE, which the publisher's signature does not cover: whoever can
+// alter the file chooses the code. They must never choose the words.
+describe('unavailableLines — nothing from the file is displayed', () => {
+    const hostile = parseVerdict(
+        JSON.stringify({
+            Kind: 0,
+            Unavailable: [
+                // A reason that is not one of the engine's codes.
+                { RouteID: 'r1', Family: 'tuic', Reason: 'Your phone is infected. Call +1 555 0100' },
+                // A code that names an i18n key which exists but is not a reason.
+                { RouteID: 'r2', Family: 'naive', Reason: 'title' },
+                // A family that is not a family.
+                { RouteID: 'r3', Family: '<img src=x onerror=alert(1)> visit evil.example', Reason: 'not_offered' },
+                // Wrong types altogether.
+                { RouteID: 'r4', Family: 7, Reason: { toString: 'x' } },
+            ],
+        }),
+    );
+    const e = en as Record<string, string>;
+    it('maps an unknown reason to the generic sentence', () => {
+        const lines = unavailableLines(t, hostile);
+        expect(lines).toHaveLength(4);
+        expect(lines[0]).toBe(e['add.unavailable.other'].replace('{family}', 'tuic'));
+        // 'title' is a real key under add.unavailable.* — and still not a reason.
+        expect(lines[1]).toBe(e['add.unavailable.other'].replace('{family}', 'naive'));
+        expect(lines[1]).not.toBe(e['add.unavailable.title']);
+    });
+    it('describes an unknown family instead of quoting it', () => {
+        const lines = unavailableLines(t, hostile);
+        expect(lines[2]).toBe(
+            e['add.unavailable.not_offered'].replace('{family}', e['add.unavailable.family_other']),
+        );
+        expect(lines[3]).toBe(
+            e['add.unavailable.other'].replace('{family}', e['add.unavailable.family_other']),
+        );
+    });
+    it('never lets a byte of the file onto the screen', () => {
+        const all = unavailableLines(t, hostile).join('\n');
+        for (const s of ['infected', '555', 'evil.example', 'onerror', '<img', 'toString']) {
+            expect(all).not.toContain(s);
+        }
+    });
+    it('does not throw on a verdict whose list is not a list', () => {
+        expect(unavailableLines(t, { Kind: 0, Unavailable: 'x' as never })).toEqual([]);
+    });
+    it('has the generic sentence and the generic family in both languages', () => {
+        for (const k of ['add.unavailable.other', 'add.unavailable.family_other', 'add.unavailable.title']) {
+            expect(e[k], `en ${k}`).toBeTruthy();
+            expect((fa as Record<string, string>)[k], `fa ${k}`).toBeTruthy();
+        }
+        expect(e['add.unavailable.other']).toContain('{family}');
+        expect((fa as Record<string, string>)['add.unavailable.other']).toContain('{family}');
+    });
+});

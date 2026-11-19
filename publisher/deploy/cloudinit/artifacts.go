@@ -5,8 +5,9 @@ package cloudinit
 // verifies SHA-256 against `Sha256`, then verifies the Ed25519
 // signature in `SigHex` against the embedded /etc/daal/release.pub.
 //
-// Updated by tools/release/relay-v1.5.0.sh on each Daal relay
-// release. The signing key for SigHex is the Daal release Ed25519
+// Updated from the snippet tools/release/relay-v1.5.1.sh stages, on
+// each Daal relay release — as ONE commit with everything
+// tools/release/README.md ("The pin bump") lists. The signing key for SigHex is the Daal release Ed25519
 // key whose public half is embedded as DaalReleasePubKeyPEM.
 //
 // RELEASE COUPLING — read before changing cmd/daal-relay-mgmt.
@@ -61,8 +62,31 @@ package cloudinit
 //     the publisher's side and would offer them regardless. It is held
 //     shut by PinnedMgmtServesOptInFamilies, below the manifests.
 //
+//   - MGMT TOKEN v2 (finding REL-1). OPEN, AND IT DOES NOT FAIL SAFE.
+//     The publisher in this tree signs the request body into every
+//     management token (mgmt.MintToken, format v2) and the daemon built
+//     from this tree refuses anything else. The pin below is a v1
+//     daemon: a relay provisioned from this build boots, passes health,
+//     and answers 401 to the first users-provision. There is
+//     deliberately no fallback to v1 in either direction. NOTHING BUILT
+//     FROM THIS TREE MAY SHIP BEFORE THE PIN MOVES to an artefact built
+//     from it (tools/release/relay-v1.5.1.sh).
+//
+//   - AUTHENTICATED BOOTSTRAP (daal-relay-health). OPEN, FAILS CLOSED.
+//     The publisher in this tree pins a management-TLS fingerprint only
+//     when the health reply authenticates it with the provisioning
+//     secret, and asks for it under a path token derived from that
+//     secret (publisher/deploy/health/bootstrap.go, spec
+//     daal-relay-mgmt-v1.md §2.1). The pinned daal-relay-health predates
+//     both: it answers the derived path with 404, and Provision stops
+//     with health.ErrBootstrapRefused about ten seconds after the box
+//     comes up. No fallback, for the reason MGMT TOKEN v2 has none. So
+//     daal-relay-health is now coupled to this tree exactly as
+//     daal-relay-mgmt is: any change under publisher/deploy/health or
+//     cmd/daal-relay-health means the release script runs again.
+//
 // When re-releasing, bump BOTH Sha256 and SigHex for
-// daal-relay-mgmt-*, flip PinnedMgmtServesOptInFamilies (and its TS
+// daal-relay-mgmt-* AND daal-relay-health-*, flip PinnedMgmtServesOptInFamilies (and its TS
 // mirror) in the same commit, and re-run the provisioner-vs-client
 // cross-check
 // (publisher/deploy/providers/hetzner/cover_sni_singbox_test.go).

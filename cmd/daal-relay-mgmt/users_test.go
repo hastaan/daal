@@ -45,6 +45,7 @@ func newUsersTestServer(t *testing.T) (*server, ed25519.PrivateKey, string, *ato
 		t.Fatal(err)
 	}
 	srv := newServer(pub, configPath)
+	srv.audience = testAudience
 	var reloadCount atomic.Int64
 	srv.singboxControl = func(action string) error {
 		if action == "reload" {
@@ -58,7 +59,6 @@ func newUsersTestServer(t *testing.T) (*server, ed25519.PrivateKey, string, *ato
 
 func postJSON(t *testing.T, url string, priv ed25519.PrivateKey, op string, body any) *http.Response {
 	t.Helper()
-	tok := mintToken(priv, op, time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC).Unix())
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -66,7 +66,7 @@ func postJSON(t *testing.T, url string, priv ed25519.PrivateKey, op string, body
 		}
 	}
 	req, _ := http.NewRequest("POST", url, &buf)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, op, time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC).Unix())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -77,9 +77,8 @@ func postJSON(t *testing.T, url string, priv ed25519.PrivateKey, op string, body
 
 func getURL(t *testing.T, url string, priv ed25519.PrivateKey, op string) *http.Response {
 	t.Helper()
-	tok := mintToken(priv, op, time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC).Unix())
 	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, op, time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC).Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -316,10 +315,9 @@ func TestUsersOps_TokenBinding(t *testing.T) {
 	defer ts.Close()
 
 	// Mint a token for users-list but post to users/provision.
-	tok := mintToken(priv, "users-list", srv.now().Unix())
 	body, _ := json.Marshal(provisionReq{Name: "r1"})
 	req, _ := http.NewRequest("POST", ts.URL+"/users/provision", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	signReq(req, priv, "users-list", srv.now().Unix())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("cross-op request: %v", err)

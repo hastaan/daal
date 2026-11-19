@@ -309,7 +309,11 @@ func (m *Manager) Failed(routeID, family string, cat diagnostics.Category) {
 	switch cat {
 	case diagnostics.AuthFailed, diagnostics.RouteExpired, diagnostics.PublisherRevoked,
 		diagnostics.PublisherKeyChanged, diagnostics.BundleSignatureInvalid,
-		diagnostics.BundleCorrupted, diagnostics.NetworkOffline:
+		diagnostics.BundleCorrupted, diagnostics.NetworkOffline,
+		// Revisions 2 and 3: a path that is only slow, and a relay
+		// that answers but reaches nothing, are not things a cooldown
+		// of this ROUTE (or, three times, of its whole family) helps.
+		diagnostics.PathTooSlow, diagnostics.RelayNoEgress:
 		// Non-cooldown classes per V0.3. Surface the failure via
 		// routeHealth (no cooldown, but the reason is recorded so
 		// the desktop can render an "auth failed" badge).

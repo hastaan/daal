@@ -1,0 +1,30 @@
+[
+  {
+    "comment": "A POST: the signature covers the relay the token is for (the lower-case hex SHA-256 of its mgmt TLS certificate), the op, the method, the path and sha256 of the body. Test key only (seed 01..20). Shared by publisher/deploy/mgmt (signs) and cmd/daal-relay-mgmt (verifies); specs/daal-relay-mgmt-v1.md section 3.",
+    "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "public_key_hex": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+    "relay_mgmt_tls_fingerprint_hex": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "nonce": "000102030405060708090a0b0c0d0e0f",
+    "ts": 1700000000,
+    "op": "users-revoke",
+    "method": "POST",
+    "path": "/users/revoke",
+    "body": "{\"name\":\"r43\"}",
+    "signing_input": "daal-mgmt-token-v2\nc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3\n000102030405060708090a0b0c0d0e0f\n1700000000\nusers-revoke\nPOST\n/users/revoke\n188a8d56570817e9f49c69b5c526c33c09bf4bd376d81fbe6cad414d4b0d2128",
+    "token": "v2:000102030405060708090a0b0c0d0e0f:1700000000:users-revoke:7rX85VLpmjvlm6c4EoqOGLZiEpSKW4DBYGhdJK960IP05AO9LHumb0pSmtPLcLUTg6BbjCAIFoxaB12Z8wwtDA=="
+  },
+  {
+    "comment": "A GET: no body, so the digest is sha256 of zero bytes.",
+    "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "public_key_hex": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+    "relay_mgmt_tls_fingerprint_hex": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "nonce": "101112131415161718191a1b1c1d1e1f",
+    "ts": 1700000000,
+    "op": "users-list",
+    "method": "GET",
+    "path": "/users/list",
+    "body": "",
+    "signing_input": "daal-mgmt-token-v2\nc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3\n101112131415161718191a1b1c1d1e1f\n1700000000\nusers-list\nGET\n/users/list\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "token": "v2:101112131415161718191a1b1c1d1e1f:1700000000:users-list:NuhbatExoJ2B3l6ZgwnPQsHdEo7EdPxPQ4HobnC3W8xpw84P+8UZdkSBMBKhscJ5uhgpEidOXA1E+v7SvP2IAQ=="
+  }
+]

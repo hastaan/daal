@@ -74,6 +74,48 @@ experimental · 9 unsupported · 1 unhandled = 18.** Nine of eighteen
 values in the recipient-side vocabulary cannot be dialled by the
 client that reads it.
 
+### How each relay port answers a stranger, and what each family carries (2026-11-18)
+
+Two properties of the seven families a Daal relay serves that the
+recommender needs and the table above does not state. Source of truth
+for the measurements: `test-rigs/worldbox/FINDINGS.md` (CEN-O1, FAM-6);
+for the mechanism: sing-box 1.13.12's source, cited there.
+
+| family | port | what a stranger who sends a few opaque bytes gets | active-probing reading | app UDP |
+|---|---|---|---|---|
+| `vless-reality` | 443/tcp | forwarded to the cover site; orderly close | looks like the cover site | yes (vless UDP) |
+| `naive` | 8444/tcp | silence | an idle TLS port | **yes, since 2026-11-18** — UDP-over-TCP inside the CONNECT stream; packs minted before it carry DNS only. Not real UDP: one TCP stream, head-of-line blocking |
+| `websocket-tls` | 8445/tcp | silence | an idle TLS port | yes (vless UDP) |
+| `hysteria2` | 443/udp | nothing (QUIC) | — | yes, native |
+| `tuic` | 8443/udp | nothing (QUIC) | — | yes, native |
+| `shadowsocks` | 8446/tcp | **TCP RST in under a millisecond**, for anything that is not a valid, fresh request from a known user (a TLS ClientHello included) | **a tell.** Consistent — it does not leak how many bytes were read, which is what the Shadowsocks-2022 spec asks for — but a port that resets everything instantly is not what any ordinary service does | yes — UDP-over-TCP |
+| `anytls` | 8447/tcp | **TCP RST in under a millisecond** for bytes that are not TLS (an ordinary TLS server sends an alert and/or FIN); after a valid TLS handshake, an unknown password is also closed with a reset, with no fallback to a web server | **a tell**, before and after TLS | yes — UDP-over-TCP |
+
+**For the recommender.** Under *observed active probing* (a relay address
+that stops answering shortly after first use, on a network that is not
+otherwise blocking the family), prefer the families that answer a
+stranger like something else — `vless-reality`, then `naive` /
+`websocket-tls` — over `shadowsocks` and `anytls`, whatever their other
+merits (`shadowsocks` is the only family with no TLS fingerprint at all;
+`anytls` is the padding tier). The machine-readable form already agrees:
+both carry `probing_risk_class: "moderate"` in every shipped profile
+(`publisher/deploy/profiles/*.json`), the four default families `"low"`,
+and both are off by default. Do not raise them to `"high"` on this alone:
+`high` changes race planning for every network, and the tell matters only
+where something is probing.
+
+**It cannot be configured away on the relay.** Both resets come from one
+library function (`sagernet/sing` `common/network/handshake.go`,
+`CloseOnHandshakeFailure`: `SetLinger(0)` then close), reached from
+`protocol/shadowsocks/inbound_multi.go` and `protocol/anytls/inbound.go`;
+neither inbound, nor the listen options, nor the inbound TLS options have
+a member that drains, delays or falls back (the `fallback` option exists
+on trojan only). Changing it needs upstream code — a `fallback` option on
+the anytls inbound (the hook exists in `sing-anytls`, sing-box does not
+set it) and a drain-instead-of-reset close for failed handshakes — and
+then a new sing-box pin on the relay. Daal does not fork sing-box; the
+exact call sites are in FINDINGS CEN-O1.
+
 ### Serving rows 5–7 needs a re-release, and rows 6–7 need a FRESH relay
 
 Rows 5, 6 and 7 (`tuic`, `shadowsocks`, `anytls`) say "yes" about the

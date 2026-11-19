@@ -19,6 +19,10 @@
 #   ANDROID_NDK_HOME   path to the NDK root
 #   ANDROID_API_LEVEL  minSdkVersion (default 24 — Android 7.0)
 #   OUT_DIR            jniLibs root (default: the tauri gen jniLibs dir)
+#
+# 16 KB PAGES: linked with max-page-size=16384 and verified. On an
+# Android 15+ device with a 16 KB-page kernel a 4 KB-aligned executable
+# (the Go and NDK r27 default) cannot be exec'd at all.
 
 set -euo pipefail
 
@@ -50,11 +54,20 @@ build_abi() {
     CGO_ENABLED=1 \
     GOOS=android \
     GOARCH="$goarch" \
-    go build -buildmode=pie -ldflags "-s -w" \
+    go build -buildmode=pie \
+      -ldflags "-s -w -extldflags=-Wl,-z,max-page-size=16384" \
       -o "$out" \
       .
   )
   ls -la "$out"
+  local small
+  small="$("$NDK_BIN/llvm-readelf" -lW "$out" | awk '$1 == "LOAD" { print $NF }' | sort -u \
+    | while read -r a; do if [ "$((a))" -lt 16384 ]; then printf '%s ' "$a"; fi; done)"
+  if [ -n "$small" ]; then
+    echo "FATAL: $out has LOAD segments aligned to ${small}— below 16 KB." >&2
+    echo "       It could not be run on an Android 15+ device with 16 KB pages." >&2
+    exit 1
+  fi
 }
 
 build_abi arm64 arm64-v8a   "aarch64-linux-android${ANDROID_API_LEVEL}-clang"

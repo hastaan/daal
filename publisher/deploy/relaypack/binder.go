@@ -104,6 +104,12 @@ type BindOpts struct {
 	// EndpointMaterial.Overlay for the precedence.
 	Endpoint *EndpointMaterial
 
+	// RelayIdentity, when non-nil, is what the relay itself said it is
+	// just before this signature (mgmt GET /identity). Where it speaks
+	// it outranks the record — see EndpointMaterial.PreferRelay — and
+	// Endpoint then fills whatever is still empty.
+	RelayIdentity *EndpointMaterial
+
 	// SubkeyCertJSON is optional FRP-7.5 cert-chain material. When
 	// non-empty, priv is allowed to be the certified sub-key while
 	// rec.PublisherPubKey remains the root publisher key shipped as
@@ -147,6 +153,12 @@ type BindResult struct {
 	// "the pack is one tier smaller than you think" notice as
 	// RewriteProfilesForRecipient's skipped list, one step earlier.
 	Uncommitted []SkippedRoute
+
+	// Committed is the relay identity this pack's signed endpoints
+	// actually carry, read back out of the routes that were signed. A
+	// caller keeps it to tell, later, whether the relay has moved away
+	// from what its recipients' packs commit to.
+	Committed CommittedIdentity
 }
 
 // errors -------------------------------------------------------------
@@ -250,6 +262,9 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 
 	// ---- 2. Render candidates ------------------------------------
 	material := EndpointMaterialFromRecord(rec)
+	if opts.RelayIdentity != nil {
+		material = material.PreferRelay(*opts.RelayIdentity)
+	}
 	if opts.Endpoint != nil {
 		material = material.Overlay(*opts.Endpoint)
 	}
@@ -399,6 +414,7 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 		RelayPackID:     relayPackID,
 		SharedRiskGraph: srg,
 		Uncommitted:     rendered.uncommitted,
+		Committed:       committedIdentity(rendered.routes),
 	}, nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 )
@@ -20,15 +19,8 @@ func TestClient_ProvisionUser_RoundTrips(t *testing.T) {
 	var sawName string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/provision", func(w http.ResponseWriter, r *http.Request) {
-		hdr := r.Header.Get("Authorization")
-		tok := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		nonce, tsStr, op, sig, err := ParseToken(tok)
-		if err != nil || op != "users-provision" {
+		if op, ok := boxVerifies(pub, r); !ok || op != "users-provision" {
 			http.Error(w, "bad token", 401)
-			return
-		}
-		if !ed25519.Verify(pub, []byte(nonce+":"+tsStr+":"+op), sig) {
-			http.Error(w, "sig", 401)
 			return
 		}
 		var body map[string]string
@@ -76,15 +68,8 @@ func TestClient_RevokeUser_RoundTrips(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/revoke", func(w http.ResponseWriter, r *http.Request) {
-		hdr := r.Header.Get("Authorization")
-		tok := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		nonce, tsStr, op, sig, err := ParseToken(tok)
-		if err != nil || op != "users-revoke" {
+		if op, ok := boxVerifies(pub, r); !ok || op != "users-revoke" {
 			http.Error(w, "bad token", 401)
-			return
-		}
-		if !ed25519.Verify(pub, []byte(nonce+":"+tsStr+":"+op), sig) {
-			http.Error(w, "sig", 401)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(RevokeResp{RevokedAtUnix: 1700000123})
@@ -112,15 +97,8 @@ func TestClient_ListUsers_RoundTrips(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/list", func(w http.ResponseWriter, r *http.Request) {
-		hdr := r.Header.Get("Authorization")
-		tok := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
-		nonce, tsStr, op, sig, err := ParseToken(tok)
-		if err != nil || op != "users-list" {
+		if op, ok := boxVerifies(pub, r); !ok || op != "users-list" {
 			http.Error(w, "bad token", 401)
-			return
-		}
-		if !ed25519.Verify(pub, []byte(nonce+":"+tsStr+":"+op), sig) {
-			http.Error(w, "sig", 401)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -160,7 +138,7 @@ func TestClient_ListUsers_RoundTrips(t *testing.T) {
 func TestMintToken_AcceptsUsersOps(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	for _, op := range []string{"users-provision", "users-revoke", "users-list"} {
-		if _, err := MintToken(priv, op, time.Now()); err != nil {
+		if _, err := MintToken(priv, testRelayFP, op, nil, time.Now()); err != nil {
 			t.Errorf("MintToken(%q) = %v", op, err)
 		}
 	}

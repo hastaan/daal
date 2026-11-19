@@ -99,6 +99,22 @@ export interface ConnectionSummary {
    *  is re-checking it). `undefined` = no route, or the engine said
    *  nothing. */
   routeCheck?: 'verifying' | 'ok' | 'degraded' | 'failed';
+  /** The failure-taxonomy category behind a 'failed' / 'degraded'
+   *  `routeCheck` (`route_check_category`). A closed engine vocabulary:
+   *  used to choose between our own sentences (lib/routeCheck.ts),
+   *  never shown. */
+  routeCheckCategory?: string;
+  /** True exactly while the engine has an instance up for a route —
+   *  connected, still being checked, or lost and being retried. What a
+   *  tap should STOP. `undefined` = the engine did not say. */
+  routeRunning?: boolean;
+  /** Why the engine refused the last connect before trying anything
+   *  (`connect_refused`): e.g. 'needs_new_file' for a route imported
+   *  from a file made before files carried signed server addresses.
+   *  `undefined` = it was not refused. On Android this is the ONLY way
+   *  the reason reaches the page: the connect call resolves as soon as
+   *  the VPN service is started. */
+  connectRefused?: 'needs_new_file' | 'cooldown' | 'revoked' | 'expired' | 'other';
 }
 
 export interface SkippedRouteEntry {

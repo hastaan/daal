@@ -29,9 +29,8 @@ func bindingBox(t *testing.T, pub ed25519.PublicKey, routes map[string]http.Hand
 	for path, h := range routes {
 		p, fn := path, h
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
-			tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Daal-Mgmt-Token ")
-			nonce, tsStr, op, sig, err := ParseToken(tok)
-			if err != nil || !ed25519.Verify(pub, []byte(nonce+":"+tsStr+":"+op), sig) {
+			op, ok := boxVerifies(pub, r)
+			if !ok {
 				http.Error(w, "auth", 401)
 				return
 			}
@@ -535,7 +534,7 @@ func TestBoxCapabilities_BindAddressFallsOutOfTheWireFormat(t *testing.T) {
 func TestMintToken_KnowsTheAddressVerbs(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	for _, op := range []string{"bind-address", "unbind-address"} {
-		tok, err := MintToken(priv, op, time.Now())
+		tok, err := MintToken(priv, testRelayFP, op, nil, time.Now())
 		if err != nil {
 			t.Fatalf("MintToken(%s): %v", op, err)
 		}

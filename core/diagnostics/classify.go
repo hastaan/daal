@@ -79,6 +79,17 @@ const (
 	// DEGRADED outcome, not a failure: never a cooldown, never
 	// RecordFailure. Excluded from IsCensorshipClass.
 	PathTooSlow Category = "path_too_slow"
+
+	// Revision 3 (the connection proof's public targets, backlog TW-14).
+	//
+	// RelayNoEgress: the relay completed its own handshake with this
+	// device, on a connection opened for the purpose, and then not one
+	// of the far-side hosts the connection check tried answered through
+	// it. The route to the relay works; the relay does not reach the
+	// internet. Not a censorship event and not a fault of the route:
+	// never a cooldown, never a network signal. See
+	// specs/failure-taxonomy-v1.md "Revision 3".
+	RelayNoEgress Category = "relay_no_egress"
 )
 
 // Classify maps a free-form error string from sing-box (or another driver)
@@ -168,7 +179,7 @@ func IsCensorshipClass(c Category) bool {
 	switch c {
 	case AuthFailed, RouteExpired, PublisherRevoked, PublisherKeyChanged,
 		BundleCorrupted, BundleSignatureInvalid, NetworkOffline, Unknown,
-		OriginUnhealthy, PathTooSlow:
+		OriginUnhealthy, PathTooSlow, RelayNoEgress:
 		return false
 	}
 	return true

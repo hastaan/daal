@@ -295,6 +295,59 @@ has been built. Verified both directions in this tree: it passes on
 all three ABIs today, and flipping one pin in `artifacts.go` makes it
 fail on all three with exit 1.
 
+### 4a-2. The Android native set — engine, Cronet, deploy (2026-11-18)
+
+Three Go-side artefacts meet in `gen/android/.../jniLibs/<abi>/`, each
+from a different script, and `tauri android build` rebuilds none of them:
+
+| file | built by | from |
+|---|---|---|
+| `libdaalcore.so` | `tools/build-engine-android.sh` | `core/` (working tree) |
+| `libcronet.so` + `libcronet.so.stamp` | the same script, via `tools/cronet/build-libcronet-android.sh` | `libcronet.a` inside the Go module `github.com/sagernet/cronet-go/lib/android_<arch>` at the version `core/go.mod` pins |
+| `libdaal_deploy.so` | `tools/build-deploy-android.sh` | `cmd/daal-deploy` (working tree) |
+
+```
+ANDROID_NDK_HOME=~/Android/android-ndk-r27 bash tools/build-engine-android.sh   # ~1 min cold
+ANDROID_NDK_HOME=~/Android/android-ndk-r27 bash tools/build-deploy-android.sh   # ~15 s
+bash tools/check-engine-so-manifest.sh && bash tools/check-deploy-so-manifest.sh
+```
+
+**Where `libcronet.so` comes from.** cronet-go publishes Cronet for
+Android only as a static archive (the `linux_*` modules carry a `.so`,
+the `android_*` ones do not), and the engine cannot link it (cgo + NDK
+linker), so it runs cronet-go `with_purego` and `dlopen()`s a `.so` we
+relink from that archive. The relink is a link, not a compile: about a
+second per ABI, reproducible byte for byte, **no Chromium checkout**.
+The one requirement beyond the NDK is an lld from LLVM ≥ 20 for arm64
+(the archive uses relocation 315, which NDK r27's LLVM 18 lld rejects);
+the script takes the one inside the Rust toolchain, or `CRONET_LLD`.
+ABIs: arm64-v8a, armeabi-v7a, x86_64 — the three the engine is built
+for. (`x86` relinks too; nothing builds an engine for it.)
+
+**Why the pair is checked.** The Go wrapper in the engine calls the
+library by symbol with its own version's argument lists. Libraries from
+two cronet-go versions export the same names, so a stale one loads and
+then misbehaves. Three records must agree: the identity string inside
+`libcronet.so` (module, version, sha256 of the archive), the stamp
+(adds the sha256 of the `.so`), and the cronet-go version in the
+engine's Go build info. `tools/cronet/check-libcronet-stamp.sh` compares
+them; `tools/check-android-so-manifest.sh` runs it per ABI, plus the
+`core/abi` export check and the page-size check, and is called from both
+existing `.so` manifest gates. After a `cronet-go` bump the next
+`build-engine-android.sh` rebuilds the library by itself; an APK build
+that skipped it is stopped by the gate, not by a phone.
+
+**16 KB pages.** Go and NDK r27 link for 4 KB pages; a 16 KB-page
+Android 15+ device refuses such a library (and cannot exec such a
+binary). All three scripts pass `max-page-size=16384` and verify it.
+The Rust half, `libdaal_desktop_tauri_lib.so`, gets the same flag from
+`client-shell/tauri/src-tauri/.cargo/config.toml` (the two 64-bit Android
+targets); the gate fails on a 4 KB-aligned copy of it as it does for the
+Go libraries. Built and read back with `readelf` on 2026-11-18: LOAD
+alignment 0x4000 on arm64-v8a and x86_64.
+
+**Not verified:** loading any of it on a device.
+
 ### 4b. `daal-tun-helper` is never staged for packaging
 
 See §1. The `.deb` postinst chmods a path nothing installs to, and does

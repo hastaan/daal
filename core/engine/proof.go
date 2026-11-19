@@ -47,7 +47,10 @@ import (
 // user), so it is drawn at random from a small set of very common
 // hosts, and a second, different one is tried before a route is called
 // dead. The set is configuration (ProofConfig.Targets) with a production
-// default. The handshake does NOT verify the target's certificate, on
+// default (DefaultProofTargetSet, and the rules it is held to). The
+// exchange is a TLS handshake and its close_notify, on port 443, and
+// nothing else: no HTTP request, no application data, no name of ours.
+// The handshake does NOT verify the target's certificate, on
 // purpose: nothing is being authenticated — no data is sent, no secret
 // is exchanged, no trust decision in the product depends on who answered
 // — and a phone with a wrong clock must not be told its route is dead.
@@ -70,6 +73,13 @@ type ProofConfig struct {
 	// (diagnostics.PathTooSlow), not a failed one. It must be below
 	// AttemptTimeout to mean anything.
 	SlowAfter time.Duration
+	// SlowBudget is the extra time ONE further attempt is given when
+	// every ordinary attempt ran out of time on a path the engine saw
+	// moving (diagnostics.Observation.Progress): bytes came back, or
+	// the relay's own answer took seconds. A dead route never gets it —
+	// nothing was seen moving — so "could not connect" still arrives
+	// within AttemptTimeout × Attempts. See "SLOW IS NOT SILENT" below.
+	SlowBudget time.Duration
 	// LivenessInterval is how often a connected route is proved again;
 	// each wait is jittered by ±LivenessJitter (a fraction, 0..1).
 	// RecheckInterval replaces it while the route is failed, so a path
@@ -79,17 +89,62 @@ type ProofConfig struct {
 	RecheckInterval  time.Duration
 }
 
-// DefaultProofTargets are hosts a relay anywhere can be expected to
-// reach and that an observer of the relay's upstream sees constantly
-// from everything. Order is irrelevant: the choice is random.
-var DefaultProofTargets = []string{
-	"www.google.com:443",
-	"www.cloudflare.com:443",
-	"www.microsoft.com:443",
-	"www.apple.com:443",
-	"www.amazon.com:443",
-	"www.wikipedia.org:443",
+// ProofTarget is one default far-side host and who runs it.
+type ProofTarget struct {
+	// Addr is "host:port".
+	Addr string
+	// Operator is the organisation whose network answers for the host.
+	// It exists so a test can hold the list to its rule: two attempts
+	// in a row never depend on one operator.
+	Operator string
 }
+
+// DefaultProofTargetSet is the production default of
+// connection_check.targets. The rules it is held to, each of them
+// checked by TestDefaultProofTargets_* and argued in
+// specs/engine-abi-v1.md "The default targets":
+//
+//  1. The front page of a service that datacentre machines and phones
+//     alike open all day. The connection leaves the RELAY, so the party
+//     that sees it is the relay's hosting network; what it sees must be
+//     what every other tenant's traffic already looks like.
+//  2. Answered from an anycast or multi-region edge that accepts TCP and
+//     completes TLS for any source address. Services that turn
+//     datacentre addresses away do it in HTTP (a challenge page), and
+//     the check never sends an HTTP request.
+//  3. Port 443 only, and nothing after the handshake: no request, no
+//     header, no path, no name of ours anywhere.
+//  4. No one operator can fail a working route: neighbours in this list
+//     are run by different organisations, and the attempts of one check
+//     go to neighbours (proofOrder).
+//  5. Not infrastructure run on donations. A volunteer-funded site is
+//     not ours to use as a beacon, however small the cost.
+//
+// The order is NOT irrelevant: it is what rule 4 is written in. The
+// starting point is random.
+var DefaultProofTargetSet = []ProofTarget{
+	{"www.google.com:443", "google"},
+	{"www.microsoft.com:443", "microsoft"},
+	{"www.cloudflare.com:443", "cloudflare"},
+	{"github.com:443", "github"},
+	{"www.apple.com:443", "apple"},
+	{"www.amazon.com:443", "amazon"},
+}
+
+// proofOperatorOwner folds operators that belong to one company, for
+// rule 4: GitHub runs its own network but is owned by Microsoft, so the
+// two are never neighbours.
+var proofOperatorOwner = map[string]string{"github": "microsoft"}
+
+// DefaultProofTargets is DefaultProofTargetSet as the "host:port" list
+// the configuration carries.
+var DefaultProofTargets = func() []string {
+	out := make([]string, 0, len(DefaultProofTargetSet))
+	for _, t := range DefaultProofTargetSet {
+		out = append(out, t.Addr)
+	}
+	return out
+}()
 
 // DefaultProofConfig is what an install with no configuration runs.
 func DefaultProofConfig() ProofConfig {
@@ -98,6 +153,7 @@ func DefaultProofConfig() ProofConfig {
 		AttemptTimeout:   4 * time.Second,
 		Attempts:         2,
 		SlowAfter:        2 * time.Second,
+		SlowBudget:       20 * time.Second,
 		LivenessInterval: 3 * time.Minute,
 		LivenessJitter:   0.25,
 		RecheckInterval:  30 * time.Second,
@@ -125,6 +181,9 @@ func (c ProofConfig) Normalised() (ProofConfig, error) {
 	}
 	if c.SlowAfter <= 0 {
 		c.SlowAfter = d.SlowAfter
+	}
+	if c.SlowBudget <= 0 {
+		c.SlowBudget = d.SlowBudget
 	}
 	if c.LivenessInterval <= 0 {
 		c.LivenessInterval = d.LivenessInterval
@@ -164,6 +223,10 @@ type ProofResult struct {
 	Slow bool
 	// Attempts actually made.
 	Attempts int
+	// Extended: the ordinary attempts all ran out of time on a path
+	// that was seen moving, and the one long attempt of
+	// ProofConfig.SlowBudget was made. OK && Extended is always Slow.
+	Extended bool
 	// Err and Observation describe the LAST failed attempt when !OK.
 	// Err's text can carry addresses: it is for the in-process event
 	// stream and the classifier, never for the route store.
@@ -209,34 +272,126 @@ func proofOrder(targets []string, n int, rnd func(int) int) []string {
 // proofAttempt is one round trip, as the driver implements it.
 type proofAttempt func(ctx context.Context, host string, port uint16) (diagnostics.Observation, error)
 
+// proofAids are the two things a driver can add to the attempt loop
+// once the ordinary attempts have all failed. Both are optional, both
+// run on the PROOF's context, and neither is ever called on a proof
+// that succeeded.
+type proofAids struct {
+	// settle refines the observation of the last failed attempt with
+	// what a check that ran beside the attempts found (the sing-box
+	// driver's reach check: was the relay's SYN answered, and how long
+	// did the answer take).
+	settle func(ctx context.Context, o *diagnostics.Observation)
+	// diagnose repeats one attempt on a connection to the relay opened
+	// for the purpose, and returns what THAT attempt saw. It is asked
+	// only about a timeout in the carry phase — the one failure whose
+	// observation says nothing about the relay, because the outbound
+	// may have answered from a session it already held (always, on a
+	// route that has been connected for a while). ok=false: the driver
+	// has no such connection to offer; the observation stands.
+	diagnose func(ctx context.Context, host string, port uint16) (o diagnostics.Observation, err error, ok bool)
+}
+
 // runProof is the attempt loop shared by every driver: bounded attempts,
 // a different target each time, total time measured, cancellation told
 // apart from failure.
 func runProof(ctx context.Context, cfg ProofConfig, rnd func(int) int, attempt proofAttempt) ProofResult {
+	return runProofWith(ctx, cfg, rnd, attempt, proofAids{})
+}
+
+// SLOW IS NOT SILENT (the end-to-end rig's observation CEN-O5).
+//
+// Behind seconds of queue the ordinary attempts finish nothing, and the
+// silence of a handshake that is still crawling is, from the error
+// alone, the silence of one a filter swallowed. Calling it that cooled
+// a working route down for 5–30 minutes and told the person "could not
+// connect" on a link that connects ten seconds later.
+//
+// What tells the two apart is whether anything was seen MOVING: bytes
+// back from the far side, a relay whose handshake took seconds rather
+// than milliseconds to complete, a SYN answered late. With any of
+// those, the proof makes one more attempt with a long budget
+// (SlowBudget). If that one completes the route is connected and slow;
+// if it does not, the failure is path_too_slow — no cooldown, no
+// network signal, and the person can try again at once. With none of
+// them the proof ends where it always did.
+func runProofWith(ctx context.Context, cfg ProofConfig, rnd func(int) int, attempt proofAttempt, aids proofAids) ProofResult {
 	cfg, err := cfg.Normalised()
 	if err != nil {
 		return ProofResult{Err: err, Observation: diagnostics.Observation{Message: err.Error()}}
 	}
 	start := time.Now()
 	var res ProofResult
-	for _, target := range proofOrder(cfg.Targets, cfg.Attempts, rnd) {
-		host, port, _ := splitProofTarget(target)
-		if ctx.Err() != nil {
-			break
-		}
-		actx, cancel := context.WithTimeout(ctx, cfg.AttemptTimeout)
+	// One target beyond the ordinary attempts for each of the two
+	// follow-ups, so neither repeats a host unless the list is short.
+	order := proofOrder(cfg.Targets, cfg.Attempts+2, rnd)
+	next := 0
+	try := func(timeout time.Duration, fn proofAttempt) bool {
+		host, port, _ := splitProofTarget(order[next%len(order)])
+		next++
+		actx, cancel := context.WithTimeout(ctx, timeout)
 		attemptStart := time.Now()
-		obs, aerr := attempt(actx, host, port)
+		obs, aerr := fn(actx, host, port)
 		cancel()
 		res.Attempts++
 		if aerr == nil {
 			res.OK, res.Err = true, nil
 			res.Observation = diagnostics.Observation{}
 			res.RoundTrip = time.Since(attemptStart)
-			break
+			return true
 		}
 		res.Err, res.Observation = aerr, obs
 		res.Failed = append(res.Failed, obs)
+		return false
+	}
+	for i := 0; i < cfg.Attempts && ctx.Err() == nil; i++ {
+		if try(cfg.AttemptTimeout, attempt) {
+			break
+		}
+	}
+	setLast := func(o diagnostics.Observation) {
+		res.Observation = o
+		if n := len(res.Failed); n > 0 {
+			res.Failed[n-1] = o
+		}
+	}
+	if !res.OK && ctx.Err() == nil && len(res.Failed) > 0 {
+		if aids.settle != nil {
+			o := res.Observation
+			aids.settle(ctx, &o)
+			setLast(o)
+		}
+		// The carry-phase timeout: ask again on a fresh connection to
+		// the relay, and believe that attempt about the relay.
+		if aids.diagnose != nil && ctx.Err() == nil && !sawProgress(res.Failed) &&
+			res.Observation.Timeout && res.Observation.Phase == diagnostics.PhaseCarry {
+			host, port, _ := splitProofTarget(order[next%len(order)])
+			actx, cancel := context.WithTimeout(ctx, cfg.AttemptTimeout)
+			o, derr, ok := aids.diagnose(actx, host, port)
+			cancel()
+			if ok && ctx.Err() == nil {
+				next++
+				res.Attempts++
+				// derr == nil: the fresh connection carried a round
+				// trip and the route's own did not — its session is
+				// stale. Nothing is known to be wrong with the route,
+				// so the attempts that failed stand as they are and the
+				// next check finds out which it was.
+				if derr != nil {
+					res.Err, res.Observation = derr, o
+					res.Failed = append(res.Failed, o)
+				}
+			}
+		}
+		if ctx.Err() == nil && res.Observation.Timeout && sawProgress(res.Failed) {
+			res.Extended = true
+			if !try(cfg.SlowBudget, attempt) && res.Observation.Timeout {
+				// Still nothing finished, on a path that was moving.
+				o := res.Observation
+				o.Progress = true
+				setLast(o)
+			}
+		}
 	}
 	res.Elapsed = time.Since(start)
 	if !res.OK && ctx.Err() != nil {
@@ -245,9 +400,31 @@ func runProof(ctx context.Context, cfg ProofConfig, rnd func(int) int, attempt p
 		return ProofResult{Cancelled: true, Err: ErrProofCancelled, Elapsed: res.Elapsed, Attempts: res.Attempts}
 	}
 	if res.OK {
-		res.Slow = proofWasSlow(res, cfg.SlowAfter)
+		res.Slow = res.Extended || proofWasSlow(res, cfg.SlowAfter)
 	}
 	return res
+}
+
+// sawProgress: did any failed attempt see the path moving?
+func sawProgress(failed []diagnostics.Observation) bool {
+	for _, o := range failed {
+		if o.Progress {
+			return true
+		}
+	}
+	return false
+}
+
+// slowSign is how long an answer from the relay must have taken to
+// count as evidence of a slow path rather than a quick one: half the
+// "slow" threshold, and never under a second — a SYN is retransmitted
+// after one second, so an answer that late was queued or resent, which
+// no filter that swallows a ClientHello makes happen.
+func slowSign(cfg ProofConfig) time.Duration {
+	if d := cfg.SlowAfter / 2; d > time.Second {
+		return d
+	}
+	return time.Second
 }
 
 // proofWasSlow decides "connected, but slow" for a proof that succeeded:

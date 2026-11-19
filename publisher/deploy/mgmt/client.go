@@ -93,6 +93,45 @@ func (c *Client) boxURL(rec *provider.OperatorRecord, path string) string {
 	return fmt.Sprintf("https://%s:%d%s", host, rec.MgmtPort, path)
 }
 
+// signedRequest builds the one request a token may authorise: the
+// method and path the op is bound to (opRoutes), the body given, and an
+// Authorization header whose signature covers all three. Every
+// authenticated call in this package goes through here, so the bytes
+// that are signed and the bytes that are sent cannot come apart — the
+// box refuses a token presented with any other method, path or body,
+// and a token minted for any other box (specs/daal-relay-mgmt-v1.md §3).
+//
+// body is nil for a GET.
+func (c *Client) signedRequest(ctx context.Context, rec *provider.OperatorRecord, privKey ed25519.PrivateKey, op string, body []byte) (*http.Request, error) {
+	method, path, ok := RouteForOp(op)
+	if !ok {
+		return nil, fmt.Errorf("mgmt: unknown op %q", op)
+	}
+	if rec == nil {
+		return nil, errors.New("mgmt: nil OperatorRecord")
+	}
+	// The token names the relay it is for by the fingerprint this
+	// session is pinned on, so no other relay that trusts the same
+	// publisher key will honour it.
+	tok, err := MintToken(privKey, rec.MgmtTLSFingerprint, op, body, c.now())
+	if err != nil {
+		return nil, err
+	}
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.boxURL(rec, path), rd)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
 // Credentials is the LEGACY (pre-Step-7) /rotate-credentials response:
 // one conflated action that rotated per-recipient credentials AND the
 // box-wide REALITY keypair. No current call site decodes it — the
@@ -212,20 +251,14 @@ func (c *Client) RotateCredentials(ctx context.Context, rec *provider.OperatorRe
 	if strings.TrimSpace(name) == "" {
 		return nil, ErrRecipientNameRequired
 	}
-	tok, err := MintToken(privKey, "rotate-credentials", c.now())
-	if err != nil {
-		return nil, err
-	}
 	reqBody, err := json.Marshal(map[string]string{"name": name})
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.boxURL(rec, "/rotate-credentials"), bytes.NewReader(reqBody))
+	req, err := c.signedRequest(ctx, rec, privKey, "rotate-credentials", reqBody)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mgmt: rotate-credentials: %w", err)
@@ -307,23 +340,27 @@ type RotateTLSResp struct {
 	// telling an operator their cover host moved when it did not is how
 	// a relay stays burned after a rotation everyone believes happened.
 	Changed []string `json:"changed,omitempty"`
+	// TLSCertPEM is the relay's data-plane certificate after the call,
+	// present only when the box re-issued it ("tls_certificate" in
+	// Changed): same key — no pin moves — with the new cover host as its
+	// first name. A naive pack minted from now on must install THIS
+	// certificate; the box also returns it on every /users/provision and
+	// /rotate-credentials reply, which is where a re-mint gets it.
+	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
+	// Warnings is whatever the box wants said out loud about a rotation
+	// that did apply. Rendered verbatim, never summarised.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (c *Client) RotateTLS(ctx context.Context, rec *provider.OperatorRecord, privKey ed25519.PrivateKey, profile TLSProfile) (*RotateTLSResp, error) {
-	tok, err := MintToken(privKey, "rotate-tls", c.now())
-	if err != nil {
-		return nil, err
-	}
 	body, err := json.Marshal(profile)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.boxURL(rec, "/rotate-tls"), bytes.NewReader(body))
+	req, err := c.signedRequest(ctx, rec, privKey, "rotate-tls", body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Daal-Mgmt-Token "+tok)
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("mgmt: rotate-tls: %w", err)

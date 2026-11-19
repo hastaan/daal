@@ -16,7 +16,7 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 SB="${SING_BOX:-$here/../../../dist-release/relay-v1.5.0/sing-box-1.13.12-linux-amd64}"
-[ -x "$SB" ] || { echo "no sing-box at $SB (run tools/release/relay-v1.5.0.sh, or set SING_BOX)" >&2; exit 2; }
+[ -x "$SB" ] || { echo "no sing-box at $SB (stage the pinned release under dist-release/relay-v1.5.0 — see tools/release/README.md — or set SING_BOX)" >&2; exit 2; }
 alpn=""; [ "${1:-}" = pinned ] && alpn=',"alpn":["h2","h3"]'
 W="${WORKERS:-12}"; N="${STARTS:-250}"
 T="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT

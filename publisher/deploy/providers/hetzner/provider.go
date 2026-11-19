@@ -327,6 +327,8 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	var healthErr error
 	var lastDebugLog string
 	var lastSSHDebug string
+	var lastPollErr error
+	var refused health.RefusalCounter
 	// Labelled so `break poll` leaves the loop. The bare `break`
 	// this replaced only left the select, so a cancelled context
 	// still burned the full 5-minute timeout before returning —
@@ -360,6 +362,16 @@ poll:
 			}
 		}
 		st, err := poller.PollOnce(ctx)
+		// PollOnce never returns a fingerprint the provisioning
+		// secret does not authenticate (health/bootstrap.go): the
+		// reply is plain HTTP and this value is what every later
+		// management reply is believed on.
+		if refused.Final(err) {
+			return fmt.Errorf("hetzner: %w", err)
+		}
+		if err != nil {
+			lastPollErr = err
+		}
 		if err == nil && st != nil && st.Healthy {
 			candidate := strings.ToLower(strings.TrimSpace(st.MgmtTLSFingerprint))
 			raw, decErr := hex.DecodeString(candidate)
@@ -379,6 +391,10 @@ poll:
 		}
 		if attempt == maxAttempts {
 			healthErr = fmt.Errorf("hetzner: health check timed out after %d attempts", maxAttempts)
+			if errors.Is(lastPollErr, health.ErrFingerprintUnauthenticated) {
+				// Not a slow boot: something answered for the box.
+				healthErr = fmt.Errorf("%w: %w", healthErr, lastPollErr)
+			}
 			break poll
 		}
 		select {
@@ -896,8 +912,10 @@ func ephemeralSSHKeyName(relay string) (string, error) {
 	return fmt.Sprintf("%s-ephemeral-%s", relay, hex.EncodeToString(b[:])), nil
 }
 
-// generateHealthToken returns a random hex token for the box's
-// /healthz/<token> route.
+// generateHealthToken returns the random secret the box's health
+// endpoint and this publisher share for one provisioning. It reaches
+// the box in cloud-init user-data and is never sent to it again: the
+// poller derives the URL token and the fingerprint MAC from it.
 func generateHealthToken() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {

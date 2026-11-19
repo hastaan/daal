@@ -186,6 +186,11 @@ export interface DiagnosticsBlob {
     // will retry; true = a connected route stopped carrying and is
     // being re-checked. Optional: an older engine emits nothing.
     route_running?: boolean;
+    // Why the last engine_set_route was refused before anything was
+    // started: '' or a closed code ('needs_new_file', 'cooldown',
+    // 'revoked', 'expired', 'other'). Read through lib/routeCheck.ts.
+    connect_refused?: string;
+    connect_refused_route?: string;
 }
 
 // Phase 2D: PIN-vault unlock outcome.

@@ -14,5 +14,6 @@
   ],
   "expect": {"*": "blocked", "hysteria2": "pass", "tuic": "pass"},
   "category": {"*": "unasserted"},
-  "established": {"*": "pass"}
+  "established": {"*": "pass"},
+  "random_loss": true
 }

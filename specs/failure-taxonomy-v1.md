@@ -12,6 +12,12 @@ path-manager behaviour, and the error-string table in
 `core/diagnostics/classify.go` is unchanged. See "Revision 2" below for
 why each was needed.
 
+**Revision 3** adds one category, `relay_no_egress`, and changes one
+rule: `path_too_slow` can now also be the category of a connect that
+FAILED — when the engine saw the path moving and nothing finished — and
+stays what it was in every other respect (no cooldown, no failure
+record, no network signal). See "Revision 3" below.
+
 ## Purpose
 
 Every failure surfaced in diagnostics, every cooldown trigger, every "Why this route?" explanation refers back to this list.
@@ -42,6 +48,7 @@ Every failure surfaced in diagnostics, every cooldown trigger, every "Why this r
 | `network_offline` | No network at all | Halt route attempts | "No internet connection" |
 | `unknown` | None of the above match | No automatic action; surface raw diagnostic | "Unknown error — see details" |
 | `path_too_slow` | The route connects and carries a round trip, but too slowly to be called usable. A **degraded** outcome, not a failure (rev. 2) | **No cooldown**, not a failure record; recorded as degraded and shown as such | "Connected, but very slow" |
+| `relay_no_egress` | The relay completed its own handshake on a connection opened for the check, and no far-side host answered through it (rev. 3) | **No cooldown** of the route or its family; recorded on the route; not censorship-class; no network signal | "Reached the server, but the server itself cannot reach the internet" |
 | `skipped_lifeline_strict` | Refresh attempt skipped because the engine is in `lifeline-strict` and the call is not user-triggered | None — recorded in audit ledger and dropped | not user-facing (audit-only) |
 
 ## Critical Rules
@@ -56,10 +63,21 @@ Every failure surfaced in diagnostics, every cooldown trigger, every "Why this r
   by `relay-ip-block`, `udp_port_blocked` by `port-whitelist`,
   `path_too_slow` by `throttle-56k`, and `udp_no_reply` is what the engine
   reports in every scenario that blocks a UDP family.
-- `path_too_slow` is not a failure. It must never be written as one
-  (`routestore.RecordFailure`), never start a cooldown, and never appear
-  in `failures[]` of the diagnostics explanation; it has its own list
-  (`degraded[]`).
+- `path_too_slow` is not a failure of the route. It must never be
+  written as one (`routestore.RecordFailure`), never start a cooldown,
+  and never appear in `failures[]` of the diagnostics explanation; a
+  route that connected slowly has its own list (`degraded[]`). A CONNECT
+  can fail with it (rev. 3): then nothing is running and the connection
+  check reads `failed` / `path_too_slow`, and the route's durable record
+  is left exactly as it was.
+- A timeout must never be read as a block while the engine has evidence
+  the path was moving (rev. 3). In particular it is never
+  `tls_handshake_failed`, and nothing derived from it may reach the
+  publisher's rotation recommender as a name-keyed or address-keyed
+  block.
+- `relay_no_egress` must never cool down a route or count toward a
+  family cooldown: every route to that relay shares the cause, and it is
+  not on the network between the device and the relay.
 - A network-wide category (`udp_unavailable`, `quic_unavailable`) must
   never be derived from one route's silence. See "What one route can
   see".
@@ -92,6 +110,45 @@ a route's seat when the link is up and every packet is dropped: per route
 that is `tcp_connect_timeout` / `udp_no_reply`, and only the aggregate
 says "nothing works". No category was added for it.
 
+## Revision 3
+
+Two things the connection proof could see and had no way to say (backlog
+TW-10 and TW-14; the end-to-end rig's observation CEN-O5).
+
+1. **Slow is not silent.** Behind seconds of queue the proof's ordinary
+   attempts finish nothing, and by revision 2's own rule ("a proof in
+   which no attempt finishes is a failed connect, classified by phase")
+   that was `tls_handshake_failed` or `unknown`, "could not connect", and
+   5–30 minutes of cooldown on a route that connects ten seconds later.
+   The rule stands where the engine saw nothing but silence. Where it
+   saw the path MOVING — bytes back from the far side, a relay that took
+   a second or more to answer a connection it did answer, a SYN answered
+   that late — the proof makes one long attempt
+   (`specs/engine-abi-v1.md`, "Slow is not silent"). A route that
+   completes it is connected and degraded. One that does not has failed
+   to connect with `path_too_slow`: the one category that says what was
+   seen. → no new word; `path_too_slow` may now be the category of a
+   failed connect.
+2. **The relay answers and reaches nothing.** `carry` + no answer was
+   `unknown` "on purpose", for want of a narrower word that would be
+   true. With a connection to the relay opened for the check, one is:
+   the relay completed its handshake a moment ago, and three far-side
+   hosts run by three operators stayed silent through it. → 
+   `relay_no_egress`. It is a statement about the relay, so it cools
+   nothing down; it is what a relay whose provider has cut its outbound
+   traffic looks like, and — indistinguishably, from one route — what a
+   filter that lets a handshake through and swallows everything after it
+   looks like. The user-facing sentence is the first; the second is why
+   the category is recorded and not acted on.
+
+The same fresh connection is what classifies a block that begins while a
+route is connected ("Classification by phase", last paragraph).
+
+Coverage: `path_too_slow` as a connect that needed the long attempt by
+the worldbox scenario `deep-queue`; `relay_no_egress` by
+`TestProveSubject_RelayThatReachesNothingIsRelayNoEgress` (the lab's
+relay always has a way out; a scenario that removes it is not written).
+
 ## Classification by phase
 
 An error string cannot carry where in the attempt a failure happened —
@@ -122,6 +179,8 @@ relay answered; the failure is in a round trip through it.
 | TCP | carry | no answer, or closed | `unknown` |
 | UDP | reach or handshake | no answer | `udp_no_reply` |
 | UDP | carry | no answer, or closed | `unknown` |
+| any | any | no answer, and the path was seen moving | `path_too_slow` (rev. 3) |
+| any | carry, on a connection opened for the check | the relay's handshake completed; no answer from the far side | `relay_no_egress` (rev. 3) |
 
 A timeout's phase is not taken from the error where the error cannot be
 trusted to give it (a multiplexed outbound re-dials on the expired
@@ -130,13 +189,29 @@ answered; a lazy outbound reports every timeout from the round trip). In
 those cases the engine makes one bare TCP connect to the route's own
 address and port — after the attempt has failed, never on a healthy
 connect — and the phase is *reach* if that goes unanswered and
-*handshake* if it is answered.
+*handshake* if it is answered. It is made in those cases only. A timeout
+whose phase the error does give (the carry phase of a family that dials
+eagerly, which is how a liveness check usually fails) starts none: the
+connect carries no payload, a failed route is checked again every
+`recheck_interval_s`, and a connect-and-close to the relay's port at that
+rhythm is a scanner's pattern, not the family's.
 
-`carry` + no answer is `unknown` on purpose: the relay is alive and its
-handshake completed, so neither `tcp_connect_timeout` nor
-`tls_handshake_failed` would be true, and "the relay accepted us and
-carried nothing" (a revoked credential on a family that fails silently,
-a relay with no way out) has no narrower word yet.
+`carry` + no answer on the route's OWN outbound says nothing about the
+relay: a family that multiplexes, pools sessions or rides one QUIC
+connection hands over a stream from the session it already holds, so on
+a route that has been connected for a while "the relay answered" is
+minutes old. A block that began mid-session was therefore `unknown` on
+exactly those families — most of them; only a family that dials per
+connection named it. The engine now
+asks once more on a connection it opens for the purpose (rev. 3) and
+classifies by what THAT attempt saw, with the table above: the SYN
+unanswered, the ClientHello swallowed or reset, the QUIC handshake
+unheard. Where that connection's handshake completes and the far side is
+still silent, the answer is `relay_no_egress`. What stays `unknown`:
+`carry` + closed (a credential refused on a family that fails by closing
+is not told apart from a relay that could not resolve a name), and
+`carry` + no answer on a family whose dial does not include the relay's
+answer.
 
 ## What one route can see
 
@@ -166,12 +241,23 @@ attempt. A path fast enough for the whole proof to finish under the
 threshold and too slow for a page is not detected (it is reported as
 nothing, `ok`), and will not be until the engine counts bytes.
 
-A proof in which NO attempt finishes is a failed connect, classified by
-phase like any other, even when the cause is a path too slow (or too
-backlogged) to finish a handshake inside the proof's few seconds: from
-one route's seat a handshake that is still crawling when the budget ends
-is the same silence as one that was swallowed. `path_too_slow` is never
-the category of a failure.
+A proof in which NO attempt finishes is a failed connect. Where nothing
+but silence was seen it is classified by phase like any other: a
+handshake that is still crawling when the budget ends, on a path that
+gave no sign of moving, is the same silence as one that was swallowed.
+Where the path WAS seen moving the proof makes its one long attempt
+first, and a connect that still does not finish fails as `path_too_slow`
+(rev. 3) — never as a block.
+
+What counts as "seen moving" is narrow on purpose, because it buys a
+route twenty more seconds before "could not connect": bytes that came
+back through the relay; a connection to the relay that completed, a
+second or more after it was asked for; the relay's address answering a
+bare SYN that late. A filter that swallows a ClientHello produces none
+of these — the SYN before it is answered in milliseconds. Not covered: a
+QUIC route whose handshake needs longer than one attempt shows nothing
+(no TCP, no connection handed over) and is still `udp_no_reply`; that
+needs the engine to count datagrams.
 
 ## Cross-References
 

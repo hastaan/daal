@@ -36,6 +36,71 @@ func TestWireVerdict(t *testing.T) {
 	}
 }
 
+// The tap counts what the relay SENT, ahead of the censor's filter. Under
+// a censor that drops at random that is not what the client received: a
+// session whose probe got nothing can show more than the payload's size
+// on the wire (dropped after being counted, then counted again as a
+// retransmission). Seen in the full matrix: heavy-loss / shadowsocks,
+// 294 563 bytes sent for a 262 144-byte blob that never completed — the
+// wire check said "pass" beside a tunnel check that said "blocked".
+func TestWireUnderRandomLoss(t *testing.T) {
+	const payload = 256 << 10
+	sent := WireSample{"shadowsocks.new": {4, 240}, "shadowsocks.in": {61, 6606}, "shadowsocks.out": {64, 294563}}
+	base, detail := sent.Verdict("shadowsocks", payload)
+	if base != Pass {
+		t.Fatalf("the sample is the measured one — the relay sent more than the payload: %q", base)
+	}
+	// Random loss, probe received nothing: tried and stopped.
+	got, why := wireUnderRandomLoss(true, false, base, detail, sent["shadowsocks.out"].Bytes, payload)
+	if got != Blocked || !strings.Contains(why, "294563") {
+		t.Errorf("random loss, payload not received: %q (%s), want blocked with the byte count in the detail", got, why)
+	}
+	// The same sample under a censor that drops by rule is NOT excused:
+	// there a payload's worth of bytes beside a failed probe is news.
+	if got, _ := wireUnderRandomLoss(false, false, base, detail, 294563, payload); got != Pass {
+		t.Errorf("a rule-based censor: the byte count stands, got %q", got)
+	}
+	// A probe that received its payload is judged by the bytes as ever.
+	if got, _ := wireUnderRandomLoss(true, true, base, detail, 294563, payload); got != Pass {
+		t.Errorf("payload received: %q", got)
+	}
+	// Nothing else is softened: a stray flow fails, an untried endpoint
+	// is silent, too few bytes are blocked for the reason Verdict gave.
+	for _, c := range []struct{ verdict, detail string }{{Fail, "a stray"}, {"silent", "never tried"}, {Blocked, "too little"}} {
+		if got, why := wireUnderRandomLoss(true, false, c.verdict, c.detail, 1, payload); got != c.verdict || why != c.detail {
+			t.Errorf("%s must pass through untouched, got %q (%s)", c.verdict, got, why)
+		}
+	}
+}
+
+// A scenario that drops at random must say so (and only such a scenario
+// may): the flag changes what the wire check asserts.
+func TestRandomLossIsDeclaredWhereTheCensorDropsAtRandom(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(rigDir(t), "scenarios", "*.json"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no scenarios: %v", err)
+	}
+	for _, f := range files {
+		name := strings.TrimSuffix(filepath.Base(f), ".json")
+		scn, err := LoadScenario(rigDir(t), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		random := false
+		for _, r := range scn.Censor.NFT {
+			random = random || (strings.Contains(r, "numgen random") && strings.Contains(r, "drop"))
+		}
+		blocked := false
+		for _, e := range scn.Expect {
+			blocked = blocked || e == Blocked
+		}
+		if want := random && blocked; scn.RandomLoss != want {
+			t.Errorf("%s: random_loss=%v, but its censor %s and it %s", name, scn.RandomLoss,
+				got(random, "drops at random", "does not drop at random"), got(blocked, "expects a blocked family", "expects nothing blocked"))
+		}
+	}
+}
+
 func TestParseWire(t *testing.T) {
 	out := `{"nftables": [{"metainfo": {"version": "1.1.6"}}, {"counter": {"family": "inet", "name": "tuic.in", "table": "wb_wire", "handle": 2, "packets": 7, "bytes": 900}}]}`
 	s, err := parseWire([]byte(out))

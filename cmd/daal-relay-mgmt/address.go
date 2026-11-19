@@ -32,9 +32,9 @@ package main
 // behind.
 //
 // Who can call it: only the publisher. Both routes are wrapped in
-// s.requireAuth, i.e. a per-request Ed25519 signature over
-// nonce:ts:op verified against the per-deploy public key, inside a 5
-// minute window, and the mgmt port is additionally shut by the cloud
+// s.requireAuth, i.e. a per-request Ed25519 signature over the op, the
+// method, the path and the body's digest (token format v2), verified
+// against the per-deploy public key, inside a 5 minute window, and the mgmt port is additionally shut by the cloud
 // provider firewall except during an ephemeral allowlist window. That
 // is the primary control and it is strong.
 //

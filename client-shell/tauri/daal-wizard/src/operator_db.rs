@@ -111,7 +111,27 @@ const MIGRATIONS: &[Migration] = &[
         name: "signed_sbps_reversibility",
         sql: include_str!("../migrations/V014__signed_sbps_reversibility.sql"),
     },
+    Migration {
+        version: 15,
+        name: "relay_identity",
+        sql: include_str!("../migrations/V015__relay_identity.sql"),
+    },
 ];
+
+/// V015: one relay's identity as last learned, and the identity its
+/// active pack commits to. See the migration for why both are kept.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RelayIdentityRow {
+    pub identity_json: String,
+    /// `"relay"` | `"reply"` | `""`.
+    pub identity_source: String,
+    pub box_fingerprint: String,
+    pub learned_at_unix: i64,
+    pub committed_json: String,
+    pub committed_at_unix: i64,
+    pub uncommitted_json: String,
+    pub healed_for: String,
+}
 
 /// `OperatorRow` mirrors a row of the `operators` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1536,6 +1556,98 @@ impl OperatorDb {
             return Err(DbError::NotFound(id));
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    // ---- V015 relay identity --------------------------------------
+
+    /// The relay-identity row, or the all-empty default when nothing
+    /// has been learned or signed yet.
+    pub fn relay_identity(&self, operator_id: i64) -> Result<RelayIdentityRow> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT identity_json, identity_source, box_fingerprint, learned_at_unix,
+                        committed_json, committed_at_unix, uncommitted_json, healed_for
+                   FROM relay_identity WHERE operator_id = ?1",
+                params![operator_id],
+                |r| {
+                    Ok(RelayIdentityRow {
+                        identity_json: r.get(0)?,
+                        identity_source: r.get(1)?,
+                        box_fingerprint: r.get(2)?,
+                        learned_at_unix: r.get(3)?,
+                        committed_json: r.get(4)?,
+                        committed_at_unix: r.get(5)?,
+                        uncommitted_json: r.get(6)?,
+                        healed_for: r.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_else(|| RelayIdentityRow {
+            uncommitted_json: "[]".into(),
+            ..Default::default()
+        }))
+    }
+
+    /// Record the relay's identity as just learned.
+    pub fn set_relay_identity_learned(
+        &self,
+        operator_id: i64,
+        identity_json: &str,
+        source: &str,
+        box_fingerprint: &str,
+        at_unix: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO relay_identity
+                 (operator_id, identity_json, identity_source, box_fingerprint, learned_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(operator_id) DO UPDATE SET
+                 identity_json = excluded.identity_json,
+                 identity_source = excluded.identity_source,
+                 box_fingerprint = excluded.box_fingerprint,
+                 learned_at_unix = excluded.learned_at_unix",
+            params![operator_id, identity_json, source, box_fingerprint, at_unix],
+        )?;
+        Ok(())
+    }
+
+    /// Record what the pack that was just signed commits the relay to.
+    /// `healed_for` is deliberately left alone: it is what stops the
+    /// next identical relay reply from signing yet again.
+    pub fn set_relay_identity_committed(
+        &self,
+        operator_id: i64,
+        committed_json: &str,
+        uncommitted_json: &str,
+        at_unix: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO relay_identity
+                 (operator_id, committed_json, uncommitted_json, committed_at_unix)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(operator_id) DO UPDATE SET
+                 committed_json = excluded.committed_json,
+                 uncommitted_json = excluded.uncommitted_json,
+                 committed_at_unix = excluded.committed_at_unix",
+            params![operator_id, committed_json, uncommitted_json, at_unix],
+        )?;
+        Ok(())
+    }
+
+    /// Remember which relay reply the pack was last signed again for.
+    /// Written only after that signature succeeded.
+    pub fn set_relay_identity_healed_for(&self, operator_id: i64, digest: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO relay_identity (operator_id, healed_for) VALUES (?1, ?2)
+             ON CONFLICT(operator_id) DO UPDATE SET healed_for = excluded.healed_for",
+            params![operator_id, digest],
+        )?;
         Ok(())
     }
 

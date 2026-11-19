@@ -28,10 +28,22 @@
 #
 # Exit 0 and skip when no .so has been built — a source checkout that
 # has never run the Android build is not broken.
+#
+# THE REST OF THE SET
+# -------------------
+# libdaal_deploy.so is packaged from the same jniLibs directory as the
+# engine and libcronet.so, by the same `tauri android build` that
+# rebuilds none of them. Whether THOSE are consistent — the engine and
+# libcronet.so from the same cronet-go, everything linked for 16 KB
+# pages, this binary included — is tools/check-android-so-manifest.sh.
+# It runs from here as well as from check-engine-so-manifest.sh so that
+# neither gate can pass alone over a mismatched set.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+bash tools/check-android-so-manifest.sh
 
 MANIFEST_SRC="publisher/deploy/cloudinit/artifacts.go"
 JNILIBS="${OUT_DIR:-client-shell/tauri/src-tauri/gen/android/app/src/main/jniLibs}"

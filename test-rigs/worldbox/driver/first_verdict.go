@@ -126,6 +126,16 @@ func (rc *RunCtx) firstVerdictCheck(f Family, phase, expect string, attempts []C
 // default — driver/first_verdict_test.go holds the two together.
 const EngineSlowAfterMs = 2000
 
+// EngineConnectWait is how long a session waits for the engine to answer
+// a connect, one way or the other. It must exceed the longest connection
+// check the engine makes on a route that is not tor
+// (engine.DefaultProofConfig): 2 attempts × 4 s, one more 4 s on a fresh
+// connection to the relay, and — only on a path the engine saw moving —
+// one long attempt of 20 s. A wait shorter than that reads a connect
+// that is still being decided as "did not connect" (heavy-loss did,
+// with the old 20 s, the first time a family was given the long attempt).
+const EngineConnectWait = 40 * time.Second
+
 // connectOverheadMs is how much longer than the proof itself a whole
 // engine_set_route may take here (starting the instance, the route-store
 // writes): the band in which set_route_ms cannot say on which side of

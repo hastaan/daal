@@ -6,13 +6,16 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"math/rand/v2"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"daal/core/diagnostics"
 
 	box "github.com/sagernet/sing-box"
+	boxoption "github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -41,7 +44,29 @@ type outboundKind struct {
 	// attempt timeout is stretched for it; the meaning of the proof is
 	// not.
 	SlowStart bool
+	// HandshakeAtDial: DialContext on a connection the outbound has to
+	// open returns only after the RELAY has answered the family's own
+	// handshake (TLS to the relay, or QUIC and its authentication). A
+	// dial that succeeds on a fresh outbound of such a kind is the
+	// relay, alive and accepting, a moment ago.
+	HandshakeAtDial bool
+	// Twin: a second outbound with the same options can be opened
+	// beside the active one for the length of one attempt (see
+	// proofSubject.twin). False for kinds where that is not a private,
+	// cheap, side-effect-free thing to do: naive (a whole Cronet
+	// engine), tor (a second tor), anything dialled through a detour.
+	Twin bool
 }
+
+// twinTypes are the outbound types a diagnosis twin may be made of.
+// handshakeAtDialTypes are the ones whose dial includes the relay's
+// answer, given TLS or QUIC to the relay.
+var (
+	twinTypes = map[string]bool{"vless": true, "vmess": true, "trojan": true, "shadowsocks": true, "anytls": true,
+		"hysteria": true, "hysteria2": true, "tuic": true, "http": true, "socks": true}
+	handshakeAtDialTypes = map[string]bool{"vless": true, "vmess": true, "trojan": true, "anytls": true,
+		"hysteria": true, "hysteria2": true, "tuic": true}
+)
 
 // udpOutboundTypes are the sing-box types whose transport to the relay
 // is UDP. tlsOutboundTypes are the ones that speak TLS to the relay
@@ -75,6 +100,9 @@ func kindOfActive(raw map[string]any) outboundKind {
 			}
 			k.SlowStart = k.Type == "tor"
 			k.Lazy = k.Type == "naive"
+			_, detoured := ob["detour"]
+			k.Twin = key == "outbounds" && twinTypes[k.Type] && !detoured
+			k.HandshakeAtDial = handshakeAtDialTypes[k.Type] && (k.TLS || k.UDP) && k.Type != "wireguard"
 			k.Server, _ = ob["server"].(string)
 			if p, ok := ob["server_port"].(float64); ok && p > 0 && p < 65536 {
 				k.ServerPort = uint16(p)
@@ -98,18 +126,35 @@ const torAttemptTimeout = 90 * time.Second
 // Prove is the singBox driver's connection proof. See proof.go.
 func (s *singBox) Prove(ctx context.Context, cfg ProofConfig) ProofResult {
 	s.mu.Lock()
-	inst, kind := s.instance, s.kind
+	sub := proofSubject{inst: s.instance, kind: s.kind, twin: s.twin}
 	s.mu.Unlock()
-	if inst == nil {
+	if sub.inst == nil {
 		return ProofResult{Err: ErrNotRunning, Observation: diagnostics.Observation{Message: ErrNotRunning.Error()}}
 	}
-	return proveInstance(ctx, inst, kind, cfg)
+	return sub.prove(ctx, cfg)
+}
+
+// proofSubject is what a proof is made of: the instance, what its
+// active outbound is, and — where the kind allows it — a way to open a
+// second outbound exactly like it.
+type proofSubject struct {
+	inst *box.Box
+	kind outboundKind
+	// twin opens an outbound with the active one's own options under a
+	// tag of its own, and returns it with the function that removes it.
+	// nil: no twin for this route.
+	twin func() (N.Dialer, func(), error)
 }
 
 // proveInstance makes the round trip through inst's active outbound. It
 // is a function of the instance, not of the driver, so the singbox test
 // build can prove a box that was started without a TUN.
 func proveInstance(ctx context.Context, inst *box.Box, kind outboundKind, cfg ProofConfig) ProofResult {
+	return proofSubject{inst: inst, kind: kind}.prove(ctx, cfg)
+}
+
+func (p proofSubject) prove(ctx context.Context, cfg ProofConfig) ProofResult {
+	inst, kind := p.inst, p.kind
 	ob, ok := inst.Outbound().Outbound(activeTag)
 	if !ok {
 		err := ErrNotRunning
@@ -121,38 +166,156 @@ func proveInstance(ctx context.Context, inst *box.Box, kind outboundKind, cfg Pr
 	if norm, err := cfg.Normalised(); err == nil {
 		cfg = norm
 	}
+	sign := slowSign(cfg)
 	var reach *reachCheck
-	res := runProof(ctx, cfg, rand.IntN, func(actx context.Context, host string, port uint16) (diagnostics.Observation, error) {
-		obs, err := proveOnce(actx, ob, kind, host, port)
+	attempt := func(actx context.Context, host string, port uint16) (diagnostics.Observation, error) {
+		obs, _, err := proveOnce(actx, ob, kind, host, port, sign)
 		if err != nil && reach == nil && timeoutPhaseIsUnknown(obs, kind) {
+			// Only where the answer is needed: a timeout whose phase
+			// the error does give (the carry phase of a family that
+			// dials eagerly — the usual way a liveness check fails)
+			// starts nothing. The reach check is a connection to the
+			// relay's port that carries no payload, and a failed route
+			// is checked again every RecheckInterval; "is the path
+			// slow" is already measured on the family's own
+			// connections (proveOnce: the dial time, the bytes back).
+			//
 			// Runs alongside the next attempt, on the proof's context
 			// (not the attempt's, which is about to end).
 			reach = startReachCheck(ctx, inst, kind, cfg.AttemptTimeout)
 		}
 		return obs, err
-	})
-	if !res.OK && !res.Cancelled && reach != nil && timeoutPhaseIsUnknown(res.Observation, kind) {
-		reach.settle(ctx, &res.Observation)
-		if n := len(res.Failed); n > 0 {
-			res.Failed[n-1] = res.Observation
+	}
+	aids := proofAids{
+		settle: func(sctx context.Context, o *diagnostics.Observation) {
+			if reach != nil {
+				reach.settle(sctx, o, kind, sign)
+			}
+		},
+	}
+	if p.twin != nil && kind.Twin {
+		aids.diagnose = func(actx context.Context, host string, port uint16) (diagnostics.Observation, error, bool) {
+			return p.diagnose(actx, host, port, sign, func(o *diagnostics.Observation) {
+				if reach == nil {
+					reach = startReachCheck(ctx, inst, kind, cfg.AttemptTimeout)
+				}
+				reach.settle(ctx, o, kind, sign)
+			})
 		}
 	}
-	return res
+	return runProofWith(ctx, cfg, rand.IntN, attempt, aids)
+}
+
+// diagnose is the carry-phase timeout asked again on a connection to
+// the relay that did not exist a moment ago.
+//
+// WHY. An outbound that multiplexes (the vless routes a relay mints),
+// pools sessions (anytls) or rides one QUIC connection (hysteria2,
+// tuic) answers DialContext from the session it already holds. On a
+// route that has been connected for a while that is every dial, so
+// when a censor starts dropping the route mid-session the liveness
+// check saw "the outbound handed over a connection, then nothing" —
+// the carry phase, which classifies as `unknown` — on exactly the
+// families where the connect-time proof, dialling fresh, names the
+// failure. A twin outbound has no session: its dial is a new SYN, a new
+// ClientHello, a new QUIC handshake, and fails where and how a connect
+// would.
+//
+// And when the twin's dial SUCCEEDS on a kind whose dial includes the
+// relay's answer, the relay is alive and accepted this device a moment
+// ago; if the far side then stays silent through it as well — the third
+// host in a row, run by a third party — what is left is a relay that
+// does not reach the internet (relay_no_egress).
+//
+// What the network sees is one more connection of the family's own
+// kind to the endpoint the device is already talking to, and only after
+// two attempts have failed.
+func (p proofSubject) diagnose(actx context.Context, host string, port uint16, sign time.Duration, settle func(*diagnostics.Observation)) (diagnostics.Observation, error, bool) {
+	tw, remove, err := p.twin()
+	if err != nil {
+		return diagnostics.Observation{}, nil, false
+	}
+	defer remove()
+	obs, relayAnswered, err := proveOnce(actx, tw, p.kind, host, port, sign)
+	if err == nil {
+		return obs, nil, true
+	}
+	if obs.Timeout && !p.kind.UDP && timeoutPhaseIsUnknown(obs, p.kind) {
+		// The twin's own dial timed out in a way that hides the phase:
+		// the reach check settles it, as it does for a connect.
+		settle(&obs)
+	}
+	if relayAnswered && obs.Timeout && obs.Phase == diagnostics.PhaseCarry && !obs.Progress {
+		obs.RelayNoEgress = true
+	}
+	return obs, err, true
+}
+
+var twinSeq atomic.Uint64
+
+// makeTwin returns proofSubject.twin for the active outbound of inst,
+// or nil when the parsed options do not carry one.
+func makeTwin(bctx context.Context, inst *box.Box, outbounds []boxoption.Outbound) func() (N.Dialer, func(), error) {
+	var active *boxoption.Outbound
+	for i := range outbounds {
+		if outbounds[i].Tag == activeTag {
+			active = &outbounds[i]
+		}
+	}
+	if active == nil {
+		return nil
+	}
+	typ, opts := active.Type, active.Options
+	return func() (N.Dialer, func(), error) {
+		tag := fmt.Sprintf("%s-check-%d", activeTag, twinSeq.Add(1))
+		mgr := inst.Outbound()
+		logger := inst.LogFactory().NewLogger("outbound/" + typ + "[" + tag + "]")
+		if err := mgr.Create(bctx, inst.Router(), logger, tag, typ, opts); err != nil {
+			return nil, nil, err
+		}
+		tw, ok := mgr.Outbound(tag)
+		if !ok {
+			return nil, nil, fmt.Errorf("engine: outbound %s vanished", tag)
+		}
+		return tw, func() { _ = mgr.Remove(tag) }, nil
+	}
+}
+
+// countingConn counts what comes BACK on the connection the outbound
+// handed over: bytes from the far side, through the relay.
+type countingConn struct {
+	net.Conn
+	back atomic.Int64
+}
+
+func (c *countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.back.Add(int64(n))
+	return n, err
 }
 
 // proveOnce is one round trip: open a connection through the outbound,
-// read a TLS ServerHello back from the far side.
-func proveOnce(ctx context.Context, ob N.Dialer, kind outboundKind, host string, port uint16) (diagnostics.Observation, error) {
+// complete a TLS handshake with the far side, send nothing, close.
+//
+// relayAnswered: the dial succeeded on a kind whose dial includes the
+// relay's own handshake. It is a fact about the relay only when the
+// outbound had to open the connection (a twin); on the active outbound
+// it may be the echo of a session opened minutes ago.
+func proveOnce(ctx context.Context, ob N.Dialer, kind outboundKind, host string, port uint16, sign time.Duration) (obs diagnostics.Observation, relayAnswered bool, err error) {
 	// Everything before DialContext returns is between the device and
 	// the relay. Which half of that (the SYN, or the family's own
 	// handshake) is read from the error where it can be: a failed
 	// connect() is a *net.OpError with Op "dial" (diagnostics.Observe).
 	// For a TIMEOUT that reading is not trustworthy — see
 	// timeoutPhaseIsUnknown — and the reach check settles it.
-	conn, err := ob.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort(host, port))
+	dialStart := time.Now()
+	raw, err := ob.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort(host, port))
 	if err != nil {
-		return diagnostics.Observe(err, diagnostics.PhaseHandshake, kind.UDP, kind.TLS), err
+		return diagnostics.Observe(err, diagnostics.PhaseHandshake, kind.UDP, kind.TLS), false, err
 	}
+	dialTook := time.Since(dialStart)
+	relayAnswered = kind.HandshakeAtDial
+	conn := &countingConn{Conn: raw}
 	defer conn.Close()
 	// An abandoned proof must let go at once (disconnect must not wait
 	// for it), and a deadline keeps a silent far end from holding the
@@ -178,9 +341,21 @@ func proveOnce(ctx context.Context, ob N.Dialer, kind outboundKind, host string,
 		// relay has answered by now. Families that dial lazily report
 		// their connect error here instead, and Observe moves those
 		// back to the reach phase.
-		return diagnostics.Observe(err, diagnostics.PhaseCarry, kind.UDP, kind.TLS), err
+		obs := diagnostics.Observe(err, diagnostics.PhaseCarry, kind.UDP, kind.TLS)
+		// Slow, not silent: something came back from the far side
+		// before the time ran out, or the relay needed a second or more
+		// to answer a connection it did answer (a dial served from a
+		// session the outbound already held takes no time at all, and
+		// says nothing either way).
+		if obs.Timeout && (conn.back.Load() > 0 || (!kind.SlowStart && !kind.Lazy && dialTook >= sign)) {
+			obs.Progress = true
+		}
+		return obs, relayAnswered, err
 	}
-	return diagnostics.Observation{}, nil
+	// The handshake is the whole exchange. Say goodbye the way a TLS
+	// client does (close_notify) rather than vanish mid-connection.
+	_ = tc.Close()
+	return diagnostics.Observation{}, relayAnswered, nil
 }
 
 // timeoutPhaseIsUnknown reports whether a failed attempt is a timeout
@@ -215,11 +390,16 @@ func timeoutPhaseIsUnknown(o diagnostics.Observation, kind outboundKind) bool {
 // protected from the tunnel exactly as the family's own are, and what
 // the network sees is the first packet the family itself sends, to the
 // endpoint the device is already known to be talking to. It runs only
-// AFTER an attempt has failed, never on a healthy connect.
+// AFTER an attempt has failed, never on a healthy connect, and only for
+// a timeout whose phase is unknown (timeoutPhaseIsUnknown): unlike the
+// family's own first flight it sends nothing after the handshake, so it
+// is not something to repeat on every failed liveness check.
 type reachCheck struct {
 	done chan struct{}
 	err  error
 	ran  bool
+	// took: how long the address needed to answer (either way).
+	took time.Duration
 }
 
 func startReachCheck(ctx context.Context, inst *box.Box, kind outboundKind, budget time.Duration) *reachCheck {
@@ -236,6 +416,8 @@ func startReachCheck(ctx context.Context, inst *box.Box, kind outboundKind, budg
 		defer close(r.done)
 		rctx, cancel := context.WithTimeout(ctx, budget)
 		defer cancel()
+		t0 := time.Now()
+		defer func() { r.took = time.Since(t0) }()
 		conn, err := direct.DialContext(rctx, N.NetworkTCP, M.ParseSocksaddrHostPort(kind.Server, kind.ServerPort))
 		if err == nil {
 			_ = conn.Close()
@@ -246,19 +428,36 @@ func startReachCheck(ctx context.Context, inst *box.Box, kind outboundKind, budg
 }
 
 // settle waits for the check and writes what it found into the
-// observation of the timed-out attempt.
-func (r *reachCheck) settle(ctx context.Context, o *diagnostics.Observation) {
+// observation of the timed-out attempt:
+//
+//   - WHERE the silence was, when the attempt's own error could not be
+//     trusted to say (timeoutPhaseIsUnknown);
+//   - whether the path is SLOW: a SYN that was answered, and took a
+//     second or more to be, was queued or resent on the way. A filter
+//     that swallows a ClientHello does not delay the SYN before it.
+//     (Read off a check that ran for the first reason; one is never
+//     started for this alone.)
+func (r *reachCheck) settle(ctx context.Context, o *diagnostics.Observation, kind outboundKind, sign time.Duration) {
 	select {
 	case <-r.done:
 	case <-ctx.Done():
 		return
 	}
-	if !r.ran {
+	if !r.ran || !o.Timeout {
 		return
 	}
+	unknown := timeoutPhaseIsUnknown(*o, kind)
 	if r.err == nil {
-		// The SYN is answered, so the silence came after it.
-		o.Phase = diagnostics.PhaseHandshake
+		if unknown {
+			// The SYN is answered, so the silence came after it.
+			o.Phase = diagnostics.PhaseHandshake
+		}
+		if r.took >= sign {
+			o.Progress = true
+		}
+		return
+	}
+	if !unknown {
 		return
 	}
 	probe := diagnostics.Observe(r.err, diagnostics.PhaseReach, false, false)

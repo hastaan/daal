@@ -386,7 +386,10 @@ A route is connected only once it has carried one real round trip
   route is called dead) and reads a TLS ServerHello back. Nothing leaves
   the device outside the tunnel and no application data is sent. The call
   therefore blocks for up to `attempts × attempt_timeout_ms` (8 s by
-  default; a `tor` route is given longer). On failure the instance is
+  default; a `tor` route is given longer) on a route where nothing is
+  seen moving, and longer in the two cases below. **A host MUST NOT call
+  it on a thread that draws its interface or runs its event loop**
+  ("Hosts" below). On failure the instance is
   torn down, the failure is classified by phase
   (`specs/failure-taxonomy-v1.md` "Classification by phase"), the route
   is cooled down and recorded as failed, the posture goes to `Recovery`,
@@ -396,6 +399,43 @@ A route is connected only once it has carried one real round trip
   route and records it as *degraded* (`path_too_slow`), never as failed.
   "Slower" is the whole proof — every attempt, the failed ones included,
   whichever phase they had reached: the caller waited through all of it.
+- *Slow is not silent.* When every ordinary attempt ran out of time and
+  the engine saw the path MOVING while they did — bytes came back from
+  the far side; or the relay answered a connection after
+  `max(slow_after_ms / 2, 1 s)` or more; or the relay's address answered
+  a bare SYN that late — one further attempt is made with a budget of
+  `slow_budget_ms` (20 s by default). If it completes, the route is
+  connected and *degraded* (`path_too_slow`). If it does not, the connect
+  fails with category `path_too_slow`: the instance is torn down and
+  `route_check` is `failed`, but the route is NOT cooled down, gets no
+  failure record and no success record, and produces no network signal —
+  the next `engine_set_route` for it is attempted at once. A path on
+  which nothing was seen moving never gets the long attempt. (The
+  evidence needs a TCP connection to the relay or an answer through it; a
+  QUIC route whose own handshake does not finish within one attempt shows
+  none and is still `udp_no_reply`.)
+- *The carry-phase timeout is asked again on a fresh connection.* A
+  timeout after the route's outbound handed over a connection says
+  nothing about the relay when the outbound answered from a session it
+  already held — which, on a route that has been connected for a while,
+  is every dial of a multiplexed, pooled or QUIC family. So after the
+  ordinary attempts end that way the engine opens ONE more outbound with
+  the route's own options, makes one attempt through it (another target,
+  `attempt_timeout_ms`), removes it, and classifies by what that attempt
+  saw: a block that begins mid-session is classified exactly as a failed
+  connect through the same block would be. Not done for `naive` and
+  `tor`, nor for a route dialled through a detour. If the fresh
+  connection carries a round trip, the route's own session was stale;
+  the check still fails (as `unknown`) and the next re-check decides.
+- *A relay with no way out.* If on that fresh connection the relay
+  completes its own handshake (TLS to the relay, or QUIC and its
+  authentication) and the far side then stays silent as well — the third
+  host in a row, each run by a different operator — the failure is
+  `relay_no_egress`: the relay answers and does not reach the internet.
+  It is recorded on the route, never cooled down, and is not a
+  censorship-class category. Families whose dial does not include the
+  relay's answer (`shadowsocks`, `naive`) cannot make this statement and
+  report `unknown`.
 - `engine_clear_route`, and an `engine_set_route` for another route,
   abandon a check in flight instead of waiting for it; the abandoned call
   fails and records nothing about its route. `engine_clear_route` does
@@ -425,6 +465,36 @@ A route is connected only once it has carried one real round trip
   `route_running: false` as connecting or retrying; it is a failed
   attempt that needs the user. `route_check` and `route_running` are read
   under one lock and always describe the same moment.
+- The `failed` state a failed connect leaves behind ends when the
+  cooldown that failure started (the route's, or its family's) has run
+  out: from then on `route_check` is `""` and the posture `NoRoute`. The
+  route's failure record is not touched. A failed connect that started no
+  cooldown (`auth_failed`, `path_too_slow`, `relay_no_egress`, …) stays
+  `failed` until the next `engine_set_route` that is not refused. A
+  `failed` with `route_running: true` is never ended by time.
+- `engine_clear_route` erases only what it stops. When it finds an
+  instance running or a check in flight (`verifying`, `ok`, `degraded`,
+  or `failed` with `route_running: true`) it stops it and resets
+  `route_check`, `route_check_category`, `connect_refused` and the
+  posture (`NoRoute`). When it finds nothing running (`route_check` `""`,
+  or `failed` with `route_running: false`) it leaves all of them as they
+  are: the verdict of the last connect is still true, and a host that
+  tears its own plumbing down after a connect that did not come up calls
+  `engine_clear_route` as part of that — on Android before the interface
+  has read the diagnostics once. It is safe to call any number of times.
+- `engine_export_diagnostics` carries the always-present
+  `connect_refused` and `connect_refused_route`: why the last
+  `engine_set_route` was refused before anything was started, as a closed
+  code, and for which route. `""` (it was not), `"needs_new_file"` (a
+  RelayPack route with no signed endpoint: it was imported from a file
+  made before files carried one, and only a new file fixes it),
+  `"cooldown"`, `"revoked"`, `"expired"`, `"other"`. Cleared by the next
+  `engine_set_route` that is not refused and by an `engine_clear_route`
+  that stops something (above). It
+  exists because a host may have no way to hand the returned error to its
+  interface (on Android the call is made by the VPN service, long after
+  the command that asked for it has returned). A consumer maps the code
+  to its own words and never displays engine text.
 - While a route is connected the same proof is repeated every
   `liveness_interval_s` (±25 %), and at once when
   `engine_network_changed` reports a different network. A connected route
@@ -445,19 +515,84 @@ is not `host:port` fails `engine_init`.
 { "connection_check": {
     "targets": ["www.example.com:443"],
     "attempt_timeout_ms": 4000, "attempts": 2, "slow_after_ms": 2000,
+    "slow_budget_ms": 20000,
     "liveness_interval_s": 180, "recheck_interval_s": 30 } }
 ```
 
 Every member is optional; zero or absent means the default shown (the
-default `targets` are the six hosts in `engine.DefaultProofTargets`).
-`targets` are TLS endpoints on the far side of the relay; the target's
-certificate is deliberately not verified (nothing is authenticated or
-sent, and a device with a wrong clock must not be told its route is
-dead).
+default `targets` are the hosts in `engine.DefaultProofTargetSet`,
+below). `targets` are TLS endpoints on the far side of the relay; the
+target's certificate is deliberately not verified (nothing is
+authenticated or sent, and a device with a wrong clock must not be told
+its route is dead).
 
-Regressions: `core/abi/route_check_test.go` (all), `core/engine/proof_test.go`,
-`core/engine/proof_singbox_test.go` (`-tags singbox`),
-`core/diagnostics/observe_test.go`.
+*The default targets.* `www.google.com`, `www.microsoft.com`,
+`www.cloudflare.com`, `github.com`, `www.apple.com`, `www.amazon.com`,
+all on port 443. The list is held to five rules
+(`core/engine/proof.go`; `TestDefaultProofTargets_*`):
+
+1. *What the relay's network already carries.* The connection leaves the
+   relay, so the party that sees it is the relay's hosting network and
+   whoever watches it. Each target is the front page of a service that
+   datacentre machines and phones both open all day — and that the
+   relay's own users open through it — so the check is one more TLS
+   connection to a name that network sees constantly.
+2. *Reachable from a rented server anywhere.* Each is answered from an
+   anycast or multi-region edge that accepts TCP and completes TLS for
+   any source address. Services that turn datacentre addresses away do it
+   in HTTP (a challenge page); the check never gets that far.
+3. *TLS only, and nothing after it.* Port 443, a full TLS handshake, a
+   `close_notify`, and no byte of application data: no HTTP request, no
+   header, no path, nothing that names Daal or the device. The handshake
+   is Go's standard one, the same for every Daal client.
+4. *No one company can fail a working route.* The attempts of one check
+   go to neighbours in the list from a random starting point, and
+   neighbours are run by different companies (GitHub is counted as
+   Microsoft), so two failures in a row are never one operator's outage
+   or one operator's refusal of a datacentre range. The fresh-connection
+   attempt takes a third.
+5. *Nobody's donated infrastructure.* A volunteer-funded site is not
+   ours to use as a beacon. (`www.wikipedia.org` was in the first list
+   and was removed for this, and because it is blocked in several
+   jurisdictions where servers are rented.)
+
+*Who learns what.* The censor between the device and the relay sees only
+the tunnel: the check is inside it. The relay learns that a connected
+client opened a connection to a common site — which it learns about all
+of that client's traffic. The relay's upstream sees a TLS handshake from
+the relay to one of six names, with no request after it, about once per
+connect and once every three minutes (±25 %) per connected device, among
+that device's own traffic to the same kind of name. The target learns the
+relay's address and that something completed a handshake. No party is
+shown anything that identifies the device, its user, or Daal by name;
+what CAN be learned by a patient observer of the relay's upstream is that
+a handshake with no data recurs — which is why the interval is jittered,
+the target is random, and the list is configuration: a publisher who
+knows their relay's neighbourhood can replace it. A relay that reaches
+none of the targets is reported as `relay_no_egress` (above), not as a
+failure of the route.
+
+*Not verified.* The list was checked for reachability from one
+residential network and reasoned about for datacentres; it has not been
+run from a relay in every hosting region. `relay_no_egress` is what a
+relay that cannot reach them looks like, and it is not a cooldown.
+
+*Hosts.* Because `engine_set_route` blocks for the check, a host calls it
+from a worker thread and treats `engine_clear_route` (safe from any
+thread) as its cancel. The Android VPN service makes every engine call on
+one dedicated thread and cancels from another
+(`DaalVpnService.kt`, "THREADING"); the desktop shell's `connect` command
+is async and runs the call on the blocking pool. While the call is in
+flight the interface reads `route_check: "verifying"` and says "Checking
+the connection…"; a tap in that state, and in `failed` with
+`route_running: true`, stops the route.
+
+Regressions: `core/abi/route_check_test.go`, `core/abi/route_check_tw_test.go`
+(all), `core/engine/proof_test.go`, `core/engine/proof_singbox_test.go`,
+`core/engine/proof_midsession_singbox_test.go` (`-tags singbox`),
+`core/diagnostics/observe_test.go`, `core/pathmanager/fsm_test.go`;
+`client-ui/src/lib/routeCheck.test.ts`, `connectThreading.test.ts`;
+end-to-end rig scenarios `throttle-56k`, `deep-queue`.
 
 ## Surface (Phase 1C — 9 additional functions, append-only)
 

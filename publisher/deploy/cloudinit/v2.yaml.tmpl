@@ -359,9 +359,10 @@ runcmd:
     # in this certificate (bundle.NaiveVerificationName), so a relay
     # that never moves puts nothing new on the wire. The name is the
     # cover host this relay was provisioned with — the one hostname
-    # already chosen to be plausible for this address. It is fixed for
-    # the certificate's life: a later rotate-tls moves REALITY's cover
-    # host, not this.
+    # already chosen to be plausible for this address. It follows the
+    # cover host: when rotate-tls moves it, daal-relay-mgmt re-issues
+    # this certificate on the SAME key (no pin moves) with the new cover
+    # host as the first DNS name and this one kept after it.
     DAAL_SAN="${DAAL_SAN},DNS:{{ .CoverSNI }}"
 {{- end }}
     run openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \

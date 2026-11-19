@@ -35,7 +35,42 @@ type Publisher struct {
 	// them (README "What is real and what is not"); on a VPS the record
 	// has the first two and this file supplies the rest.
 	endpointCreds string
+
+	// identityFile is the relay's own statement of who it is, as
+	// `relay-identity` last saved it — the file the wizard stages for
+	// `bind-and-sign --relay-identity`. Empty until the relay has been
+	// asked, and for a relay too old to answer; BindAndSign then falls
+	// back to endpointCreds, as the app does.
+	identityFile string
+	// Committed is what the last bind-and-sign said the pack commits
+	// the relay to (its `committed_identity`). The app keeps the same
+	// thing, to notice when a later reply from the relay disagrees.
+	Committed CommittedIdentity
 }
+
+// CommittedIdentity mirrors bind-and-sign's `committed_identity`.
+type CommittedIdentity struct {
+	Server            string   `json:"server"`
+	CoverSNI          string   `json:"cover_sni"`
+	RealityPublicKey  string   `json:"reality_public_key"`
+	TLSCertSHA256     string   `json:"tls_cert_sha256"`
+	SSMethod          string   `json:"ss_method"`
+	SSServerKeySHA256 string   `json:"ss_server_key_sha256"`
+	Families          []string `json:"families"`
+}
+
+// RelayIdentityDoc is the part of the relay's identity the rig reads.
+type RelayIdentityDoc struct {
+	RealityPublicKey  string   `json:"reality_public_key"`
+	TLSCertSHA256     string   `json:"tls_cert_sha256"`
+	CoverSNI          string   `json:"cover_sni"`
+	SSServerKeySHA256 string   `json:"ss_server_key_sha256"`
+	PendingFamilies   []string `json:"pending_families"`
+}
+
+// exitRelayCannotSay is `relay-identity`'s reserved exit code for a
+// relay whose software predates the identity route.
+const exitRelayCannotSay = 3
 
 // ToolboxProfile is the profile every relay in the rig is provisioned with.
 const ToolboxProfile = "iran-default"
@@ -144,8 +179,50 @@ func (pb *Publisher) Provision(ctx context.Context, families []string) Verb {
 // proves the relay is the relay), so it has to be run again after any
 // rotation that moves one of those: users-pack-sbp refuses to mint from
 // a signed pack that no longer describes the relay.
+//
+// It signs from what the app signs from: the relay's own identity when
+// the relay has stated one (RelayIdentity), and otherwise the newest
+// users-provision reply.
 func (pb *Publisher) BindAndSign(ctx context.Context, out string, extra ...string) Verb {
-	return pb.BindAndSignFor(ctx, out, pb.endpointCreds, extra...)
+	if pb.identityFile == "" {
+		return pb.BindAndSignFor(ctx, out, pb.endpointCreds, extra...)
+	}
+	args := []string{"bind-and-sign", "--operator-record", pb.Path("record.json"),
+		"--priv-key", pb.Path("publisher.priv"), "--output", pb.Path(out),
+		"--publisher-name", "Worldbox Publisher",
+		"--relay-identity", pb.Path(pb.identityFile)}
+	v := pb.Deploy(ctx, append(args, extra...)...)
+	pb.noteCommitted(v)
+	return v
+}
+
+func (pb *Publisher) noteCommitted(v Verb) {
+	if !v.OK() {
+		return
+	}
+	var ans struct {
+		Committed CommittedIdentity `json:"committed_identity"`
+	}
+	if json.Unmarshal([]byte(v.Stdout), &ans) == nil {
+		pb.Committed = ans.Committed
+	}
+}
+
+// RelayIdentity asks the relay who it is (mgmt GET /identity) and saves
+// the answer where BindAndSign picks it up — the first thing the app
+// does before every signature. Exit 3 means the relay's software
+// predates the route; nothing is saved and the caller falls back.
+func (pb *Publisher) RelayIdentity(ctx context.Context) (Verb, RelayIdentityDoc) {
+	const file = "relay-identity.json"
+	v := pb.Deploy(ctx, "relay-identity", "--record-file", pb.Path("record.json"),
+		"--priv-key", pb.Path("publisher.priv"), "--token-file", pb.Path("cloud.token"),
+		"--helper-ip", PublisherIP, "--output", pb.Path(file))
+	var doc RelayIdentityDoc
+	if v.OK() {
+		pb.identityFile = file
+		_ = json.Unmarshal([]byte(v.Stdout), &doc)
+	}
+	return v, doc
 }
 
 // BindAndSignFor is BindAndSign with an explicit relay reply to take
@@ -157,7 +234,9 @@ func (pb *Publisher) BindAndSignFor(ctx context.Context, out, credsFile string, 
 	if credsFile != "" {
 		args = append(args, "--endpoint-creds", pb.Path(credsFile))
 	}
-	return pb.Deploy(ctx, append(args, extra...)...)
+	v := pb.Deploy(ctx, append(args, extra...)...)
+	pb.noteCommitted(v)
+	return v
 }
 
 // UsersProvision creates a recipient on the relay and saves the box's

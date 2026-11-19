@@ -75,7 +75,8 @@ func (rc *RunCtx) freshChannel(phase string) (*freshChannel, bool) {
 		return nil, false
 	}
 	pubRaw, _ := os.ReadFile(rc.Pub.Path("publisher.pub"))
-	return &freshChannel{rc: rc, phase: phase, root: root, hosts: hosts, pubHex: hex.EncodeToString(pubRaw)}, true
+	return &freshChannel{rc: rc, phase: phase, root: root, hosts: hosts, pubHex: hex.EncodeToString(pubRaw),
+		announced: append([]string(nil), rc.FreshAnnounced...)}, true
 }
 
 func (fc *freshChannel) put(url string, body []byte) error {
@@ -99,6 +100,11 @@ func (fc *freshChannel) phoneOpts(fam Family, pack string) ClientOpts {
 // it is now. Its output is the SIGNED, CREDENTIAL-LESS pack.
 func (fc *freshChannel) sign(out string) (map[string]any, bool) {
 	rc := fc.rc
+	// The app asks the relay who it is before it signs (the cover host
+	// in particular may have moved since the last answer).
+	if rc.Pub.identityFile != "" {
+		rc.askRelay(fc.phase, "before-sign."+out)
+	}
 	t0 := time.Now()
 	v := rc.Pub.BindAndSign(rc.Ctx, out, freshMirrorFlags...)
 	var ans map[string]any
@@ -172,6 +178,7 @@ func (fc *freshChannel) announce(tag string) (signed map[string]any, ok bool) {
 		return nil, false
 	}
 	fc.announced = append(fc.announced, packID)
+	rc.FreshAnnounced = append(rc.FreshAnnounced, packID)
 	return signed, true
 }
 

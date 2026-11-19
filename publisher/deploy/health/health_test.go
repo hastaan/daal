@@ -81,7 +81,7 @@ func TestHandler_404OnWrongMethod(t *testing.T) {
 	h, _ := NewHandler(HandlerConfig{Token: testToken, Probe: stubProbe{}})
 	srv := httptest.NewServer(h)
 	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/healthz/"+testToken, nil)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/healthz/"+PathToken(testToken), nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestHandler_404OnWrongRemoteIP(t *testing.T) {
 		AllowedClientIP: net.ParseIP("203.0.113.10"),
 		Probe:           stubProbe{},
 	})
-	req := httptest.NewRequest(http.MethodGet, "/healthz/"+testToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz/"+PathToken(testToken), nil)
 	req.RemoteAddr = "198.51.100.20:44444"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -113,7 +113,7 @@ func TestHandler_AllowsConfiguredRemoteIP(t *testing.T) {
 		AllowedClientIP: net.ParseIP("203.0.113.10"),
 		Probe:           stubProbe{out: Status{Healthy: true}},
 	})
-	req := httptest.NewRequest(http.MethodGet, "/healthz/"+testToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz/"+PathToken(testToken), nil)
 	req.RemoteAddr = "203.0.113.10:44444"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -133,7 +133,7 @@ func TestHandler_HappyPathReturnsJSON(t *testing.T) {
 	h, _ := NewHandler(HandlerConfig{Token: testToken, Probe: probe})
 	srv := httptest.NewServer(h)
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/healthz/" + testToken)
+	resp, err := http.Get(srv.URL + "/healthz/" + PathToken(testToken))
 	if err != nil {
 		t.Fatal(err)
 	}

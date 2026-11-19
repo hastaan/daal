@@ -89,7 +89,8 @@ build_go_pt() {
     echo "==> $soname $abi"
     ( cd "$src" && \
       CC="$NDK_BIN/$cc" CGO_ENABLED=1 GOOS=android GOARCH="$goarch" \
-      go build -buildmode=pie -trimpath -ldflags "-s -w" -o "$out" "$pkg" )
+      go build -buildmode=pie -trimpath \
+        -ldflags "-s -w -extldflags=-Wl,-z,max-page-size=16384" -o "$out" "$pkg" )
     file "$out" | grep -q "pie executable" \
       || { echo "FATAL: $out is not a PIE executable and cannot be exec'd" >&2; exit 1; }
   done < <(abis)

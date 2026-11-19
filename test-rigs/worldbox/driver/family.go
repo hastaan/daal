@@ -240,13 +240,15 @@ func socketBound(dump, proto string, port int) bool {
 
 // wireCheck records where the session's packets went. expect is the
 // tunnel's expectation; minDown the payload the session claims to have
-// downloaded.
-func (rc *RunCtx) wireCheck(f Family, phase, expect string, w WireSample, werr error, minDown int64, t0 time.Time) {
+// downloaded; received whether the session's own probe got that payload
+// (verified bytes), which is the only witness of DELIVERY there is.
+func (rc *RunCtx) wireCheck(f Family, phase, expect string, w WireSample, werr error, minDown int64, received bool, t0 time.Time) {
 	if werr != nil {
 		rc.R.Add(f.Name, phase, "wire", expect, Fail, werr.Error(), nil, t0)
 		return
 	}
 	verdict, detail := w.Verdict(f.Name, minDown)
+	verdict, detail = wireUnderRandomLoss(rc.Scn.RandomLoss, received, verdict, detail, w[f.Name+".out"].Bytes, minDown)
 	if verdict == "silent" {
 		// Nothing was even attempted on the family's endpoint. Under a
 		// scenario that expects "blocked" that is not what was claimed
@@ -254,6 +256,28 @@ func (rc *RunCtx) wireCheck(f Family, phase, expect string, w WireSample, werr e
 		verdict = Fail
 	}
 	rc.R.Add(f.Name, phase, "wire", expect, verdict, detail, w.Evidence(), t0)
+}
+
+// wireUnderRandomLoss corrects the one thing the tap cannot witness
+// under a censor that drops at random (Scenario.RandomLoss).
+//
+// WireSample.Verdict says "pass" when the relay SENT at least the
+// payload towards the client. The tap counts ahead of the censor's
+// filter, so with 30% of the packets dropped behind it, and every
+// retransmission counted again, the relay routinely sends more than
+// the payload's size in a session whose probe verifiably received none
+// of it within its budget (measured: 294 563 bytes counted for a
+// 262 144-byte blob that never completed). That session was tried on
+// the right endpoint and did not carry the payload — "blocked", which
+// is what the scenario claims — and calling it "pass" contradicts the
+// tunnel check beside it. Only that case is touched: a stray flow is
+// still a failure, an untried endpoint still silent, and a session
+// whose probe DID receive its payload is judged by the bytes as ever.
+func wireUnderRandomLoss(randomLoss, received bool, verdict, detail string, sent, minDown int64) (string, string) {
+	if !randomLoss || received || verdict != Pass {
+		return verdict, detail
+	}
+	return Blocked, fmt.Sprintf("the relay sent %d bytes towards the client (payload alone is %d), but this censor drops packets at random after the tap and the probe did not receive the payload: bytes sent are not bytes delivered", sent, minDown)
 }
 
 // ---- wrong credentials --------------------------------------------------
@@ -359,7 +383,7 @@ func (rc *RunCtx) attempt(f Family, phase, check, label, pack string, budget tim
 		detail = "the engine process died: " + sig
 		return true
 	}
-	ev, err := c.Wait(rc.Ctx, 20*time.Second, "connected")
+	ev, err := c.Wait(rc.Ctx, EngineConnectWait, "connected")
 	if err != nil && dead() {
 		w, _ = WireReset(rc.Ctx)
 		return Fail, detail, w, true

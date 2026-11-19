@@ -42,6 +42,7 @@ import {
     trustFromVerdict,
 } from '../lib/importVerdict';
 import type { ImportVerdict, TrustResolution } from '../lib/importVerdict';
+import UnavailableRoutes from './UnavailableRoutes';
 
 
 
@@ -95,6 +96,10 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [done, setDone] = useState(false);
+    /** The verdict of the import that completed, kept for the one thing
+     *  the "Imported." screen must add: which ways to connect the file
+     *  did NOT give this device (UnavailableRoutes). */
+    const [doneVerdict, setDoneVerdict] = useState<ImportVerdict | null>(null);
     /** True after the engine returns VerdictTrustPromptNeeded — the
      *  user must confirm the publisher EN+FA word grid before any
      *  routes commit. */
@@ -197,6 +202,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                 return;
             }
             // KIND_IMPORTED, KIND_ROTATION_ACCEPTED, or unknown-but-no-error
+            setDoneVerdict(v);
             setDone(true);
             onImported?.();
         } catch (e) {
@@ -222,6 +228,9 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
             setError(failure);
             return;
         }
+        // The routes committed in resolveTrustPrompt, so ITS verdict is
+        // the one that lists what was left out.
+        setDoneVerdict(r.verdict);
         setDone(true);
         onImported?.();
     };
@@ -270,6 +279,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                     setError(friendlyReason(t, v.Reason || ''));
                     return;
                 }
+                setDoneVerdict(v);
             } else if (kind === 'uri') {
                 const res = await contract.uriImport(pasted.trim());
                 if (res.error) throw new Error(res.error);
@@ -308,6 +318,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                 >
                     {t('add.done')}
                 </div>
+                <UnavailableRoutes t={t} verdict={doneVerdict} />
             </Sheet>
         );
     }

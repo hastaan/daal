@@ -13,9 +13,11 @@ package relaypack
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"daal/bundle-go/bundle"
+	"daal/publisher/deploy/mgmt"
 	"daal/publisher/deploy/provider"
 )
 
@@ -42,6 +44,11 @@ type EndpointMaterial struct {
 	// only its digest is.
 	SSMethod    string
 	SSServerKey string
+	// SSServerKeySHA256 is bundle.SSServerKeyDigest of the box-wide
+	// key, for a source that states the digest and not the key — the
+	// relay's own identity (mgmt GET /identity). When set it is what
+	// the endpoint carries and SSServerKey is not consulted.
+	SSServerKeySHA256 string
 }
 
 // EndpointMaterialFromRecord reads what the OperatorRecord knows.
@@ -99,6 +106,62 @@ func (m EndpointMaterial) Overlay(live EndpointMaterial) EndpointMaterial {
 	fill(&out.TLSCertPEM, live.TLSCertPEM)
 	fill(&out.SSMethod, live.SSMethod)
 	fill(&out.SSServerKey, live.SSServerKey)
+	fill(&out.SSServerKeySHA256, live.SSServerKeySHA256)
+	return out
+}
+
+// EndpointMaterialFromIdentity reads the relay's own statement of its
+// identity (mgmt GET /identity). It carries no address: the relay does
+// not know which address recipients dial (a floating IP is routed to it
+// by the provider), so Server stays with the record.
+func EndpointMaterialFromIdentity(id *mgmt.RelayIdentity) EndpointMaterial {
+	if id == nil {
+		return EndpointMaterial{}
+	}
+	return EndpointMaterial{
+		CoverSNI:          id.CoverSNI,
+		RealityPublicKey:  id.RealityPublicKey,
+		TLSSPKISHA256:     id.TLSCertSHA256,
+		SSMethod:          id.SSMethod,
+		SSServerKeySHA256: id.SSServerKeySHA256,
+	}
+}
+
+// PreferRelay returns m (the record's view) with every field the relay
+// itself STATED replacing the record's.
+//
+// This is the opposite precedence to Overlay, for a different kind of
+// source. Overlay's second argument is a reply somebody saved earlier —
+// a snapshot, which the record outranks because every rotation verb
+// rewrites the record. PreferRelay's argument is the relay answering
+// "who are you" just before the signature: for the keys and the cover
+// host there is no better authority than the box that holds them, and a
+// record that disagrees with it (an SSH read that went stale, a
+// rotate-tls whose record write was lost) is the one that is wrong.
+//
+// The address is the exception and stays the record's: see
+// EndpointMaterialFromIdentity. A field the relay left empty is left
+// alone, so a relay that does not serve a family takes nothing away.
+func (m EndpointMaterial) PreferRelay(relay EndpointMaterial) EndpointMaterial {
+	out := m
+	take := func(dst *string, src string) {
+		if strings.TrimSpace(src) != "" {
+			*dst = src
+		}
+	}
+	take(&out.CoverSNI, relay.CoverSNI)
+	take(&out.RealityPublicKey, relay.RealityPublicKey)
+	if strings.TrimSpace(relay.TLSSPKISHA256) != "" {
+		out.TLSSPKISHA256 = relay.TLSSPKISHA256
+		// A certificate from the older source can only have been there
+		// to derive the pin the relay has now stated.
+		out.TLSCertPEM = ""
+	}
+	if strings.TrimSpace(relay.SSServerKeySHA256) != "" || strings.TrimSpace(relay.SSServerKey) != "" {
+		out.SSMethod = relay.SSMethod
+		out.SSServerKey = relay.SSServerKey
+		out.SSServerKeySHA256 = relay.SSServerKeySHA256
+	}
 	return out
 }
 
@@ -109,7 +172,8 @@ func (m EndpointMaterial) Overlay(live EndpointMaterial) EndpointMaterial {
 var ErrNoEndpointMaterial = errors.New(
 	"relaypack: no route could be given a signed endpoint — the OperatorRecord carries neither " +
 		"the relay's REALITY public key nor its TLS key pin; pass the relay's own connection " +
-		"material (bind-and-sign --endpoint-creds <a users-provision reply>)")
+		"material (bind-and-sign --relay-identity <the relay's own identity>, or " +
+		"--endpoint-creds <a users-provision reply>)")
 
 // endpointFor builds one route's commitment. A nil endpoint with a
 // reason means the material this family needs is missing: the route is
@@ -133,11 +197,16 @@ func endpointFor(family string, port int, m EndpointMaterial) (*bundle.Endpoint,
 		// The same fallback the renderer applies, so the two agree.
 		ep.ServerName = ClientConnParams{CoverSNI: m.CoverSNI}.coverSNI()
 	case string(bundle.TransportShadowsocks):
-		if m.SSMethod == "" || m.SSServerKey == "" {
-			return nil, "the relay's shadowsocks method and server key are unknown"
+		digest := strings.TrimSpace(m.SSServerKeySHA256)
+		if digest == "" && m.SSServerKey != "" {
+			digest = bundle.SSServerKeyDigest(m.SSServerKey)
+		}
+		if m.SSMethod == "" || digest == "" {
+			return nil, "the relay's shadowsocks method and server key are unknown " +
+				"(the relay makes that key together with its first recipient; sign again after adding one)"
 		}
 		ep.SSMethod = m.SSMethod
-		ep.SSServerKeySHA256 = bundle.SSServerKeyDigest(m.SSServerKey)
+		ep.SSServerKeySHA256 = digest
 	default:
 		pin := strings.TrimSpace(m.TLSSPKISHA256)
 		if pin == "" && m.TLSCertPEM != "" {
@@ -174,4 +243,56 @@ func UncommittedWarning(s SkippedRoute) string {
 // endpoint comes with the reason.
 func EndpointFor(family string, port int, m EndpointMaterial) (*bundle.Endpoint, string) {
 	return endpointFor(family, port, m)
+}
+
+// CommittedIdentity is the relay identity a signed pack commits its
+// routes to, in the vocabulary the relay uses for the same values
+// (mgmt.RelayIdentity, the users-provision reply). Nothing in it is a
+// secret: all of it is in the signed manifest, which is published.
+type CommittedIdentity struct {
+	// Server is the address the routes dial.
+	Server string `json:"server"`
+	// CoverSNI is the REALITY cover host ("" when no vless-reality
+	// route was committed).
+	CoverSNI         string `json:"cover_sni"`
+	RealityPublicKey string `json:"reality_public_key"`
+	// TLSCertSHA256 is the data-plane SPKI pin.
+	TLSCertSHA256     string `json:"tls_cert_sha256"`
+	SSMethod          string `json:"ss_method"`
+	SSServerKeySHA256 string `json:"ss_server_key_sha256"`
+	// Families lists every family that has a signed endpoint, sorted.
+	Families []string `json:"families"`
+}
+
+// committedIdentity reads the identity back out of the routes that are
+// about to be signed — what the pack says, not what the signer meant.
+func committedIdentity(routes []bundle.RouteManifestEntry) CommittedIdentity {
+	out := CommittedIdentity{Families: []string{}}
+	seen := map[string]bool{}
+	for _, r := range routes {
+		ep, err := bundle.ParseEndpoint(r.FamilySpecificConfig)
+		if err != nil || ep == nil {
+			continue
+		}
+		if !seen[r.TransportFamily] {
+			seen[r.TransportFamily] = true
+			out.Families = append(out.Families, r.TransportFamily)
+		}
+		if out.Server == "" {
+			out.Server = ep.Server
+		}
+		if ep.RealityPublicKey != "" {
+			out.RealityPublicKey = ep.RealityPublicKey
+			out.CoverSNI = ep.ServerName
+		}
+		if ep.TLSSPKISHA256 != "" {
+			out.TLSCertSHA256 = ep.TLSSPKISHA256
+		}
+		if ep.SSServerKeySHA256 != "" {
+			out.SSMethod = ep.SSMethod
+			out.SSServerKeySHA256 = ep.SSServerKeySHA256
+		}
+	}
+	sort.Strings(out.Families)
+	return out
 }
