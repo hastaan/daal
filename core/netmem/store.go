@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,11 +31,19 @@ const TTL = 30 * 24 * time.Hour
 // given network ID.
 var ErrNotFound = errors.New("netmem: not found")
 
-// Store is the per-network-memory persistence layer. Thread-safety
-// matches the underlying SecretsKV; routestore is thread-safe per
-// its package contract.
+// Store is the per-network-memory persistence layer.
+//
+// Get and Put are each one operation of the underlying SecretsKV and as
+// thread-safe as it is (routestore is, per its package contract). Every
+// helper that READS a snapshot, changes it and WRITES it back holds mu
+// for the whole of that: the host's network callback switches networks
+// on its own thread while a connect or the liveness loop records route
+// outcomes on another, and two such read-modify-writes interleaved
+// dropped whichever was written first (a carried sample, a failure
+// streak) or filed it under a record that was being moved away.
 type Store struct {
 	kv SecretsKV
+	mu sync.Mutex
 }
 
 // New returns a Store that persists into the given SecretsKV.
@@ -78,6 +87,37 @@ func (s *Store) Get(networkID string) (Snapshot, error) {
 	return UnmarshalSnapshot(body)
 }
 
+// PutKeepingRouteMemory writes snap as the record of networkID, keeping
+// what the record already holds about its ROUTES (RouteMemory and its
+// sequence) — those are written when a route carries or fails, by
+// RecordRouteOutcome, and a rewrite of everything else must not undo
+// one that landed a moment ago. The read and the write are one step.
+func (s *Store) PutKeepingRouteMemory(networkID string, snap Snapshot, now time.Time) error {
+	if networkID == "" {
+		return errors.New("netmem: empty networkID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if prev, err := s.Get(networkID); err == nil {
+		snap.RouteMemory, snap.RouteMemorySeq = prev.RouteMemory, prev.RouteMemorySeq
+	}
+	return s.Put(networkID, snap, now)
+}
+
+// PutIfAbsent writes snap as the record of networkID unless it already
+// has one, as one step. Reports whether it wrote.
+func (s *Store) PutIfAbsent(networkID string, snap Snapshot, now time.Time) (bool, error) {
+	if networkID == "" {
+		return false, errors.New("netmem: empty networkID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.Get(networkID); err == nil {
+		return false, nil
+	}
+	return true, s.Put(networkID, snap, now)
+}
+
 // Forget deletes the snapshot for networkID. Idempotent: deleting
 // an absent key returns nil.
 func (s *Store) Forget(networkID string) error {
@@ -113,6 +153,8 @@ func (s *Store) RecordWinningRendezvousChannel(networkID, channelID string, now 
 	if networkID == "" {
 		return errors.New("netmem: empty networkID")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snap, err := s.Get(networkID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
@@ -150,6 +192,8 @@ func (s *Store) RecordLastUsedMasqueSubmode(networkID, submode string, now time.
 	if networkID == "" {
 		return errors.New("netmem: empty networkID")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snap, err := s.Get(networkID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
@@ -175,23 +219,21 @@ func (s *Store) LookupLastUsedMasqueSubmode(networkID string) string {
 // networkID. The rest of the snapshot is kept as it is; a network seen
 // for the first time gets a snapshot holding only this.
 func (s *Store) RecordRouteCarried(networkID, routeID string, now time.Time) error {
-	return s.recordRoute(networkID, routeID, now, func(m *RouteMemory, seq uint64, hour int64) {
-		m.CarriedSeq, m.CarriedHour = seq, hour
-	})
+	return s.RecordRouteOutcome(networkID, routeID, RouteOutcome{Carried: true}, now)
 }
 
 // RecordRouteFailed notes that routeID failed on networkID, and the
 // taxonomy category it failed with.
 func (s *Store) RecordRouteFailed(networkID, routeID, category string, now time.Time) error {
-	return s.recordRoute(networkID, routeID, now, func(m *RouteMemory, seq uint64, hour int64) {
-		m.FailedSeq, m.FailedHour, m.FailedCategory = seq, hour, category
-	})
+	return s.RecordRouteOutcome(networkID, routeID, RouteOutcome{Category: category}, now)
 }
 
 func (s *Store) recordRoute(networkID, routeID string, now time.Time, set func(*RouteMemory, uint64, int64)) error {
 	if networkID == "" || routeID == "" {
 		return errors.New("netmem: empty networkID or routeID")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snap, err := s.Get(networkID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
@@ -222,6 +264,8 @@ func (s *Store) LookupRouteMemory(networkID string) map[string]RouteMemory {
 // ForgetRoute removes routeID from the memory of every network. For a
 // route the person deleted.
 func (s *Store) ForgetRoute(routeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ids, err := s.All()
 	if err != nil {
 		return err
@@ -252,6 +296,8 @@ func (s *Store) ForgetRoute(routeID string) error {
 // in deterministic order. Callers are expected to call Sweep on
 // the scheduler's hourly tick.
 func (s *Store) Sweep(now time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ids, err := s.All()
 	if err != nil {
 		return nil, err

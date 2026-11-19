@@ -49,6 +49,7 @@ import (
 	"time"
 
 	"daal/core/engine"
+	"daal/core/netmem"
 	"daal/core/pathmanager"
 	"daal/core/routestore"
 )
@@ -90,6 +91,15 @@ type RouteSummaryDisplay struct {
 	// (LastSuccessBucket set). It is the coarse form of the same fact
 	// HealthPct==nil carries; kept because existing UI binds to it.
 	Proven bool `json:"proven"`
+	// Measured: how the route has done ON THE NETWORK THE DEVICE IS ON
+	// NOW (core/netmem/measure.go) — {grade, setup_ms, samples, carried,
+	// failed, last}. Always an object; a route never tried here is
+	// {"grade":"unknown",0,0,0,0,0}. grade is "unknown", "good", "ok",
+	// "slow" or "failing"; setup_ms the smoothed time from starting the
+	// route to its first round trip; last the unix seconds of the HOUR
+	// of the latest recorded check. Read from the store; a poll writes
+	// nothing.
+	Measured netmem.Measured `json:"measured"`
 }
 
 // routeObservations is everything the engine has actually MEASURED
@@ -305,6 +315,7 @@ func RouteSummary(routeID string) (string, error) {
 		return "", err
 	}
 	disp := rowToDisplay(row, observeRoute(row, liveRouteHealth(c)))
+	disp.Measured = c.routeMemory()[row.RouteID].Measured()
 	body, _ := json.Marshal(disp)
 	return string(body), nil
 }
@@ -338,12 +349,15 @@ func AvailableRoutes() (string, error) {
 		return "", err
 	}
 	live := liveRouteHealth(c)
+	mem := c.routeMemory()
 	out := make([]RouteSummaryDisplay, 0, len(rows))
 	for _, r := range rows {
 		if strings.EqualFold(r.TrustState, "revoked") {
 			continue
 		}
-		out = append(out, rowToDisplay(r, observeRoute(r, live)))
+		d := rowToDisplay(r, observeRoute(r, live))
+		d.Measured = mem[r.RouteID].Measured()
+		out = append(out, d)
 	}
 	// Sort by health_pct desc, then by publisher_name asc for stability.
 	sortByHealthDesc(out)

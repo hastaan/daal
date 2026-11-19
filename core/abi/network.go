@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"daal/core/budget"
+	"daal/core/engine"
 	"daal/core/netmem"
 	"daal/core/pathmanager"
 )
@@ -32,6 +33,9 @@ type netmemSingleton struct {
 	mu            sync.Mutex
 	store         *netmem.Store
 	activeNetwork string
+	// facts: what the host last reported through engine_network_facts
+	// (network_facts.go). Reset on Shutdown.
+	facts netFacts
 }
 
 var globalNetmem = &netmemSingleton{activeNetwork: netmem.SentinelUnset}
@@ -67,6 +71,7 @@ func resetNetmemForShutdown() {
 	defer globalNetmem.mu.Unlock()
 	globalNetmem.store = nil
 	globalNetmem.activeNetwork = netmem.SentinelUnset
+	globalNetmem.facts = netFacts{}
 }
 
 // seedNetmemForInit is called from Init AFTER the core has been
@@ -122,9 +127,55 @@ func NetworkChanged(kind, carrier, ssid string) (string, error) {
 	_ = carrier
 	_ = ssid
 
+	if hostFacts().seen {
+		// The host's own network callback is reporting
+		// (engine_network_facts): it knows which network this is, and
+		// this call — the page's, with the kind as the whole identity —
+		// does not. Letting it through would swap the engine between two
+		// names for one network every time the page polled, and split
+		// what is remembered about it. Answered, and nothing is changed.
+		body, _ := json.Marshal(map[string]any{
+			"network_id":      activeNetworkID(),
+			"mode":            c.modeNow(),
+			"restored_routes": 0,
+			"fresh":           false,
+			"superseded":      true,
+		})
+		return string(body), nil
+	}
+	fresh, restored, changed, err := c.switchNetwork(incoming, nil)
+	if err != nil {
+		return "", err
+	}
+	// A route that was proved on the network the device just left has
+	// proved nothing about this one. Ask the liveness loop to check now
+	// rather than at its next tick (route_check.go). No-op when no
+	// route is connected.
+	if changed {
+		c.kickLiveness()
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"network_id":      incoming,
+		"mode":            c.modeNow(),
+		"restored_routes": restored,
+		"fresh":           fresh,
+	})
+	return string(body), nil
+}
+
+// switchNetwork makes `incoming` (a HASHED id) the network the engine is
+// on: the outgoing network's state is saved, the incoming one's
+// restored, and every per-network label follows. changed is false when
+// the engine was already on it.
+//
+// adoptFrom: hashed ids of older records whose route memory the incoming
+// network takes over when it has none of its own (the first one that
+// holds any; netmem.AdoptRouteMemory). nil for none.
+func (c *Core) switchNetwork(incoming string, adoptFrom []string) (fresh bool, restored int, changed bool, err error) {
 	store := netmemStore()
 	if store == nil {
-		return "", fmt.Errorf("abi: netmem store unavailable (engine not initialised)")
+		return false, 0, false, fmt.Errorf("abi: netmem store unavailable (engine not initialised)")
 	}
 
 	now := nowUTC()
@@ -136,17 +187,26 @@ func NetworkChanged(kind, carrier, ssid string) (string, error) {
 	}
 
 	// 2. Read the INCOMING network's snapshot.
-	snap, err := store.Get(incoming)
-	fresh := false
-	if err != nil {
+	snap, gerr := store.Get(incoming)
+	if gerr != nil {
 		fresh = true
 		snap = netmem.Snapshot{}
+	}
+	if len(snap.RouteMemory) == 0 && outgoing != incoming {
+		for _, from := range adoptFrom {
+			if moved, _ := store.AdoptRouteMemory(from, incoming, now); moved {
+				engine.LogInfo("network memory adopted from the record that had no network of its own")
+				if s2, err := store.Get(incoming); err == nil {
+					snap = s2
+				}
+				break
+			}
+		}
 	}
 
 	// 3. Restore. Mode goes through SetMode so the posture axis
 	// follows. Budget counters seed via budget.Engine.RestoreNetwork.
 	// RouteHealth restore is intentionally additive (see note below).
-	restored := 0
 	if snap.Mode != "" {
 		// SetMode validates and rejects 2D's "lifeline-strict" at
 		// 2C — if a previously-saved snapshot carries the 2D mode
@@ -171,28 +231,11 @@ func NetworkChanged(kind, carrier, ssid string) (string, error) {
 	// 5. If this is a brand-new network, persist a stub snapshot
 	// so subsequent All() / diagnostics calls see it.
 	if fresh {
-		stub := netmem.Snapshot{
-			Mode:     c.mode,
-			LastSeen: now,
-		}
-		_ = store.Put(incoming, stub, now)
+		// (One step: a route outcome recorded for this network between a
+		// look and a write here would be overwritten by the stub.)
+		_, _ = store.PutIfAbsent(incoming, netmem.Snapshot{Mode: c.modeNow(), LastSeen: now}, now)
 	}
-
-	// A route that was proved on the network the device just left has
-	// proved nothing about this one. Ask the liveness loop to check now
-	// rather than at its next tick (route_check.go). No-op when no
-	// route is connected.
-	if outgoing != incoming {
-		c.kickLiveness()
-	}
-
-	body, _ := json.Marshal(map[string]any{
-		"network_id":      incoming,
-		"mode":            c.mode,
-		"restored_routes": restored,
-		"fresh":           fresh,
-	})
-	return string(body), nil
+	return fresh, restored, outgoing != incoming, nil
 }
 
 // captureAndPersist snapshots the current engine state for the
@@ -202,13 +245,7 @@ func NetworkChanged(kind, carrier, ssid string) (string, error) {
 // state takes effect", not "outgoing state perfectly preserved").
 func captureAndPersist(store *netmem.Store, outID string, c *Core, now time.Time) {
 	snap := netmem.Snapshot{
-		Mode: c.mode,
-	}
-	// What the automatic connect remembers about the routes on this
-	// network is written when a route carries or fails, not here, and
-	// must survive this rewrite of everything else.
-	if prev, err := store.Get(outID); err == nil {
-		snap.RouteMemory, snap.RouteMemorySeq = prev.RouteMemory, prev.RouteMemorySeq
+		Mode: c.modeNow(),
 	}
 	if eng := budgetEngineIfPresent(); eng != nil {
 		usage, bucket := eng.CaptureNetwork()
@@ -231,7 +268,21 @@ func captureAndPersist(store *netmem.Store, outID string, c *Core, now time.Time
 			}
 		}
 	}
-	_ = store.Put(outID, snap, now)
+	// What the automatic connect remembers about the routes on this
+	// network is written when a route carries or fails, not here, and
+	// must survive this rewrite of everything else — including an
+	// outcome a pass on another thread records while this runs (the
+	// host's network callback calls this beside a connect).
+	_ = store.PutKeepingRouteMemory(outID, snap, now)
+}
+
+// modeNow reads the mode under Core.mu: the host's network thread reads
+// it here while SetMode writes it elsewhere. Never called with Core.mu
+// held.
+func (c *Core) modeNow() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mode
 }
 
 // allNetworks returns the hashed network IDs the engine has seen.

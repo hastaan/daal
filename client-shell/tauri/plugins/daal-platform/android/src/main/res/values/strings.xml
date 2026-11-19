@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The text of the VPN service's notification (DaalVpnService). Shown in
+  the phone's own language: Android picks values-fa for a phone set to
+  Farsi. This follows the PHONE's language (or the per-app language on
+  Android 13+), not the language chosen inside the app — the service has
+  no access to the page's setting.
+
+  Names are prefixed daal_vpn_ because a library's resources are merged
+  into the app's and must not collide with it.
+-->
+<resources>
+    <string name="daal_vpn_title" translatable="false">Daal</string>
+    <string name="daal_vpn_channel_name">Daal tunnel</string>
+    <string name="daal_vpn_channel_description">Foreground notification while the Daal tunnel is active</string>
+    <string name="daal_vpn_note_active">Tunnel active</string>
+    <!-- %1$s: the id of the way the person chose by hand. -->
+    <string name="daal_vpn_note_active_route">Tunnel active — %1$s</string>
+    <string name="daal_vpn_note_connecting">Connecting…</string>
+    <string name="daal_vpn_note_reconnecting">Reconnecting…</string>
+    <!-- Holding, and the phone itself has no network at all. -->
+    <string name="daal_vpn_note_waiting_for_network">This phone has no internet right now. Daal reconnects when it is back.</string>
+</resources>

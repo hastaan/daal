@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -25,14 +26,22 @@ func init() {
 // state directory (a fresh memory):
 //
 //	first      Connect. The route the ranking puts first carries: verdict
-//	           "", one route tried. Connect again while connected: nothing
-//	           happens. Disconnect: nothing running, nobody in charge.
+//	           "", one route carried — and, named `stopped`, the route the
+//	           engine was checking beside it. The route list then says how
+//	           the routes did on this network (`measured`). Connect again
+//	           while connected: nothing happens. Disconnect: nothing
+//	           running, nobody in charge.
 //	blocked    The censor drops that first route's endpoint. Connect: the
-//	           blocked route is tried FIRST and named `not_carrying`, the
-//	           engine moves on, verdict `moved_on`, and verified bytes
-//	           travel on the endpoint of the route it says it is on.
+//	           blocked route is checked FIRST, beside a second one; the
+//	           second proves and the first's check is stopped — `stopped`,
+//	           no category, no verdict, nothing remembered against it —
+//	           and verified bytes travel on the endpoint of the route the
+//	           engine says it is on. (Checked alone it would be
+//	           `not_carrying` and the pass `moved_on`; both are accepted.)
 //	           Disconnect, lift the block, Connect: the route that carried
 //	           here is tried first (`why: carried_here`).
+//	race       The censor drops BOTH routes of that first pair: see
+//	           ops_auto_race.go.
 //	memory     The person connects the LAST-ranked route by hand, once,
 //	           and disconnects. Connect: that route is first, ahead of the
 //	           whole ranking — the order is this network's memory and not
@@ -68,8 +77,10 @@ func init() {
 //	           in the same TUN, and verified bytes flow again.
 //
 // In a world whose scenario blocks something there is one phone: Connect
-// under the scenario as it stands, judged against what the scenario says
-// of each family (autoUnderScenario).
+// under the scenario as it stands, the network reported as Android would
+// report it, judged against what the scenario says of each family
+// (underScenario). Every press, in every world, is also asked whether the
+// censor ever saw more than two routes in flight (ops_auto_race.go).
 //
 // What the fall-over waits for: nothing on the host's clock. The engine's
 // liveness loop (core/abi/route_check.go startLivenessLocked) re-checks
@@ -84,23 +95,45 @@ func opAuto(rc *RunCtx) {
 	const phase = "op:auto"
 	a := &autoOp{rc: rc, phase: phase}
 	if a.scenarioBlocks() {
+		a.tap()
 		a.underScenario()
 		return
 	}
-	first, ok := a.first()
+	a.tap()
+	first, partner, ok := a.first()
 	if !ok {
 		return
 	}
-	a.blockedFirst(first)
-	a.memoryThenUDP(first)
-	a.quicOnly(first)
-	a.allBlocked()
-	a.fallOver()
+	for _, ph := range []struct {
+		name string
+		run  func()
+	}{
+		{"blocked", func() { a.blockedFirst(first, partner) }},
+		{"race", func() { a.race(first, partner) }},
+		{"memory", func() { a.memoryThenUDP(first) }},
+		{"quic-only", func() { a.quicOnly(first) }},
+		{"all-blocked", a.allBlocked},
+		{"fall-over", a.fallOver},
+	} {
+		if autoPhoneWanted(ph.name) {
+			ph.run()
+		}
+	}
+}
+
+// autoPhoneWanted: WB_AUTO_ONLY=race,fall-over runs only those phones of
+// an op (phone `first` always runs: the others are told what it saw).
+// For working on one phone; a matrix run sets nothing.
+func autoPhoneWanted(name string) bool {
+	only := os.Getenv("WB_AUTO_ONLY")
+	return only == "" || strings.Contains(","+only+",", ","+name+",")
 }
 
 type autoOp struct {
 	rc    *RunCtx
 	phase string
+	// tapOK: the censor's packet log is running (flowtap.go).
+	tapOK bool
 }
 
 // autoRoute is one route of the pack as the engine lists it.
@@ -228,16 +261,28 @@ type autoAnswer struct {
 	candidates int
 	tried      []map[string]any // the routes that were tried, in order
 	left       []map[string]any // the routes that were left out (result "refused")
+	// stopped: routes whose check beside another was stopped (or never
+	// sent) because the other proved first. Nothing was learned about
+	// them and nothing is recorded against them.
+	stopped []map[string]any
+	all     []map[string]any // every entry, in the engine's order
+	// from / to: the press as the driver's clock saw it — what the
+	// censor's packet log is asked about.
+	from, to time.Time
+	uses     []endpointUse
 }
 
 func (x *autoAnswer) triedText() string {
 	var parts []string
-	for _, t := range append(append([]map[string]any{}, x.tried...), x.left...) {
+	for _, t := range x.all {
 		s := fmt.Sprintf("%v(%v)=%v", t["route_id"], t["family"], t["result"])
-		for _, k := range []string{"category", "refined", "refused", "why"} {
+		for _, k := range []string{"category", "refined", "refused", "why", "raced_with"} {
 			if v, _ := t[k].(string); v != "" {
 				s += " " + k + "=" + v
 			}
+		}
+		if ms, _ := t["setup_ms"].(float64); ms > 0 {
+			s += fmt.Sprintf(" setup_ms=%d", int(ms))
 		}
 		parts = append(parts, s)
 	}
@@ -253,11 +298,12 @@ func (x *autoAnswer) evidence() map[string]any {
 // the checks every press shares: the store answered throughout and no
 // file of the app's was closed.
 func (p *autoPhone) press(step, cmd string, t0 time.Time) *autoAnswer {
+	from := time.Now()
 	ev := p.ask(step, cmd, "auto", AutoPassWait, t0)
 	if ev == nil {
 		return nil
 	}
-	x := &autoAnswer{ev: ev}
+	x := &autoAnswer{ev: ev, from: from, to: time.Now()}
 	x.res, _ = ev["result"].(map[string]any)
 	if x.res == nil {
 		p.add(step, "", "answered", Pass, Fail, fmt.Sprintf("engine_connect_auto gave no result: stage=%v error=%v", ev["stage"], ev["error"]), nil, t0)
@@ -273,12 +319,17 @@ func (p *autoPhone) press(step, cmd string, t0 time.Time) *autoAnswer {
 	rows, _ := x.res["tried"].([]any)
 	for _, r := range rows {
 		m, _ := r.(map[string]any)
-		if m["result"] == "refused" {
+		x.all = append(x.all, m)
+		switch m["result"] {
+		case "refused":
 			x.left = append(x.left, m)
-		} else {
+		case "stopped":
+			x.stopped = append(x.stopped, m)
+		default:
 			x.tried = append(x.tried, m)
 		}
 	}
+	p.twoAtATime(step, x, t0)
 	// The same two questions a switch is asked (ops_switch.go), over the
 	// whole pass: up to one engine instance per route on one TUN.
 	p.sw.storeAndFDs(step, Family{Name: x.family}, ev, t0)
@@ -432,28 +483,48 @@ func (x *autoAnswer) sawProgress(n, total int) (bool, string) {
 
 // ---- first: nothing in the way ------------------------------------------
 
-func (a *autoOp) first() (autoRoute, bool) {
+// first returns the first-ranked route and the route the engine checked
+// beside it ("" when it checked none): the pair a phone that remembers
+// nothing starts with, which the phones after this one block.
+func (a *autoOp) first() (autoRoute, string, bool) {
 	p := a.start("first", ClientOpts{})
 	if p == nil {
-		return autoRoute{}, false
+		return autoRoute{}, "", false
 	}
 	defer p.stop()
 	cands := p.candidates()
 	if len(cands) < 2 {
 		p.add("connect", "", "candidates", Skipped, Skipped, "needs a pack with two routes that are not behind the experimental gate", nil, time.Now())
-		return autoRoute{}, false
+		return autoRoute{}, "", false
 	}
 	t0 := time.Now()
 	x := p.press("connect", "auto", t0)
 	if x == nil {
-		return autoRoute{}, false
+		return autoRoute{}, "", false
 	}
 	// On a phone that remembers nothing the order is the ranking's, and
 	// the ranking of routes that have used none of their budget is the
-	// route id. One route tried, no verdict to give.
+	// route id. One route carried, no verdict to give. A second route
+	// may have been checked BESIDE the first (connect_race.go): it was
+	// stopped when the first proved, and is named as that and nothing
+	// else — it is not a route that was tried and left.
 	var wrong []string
 	if len(x.tried) != 1 || x.tried[0]["route_id"] != cands[0].ID || x.tried[0]["result"] != "carried" {
 		wrong = append(wrong, "want exactly "+cands[0].ID+" tried, and carried")
+	}
+	partner := ""
+	if e := x.entry(cands[0].ID); e != nil {
+		partner = str(e, "raced_with") // also when the other one was not stopped but proved too
+	}
+	switch {
+	case len(x.stopped) > 1:
+		wrong = append(wrong, fmt.Sprintf("%d routes were being checked beside the first", len(x.stopped)))
+	case len(x.stopped) == 1:
+		partner = str(x.stopped[0], "route_id")
+		if str(x.stopped[0], "raced_with") != cands[0].ID || len(x.tried) == 1 && str(x.tried[0], "raced_with") != partner {
+			wrong = append(wrong, fmt.Sprintf("%s was stopped beside %q and %s says it was checked beside %q: the two do not name each other",
+				partner, str(x.stopped[0], "raced_with"), cands[0].ID, str(x.tried[0], "raced_with")))
+		}
 	}
 	if x.verdict != "" {
 		wrong = append(wrong, "verdict="+x.verdict+", want none")
@@ -468,8 +539,9 @@ func (a *autoOp) first() (autoRoute, bool) {
 	}
 	p.add("connect", cands[0].Family, "first_route_first_try", Pass, got(len(wrong) == 0, Pass, Fail), strings.Join(wrong, "; "), x.evidence(), t0)
 	if !p.connectedOn("connect", x, t0) {
-		return autoRoute{}, false
+		return autoRoute{}, "", false
 	}
+	p.measuredAfterConnect("connect", x, cands, t0)
 	// Pressing Connect while connected does nothing.
 	t0 = time.Now()
 	if y := p.press("again", "auto", t0); y != nil {
@@ -479,12 +551,12 @@ func (a *autoOp) first() (autoRoute, bool) {
 		p.connectedOn("again", y, t0)
 	}
 	p.disconnect("disconnect", x.family, time.Now())
-	return cands[0], true
+	return cands[0], partner, true
 }
 
 // ---- blocked: the first-ranked route is dropped ---------------------------
 
-func (a *autoOp) blockedFirst(first autoRoute) {
+func (a *autoOp) blockedFirst(first autoRoute, partner string) {
 	rc := a.rc
 	p := a.start("blocked", ClientOpts{})
 	if p == nil {
@@ -501,8 +573,34 @@ func (a *autoOp) blockedFirst(first autoRoute) {
 	if x == nil {
 		return
 	}
+	// Two things the engine may honestly say of the dropped route, and
+	// which one depends on whether it had company:
+	//
+	//   checked alone      it was tried, it carried nothing: not_carrying,
+	//                      a category, and the pass is `moved_on`.
+	//   checked beside     the other route proved while the dropped one
+	//   another            was still waiting for its first answer, and the
+	//                      check was stopped there: `stopped`. Nothing was
+	//                      learned about it — a stopped check is not a
+	//                      failed one — so there is no verdict to give.
+	//
+	// Either way it is the first-ranked route that is checked first, it
+	// is never the one the engine says it is on, and the last thing in
+	// `tried` is the route that carried.
 	var wrong []string
-	if len(x.tried) < 2 || x.tried[0]["route_id"] != first.ID {
+	wantVerdict := "moved_on"
+	if s := x.entry(first.ID); s != nil && s["result"] == "stopped" {
+		wantVerdict = ""
+		if partner != "" && str(s, "raced_with") != partner {
+			wrong = append(wrong, fmt.Sprintf("%s was checked beside %q; a phone that remembers nothing checks it beside %s", first.ID, str(s, "raced_with"), partner))
+		}
+		if str(s, "raced_with") != x.routeID {
+			wrong = append(wrong, fmt.Sprintf("%s was stopped for %q, and the engine is on %q", first.ID, str(s, "raced_with"), x.routeID))
+		}
+		if str(s, "category") != "" {
+			wrong = append(wrong, "a check that was stopped has a failure category: "+str(s, "category"))
+		}
+	} else if len(x.tried) < 2 || x.tried[0]["route_id"] != first.ID {
 		wrong = append(wrong, "the blocked route "+first.ID+" was not the first one tried")
 	} else if x.tried[0]["result"] != "not_carrying" || str(x.tried[0], "category") == "" {
 		wrong = append(wrong, fmt.Sprintf("the blocked route is reported as result=%v category=%q, want not_carrying and a category", x.tried[0]["result"], x.tried[0]["category"]))
@@ -514,8 +612,21 @@ func (a *autoOp) blockedFirst(first autoRoute) {
 		wrong = append(wrong, "the last route tried is not the one the call says carried")
 	}
 	p.add("connect", first.Family, "blocked_route_tried_and_named", Pass, got(len(wrong) == 0, Pass, Fail), strings.Join(wrong, "; "), x.evidence(), t0)
-	p.add("connect", x.family, "verdict", "moved_on", x.verdict, "", x.evidence(), t0)
+	p.add("connect", x.family, "verdict", wantVerdict, x.verdict, got(wantVerdict == "", "the dropped route's check was stopped, not failed: nothing to report", ""), x.evidence(), t0)
+	if wantVerdict == "" {
+		// The dropped route was still in flight when the pass ended. What
+		// the phone remembers of it must be nothing: not a failure.
+		if rows, _, ok := p.listing("connect", t0); ok {
+			m := rows[first.ID]
+			clean := m.Present && m.Failed == 0 && m.Grade != "failing"
+			p.add("connect", first.Family, "a_stopped_check_is_not_a_failure", Pass, got(clean, Pass, Fail),
+				got(clean, "", "the route whose check was stopped is remembered as "+m.text()), map[string]any{"measured": m.text()}, t0)
+		}
+	}
 	seen, why := x.sawProgress(len(x.tried), x.candidates)
+	if wantVerdict == "" {
+		seen, why = x.sawRacing(first.ID, x.routeID)
+	}
 	p.add("connect", x.family, "progress_visible", Pass, got(seen, Pass, Fail), why, map[string]any{"progress": x.ev["progress"]}, t0)
 	if !p.connectedOn("connect", x, t0) {
 		return
@@ -591,6 +702,11 @@ func (a *autoOp) memoryThenUDP(first autoRoute) {
 		wrong = append(wrong, fmt.Sprintf("want only %s tried, first because it carried here; the ranking alone would start with %s", quic.ID, first.ID))
 	}
 	p.add("connect", quic.Family, "remembered_route_ahead_of_the_ranking", Pass, got(len(wrong) == 0, Pass, Fail), strings.Join(wrong, "; "), x.evidence(), t0)
+	// …and alone. This is the phone on which that can be told: nothing
+	// has been side-probed, and the remembered route is one the engine
+	// could check beside another (ops_auto_race.go aloneProblems).
+	aloneWrong, aloneEv := p.aloneProblems(x, quic.ID)
+	p.add("connect", quic.Family, "remembered_route_alone", Pass, got(len(aloneWrong) == 0, Pass, Fail), strings.Join(aloneWrong, "; "), aloneEv, t0)
 	if !p.connectedOn("connect", x, t0) {
 		return
 	}
@@ -919,15 +1035,42 @@ func (a *autoOp) fallOver() {
 var AutoVerdictUnder = map[string]string{
 	// One address, every port, silent. TCP SYNs unanswered.
 	"relay-ip-block": "relay_unreachable",
-	// Nothing leaves the border at all — to the relay or to anyone. The
-	// engine has no probe outside its routes, so it cannot see that it is
-	// not only the relay (FINDINGS AUTO-1).
+	// Nothing leaves the border at all — to the relay or to anyone. That
+	// is what is TRUE there, and what this check asks for. The engine has
+	// no probe outside its routes, and what Android says of such a
+	// network — the link is up, the platform has not validated it — is
+	// also what it says of a network that merely filters the platform's
+	// own connectivity check, so the engine does not take it for "no
+	// internet" (FINDINGS AUTO-1, open again; only kind `none` is taken
+	// at its word: auto-deep `networks.down`). The check is red and
+	// known.
 	"total-blackout": "network_down",
 }
 
 func (a *autoOp) underScenario() {
 	rc := a.rc
-	p := a.start("scenario", ClientOpts{})
+	// What Android would say of this network. Under total-blackout
+	// nothing the phone sends gets anywhere, the platform's own check
+	// included: connected to the access point, not validated. Everywhere
+	// else the internet is there and only the relay (or part of it) is
+	// not. The engine adds no traffic to learn this; it is told
+	// (engine_network_facts).
+	validated := 1
+	if rc.Scn.Name == "total-blackout" {
+		validated = 0
+	}
+	a.pressUnder("scenario", fmt.Sprintf("auto-net wifi %s %d 0", hostID("scn"), validated), AutoVerdictUnder[rc.Scn.Name])
+	if rc.Scn.Name == "total-blackout" {
+		// A host with nobody to tell it (the desktop shell has no network
+		// observer): the same press, no fact. All the engine has is its
+		// routes, all to one address, all silent.
+		a.pressUnder("scenario-untold", "auto", "relay_unreachable")
+	}
+}
+
+func (a *autoOp) pressUnder(label, cmd, wantVerdict string) {
+	rc := a.rc
+	p := a.start(label, ClientOpts{})
 	if p == nil {
 		return
 	}
@@ -944,7 +1087,7 @@ func (a *autoOp) underScenario() {
 		}
 	}
 	t0 := time.Now()
-	x := p.press("connect", "auto", t0)
+	x := p.press("connect", cmd, t0)
 	if x == nil {
 		return
 	}
@@ -979,8 +1122,8 @@ func (a *autoOp) underScenario() {
 		}
 	default:
 		p.add("connect", "", "not_connected", Blocked, got(x.connected, Pass, Blocked), "", x.evidence(), t0)
-		if want, ok := AutoVerdictUnder[rc.Scn.Name]; ok {
-			p.add("connect", "", "verdict", want, x.verdict, "", x.evidence(), t0)
+		if wantVerdict != "" {
+			p.add("connect", "", "verdict", wantVerdict, x.verdict, "", x.evidence(), t0)
 		} else {
 			p.add("connect", "", "verdict", Skipped, Skipped, "no verdict is declared for this scenario (AutoVerdictUnder); the engine said "+x.verdict, x.evidence(), t0)
 		}

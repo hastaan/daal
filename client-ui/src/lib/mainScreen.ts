@@ -35,6 +35,7 @@ import {
     type MainTapPlan,
     type PassFailure,
 } from './autoConnect';
+import { connectedQualityKey } from './measured';
 import {
     checkHeadlineKey,
     checkStateLabelKey,
@@ -122,7 +123,10 @@ export interface MainScreenView {
     noRoutes: boolean;
     needFile: boolean;
     showProgress: boolean;
-    /** i18n key of the note under "You're connected.", if any. */
+    /** i18n key of the note under "You're connected.", if any. ONE
+     *  line: what just happened (Daal moved to another way) when there
+     *  is such news, otherwise how this way does here, when that helps
+     *  (lib/measured.ts connectedQualityKey). */
     connectedNoteKey: string | undefined;
     /** i18n key of the "the engine refused that" box, if any. */
     refusedKey: string | undefined;
@@ -216,7 +220,18 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         : t(checkStateLabelKey(state, routeCheck) ?? STATE_LABEL_KEY[state]);
     const tapLabel = t(mainTapLabelKey(plan, auto, tapLabelKey(action, polled, routeCheck), holding));
 
-    const connectedNoteKey = state === 'connected' && !optimistic ? autoConnectedNoteKey(auto) : undefined;
+    // One line. News about what just happened (Daal moved) comes first
+    // — except when the connection is slow NOW: "Daal moved to a faster
+    // way." stays on the engine's record for as long as that way is up,
+    // and under "Connected, but slow." it is stale news hiding the one
+    // thing worth saying.
+    const quality = connectedQualityKey(conn, routes === undefined ? undefined : routes.length > 1);
+    const connectedNoteKey =
+        state === 'connected' && !optimistic
+            ? conn?.routeCheck === 'degraded'
+                ? quality ?? autoConnectedNoteKey(auto)
+                : autoConnectedNoteKey(auto) ?? quality
+            : undefined;
     // The engine refused the last connect before trying anything. Shown
     // only while nothing is running, and not beside an automatic
     // failure: that has its own, fuller account.

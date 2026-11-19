@@ -2,8 +2,9 @@
 //
 // Pure functions, so the rules can be tested without a webview (the
 // pages are tested through helpers in this codebase).
-import type { ConnectionSummary } from '../contract/D2Contract';
-import { summaryExtras } from './activeRoute';
+import type { ConnectionSummary, RouteDisplayRow } from '../contract/D2Contract';
+import { rowGradeSuffix } from './measured';
+import { runningRouteId, summaryExtras } from './activeRoute';
 
 // ---- the list body ---------------------------------------------------
 
@@ -27,7 +28,84 @@ export function listView(rows: readonly unknown[] | null, loadFailed: boolean): 
     return rows === null ? 'loading' : 'empty';
 }
 
+// ---- the line above the list -------------------------------------------
+
+/** The sentence above the list about who is choosing the way, and —
+ *  when the saved choice is not what is in force — a second line about
+ *  the next connect.
+ *
+ *  The line used to follow the SAVED choice alone: with a way pinned
+ *  earlier and the engine connected automatically on another one (the
+ *  person pressed "Let Daal choose", or a pinned tap fell back to
+ *  automatic) it said "You chose one way yourself. Daal uses only that
+ *  one." over a connection Daal had chosen. What is true NOW comes
+ *  from the engine; the saved choice is a statement about next time.
+ *
+ *    engine automatic (trying, or connected)   'network.auto.line'
+ *        + a pin is saved                      next: 'network.pinned.next'
+ *    connected by hand on the pinned way       'network.pinned.line'
+ *    connected by hand on another way          'network.pinned.now'
+ *        + next: the pin, or automatic
+ *    nothing running                           the saved choice
+ */
+export interface ModeLine {
+    lineKey: string;
+    nextKey?: string;
+}
+
+export function connectionsModeLine(
+    pinnedId: string | null,
+    s: ConnectionSummary | null | undefined,
+): ModeLine {
+    const saved: ModeLine = { lineKey: pinnedId ? 'network.pinned.line' : 'network.auto.line' };
+    if (!s) return saved;
+    const auto = s.auto;
+    if (auto?.mode === true && (auto.state === 'trying' || auto.state === 'connected')) {
+        return { lineKey: 'network.auto.line', ...(pinnedId ? { nextKey: 'network.pinned.next' } : {}) };
+    }
+    const running = s.state === 'connected' ? runningRouteId(s) : null;
+    if (running === null) return saved;
+    if (pinnedId === running) return { lineKey: 'network.pinned.line' };
+    return {
+        lineKey: 'network.pinned.now',
+        nextKey: pinnedId ? 'network.pinned.next' : 'network.auto.next',
+    };
+}
+
+/** The words of that line, as the page draws them: the sentence about
+ *  now, and — when there is one — the sentence about next time. */
+export function modeLineTexts(t: (k: string) => string, line: ModeLine): { now: string; next?: string } {
+    return { now: t(line.lineKey), ...(line.nextKey ? { next: t(line.nextKey) } : {}) };
+}
+
 // ---- one row ---------------------------------------------------------
+
+/** The small line under a row's name, whole: the kind of connection,
+ *  then — each only when it is true — "not supported", the row's state,
+ *  who picked it, how it has done on this network (lib/measured.ts; an
+ *  engine that sent no measurement gets no claim, and there is no
+ *  number: the old "87%" was a score, not a success rate), resting,
+ *  budget used up.
+ *
+ *  `inCooldown` / `budgetExhausted` are compared with `=== true` on
+ *  purpose: undefined means the engine has not looked, which is not the
+ *  same as "no". */
+export function rowMetaText(
+    t: (k: string) => string,
+    r: RouteDisplayRow,
+    o: { stateLabelKey?: string; isAuto?: boolean; isPinned?: boolean } = {},
+): string {
+    return [
+        r.family,
+        r.familyMaturity === 'unsupported' ? ` · ${t('network.family.unsupported')}` : '',
+        o.stateLabelKey ? ` · ${t(o.stateLabelKey)}` : '',
+        o.isAuto ? ` · ${t('network.auto.mark')}` : '',
+        o.isPinned ? ` · ${t('network.pinned.mark')}` : '',
+        rowGradeSuffix(t, r.measured),
+        r.inCooldown === true ? ` · ${t('network.cooled')}` : '',
+        r.budgetExhausted === true ? ` · ${t('network.budget_full')}` : '',
+    ].join('');
+}
 
 /** 'checking'  the route the person just tapped, or the one the engine
  *              is still proving. Not connected yet.

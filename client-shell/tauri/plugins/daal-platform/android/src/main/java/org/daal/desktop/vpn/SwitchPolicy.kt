@@ -282,6 +282,12 @@ object SwitchPolicy {
   fun describeAutoFailure(kept: String?, verdict: String): SwitchNote =
     SwitchNote(requestedRouteId = "", keptRouteId = kept, outcome = "failed", reason = verdict, auto = true)
 
+  /**
+   * `auto.verdict` after the engine moved off a route that had become
+   * slow onto one it measured as better. The connection was never down.
+   */
+  const val VERDICT_MOVED_FASTER = "moved_faster"
+
   const val AUTO_TRYING = "trying"
   const val AUTO_CONNECTED = "connected"
   const val AUTO_FAILED = "failed"
@@ -291,8 +297,15 @@ object SwitchPolicy {
     /** Nothing to do. */
     object None : Follow()
 
-    /** The engine moved to [routeId] by itself and it carries: publish it. */
-    data class Moved(val routeId: String) : Follow()
+    /**
+     * The engine moved to [routeId] by itself and it carries: publish
+     * it. [faster]: it left a route that still carried but had become
+     * slow, for one it measured as clearly better (the engine's verdict
+     * `moved_faster`) — not a route that failed. The service does the
+     * same thing either way; the difference is what its log says, and
+     * that nothing was ever down.
+     */
+    data class Moved(val routeId: String, val faster: Boolean = false) : Follow()
 
     /**
      * The engine ran out of routes: nothing is carried any more.
@@ -320,7 +333,7 @@ object SwitchPolicy {
     return when (engine.autoState) {
       AUTO_CONNECTED ->
         if (!active.isNullOrEmpty() && engine.routeRunning != false && active != shown) {
-          Follow.Moved(active)
+          Follow.Moved(active, faster = engine.autoVerdict == VERDICT_MOVED_FASTER)
         } else {
           Follow.None
         }

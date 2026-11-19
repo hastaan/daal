@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +42,20 @@ import (
 //	auto-cancel <ms>    press Connect, and Cancel <ms> later: the
 //	                    service's clearRoute, repeated every 100 ms while
 //	                    the call is in flight (DaalVpnService.cancelInFlight)
+//	auto-net <kind> <id|-> <validated> <metered>
+//	                    press Connect while the service's network callback
+//	                    reports the network: engine_network_facts on ANOTHER
+//	                    thread at the moment the connect starts, which is
+//	                    how DaalVpnService does it (startNetworkWatch in
+//	                    beginStart, its own thread `daal-vpn-network`)
+//	net <kind> <id|-> <validated> <metered>
+//	                    the callback alone: the phone moved to another
+//	                    network, or the platform changed its mind about this
+//	                    one. `-` is the empty id
 //	connect <family>    pick one route by hand (engine_set_route)
+//	listing             what the Connections page reads: the route list and
+//	                    the connected route's summary (the `measured` block)
+//	res                 what the process holds: open files and goroutines
 //	disconnect          the person disconnects; the process stays
 //	diag                the engine's diagnostics and the app's open files,
 //	                    with NO other call into the engine: what a phone
@@ -107,7 +122,7 @@ func startAutoProgress() *autoProgress {
 		defer close(p.done)
 		t := time.NewTicker(40 * time.Millisecond)
 		defer t.Stop()
-		last := ""
+		last, t0 := "", time.Now()
 		for {
 			select {
 			case <-p.stop:
@@ -124,14 +139,15 @@ func startAutoProgress() *autoProgress {
 			if json.Unmarshal([]byte(d), &doc) != nil || doc.Auto == nil {
 				continue
 			}
-			key := fmt.Sprintf("%v|%v|%v|%v", doc.Auto["state"], doc.Auto["trying"], doc.Auto["index"], doc.Auto["total"])
+			key := fmt.Sprintf("%v|%v|%v|%v|%v", doc.Auto["state"], doc.Auto["trying"], doc.Auto["index"], doc.Auto["total"], doc.Auto["racing"])
 			if key == last {
 				continue
 			}
 			last = key
 			p.mu.Lock()
 			p.seen = append(p.seen, map[string]any{"state": doc.Auto["state"], "trying": doc.Auto["trying"],
-				"index": doc.Auto["index"], "total": doc.Auto["total"], "mode": doc.Auto["mode"]})
+				"index": doc.Auto["index"], "total": doc.Auto["total"], "mode": doc.Auto["mode"], "racing": doc.Auto["racing"],
+				"ms": time.Since(t0).Milliseconds()})
 			p.mu.Unlock()
 		}
 	}()
@@ -144,9 +160,85 @@ func (p *autoProgress) finish() []map[string]any {
 	return p.seen
 }
 
+// hostNet is one report of the service's network callback.
+type hostNet struct {
+	kind, id           string
+	validated, metered int
+}
+
+// parseHostNet reads `<kind> <id|-> <validated> <metered>`.
+func parseHostNet(f []string) (*hostNet, error) {
+	if len(f) != 4 {
+		return nil, errors.New("want <kind> <id|-> <validated> <metered>")
+	}
+	n := &hostNet{kind: f[0], id: f[1]}
+	if n.id == "-" {
+		n.id = ""
+	}
+	var err error
+	if n.validated, err = strconv.Atoi(f[2]); err != nil {
+		return nil, err
+	}
+	if n.metered, err = strconv.Atoi(f[3]); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// report is the engine call. The answer goes into the event as the
+// engine gave it; the id that was sent does NOT (the driver greps
+// everything this process wrote for it).
+func (n *hostNet) report() map[string]any {
+	t0 := time.Now()
+	body, err := abi.NetworkFacts(n.kind, n.id, n.validated, n.metered)
+	return map[string]any{"kind": n.kind, "id_set": n.id != "", "validated": n.validated, "metered": n.metered,
+		"answer": rawJSON(body), "error": errString(err), "ms": time.Since(t0).Milliseconds()}
+}
+
+// held is what the process holds right now: its open files (the
+// sentinels, which are the lab's own, taken off) and its goroutines —
+// all of them, and those with a sing-box frame on their stack. A side
+// instance that was not torn down shows in both.
+func (p *phone) held() map[string]any {
+	kinds := map[string]int{}
+	total := 0
+	if ents, err := os.ReadDir("/proc/self/fd"); err == nil {
+		for _, e := range ents {
+			target, err := os.Readlink("/proc/self/fd/" + e.Name())
+			if err != nil {
+				continue // the directory handle of this very listing
+			}
+			total++
+			k := "file"
+			switch {
+			case strings.HasPrefix(target, "socket:"):
+				k = "socket"
+			case strings.HasPrefix(target, "pipe:"):
+				k = "pipe"
+			case strings.HasPrefix(target, "anon_inode:"):
+				k = strings.TrimPrefix(target, "anon_inode:")
+			case strings.HasPrefix(target, "/dev/net/tun"):
+				k = "tun"
+			}
+			kinds[k]++
+		}
+	}
+	buf := make([]byte, 4<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	box := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "github.com/sagernet/") {
+			box++
+		}
+	}
+	return map[string]any{"fds": total - len(p.sent.open), "fd_kinds": kinds, "sentinels": len(p.sent.open),
+		"goroutines": runtime.NumGoroutine(), "goroutines_box": box}
+}
+
 // auto is one press of Connect. cancelAfter >= 0: Cancel is pressed that
-// long after it.
-func (p *phone) auto(cancelAfter time.Duration) {
+// long after it. net != nil: the service's network callback reports at
+// the same moment, on its own thread.
+func (p *phone) auto(cancelAfter time.Duration, net *hostNet) {
 	ev := map[string]any{"cancel_after_ms": cancelAfter.Milliseconds()}
 	p.sent.add("before the connect", 4, -1)
 	built, err := p.tun()
@@ -167,6 +259,10 @@ func (p *phone) auto(cancelAfter time.Duration) {
 		at   time.Time
 	}
 	ch := make(chan answer, 1)
+	netDone := make(chan map[string]any, 1)
+	if net != nil {
+		go func() { netDone <- net.report() }()
+	}
 	go func() {
 		body, err := abi.ConnectAuto()
 		ch <- answer{body, err, time.Now()}
@@ -198,6 +294,9 @@ func (p *phone) auto(cancelAfter time.Duration) {
 		}
 	}
 	ev["auto_ms"] = time.Since(t0).Milliseconds()
+	if net != nil {
+		ev["net"] = <-netDone
+	}
 	ev["progress"] = progress.finish()
 	ev["poll"] = poll.finish()
 	var res struct {
@@ -304,13 +403,39 @@ loop:
 		}
 		switch f[0] {
 		case "auto":
-			p.auto(-1)
+			p.auto(-1, nil)
 		case "auto-cancel":
 			ms := 1000
 			if len(f) > 1 {
 				ms, _ = strconv.Atoi(f[1])
 			}
-			p.auto(time.Duration(ms) * time.Millisecond)
+			p.auto(time.Duration(ms)*time.Millisecond, nil)
+		case "auto-net":
+			n, err := parseHostNet(f[1:])
+			if err != nil {
+				emit("auto", map[string]any{"stage": "net", "error": err.Error()})
+				continue
+			}
+			p.auto(-1, n)
+		case "net":
+			n, err := parseHostNet(f[1:])
+			if err != nil {
+				emit("net", map[string]any{"error": err.Error()})
+				continue
+			}
+			emit("net", n.report())
+		case "listing":
+			routes, rerr := abi.AvailableRoutes()
+			ev := map[string]any{"routes": rawJSON(routes), "error": errString(rerr), "active": p.routeID}
+			if p.routeID != "" {
+				sum, serr := abi.RouteSummary(p.routeID)
+				ev["summary"], ev["summary_error"] = rawJSON(sum), errString(serr)
+			}
+			d, _ := abi.ExportDiagnostics()
+			ev["diag"] = rawJSON(d)
+			emit("listing", ev)
+		case "res":
+			emit("res", p.held())
 		case "connect":
 			if len(f) < 2 {
 				emit("set", map[string]any{"stage": "pick", "error": "connect needs a family"})
@@ -325,7 +450,7 @@ loop:
 			emit("down", map[string]any{"error": errString(cerr), "after": after})
 		case "diag":
 			d, _ := abi.ExportDiagnostics()
-			emit("diag", map[string]any{"diag": rawJSON(d), "tun": p.tunName(), "sentinels_bad": p.sent.verify(), "protect_calls": protectCalls()})
+			emit("diag", map[string]any{"diag": rawJSON(d), "tun": p.tunName(), "sentinels_bad": p.sent.verify(), "protect_calls": protectCalls(), "held": p.held()})
 		case "stop":
 			why = "stop"
 			break loop

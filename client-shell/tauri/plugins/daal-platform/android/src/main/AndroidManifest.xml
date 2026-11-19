@@ -22,6 +22,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+      Normal-level (granted at install, no dialog, no entry the person
+      has to find). DaalVpnService listens for changes of the phone's
+      default network (ConnectivityManager.registerDefaultNetworkCallback)
+      and tells the engine what kind of network it is on, whether the
+      system has seen it reach the internet, and whether it is metered.
+      Without it the registration throws and the engine is simply not
+      told. No location permission is asked for: no SSID is read.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:extractNativeLibs="true"

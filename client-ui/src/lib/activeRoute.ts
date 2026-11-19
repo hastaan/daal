@@ -108,6 +108,29 @@ export function parseLastSwitch(vpnStatus: unknown): LastSwitch | undefined {
     };
 }
 
+/** The engine's own record of the same thing (`switch_back` in the
+ *  diagnostics blob), in the shape of the service's note. On desktop
+ *  there is no service: after a switch to a route that carried nothing
+ *  the engine goes back to the one that worked, the blob reads "the
+ *  old route is connected", and without this the tapped row had no
+ *  answer but the generic sentence. `failed_route` '' — and anything
+ *  malformed — is `undefined`: "nothing to say".
+ *
+ *  `restored` false means the way back did not carry either: nothing is
+ *  connected, so no route is named as kept. */
+export function parseSwitchBack(switchBack: unknown): LastSwitch | undefined {
+    if (!switchBack || typeof switchBack !== 'object') return undefined;
+    const b = switchBack as Record<string, unknown>;
+    const routeId = nonEmpty(b.failed_route);
+    if (!routeId) return undefined;
+    return {
+        routeId,
+        keptRouteId: b.restored === true ? nonEmpty(b.restored_route) : undefined,
+        outcome: 'failed',
+        reason: typeof b.category === 'string' ? b.category : '',
+    };
+}
+
 /** ConnectionSummary plus what this wave added to the diagnostics blob.
  *  Kept beside the contract type rather than in it: the extra fields are
  *  optional, so a backend that does not send them (the browser harness)

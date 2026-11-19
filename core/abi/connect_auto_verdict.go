@@ -32,8 +32,11 @@ const (
 	// a cooldown: trying again later can work.
 	AutoVerdictAllCoolingDown = "all_cooling_down"
 	// Every route tried was told by the device itself that there is no
-	// network (network_offline). The engine has no reachability probe
-	// of its own, so silence alone is never called this.
+	// network (network_offline) — or nothing at all answered and the
+	// HOST has said the device is on no network at all (kind "none",
+	// engine_network_facts). The engine has no reachability probe of its
+	// own, so silence alone is never called this — and neither is a
+	// network the platform merely has not validated.
 	AutoVerdictNetworkDown = "network_down"
 	// Every UDP route tried heard nothing while a TCP route to the same
 	// server was answered. (The TCP routes failed too, each for the
@@ -106,6 +109,15 @@ type autoObs struct {
 	// fall-over pass). It is never a second observation for another
 	// route.
 	unplaced bool
+	// id / racedWith / second: the route, the route it was checked
+	// beside, and whether it was the SECOND of that pair (the partner
+	// picked to go beside the pass's next route).
+	id, racedWith string
+	second        bool
+	// sideOnly: "carried" in a side instance only — it proved a moment
+	// after the route the tunnel was started on. It is an observation
+	// (the address answered) and never "the pass connected".
+	sideOnly bool
 }
 
 func (a autoObs) failed() bool {
@@ -193,15 +205,25 @@ func deriveAuto(tried []autoObs) (verdict string, refined []string) {
 
 	fails := 0
 	for _, a := range tried {
-		if a.result == AutoResultCarried {
-			if fails > 0 {
-				return AutoVerdictMovedOn, refined
-			}
-			return AutoVerdictNone, refined
-		}
 		if a.failed() {
 			fails++
 		}
+	}
+	for _, c := range tried {
+		if c.result != AutoResultCarried || c.sideOnly {
+			continue
+		}
+		// Connected on c. "Moved on" is said when a route the pass came
+		// to BEFORE c did not carry. The partner picked to be checked
+		// beside c is not that: c is the route the pass meant to try,
+		// it worked at its first attempt, and the partner failing
+		// beside it is not something the engine moved on from.
+		for _, a := range tried {
+			if a.failed() && !(a.second && a.racedWith != "" && a.racedWith == c.id) {
+				return AutoVerdictMovedOn, refined
+			}
+		}
+		return AutoVerdictNone, refined
 	}
 	if fails == 0 {
 		// Every candidate was refused between the listing and its turn

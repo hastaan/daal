@@ -102,6 +102,7 @@ impl<R: Runtime> PlatformHandle<R> {
             last_switch: None,
             auto: false,
             holding: false,
+            running: false,
         })
     }
 }

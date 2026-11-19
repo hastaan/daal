@@ -34,8 +34,14 @@ import (
 // connected route stops carrying, the liveness loop calls autoFallOver
 // and the next candidate is tried without the host doing anything.
 //
-// It never tries two routes at once. Each candidate is a whole engine
-// instance reading the same TUN, and the device has one.
+// The TUN has one reader: only one route at a time is the tunnel's
+// instance. Where the driver can prove a route in a SIDE instance (no
+// TUN, no way in: core/engine/side_singbox.go) a pass races the next TWO
+// candidates there, never more, and starts the tunnel's instance on the
+// one that proves first (connect_race.go). Everything else — a family
+// that cannot be side-probed, the route that carried here last, the
+// last candidate, a network whose hourly allowance is spent — is tried
+// alone, in order, exactly as before.
 //
 // What it says afterwards — `verdict`, and `refined` on a route — is
 // derived from the set of results by deriveAuto (connect_auto_verdict.go)
@@ -56,6 +62,11 @@ const (
 	AutoResultStartFailed = "start_failed"
 	AutoResultRefused     = "refused"
 	AutoResultCancelled   = "cancelled"
+	// AutoResultStopped: the route was being checked beside another one
+	// (`raced_with`), the other proved first, and this check was stopped
+	// before it had an answer. Nothing was learned about the route and
+	// nothing is recorded about it.
+	AutoResultStopped = "stopped"
 )
 
 // `why` of one entry: why the route stood where it did in the order.
@@ -169,6 +180,12 @@ type AutoTried struct {
 	// (1, 2, … in the order tried; 0 = not known). The address itself
 	// is never reported.
 	Relay int `json:"relay"`
+	// RacedWith: the route this one was checked beside, "" when it was
+	// tried alone.
+	RacedWith string `json:"raced_with"`
+	// SetupMs: for a route that carried, how long THIS attempt took from
+	// starting the route to its first completed round trip. 0 otherwise.
+	SetupMs int `json:"setup_ms"`
 }
 
 // AutoResult is what engine_connect_auto returns.
@@ -207,6 +224,7 @@ type autoState struct {
 	state   string
 	mode    bool
 	trying  string
+	racing  []string
 	index   int
 	total   int
 	tried   []AutoTried
@@ -224,6 +242,7 @@ func (a *autoState) block() map[string]any {
 	}
 	tried := make([]AutoTried, len(a.tried))
 	copy(tried, a.tried)
+	racing := append([]string{}, a.racing...)
 	return map[string]any{
 		"state": state,
 		"mode":  a.mode,
@@ -232,6 +251,10 @@ func (a *autoState) block() map[string]any {
 		"trying": a.trying,
 		"index":  a.index,
 		"total":  a.total,
+		// racing: the two routes being checked beside each other right
+		// now; empty when one route (or none) is. `trying` is the first
+		// of the pair.
+		"racing": racing,
 		// tried: the routes of the current or last pass, in the order
 		// they were tried, then the routes that were left out.
 		"tried":   tried,
@@ -262,7 +285,7 @@ func (a *autoState) reset() {
 // clearLocked empties everything a reader sees. Called with mu held.
 func (a *autoState) clearLocked() {
 	a.state, a.mode = AutoStateIdle, false
-	a.trying, a.index, a.total = "", 0, 0
+	a.trying, a.index, a.total, a.racing = "", 0, 0, nil
 	a.tried, a.verdict, a.routeID, a.family = nil, "", "", ""
 }
 
@@ -298,6 +321,7 @@ func (a *autoState) recovered(routeID, family string) {
 // polled once (see ClearRoute).
 func (c *Core) autoStopLocked(keepFailedVerdict bool) (wasTrying bool) {
 	c.auto.gen++
+	c.cancelRaceLocked()
 	c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
 	c.auto.lost = autoLost{}
 	a := &c.auto
@@ -384,7 +408,17 @@ func (c *Core) autoFallOver(ctx context.Context) {
 		// This loop's route has been replaced or disconnected.
 		return
 	}
-	if _, mode := c.auto.snapshot(); !mode {
+	as, mode := c.auto.snapshot()
+	if !mode {
+		return
+	}
+	if as == AutoStateTrying {
+		// A pass is in flight already — one that races beside this very
+		// route and has left its instance, and so this loop, running
+		// (connect_race.go). It is trying the other routes; starting a
+		// second pass here would only cancel it, and the call that asked
+		// for it (the person's, or the host's) would come back
+		// "cancelled" while the engine was in fact still looking.
 		return
 	}
 	st, cat, running := c.check.snapshot()
@@ -398,6 +432,13 @@ func (c *Core) autoFallOver(ctx context.Context) {
 	}
 	if nowUTC().Before(c.auto.nextFallAt) {
 		// A pass of this outage found nothing a little while ago.
+		return
+	}
+	if hostFacts().noNetwork() {
+		// The host says the device is on no network at all. No other
+		// route would fare better, and a pass would replace the instance
+		// under every connection the person has open; the host's next
+		// report (engine_network_facts) asks for a check at once.
 		return
 	}
 	c.autoPassLocked(&autoLost{routeID: c.activeRoute, family: c.activeFamily, cat: cat}, false)
@@ -442,7 +483,9 @@ func (c *Core) autoTakeChargeLocked() {
 // routeCheck is its own (false when it was abandoned: the record belongs
 // to whoever took over).
 func (c *Core) autoSettleLocked(pending []autoCharge, carried bool, lost *autoLost, keepVerdict bool) (forgiven bool) {
-	if len(pending) == 0 {
+	if len(pending) == 0 || c.shuttingDown {
+		// (Shutdown has taken the core: its store is being closed, and
+		// nothing more is written to it.)
 		return false
 	}
 	silent := !carried
@@ -488,6 +531,16 @@ type autoCandidate struct {
 	udp                  bool
 	relayHost, name      string
 	relayPort            int
+	// side: the driver can prove this route in a side instance
+	// (engine.SideProber). grade: its grade on this network.
+	side  bool
+	grade string
+	// measuredMs: its smoothed setup time on this network; 0 with
+	// samples == 0 when it was never timed here.
+	measuredMs, samples int
+	// proved: a side probe of THIS pass proved it (beside a winner whose
+	// hand-over then failed) and its measurement is already kept.
+	proved bool
 }
 
 // autoPassLocked is one pass over the candidates. Called with Core.mu
@@ -554,6 +607,7 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 
 	// This pass is in charge now.
 	c.auto.gen++
+	c.cancelRaceLocked()
 	gen := c.auto.gen
 	a := &c.auto
 	if len(cands) == 0 {
@@ -570,7 +624,7 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	}
 	a.mu.Lock()
 	a.state, a.mode = AutoStateTrying, true
-	a.trying, a.index, a.total = "", 0, len(cands)
+	a.trying, a.index, a.total, a.racing = "", 0, len(cands), nil
 	a.tried, a.verdict, a.routeID, a.family = nil, "", "", ""
 	a.mu.Unlock()
 	c.check.setSwitchBack(SwitchBack{})
@@ -581,67 +635,46 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	}
 	engine.LogInfo(fmt.Sprintf("auto start candidates=%d", len(cands)))
 
-	relayNo := map[string]int{}
-	relayOf := func(cd autoCandidate) int {
-		if cd.relayHost == "" {
-			return 0
-		}
-		if n, ok := relayNo[cd.relayHost]; ok {
-			return n
-		}
-		relayNo[cd.relayHost] = len(relayNo) + 1
-		return relayNo[cd.relayHost]
-	}
-
-	var obs []autoObs
-	var tried []AutoTried
-	var pending []autoCharge
+	p := &autoPass{c: c, gen: gen, lost: lost, total: len(cands), background: !explicit, relayNo: map[string]int{}}
 	if fallOver {
 		// The route that stopped carrying is the first observation of
 		// this pass.
-		tried = append(tried, AutoTried{RouteID: current, Family: currentFamily, Result: AutoResultNotCarrying,
+		p.tried = append(p.tried, AutoTried{RouteID: current, Family: currentFamily, Result: AutoResultNotCarrying,
 			Category: string(currentCat), Why: AutoWhyWasConnected})
-		obs = append(obs, autoObs{result: AutoResultNotCarrying, category: currentCat, unplaced: true})
+		p.obs = append(p.obs, autoObs{result: AutoResultNotCarrying, category: currentCat, unplaced: true})
 	}
-	connected, connectedFamily := "", ""
-	for i, cd := range cands {
-		a.mu.Lock()
-		a.trying, a.index = cd.routeID, i+1
-		a.mu.Unlock()
-		engine.LogInfo(fmt.Sprintf("auto try route=%s family=%s index=%d total=%d",
-			engine.LogID(cd.routeID), engine.LogID(cd.family), i+1, len(cands)))
-
-		out := c.connectRouteLocked(cd.routeID, connectOpts{auto: true})
-
-		if c.auto.gen != gen || out.result == AutoResultCancelled {
-			// A disconnect, a route picked by hand or a newer pass took
-			// over. The state — the engine's and the `auto` block's — is
-			// theirs.
-			engine.LogInfo(fmt.Sprintf("auto result route=%s result=%s category=", engine.LogID(cd.routeID), AutoResultCancelled))
-			tried = append(tried, AutoTried{RouteID: cd.routeID, Family: cd.family, Result: AutoResultCancelled, Why: cd.why, Relay: relayOf(cd)})
-			engine.LogInfo(fmt.Sprintf("auto done connected=false route=- verdict=%s", AutoVerdictCancelled))
-			c.autoSettleLocked(pending, false, lost, false)
-			return AutoResult{Tried: tried, Verdict: AutoVerdictCancelled, Candidates: len(cands)}
+	queue := append([]autoCandidate(nil), cands...)
+	for first := true; len(queue) > 0 && p.connected == "" && !p.cancelled; first = false {
+		index := len(cands) - len(queue) + 1
+		// The route that carried here last is tried ALONE: when it still
+		// works — the usual press — the network sees one connection, the
+		// one it saw yesterday.
+		alone := first && queue[0].why == AutoWhyCarriedHere && queue[0].grade != netmem.GradeFailing
+		partner := -1
+		if !alone && !p.noRace {
+			partner = c.racePartnerLocked(queue, p.background)
 		}
-		t := AutoTried{RouteID: cd.routeID, Family: cd.family, Result: out.result, Category: string(out.category),
-			Refused: out.refused, Why: cd.why, Relay: relayOf(cd)}
-		tried = append(tried, t)
-		obs = append(obs, autoObs{result: out.result, category: out.category, obs: out.obs, udp: cd.udp,
-			host: cd.relayHost, port: cd.relayPort, name: cd.name})
-		engine.LogInfo(fmt.Sprintf("auto result route=%s result=%s category=%s",
-			engine.LogID(cd.routeID), out.result, engine.LogID(string(out.category))))
-		a.mu.Lock()
-		a.tried = append([]AutoTried(nil), tried...)
-		a.mu.Unlock()
-		if out.result == AutoResultCarried {
-			connected, connectedFamily = cd.routeID, cd.family
-			break
+		if partner < 0 {
+			cd := queue[0]
+			queue = queue[1:]
+			p.seq(cd, index)
+			continue
 		}
-		if out.result == AutoResultNotCarrying || out.result == AutoResultStartFailed {
-			pending = append(pending, autoCharge{routeID: cd.routeID, family: cd.family, cat: out.category})
-		}
+		a, b := queue[0], queue[partner]
+		rest := append(append([]autoCandidate{}, queue[1:partner]...), queue[partner+1:]...)
+		queue = append(p.race(a, b, index), rest...)
 	}
-	c.autoSettleLocked(pending, connected != "", lost, true)
+	if p.cancelled {
+		// A disconnect, a route picked by hand or a newer pass took
+		// over. The state — the engine's and the `auto` block's — is
+		// theirs.
+		engine.LogInfo(fmt.Sprintf("auto done connected=false route=- verdict=%s", AutoVerdictCancelled))
+		c.autoSettleLocked(p.pending, p.answered, lost, false)
+		return AutoResult{Tried: p.tried, Verdict: AutoVerdictCancelled, Candidates: len(cands)}
+	}
+	obs, tried := p.obs, p.tried
+	connected, connectedFamily := p.connected, p.connectedFamily
+	forgiven := c.autoSettleLocked(p.pending, connected != "" || p.answered, lost, true)
 	c.auto.lost = autoLost{}
 	if connected != "" {
 		c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
@@ -658,18 +691,33 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	for i := range refined {
 		tried[i].Refined = refined[i]
 	}
+	if connected == "" && forgiven && hostFacts().noNetwork() {
+		// Nothing at all answered, and the HOST says why: the device is
+		// on no network at all. No probe of the engine's own was made to
+		// learn it. Without the host's word the same silence stays what
+		// it was (relay_unreachable, all_failed) — and "the platform has
+		// not VALIDATED this network" is not that word: a network that
+		// filters the platform's own connectivity check is never
+		// validated and carries traffic all the same, and telling a
+		// person whose browser works that the phone has no internet
+		// sends them to their Wi-Fi settings instead of to a new file.
+		verdict = AutoVerdictNetworkDown
+	}
 	tried = append(tried, left...)
 
-	if connected == "" && fallOver {
-		// Nothing else carried. Put back the instance of the route that
-		// was connected: see the comment on this function.
+	if connected == "" && fallOver && !c.routeRunningLocked(current) {
+		// Nothing else carried, and the instance of the route that was
+		// connected was replaced on the way (a candidate tried through
+		// the tunnel's own instance). Put it back: see the comment on
+		// this function. A pass that only side-probed never took it
+		// down.
 		if !c.resumeFailedRouteLocked(current, currentCat) {
 			engine.LogInfo(fmt.Sprintf("auto resume route=%s result=failed", engine.LogID(current)))
 		}
 	}
 
 	a.mu.Lock()
-	a.trying, a.index = "", 0
+	a.trying, a.index, a.racing = "", 0, nil
 	a.tried, a.verdict = tried, verdict
 	if connected != "" {
 		a.state, a.routeID, a.family = AutoStateConnected, connected, connectedFamily
@@ -686,30 +734,64 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		Tried: tried, Verdict: verdict, Candidates: len(cands)}
 }
 
-// resumeFailedRouteLocked starts the instance of a route that was
-// connected and stopped carrying, WITHOUT a connection check, and hands
-// it back to the liveness loop in the state it was in: failed, running.
-// It skips the route's cooldown (this is not a new attempt at it) and
-// nothing else. Called with Core.mu held.
-func (c *Core) resumeFailedRouteLocked(routeID string, cat diagnostics.Category) bool {
+// restartInstanceLocked starts the tunnel's instance on a route WITHOUT a
+// connection check and makes it the active route. It skips the route's
+// cooldown (this is not a new attempt at it) and nothing else. The
+// caller says what state the route is in and starts its liveness loop.
+// Called with Core.mu held.
+func (c *Core) restartInstanceLocked(routeID string) (family string, ok bool) {
 	row, body, err := c.prepareRouteOpts(routeID, false, true)
 	if err != nil || c.shuttingDown {
-		return false
+		return "", false
 	}
 	c.check.abandon()
 	c.routeEpoch++
 	if err := c.driver.Start(context.Background(), body); err != nil {
-		return false
+		return "", false
 	}
 	refresh.SetTunnelRequired(true)
 	c.setActiveLocked(routeID, row.TransportFamily)
+	return row.TransportFamily, true
+}
+
+// resumeFailedRouteLocked starts the instance of a route that was
+// connected and stopped carrying, WITHOUT a connection check, and hands
+// it back to the liveness loop in the state it was in: failed, running.
+// Called with Core.mu held.
+func (c *Core) resumeFailedRouteLocked(routeID string, cat diagnostics.Category) bool {
+	family, ok := c.restartInstanceLocked(routeID)
+	if !ok {
+		return false
+	}
 	c.check.setFailed(cat, true)
 	c.startLivenessLocked()
 	// The same route id, a NEW instance with a new inlet: a host that
 	// compares route ids sees nothing to do, so the engine re-points
 	// tunnelled refresh itself.
 	rearmTunnelRefresh()
-	engine.LogInfo(fmt.Sprintf("auto resume route=%s family=%s result=running", engine.LogID(routeID), engine.LogID(row.TransportFamily)))
+	engine.LogInfo(fmt.Sprintf("auto resume route=%s family=%s result=running", engine.LogID(routeID), engine.LogID(family)))
+	return true
+}
+
+// resumeSlowRouteLocked puts back the instance of a route that was
+// carrying, slowly, when the engine left it for one that then did not
+// carry (a move for speed whose hand-over failed: connect_speed.go). No
+// pass/fail connection check stands between the person and the tunnel
+// they had: the route is back in the state it was in — degraded,
+// running — and the liveness loop is asked to check it at once, so what
+// is shown is confirmed or corrected within one check. Nothing is
+// charged to the route: the detour was the engine's own. Called with
+// Core.mu held.
+func (c *Core) resumeSlowRouteLocked(routeID string) bool {
+	family, ok := c.restartInstanceLocked(routeID)
+	if !ok {
+		return false
+	}
+	c.routeUpLocked(routeID, family, engine.ProofResult{OK: true, Slow: true})
+	c.startLivenessLocked()
+	rearmTunnelRefresh()
+	c.kickLiveness()
+	engine.LogInfo(fmt.Sprintf("auto resume route=%s family=%s result=running state=degraded", engine.LogID(routeID), engine.LogID(family)))
 	return true
 }
 
@@ -752,13 +834,15 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 		allowBulk = eng.AllowsBulkCapableThisSession()
 	}
 
+	prober := c.sideProber()
 	byID := map[string]autoCandidate{}
 	var usable []pathmanager.Route
 	for _, row := range rows {
 		if row.RouteID == exclude {
 			continue
 		}
-		if _, _, err := c.prepareRouteOpts(row.RouteID, false, false); err != nil {
+		_, body, err := c.prepareRouteOpts(row.RouteID, false, false)
+		if err != nil {
 			code := ConnectRefusedOther
 			var rr *routeRefusal
 			if errors.As(err, &rr) {
@@ -767,7 +851,8 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 			left = append(left, AutoTried{RouteID: row.RouteID, Family: row.TransportFamily, Result: AutoResultRefused, Refused: code})
 			continue
 		}
-		cd := autoCandidate{routeID: row.RouteID, family: row.TransportFamily, udp: engine.IsUDPFamily(row.TransportFamily)}
+		cd := autoCandidate{routeID: row.RouteID, family: row.TransportFamily, udp: engine.IsUDPFamily(row.TransportFamily),
+			side: prober != nil && prober.CanSideProbe(body)}
 		if profile, err := c.store.GetSecret("route:" + row.RouteID); err == nil {
 			cd.relayHost, cd.relayPort, cd.name = profileRelay(profile)
 		}
@@ -812,6 +897,7 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 	var first, middle, last []placed
 	for _, p := range order {
 		m, ok := mem[p.cd.routeID]
+		p.cd.grade, p.cd.measuredMs, p.cd.samples = m.Grade(), m.SetupMs, m.Samples
 		switch {
 		case ok && m.CarriedLast():
 			p.why = AutoWhyCarriedHere
@@ -875,18 +961,22 @@ func profileRelay(profile []byte) (host string, port int, name string) {
 // path_too_slow is not remembered as a failure: it is not one (see
 // routeDownLocked).
 func (c *Core) rememberRoute(routeID string, carried bool, cat diagnostics.Category) {
-	if !carried && cat == diagnostics.PathTooSlow {
+	c.rememberOutcome(routeID, netmem.RouteOutcome{Carried: carried, Category: string(cat)})
+}
+
+// rememberOutcome is rememberRoute with the measurement: how long a
+// fresh start of the route took, and whether the check called it slow
+// (core/netmem/measure.go). Same rules: best effort, never from a read
+// path, path_too_slow is not a failure.
+func (c *Core) rememberOutcome(routeID string, o netmem.RouteOutcome) {
+	if !o.Carried && o.Category == string(diagnostics.PathTooSlow) {
 		return
 	}
 	st := netmemStore()
 	if st == nil {
 		return
 	}
-	if carried {
-		_ = st.RecordRouteCarried(activeNetworkID(), routeID, nowUTC())
-		return
-	}
-	_ = st.RecordRouteFailed(activeNetworkID(), routeID, string(cat), nowUTC())
+	_ = st.RecordRouteOutcome(activeNetworkID(), routeID, o, nowUTC())
 }
 
 // routeMemory is what is remembered about the routes on the network the

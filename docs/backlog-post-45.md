@@ -1707,7 +1707,9 @@ first.)
   `src-tauri/src/lib.rs` command bodies are wrapped but not
   re-indented; `go build -tags gomobile ./abi` was already broken
   (`share_gomobile.go`) and still is.
-- [ ] Routes still read "not measured yet" — telemetry, a later stage.
+- [x] Routes still read "not measured yet" — telemetry, a later stage.
+  *(Section 16: routes are measured per network and graded, MP-23 /
+  MP-28; shown only while the service runs, MP-16.)*
 
 ### Repair pass after the fix wave (2026-11-19, branch `phone-pass-fixes`)
 
@@ -1863,6 +1865,10 @@ first):
   `TestConnectAuto_UsesTheShorterCheckBudget`,
   `engine.TestRunProof_StopAtUnreachedRelay`. Four dead routes still
   measure 29 s on the rig before the person is told anything final.
+  *Corrected 2026-11-19 (section 16):* the rig's censor log shows a
+  silent address costs TWO attempts, 8 s, not 4 s (FINDINGS AUTO-2,
+  open as MP-38); checked two at a time, four dead routes take 21 s on
+  a first press.
 - [x] **AC-31. Cancel is prompt.** A disconnect, a route picked by
   hand or a newer press abandons the pass, also during a check in
   flight. `TestConnectAuto_ClearRouteCancelsDuringACheck`,
@@ -2003,7 +2009,11 @@ Closed by the repair pass (each with a test that fails without it):
 Open:
 
 - [ ] **AC-18. The engine still cannot tell "no working internet" from
-  "the relay is dead"** (rig AUTO-1). It has no observation outside its
+  "the relay is dead"** (rig AUTO-1). *Half done in section 16 (MP-26,
+  MP-3): when the HOST says there is no network at all (kind `none`,
+  e.g. airplane mode) and nothing answered, the verdict is
+  `network_down`. Still open for a network that is up and carries
+  nothing (MP-18).* It has no observation outside its
   routes; a total blackout is `relay_unreachable`. The sentence now
   names both and asks the person to check other apps. A reachability
   probe is a design decision (what to probe, without becoming a
@@ -2026,12 +2036,17 @@ Open:
   whole pass each time nothing answers** (nothing is resting): at most
   one pass per 5 min after the first few. Watch battery and radio
   wake-ups on a phone.
-- [ ] **AC-23. Desktop does not read `switch_back`**: after a failed
+- [x] **AC-23. Desktop does not read `switch_back`** *(closed in
+  section 16, MP-30: the page reads the engine's `switch_back` from the
+  diagnostics where the service left no note; in the tree, not seen
+  running)*: after a failed
   switch that went back, the Connections page shows the generic
   sentence (Android has the service's note). Small; needs the summary
   to carry the field.
-- [ ] **AC-24. The Connections page line "You chose one way yourself.
-  Daal uses only that one." is shown from the saved choice**, also
+- [x] **AC-24. The Connections page line "You chose one way yourself.
+  Daal uses only that one." is shown from the saved choice** *(closed
+  in section 16, MP-30: the line follows the engine; in the tree, not
+  seen running)*, also
   while the engine is connected automatically on another way (the main
   screen's chooser was corrected; this line was not).
 - [ ] **AC-25. A phone holding only experimental-family routes is told
@@ -2049,8 +2064,11 @@ Open:
   `tauri-plugin-daal-platform` crate (no GTK and no NDK on the build
   machine). The first real compile is the APK build. The gomobile
   binding does not vet (`abi/share_gomobile.go`, older than this wave).
-- [ ] **AC-33. Nothing on the phone tells the engine the network
-  changed unless the page is open.** `engine_network_changed` is called
+- [x] **AC-33. Nothing on the phone tells the engine the network
+  changed unless the page is open.** *(In the tree since section 16,
+  MP-26 / MP-27: the service's own network callback calls
+  `engine_network_facts`. NEVER RUN: the service was type-checked, not
+  built into an APK — MP-17 is the check that this really closes it.)* `engine_network_changed` is called
   from the webview only, with the kind (wifi / mobile) as the whole
   identity; with the app in the background a dead route is noticed by
   the 3-minute timer. A `ConnectivityManager` callback in the service
@@ -2063,7 +2081,10 @@ Open:
   (`auto_unavailable`). See the three staleness layers.
 - [ ] **AC-41. Farsi of every new sentence needs a native reader**
   (`auto.*`, `network.auto.*`, `network.pinned.*`, `add.*`), and the
-  service's notification text is English only (older gap).
+  service's notification text is English only (older gap). *Section
+  16: the notification now has Farsi string resources (MP-27), written
+  without a native reader like the rest; the item stays open for the
+  reading, and MP-22 adds this wave's strings to it.*
 - [ ] **AC-42. Papers that still say otherwise**: the ABI count in
   `specs/frp-track-v1.md`, `development-phases/README.md`,
   `docs/build-and-release.md`, `CHANGELOG.md`;
@@ -2112,3 +2133,390 @@ To check on the phone (build with the new `.so`, same signing key):
   on the phone" done by hand.
 - [ ] `route_summary` for a missing route was still asked once at launch
   (one log line, not a loop).
+
+## 16. Selection stage, second slice: measured routes and a race of two (2026-11-19)
+
+The wave after section 15 (branch `measure-and-probe`): the engine
+measures every route per network and grades it, an automatic pass
+checks at most TWO routes beside each other in side instances
+(`core/abi/connect_race.go`, `core/engine/side*.go`), moves away from a
+route that is slow when a clearly faster one proves
+(`core/abi/connect_speed.go`), and is told about the phone's network by
+the Android service (`engine_network_facts`, `vpn/NetworkWatch.kt`).
+The numbers and rules are in the comments at the top of those files.
+
+Built by the wave (each "[x]" = in the tree, green in `./daal test`
+and on the rig where a rig check is named, not seen on a phone):
+
+- [x] **MP-23. Every route is measured per network and graded.** Per
+  (network, route): smoothed `setup_ms` (start to first round trip),
+  `samples`, `carried`, `failed`, `last` (the hour bucket) and a grade
+  `unknown|good|ok|slow|failing` (`core/netmem/measure.go`: one sample
+  up to 1.5 s is the good band, up to 4 s ok, above slow; the grade
+  moves only on two consecutive samples in another band; `failing` is
+  two failures in a row or failed and never carried; a route that
+  carries leaves `failing` at once). Automatic passes, connects by hand
+  and liveness changes feed the same memory; a polled read writes
+  nothing; PanicWipe removes it. Exposed as `measured{}` on
+  `engine_route_summary` and every `engine_available_routes` row, and
+  `setup_ms` on every `tried[]` entry.
+  `netmem.TestGrade_Thresholds`, `TestGrade_DoesNotFlipOnOneSample`,
+  `TestMeasured_CountsSmoothingAndBuckets`,
+  `abi.TestMeasure_AutoManualAndLivenessFeedTheSameMemory`,
+  `TestMeasure_PerNetworkPersistedWipedAndNeverWrittenByAPoll`,
+  `TestMeasure_OneBadConnectDoesNotFlipTheGrade`; rig
+  `first.connect.measured`, `slow.by-hand.graded_slow_here`,
+  `slow_is_not_failing`.
+- [x] **MP-24. An automatic pass checks at most TWO routes beside each
+  other.** The route remembered as carrying here (and not graded
+  failing) is tried ALONE first; after that, pairs: never two to the
+  same relay address and port number, a stream route with a datagram
+  route and different ports preferred, the second started 150–450 ms
+  after the first, the first to prove wins and is then started and
+  proved again as the tunnel's route, the other is stopped
+  (`result:"stopped"`, charged nothing). `tried[]` gains `raced_with`,
+  the block gains `racing`. Limits: 2 in flight, 12 side probes per
+  network per hour (in memory; lost on restart), no side probe of a
+  route probed in the last 3 min or cooling down. Raced: vless-reality,
+  websocket-tls, hysteria2 (and tuic, shadowsocks, anytls behind the
+  experimental gate). Never raced, tried alone in order: naive, tor,
+  wireguard / amneziawg, anything detoured.
+  `TestRace_TheRememberedRouteIsTriedAloneFirst`,
+  `TestRace_NeverMoreThanTwoInFlight`, `TestPickRacePartner_Table`,
+  `TestRace_PairsDifferInKindAndPort`,
+  `TestRace_TheSecondProbeStartsAfterARandomDelay`,
+  `TestRace_LimitsFallBackToOneAtATime`,
+  `TestRace_ClearRouteStopsBothProbes`,
+  `TestRace_ManualSetRouteAndShutdownStopARace`; rig
+  `race.connect.both_dropped_routes_checked_together`,
+  `faster_than_one_after_another` (8.3 s against 16.3 s),
+  `second_route_starts_after_a_delay`, and
+  `at_most_two_routes_in_flight` on every press of every world,
+  counted at the censor.
+- [x] **MP-25. The side instance.** A second short-lived sing-box built
+  from the route's own config with every inbound removed: no TUN fd,
+  protected sockets through the registered callback, nothing shared
+  with the instance that carries, closed on every path, cancelled and
+  waited for by `engine_shutdown` (`core/engine/side.go`,
+  `side_singbox.go`). It cannot be promoted to the tunnel, so the
+  winner is proved a second time (about its setup time again).
+  `engine.TestSideProbe_LeavesTheRunningRouteCarrying`,
+  `_TwoRunConcurrentlyAndTheLoserLeavesNothing`,
+  `_CancelStopsBothPromptly`, `_StopSideProbesWaitsForTeardown`,
+  `_HoldsNoTunAndNoInlet`, `_RefusesWhatCannotRace`,
+  `TestSideProbeable_Table`; rig
+  `leak-stopped.race.a_side_instance_leaves_nothing`.
+- [x] **MP-26. The host tells the engine about the network.** New
+  export (ABI 62) `engine_network_facts(kind, id, validated, metered,
+  out, out_len)`; the id is hashed before any storage or log and is the
+  per-network memory key (the first named network of a kind adopts the
+  old kind-only memory, once); a change kicks one liveness check at
+  once; kind `none` gives `network_down` when nothing answered and
+  stops the engine starting a pass by itself; metered stops
+  engine-started side probes (a pass the person asked for may still
+  race). After the first call the page's `engine_network_changed`
+  answers `superseded` and changes nothing.
+  `TestNetworkFacts_TheClearIDIsNeverStoredLoggedOrReturned`,
+  `_AdoptsTheOldKindOnlyMemoryOnce`, `_SupersedesThePagesCall`,
+  `_AChangeKicksTheLivenessCheckAtOnce`,
+  `_NothingAnsweredAndTheHostSaysDownIsNetworkDown`,
+  `_NoNetworkStartsNoFallOverPass`,
+  `TestRace_OnAMeteredNetworkTheEngineStartsNoSideProbeByItself`; rig
+  `networks.*` (`the_clear_id_is_in_no_file`,
+  `another_id_is_another_network`, `networks.down.verdict`),
+  `metered.slow.no_probe_on_a_metered_network`.
+- [x] **MP-27. The Android service watches the network itself**
+  (`vpn/NetworkWatch.kt`, pure; wired in `DaalVpnService.kt` through
+  `registerDefaultNetworkCallback`, calls on their own thread). Id
+  without the location permission: for wifi the IPv4 network, prefix
+  and gateway (same router = same id on every reconnect; two routers on
+  the same factory range share one id and one memory), for mobile data
+  the SIM operator code; hashed before it crosses JNI. Identical facts
+  are sent once, changes settle 0.75 s, a loss 2 s; a VPN network is
+  never reported; a network that comes back while holding starts a
+  search (at most every 30 s). New permission: `ACCESS_NETWORK_STATE`
+  (normal level, no dialog). Notification text is now string resources
+  with Farsi. `NetworkWatchTest` (29 tests) and
+  `SwitchPolicyTest.aMoveForSpeedIsFollowedAndKnownAsOne` in
+  `tools/test-android-jvm.sh` (97 tests); Rust
+  `engine_gate` drives `report_network` against the real library. The
+  service wiring itself has no test and has never run (MP-17).
+- [x] **MP-28. The engine moves off a slow route in automatic mode.**
+  After two consecutive slow liveness checks, if another usable route
+  is graded better here (or untried and not failed), it is probed in a
+  side instance and taken only if it proves, is not slow itself and its
+  setup time is at most half the running route's last check time;
+  verdict `moved_faster`. No move: nothing asked again for 15 min.
+  After a move: no further speed move for 30 min. Never for a family
+  that cannot be side-probed, never on a metered network, never in
+  by-hand mode. `TestSpeed_MovesAfterTwoSlowChecksToAClearlyFasterRoute`,
+  `_StaysWhenTheOtherIsNotClearlyFasterAndBacksOff`,
+  `_StaysWhenTheCandidateIsSlowOrFails`, `_DoesNotProbeWhenItMustNot`;
+  rig `speed.moved.engine_moved_for_speed`, `same_tun`,
+  `speed.hold.stays_after_a_move_for_speed`.
+- [x] **MP-29. The pages say the grade in plain words.** Rows: "Works
+  well here", "Works here", "Slow here", "Did not work here last time",
+  "Not tried here yet" in place of a percentage or "not measured yet";
+  numbers only in a closed Details fold
+  (`components/connection/MeasuredDetails.tsx`). Main screen: one line
+  under "You're connected."; "Trying two ways at once…" while two are
+  checked; `moved_faster` and the host's `network_down` have their
+  sentences; `stopped` reads "not needed: another way answered first"
+  in Details. `lib/measured.test.ts`,
+  `components/connection/MeasuredUi.test.tsx`, `lib/autoConnect.test.ts`,
+  `backends/tauri.test.ts`, `backends/harness.test.ts` (vitest 561).
+- [x] **MP-30. AC-23 and AC-24 of section 15.** The Connections page's
+  mode line follows the engine (`lib/networkRows.ts
+  connectionsModeLine`), a saved choice not in force reads "from the
+  next time you connect"; desktop reads the engine's `switch_back`
+  (`lib/activeRoute.ts parseSwitchBack`). On Android the page no longer
+  reports the network while the service does
+  (`lib/networkFacts.ts webviewMayReportNetwork`).
+- [x] **MP-31. The rig checks all of it at the censor.** `wb flows`
+  (packet log on the censor's client side, `driver/flowtap.go`), phone
+  `race` in op `auto`, a 22nd world `auto-deep` (phones slow, speed,
+  metered, networks, leak-stopped, leak-cancel), a per-endpoint delay.
+  `./daal e2e full`: PASS, 6530 checks, 22 worlds; known findings
+  CEN-4, AUTO-1, AUTO-2, SW-3. Twelve one-line engine mutations each
+  turned their check red (FINDINGS AUTO-3).
+
+What follows is the REPAIR pass over that wave's review: fifteen
+findings, each checked against the code; all fifteen were real.
+Fourteen are closed with a test that fails without the fix; one (MP-8)
+is closed by saying less in the UI, and what it would take to say more
+is open as MP-16. "[x]" means **in the tree, not seen on a phone** —
+nothing in this wave has been on one.
+
+Closed by the repair pass:
+
+- [x] **MP-1. The liveness loop of a lost route cancelled the pass the
+  person asked for.** A pass that races beside a route that stopped
+  carrying leaves that route's instance — and its liveness loop —
+  running; the loop's next failed check started a fall-over pass of its
+  own, which cancelled the one in flight ("cancelled" to the caller,
+  the Android service then kept a route that was not carrying).
+  `autoFallOver` and `autoSpeedMove` now start nothing while a pass is
+  in flight (`auto.state == trying`).
+  `TestRace_TheLivenessLoopOfTheLostRouteDoesNotCancelAPassInFlight`.
+- [x] **MP-2. A move for speed whose hand-over failed could leave
+  nothing connected**, and the route the person had been on cooling
+  down. The way back is now the fall-over's: the old instance is
+  started again with no pass/fail check in front of it
+  (`resumeSlowRouteLocked`: state degraded, one liveness check asked
+  for at once), nothing is charged to it, and only if its instance will
+  not start is a pass run — with it as the route to put back.
+  `TestSpeed_AFailedMoveGoesBackWithoutACheckAndChargesNothingToTheOldRoute`.
+- [x] **MP-3. "Not validated" was taken for "no internet".**
+  `network_down` is now given on the host's word only for kind `none`.
+  A network Android has not validated is ordinary on a filtered network
+  that carries everything else; on it a dead relay keeps the two-sided
+  `relay_unreachable` sentence ("this network, or the server"). This
+  narrows contract item 4 of the wave on purpose. The price: rig
+  finding AUTO-1 is open again for a blackout with the link up
+  (`known-findings.json`, FINDINGS AUTO-1 / AUTO-O5; rig steps
+  `networks.down` = kind none, `networks.unvalidated`,
+  `networks.dead-relay`). The UI sentence "This phone has no internet
+  right now." therefore needs no condition of its own.
+  `TestNetworkFacts_NothingAnsweredAndTheHostSaysDownIsNetworkDown`.
+- [x] **MP-4. Nothing ordered the first network report before the
+  connect.** The service now asks Android for the default network's
+  description when it starts watching (`NetworkWatch.startDescribed`),
+  sends it on the network thread and the connect waits for that call
+  (at most `FIRST_FACTS_WAIT_MS`, 1 s). The decision is unit tested
+  (`NetworkWatchTest`); the wiring in `DaalVpnService` is type-checked
+  against android.jar and has never run (MP-17).
+- [x] **MP-5. A VPN network named before it was described replaced the
+  real one** (available → capabilities(vpn) → link): two seconds later
+  the engine was told "kind other, no id". The announcement is undone
+  when the capabilities say VPN, and that handle's link / lost are
+  ignored. `aVpnNetworkNamedBeforeItIsDescribedDoesNotReplaceTheRealOne`.
+- [x] **MP-6. Both of a pair proved, the winner's hand-over failed, and
+  the other was never tried**; the failed pass then read "carried".
+  The other is now tried next, through the tunnel, alone, measured
+  once; a side-only "carried" is never the pass's verdict.
+  `TestRace_BothProveAndTheHandOverFailsThenTheOtherIsTried`.
+- [x] **MP-7. Read-modify-write races in the per-network store** now
+  that the host's network thread switches networks beside a pass.
+  `netmem.Store` holds a mutex across every read-change-write
+  (`recordRoute`, `AdoptRouteMemory`, the hints, `ForgetRoute`,
+  `Sweep`), the outgoing network's rewrite keeps the route memory in
+  the same step (`PutKeepingRouteMemory`), the stub for a new network
+  is `PutIfAbsent`, and `c.mode` is read under `Core.mu` there.
+  `netmem/store_concurrent_test.go`; `go test -race ./abi/` is clean.
+- [x] **MP-8. Every row said "Not tried here yet" before the person
+  connected**, on a network Daal had used many times: the engine knows
+  which network it is on only while the VPN service runs. The pages now
+  say nothing about "here" unless the host has told the engine the
+  network AND (on Android) the service is still watching it
+  (`lib/networkFacts.ts gradesAreForThisNetwork`; the Tauri backend
+  hands rows out without their `measured` block otherwise). See MP-16
+  for what that costs.
+- [x] **MP-9. "This phone has no internet right now." on an unvalidated
+  network**: closed in the engine by MP-3.
+- [x] **MP-10. "The first way did not work here" when it had.** A
+  partner that fails beside the route that connects is not something
+  the pass moved on from: `deriveAuto` no longer counts it (the first
+  of a pair failing while its partner connects still is `moved_on`).
+  `TestRace_AFailedPartnerOfTheRouteThatConnectedIsNotMovedOn`,
+  `TestDeriveAuto_SideOnlyCarriedAndRacePartners`; the harness follows.
+- [x] **MP-11. "Daal will switch if it finds a faster way" where it
+  never would.** Promised only when the engine's check says slow NOW,
+  automatic mode, more than one way, and the network is not metered;
+  otherwise "Slow here." (new string `measure.connected.slow`, en/fa).
+- [x] **MP-12. "Daal moved to a faster way." under "Connected, but
+  slow."** The quality line wins while the check says slow.
+- [x] **MP-13. Details showed `last` as a raw Unix number.** Shown as
+  "2026-11-19 10h UTC"; the harness scenarios produce it the same way.
+- [x] **MP-14. The harness called a stopped race partner "cancelled".**
+  Now "stopped", as the engine does.
+- [x] **MP-15. The Connections page's row line and mode line were held
+  only by source pins.** Both are pure helpers now
+  (`lib/networkRows.ts rowMetaText`, `modeLineTexts`) tested on their
+  output; the pins that remain say only that the page calls them.
+
+Open:
+
+- [ ] **MP-16. No grade is shown before the person connects on
+  Android, and none at all on desktop.** That is the honest state after
+  MP-8, and it is the state — disconnected, choosing a way — in which
+  the grades were meant to help. Closing it needs the HOST to report
+  the network while the app is merely open: on Android a
+  `NetworkCallback` owned by the plugin (or one reporter shared with
+  the service) for as long as the activity is in front; on desktop a
+  network observer in the shell (none exists; the page's
+  `engine_network_changed` knows a kind and no identity). Until then
+  rows show the grade only while the service runs.
+- [ ] **MP-17. Nothing of this wave has run on a phone.** In
+  particular: the service's network callback and the ids it produces
+  (how stable across reconnects, MP-4's ordering, MP-5's event order on
+  a real device with another VPN app installed), a race on a real
+  network, a move for speed, and what a metered network reports.
+- [ ] **MP-18. AUTO-1 is open again for a blackout with the link up**
+  (MP-3). Closing it needs an observation that is not one of the
+  routes — a probe, which the design has so far refused — or a host
+  signal narrower than "not validated".
+- [ ] **MP-19. A move for speed that fails replaces the tunnel's
+  instance twice** (to the candidate, and back): every open connection
+  is reset twice for nothing. Bounded by the 15-minute back-off after
+  any speed probe. The only cure is promoting a side instance to the
+  tunnel, which the embedded sing-box cannot do.
+- [ ] **MP-20. A network switch drops the two per-network hints**
+  (`LastWinningRendezvousChannel`, `LastUsedMasqueSubmode`):
+  `captureAndPersist` rewrites the outgoing record from scratch and
+  keeps only the route memory. Older than this wave; seen while fixing
+  MP-7 and left as it was.
+- [ ] **MP-21. The grade of a way graded "slow" from old samples has no
+  expiry in the sentence**: "Slow here." is said while the check of
+  this moment is fine (MP-11 took the promise out, not the phrase).
+- [ ] **MP-22. Farsi of `measure.*` and `auto.note.moved_faster`,
+  `measure.connected.slow` needs a native reader** (as AC-41).
+- [ ] **MP-32. The first report on a new network may be late.** The
+  connect waits at most 1 s for the service's first facts (MP-4); if
+  Android describes the network later, the pass starts under the
+  previous network's memory. Unmeasured; a phone check.
+- [ ] **MP-33. Network ids collide and are guessable.** Two wifi
+  networks on the same factory range share one memory (wrong order at
+  worst, never a wrong route); the stored hash of a low-entropy id (an
+  operator code, a common LAN range) can be guessed by whoever holds
+  the phone's store. PanicWipe removes it.
+- [ ] **MP-34. The hourly side-probe allowance is in memory only**: a
+  restart of the engine gives a network twelve more.
+- [ ] **MP-35. Not on the rig**: a stream + datagram pair (the test
+  file's hysteria2 shares port number 443 with the first route, so the
+  rig's pairs are two TCP routes), the hourly cap, the grade bands, a
+  race winner that then fails through the TUN, a restart with state, a
+  liveness kick on a network change while connected, anything in
+  `NetworkWatch.kt` or the JNI path.
+- [ ] **MP-36. The 3-minute per-route gap makes a second press soon
+  after a failed one sequential again** (rig AUTO-O6: all routes
+  blocked, press, cancel, press: 29 s). A press the person makes could
+  be exempt; not decided.
+- [ ] **MP-37. The censor-side "never more than two" has a blind
+  second**: a dropped attempt ends at its last retransmission, so a
+  third route started in the last second of a silent one would not be
+  seen (FINDINGS AUTO-O3). Three started together are.
+- [ ] **MP-38. A silent address costs 8 s, not the 4 s AC-30 states**
+  (FINDINGS AUTO-2, in `known-findings.json`): the stop is looked at
+  between attempts only (`core/engine/proof.go`). Racing halves the
+  wait, from twice the stated base.
+- [ ] **MP-39. Every TUN-attached connect leaves one eventfd open**
+  for the life of the process (FINDINGS SW-3, vendored sing-tun /
+  gVisor `stopfd`; older than this wave, found by the leak check).
+  Needs a second line in `third_party/DAAL-PATCH.md`.
+- [ ] **MP-40. Papers**: `specs/network-memory-v1.md` describes
+  neither `route_memory` nor the measurement fields nor the host id
+  (adds to AC-42); the service notification follows the phone's
+  language, not the app's.
+- [ ] **MP-41. `go test -race -tags singbox ./engine/` is not clean**:
+  a data race inside upstream sing-mux in an older test; and
+  `go vet -tags cshared ./abi/` fails on an older test file
+  (`rendezvous_test.go`). Neither is in a gate.
+- [ ] **MP-42. `jniLibs/x86` has a shell library and no engine**
+  (`check-android-so-manifest` warns): an APK that ships that ABI
+  cannot start there.
+
+To check on the phone (APK built from this tree with the rebuilt
+`libdaalcore.so` — 62 exports — and the same signing key; read
+`adb logcat` / the in-app log for the lines named):
+
+1. A network the phone has never used with Daal: press the main button.
+   Expect "Trying two ways at once…" (or way 1 of N), connected, and in
+   the log `network facts kind=wifi … network_changed=true` BEFORE
+   `auto start`, then `auto race first= second=` and `auto race
+   winner=`. Note the seconds.
+2. Disconnect, press again on the same network: connected on the same
+   way, one way tried alone (no `auto race` line).
+3. While connected, open the Connections page: the connected way reads
+   "Works well here" (or "Works here"), the others "Not tried here yet"
+   or "Did not work here last time"; open Details and read the numbers.
+   Disconnect: the grades go away (MP-16) — note whether that reads as
+   broken.
+4. Turn wifi off and on again, same router: the log's `network_id` is
+   the same as before. Another wifi: another id, grades start empty.
+5. Connected on wifi, app in the BACKGROUND, turn wifi off so the phone
+   goes to mobile data: note how long until traffic flows again and
+   whether the log shows `network facts kind=cellular` followed at once
+   by a check (AC-33). It should not be the 3-minute timer.
+6. Airplane mode on, press the main button: "This phone has no internet
+   right now." within a few seconds, nothing left running, no VPN key.
+   Airplane mode off without touching the app: it should start
+   searching by itself ("network is back") and connect.
+7. With another VPN app installed (not running), and once with it
+   having been the active VPN just before: the log never shows
+   `kind=vpn` or `kind=other` for our own tunnel (MP-5).
+8. Leave it connected for an hour, screen off, on wifi, then on mobile
+   data: count `auto speed probe` and `auto race` lines in the log —
+   on a healthy way there should be none, on mobile data (metered) none
+   at all; battery use over the hour.
+9. If a slow way can be arranged (a throttled network): "Slow here.
+   Daal will switch if it finds a faster way.", then after a move
+   "Daal moved to a faster way."; no second move within half an hour.
+
+### Seen on the phone (2026-11-19, Samsung S25, home Wi-Fi, this build)
+
+Installed as an update over the section 15 build (`adb install -r`,
+device key); the relay record and the saved routes survived.
+
+- [x] **MP-43. The service tells the engine about the network (MP-17,
+  MP-27).** First press: `network: watching (a default network exists;
+  described at once=true)`, `network facts kind=wifi validated=1
+  metered=0 network_changed=true`, `network memory adopted from the
+  record that had no network of its own`, and the facts reached the
+  engine before the pass began.
+- [x] **MP-44. The remembered route is tried alone.** `auto start
+  candidates=4`, `auto try route=r1 … index=1`, `result=carried
+  setup_ms=420`; the second press `setup_ms=220`. No second route was
+  opened. Disconnect stops the watch (`network: no longer watching`).
+- [x] **MP-45. The grades are on the pages.** Main screen: "Works well
+  here." under "You're connected."; Connections: r1 "Connected · chosen
+  by Daal · Works well here", the others "Not tried here yet", the
+  family chips "1 of 1 worked here".
+- [x] **MP-46. A stray "not measured yet" under the mode chip.** It was
+  the speed line of a build without byte counts
+  (`network.unmeasured` in `ConnectionPage.tsx`), and read as a verdict
+  on the route. The line is no longer drawn when there are no counts.
+- [ ] **MP-47. Not seen on the phone:** a race of two (needs a network
+  where the remembered route is blocked or a network never used), a
+  move for speed, a change Wi-Fi → mobile data (adb runs over the
+  Wi-Fi; the person has to switch it by hand while Daal is connected
+  and the log is read afterwards), `network_down`, a metered network.

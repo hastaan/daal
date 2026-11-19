@@ -32,6 +32,49 @@ export type FamilyMaturity =
  * The reference render is components/connection/RouteHealthBars.tsx.
  * ─────────────────────────────────────────────────────────────────── */
 
+/** What the engine has measured for ONE route on the network this
+ *  device is on now (`measured` in the route listing). Engine memory
+ *  plus its per-network record; the grade is the engine's own
+ *  conclusion and is never recomputed here.
+ *
+ *    'unknown'  never tried on this network
+ *    'good' / 'ok' / 'slow'   carried here, by how long it took
+ *    'failing'  did not carry here the last times it was tried
+ *
+ *  The numbers are for the Details fold only. */
+export type MeasuredGrade = 'unknown' | 'good' | 'ok' | 'slow' | 'failing';
+
+export interface Measured {
+  grade: MeasuredGrade;
+  /** Smoothed time from start to the first proof, in ms. `undefined` =
+   *  it never carried here, so there is no time. */
+  setupMs?: number;
+  samples: number;
+  carried: number;
+  failed: number;
+  /** When it was last tried: the engine's coarse (one-hour) bucket,
+   *  already made readable by lib/measured.ts — the engine sends Unix
+   *  seconds, which become "2026-11-19 10h UTC". Details only. */
+  last?: string;
+}
+
+/** What the HOST last told the engine about the network the device is
+ *  on (`network` in the diagnostics blob; on Android the VPN service's
+ *  network callback, while it runs). Read by lib/networkFacts.ts.
+ *
+ *  `fromHost` false = nobody has told the engine which network this is:
+ *  what it remembers "here" is then filed under no network in
+ *  particular, and the pages make no claim about "here". */
+export interface HostNetwork {
+  fromHost: boolean;
+  /** 'wifi' | 'cellular' | 'ethernet' | 'vpn' | 'other' | 'none'; ''
+   *  when the host said nothing. */
+  kind: string;
+  /** 1 yes, 0 no, -1 not known. */
+  validated: -1 | 0 | 1;
+  metered: -1 | 0 | 1;
+}
+
 export interface RouteDisplayRow {
   /** Engine route_id (opaque). */
   routeId: string;
@@ -56,6 +99,10 @@ export interface RouteDisplayRow {
    *  for this route, so there is no score to show. Render "not measured
    *  yet"; do NOT substitute 0, which reads as a measured failure. */
   healthPct?: number;
+  /** MEASURED on the current network. `undefined` = the engine sent no
+   *  such block (an engine that predates measurement, or a grade this
+   *  app does not know): the row then says nothing about it. */
+  measured?: Measured;
   /** True once the route has recorded at least one success. */
   proven?: boolean;
   /** Subscription display name that produced this route, when known.
@@ -120,6 +167,9 @@ export interface ConnectionSummary {
    *  no such block (an engine that predates automatic connect) — the
    *  page then claims nothing about it. */
   auto?: AutoStatus;
+  /** What the host told the engine about this network. `undefined` =
+   *  the engine sent no such block. */
+  network?: HostNetwork;
   /** Android only: the VPN service's note that an automatic connect
    *  found nothing — a verdict code ('' when it had none). `undefined`
    *  = no such note. Read through lib/autoConnect.ts autoFailure. */
@@ -154,6 +204,12 @@ export interface AutoTried {
    *  which is then 'moved_on' — is where "this network stops some ways"
    *  is said. */
   refined?: string;
+  /** How long THIS attempt took to prove it carries, in ms. Absent
+   *  when it did not, or the engine did not say. Details only. */
+  setupMs?: number;
+  /** The route this one was tried at the same time as ('' / absent =
+   *  it was tried alone). Details only. */
+  racedWith?: string;
 }
 
 /** The engine's own account of automatic connect, from memory.
@@ -171,8 +227,12 @@ export interface AutoTried {
 export interface AutoStatus {
   state: 'idle' | 'trying' | 'connected' | 'failed';
   mode: boolean;
-  /** Route being tried right now ('' when none). */
+  /** Route being tried right now ('' when none). While two are tried
+   *  at once this is the first of the pair. */
   trying: string;
+  /** The routes being tried at this moment when there are TWO (the
+   *  engine never tries more at once). Absent or empty = one or none. */
+  racing?: string[];
   index: number;
   total: number;
   tried: AutoTried[];
@@ -261,6 +321,8 @@ export interface RouteHealthDisplayRow {
   pct?: number;
   /** Present only when `pct` is. */
   severity?: Severity;
+  /** What the engine measured for this route on the current network. */
+  measured?: Measured;
   /** True once the route has recorded a success. */
   proven?: boolean;
 }
@@ -338,6 +400,11 @@ export interface FamilyChip {
   /** MEASURED, averaged across the family's routes that have a score.
    *  `undefined` = no route in this family has ever been measured. */
   healthPct?: number;
+  /** Of this family's routes: how many the engine has tried on the
+   *  current network (`tried`) and how many of those carried
+   *  (`worked`). `undefined` = no route of the family carries a
+   *  `measured` block, so nothing is claimed. */
+  here?: { worked: number; tried: number };
   proven: boolean;           // at least one route in the family has succeeded
   cooledCount: number;       // how many of `count` are currently cooled
   /** Full taxonomy label mirrored from routestore.FamilyMaturity. The

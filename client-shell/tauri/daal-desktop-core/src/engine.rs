@@ -200,6 +200,15 @@ pub struct Engine {
     /// it existed must still load (the host then reports that automatic
     /// connecting is not available and the person picks a route).
     connect_auto: Option<extern "C" fn(*mut c_void, c_int) -> c_int>,
+
+    /// `engine_network_facts` — what the host knows about the network:
+    /// (kind, id, validated, metered, out, out_len). Optional like the
+    /// two above: with a library that predates it the host falls back
+    /// to `engine_network_changed` and the kind alone
+    /// (`report_network`).
+    network_facts: Option<
+        extern "C" fn(*const c_char, *const c_char, c_int, c_int, *mut c_void, c_int) -> c_int,
+    >,
 }
 
 impl Engine {
@@ -484,6 +493,18 @@ impl Engine {
                 lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(&lib, b"engine_connect_auto")
                     .ok()
                     .map(|sym| *sym);
+            let network_facts = lookup::<
+                unsafe extern "C" fn(
+                    *const c_char,
+                    *const c_char,
+                    c_int,
+                    c_int,
+                    *mut c_void,
+                    c_int,
+                ) -> c_int,
+            >(&lib, NETWORK_FACTS_SYMBOL)
+            .ok()
+            .map(|sym| *sym);
 
             // Reinterpret each unsafe-extern as the safe-extern variant
             // we store in the struct. The wrapper methods enforce all
@@ -554,6 +575,7 @@ impl Engine {
                 register_protect_callback: std::mem::transmute(register_protect_callback),
                 route_precheck: route_precheck.map(|f| std::mem::transmute(f)),
                 connect_auto: connect_auto.map(|f| std::mem::transmute(f)),
+                network_facts: network_facts.map(|f| std::mem::transmute(f)),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -1343,9 +1365,128 @@ impl Engine {
         self.connect_auto.is_some()
     }
 
+    /// `engine_network_facts`: what the HOST knows about the network
+    /// the device is on, which the engine cannot see for itself.
+    ///
+    /// * `kind` — one of [`NETWORK_KINDS`]: wifi, cellular, ethernet,
+    ///   vpn, other, none.
+    /// * `id` — an opaque per-network string from the host ("" = none).
+    ///   The engine hashes it with its network hash before anything is
+    ///   stored or logged; it is never logged on this side either.
+    /// * `validated` — 1 the system has seen this network reach the
+    ///   internet, 0 it has not, -1 unknown.
+    /// * `metered` — 1 / 0 / -1.
+    ///
+    /// Returns the engine's JSON status, or `Ok(None)` when this
+    /// library predates the call (see [`report_network`] for the
+    /// fallback). A kind outside the closed list is refused here and
+    /// never crosses; the two flags are clamped to -1 / 0 / 1.
+    pub fn network_facts(
+        &self,
+        kind: &str,
+        id: &str,
+        validated: i32,
+        metered: i32,
+    ) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        if !NETWORK_KINDS.contains(&kind) {
+            return Err(DesktopError::EngineSymbol("network kind is not one of the closed list".into()));
+        }
+        let Some(facts) = self.network_facts else {
+            return Ok(None);
+        };
+        let k = CString::new(kind).map_err(|_| DesktopError::EngineSymbol("kind NUL".into()))?;
+        let i = CString::new(id).map_err(|_| DesktopError::EngineSymbol("id NUL".into()))?;
+        let (v, m) = (tri_state(validated), tri_state(metered));
+        self.call_buf("engine_network_facts", |buf, len| (facts)(k.as_ptr(), i.as_ptr(), v, m, buf, len))
+            .map(Some)
+    }
+
+    /// Whether the loaded library has `engine_network_facts` at all.
+    /// Makes no engine call.
+    pub fn has_network_facts(&self) -> bool {
+        self.network_facts.is_some()
+    }
+
     pub fn register_protect_callback(&self, fn_ptr: usize) -> Result<String> {
         self.ensure_ready()?;
         self.call_buf("engine_register_protect_callback", |buf, len| (self.register_protect_callback)(fn_ptr, buf, len))
+    }
+}
+
+/// The engine export `Engine::network_facts` binds, as dlsym wants it.
+const NETWORK_FACTS_SYMBOL: &[u8] = b"engine_network_facts";
+
+/// The closed list of network kinds a host may report.
+pub const NETWORK_KINDS: &[&str] = &["wifi", "cellular", "ethernet", "vpn", "other", "none"];
+
+/// -1 (unknown), 0 or 1; anything else a host sends is "unknown".
+fn tri_state(v: i32) -> c_int {
+    match v {
+        0 => 0,
+        1 => 1,
+        _ => -1,
+    }
+}
+
+/// How a host's network report reached the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkReport {
+    /// `engine_network_facts` took all four facts; its JSON status.
+    Facts(String),
+    /// This library has no `engine_network_facts`: it was told the kind
+    /// alone through `engine_network_changed`, and keeps what it
+    /// remembers per KIND of network, as it did before. Its JSON status.
+    KindOnly(String),
+    /// This library has no `engine_network_facts` and no word for what
+    /// was reported (no network at all): it was told nothing.
+    NotSaid,
+}
+
+impl NetworkReport {
+    /// The code the Android bridge hands to Kotlin (never negative).
+    pub fn code(&self) -> i32 {
+        match self {
+            NetworkReport::Facts(_) => 0,
+            NetworkReport::KindOnly(_) => 1,
+            NetworkReport::NotSaid => 2,
+        }
+    }
+}
+
+/// What `engine_network_changed` calls a kind from [`NETWORK_KINDS`];
+/// `None` when it has no word for it. "none" is deliberately not
+/// "unknown": to that call "unknown" is a NETWORK, and reporting one
+/// would move the engine's per-network memory to a bucket for it every
+/// time the phone lost its signal.
+pub fn legacy_network_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "wifi" => Some("wifi"),
+        "cellular" => Some("cell"),
+        "ethernet" => Some("eth"),
+        "vpn" | "other" => Some("unknown"),
+        _ => None,
+    }
+}
+
+/// Tell the engine what the host knows about the network, by the best
+/// call this library has: `engine_network_facts`, else
+/// `engine_network_changed` with the kind alone (no carrier, no ssid —
+/// the host has neither without the location permission), else nothing.
+/// The id never appears in an error or a log line.
+pub fn report_network(
+    engine: &Engine,
+    kind: &str,
+    id: &str,
+    validated: i32,
+    metered: i32,
+) -> Result<NetworkReport> {
+    if let Some(body) = engine.network_facts(kind, id, validated, metered)? {
+        return Ok(NetworkReport::Facts(body));
+    }
+    match legacy_network_kind(kind) {
+        Some(old) => engine.network_changed(old, "", "").map(NetworkReport::KindOnly),
+        None => Ok(NetworkReport::NotSaid),
     }
 }
 
@@ -1742,6 +1883,90 @@ mod connection_state_tests {
         // Nothing to report: failed_route is "".
         let v = parse(r#"{"switch_back":{"failed_route":"","category":"","restored":false}}"#);
         assert!(v["switch_back_restored"].is_null());
+    }
+
+    /// The second selection wave: the engine may move for speed, race
+    /// two routes, and say the phone has no network. None of that may
+    /// be lost or mangled on the way to the Android service — and the
+    /// new lists in `auto` (which name routes in flight) stay in the
+    /// engine's diagnostics, where the page reads them.
+    #[test]
+    fn a_move_for_speed_and_a_race_reach_the_service_as_codes() {
+        let v = parse(
+            r#"{"active_route":"r4","route_running":true,
+                "auto":{"state":"connected","mode":true,"route_id":"r4","verdict":"moved_faster",
+                        "racing":[],
+                        "tried":[{"route_id":"r4","family":"hysteria2","result":"carried",
+                                  "raced_with":"","setup_ms":210}]}}"#,
+        );
+        assert_eq!(v["auto_state"], "connected");
+        assert_eq!(v["auto_verdict"], "moved_faster");
+        assert_eq!(v["active_route"], "r4");
+        // Two in flight: still "trying", and the service waits.
+        let v = parse(
+            r#"{"active_route":"","route_running":false,
+                "auto":{"state":"trying","mode":true,"trying":"r2","racing":["r2","r4"],"verdict":""}}"#,
+        );
+        assert_eq!(v["auto_state"], "trying");
+        assert_eq!(v["auto_verdict"], "");
+        assert_eq!(v.as_object().unwrap().len(), 12, "nothing new crosses to the JVM: {v}");
+        assert!(!v.to_string().contains("r4"), "routes in flight stay in the diagnostics: {v}");
+        // The host said there is no network and nothing answered.
+        let v = parse(r#"{"active_route":"","route_running":false,"auto":{"state":"failed","mode":true,"verdict":"network_down"}}"#);
+        assert_eq!(v["auto_verdict"], "network_down");
+    }
+
+    #[test]
+    fn a_raced_answer_is_summarised_like_any_other() {
+        use super::connect_auto_summary_json;
+        let s = connect_auto_summary_json(
+            r#"{"connected":true,"route_id":"r4","family":"hysteria2","verdict":"moved_on","candidates":4,
+                "tried":[{"route_id":"r1","family":"vless-reality","result":"not_carrying","category":"timeout",
+                          "raced_with":"r2","setup_ms":0},
+                         {"route_id":"r2","family":"hysteria2","result":"not_carrying","category":"udp_no_reply",
+                          "raced_with":"r1","setup_ms":0},
+                         {"route_id":"r4","family":"websocket-tls","result":"carried","category":"",
+                          "raced_with":"r3","setup_ms":412}]}"#,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["connected"], true);
+        assert_eq!(v["route_id"], "r4");
+        assert_eq!(v["tried"], 3);
+        assert_eq!(v.as_object().unwrap().len(), 5);
+        assert!(!s.contains("setup_ms") && !s.contains("raced_with"), "{s}");
+    }
+
+    #[test]
+    fn a_hosts_network_kind_in_the_older_calls_words() {
+        use super::{legacy_network_kind, tri_state, NetworkReport, NETWORK_KINDS};
+        assert_eq!(legacy_network_kind("wifi"), Some("wifi"));
+        assert_eq!(legacy_network_kind("cellular"), Some("cell"));
+        assert_eq!(legacy_network_kind("ethernet"), Some("eth"));
+        assert_eq!(legacy_network_kind("other"), Some("unknown"));
+        assert_eq!(legacy_network_kind("vpn"), Some("unknown"));
+        // No network is not a network of unknown kind: the older call
+        // is not made at all.
+        assert_eq!(legacy_network_kind("none"), None);
+        assert_eq!(legacy_network_kind(""), None);
+        assert_eq!(legacy_network_kind("WiFi"), None);
+        // Every kind a host may send is either translated or "none".
+        for k in NETWORK_KINDS {
+            assert!(legacy_network_kind(k).is_some() || *k == "none", "{k}");
+        }
+        // What the older call accepts (core/netmem): nothing else may
+        // come out of the translation.
+        for k in NETWORK_KINDS {
+            if let Some(old) = legacy_network_kind(k) {
+                assert!(["wifi", "cell", "eth", "unknown"].contains(&old), "{old}");
+            }
+        }
+        assert_eq!((tri_state(1), tri_state(0), tri_state(-1)), (1, 0, -1));
+        assert_eq!((tri_state(7), tri_state(-9)), (-1, -1));
+        // Kotlin reads >= 0 as "the engine has been told what it can be".
+        assert_eq!(NetworkReport::Facts("{}".into()).code(), 0);
+        assert_eq!(NetworkReport::KindOnly("{}".into()).code(), 1);
+        assert_eq!(NetworkReport::NotSaid.code(), 2);
     }
 
     #[test]

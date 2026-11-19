@@ -55,7 +55,7 @@ cd "$REPO_ROOT"
 
 # --- Engine line constants. These MUST match the source of truth.
 EXPECTED_ENGINE_VERSION="daal-core 0.9.0+v3-share"
-EXPECTED_ABI=61
+EXPECTED_ABI=62
 EXPECTED_SPEC_VERSION=4
 
 # --- Tools. Override with env vars if your install paths differ.
@@ -297,7 +297,9 @@ cmd_test() {
   fi
 
   # The Android VPN service's decisions at a connect, a route switch and
-  # a cancel (vpn/SwitchPolicy.kt, vpn/StartSequence.kt), on a plain JVM.
+  # a cancel, and what it tells the engine about the network
+  # (vpn/SwitchPolicy.kt, vpn/StartSequence.kt, vpn/NetworkWatch.kt), on a
+  # plain JVM.
   # Exit 77 = a tool is missing (Kotlin compiler, junit, a Java it runs
   # on): never counted as a pass — a failure in CI, a loud warning on a
   # developer machine.

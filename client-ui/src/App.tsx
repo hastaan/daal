@@ -139,8 +139,10 @@ export default function App() {
     }, [engineLive]);
 
     // Network change emitter — basic browser online/offline as a
-    // best-effort signal. Real Wi-Fi/cell discrimination requires a
-    // platform-side observer (Tauri OS info plugin); deferred.
+    // best-effort signal, with no kind and no identity. On Android the
+    // VPN service reports the real fact while it runs, and the backend
+    // then keeps this poor one to itself (lib/networkFacts.ts); it
+    // still serves desktop, and Android while the service is down.
     useEffect(() => {
         if (!engineLive) return;
         const fire = (kind: string) => () =>

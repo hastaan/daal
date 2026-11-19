@@ -44,6 +44,22 @@ interface Props {
     onDisconnect?: () => void;
 }
 
+/** One tried route as the engine names it: id, kind, result, category,
+ *  then — when the engine said — how long this attempt took and which
+ *  route it was tried at the same time as. Details only. */
+export function triedCode(x: AutoTried): string {
+    return [
+        x.routeId,
+        x.family,
+        x.result,
+        x.category,
+        x.setupMs !== undefined ? `${x.setupMs} ms` : '',
+        x.racedWith ? `with ${x.racedWith}` : '',
+    ]
+        .filter(Boolean)
+        .join(' · ');
+}
+
 export default function AutoFailure({
     t,
     actionText,
@@ -115,7 +131,7 @@ export default function AutoFailure({
                                         unicodeBidi: 'isolate',
                                     }}
                                 >
-                                    {[x.routeId, x.family, x.result, x.category].filter(Boolean).join(' · ')}
+                                    {triedCode(x)}
                                 </code>
                             </li>
                         ))}

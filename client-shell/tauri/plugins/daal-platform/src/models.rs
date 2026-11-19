@@ -77,6 +77,15 @@ pub struct VpnStatusResponse {
     /// a way to let go. False on desktop and from an older service.
     #[serde(default)]
     pub holding: bool,
+    /// Android only. True while the VPN service is up and is itself
+    /// telling the engine about the phone's network (from a start until
+    /// the stop, whether or not a route is connected). The page must
+    /// then keep its own `network_changed` call to itself: it knows
+    /// neither the kind of network nor its identity, and its poorer
+    /// fact would replace the service's. False on desktop and from an
+    /// older service.
+    #[serde(default)]
+    pub running: bool,
 }
 
 /// See `VpnStatusResponse::last_switch`. Ids and closed codes only.
@@ -154,5 +163,19 @@ mod tests {
         let s: VpnStatusResponse =
             serde_json::from_str(r#"{"connected":false,"route_id":null,"platform":"android","auto":true}"#).unwrap();
         assert!(!s.holding);
+    }
+
+    #[test]
+    fn status_says_when_the_service_reports_the_network_itself() {
+        let s: VpnStatusResponse = serde_json::from_str(
+            r#"{"connected":true,"route_id":"r1","platform":"android","auto":true,"running":true}"#,
+        )
+        .unwrap();
+        assert!(s.running);
+        assert!(serde_json::to_string(&s).unwrap().contains(r#""running":true"#));
+        // A service that predates the field does not report the network.
+        let s: VpnStatusResponse =
+            serde_json::from_str(r#"{"connected":true,"route_id":"r1","platform":"android"}"#).unwrap();
+        assert!(!s.running);
     }
 }

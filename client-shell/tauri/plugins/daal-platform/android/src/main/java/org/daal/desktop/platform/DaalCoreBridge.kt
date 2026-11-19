@@ -24,6 +24,10 @@ package org.daal.desktop.platform
  *   engine_route_precheck(routeId)     ← DaalCoreBridge.routePrecheck
  *   engine_connect_auto()              ← DaalCoreBridge.connectAuto
  *                                         (five fields of its answer)
+ *   engine_network_facts(...)          ← DaalCoreBridge.networkFacts
+ *                                         (engine_network_changed with
+ *                                         the kind alone on an engine
+ *                                         library without it)
  *   engine_export_diagnostics()        ← DaalCoreBridge.engineState
  *                                         (six fields of it)
  *
@@ -140,6 +144,37 @@ object DaalCoreBridge {
    * names that route.
    */
   external fun connectAuto(): String?
+
+  /**
+   * What the phone knows about the network UNDER the tunnel, for the
+   * engine: `engine_network_facts`. DaalVpnService calls it from its
+   * ConnectivityManager callback (vpn/NetworkWatch.kt decides when), so
+   * the engine learns of a change with the app in the background, has a
+   * real per-network key for what it remembers, and can tell "this
+   * phone has no internet" from "the server did not answer" without
+   * sending anything.
+   *
+   * @param kind      "wifi" | "cellular" | "ethernet" | "other" | "none"
+   * @param id        opaque per-network string ([org.daal.desktop.vpn.NetworkWatch.networkId]:
+   *                  already a digest, no address in it); "" = none. The
+   *                  engine hashes it again before it stores or logs
+   *                  anything. Never log it on this side.
+   * @param validated 1 the system reached the internet through this
+   *                  network, 0 it did not, -1 not known
+   * @param metered   1 / 0 / -1
+   *
+   * Returns 0 = the engine has the facts; 1 = this engine library has
+   * no such call and was told the kind alone through
+   * `engine_network_changed` (it then keeps its memory per KIND of
+   * network, as before); 2 = that older engine has no word for these
+   * facts ("none") and was told nothing; -1 = the engine is not loaded
+   * or the call failed. Does not block on a connection check; must
+   * still not be called from the main thread (it writes the engine's
+   * store). Safe while [setRoute] / [connectAuto] is blocked on another
+   * thread — the page has always called `engine_network_changed` that
+   * way.
+   */
+  external fun networkFacts(kind: String, id: String, validated: Int, metered: Int): Int
 
   /**
    * The engine's own account of the connection, from its memory (not

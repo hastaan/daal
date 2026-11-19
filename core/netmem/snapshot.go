@@ -144,6 +144,19 @@ type RouteMemory struct {
 	FailedHour     int64  `json:"failed_hour,omitempty"`
 	FailedSeq      uint64 `json:"failed_seq,omitempty"`
 	FailedCategory string `json:"failed_category,omitempty"`
+
+	// Measurement (measure.go): the smoothed setup time and how many
+	// samples went into it, how many recorded checks carried and failed,
+	// the two streaks the grade reads, and the committed speed word with
+	// the candidate one sample has proposed.
+	SetupMs    int    `json:"setup_ms,omitempty"`
+	Samples    int    `json:"samples,omitempty"`
+	Carried    int    `json:"carried,omitempty"`
+	Failed     int    `json:"failed,omitempty"`
+	FailStreak int    `json:"fail_streak,omitempty"`
+	SlowStreak int    `json:"slow_streak,omitempty"`
+	Speed      string `json:"speed,omitempty"`
+	SpeedNext  string `json:"speed_next,omitempty"`
 }
 
 // CarriedLast reports whether the route's most recent recorded outcome

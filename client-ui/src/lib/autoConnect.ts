@@ -23,6 +23,7 @@ import type {
     RouteDisplayRow,
 } from '../contract/D2Contract';
 import type { TapAction } from './routeCheck';
+import { localDigits } from './measured';
 
 // ---- reading the engine ------------------------------------------------
 
@@ -43,15 +44,38 @@ function parseTried(v: unknown): AutoTried[] {
         const routeId = str(r.route_id);
         if (!routeId) continue;
         const refined = str(r.refined);
+        const setupMs = count(r.setup_ms);
+        const racedWith = str(r.raced_with);
         out.push({
             routeId,
             family: str(r.family),
             result: str(r.result),
             category: str(r.category),
             ...(refined ? { refined } : {}),
+            ...(setupMs > 0 ? { setupMs } : {}),
+            ...(racedWith ? { racedWith } : {}),
         });
     }
     return out;
+}
+
+/** `auto.racing`: the two routes being tried at this moment. Anything
+ *  that is not a list of at least two different ids is "not racing" —
+ *  one id alone is simply `trying`. Never more than two are kept: the
+ *  engine never tries more at once, and a block that says otherwise is
+ *  not something to repeat. */
+function parseRacing(v: unknown): string[] {
+    if (!Array.isArray(v)) return [];
+    const ids: string[] = [];
+    for (const x of v) {
+        if (typeof x === 'string' && x !== '' && !ids.includes(x)) ids.push(x);
+    }
+    return ids.length >= 2 ? ids.slice(0, 2) : [];
+}
+
+/** Two routes are being tried at the same moment. */
+export function autoRacing(auto: AutoStatus | undefined): boolean {
+    return auto?.state === 'trying' && (auto.racing?.length ?? 0) >= 2;
 }
 
 /** The `auto` block of export_diagnostics. `undefined` when there is no
@@ -68,6 +92,7 @@ export function parseAuto(v: unknown): AutoStatus | undefined {
         state,
         mode: a.mode === true,
         trying: str(a.trying),
+        racing: parseRacing(a.racing),
         index: count(a.index),
         total: count(a.total),
         tried: parseTried(a.tried),
@@ -198,11 +223,7 @@ export function autoIsUsing(auto: AutoStatus | undefined, routeId: string | null
 
 // ---- progress ----------------------------------------------------------
 
-const FA_DIGITS = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
-function digits(n: number, locale: string): string {
-    const s = String(n);
-    return locale === 'fa' ? s.replace(/[0-9]/g, (d) => FA_DIGITS[Number(d)]) : s;
-}
+const digits = localDigits;
 
 /** "Trying way 2 of 4…". No route id, no family: the sentence is for
  *  the person holding the phone. When the engine has not said how many
@@ -213,6 +234,9 @@ export function autoProgressText(
     locale: string,
     auto: AutoStatus | undefined,
 ): string {
+    // Two at once: still ONE sentence, and no "way 2 of 4" — which of
+    // the two would that be? No route id, no kind of connection.
+    if (autoRacing(auto)) return t('auto.trying_two');
     const total = auto?.total ?? 0;
     const index = auto?.index ?? 0;
     if (total < 1 || index < 1 || index > total) return t('auto.trying_plain');
@@ -407,12 +431,15 @@ export function staleFailureAfterStart(
 }
 
 /** i18n key of the short note under "You're connected.", or
- *  `undefined` for nothing. Only two things are worth a sentence once
- *  it works: Daal had to move past a way that failed, and this network
- *  blocks some kinds of connection (no action needed — it is working).
- *  An unknown code says nothing: connected is connected. */
+ *  `undefined` for nothing. Three things are worth a sentence once it
+ *  works: Daal had to move past a way that failed, this network blocks
+ *  some kinds of connection (no action needed — it is working), and
+ *  Daal left a way that still worked for a faster one ('moved_faster':
+ *  the person may have noticed a blink and should know it was on
+ *  purpose). An unknown code says nothing: connected is connected. */
 export function autoConnectedNoteKey(auto: AutoStatus | undefined): string | undefined {
     if (!auto || !auto.mode || auto.state !== 'connected') return undefined;
+    if (auto.verdict === 'moved_faster') return 'auto.note.moved_faster';
     // The engine's verdict for a pass that CONNECTED after a failure is
     // 'moved_on'; that the way it moved past was stopped by this network
     // (and not by a dead server) is on that route's entry, `refined`.
@@ -426,7 +453,7 @@ export function autoConnectedNoteKey(auto: AutoStatus | undefined): string | und
     return undefined;
 }
 
-const KNOWN_RESULT = new Set(['carried', 'not_carrying', 'start_failed', 'refused', 'cancelled']);
+const KNOWN_RESULT = new Set(['carried', 'not_carrying', 'start_failed', 'refused', 'cancelled', 'stopped']);
 
 /** i18n key of our words for one tried route's result (Details). */
 export function autoResultKey(result: string): string {

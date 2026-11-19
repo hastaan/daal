@@ -134,6 +134,10 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       // out of routes; the service is retrying): the page says so and
       // offers Disconnect.
       put("holding", DaalVpnService.isHolding())
+      // The service is up and tells the engine about the phone's
+      // network itself (from a start until the stop, connected or
+      // not): the page keeps its own network_changed call to itself.
+      put("running", DaalVpnService.isReportingNetwork())
       // The last switch that did not take (see SwitchPolicy.SwitchNote):
       // which route was asked for, which one the service stayed on, and
       // a closed code for why. Absent when there is nothing to say.

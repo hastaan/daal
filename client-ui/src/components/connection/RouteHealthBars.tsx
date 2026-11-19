@@ -2,6 +2,7 @@
 import type { Locale } from '../../lib/i18n';
 import type { RouteHealthDisplayRow } from '../../contract/D2Contract';
 import { HealthBar, NumeralSpan } from '../atoms';
+import { gradeText } from '../../lib/measured';
 
 interface Props {
     rows: RouteHealthDisplayRow[];
@@ -33,7 +34,11 @@ export default function RouteHealthBars({ rows, locale, t }: Props) {
                             className="pct"
                             style={{ color: 'var(--ink-soft)', fontSize: 12 }}
                         >
-                            {t('network.untested')}
+                            {/* What the engine measured on this
+                                network, in plain words, when it said;
+                                "not tested yet" only when it said
+                                nothing at all. */}
+                            {gradeText(t, r.measured) ?? t('network.untested')}
                         </span>
                     </div>
                 ) : (

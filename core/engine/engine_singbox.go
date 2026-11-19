@@ -74,6 +74,16 @@ type singBox struct {
 	cancel context.CancelFunc
 }
 
+// boxBuildMu serialises the BUILDING of sing-box instances in this
+// process: include.Context, the option parse and box.New. sing-box's
+// registries are assembled by functions that write package-level state
+// (include.Context → registerQUICInbounds is one the race detector
+// names), which was harmless while the engine built one instance at a
+// time and is not now that a side instance (side_singbox.go) can be
+// built while the tunnel's instance, or another side instance, is.
+// Held for the build only — never across Start or a proof.
+var boxBuildMu sync.Mutex
+
 func newSingBox() *singBox {
 	return &singBox{Stub: NewStub()}
 }
@@ -232,6 +242,15 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 			cancel()
 		}
 	}()
+	// Building an instance is serialised across the process: see
+	// boxBuildMu. Released before the instance is started.
+	boxBuildMu.Lock()
+	built := false
+	defer func() {
+		if !built {
+			boxBuildMu.Unlock()
+		}
+	}()
 	bctx := include.Context(ictx)
 	bctx = service.ContextWith[adapter.PlatformInterface](bctx, s.platform)
 
@@ -256,6 +275,8 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 		LogError(fmt.Sprintf("start: box.New failed class=%s category=%s outbound=%s", errorClass(err), diagnostics.Classify(err.Error()), activeOutboundType(raw)))
 		return fmt.Errorf("engine: box.New: %w", err)
 	}
+	built = true
+	boxBuildMu.Unlock()
 	if err := inst.Start(); err != nil {
 		LogError(fmt.Sprintf("start: instance.Start failed class=%s category=%s outbound=%s", errorClass(err), diagnostics.Classify(err.Error()), activeOutboundType(raw)))
 		_ = inst.Close()
