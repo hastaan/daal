@@ -638,3 +638,18 @@ describe('reusing a saved hosting key for a new relay', () => {
         );
     });
 });
+
+import { localCancelKey } from './PublisherWizard';
+
+describe('forgetting an unfinished relay', () => {
+    it('says nothing was rented only when the setup made nothing and Daal could look', () => {
+        expect(localCancelKey(recoveryFixture('none'))).toBe('wiz.cancel.confirm.nothing');
+        expect(localCancelKey(null)).toBe('wiz.cancel.confirm');
+        expect(localCancelKey(recoveryFixture('none', { check_error: 'no_token' }))).toBe('wiz.cancel.confirm');
+        for (const cat of [enMain, faMain] as Record<string, string>[]) {
+            expect(cat['wiz.cancel.confirm.nothing']).toBeTruthy();
+            expect(cat['wiz.cancel.confirm.nothing']).not.toMatch(/dashboard|داشبورد/);
+        }
+    });
+});
+

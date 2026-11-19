@@ -784,7 +784,7 @@ export default function PublisherWizard({
             setCancelRec(rec);
             return;
         }
-        if (!window.confirm(t('wiz.cancel.confirm'))) return;
+        if (!window.confirm(t(localCancelKey(rec)))) return;
         if (live) {
             // The command returns nothing, which arrives as null: say
             // `true` ourselves, or success looks like run()'s failure and
@@ -2567,3 +2567,15 @@ export function savedKeyLine(t: (k: string) => string, nickname: string): string
         ? fmt(t('wiz.provider.token.saved_other.named'), { relay: nickname.trim() })
         : t('wiz.provider.token.saved_other');
 }
+
+/**
+ * The question asked before an unfinished relay is only forgotten.
+ * When the setup never made anything, say so; the warning about a
+ * server that may still be charged is for when Daal could not look.
+ */
+export function localCancelKey(rec: SetupRecovery | null): string {
+    return rec && rec.state === 'none' && !rec.check_error
+        ? 'wiz.cancel.confirm.nothing'
+        : 'wiz.cancel.confirm';
+}
+

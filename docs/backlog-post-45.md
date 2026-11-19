@@ -3116,13 +3116,16 @@ W3 items: none moves with this wave.
   A command that returns nothing arrives as null, which the wizard read
   as failure. Fixed there and in the manual "my address" repair, which
   had the same mistake. Not yet seen fixed on the phone.
-- [ ] **PB-30. The draft cancel still uses the old system dialog** and
+- [x] **PB-30. (Wording fixed: when the setup made nothing and Daal could look, the question now says nothing was rented; test "forgetting an unfinished relay". It is still the system dialog, not a sheet.) The draft cancel still uses the old system dialog** and
   tells the person to delete a server "from your cloud provider's
   dashboard". With nothing rented it should just say nothing was rented.
 - [ ] **PB-31. The dearer server size was preselected.** Step 2 showed
   CPX02 (best value, 7.49/mo) and CPX12 (14.36/mo) with CPX12 selected.
   The cheapest size that is enough should be the default. (An hour
   earlier the same account offered CX23 at 6.86: the list is live.)
+  Not changed blind: nobody has yet run a relay on the 1 GB size, so
+  try CPX02 on a real account first, then make the cheapest the default
+  (the seed `cpx12` wins whenever it is on the list).
 
 ### Seen on the phone, 2026-11-19 (this tree, device key, real Hetzner account)
 

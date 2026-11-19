@@ -237,6 +237,7 @@
     "wiz.helperip.retry": "Save and try again",
     "wiz.nav.cancel": "Cancel",
     "wiz.cancel.confirm": "Remove this relay from Daal?\n\nThis only removes it from the app. If a cloud server is already running it will keep running and you will still be charged — delete it from your cloud provider's dashboard to stop billing.",
+    "wiz.cancel.confirm.nothing": "Remove this unfinished relay from Daal?\n\nNothing has been rented for it, so nothing is costing money.",
     "onboarding.welcome.title": "Welcome to Daal",
     "onboarding.welcome.body": "Internet routes that re-find you when networks change.",
     "onboarding.welcome.continue": "Continue",
