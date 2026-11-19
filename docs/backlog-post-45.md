@@ -1761,3 +1761,38 @@ test; **none of this has been seen on a phone.**
   a connect that can only fail, and the Publisher tab no longer prints
   the framework's error as its sentence. The Daal mark is not drawn as
   disabled while the notice is up; it simply does nothing.
+
+### Second phone pass, fixed build (2026-11-19, Samsung S25, relay "Test")
+
+Seen on the phone, with logcat recording (tags `daalengine`,
+`DaalVpnService`, `daal_desktop_core`):
+
+- [x] The build started on a route store the old build had damaged:
+  `init: the route store was damaged; set aside 1 file(s) and started
+  empty`, the pages said "Your saved connections were reset", the
+  publisher's relay record was untouched. Importing the file again
+  cleared the notice. This confirms PH-11's cause (the double close hit
+  the store) and PH-12's recovery.
+- [x] Connect r1, then switch r1 → r2 → r3 → r4 while connected: each
+  switch reuses the held TUN, is up in about 0.2 s, and the page shows
+  the right route. Browser exit address on r4 (hysteria2) is the relay's.
+- [x] Disconnect: one teardown, every return code 0.
+- [x] The publisher relay page shows People / One file for everyone,
+  status "Set up" in gold.
+
+Opened by this pass:
+
+- [ ] **PH-25. "Press to connect" with no route chosen does not
+  connect; it opens the Connections list.** A person with a valid file
+  and no knowledge of routes is left looking at `vless-reality`,
+  `websocket-tls`, `naive`, `hysteria2`. The main control must pick and
+  try routes itself. This is the first item of the selection stage.
+- [ ] **PH-26. A stale route id is asked for every two seconds.** After
+  the store reset the shell kept calling `route_summary` for a route
+  that no longer exists (`sql: no rows in result set`, logged each
+  time). Harmless, noisy; stop asking once the route is gone.
+- [ ] **PH-27. The add sheet speaks in protocol names and contradicts
+  itself.** "Paste a .sbp/.sbpx blob, a subscription URL, or a vless://
+  / vmess:// / trojan:// / wg:// link", and for a sealed file both
+  "enter the PIN" and "It will open automatically" (no PIN was asked).
+  The imported row is labelled "pasted" although it came from a file.
