@@ -76,6 +76,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Wizard } from './wizardCommands';
+import { failureBlock } from './failureText';
 import type { RotationRecommendation } from './wizardCommands';
 import { diagnosticsExplain } from '../lib/bridge';
 import { ListRow, Button, Card } from '../design/primitives';
@@ -137,7 +138,7 @@ export function RotationAdvice({ t, operatorId, reloadToken }: Props) {
             setRec(out);
             setShown(true);
         } catch (e) {
-            setErr(String(e));
+            setErr(failureBlock(t, e));
         } finally {
             setBusy(false);
         }
@@ -175,7 +176,15 @@ export function RotationAdvice({ t, operatorId, reloadToken }: Props) {
             />
 
             {err && (
-                <div style={{ padding: '0 14px 12px', color: 'var(--red)', fontSize: 12 }}>
+                <div
+                    style={{
+                        padding: '0 14px 12px',
+                        color: 'var(--red)',
+                        fontSize: 12,
+                        whiteSpace: 'pre-line',
+                        lineHeight: 1.5,
+                    }}
+                >
                     {err}
                 </div>
             )}

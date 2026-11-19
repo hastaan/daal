@@ -123,6 +123,10 @@ cmd/daal-soak-engine/daal-soak-engine
 cmd/daal-soak-engine-android/daal-soak-engine-android
 cmd/daal-soak-engine-ios/daal-soak-engine-ios
 test-rigs/distribution-failure/soak-driver/soak-driver
+# `go build` run by hand in the rig's client (the rig itself builds
+# into test-rigs/worldbox/out/).
+test-rigs/worldbox/labclient/labclient
+test-rigs/worldbox/driver/driver
 
 # AppVeyor after_build stages the renamed installers here
 # (appveyor.yml:282-296, :354).

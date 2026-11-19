@@ -140,7 +140,7 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	// PlatformInterface is present in the box context. We only refuse
 	// early here so the error names the actual contract violation.
 	if CurrentTunFD() < 0 {
-		androidLog("TUN fd not set before set_route")
+		LogError("start: TUN fd not set before set_route")
 		return errors.New("engine: TUN fd not set; VpnService must call engine_set_tun_fd before engine_set_route")
 	}
 
@@ -242,17 +242,22 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 
 	options, err := singjson.UnmarshalExtendedContext[boxoption.Options](bctx, merged)
 	if err != nil {
-		androidLog("option parse: " + err.Error() + " | config=" + string(merged))
+		// The class of the error and which kind of outbound it was
+		// about — never the error text (sing-box quotes the offending
+		// VALUE, which can be a credential) and never the config: this
+		// line used to append the whole merged config, passwords and
+		// server addresses included, to logcat.
+		LogError(fmt.Sprintf("start: option parse failed class=%s outbound=%s", errorClass(err), activeOutboundType(raw)))
 		return fmt.Errorf("engine: option parse: %w", err)
 	}
 
 	inst, err := box.New(box.Options{Context: bctx, Options: options})
 	if err != nil {
-		androidLog("box.New: " + err.Error())
+		LogError(fmt.Sprintf("start: box.New failed class=%s category=%s outbound=%s", errorClass(err), diagnostics.Classify(err.Error()), activeOutboundType(raw)))
 		return fmt.Errorf("engine: box.New: %w", err)
 	}
 	if err := inst.Start(); err != nil {
-		androidLog("instance.Start: " + err.Error())
+		LogError(fmt.Sprintf("start: instance.Start failed class=%s category=%s outbound=%s", errorClass(err), diagnostics.Classify(err.Error()), activeOutboundType(raw)))
 		_ = inst.Close()
 		s.Stub.mu.Lock()
 		s.Stub.publishLocked(Event{
@@ -284,6 +289,42 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 	s.Stub.publishLocked(Event{Type: "state", State: StateVerifying, Bucket: hourBucket(time.Now())})
 	s.Stub.mu.Unlock()
 	return nil
+}
+
+// errorClass is the Go type of the innermost error in err's chain: a
+// name from a closed set of types, never a value.
+func errorClass(err error) string {
+	for {
+		inner := errors.Unwrap(err)
+		if inner == nil {
+			break
+		}
+		err = inner
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+// activeOutboundType is the `type` of the outbound tagged "active" in a
+// merged config ("vless", "naive", …) — a protocol family name, the
+// only thing about the config a log line may say.
+func activeOutboundType(raw map[string]any) string {
+	outs, _ := raw["outbounds"].([]any)
+	for _, o := range outs {
+		m, _ := o.(map[string]any)
+		if tag, _ := m["tag"].(string); tag == "active" {
+			if t, _ := m["type"].(string); t != "" {
+				return LogID(t)
+			}
+		}
+	}
+	eps, _ := raw["endpoints"].([]any)
+	for _, o := range eps {
+		m, _ := o.(map[string]any)
+		if t, _ := m["type"].(string); t != "" {
+			return LogID(t)
+		}
+	}
+	return "-"
 }
 
 // closeInstance cancels the instance's context and then closes it. The

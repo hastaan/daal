@@ -8,11 +8,12 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **58 release symbols** (verified 2026-08-17 —
-see the ABI ledger at the end of this document, which is the
-authoritative count). The source tree carries **61** `//export
-engine_*` declarations; the extra three are `//go:build cshared &&
-soak` and are never present in a release build.
+Current surface count: **60 release symbols** (verified 2026-11-19
+with `nm` against a library built from the tree — see the ABI ledger at
+the end of this document, which is the authoritative count). The source
+tree carries **63** `//export engine_*` declarations; the extra three
+are `//go:build cshared && soak` and are never present in a release
+build.
 
 The `engine_version` string is **`daal-core 0.9.0+v3-share`**. The
 version bump is informative; the surface change itself remains
@@ -490,11 +491,52 @@ A route is connected only once it has carried one real round trip
   made before files carried one, and only a new file fixes it),
   `"cooldown"`, `"revoked"`, `"expired"`, `"other"`. Cleared by the next
   `engine_set_route` that is not refused and by an `engine_clear_route`
-  that stops something (above). It
+  that stops something (above) — however soon after the refusal that
+  call comes: a disconnected engine reports no refusal. (Between
+  2026-11-19 and the repair pass of the same branch a clear within five
+  seconds of the refusal kept it, for a host that tore down after a
+  refused switch; no host does, see `engine_route_precheck`.) A refusing
+  `engine_route_precheck` records the same two members. It
   exists because a host may have no way to hand the returned error to its
   interface (on Android the call is made by the VPN service, long after
   the command that asked for it has returned). A consumer maps the code
   to its own words and never displays engine text.
+- `engine_route_precheck(route_id, out, out_len)` (added 2026-11-19)
+  asks whether `engine_set_route(route_id)` would be refused right now,
+  and starts and stops nothing. It writes
+  `{"route_id":"…","refused":"<code>","active_route":"…"}` to `out`
+  (caller-owned buffer, the `engine_export_diagnostics` convention) and
+  returns the number of bytes written, or -1 only when the engine is not
+  initialised. `refused` is `""` when the route would be attempted, else
+  a `connect_refused` code, or `"no_data_plane"` for a build that cannot
+  tunnel. A refusal is not an error; it is recorded in the diagnostics
+  exactly as a refused `engine_set_route` records it (`no_data_plane`
+  is not recorded). The answer can go stale, so `engine_set_route` still
+  checks for itself. It exists for a host that must do something
+  irreversible before it can call `engine_set_route` — the Android VPN
+  service asks first, so that a switch to a route that would be refused
+  touches nothing.
+- `engine_export_diagnostics` carries four more always-present members
+  (added 2026-11-19):
+  - `active_route: string` and `active_route_family: string` — the
+    route whose engine instance is running right now (being checked,
+    connected, or connected and failing its re-check) and its transport
+    family; `""` when nothing is running. Served from engine memory,
+    never from the route store. A consumer MUST take the active route
+    from here and not from a store-backed call: `engine_diagnostics_explain`
+    carries the same `active_route` and fills its `pick` only when the
+    store can be read.
+  - `store_recovered: boolean` — the route store was found damaged at
+    `engine_init`, was set aside on disk under a dated name (never
+    deleted) and replaced by an empty one. True from that `engine_init`
+    on, across restarts, until routes exist again. A consumer tells the
+    person their saved connections were reset and to add their file
+    again.
+  - `recent_errors: array` — the last engine calls that failed, newest
+    last, each `{time, call, text, count}`. In memory only. `text` is an
+    error class passed through the log scrubber (no addresses,
+    credentials or tokens); it is for a diagnostics export and a details
+    area, never a sentence to display.
 - While a route is connected the same proof is repeated every
   `liveness_interval_s` (±25 %), and at once when
   `engine_network_changed` reports a different network. A connected route
@@ -874,7 +916,7 @@ Release builds do NOT compile this symbol.
 
 *(Historical note: this paragraph used to cite a release-build CI step in
 `.github/workflows/desktop.yml` asserting a count of 37. That workflow no
-longer exists — there is no `.github/` directory — and the count is now 58.
+longer exists and the count is now 60.
 The assertion survives as `EXPECTED_ABI` in `./daal release-check`, which
 you must run yourself. See the ABI ledger at the end of this document.)*
 
@@ -933,7 +975,9 @@ nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_
 grep -rh '^//export engine_' core/ | wc -l
 ```
 
-**Release surface: 58.  Source surface: 61.**
+**Release surface: 60.  Source surface: 63.** (2026-11-19. It was 58 /
+61 on 2026-08-17; `engine_set_tunnel_refresh` and `engine_route_precheck`
+were added since, the first without this ledger being updated.)
 
 ### Caveat on `./daal release-check`
 
@@ -962,6 +1006,13 @@ signature.
 | `engine_clear_tun_fd` | `(void *out, int out_len) -> int` | idempotent; safe without a prior set |
 | `engine_register_protect_callback` | `(uintptr_t cb, void *out, int out_len) -> int` | `cb == 0` clears the binding |
 
+Added after that pass (append-only, no existing signature changed):
+
+| Symbol | Signature | Notes |
+|---|---|---|
+| `engine_set_tunnel_refresh` | `(int enabled, void *out, int out_len) -> int` | puts the engine's own scheduled fetches on its in-process loopback inlet, or takes them off; -1 when there is no live inlet (before `engine_set_route` has succeeded) — refresh then stays fail-closed, never direct |
+| `engine_route_precheck` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; see "Connection check" above |
+
 The TUN triplet was specified only in
 `development-phases/45-gap-dataplane-and-delivery.md` and never merged
 here; `engine_route_delete` / `engine_publisher_delete` (commit
@@ -970,7 +1021,7 @@ here; `engine_route_delete` / `engine_publisher_delete` (commit
 ### Soak-only symbols — NOT part of the release surface
 
 Guarded by `//go:build cshared && soak`. They exist only in soak-rig
-builds and must never be counted toward the 58, nor relied on by any
+builds and must never be counted toward the 60, nor relied on by any
 client.
 
 | Symbol | Signature | File |
@@ -981,10 +1032,12 @@ client.
 
 ### Downstream copies of the count
 
-Every one of these was stale before this pass and has been corrected to
-58. If the surface grows again, update all of them together:
+Every one of these was stale before the 2026-08-17 pass. If the surface
+grows again, update the live ones together (the count is 60 in each as
+of 2026-11-19; the last three are dated history and keep the number
+they were written with):
 
-- `daal:50` `EXPECTED_ABI`
+- `daal` `EXPECTED_ABI`
 - `specs/frp-track-v1.md`
 - `development-phases/README.md` (states it as an invariant)
 - `docs/build-and-release.md`

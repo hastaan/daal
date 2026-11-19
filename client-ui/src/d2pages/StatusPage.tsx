@@ -16,6 +16,9 @@ import {
     StatusLight,
 } from '../design/primitives';
 
+import { errorText } from '../lib/errorText';
+import { FailureBox } from './PageNotices';
+
 interface Props {
     t: (k: string) => string;
 }
@@ -55,7 +58,9 @@ export default function StatusPage({ t }: Props) {
                     setError(null);
                 }
             } catch (e) {
-                if (!cancelled) setError((e as Error).message || 'unknown');
+                // A rejected Tauri command is a plain string; reading
+                // `.message` off it gave the single word "unknown".
+                if (!cancelled) setError(errorText(e));
             }
         };
         tick();
@@ -230,10 +235,10 @@ export default function StatusPage({ t }: Props) {
                 {t('page.status.lede')}
             </p>
 
+            {/* Our own sentence; the raw text is folded under Details.
+                The page re-reads by itself every 3 s, so no button. */}
             {error && (
-                <div style={errorBox()}>
-                    {t('common.error')}: {error}
-                </div>
+                <FailureBox t={t} text={t('status.load_failed')} detail={error} />
             )}
 
             {/* DASHBOARD GRID */}
@@ -645,17 +650,6 @@ function card() {
         border: '1px solid var(--teal-hairline)',
         borderRadius: 'var(--radius-lg)',
         padding: 18,
-    } as const;
-}
-function errorBox() {
-    return {
-        background: 'rgba(200,85,61,0.10)',
-        border: '1px solid rgba(200,85,61,0.40)',
-        color: 'var(--danger)',
-        padding: 12,
-        borderRadius: 'var(--radius-md)',
-        marginBottom: 20,
-        fontSize: 13,
     } as const;
 }
 function smallBtn() {

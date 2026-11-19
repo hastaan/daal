@@ -18,7 +18,7 @@ import "unsafe"
 func engine_set_tun_fd(fd C.int, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SetTunFD(int(fd))
 	if err != nil {
-		return -1
+		return exportFail("engine_set_tun_fd", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -30,7 +30,7 @@ func engine_set_tun_fd(fd C.int, out unsafe.Pointer, outLen C.int) C.int {
 func engine_clear_tun_fd(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := ClearTunFD()
 	if err != nil {
-		return -1
+		return exportFail("engine_clear_tun_fd", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -48,7 +48,7 @@ func engine_clear_tun_fd(out unsafe.Pointer, outLen C.int) C.int {
 func engine_register_protect_callback(cb C.uintptr_t, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := RegisterProtectCallback(uintptr(cb))
 	if err != nil {
-		return -1
+		return exportFail("engine_register_protect_callback", err)
 	}
 	return copyOut(body, out, outLen)
 }

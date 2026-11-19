@@ -215,6 +215,7 @@ func main() {
 		os.Exit(1)
 	}
 	emit("connected", map[string]any{"route_id": id, "family": *family, "set_route_ms": time.Since(t0).Milliseconds()})
+	sess := &session{vpn: vpn, routeID: id, tunBase: *tunName, sent: newSentinels(*stateDir)}
 
 	// --- stay up until the driver says stop (a line on stdin, EOF, or a signal).
 	stop := make(chan string, 2)
@@ -231,6 +232,13 @@ func main() {
 			case "diag":
 				d, _ := abi.ExportDiagnostics()
 				emit("diag", map[string]any{"diag": rawJSON(d), "protect_calls": int(C.wb_protect_count())})
+			default:
+				// switch <rotate|keep> <family>: the person taps another
+				// route's Connect while this one is up (switch.go). Runs
+				// here, so commands are strictly one after another.
+				if f := strings.Fields(sc.Text()); len(f) == 3 && f[0] == "switch" {
+					sess.doSwitch(f[1], f[2])
+				}
 			}
 		}
 		stop <- "eof"
@@ -241,11 +249,10 @@ func main() {
 	// The engine's own account of this route, taken while it is still the
 	// active one: failures[] is where a classified failure would appear.
 	explain, _ := abi.DiagnosticsExplain()
-	cerr := abi.ClearRoute()
-	_, _ = abi.ClearTunFD()
-	vpn.teardown()
+	cerr, after := sess.disconnect()
 	routesAfter, _ := abi.AvailableRoutes()
 	emit("disconnected", map[string]any{
+		"after":        after,
 		"explain":      rawJSON(explain),
 		"routes_after": rawJSON(routesAfter),
 		"why":          why, "error": errString(cerr),

@@ -53,18 +53,32 @@ func (p *androidPlatform) AutoDetectInterfaceControl(fd int) error {
 
 func (p *androidPlatform) UsePlatformInterface() bool { return true }
 
-// OpenInterface hands sing-tun the host-supplied TUN fd. With
+// OpenInterface hands sing-tun the host-supplied TUN. With
 // FileDescriptor set, sing-tun skips device creation and route setup —
 // the VpnService Builder (or the privileged tun-helper on desktop)
 // already owns both.
+//
+// sing-tun gets a DUPLICATE, never the host's own number: it wraps what
+// it is given in an os.File and closes it when the instance closes, and
+// the host's copy is closed by AdoptTunFD / ReleaseTunFD (platform.go,
+// "ONE OWNER PER COPY"). From a successful return the duplicate belongs
+// to the returned tun.Tun; on every other path it is closed here.
 func (p *androidPlatform) OpenInterface(options *tun.Options, platformOptions boxoption.TunPlatformOptions) (tun.Tun, error) {
-	fd := CurrentTunFD()
-	if fd < 0 {
-		return nil, errors.New("engine: TUN fd not set; host must call engine_set_tun_fd before engine_set_route")
+	fd, err := dupTunFD()
+	if err != nil {
+		return nil, err
 	}
 	options.FileDescriptor = fd
-	return tun.New(*options)
+	t, err := openTun(*options)
+	if err != nil {
+		_ = closeFD(fd)
+		return nil, err
+	}
+	return t, nil
 }
+
+// openTun is tun.New behind a variable so a test can make it fail.
+var openTun = tun.New
 
 func (p *androidPlatform) UsePlatformDefaultInterfaceMonitor() bool { return true }
 

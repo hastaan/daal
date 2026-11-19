@@ -13,6 +13,18 @@ export async function versionInfo(): Promise<VersionInfo> {
     return invoke<VersionInfo>('version_info');
 }
 
+/** `engine_status`: whether the engine started, and the host's reason
+ *  when it did not. The one command that answers even then. Resolves to
+ *  null where it cannot be asked (an older shell, the browser harness)
+ *  — never rejects. Parsed by lib/engineStart.ts. */
+export async function engineStatus(): Promise<unknown> {
+    try {
+        return await invoke<unknown>('engine_status');
+    } catch (_) {
+        return null;
+    }
+}
+
 export interface PreviewedBundle {
     fingerprint_hex: string;
     fingerprint_en: string;
@@ -96,6 +108,23 @@ export async function disconnect(): Promise<void> {
         }
     }
     return invoke<void>('disconnect');
+}
+
+/** The Android VPN service's own status (`vpn_status`), or null where
+ *  there is no such service (desktop) or it did not answer. Read for
+ *  its `last_switch` note: after a route switch that did not take, the
+ *  service goes back to the route that worked, which erases the
+ *  engine's verdict about the one that failed — the note is the only
+ *  record left (lib/activeRoute.ts parseLastSwitch). Ids and closed
+ *  codes only. Never throws: the connection summary must not fail
+ *  because this could not be read. */
+export async function vpnServiceStatus(): Promise<unknown> {
+    if (!isAndroid()) return null;
+    try {
+        return await invoke<unknown>('plugin:daal-platform|vpn_status');
+    } catch (_) {
+        return null;
+    }
 }
 
 export async function diagnosticsExplain(): Promise<unknown> {
@@ -191,6 +220,16 @@ export interface DiagnosticsBlob {
     // 'revoked', 'expired', 'other'). Read through lib/routeCheck.ts.
     connect_refused?: string;
     connect_refused_route?: string;
+    // The route the engine is running or was last asked to run, and its
+    // family, from engine MEMORY — never from the route store, so they
+    // still answer when the store does not. '' = none / unknown.
+    // Optional: an older engine emits neither.
+    active_route?: string;
+    active_route_family?: string;
+    // True when the engine found its route store damaged at start and
+    // set it aside (the saved connections are gone until the file is
+    // added again). Absent or false otherwise.
+    store_recovered?: boolean;
 }
 
 // Phase 2D: PIN-vault unlock outcome.

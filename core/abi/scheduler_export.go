@@ -17,7 +17,7 @@ import (
 func engine_scheduler_status(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SchedulerStatus()
 	if err != nil {
-		return -1
+		return exportFail("engine_scheduler_status", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -37,7 +37,7 @@ func engine_scheduler_status(out unsafe.Pointer, outLen C.int) C.int {
 //export engine_scheduler_tick
 func engine_scheduler_tick() C.int {
 	if err := SchedulerTick(time.Now().UTC()); err != nil {
-		return -1
+		return exportFail("engine_scheduler_tick", err)
 	}
 	return 0
 }

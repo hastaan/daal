@@ -49,7 +49,11 @@ import type {
     FreshnessStatus,
     PublishReport,
 } from './wizardCommands';
-import { Card, ListRow, Button, Section, Sheet, Input, StatusPill } from '../design/primitives';
+import { Card, ListRow, Button, Sheet, Input, StatusPill } from '../design/primitives';
+import { Collapsible, WhatIsThis } from './Disclosure';
+import { ActionButton } from './useAction';
+import type { Action } from './useAction';
+import { failureBlock } from './failureText';
 
 interface Props {
     t: (k: string) => string;
@@ -58,6 +62,9 @@ interface Props {
      *  the "inside the pack" line cannot go stale while the operator is
      *  looking at it. */
     reloadToken?: number;
+    /** The page's action controller: one lock and one result banner for
+     *  the whole screen, so nothing here ends silently either. */
+    action: Action;
 }
 
 const LABEL: React.CSSProperties = { fontSize: 12, color: 'var(--muted)' };
@@ -88,90 +95,144 @@ function providerKey(kind: string): string {
     return kind === 'r2' ? 'pub.fresh.provider.r2' : 'pub.fresh.provider.ghpages';
 }
 
-export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
+export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
     const [status, setStatus] = useState<FreshnessStatus | null>(null);
     const [err, setErr] = useState<string | null>(null);
-    const [busy, setBusy] = useState(false);
     const [report, setReport] = useState<PublishReport | null>(null);
     const [showAdd, setShowAdd] = useState(false);
     const [packUrlDraft, setPackUrlDraft] = useState('');
-    const [packUrlSaved, setPackUrlSaved] = useState(false);
+    // Closed until asked for. The owner's first reading of this page
+    // was that nothing on it said what "refresh" meant or how it
+    // differed from adding a person; what they need by default is the
+    // one-line answer, and everything else is one tap away.
+    const [open, setOpen] = useState(false);
 
     const reload = useCallback(async () => {
         try {
             const s = await Wizard.freshnessStatus(operatorId);
             setStatus(s);
             setPackUrlDraft(s.pack_url);
+            setErr(null);
         } catch (e) {
-            setErr(String(e));
+            setErr(failureBlock(t, e));
         }
-    }, [operatorId]);
+    }, [operatorId, t]);
 
     useEffect(() => {
         void reload();
     }, [reload, reloadToken]);
 
     const onSavePackUrl = async () => {
-        setErr(null);
-        setPackUrlSaved(false);
-        try {
-            await Wizard.setFreshnessPackUrl(operatorId, packUrlDraft.trim());
-            setPackUrlSaved(true);
-            await reload();
-        } catch (e) {
-            setErr(String(e));
-        }
+        const r = await action.run(
+            'fresh:url',
+            () => Wizard.setFreshnessPackUrl(operatorId, packUrlDraft.trim()),
+            { ok: t('pub.fb.url_saved'), fail: t('pub.fb.url_saved.fail') },
+        );
+        if (r.ok) await reload();
     };
 
     const onPublish = async () => {
-        setBusy(true);
-        setErr(null);
         setReport(null);
-        try {
-            const r = await Wizard.publishFreshness(operatorId);
-            setReport(r);
-        } catch (e) {
-            setErr(String(e));
-        } finally {
-            setBusy(false);
-            await reload();
+        const r = await action.run(
+            'fresh:publish',
+            () => Wizard.publishFreshness(operatorId),
+            // The per-company report below is the result; the banner
+            // carries its headline so it is seen wherever the page is
+            // scrolled.
+            { ok: null, fail: t('pub.fb.publish.fail') },
+        );
+        if (r.ok) {
+            setReport(r.value);
+            if (r.value.blocked_reason) {
+                action.report(
+                    'fresh:publish',
+                    'fail',
+                    t(`pub.fresh.blocked.${r.value.blocked_reason}`),
+                );
+            } else if (r.value.succeeded >= r.value.min_mirrors) {
+                action.report('fresh:publish', 'ok', t('pub.fresh.result.ok'));
+            } else {
+                action.report('fresh:publish', 'fail', t('pub.fresh.result.degraded'));
+            }
         }
+        if (r.ran) await reload();
     };
 
     const onDelete = async (id: number) => {
+        if (action.busy !== null) return;
         if (!window.confirm(t('pub.fresh.remove.confirm'))) return;
-        setErr(null);
-        try {
-            await Wizard.deleteFreshnessEndpoint(id);
-            await reload();
-        } catch (e) {
-            setErr(String(e));
-        }
+        const r = await action.run(
+            `fresh:del:${id}`,
+            () => Wizard.deleteFreshnessEndpoint(id),
+            { ok: t('pub.fb.address_removed'), fail: t('pub.fb.address_removed.fail') },
+        );
+        if (r.ok) await reload();
     };
 
-    if (!status) {
-        return (
-            <Section eyebrow={t('pub.fresh.eyebrow')} title={t('pub.fresh.title')}>
-                <Card>
-                    <ListRow title={t('common.loading')} last />
-                </Card>
-            </Section>
-        );
-    }
+    const enough = status ? status.distinct_providers >= status.min_mirrors : false;
+    const packCanHeal = status ? status.mirrors_in_pack.length > 0 : false;
 
-    const enough = status.distinct_providers >= status.min_mirrors;
-    const packCanHeal = status.mirrors_in_pack.length > 0;
+    // THE ONE LINE. Computed from the signed file people hold, never
+    // from what is configured — and "could not check" is its own
+    // answer, not a spinner that never ends.
+    const summary = status
+        ? packCanHeal
+            ? t('pub.keep.summary.can')
+            : t('pub.keep.summary.cannot')
+        : err
+          ? t('pub.keep.summary.unknown')
+          : t('common.loading');
 
     return (
-        <Section
-            eyebrow={t('pub.fresh.eyebrow')}
-            title={t('pub.fresh.title')}
-            action={
-                <Button variant="secondary" onClick={() => setShowAdd(true)}>
-                    {t('pub.fresh.add.action')}
-                </Button>
+        <Collapsible
+            title={t('pub.keep.title')}
+            summary={summary}
+            open={open}
+            onToggle={() => setOpen((v) => !v)}
+            trailing={
+                status ? (
+                    <StatusPill tone={packCanHeal ? 'good' : 'warn'}>
+                        {packCanHeal
+                            ? t('pub.fresh.pill.healing')
+                            : t('pub.fresh.pill.manual')}
+                    </StatusPill>
+                ) : undefined
             }
         >
+            <WhatIsThis label={t('pub.what')}>
+                <div>{t('pub.keep.what')}</div>
+                <div>{t('pub.fresh.none.body')}</div>
+                {/* The cost. Behind the same tap as the explanation,
+                    not behind a second one: a publisher deciding
+                    whether to switch this on is deciding whether their
+                    readership becomes countable at a hosting company. */}
+                <div style={{ fontWeight: 600 }}>{t('pub.fresh.privacy.title')}</div>
+                <div>{t('pub.fresh.privacy.body')}</div>
+            </WhatIsThis>
+
+            {!status && err && (
+                <Card>
+                    <div style={{ display: 'grid', gap: 8 }}>
+                        <div
+                            style={{
+                                color: 'var(--red)',
+                                fontSize: 12,
+                                whiteSpace: 'pre-line',
+                                lineHeight: 1.5,
+                            }}
+                        >
+                            {err}
+                        </div>
+                        <div>
+                            <Button variant="secondary" onClick={() => void reload()}>
+                                {t('pub.keep.retry')}
+                            </Button>
+                        </div>
+                    </div>
+                </Card>
+            )}
+
+            {status && (
             <Card>
                 {/* ---- What the files people already hold can do. This
                     is FIRST because it is the only line that answers
@@ -197,13 +258,6 @@ export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
                                 )
                               : t('pub.fresh.pack.not_healing.body')
                     }
-                    trailing={
-                        <StatusPill tone={packCanHeal ? 'good' : 'warn'}>
-                            {packCanHeal
-                                ? t('pub.fresh.pill.healing')
-                                : t('pub.fresh.pill.manual')}
-                        </StatusPill>
-                    }
                 />
 
                 {/* ---- The intent-vs-reality warning. Shown whenever
@@ -218,8 +272,11 @@ export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
                                 : t('pub.fresh.single.title')
                         }
                         subtitle={
+                            // The explanation of what a refresh address
+                            // IS sits behind "What is this?" above; it
+                            // is not said a second time here.
                             status.distinct_providers === 0
-                                ? t('pub.fresh.none.body')
+                                ? t('pub.fresh.none.short')
                                 : t('pub.fresh.single.body')
                         }
                     />
@@ -242,22 +299,28 @@ export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
                         >
                             <Input
                                 value={packUrlDraft}
-                                onChange={(e) => {
-                                    setPackUrlDraft(e.target.value);
-                                    setPackUrlSaved(false);
-                                }}
+                                onChange={(e) => setPackUrlDraft(e.target.value)}
                                 placeholder="https://…/relay.sbp"
                                 style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
                             />
-                            <Button variant="secondary" onClick={() => void onSavePackUrl()}>
-                                {packUrlSaved ? t('common.saved') : t('common.save')}
-                            </Button>
+                            <ActionButton
+                                action={action}
+                                k="fresh:url"
+                                busyLabel={t('pub.fb.saving')}
+                                variant="secondary"
+                                onClick={() => void onSavePackUrl()}
+                            >
+                                {t('common.save')}
+                            </ActionButton>
                         </span>
                     }
                 />
+                <WhatIsThis label={t('pub.fresh.pack_url.what.label')}>
+                    <div>{t('pub.fresh.pack_url.what')}</div>
+                </WhatIsThis>
 
                 {/* ---- The mirrors themselves. ---- */}
-                {status.endpoints.map((ep, i) => {
+                {status.endpoints.map((ep) => {
                     const never = ep.last_publish_at_unix === 0;
                     const tone = never ? 'neutral' : ep.last_publish_ok ? 'good' : 'bad';
                     return (
@@ -294,28 +357,55 @@ export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
                                 </StatusPill>
                             }
                             trailing={
-                                <Button variant="ghost" onClick={() => void onDelete(ep.id)}>
-                                    {t('common.remove')}
-                                </Button>
+                                <ActionButton
+                                    action={action}
+                                    k={`fresh:del:${ep.id}`}
+                                    busyLabel={t('pub.fb.removing')}
+                                    variant="ghost"
+                                    onClick={() => void onDelete(ep.id)}
+                                >
+                                    {t('pub.keep.remove_address')}
+                                </ActionButton>
                             }
-                            last={i === status.endpoints.length - 1 && !enough}
                         />
                     );
                 })}
+
+                {/* ---- Adding one. Named in full — "Add a refresh
+                    address" — because the page's other add button adds
+                    a PERSON, and two buttons that differ by a noun
+                    nobody explained was the owner's exact complaint. ---- */}
+                <ListRow
+                    title={t('pub.keep.addresses.count')
+                        .replace('{have}', String(status.distinct_providers))
+                        .replace('{need}', String(status.min_mirrors))}
+                    trailing={
+                        <Button variant="secondary" onClick={() => setShowAdd(true)}>
+                            {t('pub.fresh.add.title')}
+                        </Button>
+                    }
+                    last={!enough}
+                />
 
                 {enough && (
                     <ListRow
                         title={t('pub.fresh.publish.title')}
                         subtitle={t('pub.fresh.publish.body')}
                         trailing={
-                            <Button onClick={() => void onPublish()} disabled={busy}>
-                                {busy ? t('pub.fresh.publish.working') : t('pub.fresh.publish.action')}
-                            </Button>
+                            <ActionButton
+                                action={action}
+                                k="fresh:publish"
+                                busyLabel={t('pub.fresh.publish.working')}
+                                onClick={() => void onPublish()}
+                            >
+                                {t('pub.fresh.publish.action')}
+                            </ActionButton>
                         }
                         last
                     />
                 )}
             </Card>
+            )}
 
             {/* ---- The result of the last publish, spelled out per
                 provider. Never collapsed into one line: "R2 took it and
@@ -377,21 +467,20 @@ export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
                 </Card>
             )}
 
-            {/* ---- The cost. Not buried in a tooltip: a publisher
-                deciding whether to switch this on is deciding whether
-                their readership becomes countable at a hosting
-                company. ---- */}
-            <Card>
-                <ListRow
-                    title={t('pub.fresh.privacy.title')}
-                    subtitle={t('pub.fresh.privacy.body')}
-                    last
-                />
-            </Card>
+            {status && err && (
+                <div
+                    style={{
+                        color: 'var(--red)',
+                        fontSize: 12,
+                        whiteSpace: 'pre-line',
+                        lineHeight: 1.5,
+                    }}
+                >
+                    {err}
+                </div>
+            )}
 
-            {err && <div style={{ color: 'var(--red)', fontSize: 12 }}>{err}</div>}
-
-            {showAdd && (
+            {showAdd && status && (
                 <AddEndpointSheet
                     t={t}
                     operatorId={operatorId}
@@ -399,11 +488,12 @@ export function FreshnessPanel({ t, operatorId, reloadToken }: Props) {
                     onClose={() => setShowAdd(false)}
                     onAdded={() => {
                         setShowAdd(false);
+                        action.report('fresh:add', 'ok', t('pub.fb.address_added'));
                         void reload();
                     }}
                 />
             )}
-        </Section>
+        </Collapsible>
     );
 }
 
@@ -442,7 +532,7 @@ function AddEndpointSheet({
             await Wizard.addFreshnessEndpoint(operatorId, { ...f, kind });
             onAdded();
         } catch (e) {
-            setErr(String(e));
+            setErr(failureBlock(t, e));
         } finally {
             setBusy(false);
         }
@@ -523,7 +613,18 @@ function AddEndpointSheet({
                     {t('pub.fresh.add.credential_note')}
                 </div>
 
-                {err && <div style={{ color: 'var(--red)', fontSize: 12 }}>{err}</div>}
+                {err && (
+                    <div
+                        style={{
+                            color: 'var(--red)',
+                            fontSize: 12,
+                            whiteSpace: 'pre-line',
+                            lineHeight: 1.5,
+                        }}
+                    >
+                        {err}
+                    </div>
+                )}
             </div>
         </Sheet>
     );

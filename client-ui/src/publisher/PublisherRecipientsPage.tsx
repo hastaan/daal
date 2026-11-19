@@ -9,10 +9,24 @@
 // now the single permanent home for everything you do with a relay
 // after it exists:
 //
-//   header     — which relay this is, and what is protecting its key
-//   ARTIFACTS  — the files you actually hand out (goal 3)
-//   RECIPIENTS — the roster
-//   DANGER     — recovery key, decommission
+//   header        — which relay this is
+//   1 PEOPLE      — who has access; each person's own file is on
+//                   their row (PeopleSection)
+//   2 ONE FILE    — the file that works for anybody
+//                   (EveryoneFileSection)
+//   3 KEEP IT     — whether people's apps can repair themselves, and
+//     WORKING       the settings behind that (FreshnessPanel), closed
+//                   until tapped
+//   4 DANGER      — recovery key, rotations, removal; closed until
+//                   tapped
+//   details       — what only a maintainer asks about
+//
+// Each section has ONE job and ONE visible sentence. The page was
+// reorganised after the first real-phone session, where the owner could
+// not tell what was for everyone and what was for one person, what
+// "refresh" meant, or how "+ Add" differed from "+ Add address" — and
+// pressed Save four times because nothing answered. Longer explanations
+// sit behind "What is this?"; every action answers through `useAction`.
 //
 // Three things that were load-bearing in the old file are simply not
 // here any more, and their absence is the feature:
@@ -44,7 +58,6 @@ import {
     Card,
     ListRow,
     Button,
-    Section,
     Sheet,
     Input,
     StatusPill,
@@ -67,6 +80,13 @@ import { RelayDestroySheet, relayTitle } from './RelayListPage';
 // Wave 4 Step 11. The one share affordance that needs no network at
 // all: the pack leaves this device as light, off the screen.
 import { QrSendSheet } from './QrSendSheet';
+import { ActionButton, ActionToast, useAction } from './useAction';
+import { explainFailure, failureBlock } from './failureText';
+import { Collapsible } from './Disclosure';
+import { PeopleSection, joinPeople, personLabel } from './PeopleSection';
+import { EveryoneFileSection } from './EveryoneFileSection';
+import { relayBadge } from './relayStatus';
+import { rotateTlsVerdict } from './rotateTlsVerdict';
 
 interface Props {
     t: (k: string) => string;
@@ -85,11 +105,6 @@ function looksLikeDaalAddress(s: string): boolean {
     return /^[a-z0-9]+$/.test(trimmed);
 }
 
-function shortAddr(s: string): string {
-    if (s.length <= 18) return s;
-    return s.slice(0, 10) + '…' + s.slice(-6);
-}
-
 function tsLabel(unix: number): string {
     if (!unix) return '';
     try {
@@ -102,30 +117,6 @@ function tsLabel(unix: number): string {
 function baseName(path: string): string {
     const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
     return i >= 0 ? path.slice(i + 1) : path;
-}
-
-function sizeLabel(bytes: number): string {
-    if (!bytes) return '';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** True when the mgmt round-trip died before it reached the relay. The
- *  only recovery for a box provisioned before the ufw fix shipped is a
- *  fresh deploy, so we say so instead of showing a raw Go error. */
-function looksUnreachable(msg: string): boolean {
-    return /(context deadline exceeded|connection refused|i\/o timeout|no route to host)/i.test(
-        msg,
-    );
-}
-
-/** What to call a recipient on screen. The operator's alias if they set
- *  one, otherwise the box-side name, otherwise the row id — never an
- *  empty string, because every rotation confirm interpolates it into a
- *  sentence that has to name the one person being affected. */
-function recipientLabel(r: RecipientSummary): string {
-    return r.display_name || r.name || `#${r.id}`;
 }
 
 /** Anything the relay or the cloud plane said during a rotation, shown
@@ -167,7 +158,18 @@ interface ConfirmRemove {
 type MgmtRunner = (
     fn: () => Promise<void>,
     setErr: (s: string | null) => void,
+    /** Gets the untouched error, for callers that explain it themselves. */
+    onRaw?: (e: unknown) => void,
 ) => Promise<boolean>;
+
+/** A failure held in one string: the plain explanation, a blank line,
+ *  then the relay's own words. */
+const ERR_BLOCK: React.CSSProperties = {
+    color: 'var(--red)',
+    fontSize: 12,
+    whiteSpace: 'pre-line',
+    lineHeight: 1.5,
+};
 
 const LABEL: React.CSSProperties = { fontSize: 12, color: 'var(--muted)' };
 const MONO: React.CSSProperties = {
@@ -197,7 +199,16 @@ export default function PublisherRecipientsPage({
     const [custody, setCustody] = useState<PublisherCustodyStatus | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [notice, setNotice] = useState<string | null>(null);
+
+    // One lock and one result banner for the whole screen: while any
+    // action runs no other can start, and every one of them ends with a
+    // sentence the person can see wherever the page is scrolled.
+    const explain = useCallback((e: unknown) => explainFailure(t, e), [t]);
+    const action = useAction(explain);
+
+    // Sections that are one line until tapped.
+    const [dangerOpen, setDangerOpen] = useState(false);
+    const [detailsOpen, setDetailsOpen] = useState(false);
 
     // Header rename
     const [renaming, setRenaming] = useState(false);
@@ -226,7 +237,6 @@ export default function PublisherRecipientsPage({
      *  anyone already holding a shared pack — see onBuildShared. */
     const [confirmBuild, setConfirmBuild] = useState(false);
     const [qrSend, setQrSend] = useState(false);
-    const [artifactBusy, setArtifactBusy] = useState<string | null>(null);
 
     // Wave 3 Step 7 — the two rotations, kept apart all the way down to
     // their state. Per-recipient re-keying affects ONE person and lives
@@ -247,11 +257,8 @@ export default function PublisherRecipientsPage({
         null,
     );
 
-    // Sync
-    const [syncing, setSyncing] = useState(false);
-
-    // Recovery key / decommission
-    const [dangerBusy, setDangerBusy] = useState(false);
+    // Nothing in the danger zone may start while another action runs.
+    const dangerBusy = action.busy !== null;
     /** Teardown sheet — the two-outcome confirm shared with the relay
      *  list. See RelayDestroySheet. */
     const [confirmDestroy, setConfirmDestroy] = useState(false);
@@ -284,7 +291,7 @@ export default function PublisherRecipientsPage({
             const ops = await Wizard.listOperators();
             setOperator(ops.find((o) => o.id === operatorId) ?? null);
         } catch (e) {
-            setError(String(e));
+            setError(failureBlock(t, e));
         }
         // Best-effort: a relay with no freshness configured is the
         // common case and must not turn the whole page red.
@@ -294,15 +301,15 @@ export default function PublisherRecipientsPage({
         } catch {
             setMirrorsInPack(0);
         }
-    }, [operatorId]);
+    }, [operatorId, t]);
 
     const reloadRecipients = useCallback(async () => {
         try {
             setRecipients(await Wizard.recipientList(operatorId));
         } catch (e) {
-            setError(String(e));
+            setError(failureBlock(t, e));
         }
-    }, [operatorId]);
+    }, [operatorId, t]);
 
     const reloadArtifacts = useCallback(async () => {
         try {
@@ -310,9 +317,9 @@ export default function PublisherRecipientsPage({
             // every action that could have produced or invalidated a file.
             setArtifacts(await Wizard.listArtifacts(operatorId));
         } catch (e) {
-            setError(String(e));
+            setError(failureBlock(t, e));
         }
-    }, [operatorId]);
+    }, [operatorId, t]);
 
     useEffect(() => {
         let alive = true;
@@ -360,14 +367,16 @@ export default function PublisherRecipientsPage({
     );
 
     const commitRename = useCallback(async () => {
-        try {
-            await Wizard.setOperatorNickname(operatorId, draftName.trim());
+        const r = await action.run(
+            'rename',
+            () => Wizard.setOperatorNickname(operatorId, draftName.trim()),
+            { ok: t('pub.fb.renamed'), fail: t('pub.fb.renamed.fail') },
+        );
+        if (r.ok) {
             setRenaming(false);
             await reloadOperator();
-        } catch (e) {
-            setError(String(e));
         }
-    }, [draftName, operatorId, reloadOperator]);
+    }, [action.run, draftName, operatorId, reloadOperator, t]);
 
     // ---- mgmt-plane action wrapper ------------------------------------
 
@@ -377,13 +386,14 @@ export default function PublisherRecipientsPage({
     // behaviour, which was an inertly disabled button and a hint saying
     // "need helper IP".
     const runMgmt: MgmtRunner = useCallback(
-        async (fn, setErr) => {
+        async (fn, setErr, onRaw) => {
             setErr(null);
             try {
                 await withHelperIp(operatorId, fn);
                 setIpRepair(null);
                 return true;
             } catch (e) {
+                onRaw?.(e);
                 const code = classifyPublisherError(e);
                 if (
                     code === 'E_HELPER_IP_MISSING' ||
@@ -391,28 +401,42 @@ export default function PublisherRecipientsPage({
                 ) {
                     const detected = await detectPublicIp();
                     setIpDraft(detected?.ip ?? '');
-                    setIpRepair({ retry: () => runMgmt(fn, setErr) });
-                    setErr(t('pub.helper_ip.stale'));
-                } else if (code === 'E_RELAY_TOO_OLD') {
-                    // Not the device, not the network, and NOT retryable:
-                    // the relay's management service is pinned at build
-                    // time and only a new release of Daal moves it. The
-                    // raw tail rides along under the explanation because
-                    // it names which half was refused — that is the bit a
-                    // maintainer needs and the bit a user can forward.
-                    setErr(`${t('pub.rotate.too_old')}\n\n${String(e)}`);
-                } else if (code === 'E_RELAY_KEYS_CHANGED') {
-                    // The relay's keys changed without a rebuild, so
-                    // nothing was signed. Said in plain words first; the
-                    // raw tail names which key, for whoever is asked.
-                    setErr(`${t('pub.relay_keys_changed')}\n\n${String(e)}`);
-                } else {
-                    setErr(String(e));
+                    setIpRepair({ retry: () => runMgmt(fn, setErr, onRaw) });
                 }
+                // Plain words first, then the relay's own words under
+                // them. The raw tail is not noise: for a relay too old
+                // to do something it names which half was refused, and
+                // for changed keys it names which key — the bit a
+                // maintainer needs and the bit a user can forward. But
+                // it is never the sentence.
+                setErr(failureBlock(t, e));
                 return false;
             }
         },
         [operatorId, t],
+    );
+
+    /** `runMgmt` for an action that reports through the banner: the
+     *  same helper-address repair, but it throws the untouched error so
+     *  `action.run` can explain it. */
+    const viaMgmt = useCallback(
+        <T,>(fn: () => Promise<T>) =>
+            async (): Promise<T> => {
+                const out: { v?: T } = {};
+                const raw: { e: unknown } = { e: null };
+                const ok = await runMgmt(
+                    async () => {
+                        out.v = await fn();
+                    },
+                    () => {},
+                    (e) => {
+                        raw.e = e;
+                    },
+                );
+                if (!ok) throw raw.e;
+                return out.v as T;
+            },
+        [runMgmt],
     );
 
     const onIpRetry = useCallback(async () => {
@@ -421,160 +445,178 @@ export default function PublisherRecipientsPage({
         try {
             const typed = ipDraft.trim();
             if (typed) await setHelperIpManually(operatorId, typed);
-            await ipRepair.retry();
+            const ok = await ipRepair.retry();
+            if (ok) {
+                // The retry re-ran only the call to the relay, not
+                // whatever the original button did afterwards — so
+                // re-read everything it could have changed, and say it
+                // worked.
+                await Promise.all([
+                    reloadOperator(),
+                    reloadRecipients(),
+                    reloadArtifacts(),
+                ]);
+                setFreshTick((n) => n + 1);
+                action.report('ip', 'ok', t('pub.fb.retry_ok'));
+            } else {
+                action.report('ip', 'fail', t('pub.helper_ip.stale'));
+            }
         } catch (e) {
-            setError(String(e));
+            const f = explainFailure(t, e);
+            action.report('ip', 'fail', f.message, f.detail);
         } finally {
             setIpBusy(false);
         }
-    }, [ipDraft, ipRepair, operatorId]);
+    }, [
+        action.report,
+        ipDraft,
+        ipRepair,
+        operatorId,
+        reloadArtifacts,
+        reloadOperator,
+        reloadRecipients,
+        t,
+    ]);
 
     // ---- artifact actions ---------------------------------------------
 
     const sharedArtifact = artifacts.find((a) => a.kind === 'shared_sbp') ?? null;
     const rawArtifact = artifacts.find((a) => a.kind === 'raw_sbp') ?? null;
-    const sbpxArtifacts = artifacts.filter((a) => a.kind === 'sbpx');
-    const sharedIsLastRow =
-        !rawArtifact?.exists && sbpxArtifacts.length === 0;
+    const people = useMemo(
+        () => joinPeople(recipients, artifacts),
+        [recipients, artifacts],
+    );
 
+    /** "Send" hands the file to the system: the share menu on a phone,
+     *  the file's folder on a computer. Daal cannot know whether the
+     *  person then actually sent it, so the result says what DID happen
+     *  — the file is ready and a window opened — and not "sent". */
     const onShareShared = useCallback(async () => {
-        setArtifactBusy('share');
-        setNotice(null);
-        try {
-            await Wizard.shareInvite(operatorId, friendlyName);
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setArtifactBusy(null);
-        }
-    }, [friendlyName, operatorId]);
+        await action.run(
+            'everyone:send',
+            () => Wizard.shareInvite(operatorId, friendlyName),
+            { ok: t('pub.fb.send.ok'), fail: t('pub.fb.send.fail') },
+        );
+    }, [action.run, friendlyName, operatorId, t]);
 
     const onSaveShared = useCallback(async () => {
-        setArtifactBusy('save');
-        setNotice(null);
-        try {
-            await Wizard.saveSharedSbpToDownloads(
-                operatorId,
-                `${friendlyName}.sbp`,
-            );
-            setNotice(t('pub.share.saved'));
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setArtifactBusy(null);
-        }
-    }, [friendlyName, operatorId, t]);
+        const name = `${friendlyName}.sbp`;
+        await action.run(
+            'everyone:save',
+            () => Wizard.saveSharedSbpToDownloads(operatorId, name),
+            {
+                ok: t('pub.fb.save.ok').replace('{name}', name),
+                fail: t('pub.fb.save.fail'),
+            },
+        );
+    }, [action.run, friendlyName, operatorId, t]);
 
-    /** Copy the everyone pack as pasteable base64 text.
+    /** Copy the everyone file as pasteable text.
      *
-     *  The other half of the base64-paste lane: AddSheet can already
-     *  IMPORT a pasted bundle, but until this button there was no way
-     *  inside any Daal app to PRODUCE one — the operator's only offline
-     *  options were a QR (needs both people in one room) or a file (the
-     *  thing the messenger bans). This is the affordance that still
-     *  works on the day file transfer stops.
+     *  The other half of the paste lane: the client can already IMPORT
+     *  a pasted file, but until this button there was no way inside any
+     *  Daal app to PRODUCE one — the operator's only offline options
+     *  were a QR (needs both people in one room) or a file (the thing
+     *  the messenger bans). This is the affordance that still works on
+     *  the day file transfer stops.
      *
      *  'shared' is deliberate and matches the QR button: the everyone
-     *  pack is the only artifact that can connect anybody.
+     *  file is the only one that can connect anybody.
      */
     const onCopyPasteable = useCallback(async () => {
-        setArtifactBusy('copy');
-        setNotice(null);
-        try {
-            const text = await Wizard.copyPasteable(operatorId, 'shared');
-            await navigator.clipboard.writeText(text);
-            setNotice(t('pub.artifacts.copied'));
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setArtifactBusy(null);
-        }
-    }, [operatorId, t]);
+        await action.run(
+            'everyone:copy',
+            async () => {
+                const text = await Wizard.copyPasteable(operatorId, 'shared');
+                await navigator.clipboard.writeText(text);
+            },
+            { ok: t('pub.artifacts.copied'), fail: t('pub.fb.copy.fail') },
+        );
+    }, [action.run, operatorId, t]);
 
-    /** Build the shared pack when the staged file is missing.
+    /** Make the everyone file when it is missing from this device.
      *
-     *  It runs the *same* destructive command as "Rotate & re-share":
+     *  It runs the *same* destructive command as "Replace this file":
      *  `produce_shared_sbp` unconditionally revokes the shared `r0` user
-     *  before re-minting it, which invalidates every shared pack already
-     *  handed out. It used to be the one unguarded caller, gated purely
-     *  on whether the staged file happened to exist — and file existence
-     *  is not a proxy for "nothing has been distributed": the staging
-     *  dir is wiped by panic-wipe, skipped by app-data restores, and
-     *  cleanable by hand while the whole family still holds working
+     *  before re-minting it, which invalidates every everyone file
+     *  already handed out. It used to be the one unguarded caller, gated
+     *  purely on whether the staged file happened to exist — and file
+     *  existence is not a proxy for "nothing has been distributed": the
+     *  staging dir is wiped by panic-wipe, skipped by app-data restores,
+     *  and cleanable by hand while the whole family still holds working
      *  copies. In that state the screen said "missing — build it" and
      *  one tap silently killed every relative's connection.
      *
      *  So both paths confirm. The copy differs because the situations
      *  read differently to the user, but the warning is the same. */
     const onBuildShared = useCallback(async () => {
-        setArtifactBusy('build');
-        setNotice(null);
-        const ok = await runMgmt(async () => {
-            await Wizard.produceSharedSbp(operatorId);
-        }, setError);
+        const r = await action.run(
+            'everyone:make',
+            viaMgmt(() => Wizard.produceSharedSbp(operatorId)),
+            { ok: t('pub.fb.everyone_made'), fail: t('pub.fb.everyone_made.fail') },
+        );
+        if (!r.ran) return;
         setConfirmBuild(false);
-        if (ok) {
-            await reloadArtifacts();
-            setNotice(t('pub.artifacts.shared.built'));
-        }
-        setArtifactBusy(null);
-    }, [operatorId, reloadArtifacts, runMgmt, t]);
+        if (r.ok) await reloadArtifacts();
+    }, [action.run, operatorId, reloadArtifacts, t, viaMgmt]);
 
-    /** Rotate: re-mints the shared r0 user, which INVALIDATES every
-     *  shared pack already distributed. Behind a confirm for exactly
-     *  that reason. */
+    /** Replace: re-mints the shared r0 user, which INVALIDATES every
+     *  everyone file already distributed. Behind a confirm for exactly
+     *  that reason.
+     *
+     *  Two steps, reported separately: a share window that fails to
+     *  open after the file WAS replaced must not be reported as "the
+     *  file was not replaced" — every copy out there is already dead. */
     const onRotateShared = useCallback(async () => {
-        setArtifactBusy('rotate');
-        setNotice(null);
-        const ok = await runMgmt(async () => {
-            await Wizard.produceSharedSbp(operatorId);
-        }, setError);
+        const made = await action.run(
+            'everyone:replace',
+            viaMgmt(() => Wizard.produceSharedSbp(operatorId)),
+            { ok: null, fail: t('pub.fb.everyone_replaced.fail') },
+        );
+        if (!made.ran) return;
         setConfirmRotate(false);
-        if (ok) {
-            await reloadArtifacts();
-            try {
-                await Wizard.shareInvite(operatorId, friendlyName);
-            } catch (e) {
-                setError(String(e));
-            }
-        }
-        setArtifactBusy(null);
-    }, [friendlyName, operatorId, reloadArtifacts, runMgmt]);
+        if (!made.ok) return;
+        await reloadArtifacts();
+        await action.run(
+            'everyone:replace',
+            () => Wizard.shareInvite(operatorId, friendlyName),
+            {
+                ok: t('pub.fb.everyone_replaced'),
+                fail: t('pub.fb.everyone_replaced.send_fail'),
+            },
+        );
+    }, [action.run, friendlyName, operatorId, reloadArtifacts, t, viaMgmt]);
 
     const onResendSbpx = useCallback(
         async (path: string, label: string) => {
-            setArtifactBusy(path);
-            setNotice(null);
-            try {
-                await Wizard.shareInviteSbpx(path, label);
-            } catch (e) {
-                setError(String(e));
-            } finally {
-                setArtifactBusy(null);
-            }
+            await action.run(
+                `send:${path}`,
+                () => Wizard.shareInviteSbpx(path, label),
+                { ok: t('pub.fb.send.ok'), fail: t('pub.fb.send.fail') },
+            );
         },
-        [],
+        [action.run, t],
     );
 
+    /** The action the owner pressed four times. It always worked; it
+     *  never said so. */
     const onSaveSbpx = useCallback(
         async (path: string, label: string) => {
-            setArtifactBusy(path);
-            setNotice(null);
-            try {
-                await Wizard.saveSbpxToDownloads(path, `${label}.sbpx`);
-                setNotice(t('pub.share.saved'));
-            } catch (e) {
-                setError(String(e));
-            } finally {
-                setArtifactBusy(null);
-            }
+            const name = `${label}.sbpx`;
+            await action.run(
+                `save:${path}`,
+                () => Wizard.saveSbpxToDownloads(path, name),
+                {
+                    ok: t('pub.fb.save.ok').replace('{name}', name),
+                    fail: t('pub.fb.save.fail'),
+                },
+            );
         },
-        [t],
+        [action.run, t],
     );
 
-    /** A recipient row whose .sbpx never got written — the rewrite fails
-     *  closed on a pre-Tier-2 box. Until now there was no way to ask for
-     *  a retry anywhere in the app.
+    /** A person whose file never got written — the rewrite fails closed
+     *  on a pre-Tier-2 box.
      *
      *  It calls `recipientRepackSbpx`, NOT `recipientProvision`. The
      *  latter has no upsert path: it burns a fresh `r<n>`, mints a
@@ -585,20 +627,27 @@ export default function PublisherRecipientsPage({
      *  repack re-mints the recipient's *existing* box user instead. */
     const onRebuildSbpx = useCallback(
         async (r: RecipientSummary) => {
-            setArtifactBusy(`rebuild:${r.id}`);
-            setNotice(null);
-            const ok = await runMgmt(async () => {
-                await Wizard.recipientRepackSbpx(operatorId, r.id);
-            }, setError);
-            if (ok) {
+            const res = await action.run(
+                `remake:${r.id}`,
+                viaMgmt(() => Wizard.recipientRepackSbpx(operatorId, r.id)),
+                {
+                    ok: t('pub.fb.person_file_made').replace('{name}', personLabel(r)),
+                    fail: t('pub.fb.person_file_made.fail'),
+                },
+            );
+            if (res.ok) {
                 await Promise.all([reloadRecipients(), reloadArtifacts()]);
             }
-            setArtifactBusy(null);
         },
-        [operatorId, reloadArtifacts, reloadRecipients, runMgmt],
+        [action.run, operatorId, reloadArtifacts, reloadRecipients, t, viaMgmt],
     );
 
-    // ---- recipient actions --------------------------------------------
+    // ---- people actions -------------------------------------------------
+    //
+    // The sheets below keep their own busy flag and print a failure
+    // inside the sheet, next to the button that caused it. What they
+    // lacked was the other half: on success they simply closed. Each
+    // one now says what it did.
 
     const onAddSubmit = useCallback(async () => {
         if (!looksLikeDaalAddress(addAddress)) {
@@ -606,12 +655,14 @@ export default function PublisherRecipientsPage({
             return;
         }
         setAddBusy(true);
+        const added: { v: RecipientSummary | null } = { v: null };
         const ok = await runMgmt(async () => {
             const s = await Wizard.recipientProvision(
                 operatorId,
                 addAddress.trim(),
                 addDisplayName.trim(),
             );
+            added.v = s;
             setRecipients((prev) => [s, ...prev]);
         }, setAddError);
         setAddBusy(false);
@@ -620,8 +671,17 @@ export default function PublisherRecipientsPage({
             setAddDisplayName('');
             setShowAdd(false);
             await reloadArtifacts();
+            action.report(
+                'person:add',
+                'ok',
+                t('pub.fb.person_added').replace(
+                    '{name}',
+                    added.v ? personLabel(added.v) : '',
+                ),
+            );
         }
     }, [
+        action.report,
         addAddress,
         addDisplayName,
         operatorId,
@@ -642,26 +702,35 @@ export default function PublisherRecipientsPage({
         if (ok) {
             setConfirmRevoke(null);
             await reloadArtifacts();
+            action.report(
+                'person:revoke',
+                'ok',
+                t('pub.fb.access_removed').replace('{name}', personLabel(target)),
+            );
         }
-    }, [confirmRevoke, operatorId, reloadArtifacts, runMgmt]);
+    }, [action.report, confirmRevoke, operatorId, reloadArtifacts, runMgmt, t]);
 
     const onRemoveConfirm = useCallback(async () => {
         if (!confirmRemove) return;
+        const target = confirmRemove.recipient;
         setRemoveBusy(true);
         setRemoveError(null);
         try {
-            await Wizard.recipientDelete(operatorId, confirmRemove.recipient.id);
-            setRecipients((prev) =>
-                prev.filter((r) => r.id !== confirmRemove.recipient.id),
-            );
+            await Wizard.recipientDelete(operatorId, target.id);
+            setRecipients((prev) => prev.filter((r) => r.id !== target.id));
             setConfirmRemove(null);
             await reloadArtifacts();
+            action.report(
+                'person:remove',
+                'ok',
+                t('pub.fb.person_removed').replace('{name}', personLabel(target)),
+            );
         } catch (e) {
-            setRemoveError(String(e));
+            setRemoveError(failureBlock(t, e));
         } finally {
             setRemoveBusy(false);
         }
-    }, [confirmRemove, operatorId, reloadArtifacts]);
+    }, [action.report, confirmRemove, operatorId, reloadArtifacts, t]);
 
     // ---- Wave 3 Step 7: rotations ---------------------------------------
 
@@ -711,32 +780,33 @@ export default function PublisherRecipientsPage({
         }
     }, [operatorId, reloadArtifacts, reloadOperator, runMgmt]);
 
-    // The Sync button was dead in the shipped build: it passed pin: ''
-    // and validate_pin rejected it before the call ever left the app.
-    // Dropping the parameter is what fixes it.
+    // Compare the list here with the list on the relay. (It was dead in
+    // one shipped build: it passed pin: '' and validate_pin rejected it
+    // before the call ever left the app.) A maintainer's check, so it
+    // lives under Details — but it reaches the relay, takes seconds, and
+    // used to answer in grey text at the top of the page.
     const onSync = useCallback(async () => {
-        setSyncing(true);
-        setNotice(null);
-        await runMgmt(async () => {
-            const remote = await Wizard.recipientListRemote(operatorId);
-            const local = new Set(
-                recipients
-                    .filter((r) => r.revoked_at_unix === 0)
-                    .map((r) => r.address_str.toLowerCase()),
-            );
-            const remoteSet = new Set(remote.map((s) => s.toLowerCase()));
-            const onlyLocal = [...local].filter((a) => !remoteSet.has(a));
-            const onlyRemote = [...remoteSet].filter((a) => !local.has(a));
-            setNotice(
-                onlyLocal.length === 0 && onlyRemote.length === 0
-                    ? t('pub.recipients.sync.in_sync')
-                    : t('pub.recipients.sync.drift')
+        await action.run(
+            'details:compare',
+            viaMgmt(async () => {
+                const remote = await Wizard.recipientListRemote(operatorId);
+                const local = new Set(
+                    recipients
+                        .filter((r) => r.revoked_at_unix === 0)
+                        .map((r) => r.address_str.toLowerCase()),
+                );
+                const remoteSet = new Set(remote.map((s) => s.toLowerCase()));
+                const onlyLocal = [...local].filter((a) => !remoteSet.has(a));
+                const onlyRemote = [...remoteSet].filter((a) => !local.has(a));
+                return onlyLocal.length === 0 && onlyRemote.length === 0
+                    ? t('pub.details.compare.same')
+                    : t('pub.details.compare.differ')
                           .replace('{onlyLocal}', String(onlyLocal.length))
-                          .replace('{onlyRemote}', String(onlyRemote.length)),
-            );
-        }, setError);
-        setSyncing(false);
-    }, [operatorId, recipients, runMgmt, t]);
+                          .replace('{onlyRemote}', String(onlyRemote.length));
+            }),
+            { ok: (msg) => msg, fail: t('pub.details.compare.fail') },
+        );
+    }, [action.run, operatorId, recipients, t, viaMgmt]);
 
     // ---- danger zone ---------------------------------------------------
 
@@ -748,21 +818,21 @@ export default function PublisherRecipientsPage({
         // is non-exportable, so a factory reset otherwise destroys every
         // relay this device publishes, and there is no escrow), but it
         // is not one to make on an unannounced single tap.
+        if (action.busy !== null) return;
         if (!window.confirm(t('pub.danger.recovery.confirm'))) return;
-        setDangerBusy(true);
-        setNotice(null);
-        try {
-            const path = await Wizard.saveRecoveryKey(
-                operatorId,
-                `${friendlyName}-recovery.daalkey`,
-            );
-            setNotice(`${t('pub.danger.recovery.saved')} ${path}`);
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setDangerBusy(false);
-        }
-    }, [friendlyName, operatorId, t]);
+        await action.run(
+            'danger:recovery',
+            () =>
+                Wizard.saveRecoveryKey(
+                    operatorId,
+                    `${friendlyName}-recovery.daalkey`,
+                ),
+            {
+                ok: (path) => `${t('pub.danger.recovery.saved')} ${path}`,
+                fail: t('pub.fb.recovery.fail'),
+            },
+        );
+    }, [action.busy, action.run, friendlyName, operatorId, t]);
 
     /** What the teardown sheet is about to destroy. Detail can be
      *  rendered before the summary lands, so fall back to the id — the
@@ -782,8 +852,14 @@ export default function PublisherRecipientsPage({
 
     // ---- render --------------------------------------------------------
 
+    const badge = operator ? relayBadge(operator.status) : null;
+    const tlsVerdict = rotateTlsDone
+        ? rotateTlsVerdict(rotateTlsDone, mirrorsInPack)
+        : null;
+    const relayGone = operator?.status === 'rebuild_failed';
+
     return (
-        <div style={{ padding: '12px 16px 24px 16px', display: 'grid', gap: 16 }}>
+        <div style={{ padding: '12px 16px 24px 16px', display: 'grid', gap: 20 }}>
             {/* ---------------- Header ---------------- */}
             <div style={{ display: 'grid', gap: 8 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -793,16 +869,11 @@ export default function PublisherRecipientsPage({
                     <Button variant="ghost" onClick={onBack}>
                         {t('pub.relay.back')}
                     </Button>
-                    {operator && (
-                        <StatusPill
-                            tone={
-                                operator.status === 'provisioned'
-                                    ? 'good'
-                                    : 'gold'
-                            }
-                        >
-                            {operator.status}
-                        </StatusPill>
+                    {/* What the app last recorded about this relay, in
+                        words — never the raw state token, and never
+                        green: nothing here has checked that it answers. */}
+                    {badge && (
+                        <StatusPill tone={badge.tone}>{t(badge.labelKey)}</StatusPill>
                     )}
                 </div>
 
@@ -819,12 +890,18 @@ export default function PublisherRecipientsPage({
                             }}
                         />
                         <div style={{ display: 'flex', gap: 8 }}>
-                            <Button onClick={() => void commitRename()}>
+                            <ActionButton
+                                action={action}
+                                k="rename"
+                                busyLabel={t('pub.fb.saving')}
+                                onClick={() => void commitRename()}
+                            >
                                 {t('common.save')}
-                            </Button>
+                            </ActionButton>
                             <Button
                                 variant="ghost"
                                 onClick={() => setRenaming(false)}
+                                disabled={action.busy !== null}
                             >
                                 {t('common.cancel')}
                             </Button>
@@ -862,55 +939,12 @@ export default function PublisherRecipientsPage({
                     </div>
                 )}
 
-                <div style={MONO}>
-                    {operator
-                        ? [
-                              operator.public_ip ||
-                                  operator.public_ipv6 ||
-                                  t('pub.relays.no_ip'),
-                              operator.server_type,
-                              operator.region,
-                          ]
-                              .filter(Boolean)
-                              .join(' · ')
-                        : ''}
-                </div>
-
-                {/* The custody tier, stated plainly. device_custody.rs is
-                    explicit that these strings carry the security promise,
-                    so we never print the hardware line on a device that
-                    fell back to a weaker tier. */}
-                {custody && (
-                    <div style={LABEL}>{t(custodyLabelKey(custody.level))}</div>
-                )}
-
-                {error && (
-                    /* pre-line: the E_RELAY_TOO_OLD path deliberately
-                       renders an explanation and the relay's own words
-                       as two paragraphs. */
-                    <div
-                        style={{
-                            color: 'var(--red)',
-                            fontSize: 12,
-                            whiteSpace: 'pre-line',
-                            lineHeight: 1.5,
-                        }}
-                    >
-                        {error}
-                        {looksUnreachable(error) && (
-                            <div
-                                style={{
-                                    color: 'var(--muted)',
-                                    lineHeight: 1.5,
-                                    marginTop: 4,
-                                }}
-                            >
-                                {t('pub.recipients.err_unreachable')}
-                            </div>
-                        )}
-                    </div>
-                )}
-                {notice && <div style={MONO}>{notice}</div>}
+                {/* A page that could not load says so here, in plain
+                    words with the relay's own words under them. Results
+                    of things the person DID are in the banner at the
+                    bottom of the screen, not here: this spot scrolls
+                    away. */}
+                {error && <div style={ERR_BLOCK}>{error}</div>}
 
                 {/* Last-resort helper-IP repair. Never a gate: by the time
                     this renders, the action has already tried a fresh
@@ -950,394 +984,77 @@ export default function PublisherRecipientsPage({
                 )}
             </div>
 
-            {/* ---------------- Artifacts ---------------- */}
-            <Section
-                eyebrow={t('pub.artifacts.eyebrow')}
-                title={t('pub.artifacts.title')}
-            >
-                {/* Say out loud which relay these files belong to. With
-                    several relays provisioned, a bare filename is not
-                    enough to know what you are about to hand someone. */}
-                <div style={{ ...LABEL, marginBottom: 8 }}>
-                    {t('pub.artifacts.for').replace('{relay}', title)}
-                </div>
+            {/* THE RELAY IS GONE. Above everything, and never folded
+                away: every section below offers an action against a
+                server that no longer exists. Set by a rebuild whose
+                delete leg succeeded and whose build leg did not — the
+                one failure on this ladder with no way back. */}
+            {relayGone && <RelayGonePanel t={t} operatorId={operatorId} />}
 
-                <Card>
-                    {/* --- the "everyone" pack --- */}
-                    {sharedArtifact?.exists ? (
-                        <ListRow
-                            title={t('pub.artifacts.shared.title')}
-                            subtitle={
-                                <span style={MONO}>
-                                    {baseName(sharedArtifact.path)}
-                                    {sharedArtifact.size_bytes > 0 && (
-                                        <>
-                                            {' · '}
-                                            {sizeLabel(sharedArtifact.size_bytes)}
-                                        </>
-                                    )}
-                                    {sharedArtifact.modified_at_unix > 0 && (
-                                        <>
-                                            {' · '}
-                                            {tsLabel(
-                                                sharedArtifact.modified_at_unix,
-                                            )}
-                                        </>
-                                    )}
-                                </span>
-                            }
-                            trailing={
-                                <span
-                                    style={{
-                                        display: 'inline-flex',
-                                        gap: 6,
-                                        flexWrap: 'wrap',
-                                    }}
-                                >
-                                    <Button
-                                        onClick={() => void onShareShared()}
-                                        disabled={artifactBusy !== null}
-                                    >
-                                        {t('pub.artifacts.share')}
-                                    </Button>
-                                    <Button
-                                        variant="secondary"
-                                        onClick={() => void onSaveShared()}
-                                        disabled={artifactBusy !== null}
-                                    >
-                                        {t('pub.share.save')}
-                                    </Button>
-                                    {/* The offline lane. Sits with the
-                                        other ways of handing this file
-                                        over, because that is what it
-                                        is — the same pack, travelling
-                                        as light instead of as a file,
-                                        for the days when sending a
-                                        file is the thing that cannot
-                                        happen. */}
-                                    <Button
-                                        variant="secondary"
-                                        onClick={() => setQrSend(true)}
-                                        disabled={artifactBusy !== null}
-                                    >
-                                        {t('pub.artifacts.qr')}
-                                    </Button>
-                                    {/* The same pack again, as text.
-                                        A QR needs the other person in
-                                        the room; text goes down any
-                                        chat that still passes
-                                        messages. */}
-                                    <Button
-                                        variant="secondary"
-                                        onClick={() => void onCopyPasteable()}
-                                        disabled={artifactBusy !== null}
-                                    >
-                                        {artifactBusy === 'copy'
-                                            ? t('pub.artifacts.copying')
-                                            : t('pub.artifacts.copy')}
-                                    </Button>
-                                    <Button
-                                        variant="secondary"
-                                        onClick={() => setConfirmRotate(true)}
-                                        disabled={artifactBusy !== null}
-                                    >
-                                        {t('pub.artifacts.rotate')}
-                                    </Button>
-                                </span>
-                            }
-                            last={sharedIsLastRow}
-                        />
-                    ) : (
-                        <ListRow
-                            title={t('pub.artifacts.shared.missing.title')}
-                            subtitle={t('pub.artifacts.shared.missing.body')}
-                            last={sharedIsLastRow}
-                            trailing={
-                                <Button
-                                    onClick={() => setConfirmBuild(true)}
-                                    disabled={artifactBusy !== null}
-                                >
-                                    {artifactBusy === 'build'
-                                        ? t('pub.artifacts.building')
-                                        : t('pub.artifacts.shared.build')}
-                                </Button>
-                            }
-                        />
-                    )}
+            {/* ---------------- 1. People ---------------- */}
+            <PeopleSection
+                t={t}
+                action={action}
+                loading={loading}
+                people={people}
+                onAdd={() => {
+                    setAddError(null);
+                    setShowAdd(true);
+                }}
+                onSend={(path, label) => void onResendSbpx(path, label)}
+                onSave={(path, label) => void onSaveSbpx(path, label)}
+                onRemake={(r) => void onRebuildSbpx(r)}
+                // Re-key this one person. It belongs on their row
+                // because that is its whole blast radius — one file
+                // dies, nobody else notices. The relay-wide change
+                // lives in the danger zone and is never offered here.
+                onReplace={(r) => {
+                    setRotateCredsError(null);
+                    setConfirmRotateCreds(r);
+                }}
+                onRemoveAccess={(r) => {
+                    setRevokeError(null);
+                    setConfirmRevoke({ recipient: r });
+                }}
+                // Once access is removed (the relay has forgotten them)
+                // the greyed-out row can be cleared from the list here.
+                onRemoveFromList={(r) => {
+                    setRemoveError(null);
+                    setConfirmRemove({ recipient: r });
+                }}
+            />
 
-                    {/* --- the raw signed bundle --- */}
-                    {rawArtifact?.exists && (
-                        <ListRow
-                            title={
-                                <span style={{ color: 'var(--muted)' }}>
-                                    {t('pub.artifacts.raw.title')}
-                                </span>
-                            }
-                            subtitle={
-                                <span style={MONO}>
-                                    {baseName(rawArtifact.path)}
-                                    {' · '}
-                                    {t('pub.artifacts.raw.not_connectable')}
-                                </span>
-                            }
-                            last={sbpxArtifacts.length === 0}
-                        />
-                    )}
+            {/* ---------------- 2. One file for everyone ---------------- */}
+            <EveryoneFileSection
+                t={t}
+                action={action}
+                file={sharedArtifact}
+                onSend={() => void onShareShared()}
+                onSave={() => void onSaveShared()}
+                // The offline lane: the same file, travelling as light
+                // instead of as a file, for the days when sending a
+                // file is the thing that cannot happen.
+                onQr={() => setQrSend(true)}
+                onCopy={() => void onCopyPasteable()}
+                onMake={() => setConfirmBuild(true)}
+                onReplace={() => setConfirmRotate(true)}
+            />
 
-                    {/* --- one row per recipient --- */}
-                    {sbpxArtifacts.map((a, i) => {
-                        const label =
-                            a.recipient_label || `#${a.recipient_id ?? '?'}`;
-                        const r =
-                            recipients.find((x) => x.id === a.recipient_id) ??
-                            null;
-                        const last = i === sbpxArtifacts.length - 1;
-                        if (!a.exists) {
-                            return (
-                                <ListRow
-                                    key={`${a.recipient_id}-missing`}
-                                    title={label}
-                                    subtitle={t(
-                                        r && r.revoked_at_unix > 0
-                                            ? 'pub.artifacts.sbpx.revoked'
-                                            : 'pub.artifacts.sbpx.missing',
-                                    )}
-                                    trailing={
-                                        /* Revoked rows keep their
-                                           artifact row (the roster shows
-                                           history) but must NOT offer a
-                                           rebuild: re-minting would hand
-                                           a working credential back to
-                                           someone deliberately cut off. */
-                                        r && r.revoked_at_unix === 0 && (
-                                            <Button
-                                                onClick={() =>
-                                                    void onRebuildSbpx(r)
-                                                }
-                                                disabled={artifactBusy !== null}
-                                            >
-                                                {artifactBusy ===
-                                                `rebuild:${r.id}`
-                                                    ? t('pub.artifacts.building')
-                                                    : t('pub.artifacts.sbpx.rebuild')}
-                                            </Button>
-                                        )
-                                    }
-                                    last={last}
-                                />
-                            );
-                        }
-                        return (
-                            <ListRow
-                                key={a.path}
-                                title={label}
-                                subtitle={
-                                    <span style={MONO}>
-                                        {baseName(a.path)}
-                                        {a.size_bytes > 0 && (
-                                            <>
-                                                {' · '}
-                                                {sizeLabel(a.size_bytes)}
-                                            </>
-                                        )}
-                                        {a.modified_at_unix > 0 && (
-                                            <>
-                                                {' · '}
-                                                {tsLabel(a.modified_at_unix)}
-                                            </>
-                                        )}
-                                    </span>
-                                }
-                                trailing={
-                                    <span
-                                        style={{
-                                            display: 'inline-flex',
-                                            gap: 6,
-                                            flexWrap: 'wrap',
-                                        }}
-                                    >
-                                        <Button
-                                            onClick={() =>
-                                                void onResendSbpx(a.path, label)
-                                            }
-                                            disabled={artifactBusy !== null}
-                                        >
-                                            {t('pub.recipients.resend')}
-                                        </Button>
-                                        <Button
-                                            variant="secondary"
-                                            onClick={() =>
-                                                void onSaveSbpx(a.path, label)
-                                            }
-                                            disabled={artifactBusy !== null}
-                                        >
-                                            {t('pub.share.save')}
-                                        </Button>
-                                    </span>
-                                }
-                                last={last}
-                            />
-                        );
-                    })}
-                </Card>
-            </Section>
+            {/* ---------------- 3. Keep it working ---------------- */}
+            <FreshnessPanel
+                t={t}
+                operatorId={operatorId}
+                reloadToken={freshTick}
+                action={action}
+            />
 
-            {/* ---------------- Recipients ---------------- */}
-            <Section
-                eyebrow={t('pub.recipients.eyebrow')}
-                title={t('pub.recipients.title')}
-                action={
-                    <span style={{ display: 'inline-flex', gap: 8 }}>
-                        <Button variant="secondary" onClick={() => void onSync()} disabled={syncing}>
-                            {syncing
-                                ? t('pub.recipients.syncing')
-                                : t('pub.recipients.sync')}
-                        </Button>
-                        <Button onClick={() => setShowAdd(true)}>
-                            {t('pub.recipients.add')}
-                        </Button>
-                    </span>
-                }
-            >
-                {recipients.length === 0 && !loading && (
-                    <Card>
-                        <ListRow
-                            title={t('pub.recipients.empty.title')}
-                            subtitle={t('pub.recipients.empty.help')}
-                            last
-                        />
-                    </Card>
-                )}
-                {recipients.length > 0 && (
-                    <Card>
-                        {recipients.map((r, i) => {
-                            const revoked = r.revoked_at_unix > 0;
-                            return (
-                                <ListRow
-                                    key={r.id}
-                                    title={
-                                        <span>
-                                            {r.display_name || r.name || `#${r.id}`}
-                                            {revoked && (
-                                                <span
-                                                    style={{
-                                                        marginInlineStart: 8,
-                                                        color: 'var(--red)',
-                                                        fontSize: 11,
-                                                        fontFamily:
-                                                            'var(--font-mono)',
-                                                    }}
-                                                >
-                                                    {t('pub.recipients.revoked')}
-                                                </span>
-                                            )}
-                                        </span>
-                                    }
-                                    subtitle={
-                                        <span
-                                            style={{
-                                                fontFamily: 'var(--font-mono)',
-                                                fontSize: 11,
-                                            }}
-                                        >
-                                            {shortAddr(r.address_str)}
-                                            {r.provisioned_at_unix > 0 && (
-                                                <>
-                                                    {' · '}
-                                                    {t('pub.recipients.added')}{' '}
-                                                    {tsLabel(
-                                                        r.provisioned_at_unix,
-                                                    )}
-                                                </>
-                                            )}
-                                        </span>
-                                    }
-                                    trailing={
-                                        <span
-                                            style={{
-                                                display: 'inline-flex',
-                                                gap: 6,
-                                                flexWrap: 'wrap',
-                                            }}
-                                        >
-                                            {/* Re-key this one person.
-                                                It belongs on their row
-                                                because that is its whole
-                                                blast radius — one file
-                                                dies, nobody else notices.
-                                                The relay-wide rotation
-                                                lives in the danger zone
-                                                and is never offered from
-                                                here. */}
-                                            {!revoked && (
-                                                <Button
-                                                    variant="secondary"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setConfirmRotateCreds(r);
-                                                        setRotateCredsError(null);
-                                                    }}
-                                                    disabled={rotateCredsBusy}
-                                                >
-                                                    {t('pub.recipients.rotate')}
-                                                </Button>
-                                            )}
-                                            {!revoked && (
-                                                <Button
-                                                    variant="danger"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setConfirmRevoke({
-                                                            recipient: r,
-                                                        });
-                                                        setRevokeError(null);
-                                                    }}
-                                                >
-                                                    {t('pub.recipients.revoke')}
-                                                </Button>
-                                            )}
-                                            {/* Once revoked (on-box teardown
-                                                done) the greyed-out row can be
-                                                purged from the local roster. */}
-                                            {revoked && (
-                                                <Button
-                                                    variant="secondary"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setConfirmRemove({
-                                                            recipient: r,
-                                                        });
-                                                        setRemoveError(null);
-                                                    }}
-                                                >
-                                                    {t('pub.recipients.remove')}
-                                                </Button>
-                                            )}
-                                        </span>
-                                    }
-                                    last={i === recipients.length - 1}
-                                />
-                            );
-                        })}
-                    </Card>
-                )}
-            </Section>
-
-            {/* ---------------- Danger ---------------- */}
-            <FreshnessPanel t={t} operatorId={operatorId} reloadToken={freshTick} />
-
-            <Section
-                eyebrow={t('pub.danger.eyebrow')}
+            {/* ---------------- 4. Danger zone ---------------- */}
+            <Collapsible
                 title={t('pub.danger.title')}
+                summary={t('pub.danger.line')}
+                open={dangerOpen}
+                onToggle={() => setDangerOpen((v) => !v)}
             >
-                {/* THE RELAY IS GONE. Above everything, because every
-                    row below offers an action against a server that no
-                    longer exists. Set by a rebuild whose delete leg
-                    succeeded and whose build leg did not — the one
-                    failure on this ladder with no way back. */}
-                {operator?.status === 'rebuild_failed' && (
-                    <RelayGonePanel t={t} operatorId={operatorId} />
-                )}
                 <Card>
                     {/* Wave 6. The rotation recommender finally has a
                         caller, and this is where it belongs: above the
@@ -1359,13 +1076,15 @@ export default function PublisherRecipientsPage({
                         title={t('pub.danger.recovery.title')}
                         subtitle={t('pub.danger.recovery.body')}
                         trailing={
-                            <Button
+                            <ActionButton
+                                action={action}
+                                k="danger:recovery"
+                                busyLabel={t('pub.fb.saving')}
                                 variant="secondary"
                                 onClick={() => void onSaveRecoveryKey()}
-                                disabled={dangerBusy}
                             >
                                 {t('pub.danger.recovery.action')}
-                            </Button>
+                            </ActionButton>
                         }
                     />
                     {/* Wave 3 Step 7 (L2). It is relay-wide, which is
@@ -1476,7 +1195,94 @@ export default function PublisherRecipientsPage({
                         last
                     />
                 </Card>
-            </Section>
+            </Collapsible>
+
+            {/* ---------------- Details ----------------
+                What a maintainer asks about and a family member never
+                does. The signed bundle with nobody's access in it used
+                to sit in the files list between the everyone file and
+                the first person's, labelled "not connectable — internal
+                build artifact": true, and of no use to the person
+                reading it. */}
+            <Collapsible
+                title={t('pub.details.title')}
+                summary={t('pub.details.line')}
+                open={detailsOpen}
+                onToggle={() => setDetailsOpen((v) => !v)}
+            >
+                <Card>
+                    <ListRow
+                        title={t('pub.details.server')}
+                        subtitle={
+                            <span style={MONO} dir="ltr">
+                                {operator
+                                    ? [
+                                          operator.public_ip ||
+                                              operator.public_ipv6 ||
+                                              t('pub.relays.no_ip'),
+                                          operator.server_type,
+                                          operator.region,
+                                      ]
+                                          .filter(Boolean)
+                                          .join(' · ')
+                                    : ''}
+                            </span>
+                        }
+                    />
+                    {/* The custody tier, stated plainly. device_custody.rs
+                        is explicit that these strings carry the security
+                        promise, so we never print the hardware line on a
+                        device that fell back to a weaker tier. */}
+                    {custody && (
+                        <ListRow
+                            title={t('pub.details.key')}
+                            subtitle={t(custodyLabelKey(custody.level))}
+                            stack
+                        />
+                    )}
+                    {rawArtifact?.exists && (
+                        <ListRow
+                            title={t('pub.details.signed_file')}
+                            subtitle={
+                                <span style={{ display: 'grid', gap: 3 }}>
+                                    <span>{t('pub.details.signed_file.line')}</span>
+                                    <span style={MONO} dir="ltr">
+                                        {baseName(rawArtifact.path)}
+                                        {rawArtifact.modified_at_unix > 0 && (
+                                            <>
+                                                {' · '}
+                                                {tsLabel(rawArtifact.modified_at_unix)}
+                                            </>
+                                        )}
+                                    </span>
+                                </span>
+                            }
+                            stack
+                        />
+                    )}
+                    <ListRow
+                        title={t('pub.details.compare')}
+                        subtitle={t('pub.details.compare.line')}
+                        trailing={
+                            <ActionButton
+                                action={action}
+                                k="details:compare"
+                                busyLabel={t('pub.fb.checking')}
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => void onSync()}
+                            >
+                                {t('pub.details.compare.action')}
+                            </ActionButton>
+                        }
+                        last
+                    />
+                </Card>
+            </Collapsible>
+
+            {/* The answer to every tap. Pinned to the screen, above any
+                open sheet, so it is seen wherever the page is scrolled. */}
+            <ActionToast t={t} outcome={action.outcome} onDismiss={action.dismiss} />
 
             {/* ---------------- Sheets ---------------- */}
 
@@ -1538,22 +1344,7 @@ export default function PublisherRecipientsPage({
                         )}
                         {addError && (
                             <>
-                                <div
-                                    style={{ color: 'var(--red)', fontSize: 12 }}
-                                >
-                                    {addError}
-                                </div>
-                                {looksUnreachable(addError) && (
-                                    <div
-                                        style={{
-                                            fontSize: 11,
-                                            color: 'var(--muted)',
-                                            lineHeight: 1.5,
-                                        }}
-                                    >
-                                        {t('pub.recipients.err_unreachable')}
-                                    </div>
-                                )}
+                                <div style={ERR_BLOCK}>{addError}</div>
                             </>
                         )}
                         <div style={MONO}>
@@ -1567,7 +1358,7 @@ export default function PublisherRecipientsPage({
                 <Sheet
                     title={t('pub.artifacts.rotate.title')}
                     onClose={() => {
-                        if (artifactBusy === null) setConfirmRotate(false);
+                        if (action.busy === null) setConfirmRotate(false);
                     }}
                     width={520}
                     footer={
@@ -1575,19 +1366,19 @@ export default function PublisherRecipientsPage({
                             <Button
                                 variant="ghost"
                                 onClick={() => setConfirmRotate(false)}
-                                disabled={artifactBusy !== null}
+                                disabled={action.busy !== null}
                             >
                                 {t('common.cancel')}
                             </Button>
-                            <Button
+                            <ActionButton
+                                action={action}
+                                k="everyone:replace"
+                                busyLabel={t('pub.artifacts.building')}
                                 variant="danger"
                                 onClick={() => void onRotateShared()}
-                                disabled={artifactBusy !== null}
                             >
-                                {artifactBusy === 'rotate'
-                                    ? t('pub.artifacts.building')
-                                    : t('pub.artifacts.rotate.confirm')}
-                            </Button>
+                                {t('pub.artifacts.rotate.confirm')}
+                            </ActionButton>
                         </span>
                     }
                 >
@@ -1607,7 +1398,7 @@ export default function PublisherRecipientsPage({
                 <Sheet
                     title={t('pub.artifacts.shared.build.title')}
                     onClose={() => {
-                        if (artifactBusy === null) setConfirmBuild(false);
+                        if (action.busy === null) setConfirmBuild(false);
                     }}
                     width={520}
                     footer={
@@ -1615,18 +1406,18 @@ export default function PublisherRecipientsPage({
                             <Button
                                 variant="ghost"
                                 onClick={() => setConfirmBuild(false)}
-                                disabled={artifactBusy !== null}
+                                disabled={action.busy !== null}
                             >
                                 {t('common.cancel')}
                             </Button>
-                            <Button
+                            <ActionButton
+                                action={action}
+                                k="everyone:make"
+                                busyLabel={t('pub.artifacts.building')}
                                 onClick={() => void onBuildShared()}
-                                disabled={artifactBusy !== null}
                             >
-                                {artifactBusy === 'build'
-                                    ? t('pub.artifacts.building')
-                                    : t('pub.artifacts.shared.build')}
-                            </Button>
+                                {t('pub.everyone.make')}
+                            </ActionButton>
                         </span>
                     }
                 >
@@ -1673,18 +1464,14 @@ export default function PublisherRecipientsPage({
                         <div style={{ fontSize: 13, color: 'var(--fg)' }}>
                             {t('pub.recipients.revoke.body').replace(
                                 '{name}',
-                                confirmRevoke.recipient.display_name ||
-                                    confirmRevoke.recipient.name ||
-                                    `#${confirmRevoke.recipient.id}`,
+                                personLabel(confirmRevoke.recipient),
                             )}
                         </div>
                         <div style={MONO}>
                             {confirmRevoke.recipient.address_str}
                         </div>
                         {revokeError && (
-                            <div style={{ color: 'var(--red)', fontSize: 12 }}>
-                                {revokeError}
-                            </div>
+                            <div style={ERR_BLOCK}>{revokeError}</div>
                         )}
                     </div>
                 </Sheet>
@@ -1722,18 +1509,14 @@ export default function PublisherRecipientsPage({
                         <div style={{ fontSize: 13, color: 'var(--fg)' }}>
                             {t('pub.recipients.remove.body').replace(
                                 '{name}',
-                                confirmRemove.recipient.display_name ||
-                                    confirmRemove.recipient.name ||
-                                    `#${confirmRemove.recipient.id}`,
+                                personLabel(confirmRemove.recipient),
                             )}
                         </div>
                         <div style={MONO}>
                             {confirmRemove.recipient.address_str}
                         </div>
                         {removeError && (
-                            <div style={{ color: 'var(--red)', fontSize: 12 }}>
-                                {removeError}
-                            </div>
+                            <div style={ERR_BLOCK}>{removeError}</div>
                         )}
                     </div>
                 </Sheet>
@@ -1745,7 +1528,7 @@ export default function PublisherRecipientsPage({
                 <Sheet
                     title={t('pub.recipients.rotate.title').replace(
                         '{name}',
-                        recipientLabel(confirmRotateCreds),
+                        personLabel(confirmRotateCreds),
                     )}
                     onClose={() => {
                         if (!rotateCredsBusy) setConfirmRotateCreds(null);
@@ -1769,7 +1552,7 @@ export default function PublisherRecipientsPage({
                                     ? t('pub.recipients.rotating')
                                     : t('pub.recipients.rotate.confirm').replace(
                                           '{name}',
-                                          recipientLabel(confirmRotateCreds),
+                                          personLabel(confirmRotateCreds),
                                       )}
                             </Button>
                         </span>
@@ -1788,7 +1571,7 @@ export default function PublisherRecipientsPage({
                         >
                             {t('pub.recipients.rotate.body').replace(
                                 /\{name\}/g,
-                                recipientLabel(confirmRotateCreds),
+                                personLabel(confirmRotateCreds),
                             )}
                         </div>
                         <div style={MONO}>
@@ -1830,7 +1613,10 @@ export default function PublisherRecipientsPage({
                                 other half is getting the file into their
                                 hands, and nothing does that for them. */}
                             {rotateCredsDone.sbpx_path && (
-                                <Button
+                                <ActionButton
+                                    action={action}
+                                    k={`send:${rotateCredsDone.sbpx_path}`}
+                                    busyLabel={t('pub.fb.opening')}
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         void onResendSbpx(
@@ -1839,10 +1625,9 @@ export default function PublisherRecipientsPage({
                                                 rotateCredsDone.name,
                                         );
                                     }}
-                                    disabled={artifactBusy !== null}
                                 >
                                     {t('pub.recipients.rotate.done.send')}
-                                </Button>
+                                </ActionButton>
                             )}
                         </span>
                     }
@@ -1989,7 +1774,7 @@ export default function PublisherRecipientsPage({
                 </Sheet>
             )}
 
-            {rotateTlsDone && (
+            {rotateTlsDone && tlsVerdict && (
                 <Sheet
                     title={t('pub.danger.rotate_tls.done.title')}
                     onClose={() => setRotateTlsDone(null)}
@@ -2043,43 +1828,49 @@ export default function PublisherRecipientsPage({
                             and the app now signs the relay's file again
                             and publishes the note by itself. The backend
                             decides which of five things is true for
-                            THIS relay; the copy never widens it. */}
+                            THIS relay; the copy never widens it.
+
+                            With one exception, and it narrows rather
+                            than widens: when signing the relay's file
+                            again FAILED, the backend can still answer
+                            "nobody", and this used to print "Nobody
+                            needs a new file" above the warning that
+                            said signing had failed. rotateTlsVerdict
+                            never lets that sentence stand. */}
                         <div
                             style={{
                                 fontSize: 13,
                                 lineHeight: 1.55,
-                                color:
-                                    rotateTlsDone.needs_file === 'everyone'
-                                        ? 'var(--red)'
-                                        : 'var(--fg)',
+                                color: tlsVerdict.alarming ? 'var(--red)' : 'var(--fg)',
                             }}
                         >
-                            {t(
-                                `pub.danger.rotate_tls.done.verdict.${rotateTlsDone.needs_file}`,
-                            )}
+                            {t(tlsVerdict.verdictKey)}
                         </div>
                         {/* The one step the app cannot take: Daal
                             publishes the note, never the file. */}
-                        {rotateTlsDone.refresh_note_published &&
-                            rotateTlsDone.needs_file !== 'nobody' && (
-                                <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
-                                    {t('pub.danger.rotate_tls.done.upload')}
-                                    {rotateTlsDone.signed_pack_path && (
-                                        <div style={MONO}>{rotateTlsDone.signed_pack_path}</div>
-                                    )}
-                                </div>
-                            )}
+                        {tlsVerdict.showUpload && (
+                            <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                                {t('pub.danger.rotate_tls.done.upload')}
+                                {rotateTlsDone.signed_pack_path && (
+                                    <div style={MONO} dir="ltr">
+                                        {rotateTlsDone.signed_pack_path}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         {/* Why the change is NOT reaching people by
                             itself, when it is not — each with the thing
                             that fixes it. */}
-                        {(rotateTlsDone.needs_file === 'one_route_until_new_file' ||
-                            rotateTlsDone.needs_file === 'everyone') && (
+                        {tlsVerdict.whyKey && (
                             <div style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.5 }}>
-                                {!rotateTlsDone.pack_resigned
-                                    ? t('pub.danger.rotate_tls.done.why.not_signed')
-                                    : mirrorsInPack > 0 && !rotateTlsDone.refresh_note_published
-                                      ? t('pub.danger.rotate_tls.done.why.note_not_published')
-                                      : t('pub.danger.rotate_tls.done.why.no_refresh_address')}
+                                {t(tlsVerdict.whyKey)}
+                            </div>
+                        )}
+                        {/* What to do when the relay's file could not
+                            be signed again. */}
+                        {tlsVerdict.nextKey && (
+                            <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                                {t(tlsVerdict.nextKey)}
                             </div>
                         )}
                         {/* A count of who HOLDS a file, in the default
@@ -2094,13 +1885,11 @@ export default function PublisherRecipientsPage({
                                       String(rotateTlsDone.live_recipients),
                                   )}
                         </div>
-                        {(rotateTlsDone.live_recipients > 0 ||
-                            rotateTlsDone.shared_pack_stale) &&
-                            rotateTlsDone.needs_file !== 'nobody' && (
-                                <div style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.5 }}>
-                                    {t('pub.danger.rotate_tls.done.local_files')}
-                                </div>
-                            )}
+                        {tlsVerdict.showLocalFiles && (
+                            <div style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.5 }}>
+                                {t('pub.danger.rotate_tls.done.local_files')}
+                            </div>
+                        )}
                         <RotationWarnings t={t} warnings={rotateTlsDone.warnings} />
                     </div>
                 </Sheet>

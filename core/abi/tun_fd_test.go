@@ -3,10 +3,11 @@ package abi
 import (
 	"encoding/json"
 	"errors"
-	"os"
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"daal/core/engine"
 )
 
 // mockTunFDDriver records OnTunFD / OnClearTunFD calls so the test can
@@ -37,10 +38,31 @@ func fdIsOpen(fd int) bool {
 	return errno == 0
 }
 
-// TestSetTunFdOwnershipSemantics pins Phase 45 invariant 3:
-// engine_set_tun_fd takes ownership; the engine closes it on
-// engine_clear_tun_fd. A subsequent set with a different fd rotates
-// (the previous fd is closed).
+// rawPipe returns the read end of a pipe as a bare fd number. Bare on
+// purpose: an *os.File would close the number again from its finalizer,
+// which is the very double close these tests are about.
+func rawPipe(t *testing.T) int {
+	t.Helper()
+	var p [2]int
+	if err := syscall.Pipe(p[:]); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(p[1]) })
+	return p[0]
+}
+
+// TestSetTunFdOwnershipSemantics pins who closes what.
+//
+// engine_set_tun_fd takes ownership of the HOST's copy and the engine
+// closes that copy exactly once: when a later set replaces it, or on
+// engine_clear_tun_fd. A running instance never works on that number —
+// it holds a duplicate (engine.androidPlatform.OpenInterface) that only
+// the instance closes. So a rotate and a clear must leave a duplicate
+// taken earlier fully usable, and must never close a number twice.
+//
+// (This test used to assert only "rotate closes the previous fd", which
+// was true and was the bug: the old instance was still running on that
+// same number and closed it again later.)
 func TestSetTunFdOwnershipSemantics(t *testing.T) {
 	resetTunFDForShutdown()
 	t.Cleanup(resetTunFDForShutdown)
@@ -48,14 +70,7 @@ func TestSetTunFdOwnershipSemantics(t *testing.T) {
 	drv := &mockTunFDDriver{}
 	RegisterTunFDDriver(drv)
 
-	// Open a real fd via pipe(2) so the close assertion is meaningful.
-	r1, w1, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	defer w1.Close() // we only care about the read end's fd
-	fd1 := int(r1.Fd())
-
+	fd1 := rawPipe(t)
 	body, err := SetTunFD(fd1)
 	if err != nil {
 		t.Fatalf("SetTunFD(fd1) error: %v", err)
@@ -73,45 +88,99 @@ func TestSetTunFdOwnershipSemantics(t *testing.T) {
 	if !fdIsOpen(fd1) {
 		t.Fatalf("fd1 (%d) closed prematurely", fd1)
 	}
-
-	// Rotate: set a fresh fd; previous should be closed.
-	r2, w2, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe2: %v", err)
+	if engine.CurrentTunFD() != fd1 {
+		t.Fatalf("engine sees TUN fd %d, want %d", engine.CurrentTunFD(), fd1)
 	}
-	defer w2.Close()
-	fd2 := int(r2.Fd())
+	// The instance running on TUN 1 holds its own copy.
+	inst1, err := syscall.Dup(fd1)
+	if err != nil {
+		t.Fatalf("dup: %v", err)
+	}
+	defer syscall.Close(inst1)
 
+	// Rotate: the host's previous copy is closed; the instance's is not.
+	fd2 := rawPipe(t)
 	if _, err := SetTunFD(fd2); err != nil {
 		t.Fatalf("SetTunFD(fd2) error: %v", err)
 	}
 	if fdIsOpen(fd1) {
-		t.Fatalf("rotate did not close previous fd1 (%d)", fd1)
+		t.Fatalf("rotate did not close the host's previous copy fd1 (%d)", fd1)
+	}
+	if !fdIsOpen(inst1) {
+		t.Fatalf("rotate closed the running instance's own copy (%d)", inst1)
 	}
 	if !fdIsOpen(fd2) {
 		t.Fatalf("fd2 (%d) closed prematurely after rotate", fd2)
 	}
 
-	// Clear: engine closes the current fd.
+	// The number fd1 had is now free and is reused by something
+	// unrelated. Nothing the engine does from here may close it.
+	unrelated, err := syscall.Open("/dev/null", syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer syscall.Close(unrelated)
+	if unrelated != fd1 {
+		if err := syscall.Dup2(unrelated, fd1); err != nil {
+			t.Fatalf("dup2: %v", err)
+		}
+		defer syscall.Close(fd1)
+	}
+
+	// Setting the SAME fd again is not a rotate and closes nothing.
+	if _, err := SetTunFD(fd2); err != nil {
+		t.Fatalf("SetTunFD(fd2) again: %v", err)
+	}
+	if !fdIsOpen(fd2) {
+		t.Fatalf("re-setting the current fd closed it (%d)", fd2)
+	}
+
+	inst2, err := syscall.Dup(fd2)
+	if err != nil {
+		t.Fatalf("dup: %v", err)
+	}
+	defer syscall.Close(inst2)
+
+	// Clear: the engine closes the host's current copy, once.
 	if _, err := ClearTunFD(); err != nil {
 		t.Fatalf("ClearTunFD: %v", err)
 	}
 	if fdIsOpen(fd2) {
 		t.Fatalf("ClearTunFD did not close fd2 (%d)", fd2)
 	}
+	if !fdIsOpen(inst2) {
+		t.Fatalf("ClearTunFD closed an instance's own copy (%d)", inst2)
+	}
 	if atomic.LoadInt32(&drv.clearN) != 1 {
 		t.Fatalf("expected one OnClearTunFD call, got %d", drv.clearN)
 	}
+	if engine.CurrentTunFD() != -1 {
+		t.Fatalf("engine still sees TUN fd %d after clear", engine.CurrentTunFD())
+	}
 
-	// Idempotency: second clear is a no-op.
+	// fd2's number is reused too; a second clear and a shutdown reset
+	// must both be no-ops for it.
+	again, err := syscall.Open("/dev/null", syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer syscall.Close(again)
+	if again != fd2 {
+		if err := syscall.Dup2(again, fd2); err != nil {
+			t.Fatalf("dup2: %v", err)
+		}
+		defer syscall.Close(fd2)
+	}
 	if _, err := ClearTunFD(); err != nil {
 		t.Fatalf("second ClearTunFD: %v", err)
 	}
-
-	// File descriptors are claimed; mark the *os.File so finalizers
-	// don't double-close.
-	_ = r1
-	_ = r2
+	resetTunFDForShutdown()
+	if !fdIsOpen(fd2) {
+		t.Fatalf("a second clear / shutdown closed fd %d again after it had been reused", fd2)
+	}
+	if !fdIsOpen(fd1) {
+		t.Fatalf("an unrelated file on the first TUN's old number (%d) was closed", fd1)
+	}
 }
 
 // TestSetTunFdReleasesOwnershipOnDriverFailure: when the driver
@@ -125,13 +194,8 @@ func TestSetTunFdReleasesOwnershipOnDriverFailure(t *testing.T) {
 	drv.failNext.Store(true)
 	RegisterTunFDDriver(drv)
 
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	defer r.Close()
-	defer w.Close()
-	fd := int(r.Fd())
+	fd := rawPipe(t)
+	defer syscall.Close(fd)
 
 	if _, err := SetTunFD(fd); err == nil {
 		t.Fatal("expected SetTunFD to surface driver error")

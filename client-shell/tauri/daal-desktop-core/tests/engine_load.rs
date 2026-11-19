@@ -46,7 +46,14 @@ fn engine_loads_and_sets_tunnel_socks() {
     let path = match locate_lib() {
         Some(p) => p,
         None => {
-            eprintln!("skipping: set DAAL_ENGINE_LIB to path of libdaalcore.so to run this test");
+            // See engine_gate.rs: under `./daal test` a missing library
+            // is a failure, not a quiet skip.
+            assert!(
+                env::var("DAAL_REQUIRE_ENGINE_LIB").as_deref() != Ok("1"),
+                "DAAL_REQUIRE_ENGINE_LIB=1 but no engine library was found (DAAL_ENGINE_LIB={:?})",
+                env::var("DAAL_ENGINE_LIB").ok()
+            );
+            eprintln!("SKIPPED (not a pass): set DAAL_ENGINE_LIB to the path of libdaalcore.so to run this test");
             return;
         }
     };

@@ -35,6 +35,7 @@
 // apart in the CLI.
 import { useState } from 'react';
 import { Wizard } from './wizardCommands';
+import { failureBlock } from './failureText';
 import type { AccountAuditReport } from './wizardCommands';
 import { Button, Card } from '../design/primitives';
 
@@ -59,7 +60,7 @@ export function RelayGonePanel({
         try {
             setReport(await Wizard.accountAudit(operatorId));
         } catch (e) {
-            setErr(String(e));
+            setErr(failureBlock(t, e));
         } finally {
             setBusy(false);
         }
@@ -79,7 +80,11 @@ export function RelayGonePanel({
                         {busy ? t('pub.danger.gone.checking') : t('pub.danger.gone.check')}
                     </Button>
                 </span>
-                {err && <div style={{ ...MUTED, color: 'var(--red)' }}>{err}</div>}
+                {err && (
+                    <div style={{ ...MUTED, color: 'var(--red)', whiteSpace: 'pre-line' }}>
+                        {err}
+                    </div>
+                )}
 
                 {report && (
                     <div style={{ display: 'grid', gap: 6 }}>

@@ -7,6 +7,10 @@
 //	registerProtectCallback → establish TUN → engine_set_tun_fd →
 //	engine_set_route → (traffic) → engine_clear_route
 //
+// and, while connected, the route SWITCH the service performs when the
+// person taps another route — in the order it used on the first phone
+// pass, the order it uses now, and the one in between (switch.go).
+//
 // What it supplies is exactly what the Android platform supplies and the
 // engine cannot: a TUN file descriptor, per-uid routing that sends every
 // other app's traffic into it, and the exclusion of its own uid that

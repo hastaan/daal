@@ -15,11 +15,11 @@ func engine_network_changed(kind, carrier, ssid *C.char,
 	out unsafe.Pointer, outLen C.int) C.int {
 	body, err := NetworkChanged(C.GoString(kind), C.GoString(carrier), C.GoString(ssid))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_network_changed", err)
 	}
 	if err != nil {
 		_ = copyOut(body, out, outLen)
-		return -1
+		return exportFail("engine_network_changed", err)
 	}
 	return copyOut(body, out, outLen)
 }

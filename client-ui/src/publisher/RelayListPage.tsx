@@ -17,7 +17,9 @@
 // One deliberate omission: there is NO health indicator. The mgmt plane
 // has no health or ping verb (cli_bridge.rs's CliRunner trait exposes
 // none), so a green dot here would be a guess dressed as a fact. The
-// chip reports lifecycle only and its subtitle says so.
+// chip reports what the app last recorded, in words that say so ("Set
+// up", never a green "LIVE") — see relayStatus.ts. It used to read LIVE
+// in green directly above a caption saying it was not a live check.
 
 import { useCallback, useEffect, useState } from 'react';
 import { Wizard } from './wizardCommands';
@@ -30,6 +32,9 @@ import {
     Sheet,
     StatusPill,
 } from '../design/primitives';
+import { relayBadge } from './relayStatus';
+import { ActionButton, ActionToast, useAction } from './useAction';
+import { explainFailure, failureBlock } from './failureText';
 
 interface Props {
     t: (k: string) => string;
@@ -47,34 +52,6 @@ function dateLabel(unix: number): string {
         return new Date(unix * 1000).toISOString().slice(0, 10);
     } catch {
         return '';
-    }
-}
-
-type Tone = 'good' | 'warn' | 'bad' | 'neutral' | 'gold';
-
-function statusTone(status: string): Tone {
-    switch (status) {
-        case 'provisioned':
-            return 'good';
-        case 'pre-provision':
-            return 'gold';
-        case 'decommissioned':
-            return 'neutral';
-        default:
-            return 'neutral';
-    }
-}
-
-function statusKey(status: string): string {
-    switch (status) {
-        case 'provisioned':
-            return 'pub.relays.status.provisioned';
-        case 'pre-provision':
-            return 'pub.relays.status.pre_provision';
-        case 'decommissioned':
-            return 'pub.relays.status.decommissioned';
-        default:
-            return 'pub.relays.status.unknown';
     }
 }
 
@@ -578,7 +555,11 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
     // Inline rename: id being renamed + the draft text.
     const [renamingId, setRenamingId] = useState<number | null>(null);
     const [draftName, setDraftName] = useState('');
-    const [renameBusy, setRenameBusy] = useState(false);
+    // Every action on this screen answers: progress on the button, a
+    // result pinned to the screen when it ends.
+    const explain = useCallback((e: unknown) => explainFailure(t, e), [t]);
+    const action = useAction(explain);
+    const renameBusy = action.busy !== null;
 
     // The relay whose teardown sheet is open. Modal, so the card behind
     // it needs no busy state of its own.
@@ -600,11 +581,11 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
             );
             setError(null);
         } catch (e) {
-            setError(String(e));
+            setError(failureBlock(t, e));
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [t]);
 
     useEffect(() => {
         void reload();
@@ -612,19 +593,18 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
 
     const commitRename = useCallback(
         async (op: OperatorSummary) => {
-            setRenameBusy(true);
-            try {
-                await Wizard.setOperatorNickname(op.id, draftName.trim());
+            const r = await action.run(
+                `rename:${op.id}`,
+                () => Wizard.setOperatorNickname(op.id, draftName.trim()),
+                { ok: t('pub.fb.renamed'), fail: t('pub.fb.renamed.fail') },
+            );
+            if (r.ok) {
                 setRenamingId(null);
                 setDraftName('');
                 await reload();
-            } catch (e) {
-                setError(String(e));
-            } finally {
-                setRenameBusy(false);
             }
         },
-        [draftName, reload],
+        [action.run, draftName, reload, t],
     );
 
 
@@ -671,6 +651,8 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                             color: 'var(--red)',
                             fontSize: 12,
                             padding: '6px 4px',
+                            whiteSpace: 'pre-line',
+                            lineHeight: 1.5,
                         }}
                     >
                         {error}
@@ -715,6 +697,7 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                         const since =
                             op.last_provisioned_at_unix || op.created_at_unix;
                         const renaming = renamingId === op.id;
+                        const badge = relayBadge(op.status);
                         return (
                             <Card
                                 key={op.id}
@@ -791,10 +774,8 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                                     flex: '0 0 auto',
                                                 }}
                                             >
-                                                <StatusPill
-                                                    tone={statusTone(op.status)}
-                                                >
-                                                    {t(statusKey(op.status))}
+                                                <StatusPill tone={badge.tone}>
+                                                    {t(badge.labelKey)}
                                                 </StatusPill>
                                                 {/* Affordance for the card-wide
                                                     tap target that replaced the
@@ -856,19 +837,23 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                         )}
                                     </div>
 
-                                    {/* The chip above is lifecycle, not
-                                        health — say it out loud rather than
-                                        letting a green dot imply an uptime
-                                        check nobody performed. */}
-                                    <div
-                                        style={{
-                                            ...META,
-                                            color: 'var(--dim)',
-                                            fontStyle: 'italic',
-                                        }}
-                                    >
-                                        {t('pub.relays.status.disclaimer')}
-                                    </div>
+                                    {/* The chip above is what the app
+                                        last recorded, not a check — say
+                                        so, and only while that is what
+                                        it is. Badge and caption come
+                                        from the same value, so they
+                                        cannot disagree again. */}
+                                    {badge.recordedOnly && !dead && (
+                                        <div
+                                            style={{
+                                                ...META,
+                                                color: 'var(--dim)',
+                                                fontStyle: 'italic',
+                                            }}
+                                        >
+                                            {t('pub.relays.status.disclaimer')}
+                                        </div>
+                                    )}
 
                                     <div
                                         style={{
@@ -880,15 +865,17 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                     >
                                         {renaming ? (
                                             <>
-                                                <Button
+                                                <ActionButton
+                                                    action={action}
+                                                    k={`rename:${op.id}`}
+                                                    busyLabel={t('pub.fb.saving')}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
                                                         void commitRename(op);
                                                     }}
-                                                    disabled={renameBusy}
                                                 >
                                                     {t('common.save')}
-                                                </Button>
+                                                </ActionButton>
                                                 <Button
                                                     variant="ghost"
                                                     onClick={(e) => {
@@ -971,6 +958,8 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                     }}
                 />
             )}
+
+            <ActionToast t={t} outcome={action.outcome} onDismiss={action.dismiss} />
         </div>
     );
 }

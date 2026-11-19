@@ -85,6 +85,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Wizard } from './wizardCommands';
+import { failureBlock } from './failureText';
 import type { RotateExecuteOutput, ServerTypeOption } from './wizardCommands';
 import { ListRow, Button, Sheet, Input } from '../design/primitives';
 import {
@@ -145,7 +146,14 @@ const BODY: React.CSSProperties = {
     lineHeight: 1.55,
 };
 const LABEL: React.CSSProperties = { fontSize: 12, color: 'var(--muted)' };
-const BAD: React.CSSProperties = { fontSize: 12, color: 'var(--red)', lineHeight: 1.5 };
+// pre-line: a failure arrives as plain words, a blank line, then the
+// relay's own words (failureText.ts).
+const BAD: React.CSSProperties = {
+    fontSize: 12,
+    color: 'var(--red)',
+    lineHeight: 1.5,
+    whiteSpace: 'pre-line',
+};
 const MUTED: React.CSSProperties = { ...BODY, color: 'var(--muted)', fontSize: 12 };
 const MONO: React.CSSProperties = { fontFamily: 'var(--font-mono)' };
 
@@ -358,7 +366,7 @@ export function RelayRebuild({
                     // the create leg, after the delete leg.
                     if (alive) {
                         setTypes(null);
-                        setErr(String(e));
+                        setErr(failureBlock(t, e));
                     }
                 } finally {
                     if (alive) setTypesBusy(false);

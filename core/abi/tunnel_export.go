@@ -13,7 +13,7 @@ func engine_set_tunnel_socks(host *C.char, port C.int,
 	body, err := SetTunnelSocks(C.GoString(host), int(port),
 		C.GoString(username), C.GoString(password))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_set_tunnel_socks", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -31,7 +31,7 @@ func engine_set_tunnel_socks(host *C.char, port C.int,
 func engine_set_tunnel_refresh(enabled C.int, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SetTunnelRefresh(enabled != 0)
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_set_tunnel_refresh", err)
 	}
 	return copyOut(body, out, outLen)
 }

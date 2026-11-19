@@ -419,5 +419,21 @@
     "vault.placeholder": "PIN",
     "vault.unlock": "Unlock",
     "vault.wrong_pin": "Wrong PIN",
-    "routes.budget.title": "Data cap"
+    "routes.budget.title": "Data cap",
+    "network.load_failed": "Daal could not read your connections. Try again.",
+    "network.action_failed": "That did not work. Try again.",
+    "network.switch_failed_kept": "That route could not be used. You are still connected through the other one.",
+    "network.switch_failed_none": "That route could not be used, and the one you were on could not be brought back. You are not connected now. Choose a route to connect again.",
+    "network.connect_timeout": "This is taking too long, so Daal stopped waiting. Look at the list to see what is connected, then try again.",
+    "network.try_again": "Try again",
+    "network.error_details": "Details",
+    "status.load_failed": "Daal could not read its status right now. It will keep trying.",
+    "engine.start_failed.title": "Daal could not start on this device",
+    "engine.start_failed.body": "Nothing on this page will work until it does. Close Daal and open it again. If this keeps happening, show the details below to the person who helps you with Daal.",
+    "pub.boot.unavailable": "Daal could not open what it has saved about your servers. Close Daal and open it again. If this keeps happening, show the details below to the person who helps you with Daal.",
+    "store.reset.title": "Your saved connections were reset",
+    "store.reset.body": "Something was wrong with the connections saved on this device, so Daal had to start again with an empty list. Add your file again to get them back.",
+    "store.reset.dismiss": "OK",
+    "conn.route_unnamed": "Current connection",
+    "conn.route_unnamed_detail": "name not available"
 }

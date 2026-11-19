@@ -40,6 +40,10 @@ import {
     tapAction,
     tapLabelKey,
 } from '../lib/routeCheck';
+import { routeForDisplay, summaryExtras } from '../lib/activeRoute';
+import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
+import { EngineStartNotice, StoreResetNotice } from './PageNotices';
+import { tapAllowedWithStartProblem, useEngineStartProblem } from '../lib/engineStart';
 import RecoverySheet from '../components/RecoverySheet';
 import type { SectionId } from '../shell/Sidebar';
 
@@ -117,6 +121,13 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     const [optimistic, setOptimistic] = useState<ConnState | null>(null);
     // Transient user-facing notice (export result, failed mode change, …).
     const [notice, setNotice] = useState<string | null>(null);
+    // The engine set a damaged store aside at start; said once
+    // (lib/storeNotice.ts), here and on the Connections page.
+    const [storeReset, setStoreReset] = useState(false);
+    // Daal could not start its engine. Without this the page drew an
+    // ordinary "not connected" with a Connect button, as if it had read
+    // that from somewhere.
+    const [startProblem, reportRejection] = useEngineStartProblem();
     useEffect(() => {
         if (!notice) return;
         const id = setTimeout(() => setNotice(null), 4000);
@@ -136,6 +147,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 ]);
                 if (cancelled) return;
                 setConn(c);
+                setStoreReset(storeResetNoticeDue(summaryExtras(c).storeRecovered));
                 setWhy(w);
                 setPointer(p);
                 setHealth(h);
@@ -147,7 +159,8 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     if (prev === c.state) return null;
                     return prev;
                 });
-            } catch {
+            } catch (e) {
+                reportRejection(e);
                 if (!cancelled) {
                     setConn((prev) =>
                         prev
@@ -246,6 +259,9 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
             return;
         }
         if (busy) return;
+        // Daal could not start: the notice on the page says so, and a
+        // connect (or a sheet offering other connects) could only fail.
+        if (!tapAllowedWithStartProblem(startProblem, action)) return;
         if (action === 'recovery') {
             setShowRecovery(true);
             return;
@@ -413,6 +429,18 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     </div>
                 )}
 
+                {startProblem && <EngineStartNotice t={t} detail={startProblem.detail} />}
+
+                {storeReset && (
+                    <StoreResetNotice
+                        t={t}
+                        onDismiss={() => {
+                            markStoreResetNoticeSeen();
+                            setStoreReset(false);
+                        }}
+                    />
+                )}
+
                 {refusedKey && (
                     <div
                         role="alert"
@@ -453,7 +481,10 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 </h1>
 
                 <RouteChip
-                    row={conn?.activeRoute}
+                    // A route whose details could not be read still has
+                    // an id: it gets our own words, never "No route
+                    // selected" under "You're connected."
+                    row={routeForDisplay(conn?.activeRoute, t)}
                     locale={locale}
                     t={t}
                     onClick={() => onNavigate('network')}

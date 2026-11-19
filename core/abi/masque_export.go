@@ -26,11 +26,11 @@ import "C"
 //export engine_set_masque_submode_override
 func engine_set_masque_submode_override(submode *C.char) C.int {
 	if loadedCore() == nil {
-		return -1
+		return exportNotReady("engine_set_masque_submode_override")
 	}
 	val := ""
 	if submode != nil {
 		val = C.GoString(submode)
 	}
-	return C.int(SetMasqueSubmodeOverride(val))
+	return exportCode("engine_set_masque_submode_override", SetMasqueSubmodeOverride(val))
 }

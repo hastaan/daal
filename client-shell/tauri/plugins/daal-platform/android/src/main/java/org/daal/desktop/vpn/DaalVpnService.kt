@@ -13,12 +13,14 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.daal.desktop.platform.DaalCoreBridge
+import org.daal.desktop.vpn.StartSequence.Outcome
 
 /**
  * Phase 45 — Real `VpnService` lifecycle. Replaces the legacy stub
@@ -31,15 +33,30 @@ import org.daal.desktop.platform.DaalCoreBridge
  *      notification.
  *   2. Wire the protect callback into DaalCoreBridge BEFORE the
  *      engine has any chance to open an upstream socket.
- *   3. `Builder.establish()` the TUN inbound, detach the fd (the
- *      engine takes ownership; we must not close the
- *      ParcelFileDescriptor).
- *   4. Hand the fd to the engine via DaalCoreBridge.setTunFd.
+ *   3. DaalCoreBridge.routePrecheck(routeId) — would the engine refuse
+ *      this route? If so nothing below happens (see SWITCHING).
+ *   4. ONLY IF NO TUN IS HELD: `Builder.establish()` the TUN inbound,
+ *      hand the fd to the engine via DaalCoreBridge.setTunFd and detach
+ *      it (the engine takes ownership; we must not close the
+ *      ParcelFileDescriptor). A start that finds a TUN held is a switch
+ *      and reuses it.
  *   5. Call DaalCoreBridge.setRoute(routeId) — this is what triggers
  *      Start() on the in-process driver.
  *   6. DaalCoreBridge.setTunnelRefresh(true) — put the engine's own
  *      scheduled fetches on the tunnel via its loopback SOCKS inlet.
  *   7. Start the scheduler pump (see startSchedulerPump).
+ *
+ * SWITCHING — a route is connected and Connect is tapped on another.
+ * The old route must keep carrying traffic until the engine has
+ * accepted the new one, and a new route that is refused or does not
+ * carry must not leave the person disconnected. `Builder.establish()`
+ * tears down the interface the old route is using, so a switch never
+ * calls it: the TUN is built once per connection and the engine gives
+ * each route's instance its own duplicate of it. What happens when the
+ * new route does not come up is decided in StartSequence and
+ * SwitchPolicy (pure, unit tested): the old route is kept if the engine
+ * still carries it, reconnected if it does not, and only with nothing
+ * to go back to does the service stop.
  *
  * On `ACTION_STOP` / `onRevoke` / `onDestroy`:
  *   1. stop the scheduler pump
@@ -84,8 +101,20 @@ import org.daal.desktop.platform.DaalCoreBridge
  * short-lived thread of its own until the start has let go, and only
  * then does the queued teardown run. `generation` is how a start learns
  * it has been superseded: every start and every stop takes a new number,
- * and a start that is no longer the newest undoes what it did and
- * leaves.
+ * and a start that is no longer the newest leaves at once, undoing
+ * nothing — a stop's teardown is queued right behind it, and a newer
+ * start carries on from the TUN and the route it leaves.
+ *
+ * A NEWER START cancels the same way, for the same reason (it is queued
+ * behind the check of the start it replaces), with one difference:
+ * clearRoute also disconnects a route that is CONNECTED, so it is
+ * called only while the older start is actually inside its connection
+ * check (SwitchPolicy.cancelStep).
+ *
+ * LOGGING. Every start, stop, supersede and teardown writes Log.i lines
+ * with the generation, the route id and the return code of each engine
+ * call (tag DaalVpnService). Route ids and closed codes only: nothing
+ * read from a file, no address, no credential.
  *
  * The page shows "Checking the connection…" for as long as the check
  * runs: it reads `route_check: "verifying"` from the engine's
@@ -111,27 +140,44 @@ class DaalVpnService : VpnService() {
         promoteToForeground(routeId)
         // Everything else — including the seconds-long connection
         // check inside setRoute — on the control thread.
-        val gen = synchronized(lifecycleLock) {
-          generation.incrementAndGet().also { lastStartGen = it }
+        val gen: Int
+        val previousStart: Int
+        synchronized(lifecycleLock) {
+          previousStart = lastStartGen
+          gen = generation.incrementAndGet()
+          lastStartGen = gen
+        }
+        Log.i(TAG, "start requested gen=$gen route=$routeId")
+        if (finishedStartGen < previousStart) {
+          // An older start is queued or running. This one is queued
+          // BEHIND it on the control thread, and the older one may be
+          // inside a connection check that lasts seconds (minutes, on a
+          // cold tor route): it is cancelled, not waited for.
+          Log.i(TAG, "supersede: start gen=$gen replaces start gen=$previousStart still in flight")
+          cancelInFlight(previousStart, stopping = false)
         }
         control.execute {
-          val ok = try {
+          val outcome = try {
             start(routeId, gen)
           } catch (t: Throwable) {
-            Log.e(TAG, "start threw: ${t.message}")
-            false
+            Log.e(TAG, "start gen=$gen route=$routeId threw: ${t.javaClass.simpleName}: ${t.message}")
+            // Where it stopped is unknown, so nothing is assumed to be
+            // up: release everything.
+            teardownEngine("start gen=$gen threw")
+            Outcome.DOWN
           } finally {
-            // Under cancelLock: a stop's cancel thread checks this and
-            // calls clearRoute under the same lock, so once this start
-            // is marked finished no late cancel can land on the start
+            // Under cancelLock: a cancel thread checks this and calls
+            // clearRoute under the same lock, so once this start is
+            // marked finished no late cancel can land on the start
             // queued behind it.
             synchronized(cancelLock) { finishedStartGen = gen }
           }
-          if (!ok && generation.get() == gen) {
-            // The connect failed and nothing replaced it: there is no
-            // tunnel to keep a foreground service for. (If a stop or a
-            // newer start superseded this one, the service's fate is
-            // theirs to decide.)
+          Log.i(TAG, "start end gen=$gen route=$routeId outcome=$outcome connected=$connected on=${activeRouteId ?: "-"}")
+          if (outcome == Outcome.DOWN && generation.get() == gen) {
+            // Nothing is connected and nothing replaced this request:
+            // there is no tunnel to keep a foreground service for. (If
+            // a stop or a newer start superseded this one, the service's
+            // fate is theirs to decide.)
             mainHandler.post {
               if (generation.get() == gen) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -143,7 +189,7 @@ class DaalVpnService : VpnService() {
         return START_STICKY
       }
       ACTION_STOP -> {
-        requestStop()
+        requestStop("ACTION_STOP")
         stopSelf()
         return START_NOT_STICKY
       }
@@ -151,6 +197,7 @@ class DaalVpnService : VpnService() {
         // Restart after a system OOM kill: we don't have the route
         // id, so the safest behaviour is to stop and let the user
         // re-connect.
+        Log.i(TAG, "onStartCommand with no action (restart after kill); stopping")
         stopSelf()
         return START_NOT_STICKY
       }
@@ -158,47 +205,67 @@ class DaalVpnService : VpnService() {
   }
 
   override fun onRevoke() {
-    requestStop()
+    requestStop("onRevoke")
     super.onRevoke()
   }
 
   override fun onDestroy() {
-    requestStop()
+    requestStop("onDestroy")
     super.onDestroy()
   }
 
   /**
-   * Runs on the control thread. Returns true when the tunnel is up and
-   * this start is still the newest request; false when it failed or was
-   * superseded (in both cases it has undone what it did).
+   * Runs on the control thread. The sequence itself — pre-check, TUN
+   * only when none is held, setRoute, and what to do when the route
+   * does not come up — is StartSequence (pure, unit tested); this
+   * supplies the Android and engine halves of each step.
    */
-  private fun start(routeId: String, gen: Int): Boolean {
+  private fun start(routeId: String, gen: Int): Outcome {
+    val host = object : StartSequence.Host {
+      override fun superseded() = generation.get() != gen
+      override fun tunHeld() = tunUp
+      override fun lastGood() = lastGoodRouteId
+      override fun setLastGood(routeId: String) { lastGoodRouteId = routeId }
+      override fun registerProtect(): Int {
+        // The protect callback runs on the binder thread the JNI hop
+        // arrives on; calling VpnService.protect from there is fine per
+        // Android docs.
+        DaalCoreBridge.protectImpl = { fd -> protect(fd) }
+        return DaalCoreBridge.registerProtectCallback()
+      }
+      override fun precheck(routeId: String) = this@DaalVpnService.precheck(routeId)
+      override fun establishTun() = this@DaalVpnService.establishTun(gen)
+      override fun retractRefresh() {
+        try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) {}
+      }
+      override fun setRoute(routeId: String) = checkedSetRoute(routeId, gen)
+      override fun engineView() = this@DaalVpnService.engineView()
+      override fun routeIsUp(routeId: String) = this@DaalVpnService.routeIsUp(routeId, gen)
+      override fun teardown(why: String) = teardownEngine("start gen=$gen: $why")
+      override fun note(note: SwitchPolicy.SwitchNote?) { lastSwitch = note }
+      override fun log(message: String) { Log.i(TAG, "start gen=$gen $message") }
+    }
+    return StartSequence(host).run(routeId)
+  }
+
+  /**
+   * Control thread. Builds the TUN and hands it to the engine. Returns
+   * null on success, else how the start ends.
+   */
+  private fun establishTun(gen: Int): Outcome? {
     fun superseded() = generation.get() != gen
-    if (superseded()) return false
-
-    // 1. Register the protect callback BEFORE the engine has any
-    //    chance to open an upstream socket. The protect callback
-    //    runs on the binder thread the JNI hop arrives on; calling
-    //    VpnService.protect from there is fine per Android docs.
-    DaalCoreBridge.protectImpl = { fd -> protect(fd) }
-    DaalCoreBridge.registerProtectCallback()
-
-    // 2. Establish the TUN inbound. We hold the ParcelFileDescriptor
-    //    until the engine has accepted ownership so that on rejection
-    //    we can close it cleanly (avoids a fd leak).
-    //
-    //    addDisallowedApplication(self) is what keeps the engine's own
-    //    upstream sockets (sing-box outbounds to the relay) OUT of the
-    //    TUN. On Android the VPN captures every app's traffic INCLUDING
-    //    the VPN app's, so without this exclusion the engine's dial to
-    //    the relay loops back into the TUN. The pure-Go alternatives —
-    //    per-socket protect() bound to an auto-detected interface, or
-    //    net.Interfaces()/sysfs enumeration — are unusable here: the
-    //    untrusted-app SELinux domain denies netlink RTM_GETLINK,
-    //    /proc/net/*, and /sys/class/net alike, so the engine can never
-    //    learn an interface to bind to. Excluding our own package makes
-    //    the exclusion at the routing layer, needs no interface list,
-    //    and lets the engine dial normally (auto_detect_interface off).
+    // addDisallowedApplication(self) is what keeps the engine's own
+    // upstream sockets (sing-box outbounds to the relay) OUT of the
+    // TUN. On Android the VPN captures every app's traffic INCLUDING
+    // the VPN app's, so without this exclusion the engine's dial to
+    // the relay loops back into the TUN. The pure-Go alternatives —
+    // per-socket protect() bound to an auto-detected interface, or
+    // net.Interfaces()/sysfs enumeration — are unusable here: the
+    // untrusted-app SELinux domain denies netlink RTM_GETLINK,
+    // /proc/net/*, and /sys/class/net alike, so the engine can never
+    // learn an interface to bind to. Excluding our own package makes
+    // the exclusion at the routing layer, needs no interface list,
+    // and lets the engine dial normally (auto_detect_interface off).
     val builder = Builder()
       .setSession("Daal")
       .setMtu(1500)
@@ -213,63 +280,78 @@ class DaalVpnService : VpnService() {
       // NameNotFoundException is impossible for our own package, but a
       // failure here would silently loop traffic — fail the connect
       // loudly instead.
-      Log.e(TAG, "addDisallowedApplication(self) failed: ${e.message}")
+      Log.e(TAG, "start gen=$gen addDisallowedApplication(self) failed: ${e.message}")
       DaalCoreBridge.protectImpl = null
-      return false
+      return Outcome.DOWN
     }
+    // We hold the ParcelFileDescriptor until the engine has accepted
+    // ownership so that on rejection we can close it cleanly (avoids a
+    // fd leak).
     val pfd: ParcelFileDescriptor = builder.establish()
       ?: run {
-        Log.w(TAG, "VpnService.Builder.establish() returned null")
+        Log.w(TAG, "start gen=$gen VpnService.Builder.establish() returned null (VPN permission lost?)")
         DaalCoreBridge.protectImpl = null
-        return false
+        return Outcome.DOWN
       }
     if (superseded()) {
-      // Stopped while the interface was being built: the engine has
+      // Superseded while the interface was being built: the engine has
       // seen nothing of this start yet.
+      Log.i(TAG, "start gen=$gen superseded while the TUN was being built; closing it")
       try { pfd.close() } catch (_: Throwable) {}
-      DaalCoreBridge.protectImpl = null
-      return false
+      return Outcome.SUPERSEDED
     }
 
-    // 3. Hand the fd to the engine. Use ParcelFileDescriptor.getFd()
-    //    first so we can still close(pfd) if the engine rejects it;
-    //    on success we detach so the engine owns the lifetime.
+    // Hand the fd to the engine. Use ParcelFileDescriptor.getFd()
+    // first so we can still close(pfd) if the engine rejects it;
+    // on success we detach so the engine owns the lifetime.
     val setRc = DaalCoreBridge.setTunFd(pfd.fd)
+    Log.i(TAG, "start gen=$gen set_tun_fd_rc=$setRc")
     if (setRc < 0) {
-      Log.e(TAG, "engine_set_tun_fd returned $setRc; aborting")
       try { pfd.close() } catch (_: Throwable) {}
       DaalCoreBridge.protectImpl = null
-      return false
+      return Outcome.DOWN
     }
-    // Engine accepted ownership; detach so close-on-pfd does not
-    // touch the dup the engine is now using.
+    // Engine accepted ownership; detach so close-on-pfd does not touch
+    // the copy the engine now owns. It keeps that copy until
+    // clearTunFd and gives each route's instance a duplicate, which is
+    // why the next start can switch routes without a new TUN.
     pfd.detachFd()
+    tunUp = true
+    return null
+  }
 
-    // 4. Activate the route → starts the driver, then BLOCKS until the
-    //    engine has proved the route or given up on it (see THREADING
-    //    above). A stop request during this call makes it return an
-    //    error promptly.
-    val routeRc = if (superseded()) -1 else DaalCoreBridge.setRoute(routeId)
-    if (routeRc < 0) {
-      Log.e(TAG, "engine_set_route returned $routeRc; tearing down")
-      // The route may have been half-started by a start that was then
-      // superseded: clearRoute is idempotent, and leaves nothing up.
-      // It does not cost the page the reason for this failure: when the
-      // engine has already torn the route down (the check failed) or
-      // never started it (refused), clearRoute finds nothing running and
-      // leaves `route_check` / `connect_refused` in the diagnostics as
-      // they are — the page has not polled them yet (vpn_start resolved
-      // long ago), and they are the only way it learns why.
-      try { DaalCoreBridge.clearRoute() } catch (_: Throwable) {}
-      DaalCoreBridge.clearTunFd()
-      DaalCoreBridge.protectImpl = null
-      return false
+  /**
+   * Control thread. `engine_set_route`, marked so that a newer start
+   * can tell this one is inside the connection check and cancel it
+   * (SwitchPolicy.cancelStep). Returns the engine's code, or
+   * RC_SUPERSEDED without calling the engine when this start is no
+   * longer the newest request.
+   */
+  private fun checkedSetRoute(routeId: String, gen: Int): Int {
+    val go = synchronized(cancelLock) {
+      if (generation.get() != gen) {
+        false
+      } else {
+        checkingGen = gen
+        true
+      }
     }
+    if (!go) return RC_SUPERSEDED
+    try {
+      return DaalCoreBridge.setRoute(routeId)
+    } finally {
+      synchronized(cancelLock) { checkingGen = 0 }
+    }
+  }
 
-    // The check passed. If a stop arrived in the instant between the
-    // engine concluding and this line, the stop wins. Decided under the
-    // lock the stop takes; acted on outside it, so the main thread never
-    // waits on an engine call.
+  /**
+   * Control thread. The engine is carrying [routeId]; make the service
+   * say so, unless a stop or a newer start arrived meanwhile.
+   */
+  private fun routeIsUp(routeId: String, gen: Int): Outcome {
+    fun superseded() = generation.get() != gen
+    // Decided under the lock a stop takes; acted on outside it, so the
+    // main thread never waits on an engine call.
     val lost = synchronized(lifecycleLock) {
       if (superseded()) {
         true
@@ -280,27 +362,27 @@ class DaalVpnService : VpnService() {
       }
     }
     if (lost) {
-      teardownEngine()
-      return false
+      Log.i(TAG, "start gen=$gen superseded just after route=$routeId came up; leaving the rest to the newer request")
+      return Outcome.SUPERSEDED
     }
 
-    // 5. Put the engine's OWN fetches on the tunnel, before anything
-    //    starts asking for them.
+    // Put the engine's OWN fetches on the tunnel, before anything
+    // starts asking for them.
     //
-    //    setRoute returning 0 means the in-process sing-box instance
-    //    started, which means it has already bound every inbound in its
-    //    config — including the loopback SOCKS5 refresh inlet. Only then
-    //    does the engine publish that inlet, and only then does this
-    //    call succeed. So the listener provably exists before the
-    //    refresher is ever handed a dialer that points at it; there is
-    //    no window in which a due refresh dials a dead port.
+    // setRoute returning 0 means the in-process sing-box instance
+    // started, which means it has already bound every inbound in its
+    // config — including the loopback SOCKS5 refresh inlet. Only then
+    // does the engine publish that inlet, and only then does this call
+    // succeed. So the listener provably exists before the refresher is
+    // ever handed a dialer that points at it; there is no window in
+    // which a due refresh dials a dead port.
     //
-    //    A failure here is NOT fatal to the connection: the tunnel works
-    //    either way, and the engine's fetches stay fail-closed
-    //    (refresh.ErrTunnelRequired) rather than falling back to a
-    //    direct dial from the user's real address. Losing scheduled
-    //    refresh is a degradation; leaking the address is not one we
-    //    take. Log it and carry on.
+    // A failure here is NOT fatal to the connection: the tunnel works
+    // either way, and the engine's fetches stay fail-closed
+    // (refresh.ErrTunnelRequired) rather than falling back to a direct
+    // dial from the user's real address. Losing scheduled refresh is a
+    // degradation; leaking the address is not one we take. Log it and
+    // carry on.
     val refreshRc = try {
       DaalCoreBridge.setTunnelRefresh(true)
     } catch (e: Throwable) {
@@ -310,22 +392,76 @@ class DaalVpnService : VpnService() {
     if (refreshRc < 0) {
       Log.w(
         TAG,
-        "engine_set_tunnel_refresh returned $refreshRc; scheduled refresh " +
+        "start gen=$gen set_tunnel_refresh_rc=$refreshRc; scheduled refresh " +
           "stays disabled for this session (fail-closed, not direct-dial)",
       )
+    } else {
+      Log.i(TAG, "start gen=$gen set_tunnel_refresh_rc=$refreshRc")
     }
 
-    // 6. Now start ticking. The pump comes last on purpose: a tick that
-    //    finds work due dispatches refreshes inline, and step 5 is what
-    //    decides whether those can go anywhere at all. Under the lock,
-    //    and only if no stop has arrived: a stop stops the pump under
-    //    the same lock, so it can never be started after one. (A stop
-    //    that arrived since step 4 has queued its teardown behind this
-    //    start, on this thread; it undoes steps 4 and 5 next.)
+    // Now start ticking (a no-op when the pump is already running, as
+    // on a switch). The pump comes last on purpose: a tick that finds
+    // work due dispatches refreshes inline, and the step above is what
+    // decides whether those can go anywhere at all. Under the lock, and
+    // only if no stop has arrived: a stop stops the pump under the same
+    // lock, so it can never be started after one. (A stop that arrived
+    // since has queued its teardown behind this start, on this thread;
+    // it undoes all of this next.)
     synchronized(lifecycleLock) {
       if (!superseded()) startSchedulerPump()
     }
-    return true
+    // The notification was set to the route that was asked for; it may
+    // not be the route that is up.
+    mainHandler.post {
+      if (generation.get() == gen && connected) promoteToForeground(routeId)
+    }
+    return Outcome.UP
+  }
+
+  /** `engine_route_precheck`, or null when it cannot be asked. */
+  private fun precheck(routeId: String): SwitchPolicy.EngineView? {
+    val raw = try {
+      DaalCoreBridge.routePrecheck(routeId)
+    } catch (t: Throwable) {
+      Log.w(TAG, "route pre-check unavailable: ${t.javaClass.simpleName}")
+      null
+    } ?: return null
+    return try {
+      val o = JSONObject(raw)
+      SwitchPolicy.EngineView(
+        activeRoute = if (o.isNull("active_route")) null else o.optString("active_route", ""),
+        routeRunning = null,
+        refusedCode = o.optString("refused", ""),
+        refusedRoute = routeId,
+        failedCategory = "",
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "route pre-check answer was not readable: ${t.javaClass.simpleName}")
+      null
+    }
+  }
+
+  /** What the engine says about the connection now, or null. */
+  private fun engineView(): SwitchPolicy.EngineView? {
+    val raw = try {
+      DaalCoreBridge.engineState()
+    } catch (t: Throwable) {
+      Log.w(TAG, "engine state unavailable: ${t.javaClass.simpleName}")
+      null
+    } ?: return null
+    return try {
+      val o = JSONObject(raw)
+      SwitchPolicy.EngineView(
+        activeRoute = if (o.isNull("active_route")) null else o.optString("active_route", ""),
+        routeRunning = if (o.isNull("route_running")) null else o.optBoolean("route_running"),
+        refusedCode = o.optString("connect_refused", ""),
+        refusedRoute = o.optString("connect_refused_route", ""),
+        failedCategory = o.optString("route_check_category", ""),
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "engine state was not readable: ${t.javaClass.simpleName}")
+      null
+    }
   }
 
   /**
@@ -334,44 +470,73 @@ class DaalVpnService : VpnService() {
    * flight, and queues the engine teardown behind whatever the control
    * thread is doing. Safe to call any number of times.
    */
-  private fun requestStop() {
+  private fun requestStop(why: String) {
     val pendingStart: Int
+    val gen: Int
     synchronized(lifecycleLock) {
-      generation.incrementAndGet()
+      gen = generation.incrementAndGet()
       pendingStart = lastStartGen
       // Before the dialer is retracted (in teardownEngine), as always.
       stopSchedulerPump()
     }
-    if (finishedStartGen < pendingStart) {
+    val inFlight = finishedStartGen < pendingStart
+    Log.i(
+      TAG,
+      "stop requested ($why) gen=$gen connected=$connected on=${activeRouteId ?: "-"}" +
+        if (inFlight) " — supersedes start gen=$pendingStart still in flight" else "",
+    )
+    // The person asked to disconnect: an older note about a switch that
+    // did not take has nothing left to explain.
+    lastSwitch = null
+    if (inFlight) {
       // A start is queued or running and may be inside the engine's
-      // connection check. clearRoute abandons the check; it is repeated
-      // because a start that has not reached setRoute yet has nothing
-      // to abandon — it will see `generation` and leave by itself,
-      // usually before the first repeat. It stops the moment that start
-      // has finished (starts run in order on one thread, so "finished"
-      // is a number), and is bounded regardless.
-      val t = Thread {
-        var waited = 0L
-        while (waited < CANCEL_MAX_MS) {
-          val done = synchronized(cancelLock) {
-            if (finishedStartGen >= pendingStart) {
-              true
-            } else {
-              try { DaalCoreBridge.clearRoute() } catch (_: Throwable) {}
-              false
-            }
-          }
-          if (done) break
-          try { Thread.sleep(CANCEL_POLL_MS) } catch (_: InterruptedException) { break }
-          waited += CANCEL_POLL_MS
-        }
-      }
-      t.name = "daal-vpn-cancel"
-      t.isDaemon = true
-      t.start()
+      // connection check; the teardown below is queued BEHIND it.
+      cancelInFlight(pendingStart, stopping = true)
     }
-    control.execute { teardownEngine() }
+    control.execute { teardownEngine("stop gen=$gen ($why)") }
     stopForeground(STOP_FOREGROUND_REMOVE)
+  }
+
+  /**
+   * Cancels the start numbered [pendingStart] from a short-lived thread
+   * of its own, so that whoever superseded it (a stop on the main
+   * thread, a newer start queued behind it on the control thread) does
+   * not wait for its connection check. The engine's cancel is
+   * clearRoute; when it may be called is SwitchPolicy.cancelStep. The
+   * loop ends the moment that start has finished (starts run in order
+   * on one thread, so "finished" is a number), and is bounded
+   * regardless.
+   */
+  private fun cancelInFlight(pendingStart: Int, stopping: Boolean) {
+    val t = Thread {
+      var waited = 0L
+      var cancels = 0
+      var finished = false
+      while (waited < CANCEL_MAX_MS) {
+        val step = synchronized(cancelLock) {
+          val s = SwitchPolicy.cancelStep(stopping, pendingStart, finishedStartGen, checkingGen)
+          if (s == SwitchPolicy.CancelStep.CANCEL) {
+            try { DaalCoreBridge.clearRoute() } catch (_: Throwable) {}
+            cancels++
+          }
+          s
+        }
+        if (step == SwitchPolicy.CancelStep.DONE) {
+          finished = true
+          break
+        }
+        try { Thread.sleep(CANCEL_POLL_MS) } catch (_: InterruptedException) { break }
+        waited += CANCEL_POLL_MS
+      }
+      Log.i(
+        TAG,
+        "cancel of start gen=$pendingStart ended: finished=$finished clear_route_calls=$cancels " +
+          "waited_ms=$waited by=${if (stopping) "stop" else "newer start"}",
+      )
+    }
+    t.name = "daal-vpn-cancel"
+    t.isDaemon = true
+    t.start()
   }
 
   /**
@@ -379,9 +544,13 @@ class DaalVpnService : VpnService() {
    * takes that lock and must not wait on the engine). Idempotent: on an
    * engine that is already down every call below is a no-op.
    */
-  private fun teardownEngine() {
+  private fun teardownEngine(why: String) {
+    val wasOn = activeRouteId
+    val hadTun = tunUp
     connected = false
     activeRouteId = null
+    lastGoodRouteId = null
+    tunUp = false
     // Retract the tunnel dialer BEFORE the route (and with it the
     // loopback inlet) goes away, so no in-flight or newly-started fetch
     // can be handed a dialer pointing at a listener that is already
@@ -389,10 +558,15 @@ class DaalVpnService : VpnService() {
     // stops — this is belt and braces, and it makes the ordering
     // readable from the host side, which is where the mistake would be
     // made.
-    try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) {}
-    try { DaalCoreBridge.clearRoute() } catch (_: Throwable) {}
-    try { DaalCoreBridge.clearTunFd() } catch (_: Throwable) {}
+    val refreshRc = try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) { RC_THREW }
+    val routeRc = try { DaalCoreBridge.clearRoute() } catch (_: Throwable) { RC_THREW }
+    val tunRc = try { DaalCoreBridge.clearTunFd() } catch (_: Throwable) { RC_THREW }
     DaalCoreBridge.protectImpl = null
+    Log.i(
+      TAG,
+      "teardown ($why): was_on=${wasOn ?: "-"} tun_held=$hadTun " +
+        "set_tunnel_refresh_rc=$refreshRc clear_route_rc=$routeRc clear_tun_fd_rc=$tunRc",
+    )
   }
 
   /**
@@ -605,8 +779,35 @@ class DaalVpnService : VpnService() {
     private const val CANCEL_POLL_MS = 100L
     private const val CANCEL_MAX_MS = 60_000L
 
+    // Not engine return codes: this side's own, for the log.
+    private const val RC_SUPERSEDED = -2
+    private const val RC_THREW = -3
+
     @Volatile private var connected: Boolean = false
     @Volatile private var activeRouteId: String? = null
+
+    /**
+     * CONTROL THREAD ONLY. True while the engine holds a TUN this
+     * service established and has not released (clearTunFd). A start
+     * that finds it true is a switch and builds no new TUN.
+     */
+    private var tunUp: Boolean = false
+
+    /**
+     * CONTROL THREAD ONLY. The route that last passed its connection
+     * check on the TUN held — what a failed switch stays on or goes
+     * back to. Null when nothing has connected since the TUN was built.
+     */
+    private var lastGoodRouteId: String? = null
+
+    /**
+     * The generation of the start that is inside `engine_set_route`
+     * right now, 0 when none is. Written under cancelLock.
+     */
+    @Volatile private var checkingGen: Int = 0
+
+    /** The last switch that did not take; see SwitchPolicy.SwitchNote. */
+    @Volatile private var lastSwitch: SwitchPolicy.SwitchNote? = null
 
     /**
      * The one thread engine lifecycle calls are made on. Process-wide,
@@ -634,10 +835,14 @@ class DaalVpnService : VpnService() {
     @Volatile private var lastStartGen: Int = 0
     @Volatile private var finishedStartGen: Int = 0
 
-    /** Serialises "this start is finished" with a stop's cancel call. */
+    /**
+     * Serialises "this start is finished" and "this start is inside
+     * setRoute" with a cancel thread's clearRoute call.
+     */
     private val cancelLock = Any()
 
     @JvmStatic fun isConnected(): Boolean = connected
     @JvmStatic fun currentRouteId(): String? = activeRouteId
+    @JvmStatic fun lastSwitchNote(): SwitchPolicy.SwitchNote? = lastSwitch
   }
 }

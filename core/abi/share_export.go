@@ -12,7 +12,7 @@ import (
 func engine_share_begin(routeIDs *C.char, includeLAN C.int, qrURI *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := ShareBegin(C.GoString(routeIDs), includeLAN != 0, C.GoString(qrURI))
 	if err != nil {
-		return -1
+		return exportFail("engine_share_begin", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -20,7 +20,7 @@ func engine_share_begin(routeIDs *C.char, includeLAN C.int, qrURI *C.char, out u
 //export engine_share_end
 func engine_share_end(sessionID *C.char) C.int {
 	if err := ShareEnd(C.GoString(sessionID)); err != nil {
-		return -1
+		return exportFail("engine_share_end", err)
 	}
 	return 0
 }
@@ -29,7 +29,7 @@ func engine_share_end(sessionID *C.char) C.int {
 func engine_share_browse(timeoutMs C.int, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := ShareBrowse(int(timeoutMs))
 	if err != nil {
-		return -1
+		return exportFail("engine_share_browse", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -47,7 +47,7 @@ func engine_share_browse(timeoutMs C.int, out unsafe.Pointer, outLen C.int) C.in
 func engine_share_pull(host *C.char, port C.int, pin, sessionID, expectedSPKI *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SharePull(C.GoString(host), int(port), C.GoString(pin), C.GoString(sessionID), C.GoString(expectedSPKI))
 	if err != nil {
-		return -1
+		return exportFail("engine_share_pull", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -60,7 +60,7 @@ func engine_share_pull(host *C.char, port C.int, pin, sessionID, expectedSPKI *C
 func engine_share_pull_url(shareURI, pin, sessionID *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SharePullURL(C.GoString(shareURI), C.GoString(pin), C.GoString(sessionID))
 	if err != nil {
-		return -1
+		return exportFail("engine_share_pull_url", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -69,7 +69,7 @@ func engine_share_pull_url(shareURI, pin, sessionID *C.char, out unsafe.Pointer,
 func engine_fountain_next_frame(sessionID *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := FountainNextFrame(C.GoString(sessionID))
 	if err != nil {
-		return -1
+		return exportFail("engine_fountain_next_frame", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -78,7 +78,7 @@ func engine_fountain_next_frame(sessionID *C.char, out unsafe.Pointer, outLen C.
 func engine_fountain_feed_frame(sessionID, frameB64 *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := FountainFeedFrame(C.GoString(sessionID), C.GoString(frameB64))
 	if err != nil {
-		return -1
+		return exportFail("engine_fountain_feed_frame", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -87,7 +87,7 @@ func engine_fountain_feed_frame(sessionID, frameB64 *C.char, out unsafe.Pointer,
 func engine_uri_detect(text *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := URIDetect(C.GoString(text))
 	if err != nil {
-		return -1
+		return exportFail("engine_uri_detect", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -96,7 +96,8 @@ func engine_uri_detect(text *C.char, out unsafe.Pointer, outLen C.int) C.int {
 func engine_uri_import(rawURI *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := URIImport(C.GoString(rawURI))
 	if err != nil {
-		return copyOut(body, out, outLen)
+		// The verdict JSON is the answer; the error is only noted.
+		noteExportError("engine_uri_import", err)
 	}
 	return copyOut(body, out, outLen)
 }

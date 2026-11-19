@@ -10,6 +10,7 @@
 //! * `commands` — the typed Tauri command surface (each command has a
 //!   plain-Rust function plus an optional `#[tauri::command]` shim
 //!   gated by the `tauri` feature flag in the GUI shell crate).
+//! * `cmdlog` — the one log line every failing command writes.
 //! * `state` — `AppState` with a mutex-protected handle to the engine.
 //!
 //! Everything in this crate compiles without Node, Tauri, or any GUI
@@ -17,6 +18,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod cmdlog;
 pub mod commands;
 pub mod engine;
 pub mod errors;

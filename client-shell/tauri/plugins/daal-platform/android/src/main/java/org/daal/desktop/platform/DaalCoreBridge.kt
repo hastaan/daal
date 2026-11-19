@@ -21,6 +21,9 @@ package org.daal.desktop.platform
  *   engine_clear_route()               ← DaalCoreBridge.clearRoute
  *   engine_set_tunnel_refresh(on)      ← DaalCoreBridge.setTunnelRefresh
  *   engine_scheduler_tick()            ← DaalCoreBridge.schedulerTick
+ *   engine_route_precheck(routeId)     ← DaalCoreBridge.routePrecheck
+ *   engine_export_diagnostics()        ← DaalCoreBridge.engineState
+ *                                         (six fields of it)
  *
  * The Phase 45 spec requires these JNI methods to be wired before the
  * first upstream dial; the VpnService respects that ordering.
@@ -105,6 +108,28 @@ object DaalCoreBridge {
    * dispatches network refreshes with 15 s timeouts inline.
    */
   external fun schedulerTick(): Int
+
+  /**
+   * `engine_route_precheck`: would [setRoute] refuse this route right
+   * now? Starts and stops nothing. Returns the engine's JSON —
+   * `{"route_id", "refused": "" | code, "active_route"}` — or null when
+   * the engine is not loaded or has no such call (the caller then just
+   * attempts the route). A refusal is recorded in the engine's
+   * diagnostics exactly as a refused setRoute records it. Safe from
+   * any thread; does not block on a connection check.
+   */
+  external fun routePrecheck(routeId: String): String?
+
+  /**
+   * The engine's own account of the connection, from its memory (not
+   * the route store): `{"active_route": id | "" | null,
+   * "route_running": bool | null, "route_check", "route_check_category",
+   * "connect_refused", "connect_refused_route"}`, or null when it
+   * cannot be asked. Ids and closed codes only. DaalVpnService reads it
+   * after a setRoute that did not return 0, to learn whether the route
+   * that was connected before is still up.
+   */
+  external fun engineState(): String?
 
   /**
    * Host-side protect implementation. Stored as a property so the

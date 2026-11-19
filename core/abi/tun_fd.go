@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"syscall"
 
 	"daal/core/engine"
 )
@@ -19,6 +18,11 @@ import (
 // receives that fd and the in-process sing-box driver consumes it as
 // its TUN inbound. The engine takes ownership of the fd; the caller
 // MUST NOT close it after a successful set call.
+//
+// Ownership inside the engine: the fd handed in here is closed exactly
+// once, by core/engine (AdoptTunFD on a rotate, ReleaseTunFD on clear
+// or shutdown). A running sing-box instance never uses that number: it
+// is given a duplicate, which it alone closes. See engine/platform.go.
 //
 // engine_register_protect_callback wires a C function pointer that the
 // driver invokes for every upstream socket it opens, so the host
@@ -57,7 +61,6 @@ type ProtectCallback func(fd int) bool
 var (
 	tunFDMu       sync.Mutex
 	tunFDCurrent  int = -1
-	tunFDOwned    bool
 	tunFDDriverHk TunFDDriver
 
 	protectCallbackPtr atomic.Uintptr // C function pointer; 0 = unset
@@ -83,31 +86,30 @@ func SetTunFD(fd int) (string, error) {
 		return "", fmt.Errorf("abi: invalid tun fd %d", fd)
 	}
 	tunFDMu.Lock()
-	previous := tunFDCurrent
-	previousOwned := tunFDOwned
 	tunFDCurrent = fd
-	tunFDOwned = true
 	hook := tunFDDriverHk
+
+	// The engine package owns the host's copy from here and is the only
+	// thing that ever closes it (engine/platform.go, "ONE OWNER PER
+	// COPY"). On a rotate it closes the copy this one replaces — the
+	// HOST's previous copy only: a sing-box instance still running on
+	// the previous TUN holds a duplicate of its own, which it closes
+	// when it is torn down. Done under tunFDMu so two concurrent sets
+	// cannot leave abi and engine disagreeing about which fd is current.
+	engine.AdoptTunFD(fd)
 	tunFDMu.Unlock()
-
-	if previousOwned && previous >= 0 && previous != fd {
-		// Rotate: close the old fd before installing the new one.
-		_ = syscall.Close(previous)
-	}
-
-	// Mirror to the engine-side atomic so the singBox driver picks
-	// the fd up at its next Start() without an import cycle.
-	engine.SetCurrentTunFD(fd)
 
 	if hook != nil {
 		if err := hook.OnTunFD(fd); err != nil {
-			// Driver rejected the fd — release ownership and surface
-			// the error so the host can close its dup.
+			// Driver rejected the fd — give it back unclosed and
+			// surface the error so the host can close its copy. Only
+			// if it is still the current one: a newer set owns its own.
 			tunFDMu.Lock()
-			tunFDCurrent = -1
-			tunFDOwned = false
+			if tunFDCurrent == fd {
+				tunFDCurrent = -1
+				engine.DisownTunFD()
+			}
 			tunFDMu.Unlock()
-			engine.SetCurrentTunFD(-1)
 			return "", err
 		}
 	}
@@ -123,20 +125,17 @@ func SetTunFD(fd int) (string, error) {
 // to call even if no fd was set.
 func ClearTunFD() (string, error) {
 	tunFDMu.Lock()
-	fd := tunFDCurrent
-	owned := tunFDOwned
 	hook := tunFDDriverHk
 	tunFDCurrent = -1
-	tunFDOwned = false
+	// Closes the host's copy, once. A sing-box instance that is still
+	// up (ClearRoute normally ran first and stopped it) keeps working on
+	// its own duplicate until it is closed.
+	engine.ReleaseTunFD()
 	tunFDMu.Unlock()
 
 	if hook != nil {
 		_ = hook.OnClearTunFD()
 	}
-	if owned && fd >= 0 {
-		_ = syscall.Close(fd)
-	}
-	engine.SetCurrentTunFD(-1)
 	body, _ := json.Marshal(map[string]any{
 		"cleared": true,
 	})
@@ -172,16 +171,10 @@ func CurrentTunFD() int {
 // in the same process starts fresh.
 func resetTunFDForShutdown() {
 	tunFDMu.Lock()
-	fd := tunFDCurrent
-	owned := tunFDOwned
 	tunFDCurrent = -1
-	tunFDOwned = false
 	tunFDDriverHk = nil
+	engine.ReleaseTunFD()
 	tunFDMu.Unlock()
-	if owned && fd >= 0 {
-		_ = syscall.Close(fd)
-	}
 	protectCallbackPtr.Store(0)
-	engine.SetCurrentTunFD(-1)
 	engine.SetCurrentProtectCallback(0)
 }

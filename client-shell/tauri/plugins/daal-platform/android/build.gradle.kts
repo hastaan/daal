@@ -36,4 +36,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.9.0")
     implementation("androidx.appcompat:appcompat:1.6.0")
     implementation(project(":tauri-android"))
+    // JVM unit tests for the pure decision logic (SwitchPolicy,
+    // StartSequence): no Android classes, no emulator.
+    //   ./gradlew :tauri-plugin-daal-platform:testDebugUnitTest
+    // `./daal test` runs the same tests without Gradle or the Android
+    // SDK (tools/test-android-jvm.sh), so they are part of the gate.
+    testImplementation("junit:junit:4.13.2")
 }

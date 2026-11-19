@@ -68,7 +68,9 @@ step "daal test"        ./daal test
 # four modules for an unknown length of time.
 vet_all() {
   local rc=0 m
-  for m in $(find . -name go.mod -not -path "*/node_modules/*" | sed 's|/go.mod||'); do
+  # third_party/ holds upstream copies (see third_party/DAAL-PATCH.md);
+  # they are vetted as part of the modules that build them, not alone.
+  for m in $(find . -name go.mod -not -path "*/node_modules/*" -not -path "./third_party/*" | sed 's|/go.mod||'); do
     # cmd/daal-soak-engine only compiles under its build tag.
     if [[ "$m" == "./cmd/daal-soak-engine" ]]; then
       (cd "$m" && go vet -tags soak ./... ) || rc=1

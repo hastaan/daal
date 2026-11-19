@@ -20,6 +20,10 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { Locale } from '../lib/i18n';
+import { errorText } from '../lib/errorText';
+import { engineStatus } from '../lib/bridge';
+import { parseEngineStatus, publisherBootFailureKey } from '../lib/engineStart';
+import { FailureBox } from './PageNotices';
 import PublisherWizard from '../publisher/PublisherWizard';
 import PublisherRecipientsPage from '../publisher/PublisherRecipientsPage';
 import RelayListPage from '../publisher/RelayListPage';
@@ -44,7 +48,10 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
     // cloud account" and then having it vanish reads as a crash.
     const [view, setView] = useState<View>({ k: 'loading' });
     const [operators, setOperators] = useState<OperatorSummary[]>([]);
-    const [bootError, setBootError] = useState<string | null>(null);
+    // The list could not be read: the i18n key of OUR sentence, and the
+    // raw error text for the Details fold only. The raw text used to be
+    // printed as the sentence — Tauri's "state not managed…" in red.
+    const [bootError, setBootError] = useState<{ key: string; detail: string } | null>(null);
     // Bumped whenever we return to the list, so RelayListPage remounts
     // and refetches instead of showing a stale relay it no longer has.
     const [listNonce, setListNonce] = useState(0);
@@ -59,7 +66,16 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
             setBootError(null);
             return ops;
         } catch (e) {
-            setBootError(String(e));
+            // A rejected command may be a string, an Error or an
+            // object; String() turns the last into "[object Object]".
+            const raw = errorText(e);
+            // engine_status never rejects; it says whether this is a
+            // start problem (restart) or something to try again.
+            const status = parseEngineStatus(await engineStatus());
+            setBootError({
+                key: publisherBootFailureKey(raw, status),
+                detail: status?.publisherStoreError ?? raw,
+            });
             return null;
         }
     }, []);
@@ -107,14 +123,17 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                 key is safely under DeviceCustody. */}
             <CustodyGate t={t} operators={operators}>
                 {bootError && (
-                    <div
-                        style={{
-                            color: 'var(--red)',
-                            fontSize: 12,
-                            padding: '10px 16px 0 16px',
-                        }}
-                    >
-                        {bootError}
+                    <div style={{ padding: '10px 16px 0 16px' }}>
+                        <FailureBox
+                            t={t}
+                            text={t(bootError.key)}
+                            detail={bootError.detail}
+                            onRetry={
+                                bootError.key === 'pub.boot.unavailable'
+                                    ? undefined
+                                    : () => void refreshOperators()
+                            }
+                        />
                     </div>
                 )}
 

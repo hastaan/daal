@@ -1535,3 +1535,264 @@ Gate at close, the tree as it stood BEFORE the pin moved:
   (i) ~~The pre-push hook and CI are red on this tree until the pin
   bump~~ — the pin moved 2026-11-19 (TW-1); the wave and the pin bump
   must still be pushed together.
+
+## 14. First phone pass on relay-v1.5.1 (2026-11-19) — what a real relay showed
+
+Samsung S25, APK from `edd3a5e`, one Hetzner relay provisioned from the
+phone by the owner. What passed is in `docs/release-runbook.md` Part 5;
+this section is what did not.
+
+- [x] **PH-1. The cloud firewall lost a race with the new server.**
+  Hetzner refused the attach 280 ms after create ("no public network
+  interfaces found … private_net_only_server"); provisioning went on
+  without it and the mgmt self-heal attached one later with the
+  fleet-baseline ports, which would leave an opt-in family's port shut.
+  Fixed: the attach is retried (8 × 3 s) where the family set is known
+  (`ensureFirewallAfterCreate`; `TestProvision_FirewallAttachOutlastsTheNewServerRace`,
+  `TestProvision_FirewallAttachGivesUpAndSaysSo`). Not yet seen passing
+  on a real account.
+- [x] **PH-2. The relay page is hard to read (owner, on the phone).** In
+  the owner's words: not clean or minimal; not obvious what is for
+  everyone and what is for one device; what "Refresh addresses" means;
+  how "+ Add" (a recipient) differs from "+ Add address" (a refresh
+  address); too much text. Fixed in the tree, not yet seen on a phone:
+  the page is now People / One file for everyone / Keep it working /
+  Danger zone / Details, one sentence each, explanations behind a tap,
+  buttons that name their noun ("Add a person", "Add a refresh
+  address"); the raw signed file and "Compare the list with the relay"
+  live under Details. Pinned by `publisher/relayPage.test.tsx` (section
+  order, one sentence per section, EN/FA key parity, static render in
+  both languages). Layout was checked by static render only, never by
+  eye; the Farsi was written by the wave and wants a native read.
+- [x] **PH-3. Save gives no sign that it worked.** Saving the `.sbpx`
+  did save, and said nothing; the owner tapped four times. Fixed in the
+  tree, not yet seen on a phone: every publisher action goes through
+  one controller (`publisher/useAction.tsx`) that locks while it runs
+  and ends in a banner — what happened, or what did not and why in
+  plain words, the raw error behind Details. Pinned by
+  `publisher/useAction.test.tsx` ("a double tap fires the action once",
+  "success ends with a visible result", "failure ends with what did not
+  happen…") and `publisher/failureText.test.ts`. Swept: save / send /
+  copy / make / replace / add / remove / rename / compare / recovery
+  key / refresh-address actions.
+
+### The fix wave (2026-11-19, branch `phone-pass-fixes`)
+
+What the pass showed beyond PH-1..3: one tap on another route's Connect
+while connected left the tunnel up and the app blind ("No route
+selected", a red "unknown", "Loading…" for ever, nothing in logcat).
+Every item is **fixed in the tree, not yet seen on a phone**; the cause
+is read from the code and reproduced in the rig, not proven on the
+device. (Numbered after the repair pass below, which was written
+first.)
+
+- [x] **PH-11. The TUN fd had two owners.** The host copy was closed
+  while the old sing-box instance still held the same number, then
+  closed again with the instance; whatever opened in between lost its
+  file (rig finding SW-0). Now one owner per copy: the engine owns the
+  host's copy (`AdoptTunFD` / `ReleaseTunFD`), each instance gets its
+  own duplicate. Pinned by `TestTunSwitchDoesNotCloseAnUnrelatedFD`,
+  `TestTunDisconnectClosesEachCopyOnce`,
+  `TestOpenInterfaceClosesItsDuplicateOnFailure`,
+  `TestSetTunFdOwnershipSemantics`, and in the rig by `*.fds_intact`
+  on every switch and disconnect (red against the old two files). The
+  rig proves the double close; it never made the route store the
+  victim, so "the store died of it" is still an inference.
+- [x] **PH-12. The route store failed under its own readers, and a
+  damaged one would have crashed every launch.** One connection with a
+  busy timeout instead of an unbounded pool
+  (`TestConcurrentReadersAndOneWriterNeverError` — 4951 failed calls
+  before — and `TestStoreUsesOneConnectionWithItsPragmas`); the
+  diagnostics record is written only when it changes
+  (`TestDiagnosticsExplain_WritesOnlyWhenTheRecordChanges`); a damaged
+  file is set aside beside itself, never deleted, an empty store opens,
+  and diagnostics say `store_recovered` so the app can tell the person
+  to import again (`routestore/recover_test.go`,
+  `TestInit_DamagedStoreIsSetAsideAndReported`,
+  `TestInit_DamagedStoreIsReportedEvenWhenTheMarkerCannotBeWritten`,
+  `TestInit_OrdinaryStoreErrorStillFails`; UI `lib/storeNotice.test.ts`).
+  The shell no longer `expect`s on engine or operator-DB start and no
+  call reaches an engine that did not start (`failed_init_leaves_a_usable_process`,
+  `every_core_call_is_gated`); the page that says so is PH-10.
+- [x] **PH-13. The pages learned the active route only through the
+  store.** `ExportDiagnostics` now carries `active_route` /
+  `active_route_family` from engine memory and the pages read that
+  first; a route whose row cannot be read shows as "Current connection
+  · name not available", never "No route selected" while connected.
+  Pinned by `TestActiveRoute_ServedFromMemoryWhenTheStoreFails`,
+  `TestActiveRoute_FollowsTheEngine`, `backends/tauri.test.ts`,
+  `lib/activeRoute.test.ts`; in the rig by `*.active_route`.
+- [x] **PH-14. Errors were masked in three layers and logged in none.**
+  Every export wrapper notes its failure (`recent_errors` in
+  diagnostics, scrubbed; `TestEveryExportWrapperReportsItsFailure`,
+  `TestRecentErrors_RecordedLoggedAndScrubbed`,
+  `TestRecentErrors_SetRouteKeepsOnlyCodes`); the shell attaches the
+  engine's words to "engine call returned -1" and logs every failed
+  command (`every_result_command_is_logged`,
+  `addresses_never_reach_the_log`); the engine logs route up / switch /
+  refused / down by id and code (`TestRouteLifecycleIsLogged`); the
+  service logs each step of a start. The pages show their own sentence
+  with Try again and the raw text under Details, and no "Loading…"
+  after a failed read (`lib/errorText.test.ts`, `lib/networkRows.test.ts`
+  "never says "Loading…" once the read has failed",
+  `d2pages/PageNotices.test.tsx`).
+- [x] **PH-15. A config-parse failure wrote the whole sing-box config,
+  credentials included, to logcat.** Gone; the line is now the error's
+  class, category and outbound type
+  (`TestStartParseFailureDoesNotLogTheConfig`).
+- [x] **PH-16. A refused switch disconnected the working route, and
+  wiped the reason.** The service asks first (`engine_route_precheck`)
+  and touches nothing when refused; a switch keeps the TUN it has; a
+  switch that fails goes back to the last proven route. Pinned by
+  `TestRouteConnectPrecheck`,
+  `TestRefusedSwitch_LeavesTheRouteAloneAndADisconnectClearsTheReason`,
+  `StartSequenceTest` (`refusedSwitchLeavesTheWorkingRouteUntouched`,
+  `switchReusesTheTunAndNeverBuildsOne`,
+  `switchToARouteThatCarriesNothingGoesBackToTheOldOne`), and in the
+  rig by `check-rotate.refused.*`. `DaalVpnService` itself (threads,
+  the real `establish()`) is tested by nothing but a compile. What is
+  left of this is PH-8.
+- [x] **PH-17. On Android a newer start waited behind a check in
+  flight.** It now cancels it
+  (`SwitchPolicyTest.newerStartCancelsACheckInFlightInsteadOfWaitingBehindIt`).
+  Residual: a cancel landing between "marked checking" and the engine
+  entering the check drops the connected route for a moment; the next
+  start restores it
+  (`theStartAfterACancelledSwitchRestoresTheLastWorkingRouteIfRefused`).
+- [x] **PH-18. The Connections page could not cancel a check it
+  started, and marked the tapped row connected before the engine said
+  so.** A checking row has Cancel; the old row stays marked until the
+  engine reports the new one; a refusal for the tapped row is said in
+  words (`lib/networkRows.test.ts`; source pin in
+  `lib/routeCheck.test.ts`). The limit of that Cancel is PH-7.
+- [x] **PH-19. The rig never switched routes.** Ops `switch` (quick)
+  and `switch-all` (full, all 42 ordered pairs of the 7 families) run
+  the service's call order on a real TUN and assert tunnel, wire,
+  store, active route and fd identity after every switch and
+  disconnect (`driver/ops_switch_test.go`; `FINDINGS.md` SW-0, SW-1,
+  SW-2).
+- [x] **PH-20. A green "LIVE" above "not a live health check".** The
+  recorded state reads "Set up" in gold; green "Live" is reserved for a
+  check that just succeeded, and no such check exists yet
+  (`publisher/relayStatus.test.ts` "a recorded state is never green and
+  never says live").
+- [x] **PH-21. A disguise change could say "Nobody needs a new file"
+  when re-signing had failed.** It now says what happened and what to
+  do (`publisher/rotateTlsVerdict.test.ts`). The "what to do" sentence
+  is read from `relay_identity::heal_after_reply`, not exercised.
+- [ ] **PH-22. A person's file cannot be shown as a QR or copied as
+  text.** `wizard_qr_render` and `wizard_copy_pasteable` take only
+  `shared | raw`; both need a per-person file, plus the variant in
+  `wizardCommands.ts`.
+- [ ] **PH-23. When the engine cannot start, the shell cannot say
+  why.** `engine_init` returns -1 and there is no Core to ask;
+  `engine_status` reports the path only. Needs an init-error accessor
+  in the ABI. Related: an invalid `secrets.key` still fails start (on
+  purpose — it is not damage) and has no recovery path.
+- [ ] **PH-24. Small leftovers of the wave.** The store-reset notice
+  shows once per app run, so again on each launch until a file is
+  imported; the two extra summary fields live in
+  `ConnectionSummaryPlus` instead of the contract type; the wave's
+  ten recipient strings are in the legacy `i18n/{en,fa}.json`, not
+  `d2-extra`; retired `pub.*` keys are still in the catalogs; a TUN
+  the system killed without telling the service would be reused;
+  `src-tauri/src/lib.rs` command bodies are wrapped but not
+  re-indented; `go build -tags gomobile ./abi` was already broken
+  (`share_gomobile.go`) and still is.
+- [ ] Routes still read "not measured yet" — telemetry, a later stage.
+
+### Repair pass after the fix wave (2026-11-19, branch `phone-pass-fixes`)
+
+Review of the fix wave found the items below. Closed ones name their
+test; **none of this has been seen on a phone.**
+
+- [x] **PH-4. A route switch on a kept TUN lost about half of all
+  packets (rig finding SW-2).** sing-tun 0.8.9 never stopped the packet
+  reader of a closed instance; the service's new "keep the TUN across a
+  switch" order made that reader compete with the new instance. Fixed
+  in the engine: `third_party/sing-tun` (0.8.9 + one line) through a
+  `replace` in `core`, `cmd/daal-core`, `cmd/daal-soak-engine` and the
+  rig's `labclient` (`third_party/DAAL-PATCH.md`). Pinned by
+  `TestSingTunDetachReachesTheEndpoint` (`-tags singbox,with_gvisor`,
+  run by `./daal test`) and by the rig's `keep.*.tunnel` /
+  `*.session.old_tuns_released`, which are ordinary green checks now
+  (SW-2 is gone from `known-findings.json`). Follow-up: drop the copy
+  when a sing-tun release that sing-box 1.13.x accepts carries the fix
+  (0.8.10–0.8.15 exist and were not evaluated). First thing to try on
+  the next phone pass: after one switch, do pages load?
+- [x] **PH-5. A switch that failed and was undone left the tapped row
+  on "Checking the connection…" for 90 s, then silence.** The page now
+  reads the VPN service's `vpn_status.last_switch` and says "That route
+  could not be used. You are still connected through the other one."
+  (`lib/networkRows.ts`, `backends/tauri.test.ts`); a wait that runs
+  out says so too; the service forgets an older note when a new start
+  begins (`StartSequenceTest`).
+- [x] **PH-6. Tests nothing ran.** `./daal test` now runs the Android
+  service's JVM tests (`tools/test-android-jvm.sh`, 31 tests, real
+  JUnit, no Android SDK), `cargo test -p daal-desktop-core` against an
+  engine built from the tree (a missing engine is a failure there, not
+  a skip), and the sing-tun pin. The four source-pin tests in
+  `client-ui/src/lib/connectThreading.test.ts` are re-pinned to
+  `StartSequence.kt` / `SwitchPolicy.kt`.
+- [ ] **PH-7. "Cancel" on a pending switch cannot give the old route
+  back.** While route A is still carrying and B has just been tapped,
+  B's button now reads "Disconnect" (it stops everything, and says so)
+  instead of "Cancel". A real cancel — abandon B, stay on A — needs the
+  service to treat a cancel during a switch as "go back to the last
+  proven route" (a new plugin command; `StartSequence` already knows
+  how to restore). Once the engine has stopped A to try B (SW-1) there
+  is nothing to stay on, so this is tied to PH-8.
+- [ ] **PH-8. A switch to a route that carries nothing drops the
+  connection for the length of the check (rig finding SW-1, open).**
+  The service goes back to A afterwards; closing the gap means the
+  engine proving B beside A and swapping only then.
+- [ ] **PH-9. The Gradle task for the plugin's unit tests has never
+  run.** `:tauri-plugin-daal-platform:testDebugUnitTest` configures and
+  compiles offline but `junit:junit:4.13.2` is not in the Gradle cache
+  of the build machine. `tools/test-android-jvm.sh` covers the same
+  tests without Gradle; run the Gradle task once online so the IDE path
+  works too. Also unverified: that the CI runner has `kotlinc` and a
+  Gradle distribution for that script (with `CI` set a skip is a
+  failure, by design).
+- [x] **PH-10. When Daal could not start, the pages said nothing.**
+  The Connection and Connections pages now say "Daal could not start on
+  this device" with the reason under Details (`lib/engineStart.ts`,
+  asked of `engine_status`), a tap on the main button no longer starts
+  a connect that can only fail, and the Publisher tab no longer prints
+  the framework's error as its sentence. The Daal mark is not drawn as
+  disabled while the notice is up; it simply does nothing.
+
+### Second phone pass, fixed build (2026-11-19, Samsung S25, relay "Test")
+
+Seen on the phone, with logcat recording (tags `daalengine`,
+`DaalVpnService`, `daal_desktop_core`):
+
+- [x] The build started on a route store the old build had damaged:
+  `init: the route store was damaged; set aside 1 file(s) and started
+  empty`, the pages said "Your saved connections were reset", the
+  publisher's relay record was untouched. Importing the file again
+  cleared the notice. This confirms PH-11's cause (the double close hit
+  the store) and PH-12's recovery.
+- [x] Connect r1, then switch r1 → r2 → r3 → r4 while connected: each
+  switch reuses the held TUN, is up in about 0.2 s, and the page shows
+  the right route. Browser exit address on r4 (hysteria2) is the relay's.
+- [x] Disconnect: one teardown, every return code 0.
+- [x] The publisher relay page shows People / One file for everyone,
+  status "Set up" in gold.
+
+Opened by this pass:
+
+- [ ] **PH-25. "Press to connect" with no route chosen does not
+  connect; it opens the Connections list.** A person with a valid file
+  and no knowledge of routes is left looking at `vless-reality`,
+  `websocket-tls`, `naive`, `hysteria2`. The main control must pick and
+  try routes itself. This is the first item of the selection stage.
+- [ ] **PH-26. A stale route id is asked for every two seconds.** After
+  the store reset the shell kept calling `route_summary` for a route
+  that no longer exists (`sql: no rows in result set`, logged each
+  time). Harmless, noisy; stop asking once the route is gone.
+- [ ] **PH-27. The add sheet speaks in protocol names and contradicts
+  itself.** "Paste a .sbp/.sbpx blob, a subscription URL, or a vless://
+  / vmess:// / trojan:// / wg:// link", and for a sealed file both
+  "enter the PIN" and "It will open automatically" (no PIN was asked).
+  The imported row is labelled "pasted" although it came from a file.

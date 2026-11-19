@@ -44,6 +44,10 @@ type fakeClient struct {
 	failSSHKeyList     error
 	failSSHKeyDelete   error
 	failFirewallDelete error
+	// failFirewallEnsure fails the first N attach attempts, the way
+	// Hetzner does while a new server has no public interface yet.
+	failFirewallEnsure     int
+	firewallEnsureAttempts int
 
 	// Account-audit failure injection. The audit's central honesty
 	// property is that an unreadable list must never read as an
@@ -384,6 +388,11 @@ func (f *fakeClient) FirewallRemoveEphemeralRule(_ context.Context, ruleID strin
 func (f *fakeClient) FirewallEnsureForServer(_ context.Context, serverID string, extraPorts []relayports.Endpoint) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.firewallEnsureAttempts++
+	if f.failFirewallEnsure > 0 {
+		f.failFirewallEnsure--
+		return "", errors.New("hetzner firewall create: no public network interfaces found (private_net_only_server)")
+	}
 	if f.ensuredFirewalls == nil {
 		f.ensuredFirewalls = map[string]string{}
 	}
@@ -1586,4 +1595,65 @@ func (f *fakeClient) FirewallDeleteByID(_ context.Context, firewallID string) er
 	delete(f.fwAppliedTo, firewallID)
 	delete(f.fwLabelSelectors, firewallID)
 	return nil
+}
+
+// Hetzner refuses a firewall on a server whose public interface does
+// not exist yet. One attempt right after create lost that race on a
+// real account; the relay then got the fleet-baseline firewall from
+// the mgmt self-heal instead of its own family set.
+func TestProvision_FirewallAttachOutlastsTheNewServerRace(t *testing.T) {
+	old := firewallAttachDelay
+	firewallAttachDelay = time.Millisecond
+	defer func() { firewallAttachDelay = old }()
+
+	f := newFake()
+	f.failFirewallEnsure = 3
+	p := New(f)
+	opts := seededOpts(0x31)
+	opts.EnabledFamilies = []string{"vless-reality", "tuic"}
+	rec, err := p.Provision(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.firewallEnsureAttempts != 4 {
+		t.Fatalf("attach attempts = %d, want 4 (three refusals, then success)", f.firewallEnsureAttempts)
+	}
+	if _, ok := f.ensuredFirewalls[rec.ServerID]; !ok {
+		t.Fatal("the relay ended provisioning with no cloud firewall")
+	}
+	var tuic bool
+	for _, ep := range f.fwExtraPorts[rec.ServerID] {
+		if ep.Port == 8443 && ep.UDP {
+			tuic = true
+		}
+	}
+	if !tuic {
+		t.Errorf("firewall ports %v do not open this relay's own family (tuic 8443/udp)", f.fwExtraPorts[rec.ServerID])
+	}
+}
+
+func TestProvision_FirewallAttachGivesUpAndSaysSo(t *testing.T) {
+	old := firewallAttachDelay
+	firewallAttachDelay = time.Millisecond
+	defer func() { firewallAttachDelay = old }()
+
+	f := newFake()
+	f.failFirewallEnsure = 1000
+	p := New(f)
+	opts := seededOpts(0x32)
+	var said bool
+	opts.OnProgress = func(step, msg string) {
+		if step == "provision_cloud_firewall" && strings.Contains(msg, "firewall ensure failed") {
+			said = true
+		}
+	}
+	if _, err := p.Provision(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if f.firewallEnsureAttempts != firewallAttachAttempts {
+		t.Errorf("attach attempts = %d, want %d", f.firewallEnsureAttempts, firewallAttachAttempts)
+	}
+	if !said {
+		t.Error("a relay left without its firewall was not reported")
+	}
 }

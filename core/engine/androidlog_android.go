@@ -10,14 +10,14 @@ import "C"
 
 import "unsafe"
 
-// androidLog writes an ERROR-level line to logcat under the
-// "daalengine" tag so the in-process sing-box driver's failures are
-// diagnosable on-device (Go stderr from a c-shared lib does not reach
-// logcat on its own). No-op on non-Android builds.
-func androidLog(msg string) {
+// platformLog writes one line to logcat under the "daalengine" tag so
+// the engine is diagnosable on-device (Go stderr from a c-shared lib
+// does not reach logcat on its own). The line has already been through
+// Scrub (log.go).
+func platformLog(level int, msg string) {
 	ctag := C.CString("daalengine")
 	cmsg := C.CString(msg)
-	C.__android_log_write(C.ANDROID_LOG_ERROR, ctag, cmsg)
+	C.__android_log_write(C.int(level), ctag, cmsg)
 	C.free(unsafe.Pointer(ctag))
 	C.free(unsafe.Pointer(cmsg))
 }

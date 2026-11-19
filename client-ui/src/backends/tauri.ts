@@ -11,12 +11,19 @@ import {
     parseRouteCheck,
     parseRouteRunning,
 } from '../lib/routeCheck';
+import {
+    diagNamesActiveRoute,
+    idOnlyRoute,
+    parseLastSwitch,
+    pickActiveRouteId,
+    type ConnectionSummaryPlus,
+} from '../lib/activeRoute';
+import { errorText } from '../lib/errorText';
 import { invoke } from '@tauri-apps/api/core';
 import type {
     AddSubscriptionRequest,
     BootstrapStatus,
     BurnpressureVerdict,
-    ConnectionSummary,
     ConnMode,
     ConnState,
     D2Contract,
@@ -54,6 +61,7 @@ import { buildPublisherTree, deriveBurnpressureVerdict } from '../contract/deriv
 // are all retired; until then this is the only legitimate consumer.
 import {
     diagnostics as bridgeDiagnostics,
+    vpnServiceStatus as bridgeVpnServiceStatus,
     diagnosticsExplain,
     pointerRotationStatus,
     exportDiagnostics as bridgeExportDiag,
@@ -219,12 +227,19 @@ async function rawRouteSummary(routeId: string): Promise<RawRouteSummary | null>
     }
 }
 
+// Throws when the engine could not list the routes. The Connections
+// page needs that difference: "the list could not be read" must never
+// be drawn as "you have no connections".
+async function rawAvailableRoutesStrict(): Promise<RawRouteSummary[]> {
+    const body = await invoke<string>('available_routes');
+    if (!body) return [];
+    const parsed = JSON.parse(body) as { routes?: RawRouteSummary[] };
+    return parsed.routes ?? [];
+}
+
 async function rawAvailableRoutes(): Promise<RawRouteSummary[]> {
     try {
-        const body = await invoke<string>('available_routes');
-        if (!body) return [];
-        const parsed = JSON.parse(body) as { routes?: RawRouteSummary[] };
-        return parsed.routes ?? [];
+        return await rawAvailableRoutesStrict();
     } catch {
         return [];
     }
@@ -282,7 +297,7 @@ async function rawThroughputSnapshot(): Promise<ThroughputSnapshot> {
 // ---- backend implementation
 
 export class TauriContract implements D2Contract {
-    async connectionSummary(): Promise<ConnectionSummary> {
+    async connectionSummary(): Promise<ConnectionSummaryPlus> {
         const d = await bridgeDiagnostics();
         // The posture does not advance until the engine has PROVED the
         // route; `route_check` says what is happening meanwhile.
@@ -297,14 +312,31 @@ export class TauriContract implements D2Contract {
             routeRunning,
         );
         const mode = ((d.mode as ConnMode) ?? 'normal');
+        // The active route comes from the engine's MEMORY first
+        // (`active_route` in the blob just read). Only an engine that
+        // predates the field is asked through diagnostics_explain, which
+        // reads — and writes — the route store: when the store stopped
+        // answering on the first phone pass, that was the only source,
+        // and a working tunnel was drawn as "No route selected".
+        let explain: unknown = null;
+        if (!diagNamesActiveRoute(d)) {
+            try {
+                explain = await diagnosticsExplain();
+            } catch { /* the store-backed fallback failed; `d` still speaks */ }
+        }
         let activeRoute: RouteDisplayRow | undefined;
-        try {
-            const exp = parseExplanation(await diagnosticsExplain());
-            if (exp?.pick?.route_id) {
-                const r = await rawRouteSummary(exp.pick.route_id);
-                if (r) activeRoute = rawToRow(r);
-            }
-        } catch { /* ignore */ }
+        const activeId = pickActiveRouteId(d, explain);
+        if (activeId) {
+            // The display details (names, trust) do live in the store.
+            // When they cannot be read the id still stands: an id-only
+            // row marks the connected row and keeps the Connection page
+            // from contradicting itself.
+            const r = await rawRouteSummary(activeId);
+            activeRoute =
+                r && r.route_id
+                    ? rawToRow(r)
+                    : idOnlyRoute(activeId, d.active_route_family);
+        }
 
         // The engine emits neither `valid_for_days` nor `valid_days` —
         // reading them meant this was always undefined. Derive the day
@@ -336,6 +368,14 @@ export class TauriContract implements D2Contract {
                     : undefined,
             routeRunning,
             connectRefused: parseConnectRefused(d.connect_refused),
+            connectRefusedRoute:
+                typeof d.connect_refused_route === 'string' && d.connect_refused_route
+                    ? d.connect_refused_route
+                    : undefined,
+            storeRecovered: d.store_recovered === true,
+            // Android only (null elsewhere): the VPN service's note
+            // about a switch that did not take. Never throws.
+            lastSwitch: parseLastSwitch(await bridgeVpnServiceStatus()),
             // Only 'none' and 'singbox' are meaningful. Anything else —
             // including the absent field an older engine emits — stays
             // undefined so the UI claims nothing rather than accusing a
@@ -787,9 +827,18 @@ export class TauriContract implements D2Contract {
     private cellLabelCache = new Map<string, string>();
 
     async listPublishers(): Promise<PublisherTreeRow[]> {
+        // The routes are the page: if they cannot be listed this
+        // rejects, and the page says so. The subscription rows only
+        // decorate them (a name, a last-refresh line), so a failure
+        // there costs the decoration and not the routes — on the first
+        // phone pass a failed subscription_list blanked the whole page
+        // while every route was still usable.
         const [routes, subs, skipped] = await Promise.all([
-            this.availableRoutes(),
-            this.subscriptionList(),
+            rawAvailableRoutesStrict().then((raw) => raw.map(rawToRow)),
+            this.subscriptionList().catch((e): SubscriptionRow[] => {
+                console.warn('daal: subscription list unavailable:', errorText(e));
+                return [];
+            }),
             this.skippedFamilies(),
         ]);
         return buildPublisherTree(routes, subs, skipped, (k) =>

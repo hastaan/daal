@@ -242,15 +242,38 @@ func DiagnosticsExplain() (string, error) {
 	c := loadedCore()
 	w := c.pm.Explain()
 	// Persist to diagnostics_explain so the CLI / next-launch UI can
-	// surface it without needing the Manager to still be in memory.
+	// surface it without needing the Manager to still be in memory —
+	// but only when the record CHANGED. This function is a read path
+	// that the UI polls twice a second; writing the same row on every
+	// poll made each poll a database write that every other reader had
+	// to queue behind (and, before the store was pinned to one
+	// connection, could fail against).
 	skipped, _ := json.Marshal(w.SkippedFamilies)
-	_ = c.store.PutDiagnosticsExplain(w.Bucket, w.WhyChoseRoute, string(skipped))
+	c.persistExplain(w.Bucket, w.WhyChoseRoute, string(skipped))
+
+	// The route this answer is about. The path manager's current route
+	// first (it also names a route whose connect just failed); if it
+	// has none, whatever the engine is running. Both are memory.
+	memRoute, memFamily := c.activeRouteFromMemory()
+	activeRoute := w.ActiveRoute
+	if activeRoute == "" {
+		activeRoute = memRoute
+	}
 
 	now := time.Now().UTC()
 	exp := selection.NewExplanation("diagnostics-"+w.Bucket, selection.CurrentPhase)
 	exp.Reason = w.WhyChoseRoute
-	if w.ActiveRoute != "" {
-		if row, err := c.store.GetRoute(w.ActiveRoute); err == nil {
+	if activeRoute != "" {
+		// What is known without the store: which route, and — when it
+		// is the one the engine is running — its family. The app finds
+		// the active route through pick.route_id, and used to get an
+		// empty pick whenever the store read below failed: a working
+		// tunnel with "No route selected" on top of it.
+		exp.Pick.RouteID = activeRoute
+		if activeRoute == memRoute {
+			exp.Pick.Family = memFamily
+		}
+		if row, err := c.store.GetRoute(activeRoute); err == nil {
 			out := selection.Decide(selection.Input{
 				Routes:         []routestore.RouteRow{row},
 				NetworkSignals: activeNetworkSignals(c, now),
@@ -294,8 +317,8 @@ func DiagnosticsExplain() (string, error) {
 	// older clients can keep reading the pathmanager shape.
 	payload["bucket"] = w.Bucket
 	payload["state"] = w.State
-	if w.ActiveRoute != "" {
-		payload["active_route"] = w.ActiveRoute
+	if activeRoute != "" {
+		payload["active_route"] = activeRoute
 	}
 	payload["why_chose_route"] = w.WhyChoseRoute
 	payload["skipped_families"] = w.SkippedFamilies
@@ -305,6 +328,24 @@ func DiagnosticsExplain() (string, error) {
 
 	body, _ := json.Marshal(payload)
 	return string(body), nil
+}
+
+// persistExplain writes the "why this route?" record to the store when
+// it differs from the one last written (or the last write failed). At
+// most one write per change; an hour rollover is a change (the bucket
+// is part of the record).
+func (c *Core) persistExplain(bucket, why, skippedJSON string) {
+	rec := [3]string{bucket, why, skippedJSON}
+	c.explainMu.Lock()
+	defer c.explainMu.Unlock()
+	if c.explainSaved && c.explainWritten == rec {
+		return
+	}
+	if err := c.store.PutDiagnosticsExplain(bucket, why, skippedJSON); err != nil {
+		c.explainSaved = false
+		return
+	}
+	c.explainWritten, c.explainSaved = rec, true
 }
 
 // refreshStoreAdapter routes the routestore.Store to the refresh.Store

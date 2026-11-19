@@ -289,7 +289,16 @@ export function AddressSwap({
                         />
 
                         {err && (
-                            <div style={{ color: 'var(--red)', fontSize: 12 }}>{err}</div>
+                            <div
+                                style={{
+                                    color: 'var(--red)',
+                                    fontSize: 12,
+                                    whiteSpace: 'pre-line',
+                                    lineHeight: 1.5,
+                                }}
+                            >
+                                {err}
+                            </div>
                         )}
                     </div>
                 </Sheet>
