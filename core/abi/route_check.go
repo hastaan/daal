@@ -825,6 +825,17 @@ func jittered(d time.Duration, frac float64) time.Duration {
 	return time.Duration(float64(d) * (1 - frac + 2*frac*rand.Float64()))
 }
 
+// resetDriverNetwork drops the running instance's connections from the
+// network the device just left (engine.NetworkResetter), so that the
+// check that follows — and the person's own traffic — start on the new
+// one instead of waiting on connections that will never answer.
+func (c *Core) resetDriverNetwork() {
+	if r, ok := c.driver.(engine.NetworkResetter); ok {
+		r.ResetNetwork()
+		engine.LogInfo("network changed: connections from the old network dropped")
+	}
+}
+
 // kickLiveness asks the liveness loop to check now. The platform's
 // network-change signal calls it: a route that worked on Wi-Fi says
 // nothing about the cellular network the phone just moved to.

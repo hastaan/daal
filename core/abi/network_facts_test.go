@@ -370,3 +370,42 @@ func TestNetworkFacts_NoNetworkStartsNoFallOverPass(t *testing.T) {
 		return r == "r2" && st == RouteCheckOK
 	})
 }
+
+// Seen on a phone (2026-11-19, mobile data -> Wi-Fi): the check that
+// follows a network change ran on connections left on the network the
+// phone had just left, failed twice and the engine moved off a route
+// that was fine. A change of network drops the instance's connections
+// BEFORE that check; a report that changes nothing, a flag, or going
+// down drops nothing.
+func TestNetworkFacts_AChangeOfNetworkDropsTheOldConnectionsFirst(t *testing.T) {
+	rig := newAutoRig(t, autoFourRoutes)
+	rig.c.mu.Lock()
+	rig.c.proofCfg.LivenessInterval = time.Hour
+	rig.c.proofCfg.RecheckInterval = time.Hour
+	rig.c.mu.Unlock()
+	facts(t, NetKindWiFi, "home", 1, 0)
+	if res := rig.connectAuto(); !res.Connected {
+		t.Fatalf("got %+v", res)
+	}
+	base := rig.stub.ResetCount()
+
+	facts(t, NetKindWiFi, "home", 1, 0)
+	facts(t, NetKindWiFi, "home", 1, 1)
+	if got := rig.stub.ResetCount(); got != base {
+		t.Fatalf("no change of network, yet %d reset(s)", got-base)
+	}
+	n := proofCount(rig)
+	facts(t, NetKindCellular, "operator-1", 1, 1)
+	if got := rig.stub.ResetCount(); got != base+1 {
+		t.Fatalf("wifi -> cellular: %d reset(s), want 1", got-base)
+	}
+	waitFor(t, "the check after the reset", func() bool { return proofCount(rig) == n+1 })
+	facts(t, NetKindNone, "", -1, -1)
+	if got := rig.stub.ResetCount(); got != base+1 {
+		t.Fatalf("going down reset %d more time(s)", got-base-1)
+	}
+	facts(t, NetKindWiFi, "home", 1, 0)
+	if got := rig.stub.ResetCount(); got != base+2 {
+		t.Fatalf("cellular -> wifi: %d reset(s) in all, want 2", got-base)
+	}
+}

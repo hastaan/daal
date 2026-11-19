@@ -152,6 +152,7 @@ func NetworkChanged(kind, carrier, ssid string) (string, error) {
 	// rather than at its next tick (route_check.go). No-op when no
 	// route is connected.
 	if changed {
+		c.resetDriverNetwork()
 		c.kickLiveness()
 	}
 

@@ -10,6 +10,7 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -97,10 +98,10 @@ import org.daal.desktop.vpn.StartSequence.Outcome
  * kind, an opaque id, validated, metered). A
  * ConnectivityManager.NetworkCallback is registered from the first
  * start until the stop — also while holding, which is when "the
- * network is back" matters most — for the DEFAULT network of this app.
- * That is the network under the tunnel and never the tunnel itself:
- * the app is excluded from its own VPN (establishTun), so its default
- * network is the real one, and an event that is about a VPN network
+ * network is back" matters most — for the best network that has
+ * internet and is NOT a VPN (see startNetworkWatch for why it is not
+ * the default-network callback: with the tunnel up Android answers
+ * that one with this app's own VPN). An event that is about a VPN network
  * all the same is dropped. What is sent and when — the first facts at
  * once, later changes after they settle, identical facts once, a lost
  * network as kind "none" — is NetworkWatch (pure, unit tested). The
@@ -572,6 +573,7 @@ class DaalVpnService : VpnService() {
     }
     val cb = object : ConnectivityManager.NetworkCallback() {
       override fun onAvailable(network: Network) {
+        Log.i(TAG, "network: event available")
         netEvent(netWatch.available(network.networkHandle, netNow()))
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
           // Before Android 8 the two descriptions below are not
@@ -592,6 +594,7 @@ class DaalVpnService : VpnService() {
       }
 
       override fun onLost(network: Network) {
+        Log.i(TAG, "network: event lost")
         netEvent(netWatch.lost(network.networkHandle, netNow()))
       }
     }
@@ -615,7 +618,26 @@ class DaalVpnService : VpnService() {
         netEvent(netWatch.start(false, netNow()))
         first = netWatch.due(netNow())
       }
-      cm.registerDefaultNetworkCallback(cb)
+      // NOT the default-network callback. Seen on a phone (Android 16,
+      // 2026-11-19): once the tunnel is up Android satisfies this
+      // app's default request with the app's OWN VPN network, although
+      // the package is excluded from it, and Wi-Fi -> mobile data
+      // underneath was never called back. So the network is asked for
+      // by what it is: internet, and not a VPN (the builder's default
+      // capabilities already say NOT_VPN; it is stated all the same).
+      val wanted = NetworkRequest.Builder()
+        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        .build()
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        // The single best such network, as the default would be.
+        cm.registerBestMatchingNetworkCallback(wanted, cb, mainHandler)
+      } else {
+        // Before Android 12: every such network calls back. With one
+        // at a time (the usual case) that is the same; with Wi-Fi and
+        // mobile data both held up, the one that spoke last is taken.
+        cm.registerNetworkCallback(wanted, cb)
+      }
       netCallback = cb
       reportingNetwork = true
       Log.i(TAG, "network: watching (a default network ${if (has) "exists" else "does not exist"}; described at once=${first != null})")
