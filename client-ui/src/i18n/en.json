@@ -215,6 +215,7 @@
     "wiz.build.stage.profile": "Saving your choices",
     "wiz.build.stage.keys": "Creating your signing key",
     "wiz.build.stage.provision": "Renting and hardening the server",
+    "wiz.build.stage.provision.existing": "Setting up the server you already have",
     "wiz.build.stage.sign": "Building and signing the relay pack",
     "wiz.build.stage.share": "Making the connection file shareable",
     "wiz.build.hint": "This takes a few minutes. Keep the app open — you can watch the log below.",

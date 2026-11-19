@@ -215,6 +215,7 @@
     "wiz.build.stage.profile": "ذخیرهٔ انتخاب‌های شما",
     "wiz.build.stage.keys": "ساخت کلید امضای شما",
     "wiz.build.stage.provision": "اجارهٔ سرور و ایمن‌سازی آن",
+    "wiz.build.stage.provision.existing": "آماده‌سازی سروری که از قبل دارید",
     "wiz.build.stage.sign": "ساخت و امضای بستهٔ رله",
     "wiz.build.stage.share": "آماده کردن فایل اتصال برای فرستادن",
     "wiz.build.hint": "این کار چند دقیقه طول می‌کشد. برنامه را باز نگه دارید — می‌توانید گزارش زیر را دنبال کنید.",

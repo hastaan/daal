@@ -3102,7 +3102,7 @@ W3 items: none moves with this wave.
   "Choosing an existing server wipes it and reinstalls it". A server
   that one of the person's relays already uses must be shown as
   "used by your relay Test" and not be selectable.
-- [ ] **PB-27. "Finish setting up on this server" keeps the wording of a
+- [x] **PB-27. (Fixed: the step reads "Setting up the server you already have" whenever the setup runs on an existing server; test "the build step label".) "Finish setting up on this server" kept the wording of a
   first setup.** The progress list still says "Renting and hardening the
   server" and the log shows the old one-time key being refused for a
   while; nothing is rented. Say "Setting up the server again".
