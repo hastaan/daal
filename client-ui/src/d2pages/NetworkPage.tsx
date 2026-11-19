@@ -7,7 +7,7 @@
 // later milestones wire connect-by-scope (M3), cooldown chips (M4),
 // and editable cell labels (M5).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import AddSheet from '../components/AddSheet';
 import MyAddressSheet from '../components/MyAddressSheet';
 import ScanSheet from '../components/ScanSheet';
@@ -25,9 +25,31 @@ import { Button, Card } from '../design/primitives';
 import {
     connectFailedKey,
     connectRefusedKey,
+    parseConnectRefused,
     refusedToShow,
     type ConnectRefused,
 } from '../lib/routeCheck';
+import { runningRouteId, summaryExtras } from '../lib/activeRoute';
+import { errorText } from '../lib/errorText';
+import {
+    acceptPending,
+    listView,
+    pendingFailureKey,
+    resolvePending,
+    rowAction,
+    rowActionDisabled,
+    rowActionLabelKey,
+    rowState,
+    rowStateLabelKey,
+    runningPhase,
+    startPending,
+    switchingAwayFromRunning,
+    type PendingConnect,
+    type RunningPhase,
+} from '../lib/networkRows';
+import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
+import { EngineStartNotice, FailureBox, StoreResetNotice } from './PageNotices';
+import { useEngineStartProblem } from '../lib/engineStart';
 
 interface Props {
     t: (k: string) => string;
@@ -58,17 +80,45 @@ export default function NetworkPage({ t }: Props) {
     const contract = useContract();
     const [tree, setTree] = useState<PublisherTreeRow[] | null>(null);
     const [verdict, setVerdict] = useState<BurnpressureVerdict | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    // The list could not be read: the RAW error text, for the details
+    // fold only. What the person reads is `network.load_failed`.
+    const [loadError, setLoadError] = useState<string | null>(null);
+    // Something the person asked for did not happen: the i18n key of our
+    // own sentence, and the raw error text when there is one.
+    // `routeId` is set when the sentence is about one route's connect, so
+    // it can be taken down the moment that route is reported connected.
+    const [failure, setFailure] = useState<{ key: string; detail?: string; routeId?: string } | null>(null);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [addOpen, setAddOpen] = useState(false);
     const [addrOpen, setAddrOpen] = useState(false);
     const [scanOpen, setScanOpen] = useState(false);
     const [budgetFor, setBudgetFor] = useState<RouteDisplayRow | null>(null);
-    // Which route the user just tapped Connect on. Used to render
-    // per-row "Connecting…" feedback (disables the button + swaps the
-    // label) so a sub-second `contract.connect` resolution doesn't
-    // feel like a dead tap.
-    const [connectingId, setConnectingId] = useState<string | null>(null);
+    // The route the user tapped Connect on, until the ENGINE has
+    // answered for it — not until the connect call returns: on Android
+    // that call resolves as soon as the VPN service is started, long
+    // before the engine has decided anything. While it is set the row
+    // reads "Checking the connection…" with a Cancel button, and the
+    // route that was connected before the tap stays marked connected
+    // until the engine reports the new one (lib/networkRows.ts).
+    const [pending, setPendingState] = useState<PendingConnect | null>(null);
+    const pendingRef = useRef<PendingConnect | null>(null);
+    const setPending = (p: PendingConnect | null) => {
+        pendingRef.current = p;
+        setPendingState(p);
+    };
+    // Set when the person cancelled the connect they started here: the
+    // connect call then rejects ("connection attempt cancelled"), which
+    // is the expected outcome and not an error to report.
+    const cancelledRef = useRef(false);
+    // What the engine is doing with the route it has running: proved
+    // ('steady'), still proving it, or lost and being retried.
+    const [verifying, setVerifying] = useState<RunningPhase>('steady');
+    const lastSummaryRef = useRef<ConnectionSummary | null>(null);
+    // The engine set a damaged store aside at start; said once.
+    const [storeReset, setStoreReset] = useState(false);
+    // Daal could not start its engine: nothing here can work, and the
+    // page says that instead of "could not read… Try again".
+    const [startProblem, reportRejection] = useEngineStartProblem();
     // The route the engine reports as currently connected (from the 2 s
     // connectionSummary poll), or null. Drives Connect ↔ Disconnect and the
     // active-route highlight — without this poll the page had no live link
@@ -107,9 +157,64 @@ export default function NetworkPage({ t }: Props) {
             ]);
             setTree(tr);
             setVerdict(v);
-            setError(null);
+            setLoadError(null);
         } catch (e) {
-            setError((e as Error).message || 'unknown');
+            // A rejected Tauri command is a plain string, not an Error;
+            // errorText reads either. The rows already on screen stay.
+            setLoadError(errorText(e));
+            reportRejection(e);
+        }
+    };
+
+    // Everything the page takes from one connectionSummary read,
+    // including the answer to a tap that is still waiting for one.
+    const applySummary = (s: ConnectionSummary) => {
+        lastSummaryRef.current = s;
+        // "Active" is whatever the engine has RUNNING, not only
+        // what it has finished proving: a route still being
+        // checked, or lost and being retried, must be stoppable
+        // here too. Offering Connect for it called connect on a
+        // route in its cooldown (refused) and left no way to stop
+        // it from this page.
+        setActiveRouteId(runningRouteId(s));
+        setVerifying(runningPhase(s));
+        setRefused(s.connectRefused);
+        // A "could not connect" sentence about a route the engine now
+        // reports connected is no longer true (the permission dialog
+        // can outlast the page's patience, and the connect then goes
+        // through): take it down.
+        if (s.state === 'connected' && s.activeRoute?.routeId) {
+            const up = s.activeRoute.routeId;
+            setFailure((f) => (f && f.routeId === up ? null : f));
+        }
+        setNoDataPlane(s.dataPlane === 'none');
+        setStoreReset(storeResetNoticeDue(summaryExtras(s).storeRecovered));
+        const p = pendingRef.current;
+        if (!p) return;
+        const outcome = resolvePending(p, s, Date.now());
+        if (outcome === 'waiting') return;
+        setPending(null);
+        const note = summaryExtras(s).lastSwitch;
+        const noteIsOurs = note?.routeId === p.routeId;
+        if (outcome === 'refused') {
+            // Shown also while the old route stays connected: the
+            // engine refuses before it touches what is running. The
+            // service's note carries the code when the engine's blob no
+            // longer does.
+            setTapRefused(
+                s.connectRefused ??
+                    (noteIsOurs ? parseConnectRefused(note?.reason) ?? 'other' : undefined),
+            );
+        } else if (outcome === 'failed' || outcome === 'timeout') {
+            // Never end a tap in silence: a failed switch that left the
+            // old route connected says so, and a wait that ran out says
+            // that too.
+            setFailure({
+                key:
+                    pendingFailureKey(p.routeId, outcome, s) ??
+                    connectFailedKey(s.routeCheck, s.routeCheckCategory),
+                routeId: p.routeId,
+            });
         }
     };
     useEffect(() => {
@@ -126,22 +231,10 @@ export default function NetworkPage({ t }: Props) {
             try {
                 const s = await contract.connectionSummary();
                 if (!alive) return;
-                // "Active" is whatever the engine has RUNNING, not only
-                // what it has finished proving: a route still being
-                // checked, or lost and being retried, must offer
-                // Disconnect here too. Offering Connect for it called
-                // connect on a route in its cooldown (refused) and left
-                // no way to stop it from this page.
-                setActiveRouteId(
-                    s.state === 'connected' ||
-                        (s.state === 'connecting' && s.routeRunning === true)
-                        ? s.activeRoute?.routeId ?? null
-                        : null,
-                );
-                setRefused(s.connectRefused);
-                setNoDataPlane(s.dataPlane === 'none');
-            } catch {
+                applySummary(s);
+            } catch (e) {
                 /* transient read failure — keep last known state */
+                reportRejection(e);
             }
         };
         void tick();
@@ -153,19 +246,99 @@ export default function NetworkPage({ t }: Props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contract]);
 
+    // Stops whatever the engine has running. Also how a connection check
+    // is cancelled — the engine abandons it at once — whether this page
+    // started it or not: the same mechanism as the Connection page's
+    // main button.
     const onDisconnect = async () => {
-        setError(null);
+        setFailure(null);
         setTapRefused(undefined);
+        if (pendingRef.current) cancelledRef.current = true;
+        setPending(null);
         // Optimistic: clear the active route immediately so the button flips
         // to "Connect" without waiting for the next poll; the poll reconciles.
         setActiveRouteId(null);
+        setVerifying('steady');
         try {
             await contract.disconnect();
             await load();
         } catch (e) {
-            setError((e as Error).message || String(e) || 'disconnect failed');
+            setFailure({ key: 'network.action_failed', detail: errorText(e) });
         }
     };
+
+    const onConnectRoute = async (routeId: string) => {
+        setFailure(null);
+        setTapRefused(undefined);
+        // Refuse before the press does anything. The engine would
+        // refuse anyway; letting the call through only swaps honest,
+        // translated copy for a developer string.
+        if (noDataPlane) {
+            setFailure({ key: 'conn.no_data_plane.title' });
+            return;
+        }
+        // One connect at a time from this page; the tapped row offers
+        // Cancel meanwhile.
+        if (pendingRef.current) return;
+        cancelledRef.current = false;
+        setPending(startPending(routeId, Date.now(), lastSummaryRef.current));
+        // Read through a function: the ref changes while this handler is
+        // suspended (the poll answers, the person cancels), which the
+        // compiler's narrowing of `pendingRef.current` cannot know.
+        const current = (): PendingConnect | null => pendingRef.current;
+        const stillOurs = () => current()?.routeId === routeId;
+        try {
+            await contract.connect(routeId);
+            // The call returning is not the answer everywhere (on
+            // Android it means "the VPN service was started"). Ask the
+            // engine now rather than waiting out the poll; nothing is
+            // marked connected on the strength of the call alone.
+            const mine = stillOurs() ? current() : null;
+            if (mine) {
+                // The host has accepted the connect: the wait for the
+                // engine's answer is counted from here.
+                setPending(acceptPending(mine, Date.now()));
+                try {
+                    applySummary(await contract.connectionSummary());
+                } catch {
+                    /* the poll will catch up */
+                }
+            }
+            void load();
+        } catch (e) {
+            // Cancelled by the person, or the poll already reported how
+            // it ended: nothing more to say.
+            if (cancelledRef.current || !stillOurs()) return;
+            // A refusal the engine can name gets its own sentence, shown
+            // whether or not another route is still connected. A route
+            // that started and failed its connection check gets the
+            // sentence the Connection page shows for the same event. The
+            // host's own error text ("engine call returned -1") goes
+            // under Details, never into the sentence.
+            let summary: ConnectionSummary | undefined;
+            try {
+                summary = await contract.connectionSummary();
+            } catch {
+                /* the plain sentence below */
+            }
+            setPending(null);
+            if (summary) applySummary(summary);
+            const code = summary?.connectRefused;
+            if (code) {
+                setRefused(code);
+                setTapRefused(code);
+            } else {
+                setFailure({
+                    key: connectFailedKey(summary?.routeCheck, summary?.routeCheckCategory),
+                    detail: errorText(e),
+                    routeId,
+                });
+            }
+        }
+    };
+
+    const pendingId = pending?.routeId ?? null;
+    const view = listView(tree, loadError !== null);
 
     const toggle = (id: string) => {
         setExpanded((prev) => {
@@ -274,7 +447,17 @@ export default function NetworkPage({ t }: Props) {
                 </div>
             )}
 
-            {refusedShown && !error && (
+            {storeReset && (
+                <StoreResetNotice
+                    t={t}
+                    onDismiss={() => {
+                        markStoreResetNoticeSeen();
+                        setStoreReset(false);
+                    }}
+                />
+            )}
+
+            {refusedShown && !failure && (
                 <div
                     role="alert"
                     style={{
@@ -291,25 +474,24 @@ export default function NetworkPage({ t }: Props) {
                 </div>
             )}
 
-            {error && (
-                <div
-                    style={{
-                        background: 'rgba(200,85,61,0.10)',
-                        border: '1px solid rgba(200,85,61,0.40)',
-                        color: 'var(--red)',
-                        padding: 12,
-                        borderRadius: 'var(--radius-md)',
-                        marginBottom: 16,
-                        fontSize: 13,
-                    }}
-                >
-                    {error}
-                </div>
+            {failure && (
+                <FailureBox t={t} text={t(failure.key)} detail={failure.detail} />
             )}
 
-            {tree === null ? (
+            {startProblem && <EngineStartNotice t={t} detail={startProblem.detail} />}
+
+            {loadError !== null && !startProblem && (
+                <FailureBox
+                    t={t}
+                    text={t('network.load_failed')}
+                    detail={loadError}
+                    onRetry={() => void load()}
+                />
+            )}
+
+            {view === 'loading' ? (
                 <EmptyState text={t('common.loading')} />
-            ) : tree.length === 0 ? (
+            ) : view === 'failed' ? null : view === 'empty' || tree === null ? (
                 <EmptyState text={t('network.empty')} />
             ) : (
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
@@ -325,68 +507,11 @@ export default function NetworkPage({ t }: Props) {
                             p={p}
                             open={expanded.has(p.displayName)}
                             onToggle={() => toggle(p.displayName)}
-                            connectingId={connectingId}
+                            pendingId={pendingId}
+                            verifying={verifying}
                             activeRouteId={activeRouteId}
                             onDisconnect={onDisconnect}
-                            onConnectRoute={async (routeId) => {
-                                setError(null);
-                                setTapRefused(undefined);
-                                // Optimistic feedback: flag the row so
-                                // its button reads "Connecting…" and
-                                // disables, instantly. Cleared in
-                                // finally so error/success both
-                                // re-enable the affordance.
-                                // Refuse before the press does anything.
-                                // The engine would refuse anyway; letting
-                                // the call through only swaps honest,
-                                // translated copy for a developer string.
-                                if (noDataPlane) {
-                                    setError(t('conn.no_data_plane.title'));
-                                    return;
-                                }
-                                setConnectingId(routeId);
-                                try {
-                                    await contract.connect(routeId);
-                                    // Optimistic: mark this route active so
-                                    // the button flips to "Disconnect" at
-                                    // once; the 2 s poll reconciles.
-                                    setActiveRouteId(routeId);
-                                    await load();
-                                } catch {
-                                    // A refusal the engine can name gets
-                                    // its own sentence, shown whether or
-                                    // not another route is still
-                                    // connected. A route that started and
-                                    // failed its connection check gets
-                                    // the sentence the Connection page
-                                    // shows for the same event. The
-                                    // host's own error text ("engine call
-                                    // returned -1") is for a log, never
-                                    // for this banner.
-                                    let summary: ConnectionSummary | undefined;
-                                    try {
-                                        summary = await contract.connectionSummary();
-                                    } catch {
-                                        /* the plain sentence below */
-                                    }
-                                    const code = summary?.connectRefused;
-                                    if (code) {
-                                        setRefused(code);
-                                        setTapRefused(code);
-                                    } else {
-                                        setError(
-                                            t(
-                                                connectFailedKey(
-                                                    summary?.routeCheck,
-                                                    summary?.routeCheckCategory,
-                                                ),
-                                            ),
-                                        );
-                                    }
-                                } finally {
-                                    setConnectingId(null);
-                                }
-                            }}
+                            onConnectRoute={onConnectRoute}
                             onCool={async (routeId) => {
                                 try {
                                     await contract.applyCooldown(
@@ -452,7 +577,10 @@ export default function NetworkPage({ t }: Props) {
                                     await contract.publisherDelete(p.publisherId);
                                     await load();
                                 } catch (e) {
-                                    setError(String(e));
+                                    setFailure({
+                                        key: 'network.action_failed',
+                                        detail: errorText(e),
+                                    });
                                 }
                             }}
                         />
@@ -506,11 +634,13 @@ interface PublisherRowProps {
     onRefresh: () => void | Promise<void>;
     onRemoveSub: () => void | Promise<void>;
     onRemovePublisher: () => void | Promise<void>;
-    /** Route id whose Connect button is currently in flight, or null. */
-    connectingId: string | null;
-    /** Route id the engine is currently connected through, or null. */
+    /** Route id tapped here whose answer has not come back, or null. */
+    pendingId: string | null;
+    /** The engine is still proving the route it has running. */
+    verifying: RunningPhase;
+    /** Route id the engine currently has running, or null. */
     activeRouteId: string | null;
-    /** Tear down the active tunnel. */
+    /** Tear down the active tunnel (also cancels a connection check). */
     onDisconnect: () => void | Promise<void>;
 }
 
@@ -525,7 +655,8 @@ function PublisherRowView({
     onRefresh,
     onRemoveSub,
     onRemovePublisher,
-    connectingId,
+    pendingId,
+    verifying,
     activeRouteId,
     onDisconnect,
 }: PublisherRowProps) {
@@ -591,30 +722,17 @@ function PublisherRowView({
                                   )}
                         </div>
                     </div>
-                    {trivial && allRoutes[0] && (() => {
-                        const r0 = allRoutes[0];
-                        const isActive = activeRouteId === r0.routeId;
-                        const isConnecting = connectingId === r0.routeId;
-                        const anyInFlight = connectingId !== null;
-                        return (
-                            <Button
-                                size="sm"
-                                variant={isActive ? 'secondary' : 'primary'}
-                                disabled={anyInFlight}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (isActive) void onDisconnect();
-                                    else void onConnectRoute(r0.routeId);
-                                }}
-                            >
-                                {isConnecting
-                                    ? t('network.connecting')
-                                    : isActive
-                                    ? t('network.disconnect')
-                                    : t('network.connect')}
-                            </Button>
-                        );
-                    })()}
+                    {trivial && allRoutes[0] && (
+                        <RouteActionButton
+                            t={t}
+                            routeId={allRoutes[0].routeId}
+                            activeRouteId={activeRouteId}
+                            pendingId={pendingId}
+                            verifying={verifying}
+                            onConnectRoute={onConnectRoute}
+                            onDisconnect={onDisconnect}
+                        />
+                    )}
                     <span
                         aria-hidden
                         style={{
@@ -646,7 +764,8 @@ function PublisherRowView({
                                 onConnectRoute={onConnectRoute}
                                 onCool={onCool}
                                 onBudget={onBudget}
-                                connectingId={connectingId}
+                                pendingId={pendingId}
+                                verifying={verifying}
                                 activeRouteId={activeRouteId}
                                 onDisconnect={onDisconnect}
                             />
@@ -707,13 +826,54 @@ function PublisherRowView({
     );
 }
 
+// The one button a route has: Connect, Cancel (while its connection is
+// being checked) or Disconnect. Used by the collapsed publisher row and
+// by every route row, so the two can never disagree.
+function RouteActionButton({
+    t,
+    routeId,
+    activeRouteId,
+    pendingId,
+    verifying,
+    onConnectRoute,
+    onDisconnect,
+}: {
+    t: (k: string) => string;
+    routeId: string;
+    activeRouteId: string | null;
+    pendingId: string | null;
+    verifying: RunningPhase;
+    onConnectRoute: (routeId: string) => void | Promise<void>;
+    onDisconnect: () => void | Promise<void>;
+}) {
+    const action = rowAction(
+        rowState(routeId, activeRouteId, pendingId, verifying),
+        switchingAwayFromRunning(routeId, activeRouteId, pendingId),
+    );
+    return (
+        <Button
+            size="sm"
+            variant={action === 'connect' ? 'primary' : 'secondary'}
+            disabled={rowActionDisabled(action, pendingId)}
+            onClick={(e) => {
+                e.stopPropagation();
+                if (action === 'connect') void onConnectRoute(routeId);
+                else void onDisconnect();
+            }}
+        >
+            {t(rowActionLabelKey(action))}
+        </Button>
+    );
+}
+
 function CellRowView({
     t,
     cell,
     onConnectRoute,
     onCool,
     onBudget,
-    connectingId,
+    pendingId,
+    verifying,
     activeRouteId,
     onDisconnect,
 }: {
@@ -722,7 +882,8 @@ function CellRowView({
     onConnectRoute: (routeId: string) => void | Promise<void>;
     onCool: (routeId: string) => void | Promise<void>;
     onBudget: (r: RouteDisplayRow) => void;
-    connectingId: string | null;
+    pendingId: string | null;
+    verifying: RunningPhase;
     activeRouteId: string | null;
     onDisconnect: () => void | Promise<void>;
 }) {
@@ -759,7 +920,17 @@ function CellRowView({
             )}
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                 {cell.routes.map((r) => {
-                    const isActive = activeRouteId === r.routeId;
+                    const state = rowState(
+                        r.routeId,
+                        activeRouteId,
+                        pendingId,
+                        verifying,
+                    );
+                    const isActive = state === 'connected';
+                    // A route that stopped carrying traffic is drawn like
+                    // one being checked: not green, and with its own words.
+                    const isChecking = state === 'checking' || state === 'lost';
+                    const stateLabel = rowStateLabelKey(state);
                     return (
                     <li
                         key={r.routeId}
@@ -771,9 +942,13 @@ function CellRowView({
                             borderTop: '1px dashed var(--line-soft)',
                             borderInlineStart: isActive
                                 ? '2px solid var(--green)'
+                                : isChecking
+                                ? '2px solid var(--gold-warm)'
                                 : '2px solid transparent',
                             background: isActive
                                 ? 'rgba(80,200,120,0.08)'
+                                : isChecking
+                                ? 'rgba(193,158,80,0.08)'
                                 : 'transparent',
                         }}
                     >
@@ -793,13 +968,15 @@ function CellRowView({
                                     fontSize: 10,
                                     color: isActive
                                         ? 'var(--green)'
+                                        : isChecking
+                                        ? 'var(--gold-warm)'
                                         : 'var(--dim)',
                                 }}
                             >
                                 {r.family}
                                 {r.familyMaturity === 'unsupported' &&
                                     ` · ${t('network.family.unsupported')}`}
-                                {isActive && ` · ${t('network.connected')}`}
+                                {stateLabel && ` · ${t(stateLabel)}`}
                                 {/* Presence, not truthiness: a missing
                                     healthPct means "never measured" and
                                     must not print as 0%. */}
@@ -814,26 +991,19 @@ function CellRowView({
                                 {r.budgetExhausted === true && ` · ${t('network.budget_full')}`}
                             </div>
                         </div>
-                        <Button
-                            size="sm"
-                            variant={isActive ? 'secondary' : 'primary'}
-                            disabled={connectingId !== null}
-                            onClick={() =>
-                                isActive
-                                    ? void onDisconnect()
-                                    : void onConnectRoute(r.routeId)
-                            }
-                        >
-                            {isActive
-                                ? t('network.disconnect')
-                                : connectingId === r.routeId
-                                ? t('network.connecting')
-                                : t('network.connect')}
-                        </Button>
+                        <RouteActionButton
+                            t={t}
+                            routeId={r.routeId}
+                            activeRouteId={activeRouteId}
+                            pendingId={pendingId}
+                            verifying={verifying}
+                            onConnectRoute={onConnectRoute}
+                            onDisconnect={onDisconnect}
+                        />
                         <Button
                             variant="secondary"
                             size="sm"
-                            disabled={connectingId !== null}
+                            disabled={pendingId !== null}
                             onClick={() => void onCool(r.routeId)}
                             title={t('network.cool_15m')}
                         >

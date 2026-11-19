@@ -89,6 +89,7 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
       invoke.resolve(response)
     } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.vpnStart (after consent) failed: ${t.message}")
       invoke.reject(t.message ?: "vpnStart post-consent failed")
     }
   }
@@ -106,6 +107,7 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
       invoke.resolve(response)
     } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.vpnStop failed: ${t.message}")
       invoke.reject(t.message ?: "vpnStop failed")
     }
   }
@@ -116,6 +118,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       put("connected", DaalVpnService.isConnected())
       put("route_id", DaalVpnService.currentRouteId())
       put("platform", "android")
+      // The last switch that did not take (see SwitchPolicy.SwitchNote):
+      // which route was asked for, which one the service stayed on, and
+      // a closed code for why. Absent when there is nothing to say.
+      DaalVpnService.lastSwitchNote()?.let { n ->
+        put(
+          "last_switch",
+          JSObject().apply {
+            put("route_id", n.requestedRouteId)
+            put("kept_route_id", n.keptRouteId)
+            put("outcome", n.outcome)
+            put("reason", n.reason)
+          },
+        )
+      }
     }
     invoke.resolve(response)
   }

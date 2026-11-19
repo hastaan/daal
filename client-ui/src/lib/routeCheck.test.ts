@@ -311,8 +311,8 @@ describe('connectFailedKey', () => {
         // The page is pinned on its source (the way
         // connectThreading.test.ts pins the hosts): the Connect handler
         // runs from its header to the next row callback.
-        const i = networkPageSource.indexOf('onConnectRoute={async');
-        const j = networkPageSource.indexOf('onCool={async');
+        const i = networkPageSource.indexOf('const onConnectRoute = async');
+        const j = networkPageSource.indexOf('const pendingId =');
         expect(i).toBeGreaterThanOrEqual(0);
         expect(j).toBeGreaterThan(i);
         const handler = networkPageSource
@@ -323,6 +323,10 @@ describe('connectFailedKey', () => {
         expect(handler).toContain('connectFailedKey(');
         expect(handler).not.toMatch(/\.message\b/);
         expect(handler).not.toMatch(/String\(e\)/);
-        expect(handler).not.toMatch(/catch \(/);
+        // The caught error's text goes one place only: the `detail` that
+        // the page folds under "Details". The sentence is always a key.
+        expect(handler.match(/errorText\(/g)).toHaveLength(1);
+        expect(handler).toMatch(/detail: errorText\(e\)/);
+        expect(handler).toMatch(/key: connectFailedKey\(/);
     });
 });

@@ -33,11 +33,12 @@ No sudo, no network, no VPS, no phone.
 
 | mode | worlds | what it covers |
 |---|---|---|
-| **quick** (~1 min) | `clean` | no censor × all 7 families on the tree's mgmt daemon, plus the ops `revoke`, `l1`, `mgmtauth`, `tamper` |
+| **quick** (~1 min) | `clean` | no censor × all 7 families on the tree's mgmt daemon, plus the ops `switch` (a live route switch, TCP family ↔ QUIC family), `revoke`, `l1`, `mgmtauth`, `tamper` |
 | | `release` | the **pinned release artefacts** (what a relay provisioned today really downloads) × the default families, plus `revoke`, `mgmtauth` |
 | | one per censor scenario (14) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
 | **full** (4–5 min) | one per censor scenario (14) | every scenario × all 7 families |
 | | `clean.recipients`, `clean.rotation` | the whole lifecycle on the tree daemon × all 7 families: recipients, revoke, wrong credentials, tamper, mgmt-auth, repeated relay restarts; then L1, **L2 then L3** (the cover host moves, then the address — the order in which naive's certificate matters), freshness, capability honesty |
+| | `clean.switch` | one phone, many routes: `switch`, then `switch-all` — a live switch between **every ordered pair** of the 7 families (42) in one session |
 | | `release.lifecycle` | the whole lifecycle again on the pinned release artefacts × the default families |
 | | `udp-blackhole` (+ops) | recipients and the three rotation rungs (L1, L3, L2 — the other order) **under a censor** |
 | | `release.all-families` | the pinned artefacts × all 7 families — FINDINGS F-002, kept visible until the release. **Until the pin moves, every pinned world stops at `provision`: this tree's publisher will not pin a management fingerprint the pinned health binary cannot authenticate (FINDINGS BOOT-1), and could not authenticate to the pinned daemon if it did (REL-1)** |
@@ -215,7 +216,10 @@ the rig could be wrong instead of the product:
 
 Nothing was added to the engine to push traffic through it. `wb-client`
 does what `DaalVpnService.kt` does, in the same order: register the protect
-callback, establish a TUN, `abi.SetTunFD(fd)`, `abi.SetRoute(id)`. The
+callback, establish a TUN (non-blocking, as `Builder.establish()` hands it
+over; `WB_TUN_BLOCKING=1` for the other kind), `abi.SetTunFD(fd)`,
+`abi.SetRoute(id)` — and, on `switch <order> <family>`, the service's
+route switch (see "Client-side ops"). The
 "VPN" is per-uid policy routing, exactly as on Android: every uid but the
 engine's own is routed into the TUN (`ip rule uidrange 1-65535 → table
 51820`), which is `addDisallowedApplication(self)`. The probe runs as uid
@@ -247,13 +251,13 @@ driver/                the `wb` binary (stdlib + hcloud schema types)
   publisher.go         one helper per daal-deploy verb
   client.go            wb-client and probe control
   fakecloud.go inet.go target.go probe.go labca.go     the outside world
-  ops.go ops_*.go      publisher-side operations, ONE FILE EACH
+  ops.go ops_*.go      publisher-side operations, ONE FILE EACH (ops_switch.go: the client-side one — a live route switch)
   lifecycle.go         shared plumbing for the lifecycle ops (verb helpers, Rebuild, box views, --ops lifecycle)
   fakecloud_fip.go     floating IPs (the cloud half of L3)
   mgmtprobe.go         hand-built mgmt requests (`wb mgmtprobe`)
   storage.go           static hosting the insider reaches without a tunnel (`wb storage`)
   *_test.go            hermetic: isolation + declaration validation
-labclient/             `wb-client`: real engine + the lab's VpnService
+labclient/             `wb-client`: real engine + the lab's VpnService (switch.go: route switch, fd sentinels, store checks)
 box/init.py            cloud-init first boot
 box/shims/             systemctl ufw sleep chown
 families/<name>.json   ONE FILE PER FAMILY
@@ -661,6 +665,60 @@ Any op that moves an endpoint must `rc.Resign` before it mints from
 describes the relay. `caps` must run last. The rotation rungs
 need a mgmt daemon that advertises them: the pinned release does for
 L1/L2/L3 on the four default families (FINDINGS LC-O4).
+
+#### Client-side ops — one phone that stays up
+
+`switch` and `switch-all` (`driver/ops_switch.go`) change nothing on the
+publisher's side. They are the only sessions in the rig that do not end
+after one route: one `wb-client` stays connected and is told, on stdin,
+`switch <order> <family>` (`labclient/switch.go`) — the person tapping
+another route's Connect. They exist because the first real-phone pass
+broke on exactly that (FINDINGS SW-0), in a place a connect → fetch →
+disconnect session never visits.
+
+| order | what the client does, through the same abi the phone uses | whose order |
+|---|---|---|
+| `rotate` | a NEW TUN → `SetTunFD(new)` → `SetRoute(B)`, no `ClearRoute` first | `DaalVpnService.kt` on the phone pass of 2026-11-19 — the only order in which the engine closes a TUN fd under a running instance |
+| `keep` | `RouteConnectPrecheck(B)` → (refused: stop, touch nothing) → `SetRoute(B)` on the TUN already held | `vpn/StartSequence.kt` since |
+| `check-rotate` | `RouteConnectPrecheck(B)` → (refused: stop) → a NEW TUN → `SetTunFD(new)` → `SetRoute(B)` | nobody's; the order that never shares a TUN between two instances (what FINDINGS SW-2 recommended before the engine carried the fix) |
+
+Per switch (`<order>.<from>><to>.<check>`):
+
+| check | expect | what it proves |
+|---|---|---|
+| `accepted` | pass | the engine took route B |
+| `tunnel` | pass | a 256 KiB fetch verified through the relay **and 20 further connections, every one** — a tunnel that resets some of them is not carrying |
+| `wire` | pass | at the censor the fetch travelled on B's endpoint, and the client opened nothing else on the relay |
+| `store_survives` | pass | `SubscriptionList`, `AvailableRoutes`, `RouteSummary`, `DiagnosticsExplain` answer after the switch, the engine still lists its routes, and none of those calls failed while polled every 25 ms during it |
+| `active_route` | pass | `ExportDiagnostics.active_route` / `active_route_family` and `DiagnosticsExplain.active_route` name B |
+| `fds_intact` | pass | sentinel files the "app" opened before the switch and between the TUN rotate and the switch are still open, still the same file (fstat), still writable. In a rotating order the client keeps opening until one of them has the old TUN's fd number |
+
+Per session: `connect.*` (the first route carries), `disconnect.*` (the
+same `store_survives` / `fds_intact` after `ClearRoute` + `ClearTunFD`,
+with sentinels opened between the two; `active_route_cleared`;
+`control.after`), `session.fd_trap_armed` (a sentinel really did land on
+an old TUN's number — otherwise `fds_intact` proved nothing) and
+`session.old_tuns_released` (no TUN interface a switch replaced is still
+held by the engine).
+
+`switch` runs three sessions between one TCP family and one QUIC family
+(vless-reality and hysteria2 where under test): `rotate` A→B→A; `keep`
+A→B→A; and `check-rotate` with the two switches that must **not** take —
+`unreachable.*` (B's endpoint dropped at the censor for the moment, a
+private nft table `wb_switch`: the engine must not call B connected, and
+what it leaves running is recorded — FINDINGS SW-1), `restore.*` (back to
+A, as the Android service does) and `refused.*` (B is now cooling down:
+refused by the pre-check, the reason is in the diagnostics, A is still
+connected and still carries verified bytes on its own endpoint).
+`switch-all` walks an Eulerian circuit of the families — every ordered
+pair once, 42 switches for 7 — in one `rotate` session, then the ring of
+them in one `keep` session. Both ops need a scenario that blocks neither
+family (`clean`); elsewhere they record one `skipped` line.
+
+Controls: `connect.control.before` / `disconnect.control.after` (no
+tunnel, no path); the wire tap (bytes on B's endpoint are not bytes on
+A's); and the proof that `fds_intact` can fail at all — build the client
+without the fd fix and it does (FINDINGS SW-0).
 
 The client side of `freshness` uses `wb-client --idle`: import, then wait
 for commands with the VPN off — `tick` calls the product's own

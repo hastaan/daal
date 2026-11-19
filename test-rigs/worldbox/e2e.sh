@@ -9,14 +9,16 @@
 #   ./e2e.sh --plan full     print the worlds a mode runs, and stop
 #   ./e2e.sh quick --only clean,sni-rst      just these worlds of the plan
 #
-# quick   no censor × all 7 families (tree daemon) with revoke, L1 rotation,
-#         mgmt-auth and tamper; the pinned RELEASE artefacts × the default
+# quick   no censor × all 7 families (tree daemon) with a live route switch
+#         (TCP family ↔ QUIC family), revoke, L1 rotation, mgmt-auth and
+#         tamper; the pinned RELEASE artefacts × the default
 #         families; and every censor scenario × one TCP and one QUIC family.
 # full    every censor scenario × all 7 families; the whole lifecycle
 #         (recipients, revoke, L1, L2, L3, freshness, mgmt-auth, capability
 #         honesty, tamper, wrong credentials, repeated relay restarts) on the
 #         tree daemon and again (bar the restarts) on
-#         the pinned release artefacts; rotation under a censor; and the
+#         the pinned release artefacts; rotation under a censor; a live
+#         route switch between every ordered pair of families; and the
 #         pinned artefacts × all 7 families (FINDINGS F-002, kept visible);
 #         and a relay provisioned with two opt-in families only (FAM-4).
 #
@@ -55,13 +57,14 @@ fi
 scenarios=(); for f in "$RIG"/scenarios/*.json; do s="$(basename "$f" .json)"; [[ "$s" == clean ]] || scenarios+=("$s"); done
 plan=()
 if [[ "$mode" == quick ]]; then
-  plan+=("clean"$'\t'"--mgmt=tree --ops revoke,l1,mgmtauth,tamper clean")
+  plan+=("clean"$'\t'"--mgmt=tree --ops switch,revoke,l1,mgmtauth,tamper clean")   # switch first: it uses r1's pack as minted
   plan+=("release"$'\t'"--ops revoke,mgmtauth clean @default")
   for s in "${scenarios[@]}"; do plan+=("$s"$'\t'"--mgmt=tree $s vless-reality hysteria2"); done
 else
   plan+=("release.lifecycle"$'\t'"--ops lifecycle,tamper,wrongcreds clean @default")
   plan+=("clean.rotation"$'\t'"--mgmt=tree --ops l1,l2,l3,freshness,caps clean")   # l2 THEN l3: the cover host moves, then the address (naive, FINDINGS LC-3); the other order runs under udp-blackhole and in release.lifecycle
   plan+=("clean.recipients"$'\t'"--mgmt=tree --ops recipients,revoke,wrongcreds,tamper,mgmtauth,restarts clean")
+  plan+=("clean.switch"$'\t'"--mgmt=tree --ops switch,switch-all clean")   # one phone, many routes: every ordered pair of families (FINDINGS SW-0, SW-1, SW-2)
   for s in "${scenarios[@]}"; do
     if [[ "$s" == udp-blackhole ]]; then
       plan+=("$s"$'\t'"--mgmt=tree --ops recipients,l1,l3,l2,caps $s")   # rotation under a censor

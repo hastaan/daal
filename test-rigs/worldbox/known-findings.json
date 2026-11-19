@@ -22,5 +22,17 @@
         "got": "tls_sni_or_cert_block_suspected"
       }
     ]
+  },
+  {
+    "id": "SW-1",
+    "severity": "low",
+    "title": "a switch to a route that carries nothing leaves nothing connected: engine_set_route stops the connected route before it knows whether the new one works",
+    "match": [
+      {
+        "phase": "op:switch",
+        "check": "check-rotate.unreachable.*.old_route_still_connected",
+        "got": "disconnected"
+      }
+    ]
   }
 ]

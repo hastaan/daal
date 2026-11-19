@@ -21,12 +21,17 @@ the rig proved). Last gate 2026-11-19: `./daal e2e full` →
 `PASS — 5388 checks`, 18 worlds, the three pinned worlds (`release`,
 `release.lifecycle`, `release.all-families`) green; the only known
 finding is CEN-4. **Not yet run on a phone or on a rented relay** — that
-is `docs/release-runbook.md`, Part 2 onwards. Below, "the pinned release"
+is `docs/release-runbook.md`, Part 2 onwards. **Since the first phone pass
+(2026-11-19, branch `phone-pass-fixes`)** the rig also switches routes on a
+live session (ops `switch`, `switch-all`): SW-0 and SW-2 are fixed, SW-1
+is open and in `known-findings.json`. Gate on that branch, 2026-11-19:
+`./daal e2e full` → `PASS — 5901 checks`, 20 worlds, known findings
+reproduced: CEN-4 and SW-1 only. Below, "the pinned release"
 / "the pinned box" in text written before 2026-11-19 means relay-v1.5.0.
 Reproductions are run from `test-rigs/worldbox/`. "quick"/"full" are the
 modes of `./daal e2e` (`./e2e.sh`); a world name is a row of its report.
 
-### Fixed in this tree (25)
+### Fixed in this tree (26)
 
 | id | severity | one line | status | reproduce (before the fix) | pinned by |
 |---|---|---|---|---|---|
@@ -55,6 +60,7 @@ modes of `./daal e2e` (`./e2e.sh`); a world name is a row of its report.
 | F-002 | **high** | A relay provisioned from `main` could not serve shadowsocks, anytls or tuic: the then-pinned `daal-relay-mgmt` (relay-v1.5.0) predated them | **fixed — released as relay-v1.5.1, 2026-11-19**: the code was right and the fix was the release. The pinned `daal-relay-mgmt` serves all three; `PinnedMgmtServesOptInFamilies` and `RELEASED_RELAY_SERVES_EXTRA_FAMILIES` are true, which unlocks the wizard's switches and `provision --families` (FAM-2, FAM-3). Not run on a rented relay or a phone | at relay-v1.5.0: `./run.sh clean` (pinned) vs `./run.sh --mgmt=tree clean` | world release.all-families (full) all green on the pinned box, 7 families — it downloads through the real verifier, so a wrong hash or signature fails it too; unit `TestPinnedMgmtOptInGateMatchesThePin` (publisher/deploy/cloudinit) |
 | F-005 | **high** (the app; code-reading) | The app signed a relay BEFORE it had the relay's connection material: `bind-and-sign` could commit a route only to what the OperatorRecord carries, and the wizard passed nothing else | **fixed — released as relay-v1.5.1, 2026-11-19**: the relay states its public identity over the management plane (`GET /identity`, read-only, authenticated); the wizard asks before every signature (`daal-deploy relay-identity` → `bind-and-sign --relay-identity`) on every provider, remembers what the pack commits to, and signs again when a later reply disagrees (the first recipient on a relay that serves shadowsocks; a disguise change; a rebuild). The pinned daemon serves `/identity`; the fallback is left for a relay too old to answer, and none is in service. *The desktop app itself was still not run: the wizard is proven against its fake relay in cargo tests, and the order of operations against a real daemon by the rig through the CLI* | at `062f809`: `daal-deploy bind-and-sign` on a record with no `reality_public_key`/`tls_cert_sha256` → exit 1 | `mint verb.relay-identity.before-first-recipient`, `verb.bind-and-sign.before-first-recipient`, `bind-and-sign.before-first-recipient.only_pending_families_uncommitted`, `resign.after-first-recipient`, then every `family/*` session of the world (the pack that connects was signed that way) — on tree worlds and, since the pin moved, on the three pinned worlds; `a_relay_whose_record_has_no_keys_is_signed_from_what_the_relay_says`, `the_first_recipient_makes_the_wizard_sign_again_so_shadowsocks_is_committed`, `an_older_relay_with_an_empty_record_is_learned_from_its_first_reply` (daal-wizard); `TestBindAndSign_RelayIdentity_SignsARecordThatKnowsNothing` (publisher/deploy/cli); `TestIdentity_BeforeAnyRecipient` (cmd/daal-relay-mgmt) |
 | REL-1 | **high** (was release-blocking) | This tree could not manage a relay built from the then-PINNED release, relay-v1.5.0: the publisher mints token format v2 (the request is signed — LC-1's full fix) and that `daal-relay-mgmt` only understands v1, so every authenticated verb was 401; since BOOT-1's fix such a relay stopped one phase sooner, at `provision` (its health binary cannot authenticate the management fingerprint) | **fixed — released as relay-v1.5.1, 2026-11-19**: the pin moved to a daemon and a health binary built from this tree, byte-identical to the candidate the rig proved (`tools/release/relay-v1.5.1.sh`). The one release also carries F-002, LC-1, INT-2, INT-O1, FAM-4 and TW-11. There is still, deliberately, no compatibility path: a publisher from this tree cannot manage a relay-v1.5.0 box (a publisher that would sign less for an older relay is the downgrade); none is in service | at relay-v1.5.0: `./run.sh clean @default` (pinned) → `mint verb.users-provision.r1 got=fail` — `401: unauthorized: malformed token (need nonce:ts:op:sig)` | the three pinned worlds are green — quick: `release`; full: also `release.lifecycle`, `release.all-families` (`./daal e2e full` → `PASS — 5388 checks`, 18 worlds). It was never excused: a pinned world that stops before a client session is an unexpected red and `./daal e2e` exits 1 |
+| SW-0 | **high** (user-visible; found on a phone, not by the rig) | After one route switch the tunnel carried traffic while the app said "No route selected" and every store-backed screen failed: the engine closed the old TUN's fd twice (once on `engine_set_tun_fd`, again when the old sing-box instance was torn down), and the second close hit whatever file had been given the freed number in between. Same pair of closes on every disconnect | **fixed** in `core/engine/platform.go`, `platform_singbox.go`, `core/abi/tun_fd.go`: one owner per copy, every instance reads a duplicate of its own | build `wb-client` with those two files as they were at `8d47a82` (section below), `./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2` → `rotate.*.fds_intact` and `*.disconnect.fds_intact` fail: "closed underneath them and the number reused" | rig: ops `switch` (quick) and `switch-all` (full) — `fds_intact`, `store_survives`, `active_route`, `session.fd_trap_armed`; unit: `core/engine/tunfd_singbox_test.go` |
 
 ### Found in review, not by the rig — repaired 2026-11-19 (9, and BOOT-1 above)
 
@@ -74,11 +80,13 @@ here fails without its fix. None has a `known-findings.json` entry.
 | REV-8 | low (fingerprint) | The bare TCP reach check ran on every timed-out attempt, not only when the timeout hides its phase: one payload-less connect-and-close to the relay's port per failed proof, every 30 s on a failed route | **fixed** in `core/engine/proof_singbox.go` (`timeoutPhaseIsUnknown` gates it) | counting hop in front of an in-process relay: "2 of 4 connections to the relay's port carried nothing" | unit `TestProveSubject_CarryTimeoutMakesNoBareConnectToTheRelay` (`-tags singbox`) |
 | REV-9 | low (security, defence in depth; on the relay) | Request binding ignored the query string (`/users/list?name=…` rode a token for `/users/list`; `POST /users/revoke?name=r2` changed the config), and three token field checks were held by no test | **fixed** in `cmd/daal-relay-mgmt/main.go` (`requireAuth`): any query string, even a bare `?`, is 400 before the token is read. Released as relay-v1.5.1 (2026-11-19) | the requests above: 200 | unit `TestQueryStringIsRefused`, `TestTokenFieldChecksHold` (each check proven by mutation in a scratch copy) |
 
-### Open — need a decision, a release or a dependency fix (1)
+### Open — need a decision, a release or a dependency fix (3)
 
 | id | severity | one line | status | reproduce | pinned by |
 |---|---|---|---|---|---|
 | CEN-4 | medium | One route cannot tell apart what needs two observations: every silent UDP route is `udp_no_reply` (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is `tls_sni_or_cert_block_suspected` whether the filter is keyed on the name or on the address | open — the prober's job (selection stage): a second datagram / a second name. What the engine says is true, cools down only the one route, and is never the wrong network-wide claim | `./run.sh --mgmt=tree relay-ip-block hysteria2` → `engine.category expect=udp_address_blocked got=udp_no_reply`; `./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality` → `expect=tcp_reset got=tls_sni_or_cert_block_suspected` | known-findings.json `CEN-4` (14 checks in full: 11 UDP, 3 reset); the report's ENGINE CATEGORY line lists each truth → reported pair |
+| SW-2 | **high** (user-visible on a TUN kept across a switch; a leak otherwise) | The engine never stops the packet reader of a sing-box instance it closes. On a TUN that is REPLACED at a switch that reader sleeps for ever, holding the old interface open. On a TUN that is KEPT across a switch (what the Android service does since the phone pass) it wakes for every packet and takes about half of them away from the new instance: most new connections are reset or refused, for good, while the engine says Connected | **fixed 2026-11-19** — a dependency defect (sing-tun 0.8.9, `LinkEndpointFilter.Attach` never passed the "detach" on). The engine now builds against `third_party/sing-tun` (0.8.9 + that one line, via `replace` in every module that links it; `third_party/DAAL-PATCH.md`); pinned by `core/engine/singtun_detach_singbox_test.go` | `./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2` → `keep.vless-reality>hysteria2.tunnel expect=pass got=blocked` and `rotate.session.old_tuns_released got=held` | `keep.*.tunnel` and `*.session.old_tuns_released` are ordinary green checks now: a regression is an unexpected red |
+| SW-1 | low-to-medium | A switch to a route that turns out to carry nothing ends with NOTHING connected: `engine_set_route(B)` stops the connected route A before it has learned whether B works. (A route the engine can refuse without trying — cooling down, revoked, expired — leaves A alone; that is checked and green) | open — needs a decision: prove B beside A and swap only then, or keep "the host goes back to A" (what `vpn/StartSequence.kt` does) and accept the gap | same command → `check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected expect=pass got=disconnected`; the next rows show the way back to A working | known-findings.json `SW-1` (1 check, quick and full) |
 
 ### Observations (no verdict; recorded so the day they change is visible)
 
@@ -2686,3 +2694,140 @@ not get through on the same family right after, it records a red
 session's red checks carry the tail of the engine's stderr, and the shim
 journals every stop/start of every unit to
 `boxes/<id>/rootfs/var/log/wb-units/<unit>.lifecycle.log`.
+
+## SW-0 — one route switch closed somebody else's file (fixed)
+
+**Found on a phone, not here** (first real-phone pass, 2026-11-19): connect
+on one route, tap Connect on another. The tunnel went on carrying traffic;
+the Connection page said "No route selected", the Network page showed
+"unknown" and loaded for ever. The rig had never switched a route on a
+live session — every session was connect → fetch → disconnect on a fresh
+phone — so it could not have seen it.
+
+**What.** The TUN fd had two owners. `engine_set_tun_fd(new)` closed the
+previous fd while the old sing-box instance was still running on it;
+tearing that instance down inside `engine_set_route(B)` closed the same
+NUMBER again. In between the number was free, the process's next `open()`
+got it (on the phone: the route store's database), and the second close
+shut that. The same two closes ran on every disconnect (`engine_clear_route`
+through the instance, then `engine_clear_tun_fd`).
+
+**Fix** (core, lane A of the phone-pass wave): one owner per copy. The
+host's fd is closed once, by `core/engine/platform.go`; every instance is
+handed a duplicate, which it alone closes.
+
+**Pinned by.** Ops `switch` and `switch-all` (`driver/ops_switch.go`,
+`labclient/switch.go`): after every switch and after the disconnect,
+`fds_intact` (sentinel files the "app" opened before the switch, between
+the TUN rotate and the switch, and between clear_route and clear_tun_fd
+are still open, still the same file, still writable), `store_survives`
+(the four store-backed calls the pages make, afterwards and polled every
+25 ms during the switch) and `active_route`. `session.fd_trap_armed`
+fails if no sentinel ever landed on the old TUN's number.
+
+**Proved red without the fix** (2026-11-19): `wb-client` built with
+`go build -overlay` replacing `core/abi/tun_fd.go` and
+`core/engine/platform_singbox.go` by their content at `8d47a82`, same
+command as below. `rotate.vless-reality>hysteria2.fds_intact`,
+`rotate.hysteria2>vless-reality.fds_intact` and every
+`*.disconnect.fds_intact` failed ("fd 6 (opened between the TUN rotate
+and the switch) is no longer the file its owner opened"), 11 red checks
+in all. **What did not reproduce:** `store_survives` stayed green in that
+build — here the freed number went to a sentinel, not to SQLite, so the
+store itself was never the victim. The rig proves the double close, not
+the particular file it hit on the phone.
+
+```
+./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2
+```
+
+## SW-2 — a closed instance's packet reader is never stopped; on a kept TUN it eats the new instance's packets
+
+**What.** Closing a sing-box instance does not stop the goroutine that
+reads packets from its TUN. sing-tun 0.8.9 closes its gVisor stack with
+`t.endpoint.Attach(nil)` — "detach, stop the readers" — but the endpoint
+is wrapped in `LinkEndpointFilter`, whose `Attach` wraps whatever it is
+given, `nil` included, in a non-nil filter (`stack_gvisor_filter.go`). The
+fd endpoint underneath sees "already attached" and does nothing. The
+reader stays in `ppoll` on the TUN's fd NUMBER.
+
+What that costs depends on what the host does at a switch:
+
+| the host | the old reader | seen in the rig |
+|---|---|---|
+| builds a new TUN for the next instance (rotate, check-rotate; every reconnect) | sleeps for ever on the old interface and keeps it open | `session.old_tuns_released got=held`: every replaced interface still exists after its instance was closed (42 of 42 in `switch-all`) |
+| keeps the TUN and calls `engine_set_route(B)` (keep — `vpn/StartSequence.kt` since the phone pass) | the new instance's duplicate gets the number the old one just freed, on the same TUN: the old reader wakes for every packet and wins about half of them, feeding a stack that has been closed | `keep.vless-reality>hysteria2.tunnel got=blocked`: "connection refused" / "connection reset by peer" on 15–20 of 20 new connections, measured unchanged 15 s after the switch; the engine reports `route_check: ok` throughout |
+
+Every further switch on the same TUN adds another reader.
+
+**Why the engine does not notice.** Its connection check dials through
+the outbound, not through the TUN: the route really is up. Only traffic
+from apps is lost.
+
+**Confirmed cause.** `wb-client` built against a copy of sing-tun 0.8.9
+with one change — `LinkEndpointFilter.Attach` passes `nil` through to the
+wrapped endpoint — and nothing else: `keep.*.tunnel` passes in both
+directions with 20 of 20 connections, and every replaced interface is
+gone (`old_tun_gone: true`) straight after the switch.
+
+**Not verified on a phone.** The rig is Linux; Android builds the same
+sing-tun files (`tun_linux*.go`, `stack_gvisor*.go`) and its VpnService
+fd is non-blocking like the lab's. Whether the phone shows it is for the
+next phone pass to say — after one switch, do pages load?
+
+**Fixed 2026-11-19 (repair pass of `phone-pass-fixes`).** The engine
+carries the one-line fix: `third_party/sing-tun` is sing-tun 0.8.9 with
+`LinkEndpointFilter.Attach(nil)` passed through, wired by a `replace` in
+`core/go.mod`, `cmd/daal-core/go.mod`, `cmd/daal-soak-engine/go.mod` and
+`labclient/go.mod` (`third_party/DAAL-PATCH.md`). `keep` — the order
+`vpn/StartSequence.kt` uses — is a sound order again. Run after the fix:
+`keep.vless-reality>hysteria2.tunnel got=pass`,
+`keep.hysteria2>vless-reality.tunnel got=pass`,
+`rotate.session.old_tuns_released got=pass`,
+`check-rotate.session.old_tuns_released got=pass`; the entry is gone
+from `known-findings.json`. Unit pin:
+`go test -tags singbox,with_gvisor ./engine -run TestSingTunDetach` in
+`core/` (red without the `replace`). A module that builds the engine
+WITHOUT the `replace` line gets the defect back — the line is per module.
+Still not verified on a phone.
+
+**Reproduce.**
+
+```
+./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2
+#   keep.vless-reality>hysteria2.tunnel   expect=pass got=blocked
+#   rotate.session.old_tuns_released      expect=pass got=held
+WB_TUN_BLOCKING=1 …   # the same with a blocking TUN fd: no different
+```
+
+Acceptance (met): both checks green and the entry deleted.
+
+## SW-1 — a switch to a route that carries nothing leaves nothing connected
+
+**What.** `engine_set_route(B)` while A is connected stops A's instance
+before B's is started, and learns whether B carries anything only
+afterwards. When B does not (its endpoint is dropped on the path), the
+engine tears B down and nothing is running: `active_route: ""`,
+`route_running: false`, `route_check: failed`. The person was connected,
+asked for a route that turned out not to work, and is now disconnected
+until something sets A again.
+
+**What is fine.** A switch the engine can refuse WITHOUT trying — B
+cooling down after that failure, revoked, expired, needing a new file —
+leaves A connected and carrying: `check-rotate.refused.*` is green
+(`refused`, `refusal_recorded`, `old_route_still_connected`, `tunnel`,
+`wire`). And going back works: `check-rotate.restore.*` sets A again with
+B still unreachable and carries verified bytes on A's endpoint. That is
+what `vpn/StartSequence.kt` does (`SwitchPolicy.AfterFailure.Restore`).
+
+**Why it is still a finding.** Between the two there is a gap of the
+connection check's length (5 s here) plus a reconnect, on every host that
+goes back, and a disconnect on every host that does not. Closing it in
+the engine means proving B beside A and swapping only then.
+
+**Reproduce.**
+
+```
+./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2
+#   check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected  expect=pass got=disconnected
+```

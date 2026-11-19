@@ -10,7 +10,7 @@ import "unsafe"
 func engine_bootstrap_install_seeds(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := BootstrapInstallSeeds()
 	if err != nil {
-		return -1
+		return exportFail("engine_bootstrap_install_seeds", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -19,7 +19,7 @@ func engine_bootstrap_install_seeds(out unsafe.Pointer, outLen C.int) C.int {
 func engine_bootstrap_refresh(timeoutMs C.int, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := BootstrapRefresh(int(timeoutMs))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_bootstrap_refresh", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -28,7 +28,7 @@ func engine_bootstrap_refresh(timeoutMs C.int, out unsafe.Pointer, outLen C.int)
 func engine_bootstrap_status(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := BootstrapStatus()
 	if err != nil {
-		return -1
+		return exportFail("engine_bootstrap_status", err)
 	}
 	return copyOut(body, out, outLen)
 }

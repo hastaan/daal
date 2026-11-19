@@ -10,7 +10,7 @@ import "C"
 //export engine_route_delete
 func engine_route_delete(routeID *C.char) C.int {
 	if err := RouteDelete(C.GoString(routeID)); err != nil {
-		return -1
+		return exportFail("engine_route_delete", err)
 	}
 	return 0
 }
@@ -22,7 +22,7 @@ func engine_route_delete(routeID *C.char) C.int {
 func engine_publisher_delete(publisherID *C.char) C.int {
 	n, err := PublisherDelete(C.GoString(publisherID))
 	if err != nil {
-		return -1
+		return exportFail("engine_publisher_delete", err)
 	}
 	return C.int(n)
 }

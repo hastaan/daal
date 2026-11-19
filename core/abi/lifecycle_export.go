@@ -29,11 +29,11 @@ import "C"
 //export engine_lifecycle_event
 func engine_lifecycle_event(token *C.char) C.int {
 	if token == nil {
-		return -1
+		return exportFailCode("engine_lifecycle_event", -1, "bad argument: null token")
 	}
 	t := C.GoString(token)
 	if err := LifecycleEvent(t); err != nil {
-		return -1
+		return exportFail("engine_lifecycle_event", err)
 	}
 	return 0
 }

@@ -47,6 +47,15 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: client-ui/package-lock.json
+      # `./daal test` runs the Android VPN service's JVM unit tests
+      # (tools/test-android-jvm.sh) and, with CI set, FAILS if they
+      # cannot run. They need a Java the Kotlin compiler runs on (11–22),
+      # `kotlinc`, and junit-4 from a Gradle distribution; the runner
+      # image ships the last two.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: Tools the gates shell out to
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep nftables iproute2 util-linux openssl
       # The end-to-end rig (test-rigs/worldbox) builds its world inside an

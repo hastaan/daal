@@ -20,6 +20,13 @@ use crate::state::AppState;
 pub struct VersionInfo {
     pub engine_version: String,
     pub gui_version: &'static str,
+    /// False when `engine_init` failed: the library answers its version
+    /// but no other engine call can be made (they return
+    /// `engine_unavailable: …`). The UI calls this at start, so it is
+    /// where it first learns the engine is not there.
+    pub engine_ready: bool,
+    /// Why not, in the host's words; `None` when ready.
+    pub engine_error: Option<String>,
 }
 
 pub const GUI_VERSION: &str = "0.2.0";
@@ -28,6 +35,8 @@ pub fn version_info(state: &AppState) -> VersionInfo {
     VersionInfo {
         engine_version: state.engine.version_str(),
         gui_version: GUI_VERSION,
+        engine_ready: state.engine.is_ready(),
+        engine_error: state.engine.unavailable_reason(),
     }
 }
 

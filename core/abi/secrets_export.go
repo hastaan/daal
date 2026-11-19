@@ -23,10 +23,11 @@ func engine_unlock_secrets(pin *C.char) C.int {
 	if err == nil {
 		return 0
 	}
+	// Fixed texts, never the error: this call is handed the PIN.
 	if errors.Is(err, ErrVaultProfileNotEnabled) {
-		return -2
+		return exportFailCode("engine_unlock_secrets", -2, "vault profile not enabled")
 	}
-	return -1
+	return exportFailCode("engine_unlock_secrets", -1, "unlock failed")
 }
 
 // engine_set_allow_bulk_capable is the second Phase 2D release ABI

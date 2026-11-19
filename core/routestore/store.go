@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 // Store is a thread-safe wrapper around a sqlite database plus an
@@ -20,10 +22,29 @@ type Store struct {
 	dbPath  string
 	keyPath string
 	key     []byte // age X25519 identity bytes; zeroed on Close.
+
+	explainWrites atomic.Int64 // see DiagnosticsExplainWrites
 }
+
+// busyTimeoutMs is how long a statement waits for a lock held by
+// ANOTHER process (or another handle in this one) before giving up
+// with SQLITE_BUSY. Inside this process the store uses one connection
+// (see openDB), so callers queue in database/sql and never see a lock
+// at all; this covers a second opener such as a CLI on the same
+// directory.
+const busyTimeoutMs = 5000
+
+// ErrDamaged is wrapped by the error Open returns when the database
+// file exists and is not a usable SQLite database. It is deliberately
+// narrow — see isDamage.
+var ErrDamaged = errors.New("routestore: database file is damaged")
 
 // Open creates or opens the store under dir. The directory and database
 // file are created with 0700/0600 permissions on POSIX systems.
+//
+// A database file that is not a usable database fails with an error
+// wrapping ErrDamaged and is left exactly where it is; OpenOrRecover is
+// the variant that sets it aside.
 func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("routestore: dir required")
@@ -41,16 +62,59 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openDB(dbPath)
 	if err != nil {
 		zero(key)
+		return nil, err
+	}
+	return &Store{db: db, dbPath: dbPath, keyPath: keyPath, key: key}, nil
+}
+
+// openDB opens dbPath, applies the schema and checks that what is on
+// disk is a database.
+//
+// ONE CONNECTION. database/sql is a pool: left alone it opens a new
+// SQLite connection for every caller that arrives while another is
+// busy. With the rollback journal (journal_mode=DELETE, kept for
+// secure_delete and for having no -wal file to wipe) a writer needs the
+// file exclusively, so a second connection reading at that moment made
+// the write — or the read — fail at once with "database is locked", and
+// every UI poll is a reader. One connection turns that into a short
+// queue inside database/sql: callers wait their turn (statements here
+// take microseconds) and none of them can fail on a lock. It also makes
+// the per-connection PRAGMAs below hold for every statement, which they
+// did not: the schema script set them on the first pooled connection
+// only, so later connections ran with foreign keys and secure_delete
+// off.
+//
+// The price is that a statement must never be issued while a *sql.Rows
+// from this store is still open in the same goroutine — it would wait
+// for itself. Every method here drains or closes its rows first, and
+// transactions use the tx handle throughout.
+func openDB(dbPath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
 		return nil, fmt.Errorf("routestore: open sqlite: %w", err)
 	}
-	if _, err := db.Exec(schema); err != nil {
-		zero(key)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	// Never recycle the connection: its PRAGMAs live and die with it.
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	fail := func(what string, err error) (*sql.DB, error) {
 		db.Close()
-		return nil, fmt.Errorf("routestore: apply schema: %w", err)
+		if isDamage(err) {
+			return nil, fmt.Errorf("%w (%s: %v)", ErrDamaged, what, err)
+		}
+		return nil, fmt.Errorf("routestore: %s: %w", what, err)
+	}
+	// First, before anything can contend: this one does not touch the
+	// file.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMs)); err != nil {
+		return fail("set busy timeout", err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		return fail("apply schema", err)
 	}
 	// Forward-only additive migrations. ALTER TABLE ADD COLUMN errors on
 	// an already-present column; we tolerate that to allow re-opening
@@ -58,10 +122,156 @@ func Open(dir string) (*Store, error) {
 	for _, m := range migrations {
 		_, _ = db.Exec(m)
 	}
+	// A file can carry a valid header and still be unusable further in
+	// (truncated, pages overwritten). quick_check reads every page once;
+	// the store is a few hundred kilobytes.
+	if err := quickCheck(db); err != nil {
+		return fail("integrity check", err)
+	}
 	// Ensure file mode after sqlite created the file.
 	_ = os.Chmod(dbPath, 0o600)
+	return db, nil
+}
 
-	return &Store{db: db, dbPath: dbPath, keyPath: keyPath, key: key}, nil
+// errIntegrity is a quick_check that ran and reported problems.
+var errIntegrity = errors.New("routestore: integrity check reported problems")
+
+func quickCheck(db *sql.DB) error {
+	var verdict string
+	if err := db.QueryRow("PRAGMA quick_check(1)").Scan(&verdict); err != nil {
+		return err
+	}
+	if verdict != "ok" {
+		return errIntegrity
+	}
+	return nil
+}
+
+// isDamage decides whether an error from opening the store means "the
+// file is not a usable database" — the only thing OpenOrRecover sets a
+// file aside for. Exactly three things qualify:
+//
+//   - SQLITE_NOTADB: the file is not a SQLite database at all;
+//   - SQLITE_CORRUPT (any extended code): SQLite read it and found the
+//     image malformed;
+//   - a quick_check that completed and did not say "ok".
+//
+// Everything else is NOT damage and must surface as an ordinary error:
+// SQLITE_BUSY / SQLITE_LOCKED (someone else has it), SQLITE_IOERR (the
+// disk, not the file's contents), SQLITE_CANTOPEN / SQLITE_PERM /
+// SQLITE_READONLY / SQLITE_AUTH (permissions), SQLITE_FULL,
+// SQLITE_NOMEM. Setting a healthy database aside because the disk was
+// full for a moment would throw away the user's routes for nothing.
+func isDamage(err error) bool {
+	if errors.Is(err, errIntegrity) {
+		return true
+	}
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		switch se.Code() & 0xff {
+		case sqlite3NotADB, sqlite3Corrupt:
+			return true
+		}
+	}
+	return false
+}
+
+// Primary SQLite result codes (sqlite3.h); the low byte of an extended
+// code.
+const (
+	sqlite3Corrupt = 11
+	sqlite3NotADB  = 26
+)
+
+// damagedInfix marks a database file that was set aside.
+const damagedInfix = ".damaged-"
+
+// OpenOrRecover is Open for the application's start-up path, where a
+// damaged database must not be fatal: a store that cannot be opened
+// would otherwise fail every launch, and the only way out a person has
+// — clearing the app's data — destroys everything else the app keeps.
+//
+// When (and only when) Open fails with ErrDamaged, the database file
+// and its journal siblings are RENAMED, never deleted, to
+// "<name>.damaged-<hour bucket>" in the same directory, and a new empty
+// store is opened in their place. setAside lists the new paths; it is
+// empty when nothing was wrong. The secrets key is left in place — it
+// is not part of the damage, and it is what makes the set-aside file's
+// contents recoverable by someone who repairs it.
+//
+// The person's imported routes are gone from the app's point of view
+// and must be imported again. That is the accepted cost.
+func OpenOrRecover(dir string, now time.Time) (s *Store, setAside []string, err error) {
+	s, err = Open(dir)
+	if err == nil || !errors.Is(err, ErrDamaged) {
+		return s, nil, err
+	}
+	damage := err
+	dbPath := filepath.Join(dir, "daal.db")
+	// The name carries an hour bucket like every other timestamp this
+	// store puts on disk, plus a counter so two recoveries in one hour
+	// never overwrite each other.
+	stamp := now.UTC().Truncate(time.Hour).Format("20060102T15Z")
+	suffix := damagedInfix + stamp
+	for n := 1; ; n++ {
+		if _, statErr := os.Lstat(dbPath + suffix); errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		suffix = fmt.Sprintf("%s%s.%d", damagedInfix, stamp, n)
+		if n > 1000 {
+			return nil, nil, fmt.Errorf("routestore: cannot name the set-aside file: %w", damage)
+		}
+	}
+	// The main file first: once it is out of the way a stale journal
+	// can no longer be replayed into anything.
+	for _, sfx := range []string{"", "-journal", "-wal", "-shm"} {
+		from := dbPath + sfx
+		if _, statErr := os.Lstat(from); statErr != nil {
+			continue
+		}
+		to := from + suffix
+		if rerr := os.Rename(from, to); rerr != nil {
+			return nil, setAside, fmt.Errorf("routestore: set damaged database aside: %v (after: %w)", rerr, damage)
+		}
+		setAside = append(setAside, to)
+	}
+	s, err = Open(dir)
+	if err != nil {
+		return nil, setAside, err
+	}
+	// Remembered on disk, so the person is still told on a later launch
+	// if this one ended before they saw it. Best effort.
+	_ = writeRecoveredMarker(filepath.Join(dir, recoveredMarker), nil, 0o600)
+	return s, setAside, nil
+}
+
+// writeRecoveredMarker is os.WriteFile; a variable so a test can make
+// the marker unwritable (a disk that took the renames and has no room
+// for one more file). Nothing in production reassigns it.
+var writeRecoveredMarker = os.WriteFile
+
+// SetRecoveryMarkerWriterForTest replaces the marker write and returns
+// a function that restores it.
+func SetRecoveryMarkerWriterForTest(fn func(name string, data []byte, perm os.FileMode) error) (restore func()) {
+	prev := writeRecoveredMarker
+	writeRecoveredMarker = fn
+	return func() { writeRecoveredMarker = prev }
+}
+
+// recoveredMarker is an empty file that exists from the moment a
+// damaged store was set aside until ClearRecoveryPending.
+const recoveredMarker = "daal.db.recovered"
+
+// RecoveryPending reports whether a damaged store was set aside (now or
+// on an earlier launch) and nobody has acknowledged it yet.
+func (s *Store) RecoveryPending() bool {
+	_, err := os.Lstat(filepath.Join(filepath.Dir(s.dbPath), recoveredMarker))
+	return err == nil
+}
+
+// ClearRecoveryPending removes the marker. The set-aside files stay.
+func (s *Store) ClearRecoveryPending() {
+	_ = os.Remove(filepath.Join(filepath.Dir(s.dbPath), recoveredMarker))
 }
 
 // Close shuts down the database and zeros the in-memory key bytes.
@@ -97,6 +307,22 @@ func (s *Store) PanicWipe() error {
 	for _, sfx := range []string{"-wal", "-shm", "-journal"} {
 		_ = os.Remove(s.dbPath + sfx)
 	}
+	// A database that was set aside as damaged (OpenOrRecover) still
+	// holds the routes it held. A panic wipe that left it behind would
+	// not be one.
+	dir, base := filepath.Dir(s.dbPath), filepath.Base(s.dbPath)
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.HasPrefix(name, base) || !strings.Contains(name, damagedInfix) {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) && first == nil {
+				first = err
+			}
+		}
+	}
+	_ = os.Remove(filepath.Join(filepath.Dir(s.dbPath), recoveredMarker))
 	return first
 }
 

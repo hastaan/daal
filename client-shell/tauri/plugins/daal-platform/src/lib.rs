@@ -97,6 +97,7 @@ impl<R: Runtime> PlatformHandle<R> {
             connected: false,
             route_id: None,
             platform: "desktop".into(),
+            last_switch: None,
         })
     }
 }

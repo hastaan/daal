@@ -10,7 +10,7 @@ import "unsafe"
 func engine_subscription_add(publisherFP, url, displayName *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SubscriptionAdd(C.GoString(publisherFP), C.GoString(url), C.GoString(displayName))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_subscription_add", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -19,7 +19,7 @@ func engine_subscription_add(publisherFP, url, displayName *C.char, out unsafe.P
 func engine_subscription_refresh(subscriptionID *C.char, timeoutMs C.int, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SubscriptionRefresh(C.GoString(subscriptionID), int(timeoutMs))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_subscription_refresh", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -27,7 +27,7 @@ func engine_subscription_refresh(subscriptionID *C.char, timeoutMs C.int, out un
 //export engine_subscription_remove
 func engine_subscription_remove(subscriptionID *C.char) C.int {
 	if err := SubscriptionRemove(C.GoString(subscriptionID)); err != nil {
-		return -1
+		return exportFail("engine_subscription_remove", err)
 	}
 	return 0
 }
@@ -36,7 +36,7 @@ func engine_subscription_remove(subscriptionID *C.char) C.int {
 func engine_subscription_list(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := SubscriptionList()
 	if err != nil {
-		return -1
+		return exportFail("engine_subscription_list", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -45,7 +45,7 @@ func engine_subscription_list(out unsafe.Pointer, outLen C.int) C.int {
 func engine_revocation_refresh_all(timeoutMs C.int, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := RevocationRefreshAll(int(timeoutMs))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_revocation_refresh_all", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -54,7 +54,7 @@ func engine_revocation_refresh_all(timeoutMs C.int, out unsafe.Pointer, outLen C
 func engine_pointer_rotation_status(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := PointerRotationStatus()
 	if err != nil {
-		return -1
+		return exportFail("engine_pointer_rotation_status", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -63,7 +63,7 @@ func engine_pointer_rotation_status(out unsafe.Pointer, outLen C.int) C.int {
 func engine_diagnostics_explain(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := DiagnosticsExplain()
 	if err != nil {
-		return -1
+		return exportFail("engine_diagnostics_explain", err)
 	}
 	return copyOut(body, out, outLen)
 }

@@ -10,7 +10,7 @@ import "unsafe"
 func engine_route_summary(routeID *C.char, out unsafe.Pointer, outLen C.int) C.int {
 	body, err := RouteSummary(C.GoString(routeID))
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_route_summary", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -19,7 +19,7 @@ func engine_route_summary(routeID *C.char, out unsafe.Pointer, outLen C.int) C.i
 func engine_available_routes(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := AvailableRoutes()
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_available_routes", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -28,7 +28,7 @@ func engine_available_routes(out unsafe.Pointer, outLen C.int) C.int {
 func engine_throughput_snapshot(out unsafe.Pointer, outLen C.int) C.int {
 	body, err := ThroughputSnapshot()
 	if err != nil && body == "" {
-		return -1
+		return exportFail("engine_throughput_snapshot", err)
 	}
 	return copyOut(body, out, outLen)
 }
@@ -36,7 +36,7 @@ func engine_throughput_snapshot(out unsafe.Pointer, outLen C.int) C.int {
 //export engine_panic_wipe
 func engine_panic_wipe() C.int {
 	if err := PanicWipe(); err != nil {
-		return -1
+		return exportFail("engine_panic_wipe", err)
 	}
 	return 0
 }

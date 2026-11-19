@@ -3,7 +3,9 @@
 #
 # Subcommands:
 #   doctor         — verify host has Go, Rust, Node, npm.
-#   test           — run all Go test suites + Rust bundle parity tests.
+#   test           — run all Go test suites, the Rust bundle parity and
+#                    desktop-core tests (against an engine built from
+#                    this tree) and the Android service's JVM tests.
 #   e2e [quick|full] — run a whole Daal world on this machine, rootless:
 #                    real provisioning, real relay binaries, real engine,
 #                    a censor in the middle. quick ≈ 1 min, full ≈ 5 min.
@@ -13,7 +15,7 @@
 #                    gate-eval CLI. Output under build/.
 #   package        — copy final artifacts into build/release/ + write
 #                    build/release/manifest.json.
-#   release-check  — verify ABI=58, engine version unchanged, spec_version=4,
+#   release-check  — verify ABI=60, engine version unchanged, spec_version=4,
 #                    no forbidden imports, working tree clean.
 #   manifest       — print the manifest JSON to stdout (no build).
 #   help           — print this list.
@@ -53,7 +55,7 @@ cd "$REPO_ROOT"
 
 # --- Engine line constants. These MUST match the source of truth.
 EXPECTED_ENGINE_VERSION="daal-core 0.9.0+v3-share"
-EXPECTED_ABI=58
+EXPECTED_ABI=60
 EXPECTED_SPEC_VERSION=4
 
 # --- Tools. Override with env vars if your install paths differ.
@@ -226,6 +228,20 @@ cmd_test() {
         err "$m: tests failed under -tags singbox"
         fail=1
       fi
+      # The packet stack (gVisor) is only linked under `with_gvisor`,
+      # which every shipped engine has and neither run above does. One
+      # test lives there: a closed sing-box instance must stop reading
+      # its TUN, which holds only while this module builds against
+      # third_party/sing-tun (third_party/DAAL-PATCH.md). Without that
+      # `replace`, a route switch on Android loses about half of all
+      # packets while the engine says Connected.
+      log "go test -tags singbox,with_gvisor ./engine -run TestSingTunDetach ($m)"
+      if ( cd "$REPO_ROOT/$m" && "$GO_BIN" test -tags singbox,with_gvisor ./engine -run TestSingTunDetach -count=1 ); then
+        ok "$m (sing-tun detach)"
+      else
+        err "$m: the linked sing-tun does not stop a closed instance's packet reader"
+        fail=1
+      fi
     fi
   done
 
@@ -251,8 +267,54 @@ cmd_test() {
         fail=1
       fi
     fi
+    # daal-desktop-core: the engine wrapper, the command log and the
+    # "a failed engine_init leaves a usable process" test. That last one
+    # drives a real engine library and used to return early with
+    # "skipping" (and report ok) unless someone had left one in /tmp —
+    # so the fix for "a damaged store crashes the app on every launch"
+    # was tested by nothing. Build the engine from THIS tree and require
+    # it (the test fails rather than skips under DAAL_REQUIRE_ENGINE_LIB).
+    local test_engine="$BUILD_DIR/test/libdaalcore.so"
+    mkdir -p "$BUILD_DIR/test"
+    log "building libdaalcore from this tree for the desktop-core tests"
+    if ( cd "$REPO_ROOT/core" && CGO_ENABLED=1 "$GO_BIN" build \
+           -buildmode=c-shared -tags cshared -o "$test_engine" ./cmd/libdaalcore ); then
+      log "cargo test (client-shell/tauri daal-desktop-core)"
+      if ( cd "$REPO_ROOT/client-shell/tauri" \
+           && DAAL_ENGINE_LIB="$test_engine" DAAL_REQUIRE_ENGINE_LIB=1 \
+              "$CARGO_BIN" test -p daal-desktop-core ); then
+        ok "daal-desktop-core"
+      else
+        err "daal-desktop-core: tests failed"
+        fail=1
+      fi
+    else
+      err "could not build libdaalcore for the desktop-core tests"
+      fail=1
+    fi
   else
     warn "skip Rust tests (no cargo)"
+  fi
+
+  # The Android VPN service's decisions at a connect, a route switch and
+  # a cancel (vpn/SwitchPolicy.kt, vpn/StartSequence.kt), on a plain JVM.
+  # Exit 77 = a tool is missing (Kotlin compiler, junit, a Java it runs
+  # on): never counted as a pass — a failure in CI, a loud warning on a
+  # developer machine.
+  if [[ -x "$REPO_ROOT/tools/test-android-jvm.sh" ]]; then
+    log "Android service JVM tests (tools/test-android-jvm.sh)"
+    local jvm_rc=0
+    "$REPO_ROOT/tools/test-android-jvm.sh" || jvm_rc=$?
+    case "$jvm_rc" in
+      0)  ok "android service (JVM)" ;;
+      77) if [[ -n "${CI:-}" || "${DAAL_REQUIRE_ANDROID_JVM_TESTS:-0}" == "1" ]]; then
+            err "android service (JVM): SKIPPED — required here (CI / DAAL_REQUIRE_ANDROID_JVM_TESTS=1). Nothing was tested."
+            fail=1
+          else
+            warn "android service (JVM): SKIPPED — the switch/cancel tests did NOT run (reason above). This is NOT a pass."
+          fi ;;
+      *)  err "android service (JVM): tests failed"; fail=1 ;;
+    esac
   fi
 
   hr

@@ -200,6 +200,45 @@ type Core struct {
 	activeFamily string
 	routeEpoch   uint64
 	check        routeCheck
+
+	// activeSnap mirrors activeRoute/activeFamily for readers that must
+	// not wait for mu (SetRoute holds it across driver.Start): the
+	// diagnostics blob serves `active_route` from here. Written only by
+	// setActiveLocked. It is the engine's MEMORY of what is running and
+	// never depends on the route store being readable.
+	activeSnap atomic.Pointer[activeRouteSnap]
+
+	// storeRecovered: the route store was found damaged and set aside
+	// (routestore.OpenOrRecover) at this start or an earlier one, and
+	// the person has not imported anything since. `store_recovered` in
+	// the diagnostics blob.
+	storeRecovered atomic.Bool
+
+	// explainMu / explainWritten: the last "why this route?" record
+	// DiagnosticsExplain persisted, so a poll that has nothing new to
+	// say does not write to the store (refresh.go).
+	explainMu      sync.Mutex
+	explainWritten [3]string
+	explainSaved   bool
+}
+
+// activeRouteSnap is one consistent (route, family) pair.
+type activeRouteSnap struct{ route, family string }
+
+// setActiveLocked records which route's engine instance is running
+// ("" for none). Called with mu held; the only writer of activeRoute.
+func (c *Core) setActiveLocked(routeID, family string) {
+	c.activeRoute, c.activeFamily = routeID, family
+	c.activeSnap.Store(&activeRouteSnap{route: routeID, family: family})
+}
+
+// activeRouteFromMemory returns the running route and its family
+// without taking mu and without touching the store.
+func (c *Core) activeRouteFromMemory() (routeID, family string) {
+	if a := c.activeSnap.Load(); a != nil {
+		return a.route, a.family
+	}
+	return "", ""
 }
 
 // globalCorePtr holds the process-wide Core. Init fully constructs the
@@ -237,9 +276,20 @@ func Init(stateDir, logLevel string) error {
 	if err != nil {
 		return err
 	}
-	s, err := routestore.Open(stateDir)
+	// A route store that is not a usable database is set aside (never
+	// deleted) and replaced by an empty one, instead of failing Init:
+	// the shell treats a failed Init as fatal, so a damaged file would
+	// otherwise crash the app on every launch, and the only way out a
+	// person has — clearing the app's data — also destroys the
+	// publisher's operator database. Anything that is not damage (a
+	// permission error, a bad secrets key, a full disk) still fails
+	// here. See routestore.OpenOrRecover for what counts.
+	s, setAside, err := routestore.OpenOrRecover(stateDir, nowUTC())
 	if err != nil {
 		return err
+	}
+	if len(setAside) > 0 {
+		engine.LogError(fmt.Sprintf("init: the route store was damaged; set aside %d file(s) and started empty", len(setAside)))
 	}
 
 	core := &Core{
@@ -257,6 +307,11 @@ func Init(stateDir, logLevel string) error {
 	}
 	core.pm.SetNow(nowUTC)
 	core.driver.Subscribe(core.subs)
+	// From what this Init just did, not only from the marker on disk:
+	// the marker is written best-effort (a nearly full disk can take the
+	// renames and refuse the new file), and a person whose routes were
+	// just set aside must be told whether or not it was.
+	core.storeRecovered.Store(len(setAside) > 0 || s.RecoveryPending())
 
 	// Wave 5: tell the engine where tor may keep its data directory.
 	// tor caches the directory consensus there; without it every route
@@ -400,45 +455,16 @@ func SetRoute(routeID string) error {
 		return ErrNoDataPlane
 	}
 	c.mu.Lock()
-	// refuse is every way out of this function before anything is
-	// started: the reason is kept (as a closed code) for the diagnostics
-	// blob, because on Android the returned error reaches nobody.
-	refuse := func(err error) error {
-		c.check.setRefused(refusedCode(err), routeID)
+	// Every way out of this function before anything is started goes
+	// through prepareRouteLocked, which keeps the reason (as a closed
+	// code) for the diagnostics blob: on Android the returned error
+	// reaches nobody.
+	row, body, err := c.prepareRouteLocked(routeID)
+	if err != nil {
+		active := c.activeRoute
 		c.mu.Unlock()
+		logRouteRefused(routeID, err, active)
 		return err
-	}
-	row, err := c.store.GetRoute(routeID)
-	if err != nil {
-		return refuse(fmt.Errorf("abi: route %s not found: %w", routeID, err))
-	}
-	switch row.TrustState {
-	case "revoked":
-		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteRevoked))
-	case "expired":
-		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteExpired))
-	}
-	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok {
-		return refuse(fmt.Errorf("abi: %s%.0w", reason, errRouteCooling))
-	}
-	profile, err := c.store.GetSecret("route:" + routeID)
-	if err != nil {
-		return refuse(fmt.Errorf("abi: load profile for %s: %w", routeID, err))
-	}
-	// Defence in depth behind the importer (endpoint_guard.go): the
-	// outbound about to be dialled must still point where its publisher
-	// signed. Refused BEFORE pm.Attempt, so a refusal is never filed as
-	// a network failure of the route.
-	if err := routeEndpointGuard(c.store, row, profile); err != nil {
-		return refuse(err)
-	}
-	cfg, err := engine.BuildSingBoxConfig(row, profile)
-	if err != nil {
-		return refuse(err)
-	}
-	body, err := engine.MarshalSingBox(cfg)
-	if err != nil {
-		return refuse(err)
 	}
 	family := row.TransportFamily
 	// Every refusal is behind us: from here this call REPLACES whatever
@@ -451,11 +477,14 @@ func SetRoute(routeID string) error {
 	c.check.setRefused(ConnectRefusedNone, "")
 	c.routeEpoch++
 	epoch := c.routeEpoch
+	if prev := c.activeRoute; prev != "" && prev != routeID {
+		engine.LogInfo(fmt.Sprintf("route switch from=%s to=%s family=%s", engine.LogID(prev), engine.LogID(routeID), engine.LogID(family)))
+	}
 	c.pm.Attempt(routeID, family)
 	if err := c.driver.Start(context.Background(), body); err != nil {
 		// Start failed: there is no instance. Classified from the error
 		// text alone — a config or start-up error has no phase.
-		c.activeRoute, c.activeFamily = routeID, family
+		c.setActiveLocked(routeID, family)
 		c.routeDownLocked(routeID, family, diagnostics.Classify(err.Error()), err.Error(), true)
 		c.mu.Unlock()
 		return err
@@ -468,7 +497,7 @@ func SetRoute(routeID string) error {
 	// tunnel-aware dialer yet: on those, scheduled refresh stops working
 	// while connected, which is the intended trade.
 	refresh.SetTunnelRequired(true)
-	c.activeRoute, c.activeFamily = routeID, family
+	c.setActiveLocked(routeID, family)
 	c.pm.Verifying()
 	c.check.set(RouteCheckVerifying, "")
 	pctx, cancel := context.WithCancel(context.Background())
@@ -493,7 +522,7 @@ func SetRoute(routeID string) error {
 		cat := res.Category()
 		reason := proofFailureText(res)
 		c.routeDownLocked(routeID, family, cat, reason, true)
-		return fmt.Errorf("%w (route %s: %s): %s", ErrRouteNotCarrying, routeID, cat, reason)
+		return &routeFailure{routeID: routeID, category: cat, reason: reason}
 	}
 	c.routeUpLocked(routeID, family, res)
 	c.startLivenessLocked()
@@ -522,10 +551,14 @@ func ClearRoute() error {
 	// once it is cancelled — so it counts as something stopped.
 	st, _, running := c.check.snapshot()
 	nothingRunning := st == RouteCheckNone || (st == RouteCheckFailed && !running)
+	stopped, stoppedFamily := c.activeRoute, c.activeFamily
 	if err := c.driver.Stop(); err != nil {
 		return err
 	}
-	c.activeRoute, c.activeFamily = "", ""
+	c.setActiveLocked("", "")
+	if stopped != "" {
+		engine.LogInfo(fmt.Sprintf("route down route=%s family=%s result=disconnected", engine.LogID(stopped), engine.LogID(stoppedFamily)))
+	}
 	// No route: there is no tunnel to betray, so direct egress is
 	// permitted again (bootstrap has to start somewhere).
 	refresh.SetTunnelRequired(false)
@@ -545,6 +578,15 @@ func ClearRoute() error {
 		return nil
 	}
 	c.check.set(RouteCheckNone, "")
+	// This call stopped something, so it is a disconnect, and a
+	// disconnected engine reports no refusal: whatever was refused
+	// earlier is not being asked for any more. (A refusal used to be
+	// kept through a ClearRoute that came within five seconds of it,
+	// for a host that tore everything down after a refused switch. No
+	// host does: the Android service asks engine_route_precheck first
+	// and a refused switch touches nothing. The only ClearRoute left in
+	// that window was the person's own Disconnect, after which the
+	// refusal stood for good.)
 	c.check.setRefused(ConnectRefusedNone, "")
 	c.pm.Disconnect()
 	// Posture axis: a user-initiated disconnect always returns to
@@ -766,6 +808,12 @@ func ExportDiagnostics() (string, error) {
 	c.expireFailedConnect()
 	routeCheckState, routeCheckCat, routeRunning := c.check.snapshot()
 	connectRefused, connectRefusedRoute := c.check.refusal()
+	activeRoute, activeFamily := c.activeRouteFromMemory()
+	// A damaged store was set aside and the person has imported again:
+	// there is nothing left to tell them.
+	if len(routes) > 0 && c.storeRecovered.CompareAndSwap(true, false) {
+		c.store.ClearRecoveryPending()
+	}
 	out := map[string]any{
 		"version": Version,
 		"mode":    c.mode,
@@ -799,10 +847,33 @@ func ExportDiagnostics() (string, error) {
 		// "needs_new_file" (the route came from a file made before
 		// files carried signed server addresses), "cooldown", "revoked",
 		// "expired", "other". Closed vocabulary, always present; cleared
-		// by the next set_route that is not refused and by clear_route.
+		// by the next set_route that is not refused and by a clear_route
+		// that disconnects a running route (one that finds nothing
+		// running leaves it). It is also what a refusing
+		// engine_route_precheck records.
 		// `connect_refused_route` is the route id it was about.
 		"connect_refused":       connectRefused,
 		"connect_refused_route": connectRefusedRoute,
+		// `active_route` / `active_route_family`: the route whose engine
+		// instance is running right now (being checked, connected, or
+		// connected and failing its liveness check) and its transport
+		// family; "" when nothing is running. Served from the engine's
+		// MEMORY, never from the route store: a UI that asks the store
+		// which route is active shows "no route selected" over a working
+		// tunnel the moment the store cannot answer. Always present.
+		"active_route":        activeRoute,
+		"active_route_family": activeFamily,
+		// `store_recovered`: true when the route store was found damaged
+		// at start, was set aside (kept on disk under a dated name) and
+		// replaced by an empty one — the person must import their file
+		// again. Stays true across restarts until they have. Always
+		// present.
+		"store_recovered": c.storeRecovered.Load(),
+		// `recent_errors`: the last engine calls that failed, newest
+		// last — {time, call, text, count}. In memory only; the text is
+		// an error CLASS run through the log scrubber (no addresses,
+		// credentials or tokens). See export_errors.go. Always present.
+		"recent_errors": recentErrors(),
 		// Which data plane this binary actually links: "singbox" (real,
 		// can carry traffic) or "none" (the deterministic Stub — this
 		// binary CANNOT tunnel and SetRoute refuses). A GUI reading

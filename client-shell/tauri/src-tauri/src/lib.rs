@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use daal_desktop_core::{
+    cmdlog,
     commands::{self as cmd, AddSubscriptionRequest, ConnectRequest, PreviewedBundle, VersionInfo},
     engine::Engine,
     state::AppState,
@@ -330,6 +331,39 @@ fn version_info(state: State<'_, AppState>) -> VersionInfo {
     cmd::version_info(&state)
 }
 
+/// What went wrong at start, kept for `engine_status`.
+pub struct StartupProblems {
+    /// The operator database could not be opened; publisher features
+    /// are unavailable. The host's own words — for a details area.
+    publisher_store_error: Option<String>,
+}
+
+/// `engine_status`: can the engine be used, and if not, why.
+///
+/// Never fails and never touches the engine's Core, so it is the one
+/// call a page can always make. `engine_ready: false` means every
+/// engine command is answering `engine_unavailable: …`; the page should
+/// say so in its own words (the app could not start its connection
+/// engine; restarting the app or freeing storage space are the things
+/// to try) and keep `engine_error` for a details area.
+#[derive(serde::Serialize)]
+struct EngineStatus {
+    engine_ready: bool,
+    engine_error: Option<String>,
+    publisher_store_ready: bool,
+    publisher_store_error: Option<String>,
+}
+
+#[tauri::command]
+fn engine_status(state: State<'_, AppState>, problems: State<'_, StartupProblems>) -> EngineStatus {
+    EngineStatus {
+        engine_ready: state.engine.is_ready(),
+        engine_error: state.engine.unavailable_reason(),
+        publisher_store_ready: problems.publisher_store_error.is_none(),
+        publisher_store_error: problems.publisher_store_error.clone(),
+    }
+}
+
 /// Render a `DesktopError` for the React layer. When the error is a
 /// `bundle_rs::Error` we prepend its stable `code()` so the UI can
 /// look up friendly i18n copy (e.g. `ErrInvalidSignature` ->
@@ -346,12 +380,16 @@ fn render_bundle_err(e: &daal_desktop_core::DesktopError) -> String {
 
 #[tauri::command]
 fn preview_bundle(path: String) -> Result<PreviewedBundle, String> {
+    cmdlog::logged("preview_bundle", || {
     cmd::preview_bundle(PathBuf::from(path)).map_err(|e| render_bundle_err(&e))
+    })
 }
 
 #[tauri::command]
 fn import_sbp(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    cmdlog::logged("import_sbp", || {
     cmd::import_sbp(&state, PathBuf::from(path)).map_err(|e| render_bundle_err(&e))
+    })
 }
 
 // -- Wave 4 Step 11 — a route that arrives as TEXT -------------------
@@ -433,8 +471,10 @@ fn import_sbp_bytes(
     wstate: State<'_, WizardStateMgr>,
     text: String,
 ) -> Result<String, String> {
+    cmdlog::logged("import_sbp_bytes", || {
     let (path, _staged, _plain) = stage_pasted_for_import(&wstate, &text)?;
     cmd::import_sbp(&state, path).map_err(|e| render_bundle_err(&e))
+    })
 }
 
 #[tauri::command]
@@ -443,7 +483,9 @@ fn resolve_trust_prompt(
     fingerprint: String,
     decision: i32,
 ) -> Result<String, String> {
+    cmdlog::logged("resolve_trust_prompt", || {
     cmd::resolve_trust_prompt(&state, &fingerprint, decision).map_err(|e| e.to_string())
+    })
 }
 
 /// `engine_set_route` does not return when the engine has started: it
@@ -460,39 +502,41 @@ fn resolve_trust_prompt(
 /// call then returns "connection attempt cancelled".
 #[tauri::command]
 async fn connect(app: tauri::AppHandle, route_id: String) -> Result<(), String> {
+    cmdlog::result("connect", async move {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         cmd::connect(&state, ConnectRequest { route_id }).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("connect: {e}"))?
+    }.await)
 }
 
 #[tauri::command]
 fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    cmd::disconnect(&state).map_err(|e| e.to_string())
+    cmdlog::logged("disconnect", || cmd::disconnect(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn diagnostics_explain(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::diagnostics_explain(&state).map_err(|e| e.to_string())
+    cmdlog::logged("diagnostics_explain", || cmd::diagnostics_explain(&state).map_err(|e| e.to_string()))
 }
 
 // -- D-2.1 — display-summary surface ---------------------------------
 
 #[tauri::command]
 fn route_summary(state: State<'_, AppState>, route_id: String) -> Result<String, String> {
-    cmd::route_summary(&state, &route_id).map_err(|e| e.to_string())
+    cmdlog::logged("route_summary", || cmd::route_summary(&state, &route_id).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn available_routes(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::available_routes(&state).map_err(|e| e.to_string())
+    cmdlog::logged("available_routes", || cmd::available_routes(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn throughput_snapshot(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::throughput_snapshot(&state).map_err(|e| e.to_string())
+    cmdlog::logged("throughput_snapshot", || cmd::throughput_snapshot(&state).map_err(|e| e.to_string()))
 }
 
 /// Device Custody B5: full multiplatform panic-wipe.
@@ -529,6 +573,7 @@ fn panic_wipe(
     state: State<'_, AppState>,
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<(), String> {
+    cmdlog::logged("panic_wipe", || {
     let now = (wstate.0.clock)();
     let level = wstate.0.custody.level().as_str().to_string();
 
@@ -571,16 +616,17 @@ fn panic_wipe(
     // 7. Engine-owned nuke — last because it removes wizard.db
     //    so step 2's audit event is gone after this.
     cmd::panic_wipe(&state).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn export_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::export_diagnostics(&state).map_err(|e| e.to_string())
+    cmdlog::logged("export_diagnostics", || cmd::export_diagnostics(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn set_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
-    cmd::set_mode(&state, &mode).map_err(|e| e.to_string())
+    cmdlog::logged("set_mode", || cmd::set_mode(&state, &mode).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -590,22 +636,24 @@ fn network_changed(
     carrier: String,
     ssid: String,
 ) -> Result<String, String> {
+    cmdlog::logged("network_changed", || {
     cmd::network_changed(&state, &kind, &carrier, &ssid).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn unlock_secrets(state: State<'_, AppState>, pin: String) -> Result<cmd::UnlockOutcome, String> {
-    cmd::unlock_secrets(&state, &pin).map_err(|e| e.to_string())
+    cmdlog::logged("unlock_secrets", || cmd::unlock_secrets(&state, &pin).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn set_allow_bulk_capable(state: State<'_, AppState>, allow: bool) -> Result<(), String> {
-    cmd::set_allow_bulk_capable(&state, allow).map_err(|e| e.to_string())
+    cmdlog::logged("set_allow_bulk_capable", || cmd::set_allow_bulk_capable(&state, allow).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn pointer_rotation_status(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::pointer_rotation_status(&state).map_err(|e| e.to_string())
+    cmdlog::logged("pointer_rotation_status", || cmd::pointer_rotation_status(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -613,7 +661,7 @@ fn subscription_add(
     state: State<'_, AppState>,
     req: AddSubscriptionRequest,
 ) -> Result<String, String> {
-    cmd::subscription_add(&state, req).map_err(|e| e.to_string())
+    cmdlog::logged("subscription_add", || cmd::subscription_add(&state, req).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -622,42 +670,50 @@ fn subscription_refresh(
     subscription_id: String,
     timeout_ms: i32,
 ) -> Result<String, String> {
+    cmdlog::logged("subscription_refresh", || {
     cmd::subscription_refresh(&state, &subscription_id, timeout_ms).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn route_delete(state: State<'_, AppState>, route_id: String) -> Result<(), String> {
-    cmd::route_delete(&state, &route_id).map_err(|e| e.to_string())
+    cmdlog::logged("route_delete", || cmd::route_delete(&state, &route_id).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn publisher_delete(state: State<'_, AppState>, publisher_id: String) -> Result<i32, String> {
+    cmdlog::logged("publisher_delete", || {
     cmd::publisher_delete(&state, &publisher_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn subscription_remove(state: State<'_, AppState>, subscription_id: String) -> Result<(), String> {
+    cmdlog::logged("subscription_remove", || {
     cmd::subscription_remove(&state, &subscription_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn subscription_list(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::subscription_list(&state).map_err(|e| e.to_string())
+    cmdlog::logged("subscription_list", || cmd::subscription_list(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn revocation_refresh_all(state: State<'_, AppState>, timeout_ms: i32) -> Result<String, String> {
+    cmdlog::logged("revocation_refresh_all", || {
     cmd::revocation_refresh_all(&state, timeout_ms).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn start_sidecar(state: State<'_, AppState>) -> Result<(), String> {
-    cmd::start_sidecar(&state).map_err(|e| e.to_string())
+    cmdlog::logged("start_sidecar", || cmd::start_sidecar(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn stop_sidecar(state: State<'_, AppState>) -> Result<(), String> {
-    cmd::stop_sidecar(&state).map_err(|e| e.to_string())
+    cmdlog::logged("stop_sidecar", || cmd::stop_sidecar(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -673,12 +729,14 @@ fn apply_cooldown(
     route_id: String,
     seconds: i32,
 ) -> Result<(), String> {
+    cmdlog::logged("apply_cooldown", || {
     cmd::apply_cooldown(&state, &route_id, seconds).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn lifecycle_event(state: State<'_, AppState>, token: String) -> Result<(), String> {
-    cmd::lifecycle_event(&state, &token).map_err(|e| e.to_string())
+    cmdlog::logged("lifecycle_event", || cmd::lifecycle_event(&state, &token).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -696,15 +754,15 @@ fn probe_tcp443(state: State<'_, AppState>, timeout_ms: i32) -> i32 {
 
 #[tauri::command]
 fn scheduler_status(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::scheduler_status(&state).map_err(|e| e.to_string())
+    cmdlog::logged("scheduler_status", || cmd::scheduler_status(&state).map_err(|e| e.to_string()))
 }
 #[tauri::command]
 fn scheduler_tick(state: State<'_, AppState>) -> Result<(), String> {
-    cmd::scheduler_tick(&state).map_err(|e| e.to_string())
+    cmdlog::logged("scheduler_tick", || cmd::scheduler_tick(&state).map_err(|e| e.to_string()))
 }
 #[tauri::command]
 fn stats_redacted(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::stats_redacted(&state).map_err(|e| e.to_string())
+    cmdlog::logged("stats_redacted", || cmd::stats_redacted(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -713,7 +771,9 @@ fn redistribute_route(
     route_id: String,
     recipient_fp: String,
 ) -> Result<String, String> {
+    cmdlog::logged("redistribute_route", || {
     cmd::redistribute_route(&state, &route_id, &recipient_fp).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -722,7 +782,9 @@ fn set_route_budget(
     route_id: String,
     budget_tag: String,
 ) -> Result<String, String> {
+    cmdlog::logged("set_route_budget", || {
     cmd::set_route_budget(&state, &route_id, &budget_tag).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -730,11 +792,15 @@ fn set_rendezvous_priority(
     state: State<'_, AppState>,
     priority_json: String,
 ) -> Result<(), String> {
+    cmdlog::logged("set_rendezvous_priority", || {
     cmd::set_rendezvous_priority(&state, &priority_json).map_err(|e| e.to_string())
+    })
 }
 #[tauri::command]
 fn set_push_rendezvous_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    cmdlog::logged("set_push_rendezvous_enabled", || {
     cmd::set_push_rendezvous_enabled(&state, enabled).map_err(|e| e.to_string())
+    })
 }
 #[tauri::command]
 fn set_auto_promotion(state: State<'_, AppState>, enabled: bool) {
@@ -742,45 +808,49 @@ fn set_auto_promotion(state: State<'_, AppState>, enabled: bool) {
 }
 #[tauri::command]
 fn set_masque_submode_override(state: State<'_, AppState>, submode: String) -> Result<(), String> {
+    cmdlog::logged("set_masque_submode_override", || {
     cmd::set_masque_submode_override(&state, &submode).map_err(|e| e.to_string())
+    })
 }
 #[tauri::command]
 fn set_experimental_families_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
+    cmdlog::logged("set_experimental_families_enabled", || {
     cmd::set_experimental_families_enabled(&state, enabled).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn bootstrap_install_seeds(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::bootstrap_install_seeds(&state).map_err(|e| e.to_string())
+    cmdlog::logged("bootstrap_install_seeds", || cmd::bootstrap_install_seeds(&state).map_err(|e| e.to_string()))
 }
 #[tauri::command]
 fn bootstrap_refresh(state: State<'_, AppState>, timeout_ms: i32) -> Result<String, String> {
-    cmd::bootstrap_refresh(&state, timeout_ms).map_err(|e| e.to_string())
+    cmdlog::logged("bootstrap_refresh", || cmd::bootstrap_refresh(&state, timeout_ms).map_err(|e| e.to_string()))
 }
 #[tauri::command]
 fn bootstrap_status(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::bootstrap_status(&state).map_err(|e| e.to_string())
+    cmdlog::logged("bootstrap_status", || cmd::bootstrap_status(&state).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn uri_detect(state: State<'_, AppState>, text: String) -> Result<String, String> {
-    cmd::uri_detect(&state, &text).map_err(|e| e.to_string())
+    cmdlog::logged("uri_detect", || cmd::uri_detect(&state, &text).map_err(|e| e.to_string()))
 }
 #[tauri::command]
 fn uri_import(state: State<'_, AppState>, raw_uri: String) -> Result<String, String> {
-    cmd::uri_import(&state, &raw_uri).map_err(|e| e.to_string())
+    cmdlog::logged("uri_import", || cmd::uri_import(&state, &raw_uri).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 fn loaded_wasm_modules(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::loaded_wasm_modules(&state).map_err(|e| e.to_string())
+    cmdlog::logged("loaded_wasm_modules", || cmd::loaded_wasm_modules(&state).map_err(|e| e.to_string()))
 }
 #[tauri::command]
 fn wasm_kill_switch_pubkey(state: State<'_, AppState>) -> Result<String, String> {
-    cmd::wasm_kill_switch_pubkey(&state).map_err(|e| e.to_string())
+    cmdlog::logged("wasm_kill_switch_pubkey", || cmd::wasm_kill_switch_pubkey(&state).map_err(|e| e.to_string()))
 }
 
 // ---- FRP-5 wizard command shims ------------------------------------
@@ -796,7 +866,9 @@ fn wizard_store_cloud_token(
     token: String,
     operator_id: Option<i64>,
 ) -> Result<i64, String> {
+    cmdlog::logged("wizard_store_cloud_token", || {
     wcmd::store_cloud_token(&wstate.0, &provider, &token, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -804,7 +876,9 @@ fn wizard_list_existing_servers(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<daal_wizard::cli_bridge::ExistingServer>, String> {
+    cmdlog::logged("wizard_list_existing_servers", || {
     wcmd::list_existing_servers(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -813,7 +887,9 @@ fn wizard_list_server_types(
     operator_id: i64,
     region: String,
 ) -> Result<Vec<daal_wizard::cli_bridge::ServerTypeOption>, String> {
+    cmdlog::logged("wizard_list_server_types", || {
     wcmd::list_server_types(&wstate.0, operator_id, &region).map_err(|e| e.to_string())
+    })
 }
 
 /// L5's catalogue lookup: a DIFFERENT provider, with a credential the
@@ -829,7 +905,9 @@ fn wizard_list_server_types_for(
     region: String,
     token: String,
 ) -> Result<Vec<daal_wizard::cli_bridge::ServerTypeOption>, String> {
+    cmdlog::logged("wizard_list_server_types_for", || {
     wcmd::list_server_types_for(&wstate.0, &provider, &region, &token).map_err(|e| e.to_string())
+    })
 }
 
 /// Read-only: what is left on this relay's cloud account. Never
@@ -840,7 +918,9 @@ fn wizard_account_audit(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<daal_wizard::cli_bridge::AccountAuditReport, String> {
+    cmdlog::logged("wizard_account_audit", || {
     wcmd::account_audit(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -850,7 +930,9 @@ fn wizard_pricing_lookup(
     region: String,
     server_type: String,
 ) -> Result<daal_wizard::cli_bridge::Pricing, String> {
+    cmdlog::logged("wizard_pricing_lookup", || {
     wcmd::pricing_lookup(&wstate.0, operator_id, &region, &server_type).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -862,6 +944,7 @@ fn wizard_select_profile(
     toolbox_profile: String,
     enabled_families: Vec<String>,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_select_profile", || {
     wcmd::select_profile(
         &wstate.0,
         operator_id,
@@ -871,6 +954,7 @@ fn wizard_select_profile(
         enabled_families,
     )
     .map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -878,7 +962,9 @@ fn wizard_publisher_keygen(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Fingerprint, String> {
+    cmdlog::logged("wizard_publisher_keygen", || {
     wcmd::publisher_keygen(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -887,7 +973,9 @@ fn wizard_publisher_keyimport(
     operator_id: i64,
     priv_bytes_b64: String,
 ) -> Result<Fingerprint, String> {
+    cmdlog::logged("wizard_publisher_keyimport", || {
     wcmd::publisher_keyimport(&wstate.0, operator_id, &priv_bytes_b64).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -895,16 +983,18 @@ fn wizard_finalize_pre_provision(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<String, String> {
+    cmdlog::logged("wizard_finalize_pre_provision", || {
     wcmd::finalize_pre_provision(&wstate.0, operator_id)
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
 fn wizard_list_operators(
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<Vec<wcmd::OperatorSummary>, String> {
-    wcmd::list_operators(&wstate.0).map_err(|e| e.to_string())
+    cmdlog::logged("wizard_list_operators", || wcmd::list_operators(&wstate.0).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -912,7 +1002,9 @@ fn wizard_get_operator_state(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<wcmd::OperatorState, String> {
+    cmdlog::logged("wizard_get_operator_state", || {
     wcmd::get_operator_state(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -920,7 +1012,9 @@ fn wizard_cancel_and_cleanup(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_cancel_and_cleanup", || {
     wcmd::cancel_and_cleanup(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_relay_destroy`: remove a relay, and — when the user asked
@@ -937,7 +1031,9 @@ fn wizard_relay_destroy(
     operator_id: i64,
     delete_server: bool,
 ) -> Result<wcmd::DestroyReport, String> {
+    cmdlog::logged("wizard_relay_destroy", || {
     wcmd::relay_destroy(&wstate.0, operator_id, delete_server).map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-4b live operations ----------------------------------------
@@ -952,6 +1048,7 @@ async fn wizard_provision_run(
     operator_id: i64,
     existing_server_id: Option<String>,
 ) -> Result<(), String> {
+    cmdlog::result("wizard_provision_run", async move {
     // Extract Arc fields so we can move them into spawn_blocking
     // (State<> borrows the managed value and can't cross await).
     let db = wstate.0.db.clone();
@@ -1011,6 +1108,7 @@ async fn wizard_provision_run(
     .map_err(|e| format!("join: {e}"))?;
     eprintln!("[provision] done ok={}", result.is_ok());
     result
+    }.await)
 }
 
 /// `wizard_sign_relaypack`: runs `daal-deploy bind-and-sign` on a
@@ -1025,6 +1123,7 @@ async fn wizard_sign_relaypack(
     output_dir: String,
     publisher_name: String,
 ) -> Result<WizardBindResult, String> {
+    cmdlog::result("wizard_sign_relaypack", async move {
     let db = wstate.0.db.clone();
     let keystore = wstate.0.keystore.clone();
     let staging_dir = wstate.0.staging_dir.clone();
@@ -1061,6 +1160,7 @@ async fn wizard_sign_relaypack(
     })
     .await
     .map_err(|e| format!("join: {e}"))?
+    }.await)
 }
 
 /// `wizard_qr_render`: streams animated-QR fountain frames to the
@@ -1086,6 +1186,7 @@ async fn wizard_qr_render(
     max_frames: u32,
     seed: i64,
 ) -> Result<(), String> {
+    cmdlog::result("wizard_qr_render", async move {
     let db = wstate.0.db.clone();
     let keystore = wstate.0.keystore.clone();
     let staging_dir = wstate.0.staging_dir.clone();
@@ -1119,6 +1220,7 @@ async fn wizard_qr_render(
     })
     .await
     .map_err(|e| format!("join: {e}"))?
+    }.await)
 }
 
 /// `wizard_copy_pasteable`: the SENDING half of the base64-paste lane.
@@ -1138,6 +1240,7 @@ fn wizard_copy_pasteable(
     operator_id: i64,
     artifact: String,
 ) -> Result<String, String> {
+    cmdlog::logged("wizard_copy_pasteable", || {
     let ctx = wcmd::WizardCtx {
         db: wstate.0.db.clone(),
         keystore: wstate.0.keystore.clone(),
@@ -1147,6 +1250,7 @@ fn wizard_copy_pasteable(
         custody: wstate.0.custody.clone(),
     };
     wcmd::copy_pasteable(&ctx, operator_id, &artifact).map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-8 CDN-front command shims --------------------------------
@@ -1157,6 +1261,7 @@ fn wizard_store_cloudflare_token(
     operator_id: i64,
     token: String,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_store_cloudflare_token", || {
     // Delegated to daal-wizard so the write goes through `custody_put`
     // and the failure carries the same stable `E_CUSTODY_*` prefix as
     // every other secret-touching command. (The old code also opened
@@ -1164,6 +1269,7 @@ fn wizard_store_cloudflare_token(
     // to verify, and reading a secret only to discard it was never a
     // check of anything.)
     wcmd::store_cloudflare_token(&wstate.0, operator_id, &token).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1176,6 +1282,7 @@ fn wizard_provision_cdn_front(
     origin_path: String,
     public_path: String,
 ) -> Result<i64, String> {
+    cmdlog::logged("wizard_provision_cdn_front", || {
     let input = wcmd::ProvisionCdnFrontInput {
         operator_id,
         hostname,
@@ -1185,6 +1292,7 @@ fn wizard_provision_cdn_front(
         public_path,
     };
     wcmd::provision_cdn_front(&wstate.0, &input).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1192,7 +1300,9 @@ fn wizard_list_cdn_fronts(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<CdnFrontRow>, String> {
+    cmdlog::logged("wizard_list_cdn_fronts", || {
     wcmd::list_cdn_fronts(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1200,7 +1310,9 @@ fn wizard_verify_cdn_posture(
     wstate: State<'_, WizardStateMgr>,
     front_id: i64,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_verify_cdn_posture", || {
     wcmd::verify_cdn_posture(&wstate.0, front_id).map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-7 rotation command shims ---------------------------------
@@ -1232,6 +1344,7 @@ fn wizard_rotate_recommend(
     operator_id: i64,
     args: RotateRecommendArgs,
 ) -> Result<WizardRotationRecommendation, String> {
+    cmdlog::logged("wizard_rotate_recommend", || {
     let input = if args.mode == "explanation" {
         let json = args
             .explanation_json
@@ -1250,6 +1363,7 @@ fn wizard_rotate_recommend(
         })
     };
     wcmd::rotate_recommend(&wstate.0, operator_id, input).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_rotate_execute`: run the chosen rotation. Streams
@@ -1294,6 +1408,7 @@ fn wizard_rotate_execute(
     cdn_new_origin_ipv6: Option<String>,
     freshness_signed_sbp_url: Option<String>,
 ) -> Result<RotateExecuteOutput, String> {
+    cmdlog::logged("wizard_rotate_execute", || {
     let app_clone = app.clone();
     let mut on_progress = move |ev: ProgressEvent| {
         let _ = app_clone.emit("wizard://rotate-event", ev);
@@ -1321,6 +1436,7 @@ fn wizard_rotate_execute(
     };
     wcmd::rotate_execute(&wstate.0, operator_id, input, &mut on_progress)
         .map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_rotate_revert`: flip the most-recent inactive history
@@ -1330,7 +1446,9 @@ fn wizard_rotate_revert(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<SignedSbpRow, String> {
+    cmdlog::logged("wizard_rotate_revert", || {
     wcmd::rotate_revert(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_rotate_history`: list the rotation history rows for a
@@ -1341,7 +1459,9 @@ fn wizard_rotate_history(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<SignedSbpRow>, String> {
+    cmdlog::logged("wizard_rotate_history", || {
     wcmd::list_rotation_history(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 // ---- Wave 3 Step 8: freshness command shims -------------------------
@@ -1361,7 +1481,9 @@ fn wizard_freshness_status(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<FreshnessStatus, String> {
+    cmdlog::logged("wizard_freshness_status", || {
     daal_wizard::freshness::status(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_freshness_add_endpoint`: store one provider's routing, and
@@ -1376,8 +1498,10 @@ fn wizard_freshness_add_endpoint(
     operator_id: i64,
     endpoint: FreshnessEndpointInput,
 ) -> Result<i64, String> {
+    cmdlog::logged("wizard_freshness_add_endpoint", || {
     daal_wizard::freshness::add_endpoint(&wstate.0, operator_id, endpoint)
         .map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_freshness_delete_endpoint`: forget one provider, including
@@ -1387,7 +1511,9 @@ fn wizard_freshness_delete_endpoint(
     wstate: State<'_, WizardStateMgr>,
     endpoint_id: i64,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_freshness_delete_endpoint", || {
     daal_wizard::freshness::delete_endpoint(&wstate.0, endpoint_id).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_freshness_set_pack_url`: where the signed .sbp itself will
@@ -1399,7 +1525,9 @@ fn wizard_freshness_set_pack_url(
     operator_id: i64,
     url: String,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_freshness_set_pack_url", || {
     daal_wizard::freshness::set_pack_url(&wstate.0, operator_id, &url).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_freshness_publish`: sign and upload the document now.
@@ -1415,12 +1543,14 @@ fn wizard_freshness_publish(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<PublishReport, String> {
+    cmdlog::logged("wizard_freshness_publish", || {
     let app_clone = app.clone();
     let mut on_progress = move |ev: ProgressEvent| {
         let _ = app_clone.emit("wizard://freshness-event", ev);
     };
     daal_wizard::freshness::publish(&wstate.0, operator_id, &mut on_progress)
         .map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-7.5 sub-key rotation command shims ------------------------
@@ -1442,9 +1572,11 @@ fn wizard_subkey_rotate(
     validity: Option<String>,
     label: Option<String>,
 ) -> Result<SubkeyRotateResult, String> {
+    cmdlog::logged("wizard_subkey_rotate", || {
     let validity = validity.unwrap_or_else(|| "90d".to_string());
     let label = label.unwrap_or_else(|| "rotated-subkey".to_string());
     wcmd::subkey_rotate(&wstate.0, operator_id, &validity, &label).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_subkey_active`: return the currently-active sub-key
@@ -1456,7 +1588,9 @@ fn wizard_subkey_active(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Option<SubkeyRow>, String> {
+    cmdlog::logged("wizard_subkey_active", || {
     wcmd::active_subkey(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 /// `wizard_subkey_history`: list the sub-key rotation history,
@@ -1467,7 +1601,9 @@ fn wizard_subkey_history(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<SubkeyRow>, String> {
+    cmdlog::logged("wizard_subkey_history", || {
     wcmd::list_subkey_history(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-14 per-recipient surface ----------------------------------
@@ -1479,6 +1615,7 @@ fn wizard_recipient_provision(
     address: String,
     display_name: String,
 ) -> Result<daal_wizard::recipient_book::RecipientSummary, String> {
+    cmdlog::logged("wizard_recipient_provision", || {
     // Logcat trace so the *actual* stderr from the daal-deploy
     // subprocess surfaces on the device when provisioning fails.
     // The UI only shows the short wrapped error; the full stderr
@@ -1501,6 +1638,7 @@ fn wizard_recipient_provision(
         Err(e) => eprintln!("[recipient_provision] err: {}", e),
     }
     r.map_err(|e| e.to_string())
+    })
 }
 
 /// Produce the shareable shared `.sbp` (default distribution artifact):
@@ -1511,6 +1649,7 @@ fn wizard_produce_shared_sbp(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<daal_wizard::recipient_book::SharedSbpSummary, String> {
+    cmdlog::logged("wizard_produce_shared_sbp", || {
     eprintln!("[produce_shared_sbp] op={}", operator_id);
     let r = daal_wizard::recipient_book::produce_shared_sbp(&wstate.0, operator_id);
     match &r {
@@ -1518,6 +1657,7 @@ fn wizard_produce_shared_sbp(
         Err(e) => eprintln!("[produce_shared_sbp] err: {}", e),
     }
     r.map_err(|e| e.to_string())
+    })
 }
 
 /// Rebuild the `.sbpx` for a recipient already on the roster.
@@ -1533,6 +1673,7 @@ fn wizard_recipient_repack_sbpx(
     operator_id: i64,
     recipient_id: i64,
 ) -> Result<daal_wizard::recipient_book::RecipientSummary, String> {
+    cmdlog::logged("wizard_recipient_repack_sbpx", || {
     eprintln!("[recipient_repack_sbpx] op={operator_id} rid={recipient_id}");
     let r =
         daal_wizard::recipient_book::recipient_repack_sbpx(&wstate.0, operator_id, recipient_id);
@@ -1541,6 +1682,7 @@ fn wizard_recipient_repack_sbpx(
         Err(e) => eprintln!("[recipient_repack_sbpx] err: {e}"),
     }
     r.map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1549,8 +1691,10 @@ fn wizard_recipient_revoke(
     operator_id: i64,
     recipient_id: i64,
 ) -> Result<daal_wizard::recipient_book::RecipientSummary, String> {
+    cmdlog::logged("wizard_recipient_revoke", || {
     daal_wizard::recipient_book::recipient_revoke(&wstate.0, operator_id, recipient_id)
         .map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1558,7 +1702,9 @@ fn wizard_recipient_list(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<daal_wizard::recipient_book::RecipientSummary>, String> {
+    cmdlog::logged("wizard_recipient_list", || {
     daal_wizard::recipient_book::recipient_list(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1566,8 +1712,10 @@ fn wizard_recipient_list_remote(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<String>, String> {
+    cmdlog::logged("wizard_recipient_list_remote", || {
     daal_wizard::recipient_book::recipient_list_remote(&wstate.0, operator_id)
         .map_err(|e| e.to_string())
+    })
 }
 
 /// Hard-removes an already-revoked recipient from the local roster.
@@ -1579,8 +1727,10 @@ fn wizard_recipient_delete(
     operator_id: i64,
     recipient_id: i64,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_recipient_delete", || {
     daal_wizard::recipient_book::recipient_delete(&wstate.0, operator_id, recipient_id)
         .map_err(|e| e.to_string())
+    })
 }
 
 // ---- Wave 3 Step 7: in-place relay healing -------------------------
@@ -1603,6 +1753,7 @@ fn wizard_rotate_credentials(
     operator_id: i64,
     recipient_name: String,
 ) -> Result<daal_wizard::relay_rotation::RotateCredentialsSummary, String> {
+    cmdlog::logged("wizard_rotate_credentials", || {
     // Logcat trace: the short wrapped error the UI shows is not enough
     // to debug an on-box auth/firewall/version failure from a device.
     eprintln!("[rotate_credentials] op={operator_id} name={recipient_name}");
@@ -1621,6 +1772,7 @@ fn wizard_rotate_credentials(
         Err(e) => eprintln!("[rotate_credentials] err: {e}"),
     }
     r.map_err(|e| e.to_string())
+    })
 }
 
 /// Move the relay's cover hostname / TLS parameters.
@@ -1651,6 +1803,7 @@ fn wizard_rotate_tls(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<daal_wizard::relay_rotation::RotateTlsSummary, String> {
+    cmdlog::logged("wizard_rotate_tls", || {
     eprintln!("[rotate_tls] op={operator_id}");
     let r = daal_wizard::relay_rotation::rotate_tls(&wstate.0, operator_id);
     match &r {
@@ -1661,6 +1814,7 @@ fn wizard_rotate_tls(
         Err(e) => eprintln!("[rotate_tls] err: {e}"),
     }
     r.map_err(|e| e.to_string())
+    })
 }
 
 // ---- Publisher custody: status, migration, recovery ----------------
@@ -1673,7 +1827,7 @@ fn wizard_rotate_tls(
 fn publisher_custody_status(
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<wcmd::PublisherCustodyStatus, String> {
-    wcmd::custody_status(&wstate.0).map_err(|e| e.to_string())
+    cmdlog::logged("publisher_custody_status", || wcmd::custody_status(&wstate.0).map_err(|e| e.to_string()))
 }
 
 /// One-time upgrade from the PIN-sealed store to device custody.
@@ -1689,7 +1843,7 @@ fn publisher_migrate_from_pin(
     wstate: State<'_, WizardStateMgr>,
     pin: String,
 ) -> Result<wcmd::CustodyMigrationReport, String> {
-    wcmd::migrate_from_pin(&wstate.0, &pin).map_err(|e| e.to_string())
+    cmdlog::logged("publisher_migrate_from_pin", || wcmd::migrate_from_pin(&wstate.0, &pin).map_err(|e| e.to_string()))
 }
 
 /// Unlock session-passphrase custody.
@@ -1703,7 +1857,9 @@ fn publisher_custody_unlock(
     wstate: State<'_, WizardStateMgr>,
     passphrase: String,
 ) -> Result<wcmd::PublisherCustodyStatus, String> {
+    cmdlog::logged("publisher_custody_unlock", || {
     wcmd::custody_unlock(&wstate.0, &passphrase).map_err(|e| e.to_string())
+    })
 }
 
 /// Write a recovery copy of a relay's publisher signing key into the
@@ -1721,6 +1877,7 @@ fn publisher_save_recovery_key(
     operator_id: i64,
     file_name: String,
 ) -> Result<String, String> {
+    cmdlog::logged("publisher_save_recovery_key", || {
     let staged = wcmd::export_recovery_key(&wstate.0, operator_id).map_err(|e| e.to_string())?;
     let name = sanitize_filename(&file_name);
     let name = if name.is_empty() {
@@ -1736,6 +1893,7 @@ fn publisher_save_recovery_key(
     let _ = std::fs::remove_file(&staged);
     res?;
     Ok(name)
+    })
 }
 
 // ---- Relay identity, artifacts, helper IP --------------------------
@@ -1747,7 +1905,9 @@ fn wizard_set_operator_nickname(
     operator_id: i64,
     nickname: String,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_set_operator_nickname", || {
     wcmd::set_operator_nickname(&wstate.0, operator_id, &nickname).map_err(|e| e.to_string())
+    })
 }
 
 /// List a relay's distributable files. Read-only; safe to call on
@@ -1759,7 +1919,9 @@ fn wizard_list_artifacts(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<Vec<wcmd::ArtifactInfo>, String> {
+    cmdlog::logged("wizard_list_artifacts", || {
     wcmd::list_artifacts(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 /// The persisted helper IP for a relay, or "" if never detected.
@@ -1768,7 +1930,9 @@ fn wizard_get_helper_ip(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<String, String> {
+    cmdlog::logged("wizard_get_helper_ip", || {
     wcmd::get_helper_ip(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
 }
 
 /// Persist the helper IP. `source` is "auto" | "manual" | "whoami"
@@ -1782,7 +1946,9 @@ fn wizard_set_helper_ip(
     helper_ip: String,
     source: String,
 ) -> Result<(), String> {
+    cmdlog::logged("wizard_set_helper_ip", || {
     wcmd::set_helper_ip(&wstate.0, operator_id, &helper_ip, &source).map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-14 Layer 3c: recipient-side identity ----------------------
@@ -1795,7 +1961,9 @@ fn wizard_set_helper_ip(
 fn recipient_identity_get_or_create(
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<daal_wizard::recipient_identity::RecipientIdentitySummary, String> {
+    cmdlog::logged("recipient_identity_get_or_create", || {
     daal_wizard::recipient_identity::get_or_create(&wstate.0).map_err(|e| e.to_string())
+    })
 }
 
 // ---- Device Custody v1: level + session unlock/lock ----------------
@@ -1804,7 +1972,7 @@ fn recipient_identity_get_or_create(
 /// `"hardware" | "os_keystore" | "session_passphrase"`.
 #[tauri::command]
 fn device_custody_level(wstate: State<'_, WizardStateMgr>) -> Result<String, String> {
-    Ok(wstate.0.custody.level().as_str().to_string())
+    cmdlog::logged("device_custody_level", || Ok(wstate.0.custody.level().as_str().to_string()))
 }
 
 /// Returns true when custody is currently usable without a
@@ -1812,7 +1980,7 @@ fn device_custody_level(wstate: State<'_, WizardStateMgr>) -> Result<String, Str
 /// session-passphrase, true only after a successful unlock).
 #[tauri::command]
 fn device_custody_is_unlocked(wstate: State<'_, WizardStateMgr>) -> Result<bool, String> {
-    Ok(wstate.0.custody.is_unlocked())
+    cmdlog::logged("device_custody_is_unlocked", || Ok(wstate.0.custody.is_unlocked()))
 }
 
 /// Session-passphrase devices: derive the in-memory wrap key from
@@ -1826,6 +1994,7 @@ fn device_custody_unlock(
     wstate: State<'_, WizardStateMgr>,
     passphrase: Option<String>,
 ) -> Result<(), String> {
+    cmdlog::logged("device_custody_unlock", || {
     wstate
         .0
         .custody
@@ -1838,6 +2007,7 @@ fn device_custody_unlock(
         .db
         .insert_custody_event(now, "unlocked", &level, "{}");
     Ok(())
+    })
 }
 
 /// Drop in-memory key material. No-op for hardware/os_keystore.
@@ -1847,11 +2017,13 @@ fn device_custody_unlock(
 /// always succeed.
 #[tauri::command]
 fn device_custody_lock(wstate: State<'_, WizardStateMgr>) -> Result<(), String> {
+    cmdlog::logged("device_custody_lock", || {
     wstate.0.custody.lock();
     let level = wstate.0.custody.level().as_str().to_string();
     let now = (wstate.0.clock)();
     let _ = wstate.0.db.insert_custody_event(now, "locked", &level, "{}");
     Ok(())
+    })
 }
 
 /// Device Custody B4: rotate the recipient identity. Mints a new
@@ -1862,7 +2034,9 @@ fn device_custody_lock(wstate: State<'_, WizardStateMgr>) -> Result<(), String> 
 fn device_custody_rotate(
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<daal_wizard::recipient_identity::RecipientIdentitySummary, String> {
+    cmdlog::logged("device_custody_rotate", || {
     daal_wizard::recipient_identity::rotate(&wstate.0).map_err(|e| e.to_string())
+    })
 }
 
 /// Device Custody B4: list the rotation history (newest retirement
@@ -1871,11 +2045,13 @@ fn device_custody_rotate(
 fn device_custody_history(
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<Vec<daal_wizard::operator_db::RecipientIdentityHistoryRow>, String> {
+    cmdlog::logged("device_custody_history", || {
     wstate
         .0
         .db
         .list_recipient_identity_history()
         .map_err(|e| e.to_string())
+    })
 }
 
 /// Device Custody B4: read the audit-event log (newest first).
@@ -1885,11 +2061,13 @@ fn device_custody_events(
     wstate: State<'_, WizardStateMgr>,
     limit: Option<i64>,
 ) -> Result<Vec<daal_wizard::operator_db::CustodyEventRow>, String> {
+    cmdlog::logged("device_custody_events", || {
     wstate
         .0
         .db
         .list_custody_events(limit.unwrap_or(200))
         .map_err(|e| e.to_string())
+    })
 }
 
 /// Read-only: returns `null` when no identity exists yet so the
@@ -1899,7 +2077,9 @@ fn device_custody_events(
 fn recipient_identity_get(
     wstate: State<'_, WizardStateMgr>,
 ) -> Result<Option<daal_wizard::recipient_identity::RecipientIdentitySummary>, String> {
+    cmdlog::logged("recipient_identity_get", || {
     daal_wizard::recipient_identity::get_summary(&wstate.0).map_err(|e| e.to_string())
+    })
 }
 
 // ---- FRP-14 Layer 3d: recipient-side `.sbpx` import ----------------
@@ -1911,8 +2091,10 @@ fn recipient_identity_get(
 /// fall through to the existing `importSbp` lane (plain).
 #[tauri::command]
 fn recipient_sbpx_sniff(path: String) -> Result<bool, String> {
+    cmdlog::logged("recipient_sbpx_sniff", || {
     daal_wizard::recipient_sbpx::sniff_file(std::path::Path::new(&path))
         .map_err(|e| e.to_string())
+    })
 }
 
 /// Stage a user-picked file under the wizard's private staging dir.
@@ -1928,6 +2110,7 @@ fn stage_picked_file(
     wstate: State<'_, WizardStateMgr>,
     path: String,
 ) -> Result<String, String> {
+    cmdlog::logged("stage_picked_file", || {
     // Plain filesystem path? Pass through unchanged.
     if !path.starts_with("content://") {
         return Ok(path);
@@ -1980,6 +2163,7 @@ fn stage_picked_file(
         let _ = wstate;
         Err(format!("content:// URIs not supported on this platform"))
     }
+    })
 }
 
 /// Decrypt a `.sbpx` envelope using the recipient's identity.
@@ -1991,12 +2175,14 @@ fn recipient_import_sbpx(
     wstate: State<'_, WizardStateMgr>,
     path: String,
 ) -> Result<String, String> {
+    cmdlog::logged("recipient_import_sbpx", || {
     let p = std::path::PathBuf::from(&path);
     daal_wizard::recipient_sbpx::import_sbpx(&wstate.0, &p)
         .map(|out| out.to_string_lossy().to_string())
         // Same code-prefixed rendering as the paste lane, so the two
         // ways into the same unwrap produce the same translated copy.
         .map_err(|e| render_sbpx_err(&e))
+    })
 }
 
 // ---- FRP-6 recipient command shims ---------------------------------
@@ -2018,11 +2204,13 @@ fn recipient_qr_feed_frame(
     total_frames: u32,
     data_b64: String,
 ) -> Result<recipient::SessionStatus, String> {
+    cmdlog::logged("recipient_qr_feed_frame", || {
     let _ = (index, total_frames);
     rstate.0.ensure(&session_id)?;
     let body =
         cmd::fountain_feed_frame(&state, &session_id, &data_b64).map_err(|e| e.to_string())?;
     rstate.0.record_engine_response(&session_id, &body)
+    })
 }
 
 #[tauri::command]
@@ -2030,7 +2218,7 @@ fn recipient_qr_status(
     rstate: State<'_, RecipientStateMgr>,
     session_id: String,
 ) -> Result<recipient::SessionStatus, String> {
-    rstate.0.status(&session_id)
+    cmdlog::logged("recipient_qr_status", || rstate.0.status(&session_id))
 }
 
 #[tauri::command]
@@ -2038,8 +2226,10 @@ fn recipient_qr_cancel(
     rstate: State<'_, RecipientStateMgr>,
     session_id: String,
 ) -> Result<(), String> {
+    cmdlog::logged("recipient_qr_cancel", || {
     rstate.0.cancel(&session_id);
     Ok(())
+    })
 }
 
 /// `recipient_qr_finalize` returns the importer verdict produced by
@@ -2050,7 +2240,7 @@ fn recipient_qr_finalize(
     rstate: State<'_, RecipientStateMgr>,
     session_id: String,
 ) -> Result<String, String> {
-    rstate.0.finish(&session_id)
+    cmdlog::logged("recipient_qr_finalize", || rstate.0.finish(&session_id))
 }
 
 /// Resolve the `daal-deploy` binary path. On Android, it's bundled as
@@ -2152,6 +2342,7 @@ fn wizard_get_sbp_path(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
 ) -> Result<String, String> {
+    cmdlog::logged("wizard_get_sbp_path", || {
     let path = wstate
         .0
         .staging_dir
@@ -2160,6 +2351,7 @@ fn wizard_get_sbp_path(
         return Err(format!("no signed invite package for operator {operator_id}"));
     }
     Ok(path.to_string_lossy().to_string())
+    })
 }
 
 /// Convert an arbitrary user-supplied label into a safe file stem.
@@ -2215,6 +2407,7 @@ fn share_invite(
     operator_id: i64,
     friendly_name: String,
 ) -> Result<String, String> {
+    cmdlog::logged("share_invite", || {
     // Prefer the shared .sbp (rewritten with the r0 shared user's working
     // outbounds by wizard_produce_shared_sbp) — that's the one any phone
     // can actually connect. Fall back to the raw Step-6 .sbp only if the
@@ -2303,6 +2496,7 @@ fn share_invite(
             .spawn();
         Ok(path)
     }
+    })
 }
 
 /// Copy a staged file into the phone's public Downloads via the Kotlin
@@ -2370,6 +2564,7 @@ fn save_shared_sbp_to_downloads(
     operator_id: i64,
     file_name: String,
 ) -> Result<(), String> {
+    cmdlog::logged("save_shared_sbp_to_downloads", || {
     let shared = wstate
         .0
         .staging_dir
@@ -2383,12 +2578,14 @@ fn save_shared_sbp_to_downloads(
         format!("{name}.sbp")
     };
     save_path_to_downloads(&shared.to_string_lossy(), &name)
+    })
 }
 
 /// Save a per-recipient `.sbpx` (from a recipient row's sbpx_path) into the
 /// phone's Downloads folder.
 #[tauri::command]
 fn save_sbpx_to_downloads(sbpx_path: String, file_name: String) -> Result<(), String> {
+    cmdlog::logged("save_sbpx_to_downloads", || {
     let name = sanitize_filename(&file_name);
     let name = if name.is_empty() {
         "daal-connection.sbpx".to_string()
@@ -2398,6 +2595,7 @@ fn save_sbpx_to_downloads(sbpx_path: String, file_name: String) -> Result<(), St
         format!("{name}.sbpx")
     };
     save_path_to_downloads(&sbpx_path, &name)
+    })
 }
 
 /// FRP-14 Layer 3b.5: `share_invite_sbpx` — same shape as
@@ -2412,6 +2610,7 @@ fn share_invite_sbpx(
     sbpx_path: String,
     friendly_name: String,
 ) -> Result<String, String> {
+    cmdlog::logged("share_invite_sbpx", || {
     let canonical = std::path::PathBuf::from(&sbpx_path);
     if !canonical.exists() {
         return Err(format!("no .sbpx at {sbpx_path}"));
@@ -2482,6 +2681,7 @@ fn share_invite_sbpx(
             .spawn();
         Ok(path)
     }
+    })
 }
 
 /// Open a URL in the system's default browser as a separate app.
@@ -2489,6 +2689,7 @@ fn share_invite_sbpx(
 /// On desktop it uses xdg-open / open / start.
 #[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    cmdlog::logged("open_external_url", || {
     use tauri::Url;
     let _parsed = Url::parse(&url).map_err(|e| format!("invalid URL: {e}"))?;
 
@@ -2523,6 +2724,7 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|e| format!("open failed: {e}"))?;
         Ok(())
     }
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2554,7 +2756,24 @@ pub fn run() {
             lib_path.display()
         )
     });
-    engine.init(&state_dir, "warn").expect("engine init");
+    // The engine failing to start must not take the app with it. This
+    // was `.expect("engine init")`: with a route store the engine could
+    // not open, the app died on every launch, and the only way out —
+    // clearing the app's data — also destroys the publisher's operator
+    // database, which lives in the same directory. The Go side now sets
+    // a damaged store aside and starts clean by itself; whatever can
+    // still fail here (a full disk, a directory that cannot be written)
+    // leaves the app open, with every engine command answering
+    // `engine_unavailable: …` (see `Engine::ensure_ready`: nothing
+    // reaches the uninitialised library, which would abort the process)
+    // and `engine_status` / `version_info` saying why. The publisher
+    // side does not need the engine and keeps working.
+    if let Err(e) = engine.init(&state_dir, "warn") {
+        log::error!(
+            "engine did not start ({e}); the app stays open without it: {}",
+            engine.unavailable_reason().unwrap_or_default()
+        );
+    }
 
     // Phase 45 — publish a global Arc<Engine> so the Android JNI bridge
     // (Java_org_daal_desktop_platform_DaalCoreBridge_*) can reach the
@@ -2566,18 +2785,38 @@ pub fn run() {
     }
 
     let app_state = AppState::new(engine, state_dir.clone());
-    let wizard_ctx = build_wizard_ctx(&state_dir).expect("wizard context init (DB + keystore)");
+    // Same rule for the operator database: a file that cannot be opened
+    // is reported, never a crash on every launch — and never deleted or
+    // replaced here, because it holds the publisher's relays and
+    // recipients. Without it the wizard state is simply not managed:
+    // each command that needs it is rejected by Tauri ("state not
+    // managed…"), `engine_status` carries the reason, and connecting
+    // through routes already imported is unaffected.
+    let (wizard_ctx, publisher_store_error) = match build_wizard_ctx(&state_dir) {
+        Ok(ctx) => (Some(ctx), None),
+        Err(e) => {
+            log::error!("operator database did not open; publisher features are off: {}", cmdlog::scrub(&e));
+            (None, Some(e))
+        }
+    };
     let recipient_registry = recipient::SessionRegistry::default();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_daal_platform::init())
         .manage(app_state)
-        .manage(WizardStateMgr(wizard_ctx))
-        .manage(RecipientStateMgr(recipient_registry))
+        .manage(StartupProblems {
+            publisher_store_error,
+        })
+        .manage(RecipientStateMgr(recipient_registry));
+    if let Some(ctx) = wizard_ctx {
+        builder = builder.manage(WizardStateMgr(ctx));
+    }
+    builder
         .invoke_handler(tauri::generate_handler![
             version_info,
+            engine_status,
             preview_bundle,
             import_sbp,
             // Wave 4 Step 11: the same import, taking pasted text.
@@ -2734,14 +2973,17 @@ pub fn run() {
             // (`<staging>/paste/`), so both are swept here — 10
             // minutes, the window the sbpx doc already specified.
             {
-                let wstate: State<WizardStateMgr> = app.state();
-                let now = (wstate.0.clock)();
-                let _ = daal_wizard::recipient_sbpx::sweep_stale(&wstate.0, 600);
-                let _ = daal_wizard::recipient_paste::sweep_stale_pastes(
-                    &wstate.0.staging_dir,
-                    now,
-                    600,
-                );
+                // try_state: the wizard state is absent when the
+                // operator database did not open (see run()).
+                if let Some(wstate) = app.try_state::<WizardStateMgr>() {
+                    let now = (wstate.0.clock)();
+                    let _ = daal_wizard::recipient_sbpx::sweep_stale(&wstate.0, 600);
+                    let _ = daal_wizard::recipient_paste::sweep_stale_pastes(
+                        &wstate.0.staging_dir,
+                        now,
+                        600,
+                    );
+                }
             }
 
             // Gap 4-recipient: drive scheduler.Tick on a ~60 s
@@ -2863,6 +3105,8 @@ pub fn run() {
 //   clearRoute(): Int
 //   setTunnelRefresh(enabled: Boolean): Int
 //   schedulerTick(): Int
+//   engineState(): String?
+//   routePrecheck(routeId: String): String?
 //
 // We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
 // (Kotlin's class-mangling rule for object companions), reach the
@@ -2885,7 +3129,7 @@ mod jni_bridge {
     use std::sync::Arc;
 
     use jni::objects::{JClass, JString};
-    use jni::sys::{jboolean, jint};
+    use jni::sys::{jboolean, jint, jstring};
     use jni::JNIEnv;
 
     use daal_desktop_core::engine::Engine;
@@ -2938,7 +3182,10 @@ mod jni_bridge {
         let Some(eng) = engine() else { return -1 };
         match eng.set_tun_fd(fd as c_int) {
             Ok(_) => 0,
-            Err(_) => -1,
+            Err(e) => {
+                log::error!("DaalCoreBridge.setTunFd failed: {e}");
+                -1
+            }
         }
     }
 
@@ -2950,7 +3197,10 @@ mod jni_bridge {
         let Some(eng) = engine() else { return -1 };
         match eng.clear_tun_fd() {
             Ok(_) => 0,
-            Err(_) => -1,
+            Err(e) => {
+                log::warn!("DaalCoreBridge.clearTunFd failed: {e}");
+                -1
+            }
         }
     }
 
@@ -2963,7 +3213,10 @@ mod jni_bridge {
         let ptr = protect_trampoline as *const () as usize;
         match eng.register_protect_callback(ptr) {
             Ok(_) => 0,
-            Err(_) => -1,
+            Err(e) => {
+                log::error!("DaalCoreBridge.registerProtectCallback failed: {e}");
+                -1
+            }
         }
     }
 
@@ -2997,7 +3250,85 @@ mod jni_bridge {
         let Some(eng) = engine() else { return -1 };
         match eng.clear_route() {
             Ok(_) => 0,
-            Err(_) => -1,
+            Err(e) => {
+                log::warn!("DaalCoreBridge.clearRoute failed: {e}");
+                -1
+            }
+        }
+    }
+
+    /// What the engine says about the connection right now, for the
+    /// VPN service's decision after a `setRoute` that did not return 0:
+    /// is the route that was connected before still carrying traffic
+    /// (the new one was refused and nothing was touched), or did the
+    /// engine let go of it (the new one was started and failed)?
+    ///
+    /// Returns a small JSON object, or null when the engine cannot be
+    /// asked (not loaded, not started, export failed):
+    ///
+    ///   {"active_route": "<id>" | "" | null,
+    ///    "route_check": "...", "route_check_category": "...",
+    ///    "connect_refused": "...", "connect_refused_route": "..."}
+    ///
+    /// `active_route` is read from the engine's MEMORY (the
+    /// export_diagnostics field of that name), never from the route
+    /// store, so a store that cannot be read does not make a connected
+    /// route look disconnected. It is null — not "" — when the engine
+    /// is too old to report the field: "unknown" and "nothing is
+    /// connected" lead to different decisions in SwitchPolicy.
+    ///
+    /// Only ids and closed codes cross: no endpoint, no credential.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_engineState<'local>(
+        env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) -> jstring {
+        let null = std::ptr::null_mut();
+        let Some(eng) = engine() else { return null };
+        let blob = match eng.export_diagnostics() {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("DaalCoreBridge.engineState: diagnostics unavailable: {e}");
+                return null;
+            }
+        };
+        let Some(state) = daal_desktop_core::engine::connection_state_json(&blob) else {
+            log::warn!("DaalCoreBridge.engineState: diagnostics were not a JSON object");
+            return null;
+        };
+        match env.new_string(state) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null,
+        }
+    }
+
+    /// `engine_route_precheck`: would `setRoute(routeId)` be refused
+    /// right now? Starts and stops nothing. Returns the engine's JSON
+    /// (`{"route_id","refused":"" | code,"active_route"}`), or null when
+    /// the engine cannot be asked or predates the call — the caller
+    /// then attempts the route and reads the outcome from engineState.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_routePrecheck<'local>(
+        mut env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        route_id: JString<'local>,
+    ) -> jstring {
+        let null = std::ptr::null_mut();
+        let Some(eng) = engine() else { return null };
+        let s: String = match env.get_string(&route_id) {
+            Ok(s) => s.into(),
+            Err(_) => return null,
+        };
+        match eng.route_precheck(&s) {
+            Ok(Some(body)) => match env.new_string(body) {
+                Ok(j) => j.into_raw(),
+                Err(_) => null,
+            },
+            Ok(None) => null,
+            Err(e) => {
+                log::warn!("DaalCoreBridge.routePrecheck({s}) failed: {e}");
+                null
+            }
         }
     }
 

@@ -895,6 +895,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "libloading 0.8.9",
+ "log",
  "nix 0.27.1",
  "serde",
  "serde_json",

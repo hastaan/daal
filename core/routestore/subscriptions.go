@@ -263,6 +263,7 @@ func (s *Store) CountRefreshAudit() (int, error) {
 // comparison the overwhelming majority of the time and only deletes at
 // a bucket rollover.
 func (s *Store) PutDiagnosticsExplain(bucket, why, skippedJSON string) error {
+	s.explainWrites.Add(1)
 	if _, err := s.db.Exec(`
 INSERT INTO diagnostics_explain (bucket, why_chose_route, skipped_families_json)
 VALUES (?, ?, ?)
@@ -282,6 +283,12 @@ ON CONFLICT(bucket) DO UPDATE SET
 	}
 	return nil
 }
+
+// DiagnosticsExplainWrites reports how many times PutDiagnosticsExplain
+// has run on this handle. SQLite does not rewrite the file for an
+// upsert that changes nothing, so the file cannot show whether a poll
+// took a write transaction; this can. Test surface only.
+func (s *Store) DiagnosticsExplainWrites() int64 { return s.explainWrites.Load() }
 
 // CountDiagnosticsExplain returns the number of retained rows. Test and
 // future-reader surface only.

@@ -173,3 +173,6 @@ require (
 replace daal/core => ../../core
 
 replace daal/bundle-go => ../../bundle/go
+
+// One-line fix carried locally: see third_party/DAAL-PATCH.md (FINDINGS SW-2).
+replace github.com/sagernet/sing-tun => ../../third_party/sing-tun

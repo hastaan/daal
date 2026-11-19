@@ -97,7 +97,7 @@ type routeCheck struct {
 	// refused / refusedRoute: the last SetRoute that was REFUSED before
 	// anything was tried, as a closed code (ConnectRefused*). Cleared by
 	// the next SetRoute that gets past its refusals and by a ClearRoute
-	// that stops something (one that finds nothing running keeps it).
+	// that stops something. One that finds nothing running keeps it.
 	refused, refusedRoute string
 }
 
@@ -146,6 +146,151 @@ func refusedCode(err error) string {
 		return ConnectRefusedExpired
 	}
 	return ConnectRefusedOther
+}
+
+// routeRefusal is the error of a SetRoute that was refused before
+// anything was started. It reads and unwraps exactly as the error it
+// carries; the code rides along so a log line can name the refusal
+// without quoting the error text.
+type routeRefusal struct {
+	code string
+	err  error
+}
+
+func (e *routeRefusal) Error() string { return e.err.Error() }
+func (e *routeRefusal) Unwrap() error { return e.err }
+
+// routeFailure is the error of a SetRoute whose route started and then
+// failed its connection proof. It wraps ErrRouteNotCarrying; reason is
+// the raw account of the proof and can carry addresses — it is in
+// Error() for the in-process caller and is never logged.
+type routeFailure struct {
+	routeID  string
+	category diagnostics.Category
+	reason   string
+}
+
+func (e *routeFailure) Error() string {
+	return fmt.Sprintf("%v (route %s: %s): %s", ErrRouteNotCarrying, e.routeID, e.category, e.reason)
+}
+func (e *routeFailure) Unwrap() error { return ErrRouteNotCarrying }
+
+// prepareRouteLocked is everything SetRoute checks before it starts
+// anything: the route exists, is not revoked or expired, is not cooling
+// down, has a readable profile that still points where its publisher
+// signed, and builds into a config. On success it returns the row and
+// the config. On refusal it records the reason (connect_refused /
+// connect_refused_route) and returns a *routeRefusal; nothing else
+// changes — the route that was connected stays connected.
+//
+// Called with mu held. RouteConnectPrecheck runs the same function, so
+// "would this be refused" and "this was refused" cannot drift apart.
+func (c *Core) prepareRouteLocked(routeID string) (routestore.RouteRow, []byte, error) {
+	refuse := func(err error) (routestore.RouteRow, []byte, error) {
+		code := refusedCode(err)
+		c.check.setRefused(code, routeID)
+		return routestore.RouteRow{}, nil, &routeRefusal{code: code, err: err}
+	}
+	row, err := c.store.GetRoute(routeID)
+	if err != nil {
+		return refuse(fmt.Errorf("abi: route %s not found: %w", routeID, err))
+	}
+	switch row.TrustState {
+	case "revoked":
+		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteRevoked))
+	case "expired":
+		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteExpired))
+	}
+	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok {
+		return refuse(fmt.Errorf("abi: %s%.0w", reason, errRouteCooling))
+	}
+	profile, err := c.store.GetSecret("route:" + routeID)
+	if err != nil {
+		return refuse(fmt.Errorf("abi: load profile for %s: %w", routeID, err))
+	}
+	// Defence in depth behind the importer (endpoint_guard.go): the
+	// outbound about to be dialled must still point where its publisher
+	// signed. Refused BEFORE pm.Attempt, so a refusal is never filed as
+	// a network failure of the route.
+	if err := routeEndpointGuard(c.store, row, profile); err != nil {
+		return refuse(err)
+	}
+	cfg, err := engine.BuildSingBoxConfig(row, profile)
+	if err != nil {
+		return refuse(err)
+	}
+	body, err := engine.MarshalSingBox(cfg)
+	if err != nil {
+		return refuse(err)
+	}
+	return row, body, nil
+}
+
+// logRouteRefused writes the one line a refused connect leaves in the
+// log: which route, the closed refusal code, and what stays running.
+func logRouteRefused(routeID string, err error, active string) {
+	code := ConnectRefusedOther
+	var rr *routeRefusal
+	if errors.As(err, &rr) {
+		code = rr.code
+	}
+	staying := "-"
+	if active != "" {
+		staying = engine.LogID(active)
+	}
+	engine.LogInfo(fmt.Sprintf("route refused route=%s code=%s still_running=%s", engine.LogID(routeID), code, staying))
+}
+
+// RouteConnectPrecheck is engine_route_precheck: would engine_set_route
+// for this route be refused right now? It runs exactly the checks
+// SetRoute runs before it starts anything, and starts nothing.
+//
+// It exists for a host that has to do something irreversible BEFORE it
+// can call engine_set_route — on Android, replacing the running route's
+// TUN. Asked first, a host can leave the working tunnel alone when the
+// new route would be refused anyway.
+//
+// A refusal is RECORDED exactly as a refused SetRoute records it
+// (connect_refused / connect_refused_route in the diagnostics blob), so
+// a host that stops there has already told the page why. A route that
+// would not be refused changes nothing at all. The answer can go stale
+// (a cooldown can start between this call and the SetRoute), so
+// SetRoute still checks for itself.
+//
+// Returns {"route_id", "refused": "" | code, "active_route"}; the codes
+// are the connect_refused vocabulary plus "no_data_plane" for a build
+// that cannot tunnel (which is not recorded). The error is non-nil only
+// when the engine is not initialised.
+func RouteConnectPrecheck(routeID string) (string, error) {
+	c := loadedCore()
+	if c == nil {
+		return "", errors.New("abi: not initialized")
+	}
+	refused := ConnectRefusedNone
+	if !dataPlaneLinked {
+		refused = "no_data_plane"
+	}
+	c.mu.Lock()
+	active := c.activeRoute
+	var perr error
+	if refused == ConnectRefusedNone {
+		_, _, perr = c.prepareRouteLocked(routeID)
+	}
+	c.mu.Unlock()
+	if perr != nil {
+		refused = ConnectRefusedOther
+		var rr *routeRefusal
+		if errors.As(perr, &rr) {
+			refused = rr.code
+		}
+		logRouteRefused(routeID, perr, active)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"route_id":     routeID,
+		"refused":      refused,
+		"active_route": active,
+	})
+	return string(body), nil
 }
 
 var (
@@ -316,6 +461,14 @@ func (c *Core) advancePosture(event pathmanager.PostureEvent, to pathmanager.Pos
 // engine concludes a route works. `proven` and `health_pct` are
 // downstream of the RecordSuccess / RecordDegraded here.
 func (c *Core) routeUpLocked(routeID, family string, res engine.ProofResult) {
+	// One line per CHANGE of state, not one per liveness check.
+	if prev, _ := c.check.get(); (prev != RouteCheckOK && !res.Slow) || (prev != RouteCheckDegraded && res.Slow) {
+		result := RouteCheckOK
+		if res.Slow {
+			result = RouteCheckDegraded
+		}
+		engine.LogInfo(fmt.Sprintf("route up route=%s family=%s result=%s", engine.LogID(routeID), engine.LogID(family), result))
+	}
 	c.pm.Resume(routeID, family)
 	c.pm.Connected()
 	if res.Slow {
@@ -363,8 +516,10 @@ func (c *Core) routeDownLocked(routeID, family string, cat diagnostics.Category,
 		_ = c.driver.Stop()
 		// No tunnel, so bootstrap/refresh may dial direct.
 		refresh.SetTunnelRequired(false)
-		c.activeRoute, c.activeFamily = "", ""
+		c.setActiveLocked("", "")
 	}
+	engine.LogInfo(fmt.Sprintf("route down route=%s family=%s result=failed category=%s running=%t",
+		engine.LogID(routeID), engine.LogID(family), engine.LogID(string(cat)), !teardown))
 	c.pm.Resume(routeID, family)
 	c.pm.Failed(routeID, family, cat)
 	until := pmCooldownUntil(c, routeID)
