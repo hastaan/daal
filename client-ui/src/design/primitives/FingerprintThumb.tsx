@@ -31,9 +31,9 @@ export function FingerprintThumb({ fingerprint, size = 36 }: Props) {
                 aria-hidden
                 style={{ display: 'block' }}
             >
-                <circle cx="9" cy="9" r="6" fill={`oklch(72% 0.12 ${a})`} opacity="0.85" />
-                <circle cx="27" cy="9" r="5" fill={`oklch(72% 0.12 ${b})`} opacity="0.75" />
-                <circle cx="18" cy="26" r="7" fill={`oklch(72% 0.12 ${c})`} opacity="0.7" />
+                <circle cx="9" cy="9" r="6" fill={`hsl(${a}, 45%, 62%)`} opacity="0.85" />
+                <circle cx="27" cy="9" r="5" fill={`hsl(${b}, 45%, 62%)`} opacity="0.75" />
+                <circle cx="18" cy="26" r="7" fill={`hsl(${c}, 45%, 62%)`} opacity="0.7" />
             </svg>
         </div>
     );

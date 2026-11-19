@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type { SubscriptionRow } from '../contract/D2Contract';
 import { Card, ListRow, Button } from '../design/primitives';
+import { mix } from '../design/mix';
 
 interface Props {
     t: (k: string) => string;
@@ -168,7 +169,7 @@ export default function SubscriptionsPanel({ t }: Props) {
                 <Card
                     style={{
                         borderColor:
-                            'color-mix(in oklab, var(--red) 35%, var(--line-soft))',
+                            mix('var(--red)', 35, 'var(--line-soft)'),
                     }}
                 >
                     <ListRow

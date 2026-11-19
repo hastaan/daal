@@ -25,6 +25,7 @@ import {
     DaalGlyph,
 } from '../design/primitives';
 import { useDensity } from '../design/DensityProvider';
+import { mix } from '../design/mix';
 
 interface Props {
     t: (k: string) => string;
@@ -458,7 +459,7 @@ export default function SettingsPage({
                         style={{
                             padding: 0,
                             borderColor:
-                                'color-mix(in oklab, var(--red) 35%, var(--line-soft))',
+                                mix('var(--red)', 35, 'var(--line-soft)'),
                         }}
                     >
                         <div style={{ padding: '0 16px' }}>
@@ -472,7 +473,7 @@ export default function SettingsPage({
                                         style={{
                                             background: 'transparent',
                                             border:
-                                                '1px solid color-mix(in oklab, var(--red) 60%, transparent)',
+                                                `1px solid ${mix('var(--red)', 60, 'transparent')}`,
                                             color: 'var(--red)',
                                             padding: '6px 14px',
                                             borderRadius: 'var(--r-pill)',
@@ -788,7 +789,7 @@ function SwitchInline({
                     left: checked ? 18 : 2,
                     width: 16,
                     height: 16,
-                    background: checked ? 'oklch(20% 0.04 80)' : 'var(--fg)',
+                    background: checked ? '#1f1401' : 'var(--fg)',
                     borderRadius: '50%',
                     transition: 'left var(--t-fast)',
                 }}
@@ -815,7 +816,7 @@ function Dot({ tone }: { tone: 'good' | 'warn' | 'bad' | 'neutral' }) {
                 borderRadius: '50%',
                 background: color,
                 display: 'inline-block',
-                boxShadow: `0 0 6px color-mix(in oklab, ${color} 60%, transparent)`,
+                boxShadow: `0 0 6px ${mix(color, 60, 'transparent')}`,
             }}
         />
     );

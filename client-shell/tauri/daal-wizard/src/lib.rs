@@ -68,3 +68,42 @@ pub mod setup_recovery;
 #[cfg(test)]
 mod publisher_alone_tests;
 pub mod staging;
+
+/// Whether `dir` exists (or can be made) and a file can be created in
+/// it. The shell uses it to choose a state and a temp directory on
+/// devices that give the app no usable HOME or TMPDIR.
+pub fn dir_is_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".daal-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod writable_dir_tests {
+    use super::dir_is_writable;
+
+    #[test]
+    fn a_directory_that_can_be_made_and_written_counts_and_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("a").join("b");
+        assert!(dir_is_writable(&d));
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_place_that_cannot_hold_a_directory_does_not_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!dir_is_writable(&file.join("daal")));
+    }
+}
+

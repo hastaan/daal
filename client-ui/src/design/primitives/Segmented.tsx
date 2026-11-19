@@ -45,7 +45,7 @@ export function Segmented<T extends string>({
                                 ? 'var(--gold-warm)'
                                 : 'transparent',
                             color: on
-                                ? 'oklch(20% 0.04 80)'
+                                ? '#1f1401'
                                 : 'var(--muted)',
                             border: 0,
                             padding: '6px 14px',

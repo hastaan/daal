@@ -9,23 +9,23 @@
 
 :root {
   /* palette (oklch teal + warm gold accent) */
-  --bg:         oklch(28% 0.04 215);
-  --bg-deep:    oklch(22% 0.045 215);
-  --surface:    oklch(33% 0.04 215);
-  --surface-2:  oklch(38% 0.04 215);
-  --surface-3:  oklch(43% 0.035 215);
-  --line:       oklch(45% 0.025 215);
-  --line-soft:  oklch(40% 0.03 215);
-  --fg:         oklch(96% 0.012 80);
-  --muted:      oklch(72% 0.012 215);
-  --dim:        oklch(58% 0.015 215);
+  --bg:         #0d2e35;  /* oklch(28% 0.04 215) */
+  --bg-deep:    #001f28;  /* oklch(22% 0.045 215) */
+  --surface:    #1a3b42;  /* oklch(33% 0.04 215) */
+  --surface-2:  #284850;  /* oklch(38% 0.04 215) */
+  --surface-3:  #39555c;  /* oklch(43% 0.035 215) */
+  --line:       #46595e;  /* oklch(45% 0.025 215) */
+  --line-soft:  #354c52;  /* oklch(40% 0.03 215) */
+  --fg:         #f6f1e9;  /* oklch(96% 0.012 80) */
+  --muted:      #9da7a9;  /* oklch(72% 0.012 215) */
+  --dim:        #717d80;  /* oklch(58% 0.015 215) */
   --gold:       #C9A23A;
-  --gold-warm:  oklch(78% 0.12 80);
-  --gold-deep:  oklch(60% 0.12 75);
-  --green:      oklch(72% 0.14 150);
-  --green-dim:  oklch(52% 0.10 150);
-  --amber:      oklch(76% 0.14 80);
-  --red:        oklch(64% 0.18 25);
+  --gold-warm:  #e0ae57;  /* oklch(78% 0.12 80) */
+  --gold-deep:  #a97416;  /* oklch(60% 0.12 75) */
+  --green:      #5bbd74;  /* oklch(72% 0.14 150) */
+  --green-dim:  #397949;  /* oklch(52% 0.10 150) */
+  --amber:      #dfa635;  /* oklch(76% 0.14 80) */
+  --red:        #e55551;  /* oklch(64% 0.18 25) */
 
   /* legacy aliases used by Phase B+ files that still reference the
    * old "teal-*" / "paper" names. Both names point at the same token
@@ -40,7 +40,7 @@
   --ink-soft:      var(--muted);
   --ink-mute:      var(--dim);
   --danger:        var(--red);
-  --cyan:          oklch(72% 0.10 200);
+  --cyan:          #48b7bd;  /* oklch(72% 0.10 200) */
 
   /* typography */
   --font-display:  'Iowan Old Style', 'Charter', 'Newsreader',
@@ -84,8 +84,8 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   background-image:
-    radial-gradient(1100px 600px at 12% -10%, oklch(35% 0.05 215) 0%, transparent 60%),
-    radial-gradient(900px 500px at 92% 8%, oklch(34% 0.05 195) 0%, transparent 60%);
+    radial-gradient(1100px 600px at 12% -10%, #15414b 0%, transparent 60%),  /* oklch(35% 0.05 215) */
+    radial-gradient(900px 500px at 92% 8%, #104040 0%, transparent 60%);  /* oklch(34% 0.05 195) */
   background-attachment: fixed;
 }
 

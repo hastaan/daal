@@ -3,9 +3,13 @@ package org.daal.desktop.platform
 import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
+import android.graphics.Color
+import android.view.View
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.activity.result.ActivityResult
 import app.tauri.Logger
 import app.tauri.annotation.ActivityCallback
@@ -66,6 +70,7 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
    */
   override fun load(webView: WebView) {
     super.load(webView)
+    keepClearOfSystemBars(webView)
     val host = activity as? ComponentActivity ?: return
     val callback = object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
@@ -93,6 +98,31 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
     }
     host.onBackPressedDispatcher.addCallback(host, callback)
+  }
+
+  /**
+   * Keep the page between the system bars.
+   *
+   * The activity draws edge to edge and the page relied on the web
+   * view reporting the bars as CSS safe-area insets. Older web views
+   * report none: on an Xperia with Android 12 and three-button
+   * navigation the tab bar sat underneath the system buttons (seen
+   * 2026-11-19). The bars (and the keyboard) are instead taken off the
+   * web view's parent as padding, here, on every device, and the insets
+   * are consumed so a newer web view does not add them a second time.
+   */
+  private fun keepClearOfSystemBars(webView: WebView) {
+    val host = (webView.parent as? View) ?: webView
+    host.setBackgroundColor(PAGE_BACKGROUND)
+    ViewCompat.setOnApplyWindowInsetsListener(host) { v, insets ->
+      val bars = insets.getInsets(
+        WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+      )
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+      v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+      WindowInsetsCompat.CONSUMED
+    }
+    ViewCompat.requestApplyInsets(host)
   }
 
   private var pendingStartArgs: VpnStartArgs? = null
@@ -221,3 +251,6 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 }
+
+/** The page's own background (client-ui tokens.css --bg-deep), shown behind the system bars. */
+private val PAGE_BACKGROUND = Color.rgb(0, 31, 40)
