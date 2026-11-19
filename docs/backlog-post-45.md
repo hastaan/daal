@@ -3471,3 +3471,59 @@ translated English, and it mixed words (نشانی/آدرس, تلفن/گوشی,
   starts listening. Seen broken on the Xperia; the fix is to be looked
   at there.
 
+## 22. Before a person inside can be asked to try it (2026-11-19)
+
+Stage 5 is a pilot with real people inside Iran. Everything so far was
+run from one home network outside, on two phones, and on simulated
+censored networks. These are the things between here and asking someone
+inside to install the app. None is started unless marked.
+
+- [ ] **FP-1. How the app itself reaches the person.** There is no plan
+  written anywhere. The signed file reaches them by messenger, QR or
+  text; the app must reach them too, where the store is unreliable and
+  links are blocked. To decide with the owner: which file is handed over
+  (see FP-2), by which ways (a messenger attachment, phone to phone by
+  Bluetooth or Nearby Share, a memory card), and how the person can tell
+  the file is the real one (a short fingerprint the publisher reads out,
+  as the app already does for a publisher's key).
+- [ ] **FP-2. The app file is 108 MB.** The build is one "universal"
+  file carrying four processor types. An arm64-only build of the same
+  tree is 41 MB (measured 2026-11-19, signed with the same key) and
+  covers nearly every phone from the last eight years; a 32-bit ARM one
+  covers the rest. To do: produce the per-processor files in the release
+  step, name them so that the right one is obvious, and say in the
+  hand-over instructions which to send. Within arm64 the engine library
+  is 40 MB of the unpacked size: what in it can go (families that are
+  frozen) is a second step.
+- [ ] **FP-3. The phones the app has run on: two.** A Samsung S25 and a
+  Sony Xperia with Android 12 and a web view from 2022. The second one
+  found three faults that the first hid (section 19). Unknown: Android
+  10 and 11, a web view older than 103, Xiaomi and Huawei battery
+  managers killing the tunnel service, a phone with little free storage.
+- [ ] **FP-4. Still unseen on any phone** (code and tests exist): a
+  backup made and restored on a second phone, the question about people
+  removed since the backup, removing a person the phone does not know,
+  the screens that must not be captured, receiving one person's file by
+  QR, a move to a faster route, the notice when the network is down.
+  The first five need the owner's own hands for one step each (the
+  recovery words are theirs to see).
+- [ ] **FP-5. Nothing has been tried from inside Iran.** The simulated
+  networks say what the engine does when a route is blocked in the ways
+  we modelled. They cannot say which routes are blocked today, on which
+  operator, at which hour. The first field session should only observe:
+  one person, one relay, the diagnostics file sent back, nothing
+  depending on it.
+- [ ] **FP-6. One relay, one hosting company, one data centre.** Every
+  file handed out so far points at one address. Vultr is written and has
+  no end-to-end test (PA-19). A pilot should not start with a single
+  address that one block can end.
+- [ ] **FP-7. What the person inside is told.** There is no one-page
+  instruction in Farsi for the recipient (install, add the file, press
+  once, what the words on the screen mean, what to send back when it
+  fails) and none for the publisher. The app's own text is now readable
+  (section 21); the page that travels with the file does not exist.
+- [ ] **FP-8. The hosting key that set up the test relay** was pasted
+  during early tests and should be replaced at the hosting company
+  before anything real depends on it (the owner's decision: at the very
+  end).
+
