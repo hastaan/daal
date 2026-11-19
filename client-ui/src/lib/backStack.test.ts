@@ -238,3 +238,48 @@ describe('one mechanism', () => {
         }
     });
 });
+
+// Android: the shell asks the stack directly. Seen on the phone
+// 2026-11-19: with the history entry, a second Back in a row left the
+// app, because Chromium skips an entry added without a touch.
+describe('Back answered natively (Android)', () => {
+    it('answers every Back in a row without touching history, then lets the app close', () => {
+        let pushes = 0;
+        const win: WinLike = { addEventListener: () => {}, removeEventListener: () => {} };
+        const history: HistoryLike = {
+            pushState: () => {
+                pushes += 1;
+            },
+            back: () => {
+                throw new Error('history must not be used');
+            },
+        };
+        const stack = createBackStack(history, win, (fn) => fn(), true);
+        const seen: string[] = [];
+        let offSheet = () => {};
+        const offPage = stack.register('page', () => {
+            seen.push('page');
+            offPage();
+        });
+        offSheet = stack.register('sheet', () => {
+            seen.push('sheet');
+            offSheet();
+        });
+        expect(stack.answerNative()).toBe(true);
+        expect(stack.answerNative()).toBe(true);
+        expect(seen).toEqual(['sheet', 'page']);
+        // Nothing open: Back goes on to leave the app.
+        expect(stack.answerNative()).toBe(false);
+        expect(pushes).toBe(0);
+        expect(stack.hasSentinel()).toBe(false);
+    });
+
+    it('a handler that refuses keeps the app open', () => {
+        const win: WinLike = { addEventListener: () => {}, removeEventListener: () => {} };
+        const history: HistoryLike = { pushState: () => {}, back: () => {} };
+        const stack = createBackStack(history, win, (fn) => fn(), true);
+        stack.register('sheet', () => {});
+        expect(stack.answerNative()).toBe(true);
+        expect(stack.answerNative()).toBe(true);
+    });
+});

@@ -43,6 +43,9 @@ interface Entry {
 
 export interface BackStack {
     register(layer: BackLayer, onBack: () => void): () => void;
+    /** The native shell's Back: run the topmost handler and say true,
+     *  or say false when nothing is registered (Back then leaves). */
+    answerNative(): boolean;
     /** Test/inspection: how many handlers are registered. */
     size(): number;
     /** Test/inspection: whether our history entry is in place. */
@@ -82,6 +85,11 @@ export function createBackStack(
     schedule: (fn: () => void) => void = (fn) => {
         setTimeout(fn, 0);
     },
+    /** True where the shell answers the system Back itself and calls
+     *  `answerNative` (Android): then no history entry is used at all.
+     *  Chromium skips an entry a page added without a touch, so after
+     *  one Back the re-added entry no longer held the app open. */
+    native = false,
 ): BackStack {
     const entries: Entry[] = [];
     let seq = 0;
@@ -105,6 +113,8 @@ export function createBackStack(
 
     const reconcileNow = () => {
         pending = false;
+        // The native shell asks `answerNative` directly: no history entry.
+        if (native) return;
         if (entries.length > 0 && !sentinel) {
             sentinel = true;
             history.pushState({ daalBack: true }, '', win.location?.href ?? null);
@@ -154,7 +164,7 @@ export function createBackStack(
         else runTop();
     };
 
-    win.addEventListener('popstate', onPop as (e: never) => void);
+    if (!native) win.addEventListener('popstate', onPop as (e: never) => void);
     win.addEventListener('keydown', onKey as (e: never) => void);
 
     return {
@@ -171,6 +181,11 @@ export function createBackStack(
                 reconcile();
             };
         },
+        answerNative() {
+            if (entries.length === 0) return false;
+            runTop();
+            return true;
+        },
         size: () => entries.length,
         hasSentinel: () => sentinel,
         flush: () => reconcileNow(),
@@ -186,6 +201,13 @@ let shared: BackStack | null = null;
 /** The app's one stack, or null outside a browser (tests, SSR). */
 export function appBackStack(): BackStack | null {
     if (typeof window === 'undefined' || typeof window.history === 'undefined') return null;
-    if (!shared) shared = createBackStack(window.history, window as unknown as WinLike);
+    if (!shared) {
+        const native = /Android/i.test(window.navigator?.userAgent ?? '');
+        const made = createBackStack(window.history, window as unknown as WinLike, undefined, native);
+        shared = made;
+        // Asked by the Android shell on every system Back
+        // (DaalPlatformPlugin.load). Must answer synchronously.
+        (window as unknown as { __daalBack?: () => boolean }).__daalBack = () => made.answerNative();
+    }
     return shared;
 }

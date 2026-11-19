@@ -37,7 +37,7 @@ MAIN="$SRC/main/java/org/daal/desktop/vpn"
 TEST="$SRC/test/java/org/daal/desktop/vpn"
 
 # Pure sources only. A file that imports android.* does not belong here.
-SOURCES=("$MAIN/SwitchPolicy.kt" "$MAIN/StartSequence.kt" "$MAIN/NetworkWatch.kt")
+SOURCES=("$MAIN/SwitchPolicy.kt" "$MAIN/StartSequence.kt" "$MAIN/NetworkWatch.kt" "$MAIN/BackAnswer.kt")
 TESTS=()
 CLASSES=()
 for f in "$TEST"/*Test.kt; do

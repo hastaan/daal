@@ -2792,7 +2792,7 @@ Open:
   asks keep or delete", "Delete my server passes it, and only then", "a
   setup still running: the sheet deletes nothing"; `listDeleteFor`
   (pure).
-- [ ] **PA-18. Does the setup helper survive Android killing the
+- [x] **PA-18. (Answered on the phone 2026-11-19: no, it dies with the app; see section 18.) Does the setup helper survive Android killing the
   app?** Unknown. If it does, a resumed app finds the journal locked and
   says a setup is still running (`E_SETUP_RUNNING`) until it ends; if it
   does not, the journal is what the card reads. Only a phone answers it.
@@ -3092,6 +3092,54 @@ W3 items: none moves with this wave.
   on the phone. Tests: `a_new_relay_can_reuse_the_hosting_key_another_relay_saved`
   (commands.rs), "reusing a saved hosting key for a new relay"
   (backupWave.test.tsx).
+
+- [ ] **PB-26. The new-relay screen offers to wipe another relay's
+  server.** Seen on the phone 2026-11-19: step 2 of a new relay lists
+  "Your existing servers" and shows the live relay "Test"'s server with
+  "Choosing an existing server wipes it and reinstalls it". A server
+  that one of the person's relays already uses must be shown as
+  "used by your relay Test" and not be selectable.
+- [ ] **PB-27. "Finish setting up on this server" keeps the wording of a
+  first setup.** The progress list still says "Renting and hardening the
+  server" and the log shows the old one-time key being refused for a
+  while; nothing is rented. Say "Setting up the server again".
+- [ ] **PB-28. Renew after a rebuild is still not seen on a real
+  account** (PA-12): the app only offers a rebuild when the server is
+  gone, and deleting it at the hosting company is the owner's step.
+
+### Seen on the phone, 2026-11-19 (this tree, device key, real Hetzner account)
+
+- **Back (PA-25, PB-18).** The first build of this wave closed a sheet on
+  Back, but a second Back in a row left the app: Chromium skips a
+  history entry a page adds without a touch. Back on Android now goes
+  through a native callback that asks the page (`window.__daalBack`);
+  no history entry is used there. Seen after the fix: QR sheet -> Back
+  closes it -> Back goes to the relay list; "Add a person" sheet -> Back
+  closes it. Tests: "Back answered natively (Android)"
+  (backStack.test.ts), `BackAnswerTest` (JVM).
+- **Migration V017** ran; relay, person and files intact. The backup
+  card is on the relay list (backup itself not made yet: the recovery
+  words are for the owner to see and write down, not for a test run).
+- **PB-25** seen: the new-relay screen said "Daal will use the access
+  key you already saved for "Test"" and Next worked with the box empty.
+- **Killed setup (PA-8, PA-9, PA-18).** A second relay was started; once
+  the server existed (167.233.235.190) the app was force-stopped.
+  PA-18 answered: the setup helper died with the app (it was a child
+  process and was gone after the stop). On reopening, the list said
+  "Setup stopped before it finished. A server may be costing money -
+  open it to see." The card named the server and the leftover one-time
+  access key, said which costs money, and offered Finish / Delete.
+  "Finish setting up on this server" ended with the relay live and the
+  health check green about two minutes later. The account check then
+  showed 4 things in use (two servers, two firewalls) and no leftovers:
+  no second server was rented and the one-time key was gone.
+- **Delete (PA-10, PA-14 without a reserved address).** "Remove" ->
+  "Delete the server too" named the address on the button, reported
+  cloud server, SSH key, firewall deleted and the relay removed, and the
+  account check went back to 2 things in use.
+- **Account check (PA-11)** seen three times with the right counts.
+- Not seen: a reserved address being released (none was reserved), the
+  Vultr path, restore on a second phone, receiving a per-person QR.
 
 ### To check on the phone
 
