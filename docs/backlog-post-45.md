@@ -3448,7 +3448,7 @@ translated English, and it mixed words (نشانی/آدرس, تلفن/گوشی,
 - [ ] **FA-3. The owner has not read the new text yet.** It is their
   language: anything they mark goes into the style guide, not only into
   the one string.
-- [ ] **FA-4. English that the pass found unclear or wrong** (the Farsi
+- [ ] **FA-4. (Done from this list: Provider is now Publisher in the two cooldown labels; the monthly cost reads "about 5 to 8 euros" in all three places, which is what the hosting company listed on 2026-11-19.) English that the pass found unclear or wrong** (the Farsi
   follows the intended meaning where it was clear): "Provider revoked" /
   "Provider key changed" should say Publisher; "Access key" is used for
   both the hosting key and a one-time SSH key; the monthly cost is given
