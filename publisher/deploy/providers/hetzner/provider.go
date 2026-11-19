@@ -36,6 +36,38 @@ type Provider struct {
 	health      healthWaiter
 }
 
+// Hetzner reports a server as created before its public interface
+// exists, and refuses to attach a firewall until it does
+// ("no public network interfaces found … private_net_only_server").
+// Seen on the first real provision of relay-v1.5.1 (2026-11-19): the
+// single attempt failed 280 ms after "Server ready", the relay came up
+// with no cloud firewall, and the mgmt self-heal later attached one
+// with the fleet-baseline ports — which leaves an opt-in family's port
+// (tuic, 8443/udp) shut. So the attach is retried here, where the
+// relay's real family set is known.
+const firewallAttachAttempts = 8
+
+var firewallAttachDelay = 3 * time.Second
+
+func (p *Provider) ensureFirewallAfterCreate(ctx context.Context, serverID string, ports []relayports.Endpoint, progress func(step, message string)) error {
+	var err error
+	for attempt := 1; attempt <= firewallAttachAttempts; attempt++ {
+		if _, err = p.c.FirewallEnsureForServer(ctx, serverID, ports); err == nil {
+			return nil
+		}
+		if attempt == firewallAttachAttempts {
+			break
+		}
+		progress("provision_cloud_firewall", "The server's network is not ready for its firewall yet; trying again")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(firewallAttachDelay):
+		}
+	}
+	return err
+}
+
 // healthWaiter is the seam Provision uses to wait for a freshly
 // created box to finish cloud-init. Production binds
 // Provider.waitForHealthy; tests inject a stub, because the real
@@ -254,7 +286,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	// roster) fails with "no attached firewall" because
 	// FirewallAddEphemeralRule has nothing to mutate.
 	progress("provision_cloud_firewall", "Attaching Daal baseline firewall to server")
-	if _, err := p.c.FirewallEnsureForServer(ctx, rec.ServerID, dataPlanePorts); err != nil {
+	if err := p.ensureFirewallAfterCreate(ctx, rec.ServerID, dataPlanePorts, progress); err != nil {
 		// Don't tear the whole provision down; the box-side ufw
 		// still provides surface-area minimisation for the
 		// non-mgmt ports. We just won't be able to talk to the

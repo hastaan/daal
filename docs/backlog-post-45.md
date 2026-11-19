@@ -1535,3 +1535,30 @@ Gate at close, the tree as it stood BEFORE the pin moved:
   (i) ~~The pre-push hook and CI are red on this tree until the pin
   bump~~ — the pin moved 2026-11-19 (TW-1); the wave and the pin bump
   must still be pushed together.
+
+## 14. First phone pass on relay-v1.5.1 (2026-11-19) — what a real relay showed
+
+Samsung S25, APK from `edd3a5e`, one Hetzner relay provisioned from the
+phone by the owner. What passed is in `docs/release-runbook.md` Part 5;
+this section is what did not.
+
+- [x] **PH-1. The cloud firewall lost a race with the new server.**
+  Hetzner refused the attach 280 ms after create ("no public network
+  interfaces found … private_net_only_server"); provisioning went on
+  without it and the mgmt self-heal attached one later with the
+  fleet-baseline ports, which would leave an opt-in family's port shut.
+  Fixed: the attach is retried (8 × 3 s) where the family set is known
+  (`ensureFirewallAfterCreate`; `TestProvision_FirewallAttachOutlastsTheNewServerRace`,
+  `TestProvision_FirewallAttachGivesUpAndSaysSo`). Not yet seen passing
+  on a real account.
+- [ ] **PH-2. The relay page is hard to read (owner, on the phone).** In
+  the owner's words: not clean or minimal; not obvious what is for
+  everyone and what is for one device; what "Refresh addresses" means;
+  how "+ Add" (a recipient) differs from "+ Add address" (a refresh
+  address); too much text. The page needs one job per section, plain
+  section names, and the explanations behind a tap.
+- [ ] **PH-3. Save gives no sign that it worked.** Saving the `.sbpx`
+  did save, and said nothing; the owner tapped four times. Every action
+  that finishes silently needs a visible result (and must not repeat
+  when tapped again while running). Sweep the publisher screens for the
+  same pattern.
