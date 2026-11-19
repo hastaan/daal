@@ -121,7 +121,18 @@ const MIGRATIONS: &[Migration] = &[
         name: "publisher_alone",
         sql: include_str!("../migrations/V016__publisher_alone.sql"),
     },
+    Migration {
+        version: 17,
+        name: "publisher_backup",
+        sql: include_str!("../migrations/V017__publisher_backup.sql"),
+    },
 ];
+
+/// The highest migration version this build knows. A publisher backup
+/// records it, and a restore refuses a backup from a higher one.
+pub fn current_schema_version() -> i64 {
+    MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
+}
 
 /// V015: one relay's identity as last learned, and the identity its
 /// active pack commits to. See the migration for why both are kept.
@@ -397,6 +408,15 @@ impl OperatorDb {
         };
         db.run_migrations()?;
         Ok(db)
+    }
+
+    /// Run `f` against the raw connection. Used by `publisher_backup`,
+    /// which works table by table and needs one transaction across all
+    /// of them. `f` must not call back into `OperatorDb` (the lock is
+    /// held while it runs).
+    pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&mut Connection) -> R) -> R {
+        let mut conn = self.conn.lock().unwrap();
+        f(&mut conn)
     }
 
     /// Open an in-memory DB for tests.
@@ -1855,6 +1875,21 @@ impl OperatorDb {
             params![operator_id],
         )?;
         Ok(format!("r{}", next))
+    }
+
+    /// Never hand out a name at or below `seen`: the relay already has
+    /// a user `r<seen>` this book does not know (a person added on
+    /// another phone after the backup this book came from). Monotonic:
+    /// never lowers the counter.
+    pub fn advance_recipient_name_counter(&self, operator_id: i64, seen: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO recipient_name_counters (operator_id, next_index)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(operator_id) DO UPDATE SET next_index = MAX(next_index, excluded.next_index)",
+            params![operator_id, seen.saturating_add(1).max(1)],
+        )?;
+        Ok(())
     }
 
     /// Inserts a recipient row. Returns the new row id.

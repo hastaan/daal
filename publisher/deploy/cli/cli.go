@@ -86,6 +86,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runReprovision(ctx, rest, stdout, stderr)
 	case "decommission":
 		return runDecommission(ctx, rest, stdout, stderr)
+	case "release-address":
+		return runReleaseAddress(ctx, rest, stdout, stderr)
 	case "pricing":
 		return runPricing(ctx, rest, stdout, stderr)
 	case "assign-fip":
@@ -183,6 +185,14 @@ Subcommands:
                 --release-addresses also gives back every address Daal reserved
                 for this relay (report: "addresses"); exit 6 means the server is
                 gone but an address could not be released and still bills.
+                Exit 7: the recorded server is gone but another server with
+                this relay's name and marks remains (report: "named_server");
+                nothing was deleted — keep the record.
+  release-address  Give back ONE address left reserved for a live relay
+                (--address <id-or-ip>). Never the relay's own address
+                (in_use), never one Daal did not reserve (not_daal), never one
+                attached to a server (still_attached). One JSON outcome on
+                stdout; exit 6 means it could not be given back and still bills.
   pricing       Print live per-hour cost for a record's server type.
   assign-fip    Attach a floating IP to a record's server AND bind it on the
                 relay so the box actually answers there. Needs --priv-key and
@@ -693,6 +703,10 @@ func runDecommission(ctx context.Context, args []string, stdout, stderr io.Write
 		return 1
 	}
 	fmt.Fprintln(stdout, string(body))
+	if errors.Is(decErr, provider.ErrNamedServerRemains) {
+		fmt.Fprintf(stderr, "decommission: %v\n", decErr)
+		return exitNamedServerRemains
+	}
 	if decErr != nil {
 		fmt.Fprintf(stderr, "decommission: %v\n", decErr)
 		return 1
@@ -710,6 +724,83 @@ func runDecommission(ctx context.Context, args []string, stdout, stderr io.Write
 // exitAddressStillReserved: decommission --release-addresses deleted the
 // server, but at least one Daal address came back release_failed.
 const exitAddressStillReserved = 6
+
+// exitNamedServerRemains (PA-3): the recorded server id is gone, but
+// another server with this relay's derived name and both ownership
+// marks is on the account. Nothing was deleted; the report's
+// named_server says which. Keep the record and the token.
+const exitNamedServerRemains = 7
+
+// runReleaseAddress is PA-1: give back ONE address left reserved for a
+// relay that is still live (an earlier try's address on a relay that
+// then finished).
+//
+//	daal-deploy release-address --record-file F --token-file T --address <id-or-ip> [--json]
+//
+// stdout is always exactly one provider.AddressOutcome once the flags
+// parse. Exit 0 for released / not_daal / still_attached / in_use (each
+// a final answer), 6 for release_failed (it may still bill; retry), 3
+// when the hosting company's adapter cannot do this, 1 when the record
+// or token cannot be read, 2 for flag errors. `--json` is accepted and
+// ignored, as for decommission. Nothing on the relay is touched.
+func runReleaseAddress(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("release-address", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
+	tokenFile := fs.String("token-file", "", "hosting API token file")
+	address := fs.String("address", "", "the address to give back: its provider id or the IP itself")
+	_ = fs.Bool("json", false, "emit the outcome as JSON (always on; accepted for compatibility)")
+	if rc := parseFlags(fs, args); rc >= 0 {
+		return rc
+	}
+	addr := strings.TrimSpace(*address)
+	emit := func(o provider.AddressOutcome, rc int) int {
+		body, err := json.Marshal(o)
+		if err != nil {
+			fmt.Fprintf(stderr, "marshal outcome: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, string(body))
+		return rc
+	}
+	failed := func(msg string) provider.AddressOutcome {
+		o := provider.AddressOutcome{Code: provider.AddrReleaseFailed, Error: msg}
+		if net.ParseIP(addr) != nil {
+			o.IP = addr
+		} else {
+			o.ID = addr
+		}
+		return o
+	}
+	if err := requireAll(stderr, map[string]string{
+		"--record-file": *recordFile,
+		"--token-file":  *tokenFile,
+		"--address":     addr,
+	}); err != nil {
+		return emit(failed("missing flags"), 2)
+	}
+	rec, err := readRecord(*recordFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "read record-file: %v\n", err)
+		return emit(failed("the relay record could not be read"), 1)
+	}
+	p, err := buildProviderFn(rec.Provider, *tokenFile, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "build provider: %v\n", err)
+		return emit(failed("the hosting key could not be read"), 1)
+	}
+	r, ok := p.(provider.SingleAddressReleaser)
+	if !ok {
+		fmt.Fprintf(stderr, "release-address: not supported for %q\n", rec.Provider)
+		return emit(failed("this hosting company's adapter cannot release addresses"), 3)
+	}
+	o := r.ReleaseOneAddress(context.WithoutCancel(ctx), rec, addr)
+	if o.Code == provider.AddrReleaseFailed {
+		fmt.Fprintln(stderr, "release-address: the address could not be given back and may still bill; run the same command again")
+		return emit(o, exitAddressStillReserved)
+	}
+	return emit(o, 0)
+}
 
 // releaseRelayAddresses is the --release-addresses half of decommission.
 // It runs only once the server is provably gone (decErr nil and

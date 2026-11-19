@@ -141,6 +141,24 @@ export type PublisherErrorCode =
     | 'E_RELAY_UNREACHABLE'
     | 'E_FILE_MISSING'
     | 'E_DEPLOY_TOO_OLD'
+    // Backup and restore wave. See `Backup` below.
+    | 'E_BACKUP_NOT_A_BACKUP'
+    | 'E_BACKUP_DAMAGED'
+    | 'E_BACKUP_NEWER'
+    | 'E_BACKUP_WORDS_INVALID'
+    | 'E_BACKUP_WRONG_WORDS'
+    | 'E_BACKUP_NO_WORDS'
+    | 'E_BACKUP_WORDS_MISMATCH'
+    | 'E_BACKUP_NOTHING'
+    | 'E_BACKUP_SECRET_UNREADABLE'
+    | 'E_BACKUP_SAVE_FAILED'
+    | 'E_RESTORE_WOULD_REPLACE'
+    | 'E_RESTORE_STATE_CHANGED'
+    | 'E_RESTORE_UNFINISHED'
+    | 'E_BACKUP_READ_FAILED'
+    | 'E_RESTORE_FAILED'
+    | 'E_HOSTING_KEY_REJECTED'
+    | 'E_HOSTING_KEY_WRONG_ACCOUNT'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -181,6 +199,30 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     // The app's bundled setup helper is older than this screen and lacks
     // the verb. Not retryable: only an app update fixes it.
     'E_DEPLOY_TOO_OLD',
+    // Backup and restore. Every one is a refusal that changed NOTHING,
+    // except E_RESTORE_UNFINISHED (a restore committed and its last
+    // steps must be finished before anything else runs).
+    'E_BACKUP_NOT_A_BACKUP',
+    'E_BACKUP_DAMAGED',
+    'E_BACKUP_NEWER',
+    'E_BACKUP_WORDS_INVALID',
+    'E_BACKUP_WRONG_WORDS',
+    'E_BACKUP_NO_WORDS',
+    'E_BACKUP_WORDS_MISMATCH',
+    'E_BACKUP_NOTHING',
+    'E_BACKUP_SECRET_UNREADABLE',
+    'E_BACKUP_SAVE_FAILED',
+    'E_RESTORE_WOULD_REPLACE',
+    'E_RESTORE_STATE_CHANGED',
+    'E_RESTORE_UNFINISHED',
+    // The file could not be opened or read (not a verdict on it).
+    'E_BACKUP_READ_FAILED',
+    // This phone's database could not take the restore; it rolled back.
+    'E_RESTORE_FAILED',
+    // A new hosting key was not accepted, or opens another account; the
+    // key this phone had is still the one in use.
+    'E_HOSTING_KEY_REJECTED',
+    'E_HOSTING_KEY_WRONG_ACCOUNT',
 ];
 
 /** The server id carried by an `E_SERVER_EXISTS: <id> ...` rejection,
@@ -727,14 +769,166 @@ export interface DestroyReport {
     /** D4: the server is gone but an address is still reserved and
      *  billing; the same `relayDestroy(op, true)` call is the retry. */
     retry_needed?: boolean;
+    /** PA-3: the server id Daal had is gone, but the hosting account
+     *  still has a Daal-labelled server with this relay's name and a
+     *  different id. Daal did NOT delete it, and kept the relay. "" or
+     *  absent when there is none. Details only. */
+    other_server_id?: string;
+    other_server_name?: string;
 }
 
 export interface AddressOutcome {
     id: string;
     ip: string;
     released: boolean;
-    code: 'released' | 'not_daal' | 'still_attached' | 'release_failed';
+    code: 'released' | 'not_daal' | 'still_attached' | 'release_failed' | 'in_use';
 }
+
+/** PA-1: giving back one address left reserved on a live relay.
+ *  Mirrors `wizard_release_address`. */
+export interface ReleaseAddressResult {
+    address: string;
+    code: 'released' | 'in_use' | 'not_daal' | 'still_attached' | 'release_failed';
+    /** The hosting company's own words on a failure. Details only. */
+    error?: string;
+    /** What the relay row still lists as costing money afterwards. */
+    still_billing: string[];
+}
+
+// ---- Backup and restore (D1/D2) ---------------------------------------
+//
+// The backup format lives in Rust only. Nothing here sees a key or a
+// token. The twelve recovery words DO cross this boundary twice: once
+// out (shown once, `wordsNew`) and once in (typed, `open`/`restore`).
+// They live in React state for one flow and are dropped on leaving;
+// never logged, never in localStorage.
+
+export type BackupBlocked =
+    | ''
+    | 'setup_running'
+    | 'secret_unreadable'
+    | 'custody_locked'
+    | 'legacy_pending'
+    | 'custody_backend';
+
+export interface RelayLine {
+    id: number;
+    nickname: string;
+    public_ip: string;
+    status: string;
+    provider: string;
+    people: number;
+    removed_people: number;
+    has_hosting_key: boolean;
+}
+
+export interface BackupContents {
+    relays: RelayLine[];
+    people_total: number;
+    files: number;
+    includes_hosting_key: boolean;
+    unfinished_setups: number;
+}
+
+export interface RestoreNotice {
+    restored_at_unix: number;
+    backup_made_at_unix: number;
+    relays: RelayLine[];
+    has_refresh_keys: boolean;
+}
+
+export interface BackupStatus {
+    has_publisher_data: boolean;
+    words_set: boolean;
+    /** 0 = never. */
+    last_backup_at_unix: number;
+    stale: boolean;
+    /** What a backup made now would hold. */
+    contents: BackupContents;
+    blocked: BackupBlocked;
+    /** Details fold only. */
+    blocked_detail: string;
+    /** A restore committed but not finished. */
+    restore_pending: boolean;
+    /** Until dismissed. */
+    restore_notice: RestoreNotice | null;
+    /** New words were made and never confirmed: backups still use the
+     *  old (confirmed) words. */
+    words_pending?: boolean;
+    /** New words were confirmed after the last backup: that file opens
+     *  only with the old words (implies `stale`). */
+    words_changed?: boolean;
+    /** A backup handed to another app that the person has not yet said
+     *  arrived; 0 = none. It is not the last backup until they do. */
+    share_unconfirmed_at_unix?: number;
+}
+
+export interface MadeBackup {
+    file_name: string;
+    made_at_unix: number;
+    contents: BackupContents;
+    destination: 'downloads' | 'share';
+    /** Downloads: recorded as the last backup. Share: waits for
+     *  `Backup.confirmShared`. */
+    confirmed?: boolean;
+}
+
+export interface ExistingData {
+    relays: RelayLine[];
+    people_total: number;
+    digest: string;
+}
+
+export interface BackupInspect {
+    existing: ExistingData | null;
+}
+
+export interface BackupPreview {
+    made_at_unix: number;
+    app_version: string;
+    contents: BackupContents;
+    replace: null | { this_phone: RelayLine[]; only_on_this_phone: RelayLine[]; digest: string };
+}
+
+export interface RestoreResult {
+    contents: BackupContents;
+    notice: RestoreNotice;
+}
+
+export const Backup = {
+    /** Finishes a committed restore first. */
+    status: () => invoke<BackupStatus>('publisher_backup_status'),
+    /** Twelve new words; replaces any earlier unconfirmed ones. */
+    wordsNew: () => invoke<{ words: string[] }>('publisher_backup_words_new'),
+    /** At least three distinct positions (0-based) and what was typed. */
+    wordsConfirm: (answers: { index: number; word: string }[]) =>
+        invoke<unknown>('publisher_backup_words_confirm', { answers }),
+    /** "Check my words": true when they are the stored words. */
+    wordsCheck: (words: string) => invoke<boolean>('publisher_backup_words_check', { words }),
+    make: (destination: 'downloads' | 'share', fileName?: string, chooserTitle?: string) =>
+        invoke<MadeBackup>('publisher_backup_make', {
+            destination,
+            fileName: fileName ?? null,
+            chooserTitle: chooserTitle ?? null,
+        }),
+    /** Did the file handed to another app arrive? Yes records it as the
+     *  last backup; no forgets it. Resolves true when one was recorded. */
+    confirmShared: (arrived: boolean) => invoke<boolean>('publisher_backup_confirm_shared', { arrived }),
+    /** A new hosting key for these relays, tested with one read-only
+     *  account call first; refused (and nothing stored) when the company
+     *  does not accept it or it opens another account. */
+    replaceHostingKey: (provider: string, token: string, operatorIds: number[]) =>
+        invoke<number[]>('publisher_replace_hosting_key', { provider, token, operatorIds }),
+    /** Header only, plus what this phone already has. */
+    inspect: (path: string) => invoke<BackupInspect>('publisher_backup_inspect', { path }),
+    /** Full check; writes nothing. */
+    open: (path: string, words: string) =>
+        invoke<BackupPreview>('publisher_backup_open', { path, words }),
+    restore: (path: string, words: string, replaceDigest: string | null) =>
+        invoke<RestoreResult>('publisher_backup_restore', { path, words, replaceDigest }),
+    finishRestore: () => invoke<unknown>('publisher_backup_finish_restore'),
+    dismissNotice: () => invoke<unknown>('publisher_backup_dismiss_notice'),
+};
 
 // ---- Publisher-alone wave: D1 interrupted setup + account check ----
 
@@ -865,6 +1059,9 @@ export interface RelayHealth {
     keys_match: boolean | null;
     people_missing: number | null;
     everyone_missing: boolean | null;
+    /** People the relay lets in that this phone's list never had (added
+     *  on another phone after the backup restored here). */
+    people_unknown?: number | null;
     ways: { family: string; state: HealthWayState }[];
     details: string[];
 }
@@ -981,6 +1178,23 @@ export const Wizard = {
             token,
             operatorId: operator_id ?? null,
         }),
+
+    /**
+     * A relay that already holds a readable hosting key for `provider`
+     * (null when none). Carries no secret.
+     */
+    savedCloudToken: (provider: string) =>
+        invoke<{ operator_id: number; nickname: string } | null>(
+            'wizard_saved_cloud_token',
+            { provider },
+        ),
+
+    /**
+     * Start a NEW relay with the hosting key another relay already
+     * saved. The key is copied inside the shell and never reaches JS.
+     */
+    reuseCloudToken: (provider: string) =>
+        invoke<number>('wizard_reuse_cloud_token', { provider }),
 
     listExistingServers: (operator_id: number) =>
         invoke<ExistingServer[]>('wizard_list_existing_servers', {
@@ -1479,6 +1693,14 @@ export const Wizard = {
      *  `force` is true. Read-only. */
     relayHealth: (operator_id: number, force: boolean) =>
         invoke<RelayHealth>('wizard_relay_health', { operatorId: operator_id, force }),
+    /** PA-1. Give back ONE address left reserved on a live relay. Never
+     *  touches the server: an address that is in use, attached, or not
+     *  Daal's is kept and said so. */
+    releaseAddress: (operator_id: number, address: string) =>
+        invoke<ReleaseAddressResult>('wizard_release_address', {
+            operatorId: operator_id,
+            address,
+        }),
 };
 
 // ---- Streaming events ----

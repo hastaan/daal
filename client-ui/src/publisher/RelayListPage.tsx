@@ -23,7 +23,14 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Wizard } from './wizardCommands';
-import type { DestroyReport, OperatorSummary, RelayHealth } from './wizardCommands';
+import type {
+    BackupStatus,
+    DestroyReport,
+    OperatorSummary,
+    ReleaseAddressResult,
+    RelayHealth,
+    SetupRecovery,
+} from './wizardCommands';
 import { AccountCheckSheet } from './AccountCheckSheet';
 import { checkHealth, checkSequentially, checkedWorking, nowUnix, overallKey } from './relayHealth';
 import {
@@ -39,7 +46,21 @@ import { ActionButton, ActionToast, useAction } from './useAction';
 import { explainFailure, failureBlock } from './failureText';
 import { WhatIsThis } from './Disclosure';
 import { AddressLines, UnreleasedAddresses, retryNeeded, stillBills } from './DestroyAddresses';
-import { releaseRetryFor, retryRelease as runReleaseRetry } from './destroyReport';
+import {
+    releaseLiveAddresses,
+    releaseResultKey,
+    releaseRetryFor,
+    releaseStillBills,
+    retryRelease as runReleaseRetry,
+} from './destroyReport';
+import { CancelSetupSheet } from './SetupRecoveryCard';
+import { deleteMine, keepMine, listDeleteFor } from './listDelete';
+import { BackupCard } from './BackupCard';
+import { NewHostingKeySheet, RestoreNoticeCard } from './RestoreNotice';
+import { backupApi } from './backupHarness';
+import type { BackupApi } from './backupHarness';
+import type { Failure } from './failureText';
+import { OtherServerNote, otherServerId } from './OtherServerNote';
 
 interface Props {
     t: (k: string) => string;
@@ -49,6 +70,84 @@ interface Props {
     onNew: () => void;
     /** Re-enter the wizard for a half-built relay. */
     onResume: (operatorId: number) => void;
+    /** Open the backup page. */
+    onBackup?: () => void;
+    /** Open the restore page. */
+    onRestore?: () => void;
+    /** Backup and restore commands (the harness passes a fake). */
+    backup?: BackupApi;
+}
+
+/** PA-1: what a live relay's address release said, one line each. */
+export function ReleaseResults({
+    t,
+    results,
+    failure,
+    retryBusy,
+    onRetry,
+}: {
+    t: (k: string) => string;
+    results: ReleaseAddressResult[];
+    failure: Failure | null;
+    retryBusy?: boolean;
+    onRetry?: () => void;
+}) {
+    if (results.length === 0 && !failure) return null;
+    const anyFailed = failure !== null || results.some((r) => r.code === 'release_failed');
+    return (
+        <div style={{ display: 'grid', gap: 6 }} data-testid="release-results">
+            {results.map((r) => (
+                <div
+                    key={r.address}
+                    data-code={r.code}
+                    style={{
+                        fontSize: 12,
+                        lineHeight: 1.55,
+                        color:
+                            r.code === 'release_failed' || r.code === 'still_attached' ? 'var(--red)' : 'var(--fg)',
+                    }}
+                >
+                    <span dir="ltr" style={{ fontFamily: 'var(--font-mono)' }}>
+                        {r.address}
+                    </span>
+                    {' · '}
+                    {t(releaseResultKey(r.code))}
+                </div>
+            ))}
+            {failure && <div style={{ fontSize: 12, color: 'var(--red)', lineHeight: 1.55 }}>{failure.message}</div>}
+            {anyFailed && onRetry && (
+                <div>
+                    <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={retryBusy}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onRetry();
+                        }}
+                    >
+                        {retryBusy ? t('pub.relays.destroy.addr.retrying') : t('pub.relays.destroy.addr.retry')}
+                    </Button>
+                </div>
+            )}
+            {(failure?.detail || results.some((r) => r.error)) && (
+                <WhatIsThis label={t('pub.fb.details')}>
+                    {failure?.detail && (
+                        <div style={META} dir="ltr">
+                            {failure.detail}
+                        </div>
+                    )}
+                    {results
+                        .filter((r) => r.error)
+                        .map((r) => (
+                            <div key={r.address} style={META} dir="ltr">
+                                {r.address}: {r.error}
+                            </div>
+                        ))}
+                </WhatIsThis>
+            )}
+        </div>
+    );
 }
 
 function dateLabel(unix: number): string {
@@ -260,9 +359,13 @@ export function RelayDestroySheet({
         setBusy(true);
         setFailure(null);
         try {
+            // Never the person's own server from here: that choice is
+            // asked first (PA-7, `listDeleteFor`), and only "Delete my
+            // server" passes it.
             const r = await Wizard.relayDestroy(
                 target.operatorId,
                 choice === 'server',
+                false,
             );
             setReport(r);
         } catch (e) {
@@ -382,7 +485,13 @@ export function RelayDestroySheet({
 
                     {/* The verdict, in the order that matters to a
                         person: is anything still costing me money? */}
-                    {askedForServer && !report.server_deleted && (
+                    {/* PA-3: another Daal server carries this relay's
+                        name. Not deleted, relay kept: say that instead
+                        of "the server was not deleted". */}
+                    {askedForServer && !report.server_deleted && otherServerId(report) !== '' && (
+                        <OtherServerNote t={t} report={report} />
+                    )}
+                    {askedForServer && !report.server_deleted && otherServerId(report) === '' && (
                         <div
                             style={{
                                 border: '1px solid var(--red)',
@@ -582,7 +691,25 @@ export function RelayDestroySheet({
     );
 }
 
-export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
+/** The list's delete for an unfinished setup on the person's own
+ *  server, or one still running (PA-7). */
+interface ListCancel {
+    op: OperatorSummary;
+    rec: SetupRecovery;
+    busy: boolean;
+    outcome: DestroyReport | null;
+    error: Failure | null;
+}
+
+export default function RelayListPage({
+    t,
+    onOpen,
+    onNew,
+    onResume,
+    onBackup,
+    onRestore,
+    backup = backupApi(),
+}: Props) {
     const [operators, setOperators] = useState<OperatorSummary[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -605,6 +732,16 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
     const [healthStarted, setHealthStarted] = useState(false);
     // D1: the account check sheet.
     const [accountOpen, setAccountOpen] = useState(false);
+    // D1/D2: backup status (null: unknown or an older shell) and the
+    // "new hosting key" sheet the restore notice opens.
+    const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+    const [keySheet, setKeySheet] = useState(false);
+    // PA-7.
+    const [listCancel, setListCancel] = useState<ListCancel | null>(null);
+    // PA-1: per relay, what the last address release said.
+    const [releases, setReleases] = useState<
+        Record<number, { results: ReleaseAddressResult[]; failure: Failure | null }>
+    >({});
 
     const reload = useCallback(async () => {
         setLoading(true);
@@ -632,6 +769,62 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
         void reload();
     }, [reload]);
 
+    const reloadBackup = useCallback(async () => {
+        try {
+            setBackupStatus(await backup.status());
+        } catch {
+            // An older shell, or the store could not be read: the list
+            // still works, it just does not show the backup card.
+            setBackupStatus(null);
+        }
+    }, [backup]);
+
+    useEffect(() => {
+        void reloadBackup();
+    }, [reloadBackup]);
+
+    /** PA-7: delete pressed on a card. An unfinished setup asks first. */
+    const startDelete = useCallback(
+        async (op: OperatorSummary) => {
+            const plan = await listDeleteFor(op, (id) => Wizard.setupRecovery(id));
+            if (plan.kind === 'destroy') setDestroying(destroyTarget(op));
+            else setListCancel({ op, rec: plan.rec, busy: false, outcome: null, error: null });
+        },
+        [],
+    );
+
+    const listCancelRun = useCallback(
+        async (which: 'delete' | 'keep' | 'check') => {
+            if (!listCancel) return;
+            const cur = listCancel;
+            setListCancel({ ...cur, busy: true, error: null });
+            try {
+                if (which === 'check') {
+                    const plan = await listDeleteFor(cur.op, (id) => Wizard.setupRecovery(id));
+                    if (plan.kind === 'destroy') {
+                        setListCancel(null);
+                        setDestroying(destroyTarget(cur.op));
+                    } else {
+                        setListCancel({ ...cur, rec: plan.rec, busy: false });
+                    }
+                    return;
+                }
+                if (which === 'keep') {
+                    await keepMine(cur.op.id, (id, del, own) => Wizard.relayDestroy(id, del, own));
+                    setListCancel(null);
+                    action.report('keep-mine', 'ok', t('pub.relays.keep_mine.done'));
+                    void reload();
+                    void reloadBackup();
+                    return;
+                }
+                const r = await deleteMine(cur.op.id, (id, del, own) => Wizard.relayDestroy(id, del, own));
+                setListCancel({ ...cur, busy: false, outcome: r });
+            } catch (e) {
+                setListCancel({ ...cur, busy: false, error: explainFailure(t, e) });
+            }
+        },
+        [action.report, listCancel, reload, reloadBackup, t],
+    );
     useEffect(() => {
         if (healthStarted || loading) return;
         const ids = operators.filter((o) => o.status === 'provisioned').map((o) => o.id);
@@ -648,6 +841,43 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
      *  gone — for a relay whose reserved address is still billing. */
     const retryRelease = useCallback(
         async (op: OperatorSummary) => {
+            if (releaseRetryFor(op.status) === 'release_address') {
+                // PA-1: a working relay. Give back each listed address on
+                // its own; never a delete.
+                setReleases((m) => ({ ...m, [op.id]: { results: m[op.id]?.results ?? [], failure: null } }));
+                await action.run(
+                    `release:${op.id}`,
+                    async () => {
+                        try {
+                            const results = await releaseLiveAddresses(
+                                op,
+                                op.unreleased_addresses ?? [],
+                                (id, a) => Wizard.releaseAddress(id, a),
+                            );
+                            setReleases((m) => ({ ...m, [op.id]: { results, failure: null } }));
+                            if (results.some((r) => r.code === 'release_failed')) throw new Error('release_failed');
+                            return results;
+                        } catch (e) {
+                            if (!(e instanceof Error && e.message === 'release_failed')) {
+                                setReleases((m) => ({
+                                    ...m,
+                                    [op.id]: { results: m[op.id]?.results ?? [], failure: explainFailure(t, e) },
+                                }));
+                            }
+                            throw e;
+                        }
+                    },
+                    {
+                        ok: (r) =>
+                            releaseStillBills(r)
+                                ? t('pub.relays.destroy.addr.retry_ok_some_left')
+                                : t('pub.relays.destroy.addr.retry_ok'),
+                        fail: t('pub.relays.destroy.addr.retry_failed'),
+                    },
+                );
+                await reload();
+                return;
+            }
             await action.run(
                 `release:${op.id}`,
                 async () => {
@@ -729,6 +959,36 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                 title={t('pub.relays.title')}
                 action={<Button onClick={onNew}>{t('pub.relays.new')}</Button>}
             >
+                {/* D2: a restore committed here; the truth about the
+                    old phone stays until the person has read it. */}
+                {backupStatus?.restore_notice && (
+                    <div style={{ marginBottom: 10 }}>
+                        <RestoreNoticeCard
+                            t={t}
+                            notice={backupStatus.restore_notice}
+                            onEnterKey={() => setKeySheet(true)}
+                            onDismiss={async () => {
+                                try {
+                                    await backup.dismissNotice();
+                                } catch {
+                                    /* shown again next time; nothing lost */
+                                }
+                                void reloadBackup();
+                            }}
+                        />
+                    </div>
+                )}
+                {/* D1: only this phone can manage the relays. */}
+                <div style={{ marginBottom: 10, display: 'grid', gap: 6 }}>
+                    <BackupCard t={t} status={backupStatus} onBackup={onBackup} />
+                    {onRestore && (
+                        <div>
+                            <Button variant="ghost" size="sm" onClick={onRestore} data-button="restore-link">
+                                {t('pub.restore.link')}
+                            </Button>
+                        </div>
+                    )}
+                </div>
                 {anyToken && (
                     <div style={{ marginBottom: 10 }}>
                         <Button variant="secondary" onClick={() => setAccountOpen(true)}>
@@ -959,12 +1219,21 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                         <UnreleasedAddresses
                                             t={t}
                                             ips={unreleased}
+                                            live={releaseRetryFor(op.status) === 'release_address'}
                                             retryBusy={action.busy === `release:${op.id}`}
                                             onRetry={
                                                 releaseRetryFor(op.status)
                                                     ? () => void retryRelease(op)
                                                     : undefined
                                             }
+                                        />
+                                    )}
+
+                                    {releases[op.id] && (
+                                        <ReleaseResults
+                                            t={t}
+                                            results={releases[op.id].results}
+                                            failure={releases[op.id].failure}
                                         />
                                     )}
 
@@ -1052,9 +1321,9 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                                         variant="danger"
                                                         onClick={(e) => {
                                                             e.stopPropagation();
-                                                            setDestroying(
-                                                                destroyTarget(op),
-                                                            );
+                                                            // PA-7: an unfinished setup asks
+                                                            // the wizard's Cancel question first.
+                                                            void startDelete(op);
                                                         }}
                                                     >
                                                         {t(
@@ -1082,6 +1351,45 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                         // and the list is the only place that says so.
                         setDestroying(null);
                         void reload();
+                        void reloadBackup();
+                    }}
+                />
+            )}
+
+            {listCancel && (
+                <CancelSetupSheet
+                    t={t}
+                    rec={listCancel.rec}
+                    busy={listCancel.busy}
+                    outcome={listCancel.outcome}
+                    error={listCancel.error}
+                    onDelete={() => void listCancelRun('delete')}
+                    onKeep={() => void listCancelRun('keep')}
+                    onCheckAgain={() => void listCancelRun('check')}
+                    onClose={() => {
+                        const changed = listCancel.outcome !== null;
+                        setListCancel(null);
+                        if (changed) {
+                            void reload();
+                            void reloadBackup();
+                        }
+                    }}
+                    onDone={() => {
+                        setListCancel(null);
+                        void reload();
+                        void reloadBackup();
+                    }}
+                />
+            )}
+
+            {keySheet && backupStatus?.restore_notice && (
+                <NewHostingKeySheet
+                    t={t}
+                    notice={backupStatus.restore_notice}
+                    onClose={() => {
+                        setKeySheet(false);
+                        void reload();
+                        void reloadBackup();
                     }}
                 />
             )}

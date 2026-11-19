@@ -19,6 +19,8 @@ export function addressLineKey(code: AddressOutcome['code']): string {
             return 'pub.relays.destroy.addr.not_daal';
         case 'still_attached':
             return 'pub.relays.destroy.addr.still_attached';
+        case 'in_use':
+            return 'pub.relays.destroy.addr.in_use';
         default:
             return 'pub.relays.destroy.addr.release_failed';
     }
@@ -82,12 +84,16 @@ export function UnreleasedAddresses({
     ips,
     onRetry,
     retryBusy,
+    live,
 }: {
     t: (k: string) => string;
     ips: string[];
-    /** Absent for a working relay: there is nothing safe to retry. */
+    /** Absent when there is nothing safe to retry. */
     onRetry?: () => void;
     retryBusy?: boolean;
+    /** A working relay (PA-1): Try again gives back only the address,
+     *  never the server. */
+    live?: boolean;
 }) {
     if (ips.length === 0) return null;
     return (
@@ -97,6 +103,7 @@ export function UnreleasedAddresses({
                     {addressLineText(t, 'release_failed', ip)}
                 </div>
             ))}
+            {live && <div style={{ ...LINE, color: 'var(--muted)' }}>{t('pub.relays.release.intro')}</div>}
             {onRetry ? (
                 <div>
                     <Button

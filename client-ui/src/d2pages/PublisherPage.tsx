@@ -28,14 +28,34 @@ import PublisherWizard from '../publisher/PublisherWizard';
 import PublisherRecipientsPage from '../publisher/PublisherRecipientsPage';
 import RelayListPage from '../publisher/RelayListPage';
 import CustodyGate from '../publisher/CustodyGate';
+import BackupPage from '../publisher/BackupPage';
+import RestorePage from '../publisher/RestorePage';
 import { Wizard } from '../publisher/wizardCommands';
 import type { OperatorSummary } from '../publisher/wizardCommands';
+import { useBack } from '../lib/useBack';
 
-type View =
+export type View =
     | { k: 'loading' }
     | { k: 'list' }
-    | { k: 'wizard'; operatorId?: number }
-    | { k: 'relay'; operatorId: number };
+    /** `from: 'list'`: opened from the relay list, so Back at the first
+     *  step returns there. Absent: the wizard is the root view (no
+     *  relays yet), and Back at the first step leaves the app. */
+    | { k: 'wizard'; operatorId?: number; from?: 'list' }
+    | { k: 'relay'; operatorId: number }
+    | { k: 'backup' }
+    | { k: 'restore'; from: 'list' | 'wizard' };
+
+/** Where a restore page goes back to. */
+export function restoreBackView(from: 'list' | 'wizard'): View {
+    return from === 'list' ? { k: 'list' } : { k: 'wizard' };
+}
+
+/** The relay page is an inner page of the list: Back returns there. The
+ *  backup, restore and wizard views answer Back themselves (they know
+ *  when they are busy). */
+export function pageBackTarget(view: View): View | null {
+    return view.k === 'relay' ? { k: 'list' } : null;
+}
 
 interface Props {
     t: (k: string) => string;
@@ -100,6 +120,16 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
         setView({ k: 'list' });
     }, []);
 
+    // System Back on the relay page: the same as its own Back button.
+    useBack(
+        pageBackTarget(view) !== null,
+        () => {
+            void refreshOperators();
+            toList();
+        },
+        'page',
+    );
+
     return (
         <div
             // `daal-publisher` (styles.css) lets every descendant shrink and
@@ -154,10 +184,12 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                         key={listNonce}
                         t={t}
                         onOpen={(id) => setView({ k: 'relay', operatorId: id })}
-                        onNew={() => setView({ k: 'wizard' })}
+                        onNew={() => setView({ k: 'wizard', from: 'list' })}
                         onResume={(id) =>
-                            setView({ k: 'wizard', operatorId: id })
+                            setView({ k: 'wizard', operatorId: id, from: 'list' })
                         }
+                        onBackup={() => setView({ k: 'backup' })}
+                        onRestore={() => setView({ k: 'restore', from: 'list' })}
                     />
                 )}
 
@@ -173,6 +205,27 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                             setView({ k: 'relay', operatorId: id });
                         }}
                         onCancel={toList}
+                        // Back at the first step: only when there is a
+                        // list to go back to. Never a cancel: an
+                        // unfinished relay stays resumable from the list.
+                        rootBack={view.from === 'list' ? toList : undefined}
+                        onRestore={() => setView({ k: 'restore', from: 'wizard' })}
+                    />
+                )}
+
+                {view.k === 'backup' && <BackupPage t={t} onBack={toList} />}
+
+                {view.k === 'restore' && (
+                    <RestorePage
+                        t={t}
+                        onBack={() => {
+                            if (view.from === 'list') toList();
+                            else setView(restoreBackView('wizard'));
+                        }}
+                        onDone={() => {
+                            void refreshOperators();
+                            toList();
+                        }}
                     />
                 )}
 
@@ -180,6 +233,7 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                     <PublisherRecipientsPage
                         t={t}
                         operatorId={view.operatorId}
+                        onBackup={() => setView({ k: 'backup' })}
                         onBack={() => {
                             void refreshOperators();
                             toList();

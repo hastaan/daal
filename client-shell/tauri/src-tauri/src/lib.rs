@@ -918,6 +918,28 @@ fn wizard_store_cloud_token(
     })
 }
 
+/// Which relay's saved hosting key a new relay could reuse (no secret).
+#[tauri::command]
+fn wizard_saved_cloud_token(
+    wstate: State<'_, WizardStateMgr>,
+    provider: String,
+) -> Result<Option<wcmd::SavedCloudToken>, String> {
+    cmdlog::logged("wizard_saved_cloud_token", || {
+    wcmd::saved_cloud_token(&wstate.0, &provider).map_err(|e| e.to_string())
+    })
+}
+
+/// Start a new relay with the hosting key another relay already saved.
+#[tauri::command]
+fn wizard_reuse_cloud_token(
+    wstate: State<'_, WizardStateMgr>,
+    provider: String,
+) -> Result<i64, String> {
+    cmdlog::logged("wizard_reuse_cloud_token", || {
+    wcmd::reuse_cloud_token(&wstate.0, &provider).map_err(|e| e.to_string())
+    })
+}
+
 #[tauri::command]
 fn wizard_list_existing_servers(
     wstate: State<'_, WizardStateMgr>,
@@ -1138,6 +1160,22 @@ async fn wizard_setup_remove_server(
         on_blocking_pool(wstate.inner(), move |ctx| {
             daal_wizard::setup_recovery::setup_remove_server(ctx, operator_id)
                 .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// PA-1: give back one address a running relay has left reserved.
+#[tauri::command]
+async fn wizard_release_address(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    address: String,
+) -> Result<wcmd::ReleaseAddressResult, String> {
+    cmdlog::result(
+        "wizard_release_address",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            wcmd::release_address(ctx, operator_id, &address).map_err(|e| e.to_string())
         })
         .await,
     )
@@ -2014,6 +2052,228 @@ fn publisher_custody_status(
     cmdlog::logged("publisher_custody_status", || wcmd::custody_status(&wstate.0).map_err(|e| e.to_string()))
 }
 
+// ---- Publisher backup and restore ---------------------------------
+//
+// One file holding every relay, person and key, encrypted under twelve
+// recovery words (daal_wizard::publisher_backup). The heavy ones run
+// the memory-hard KDF, so they go to the blocking pool. Typed words
+// arrive as a String and are wiped when the command returns; error
+// tails (which are logged) never carry a word, a key or contents.
+
+use daal_wizard::publisher_backup as pbackup;
+
+#[tauri::command]
+async fn publisher_backup_status(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<pbackup::BackupStatus, String> {
+    cmdlog::result(
+        "publisher_backup_status",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            pbackup::backup_status(ctx).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+fn publisher_backup_words_new(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<pbackup::WordsNew, String> {
+    cmdlog::logged("publisher_backup_words_new", || {
+        pbackup::words_new(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn publisher_backup_words_confirm(
+    wstate: State<'_, WizardStateMgr>,
+    mut answers: Vec<pbackup::WordAnswer>,
+) -> Result<(), String> {
+    let r = cmdlog::logged("publisher_backup_words_confirm", || {
+        pbackup::words_confirm(&wstate.0, &answers).map_err(|e| e.to_string())
+    });
+    for a in answers.iter_mut() {
+        zeroize::Zeroize::zeroize(&mut a.word);
+    }
+    r
+}
+
+#[tauri::command]
+fn publisher_backup_words_check(
+    wstate: State<'_, WizardStateMgr>,
+    words: String,
+) -> Result<bool, String> {
+    let words = zeroize::Zeroizing::new(words);
+    cmdlog::logged("publisher_backup_words_check", || {
+        pbackup::words_check(&wstate.0, &words).map_err(|e| e.to_string())
+    })
+}
+
+/// Build and encrypt the backup in memory, write only the ciphertext,
+/// then save it to Downloads (and delete the staged copy) or hand it to
+/// the share sheet (kept for the receiving app; swept after a day).
+/// A Downloads save is recorded as the last backup once it worked. A
+/// share is only held as waiting: the chooser opening proves nothing,
+/// so it counts once the person says it arrived
+/// (`publisher_backup_confirm_shared`). `chooser_title` is the
+/// translated title of the share sheet.
+#[tauri::command]
+async fn publisher_backup_make(
+    wstate: State<'_, WizardStateMgr>,
+    destination: String,
+    file_name: Option<String>,
+    chooser_title: Option<String>,
+) -> Result<pbackup::MadeBackup, String> {
+    cmdlog::result(
+        "publisher_backup_make",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            if destination != "downloads" && destination != "share" {
+                return Err("destination must be downloads or share".to_string());
+            }
+            let made = pbackup::backup_make_file(ctx, file_name.as_deref()).map_err(|e| e.to_string())?;
+            let path = made.path.to_string_lossy().to_string();
+            let handed = if destination == "downloads" {
+                let r = save_path_to_downloads(&path, &made.file_name);
+                let _ = std::fs::remove_file(&made.path);
+                r
+            } else {
+                let title = chooser_title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("Save the Daal backup");
+                share_path(&path, "application/octet-stream", title).map(|_| ())
+            };
+            if let Err(e) = handed {
+                if destination == "share" {
+                    let _ = std::fs::remove_file(&made.path);
+                }
+                return Err(format!("{}: {e}", wcmd::E_BACKUP_SAVE_FAILED));
+            }
+            let confirmed = destination == "downloads";
+            if confirmed {
+                pbackup::backup_mark_made(ctx, &made).map_err(|e| e.to_string())?;
+            } else {
+                pbackup::backup_note_shared(ctx, &made).map_err(|e| e.to_string())?;
+            }
+            Ok(pbackup::MadeBackup {
+                file_name: made.file_name.clone(),
+                made_at_unix: made.made_at_unix,
+                contents: made.contents.clone(),
+                destination,
+                confirmed,
+            })
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn publisher_backup_inspect(
+    wstate: State<'_, WizardStateMgr>,
+    path: String,
+) -> Result<pbackup::BackupInspect, String> {
+    cmdlog::result(
+        "publisher_backup_inspect",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            pbackup::backup_inspect(ctx, std::path::Path::new(&path)).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn publisher_backup_open(
+    wstate: State<'_, WizardStateMgr>,
+    path: String,
+    words: String,
+) -> Result<pbackup::BackupPreview, String> {
+    let words = zeroize::Zeroizing::new(words);
+    cmdlog::result(
+        "publisher_backup_open",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            pbackup::backup_open(ctx, std::path::Path::new(&path), &words).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn publisher_backup_restore(
+    wstate: State<'_, WizardStateMgr>,
+    path: String,
+    words: String,
+    replace_digest: Option<String>,
+) -> Result<pbackup::RestoreResult, String> {
+    let words = zeroize::Zeroizing::new(words);
+    cmdlog::result(
+        "publisher_backup_restore",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            let p = std::path::PathBuf::from(&path);
+            let r = pbackup::backup_restore(ctx, &p, &words, replace_digest.as_deref())
+                .map_err(|e| e.to_string())?;
+            // The copy `stage_picked_file` made of the picked file; a
+            // desktop path is the person's own file and is left alone.
+            if p.starts_with(ctx.staging_dir.join("picked")) {
+                let _ = std::fs::remove_file(&p);
+            }
+            Ok(r)
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn publisher_backup_finish_restore(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<(), String> {
+    cmdlog::result(
+        "publisher_backup_finish_restore",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            pbackup::finish_restore(ctx).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// The person says whether the backup handed to another app arrived.
+#[tauri::command]
+fn publisher_backup_confirm_shared(
+    wstate: State<'_, WizardStateMgr>,
+    arrived: bool,
+) -> Result<bool, String> {
+    cmdlog::logged("publisher_backup_confirm_shared", || {
+        pbackup::backup_confirm_shared(&wstate.0, arrived).map_err(|e| e.to_string())
+    })
+}
+
+/// After a restore: a new hosting key, tested before it replaces the
+/// stored one. The key is wiped when the command returns.
+#[tauri::command]
+async fn publisher_replace_hosting_key(
+    wstate: State<'_, WizardStateMgr>,
+    provider: String,
+    token: String,
+    operator_ids: Vec<i64>,
+) -> Result<Vec<i64>, String> {
+    let token = zeroize::Zeroizing::new(token);
+    cmdlog::result(
+        "publisher_replace_hosting_key",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            pbackup::replace_hosting_key(ctx, &provider, &token, &operator_ids)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+fn publisher_backup_dismiss_notice(wstate: State<'_, WizardStateMgr>) -> Result<(), String> {
+    cmdlog::logged("publisher_backup_dismiss_notice", || {
+        pbackup::dismiss_notice(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
 /// One-time upgrade from the PIN-sealed store to device custody.
 ///
 /// Safety property: a legacy blob is deleted only after the same
@@ -2664,8 +2924,17 @@ fn share_invite(
     let dest = share_dir.join(format!("{stem}.sbp"));
     std::fs::copy(&canonical, &dest).map_err(|e| format!("copy: {e}"))?;
     let path = dest.to_string_lossy().to_string();
-    let chooser_title = "Send Daal relay pack".to_string();
-    let mime = "application/octet-stream".to_string();
+    share_path(&path, "application/octet-stream", "Send Daal relay pack")
+    })
+}
+
+/// Hand a staged file to the system share sheet (Android
+/// `MainActivity.shareFile`) or reveal it in the file manager
+/// (desktop). Returns the path handed over.
+fn share_path(path: &str, mime: &str, chooser_title: &str) -> Result<String, String> {
+    let path = path.to_string();
+    let mime = mime.to_string();
+    let chooser_title = chooser_title.to_string();
 
     #[cfg(target_os = "android")]
     {
@@ -2721,7 +2990,6 @@ fn share_invite(
             .spawn();
         Ok(path)
     }
-    })
 }
 
 /// Copy a staged file into the phone's public Downloads via the Kotlin
@@ -2766,9 +3034,20 @@ fn save_path_to_downloads(src: &str, display_name: &str) -> Result<(), String> {
     }
     #[cfg(not(target_os = "android"))]
     {
+        // Copy beside the target and rename over it: a copy that fails
+        // half way (disk full) leaves the earlier file of that name whole.
         let dl = dirs_downloads();
         std::fs::create_dir_all(&dl).map_err(|e| format!("mkdir downloads: {e}"))?;
-        std::fs::copy(src, dl.join(display_name)).map_err(|e| format!("copy: {e}"))?;
+        let dst = dl.join(display_name);
+        let tmp = dl.join(format!(".{display_name}.part"));
+        if let Err(e) = std::fs::copy(src, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("copy: {e}"));
+        }
+        std::fs::rename(&tmp, &dst).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("rename: {e}")
+        })?;
         Ok(())
     }
 }
@@ -3067,6 +3346,8 @@ pub fn run() {
             stop_sidecar,
             heartbeat_tick,
             wizard_store_cloud_token,
+            wizard_saved_cloud_token,
+            wizard_reuse_cloud_token,
             wizard_list_existing_servers,
             wizard_list_server_types,
             wizard_list_server_types_for,
@@ -3082,6 +3363,7 @@ pub fn run() {
             wizard_relay_destroy,
             wizard_setup_recovery,
             wizard_setup_remove_server,
+            wizard_release_address,
             wizard_account_check,
             wizard_account_cleanup,
             wizard_renew_everyone,
@@ -3124,6 +3406,18 @@ pub fn run() {
             wizard_rotate_tls,
             // Publisher custody: status, one-time PIN migration, recovery
             publisher_custody_status,
+            publisher_backup_status,
+            publisher_backup_words_new,
+            publisher_backup_words_confirm,
+            publisher_backup_words_check,
+            publisher_backup_make,
+            publisher_backup_inspect,
+            publisher_backup_open,
+            publisher_backup_restore,
+            publisher_backup_finish_restore,
+            publisher_backup_dismiss_notice,
+            publisher_backup_confirm_shared,
+            publisher_replace_hosting_key,
             publisher_migrate_from_pin,
             publisher_custody_unlock,
             publisher_save_recovery_key,

@@ -64,6 +64,9 @@ export function failureKey(e: unknown): string {
             return 'pub.fail.file_missing';
         case 'E_DEPLOY_TOO_OLD':
             return 'pub.fail.deploy_too_old';
+        case 'E_RESTORE_UNFINISHED':
+            // A restore committed and must finish before anything else.
+            return 'pub.backup.err.unfinished';
         default:
             break;
     }

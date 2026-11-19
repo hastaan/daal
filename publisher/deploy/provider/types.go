@@ -13,6 +13,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -281,7 +282,29 @@ type DecommissionReport struct {
 	// shell sees exactly the report it always did. A pointer so that
 	// "the flag was given and there were none" is `[]`, not absent.
 	Addresses *[]AddressOutcome `json:"addresses,omitempty"`
+
+	// NamedServer is set when the record's server id is provably gone
+	// but the account still has a server carrying this relay's derived
+	// name AND both ownership marks under a different id (PA-3): a
+	// server made outside the record, or after a console delete. It is
+	// not deleted (the id the caller gave is the only thing it asked
+	// for), ServerDeleted stays false, and decommission exits 7. Absent
+	// otherwise, so an older shell sees the report it always did.
+	NamedServer *NamedServer `json:"named_server,omitempty"`
 }
+
+// NamedServer names a server that still carries a relay's derived name
+// and ownership marks after its recorded id was found gone.
+type NamedServer struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ErrNamedServerRemains is returned (wrapped) by Decommission when the
+// recorded server id is gone but another server with this relay's
+// derived name and both ownership marks exists (see NamedServer).
+// Nothing was deleted; the caller keeps the record and the token.
+var ErrNamedServerRemains = errors.New("another server with this relay's name remains")
 
 // NewDecommissionReport returns a report with every boolean false
 // (nothing proven gone yet) and a non-nil Warnings slice.
@@ -357,7 +380,7 @@ type AddressOutcome struct {
 	ID       string `json:"id"`
 	IP       string `json:"ip"`
 	Released bool   `json:"released"`
-	// Code: released | not_daal | still_attached | release_failed.
+	// Code: released | not_daal | still_attached | in_use | release_failed.
 	Code  string `json:"code"`
 	Error string `json:"error"`
 }
@@ -368,6 +391,10 @@ const (
 	AddrNotDaal       = "not_daal"
 	AddrStillAttached = "still_attached"
 	AddrReleaseFailed = "release_failed"
+	// AddrInUse: release-address was asked for the address the live
+	// relay itself is reached on (its record's FloatingIPID or
+	// PublicIP). Kept, never deleted.
+	AddrInUse = "in_use"
 )
 
 // AddressReleaser is implemented by adapters that can give back every
@@ -378,4 +405,18 @@ const (
 // one attached to ANOTHER server is kept (still_attached).
 type AddressReleaser interface {
 	ReleaseRelayAddresses(ctx context.Context, rec *OperatorRecord, deletedServerID string) []AddressOutcome
+}
+
+// SingleAddressReleaser gives back ONE named address left reserved for
+// a relay that is still live (PA-1: `daal-deploy release-address`).
+// idOrIP is the provider's address id or the address itself. Rules, in
+// order: absent from the account -> released (already gone); the list
+// cannot be read -> release_failed; it is the relay's own address
+// (rec.FloatingIPID or rec.PublicIP) -> in_use; it lacks this relay's
+// ownership marks -> not_daal; it is attached to any server, the live
+// relay's own included -> still_attached; otherwise it is deleted ->
+// released, or release_failed with the provider's text. Nothing on the
+// box is touched: an unattached address is not configured there.
+type SingleAddressReleaser interface {
+	ReleaseOneAddress(ctx context.Context, rec *OperatorRecord, idOrIP string) AddressOutcome
 }

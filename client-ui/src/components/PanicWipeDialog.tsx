@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
+import { useBack } from '../lib/useBack';
 
 const WORD = 'erase';
 const HOLD_MS = 5000;
@@ -42,6 +43,11 @@ export default function PanicWipeDialog({ t, onClose }: Props) {
         }, 50);
         return () => clearInterval(id);
     }, [holdSince, onClose, contract]);
+
+    // Back is Cancel; once the wipe has fired there is nothing to cancel.
+    useBack(true, () => {
+        if (!done) onClose();
+    });
 
     const wordOk = typed.toLowerCase() === WORD;
 

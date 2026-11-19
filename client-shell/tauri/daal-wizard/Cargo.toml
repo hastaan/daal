@@ -25,6 +25,9 @@ time = { workspace = true }
 keyring = "3.6"
 argon2 = "0.5"
 aes-gcm = "0.10"
+# Constant-time compare for the backup key check (already in the tree
+# through aes-gcm; named here so the use is explicit).
+subtle = "2.6"
 hkdf = "0.12"
 zeroize = { version = "1.8", features = ["derive"] }
 rand = "0.8"

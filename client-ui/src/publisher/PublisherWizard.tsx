@@ -74,6 +74,7 @@ import {
     StatusPill,
 } from '../design/primitives';
 import { useDensity } from '../design/DensityProvider';
+import { useBack } from '../lib/useBack';
 
 /** Open a URL in the system's default browser (not Custom Tabs). */
 async function openExternal(url: string) {
@@ -96,6 +97,36 @@ interface Props {
     onDone: (operatorId: number) => void;
     /** User backed out of screen 1 with no relay created. */
     onCancel: () => void;
+    /** System Back at the first step. Set only when the wizard was
+     *  opened from the relay list; it goes back there and never cancels
+     *  or cleans anything up. Absent on a fresh install, where Back at
+     *  the first step leaves the app. */
+    rootBack?: () => void;
+    /** "I have a backup from another phone" on the first step. */
+    onRestore?: () => void;
+}
+
+/** What the system Back does in the wizard. */
+export type WizardBack = 'refuse' | 'wait' | 'done' | 'step' | 'root' | 'none';
+
+export function wizardBack(o: {
+    building: boolean;
+    stepIdx: number;
+    hasRootBack: boolean;
+    /** Another call is running on this screen (a recovery delete, a
+     *  cancel): Back would hide its outcome, so it waits. */
+    busyElsewhere?: boolean;
+    /** The relay row is already gone and the screen leaves only through
+     *  Done: Back does what Done does, never a step onto a dead relay. */
+    leavesOnlyByDone?: boolean;
+}): WizardBack {
+    // A setup in progress keeps its guard: Back never interrupts it.
+    if (o.building) return 'refuse';
+    if (o.busyElsewhere) return 'wait';
+    if (o.leavesOnlyByDone) return 'done';
+    if (o.stepIdx > 0) return 'step';
+    if (o.hasRootBack) return 'root';
+    return 'none';
 }
 
 // ---- Step model ----
@@ -318,6 +349,8 @@ export default function PublisherWizard({
     operatorId: resumeOperatorId,
     onDone,
     onCancel,
+    rootBack,
+    onRestore,
 }: Props) {
     const { density } = useDensity();
     const isPhone = density === 'phone';
@@ -340,6 +373,24 @@ export default function PublisherWizard({
     // comes back over IPC. Without this flag the Next gate would demand
     // the user re-paste a key they already gave us.
     const [hasStoredToken, setHasStoredToken] = useState(false);
+    // A hosting key another relay already saved for this company: a new
+    // relay can start with it, so the person does not paste it again.
+    const [savedElsewhere, setSavedElsewhere] = useState<
+        { operator_id: number; nickname: string } | null
+    >(null);
+    useEffect(() => {
+        let dead = false;
+        if (!live || operatorId != null) {
+            setSavedElsewhere(null);
+            return;
+        }
+        Wizard.savedCloudToken(provider)
+            .then((s) => !dead && setSavedElsewhere(s))
+            .catch(() => !dead && setSavedElsewhere(null));
+        return () => {
+            dead = true;
+        };
+    }, [live, provider, operatorId]);
 
     // Screen 2 — name, region, size.
     const providerDef = useMemo(
@@ -735,7 +786,11 @@ export default function PublisherWizard({
         }
         if (!window.confirm(t('wiz.cancel.confirm'))) return;
         if (live) {
-            const ok = await run(() => Wizard.cancelAndCleanup(opId));
+            // The command returns nothing, which arrives as null: say
+            // `true` ourselves, or success looks like run()'s failure and
+            // the wizard stays open on a relay that no longer exists
+            // (seen on the phone 2026-11-19).
+            const ok = await run(() => Wizard.cancelAndCleanup(opId).then(() => true));
             if (ok === null) return;
         }
         resetAfterCancel();
@@ -1039,6 +1094,48 @@ export default function PublisherWizard({
     const step = STEPS[stepIdx];
     const building =
         stage !== 'idle' && stage !== 'done' && stage !== 'failed';
+
+    // System Back: one step back, else back to the list it came from.
+    // While the build runs it is refused and says why.
+    const [backNotice, setBackNotice] = useState<string | null>(null);
+    useEffect(() => {
+        if (!backNotice) return;
+        const h = setTimeout(() => setBackNotice(null), 4000);
+        return () => clearTimeout(h);
+    }, [backNotice]);
+    useBack(
+        stepIdx > 0 || !!rootBack || recoveryLeaving,
+        () => {
+            switch (
+                wizardBack({
+                    building,
+                    stepIdx,
+                    hasRootBack: !!rootBack,
+                    busyElsewhere: recoveryBusy || cancelBusy || busy,
+                    leavesOnlyByDone: recoveryLeaving,
+                })
+            ) {
+                case 'refuse':
+                    setBackNotice('pub.back.setup_running');
+                    return;
+                case 'wait':
+                    setBackNotice('pub.back.wait');
+                    return;
+                case 'done':
+                    resetAfterCancel();
+                    return;
+                case 'step':
+                    setStepIdx(stepIdx - 1);
+                    return;
+                case 'root':
+                    rootBack?.();
+                    return;
+                default:
+                    return;
+            }
+        },
+        'page',
+    );
     // How far the chain got. On failure `stage` is 'failed', which is
     // not in BUILD_STAGES — fall back to failedAt so the sub-stages that
     // DID succeed keep their green light instead of all reverting to
@@ -1091,6 +1188,24 @@ export default function PublisherWizard({
             {/* Three screens fit in a strip. The old build had a 220px
                 desktop side rail and a separate phone pager component
                 for seven steps; neither earns its space at three. */}
+            {backNotice && (
+                <div
+                    role="status"
+                    data-testid="wizard-back-refused"
+                    style={{ fontSize: 13, color: 'var(--gold)', margin: '0 0 10px', lineHeight: 1.5 }}
+                >
+                    {t(backNotice)}
+                </div>
+            )}
+
+            {onRestore && !rootBack && stepIdx === 0 && !resumeOperatorId && (
+                <div style={{ margin: '0 0 10px' }}>
+                    <Button variant="ghost" size="sm" onClick={onRestore} data-button="restore-link">
+                        {t('pub.restore.link.wizard')}
+                    </Button>
+                </div>
+            )}
+
             <StepStrip
                 stepIdx={stepIdx}
                 completed={completed}
@@ -1326,6 +1441,8 @@ export default function PublisherWizard({
                             >
                                 {hasStoredToken
                                     ? t('wiz.provider.token.stored')
+                                    : canReuseSaved(savedElsewhere, token, hasStoredToken)
+                                    ? savedKeyLine(t, savedElsewhere!.nickname)
                                     : fmt(t('wiz.provider.token.help'), {
                                           hint: t(providerDef.tokenHintKey),
                                       })}
@@ -1336,7 +1453,10 @@ export default function PublisherWizard({
                                 backLabel={t('wiz.nav.cancel')}
                                 onBack={onCancel}
                                 nextDisabled={
-                                    busy || (!token.trim() && !hasStoredToken)
+                                    busy ||
+                                    (!token.trim() &&
+                                        !hasStoredToken &&
+                                        !savedElsewhere)
                                 }
                                 onNext={async () => {
                                     if (!live) {
@@ -1356,11 +1476,13 @@ export default function PublisherWizard({
                                         return;
                                     }
                                     const dbId = await run(() =>
-                                        Wizard.storeCloudToken(
-                                            provider,
-                                            token,
-                                            operatorId ?? undefined,
-                                        ),
+                                        canReuseSaved(savedElsewhere, token, hasStoredToken)
+                                            ? Wizard.reuseCloudToken(provider)
+                                            : Wizard.storeCloudToken(
+                                                  provider,
+                                                  token,
+                                                  operatorId ?? undefined,
+                                              ),
                                     );
                                     if (dbId == null) return;
                                     setOperatorId(dbId);
@@ -1928,11 +2050,12 @@ export default function PublisherWizard({
                                         onClick={async () => {
                                             if (!operatorId) return;
                                             const ok = await run(() =>
+                                                // Returns nothing (null): see onCancelPress.
                                                 Wizard.setHelperIp(
                                                     operatorId,
                                                     helperIpRepair.trim(),
                                                     'manual',
-                                                ),
+                                                ).then(() => true),
                                             );
                                             if (ok === null) return;
                                             setHelperIpRepair(null);
@@ -2424,4 +2547,23 @@ function mockDestroyReport(): DestroyReport {
         addresses: [],
         retry_needed: false,
     };
+}
+
+/**
+ * A new relay may start with the hosting key another relay saved when
+ * the person typed no key of their own and this relay has none yet.
+ */
+export function canReuseSaved(
+    saved: { operator_id: number; nickname: string } | null,
+    typed: string,
+    hasOwn: boolean,
+): boolean {
+    return saved != null && !typed.trim() && !hasOwn;
+}
+
+/** The line under the key box when a saved key will be used. */
+export function savedKeyLine(t: (k: string) => string, nickname: string): string {
+    return nickname.trim()
+        ? fmt(t('wiz.provider.token.saved_other.named'), { relay: nickname.trim() })
+        : t('wiz.provider.token.saved_other');
 }

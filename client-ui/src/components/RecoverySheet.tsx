@@ -1,6 +1,8 @@
 // RecoverySheet.tsx — connection-failure recovery sheet (D-2 §5C).
 // Centered modal on desktop with four explicit options.
 
+import { useBack } from '../lib/useBack';
+
 interface Props {
     t: (k: string) => string;
     onClose: () => void;
@@ -18,6 +20,7 @@ export default function RecoverySheet({
     onLifeline,
     onExportDiag,
 }: Props) {
+    useBack(true, onClose);
     return (
         <div
             role="dialog"

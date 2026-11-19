@@ -177,6 +177,48 @@ pub const E_FILE_MISSING: &str = "E_FILE_MISSING";
 /// The setup helper bundled with this app lacks the verb asked for.
 pub const E_DEPLOY_TOO_OLD: &str = "E_DEPLOY_TOO_OLD";
 
+// ---- Publisher backup and restore (`publisher_backup`) ------------
+//
+// Tails never carry a typed word, a secret or file contents: command
+// failures are written to the log.
+
+/// The file does not start with the backup magic.
+pub const E_BACKUP_NOT_A_BACKUP: &str = "E_BACKUP_NOT_A_BACKUP";
+/// Truncated, extended, corrupted, out-of-bounds or invalid inside.
+pub const E_BACKUP_DAMAGED: &str = "E_BACKUP_DAMAGED";
+/// Made by a newer format, cipher or database than this build knows.
+pub const E_BACKUP_NEWER: &str = "E_BACKUP_NEWER";
+/// The typed words are not twelve list words with a valid checksum.
+pub const E_BACKUP_WORDS_INVALID: &str = "E_BACKUP_WORDS_INVALID";
+/// Valid words, but not the ones this file was made with.
+pub const E_BACKUP_WRONG_WORDS: &str = "E_BACKUP_WRONG_WORDS";
+/// No recovery words have been created (or confirmed) on this phone.
+pub const E_BACKUP_NO_WORDS: &str = "E_BACKUP_NO_WORDS";
+/// A confirm answer is not the word at that position.
+pub const E_BACKUP_WORDS_MISMATCH: &str = "E_BACKUP_WORDS_MISMATCH";
+/// There is no publisher data to back up.
+pub const E_BACKUP_NOTHING: &str = "E_BACKUP_NOTHING";
+/// A live relay's signing key cannot be read; the tail names the relay id.
+pub const E_BACKUP_SECRET_UNREADABLE: &str = "E_BACKUP_SECRET_UNREADABLE";
+/// The backup file could not be written, saved or handed over.
+pub const E_BACKUP_SAVE_FAILED: &str = "E_BACKUP_SAVE_FAILED";
+/// This phone has publisher data and no replace confirmation was given.
+pub const E_RESTORE_WOULD_REPLACE: &str = "E_RESTORE_WOULD_REPLACE";
+/// The replace confirmation was for a state that has since changed.
+pub const E_RESTORE_STATE_CHANGED: &str = "E_RESTORE_STATE_CHANGED";
+/// A restore committed but could not be finished.
+pub const E_RESTORE_UNFINISHED: &str = "E_RESTORE_UNFINISHED";
+/// The chosen file could not be opened or read (permission, a picked
+/// copy already swept, an I/O error): not a judgement on its contents.
+pub const E_BACKUP_READ_FAILED: &str = "E_BACKUP_READ_FAILED";
+/// The restore could not be written to this phone's database (disk
+/// full, busy); its single transaction rolled back, nothing changed.
+pub const E_RESTORE_FAILED: &str = "E_RESTORE_FAILED";
+/// A new hosting key was refused by the hosting company, or opens an
+/// account without this relay's server; the stored key was kept.
+pub const E_HOSTING_KEY_REJECTED: &str = "E_HOSTING_KEY_REJECTED";
+pub const E_HOSTING_KEY_WRONG_ACCOUNT: &str = "E_HOSTING_KEY_WRONG_ACCOUNT";
+
 /// Build a [`WizardError::Coded`] from a code constant and a tail.
 pub(crate) fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
     WizardError::Coded(format!("{code}: {tail}"))
@@ -345,6 +387,10 @@ pub struct WizardCtx {
 /// getting that distinction wrong would either hide a recoverable
 /// state behind a dead end or demand a PIN that no longer exists.
 pub(crate) fn custody_get(ctx: &WizardCtx, alias: &str) -> Result<Zeroizing<Vec<u8>>> {
+    // A restore that committed its rows but has not written every key
+    // and file yet: no publisher operation may run on half-written
+    // state. Finishes it here once, or refuses.
+    crate::publisher_backup::ensure_restore_finished(ctx)?;
     match ctx.custody.get(alias) {
         Ok(b) => Ok(Zeroizing::new(b)),
         Err(e) => Err(map_custody_err(ctx, alias, e)),
@@ -371,7 +417,7 @@ pub(crate) fn custody_get_string(ctx: &WizardCtx, alias: &str) -> Result<Zeroizi
     Ok(Zeroizing::new(s))
 }
 
-fn map_custody_err(ctx: &WizardCtx, alias: &str, e: CustodyError) -> WizardError {
+pub(crate) fn map_custody_err(ctx: &WizardCtx, alias: &str, e: CustodyError) -> WizardError {
     match e {
         CustodyError::Locked => coded(
             E_CUSTODY_LOCKED,
@@ -674,6 +720,16 @@ pub fn store_cloud_token(
         // UPDATE: the row exists; re-seal the token under its
         // canonical alias and re-point the provider if it changed.
         let row = ctx.db.get(id)?;
+        // A relay that exists lives at one hosting company: its record
+        // holds the server id, address and management port, which the
+        // PreProvisionRecord round trip below would drop. A different
+        // provider for it is a mistake, never a re-point.
+        if row.cloud_provider != provider && row.status != "pre-provision" {
+            return Err(WizardError::Validation(format!(
+                "relay {id} lives at {}, not {provider}; its key cannot move to another company",
+                row.cloud_provider
+            )));
+        }
         let token_alias = cloud_alias(id);
         custody_put(ctx, &token_alias, token.as_bytes())?;
         ctx.db.update_token_alias(id, &token_alias)?;
@@ -708,6 +764,46 @@ pub fn store_cloud_token(
     Ok(id)
 }
 
+/// A relay that already holds a readable hosting key for `provider`,
+/// so a new relay can be started without pasting the key again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedCloudToken {
+    pub operator_id: i64,
+    /// The person's name for that relay; empty when they gave none.
+    pub nickname: String,
+}
+
+/// Which relay's saved hosting key a new relay at `provider` could
+/// reuse: the newest relay at that company that is not deleted and
+/// whose key custody can read right now. `None` when there is none.
+/// Reads no secret into the result.
+pub fn saved_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<Option<SavedCloudToken>> {
+    let mut rows = ctx.db.list()?;
+    rows.sort_by_key(|r| std::cmp::Reverse(r.id));
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.cloud_provider == provider && r.status != "decommissioned")
+        .find(|r| {
+            !r.cloud_token_keystore_alias.is_empty()
+                && custody_has(ctx, &r.cloud_token_keystore_alias)
+        })
+        .map(|r| SavedCloudToken {
+            operator_id: r.id,
+            nickname: r.nickname,
+        }))
+}
+
+/// Start a new relay at `provider` with the hosting key another relay
+/// already holds. The key is copied inside custody under the new
+/// relay's own alias, so deleting either relay leaves the other's key
+/// alone, and it never passes through the UI.
+pub fn reuse_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<i64> {
+    let src = saved_cloud_token(ctx, provider)?.ok_or(WizardError::EmptyToken)?;
+    let row = ctx.db.get(src.operator_id)?;
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
+    store_cloud_token(ctx, provider, &token, None)
+}
+
 /// Seal the operator's Cloudflare API token under device custody.
 ///
 /// This lives here rather than inline in the Tauri shim so it goes
@@ -738,7 +834,32 @@ pub fn list_existing_servers(
         .cli
         .run_list_servers(&row.cloud_provider, token.as_str())
         .map_err(|e| WizardError::Pricing(e.to_string()))?;
-    Ok(servers)
+    // "Use a server I already own" wipes the server it is given. A
+    // server another of this person's relays runs on is never a
+    // candidate: choosing it would destroy that relay (seen offered on
+    // the phone 2026-11-19, PB-26).
+    let mut taken_ids = std::collections::HashSet::new();
+    let mut taken_ips = std::collections::HashSet::new();
+    for other in ctx.db.list()? {
+        if other.id == operator_id || other.status == "decommissioned" {
+            continue;
+        }
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(&other.operator_record_json)
+        else {
+            continue;
+        };
+        for (key, set) in [("server_id", &mut taken_ids), ("public_ip", &mut taken_ips)] {
+            if let Some(v) = rec.get(key).and_then(|v| v.as_str()) {
+                if !v.trim().is_empty() {
+                    set.insert(v.trim().to_string());
+                }
+            }
+        }
+    }
+    Ok(servers
+        .into_iter()
+        .filter(|s| !taken_ids.contains(s.id.trim()) && !taken_ips.contains(s.public_ip.trim()))
+        .collect())
 }
 
 /// List available server types for the operator's cloud provider.
@@ -1590,6 +1711,10 @@ pub(crate) fn record_served_families(rec: &PreProvisionRecord) -> Vec<String> {
 /// List all operators (any status), fully populated for the relay
 /// list. Touches no secrets, so it is always safe to call on boot.
 pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
+    // Roll a committed-but-unfinished restore forward first. A failure
+    // is not fatal here: the list still renders, and every operation
+    // that needs a key refuses with E_RESTORE_UNFINISHED.
+    let _ = crate::publisher_backup::finish_pending_restore(ctx);
     let rows = ctx.db.list()?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1743,6 +1868,97 @@ pub struct DestroyReport {
     /// reserved and billing; the same call again retries.
     #[serde(default)]
     pub retry_needed: bool,
+    /// PA-3: the relay's own server was gone, but the hosting account
+    /// still has a Daal server with this relay's name and this other
+    /// id. Nothing was deleted; the relay and its token were kept.
+    #[serde(default)]
+    pub other_server_id: String,
+    #[serde(default)]
+    pub other_server_name: String,
+}
+
+/// PA-3: the report for "another server with this relay's name is still
+/// there; Daal deleted nothing". The row and the token stay.
+pub(crate) fn named_server_report(cloud: DecommissionResult) -> Option<DestroyReport> {
+    let named = cloud.named_server.clone()?;
+    let mut warnings = cloud.warnings;
+    warnings.extend(cloud.bridge_notes);
+    Some(DestroyReport {
+        server_deleted: false,
+        ssh_key_deleted: cloud.ssh_key_deleted,
+        firewall_deleted: cloud.firewall_deleted,
+        local_removed: false,
+        warnings,
+        addresses: cloud.addresses,
+        retry_needed: false,
+        other_server_id: named.id,
+        other_server_name: named.name,
+    })
+}
+
+/// PA-1: what giving back one left address did.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ReleaseAddressResult {
+    pub address: String,
+    /// `released` | `in_use` | `not_daal` | `still_attached` | `release_failed`.
+    pub code: String,
+    /// Raw provider text; Details only.
+    #[serde(default)]
+    pub error: String,
+    /// What this relay still has reserved and billing afterwards.
+    pub still_billing: Vec<String>,
+}
+
+/// PA-1 `wizard_release_address`: give back one address a relay's
+/// card lists as still reserved, without touching the relay. Works on a
+/// relay that is still running (the teardown path never runs here).
+pub fn release_address(ctx: &WizardCtx, operator_id: i64, address: &str) -> Result<ReleaseAddressResult> {
+    let row = ctx.db.get(operator_id)?;
+    let listed = ctx.db.unreleased_addresses(operator_id)?;
+    let address = address.trim();
+    if address.is_empty() || !listed.iter().any(|a| a == address) {
+        return Err(WizardError::Validation(
+            "this address is not one this relay has left reserved".into(),
+        ));
+    }
+    if row.cloud_token_keystore_alias.is_empty() {
+        return Err(WizardError::EmptyToken);
+    }
+    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
+    let record_path =
+        crate::recipient_book::write_record_staging(ctx, operator_id, &row.operator_record_json)?;
+    let res = ctx.cli.run_release_address(crate::cli_bridge::ReleaseAddressArgs {
+        record_path: &record_path,
+        token: token.as_str(),
+        address,
+    });
+    let _ = std::fs::remove_file(&record_path);
+    let outcome = match res {
+        Ok(o) => o,
+        Err(e) if crate::cli_bridge::verb_unknown(&e) => {
+            return Err(coded(
+                E_DEPLOY_TOO_OLD,
+                "the setup helper bundled with this app cannot give back one address",
+            ))
+        }
+        Err(crate::cli_bridge::BridgeError::SubprocessFailed { rc: 3, stderr }) => {
+            return Err(coded(E_NOT_SUPPORTED, stderr.trim()))
+        }
+        Err(e) => return Err(map_deploy_err(e)),
+    };
+    let gone = matches!(outcome.code.as_str(), "released" | "in_use" | "not_daal");
+    let still: Vec<String> = if gone {
+        listed.into_iter().filter(|a| a != address).collect()
+    } else {
+        listed
+    };
+    ctx.db.set_unreleased_addresses(operator_id, &still)?;
+    Ok(ReleaseAddressResult {
+        address: address.to_string(),
+        code: outcome.code,
+        error: outcome.error,
+        still_billing: still,
+    })
 }
 
 /// Addresses a teardown could not give back: the IP when known, else
@@ -1827,6 +2043,12 @@ pub fn relay_destroy_with(
     // token, staged record — survives untouched for the retry.
     let cloud = destroy_cloud_resources(ctx, operator_id, &row, true, delete_own_server)?;
 
+    // PA-3: another Daal server with this relay's name is still there.
+    // Nothing was deleted; keep the row and its token.
+    if let Some(rep) = named_server_report(cloud.clone()) {
+        return Ok(rep);
+    }
+
     // The server is gone but an address Daal reserved is still reserved
     // and billing. Forgetting the relay now would forget the only
     // credential that can give it back, so the row stays — marked
@@ -1849,6 +2071,7 @@ pub fn relay_destroy_with(
             warnings,
             addresses: cloud.addresses,
             retry_needed: true,
+            ..Default::default()
         });
     }
 
@@ -1880,6 +2103,7 @@ pub fn relay_destroy_with(
         warnings,
         addresses: cloud.addresses,
         retry_needed: false,
+        ..Default::default()
     })
 }
 
@@ -4241,15 +4465,15 @@ pub fn list_rotation_history(
     Ok(ctx.db.list_signed_sbps_history(operator_id)?)
 }
 
-fn cloud_alias(id: i64) -> String {
+pub(crate) fn cloud_alias(id: i64) -> String {
     format!("daal.cloud.{id}.token")
 }
 
-fn pub_alias(id: i64) -> String {
+pub(crate) fn pub_alias(id: i64) -> String {
     format!("daal.publisher.{id}.priv")
 }
 
-fn cloudflare_alias(id: i64) -> String {
+pub(crate) fn cloudflare_alias(id: i64) -> String {
     format!("daal.cloudflare.{id}.token")
 }
 
@@ -4348,7 +4572,7 @@ fn publisher_aliases(ctx: &WizardCtx) -> Result<Vec<String>> {
 
 /// Probe custody for real rather than asking it whether it feels ready.
 /// Returns `Ok(())` only if a value round-trips through the backend.
-fn probe_custody(ctx: &WizardCtx) -> std::result::Result<(), CustodyError> {
+pub(crate) fn probe_custody(ctx: &WizardCtx) -> std::result::Result<(), CustodyError> {
     // unlock(None) forces the DWK to materialise, which is what
     // surfaces an Android JNI / libsecret failure eagerly.
     ctx.custody.unlock(None)?;
@@ -4426,6 +4650,7 @@ pub fn custody_unlock(ctx: &WizardCtx, passphrase: &str) -> Result<PublisherCust
 /// UI shows no banner, no sheet and no prompt. That silence is the
 /// entire point of removing the PIN.
 pub fn custody_status(ctx: &WizardCtx) -> Result<PublisherCustodyStatus> {
+    let _ = crate::publisher_backup::finish_pending_restore(ctx);
     let (ok, error) = match probe_custody(ctx) {
         Ok(()) => (true, String::new()),
         // The probe alias is a scratch value, never a stored secret,
@@ -4998,6 +5223,38 @@ mod tests {
         // No token at all → provider step.
         let row = wizard_step_row("draft", "", "{}", "", None);
         assert_eq!(derive_wizard_step(&row), "provider");
+    }
+
+    #[test]
+    fn a_new_relay_can_reuse_the_hosting_key_another_relay_saved() {
+        let (ctx, _dir) = ctx(1_700_000_000);
+        assert_eq!(saved_cloud_token(&ctx, "hetzner").unwrap(), None);
+        assert!(matches!(
+            reuse_cloud_token(&ctx, "hetzner"),
+            Err(WizardError::EmptyToken)
+        ));
+
+        let first = store_cloud_token(&ctx, "hetzner", "tok-abc", None).unwrap();
+        // A key for one company is never offered for another.
+        assert_eq!(saved_cloud_token(&ctx, "vultr").unwrap(), None);
+        assert_eq!(
+            saved_cloud_token(&ctx, "hetzner").unwrap().map(|s| s.operator_id),
+            Some(first)
+        );
+
+        let second = reuse_cloud_token(&ctx, "hetzner").unwrap();
+        assert_ne!(second, first);
+        // The new relay holds its own copy under its own alias.
+        let got = custody_get_string(&ctx, &cloud_alias(second)).unwrap();
+        assert_eq!(got.as_str(), "tok-abc");
+        ctx.custody.forget(&cloud_alias(first)).unwrap();
+        let still = custody_get_string(&ctx, &cloud_alias(second)).unwrap();
+        assert_eq!(still.as_str(), "tok-abc");
+        // With the first relay's key gone, the newest readable one is offered.
+        assert_eq!(
+            saved_cloud_token(&ctx, "hetzner").unwrap().map(|s| s.operator_id),
+            Some(second)
+        );
     }
 
     #[test]

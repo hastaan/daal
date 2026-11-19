@@ -629,7 +629,8 @@ pub struct AddressOutcome {
     pub ip: String,
     #[serde(default)]
     pub released: bool,
-    /// `released` | `not_daal` | `still_attached` | `release_failed`.
+    /// `released` | `not_daal` | `still_attached` | `release_failed` |
+    /// `in_use` (release-address only: the live relay uses it).
     #[serde(default)]
     pub code: String,
     /// Raw provider text. Details only.
@@ -803,6 +804,12 @@ pub trait CliRunner: Send + Sync {
     /// leaves the *server* alive is an `Err`, because that is the one
     /// the caller must not treat as "safe to forget this relay".
     fn run_decommission(&self, args: DecommissionArgs<'_>) -> Result<DecommissionResult>;
+
+    /// PA-1: `daal-deploy release-address`. Exit 0 carries `released`,
+    /// `not_daal`, `still_attached` or `in_use`; exit 6 `release_failed`
+    /// (also a report, read from stdout). Exit 3 is "this hosting
+    /// company cannot" and exit 2 an unknown verb or flag: both errors.
+    fn run_release_address(&self, args: ReleaseAddressArgs<'_>) -> Result<AddressOutcome>;
 
     /// FRP-4b: invoke `daal-deploy bind-and-sign`, piping the
     /// 64-byte privkey through stdin (never to disk). Streams
@@ -1651,6 +1658,30 @@ pub struct DecommissionResult {
     /// addresses; raw otherwise.
     #[serde(default, deserialize_with = "null_default")]
     pub preserved: Vec<String>,
+    /// PA-3: the given server id was gone, but the account still has a
+    /// Daal-labelled server with this relay's derived name and another
+    /// id. Nothing was deleted (exit 7).
+    #[serde(default)]
+    pub named_server: Option<NamedServer>,
+}
+
+/// A server found by the relay's derived name (PA-3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct NamedServer {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `daal-deploy release-address` (PA-1): give back ONE address Daal
+/// reserved for a relay that is still running.
+#[derive(Debug, Clone)]
+pub struct ReleaseAddressArgs<'a> {
+    pub record_path: &'a Path,
+    pub token: &'a str,
+    /// The provider id or the IP.
+    pub address: &'a str,
 }
 
 /// An old helper that could not be sent `--release-addresses` left every
@@ -2689,7 +2720,11 @@ impl CliRunner for SubprocessRunner {
         // Exit 6: the server is gone, a Daal address is still reserved.
         // That is a REPORT, not a failure: the JSON on stdout says which.
         let exit6 = release && out.status.code() == Some(6);
-        if !out.status.success() && !exit6 {
+        // Exit 7 (PA-3): the given server was gone but another server
+        // with this relay's name and Daal's labels is still there; the
+        // helper deleted nothing else. Also a report.
+        let exit7 = sent_json_flag && out.status.code() == Some(7);
+        if !out.status.success() && !exit6 && !exit7 {
             return Err(BridgeError::SubprocessFailed {
                 rc: out.status.code().unwrap_or(-1),
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
@@ -2712,6 +2747,19 @@ impl CliRunner for SubprocessRunner {
             Ok(res) => return Ok(finish(res)),
             Err(e) => e,
         };
+        if exit7 {
+            if let Some(res) = body
+                .lines()
+                .rev()
+                .find_map(|l| serde_json::from_str::<DecommissionResult>(l.trim()).ok())
+            {
+                return Ok(finish(res));
+            }
+            return Err(BridgeError::SubprocessFailed {
+                rc: 7,
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            });
+        }
         // The verb may narrate before it reports; take the last
         // non-empty line as the result document.
         if let Some(last) = body.lines().rev().find(|l| !l.trim().is_empty()) {
@@ -2737,6 +2785,46 @@ impl CliRunner for SubprocessRunner {
             }));
         }
         Err(BridgeError::Parse(parse_err))
+    }
+
+    fn run_release_address(&self, args: ReleaseAddressArgs<'_>) -> Result<AddressOutcome> {
+        let tmp = tempfile_with_secret(args.token)?;
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("release-address")
+            .arg("--record-file")
+            .arg(args.record_path)
+            .arg("--token-file")
+            .arg(tmp.path())
+            .arg("--address")
+            .arg(args.address)
+            .arg("--json");
+        let out = cmd
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        drop(tmp);
+        let out = match out {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(BridgeError::BinaryMissing),
+            Err(e) => return Err(BridgeError::Io(e)),
+        };
+        let code = out.status.code().unwrap_or(-1);
+        if code == 0 || code == 6 {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if let Some(o) = stdout
+                .lines()
+                .rev()
+                .find_map(|l| serde_json::from_str::<AddressOutcome>(l.trim()).ok())
+            {
+                return Ok(o);
+            }
+        }
+        Err(BridgeError::SubprocessFailed {
+            rc: code,
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        })
     }
 
     fn run_bind_and_sign(
@@ -3586,6 +3674,12 @@ pub struct MockRunner {
     /// instead of succeeding. Tests use it to prove a cloud failure
     /// leaves the local relay record intact.
     pub decommission_error: Mutex<Option<String>>,
+    /// PA-1: every `release-address` asked: (record json, token, address).
+    pub release_address_calls: Mutex<Vec<(String, String, String)>>,
+    /// The outcome per address; default `released`.
+    pub release_address_results: Mutex<std::collections::HashMap<String, AddressOutcome>>,
+    /// Fail the verb: (exit code, stderr).
+    pub release_address_error: Mutex<Option<(i32, String)>>,
     /// FRP-9: recorded CDN-rotate-path calls.
     pub cdn_rotate_path_calls: Mutex<Vec<MockCdnRotatePathCall>>,
     /// FRP-9: recorded CDN-rotate-hostname calls.
@@ -3667,6 +3761,11 @@ pub struct MockRunner {
     /// `relay-health`: calls, canned answer, injected failure.
     pub relay_health_calls: Mutex<Vec<bool>>,
     pub relay_health_result: Mutex<Option<RelayHealthReport>>,
+    /// What `run_list_servers` answers: `None` = an empty account,
+    /// `Some(Err(text))` = the provider refused (a bad key).
+    pub list_servers_result: Mutex<Option<std::result::Result<Vec<ExistingServer>, String>>>,
+    /// How many `run_list_servers` calls were made (never the token).
+    pub list_servers_calls: Mutex<usize>,
     pub relay_health_error: Mutex<Option<(i32, String)>>,
 }
 
@@ -3819,6 +3918,9 @@ impl MockRunner {
             decommission_result: Mutex::new(None),
             assign_fip_error: Mutex::new(None),
             decommission_error: Mutex::new(None),
+            release_address_calls: Mutex::new(Vec::new()),
+            release_address_results: Mutex::new(std::collections::HashMap::new()),
+            release_address_error: Mutex::new(None),
             cdn_rotate_path_calls: Mutex::new(Vec::new()),
             cdn_rotate_hostname_calls: Mutex::new(Vec::new()),
             cdn_rotate_origin_calls: Mutex::new(Vec::new()),
@@ -3852,6 +3954,8 @@ impl MockRunner {
             renew_fail_names: Mutex::new(Default::default()),
             relay_health_calls: Mutex::new(Vec::new()),
             relay_health_result: Mutex::new(None),
+            list_servers_result: Mutex::new(None),
+            list_servers_calls: Mutex::new(0),
             relay_health_error: Mutex::new(None),
         }
     }
@@ -4023,7 +4127,12 @@ impl MockRunner {
 
 impl CliRunner for MockRunner {
     fn run_list_servers(&self, _provider: &str, _token: &str) -> Result<Vec<ExistingServer>> {
-        Ok(vec![])
+        *self.list_servers_calls.lock().unwrap() += 1;
+        match self.list_servers_result.lock().unwrap().clone() {
+            None => Ok(vec![]),
+            Some(Ok(v)) => Ok(v),
+            Some(Err(stderr)) => Err(BridgeError::SubprocessFailed { rc: 1, stderr }),
+        }
     }
 
     fn run_list_server_types(
@@ -4660,6 +4769,29 @@ impl CliRunner for MockRunner {
             firewall_deleted: true,
             ..Default::default()
         })
+    }
+
+    fn run_release_address(&self, args: ReleaseAddressArgs<'_>) -> Result<AddressOutcome> {
+        self.release_address_calls.lock().unwrap().push((
+            std::fs::read_to_string(args.record_path).unwrap_or_default(),
+            args.token.to_string(),
+            args.address.to_string(),
+        ));
+        if let Some((rc, stderr)) = self.release_address_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
+        Ok(self
+            .release_address_results
+            .lock()
+            .unwrap()
+            .get(args.address)
+            .cloned()
+            .unwrap_or(AddressOutcome {
+                id: args.address.to_string(),
+                released: true,
+                code: "released".into(),
+                ..Default::default()
+            }))
     }
 
     fn run_bind_and_sign(
@@ -5644,6 +5776,70 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    /// PA-3: exit 7 is a report (another Daal server with this relay's
+    /// name remains; nothing deleted), read from stdout, not a failure.
+    #[cfg(unix)]
+    #[test]
+    fn decommission_exit_7_reports_the_named_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, "{}").unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            r#"echo '{"server_deleted":false,"ssh_key_deleted":false,"firewall_deleted":false,"named_server":{"id":"999","name":"daal-fsn1-ab"},"warnings":["kept"]}'
+exit 7"#,
+        );
+        let got = SubprocessRunner::new(Some(bin))
+            .run_decommission(DecommissionArgs { record_path: &rec, token: "tok", release_addresses: true })
+            .unwrap();
+        assert!(!got.server_deleted);
+        assert_eq!(got.named_server, Some(NamedServer { id: "999".into(), name: "daal-fsn1-ab".into() }));
+        assert!(!got.retry_needed);
+        // Exit 7 without a report is still a failure.
+        let bin = fake_deploy(dir.path(), "echo 'lookup failed' >&2\nexit 7");
+        assert!(SubprocessRunner::new(Some(bin))
+            .run_decommission(DecommissionArgs { record_path: &rec, token: "tok", release_addresses: true })
+            .is_err());
+    }
+
+    /// PA-1: `release-address` reads its one outcome on exit 0 and 6, and
+    /// passes exit 3 (unsupported) and exit 2 (unknown verb) as errors.
+    /// The token goes through a file, never the command line.
+    #[cfg(unix)]
+    #[test]
+    fn release_address_reads_its_outcome_and_keeps_the_token_off_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, "{}").unwrap();
+        let log = dir.path().join("argv.log");
+        let run = |script: &str| {
+            let bin = fake_deploy(dir.path(), script);
+            SubprocessRunner::new(Some(bin)).run_release_address(ReleaseAddressArgs {
+                record_path: &rec,
+                token: "tok-SECRET",
+                address: "198.51.100.10",
+            })
+        };
+        let ok = run(&format!(
+            "echo \"$*\" >> '{}'\necho '{{\"id\":\"43\",\"ip\":\"198.51.100.10\",\"released\":true,\"code\":\"released\"}}'",
+            log.display()
+        ))
+        .unwrap();
+        assert_eq!((ok.code.as_str(), ok.released), ("released", true));
+        let argv = std::fs::read_to_string(&log).unwrap();
+        assert!(argv.contains("release-address") && argv.contains("--address 198.51.100.10"), "{argv}");
+        assert!(argv.contains("--token-file") && !argv.contains("tok-SECRET"), "{argv}");
+        let failed = run(
+            "echo '{\"id\":\"43\",\"code\":\"release_failed\",\"error\":\"409 locked\"}'\nexit 6",
+        )
+        .unwrap();
+        assert_eq!(failed.code, "release_failed");
+        let e = run("echo 'not supported' >&2\nexit 3").unwrap_err();
+        assert!(matches!(e, BridgeError::SubprocessFailed { rc: 3, .. }));
+        let e = run("echo 'unknown subcommand \"release-address\"' >&2\nexit 2").unwrap_err();
+        assert!(verb_unknown(&e));
     }
 
     /// The seam itself. The test above uses a hand-written one-liner;

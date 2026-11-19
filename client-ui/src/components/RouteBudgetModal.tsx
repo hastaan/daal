@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
+import { useBack } from '../lib/useBack';
 import type { RouteDisplayRow } from '../contract/D2Contract';
 
 interface Props {
@@ -32,8 +33,13 @@ export default function RouteBudgetModal({ t, route, onClose, onSaved }: Props) 
         }
     };
 
+    // Back is the same close as a tap outside.
+    useBack(true, onClose);
+
     return (
         <div
+            role="dialog"
+            aria-modal="true"
             onClick={onClose}
             style={{
                 position: 'fixed',

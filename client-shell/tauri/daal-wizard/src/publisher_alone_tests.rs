@@ -593,6 +593,93 @@ fn an_address_that_could_not_be_released_keeps_the_relay_for_a_retry() {
     assert!(f.ctx.db.get(id).is_err());
 }
 
+// ------------------------------------------------- wave 2: PA-1, PA-3
+
+/// PA-1: a relay that is still running gives back each left address on
+/// its own, through `release-address`, and never through a teardown.
+#[test]
+fn a_left_address_on_a_live_relay_is_given_back_on_its_own() {
+    let f = fx();
+    let id = provisioned(&f);
+    let left = vec!["198.51.100.9".to_string(), "198.51.100.10".to_string(), "44".to_string(),
+                    "45".to_string(), "46".to_string()];
+    f.ctx.db.set_unreleased_addresses(id, &left).unwrap();
+    {
+        let mut r = f.mock.release_address_results.lock().unwrap();
+        let o = |code: &str| AddressOutcome { id: "x".into(), code: code.into(), error: if code == "release_failed" { "409 locked".into() } else { String::new() }, ..Default::default() };
+        r.insert("198.51.100.10".into(), o("in_use"));
+        r.insert("44".into(), o("not_daal"));
+        r.insert("45".into(), o("still_attached"));
+        r.insert("46".into(), o("release_failed"));
+    }
+    let r = crate::commands::release_address(&f.ctx, id, "198.51.100.9").unwrap();
+    assert_eq!(r.code, "released");
+    assert_eq!(r.still_billing.len(), 4);
+    let r = crate::commands::release_address(&f.ctx, id, "198.51.100.10").unwrap();
+    assert_eq!(r.code, "in_use");
+    let r = crate::commands::release_address(&f.ctx, id, "44").unwrap();
+    assert_eq!(r.code, "not_daal");
+    let r = crate::commands::release_address(&f.ctx, id, "45").unwrap();
+    assert_eq!(r.code, "still_attached");
+    let r = crate::commands::release_address(&f.ctx, id, "46").unwrap();
+    assert_eq!((r.code.as_str(), r.error.as_str()), ("release_failed", "409 locked"));
+    assert_eq!(r.still_billing, vec!["45".to_string(), "46".to_string()]);
+    assert_eq!(f.ctx.db.unreleased_addresses(id).unwrap(), r.still_billing);
+    assert!(!serde_json::to_string(&r).unwrap().contains(TOKEN));
+    let calls = f.mock.release_address_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 5);
+    assert!(calls.iter().all(|(rec, tok, _)| rec.contains("\"123\"") && tok == TOKEN));
+    assert!(f.mock.decommission_calls.lock().unwrap().is_empty(), "never a teardown");
+    assert_eq!(f.ctx.db.get(id).unwrap().status, "provisioned");
+    assert!(!f.ctx.staging_dir.join(format!("{id}.record.json")).exists());
+
+    // Only listed addresses; old helper; unsupported provider.
+    assert!(matches!(crate::commands::release_address(&f.ctx, id, "203.0.113.7"), Err(WizardError::Validation(_))));
+    assert_eq!(f.mock.release_address_calls.lock().unwrap().len(), 5);
+    *f.mock.release_address_error.lock().unwrap() = Some((2, "unknown subcommand \"release-address\"".into()));
+    let e = crate::commands::release_address(&f.ctx, id, "45").unwrap_err().to_string();
+    assert!(e.starts_with("E_DEPLOY_TOO_OLD"), "{e}");
+    *f.mock.release_address_error.lock().unwrap() = Some((3, "this hosting company cannot".into()));
+    let e = crate::commands::release_address(&f.ctx, id, "45").unwrap_err().to_string();
+    assert!(e.starts_with("E_NOT_SUPPORTED"), "{e}");
+    assert_eq!(f.ctx.db.unreleased_addresses(id).unwrap().len(), 2, "a failure changes nothing");
+}
+
+/// PA-3: the relay's own server is gone but another Daal server with its
+/// name remains: nothing deleted, the row and the token kept, the other
+/// server's id reported.
+#[test]
+fn another_server_with_the_relays_name_keeps_the_relay() {
+    let named = DecommissionResult {
+        server_deleted: false,
+        ssh_key_deleted: false,
+        firewall_deleted: false,
+        named_server: Some(crate::cli_bridge::NamedServer { id: "999".into(), name: "daal-fsn1-0011223344556677".into() }),
+        warnings: vec!["kept".into()],
+        ..Default::default()
+    };
+    let f = fx();
+    let id = provisioned(&f);
+    *f.mock.decommission_result.lock().unwrap() = Some(named.clone());
+    let rep = relay_destroy(&f.ctx, id, true).unwrap();
+    assert_eq!((rep.other_server_id.as_str(), rep.other_server_name.as_str()), ("999", "daal-fsn1-0011223344556677"));
+    assert!(!rep.server_deleted && !rep.retry_needed && !rep.local_removed);
+    let row = f.ctx.db.get(id).unwrap();
+    assert_eq!(row.status, "provisioned", "the row is kept as it was");
+    assert_eq!(&*crate::commands::custody_get_string(&f.ctx, &row.cloud_token_keystore_alias).unwrap(), TOKEN);
+
+    let g = fx();
+    let id = pre_provision(&g, TOKEN);
+    let j = jpath(&g, id);
+    std::fs::write(&j, KILLED_AFTER_SERVER).unwrap();
+    *g.mock.decommission_result.lock().unwrap() = Some(named);
+    let rep = setup_remove_server(&g.ctx, id).unwrap();
+    assert_eq!(rep.other_server_id, "999");
+    assert!(!rep.server_deleted && !rep.retry_needed);
+    assert!(j.exists(), "the journal is kept");
+    assert!(g.ctx.db.get(id).is_ok());
+}
+
 #[test]
 fn a_not_daal_address_does_not_block_removal() {
     let f = fx();
@@ -917,3 +1004,40 @@ fn one_persons_file_is_handed_out_only_while_they_are_on_the_relay() {
     let e = copy_pasteable(&f.ctx, p.op, "recipient:abc").unwrap_err();
     assert!(matches!(e, WizardError::Validation(_)));
 }
+
+#[test]
+fn a_new_relay_is_never_offered_the_server_another_relay_runs_on() {
+    use crate::cli_bridge::ExistingServer;
+    use crate::commands::{list_existing_servers, reuse_cloud_token};
+    let f = fx();
+    let live = provisioned(&f); // runs on server 123 at 203.0.113.7
+    let srv = |id: &str, ip: &str| ExistingServer {
+        id: id.into(),
+        name: format!("srv-{id}"),
+        status: "running".into(),
+        server_type: "cx22".into(),
+        region: "fsn1".into(),
+        public_ip: ip.into(),
+        public_ipv6: String::new(),
+    };
+    *f.mock.list_servers_result.lock().unwrap() = Some(Ok(vec![
+        srv("123", "203.0.113.7"),
+        srv("999", "203.0.113.7"), // same address under another id: still the live relay's
+        srv("555", "198.51.100.50"),
+    ]));
+    let fresh = reuse_cloud_token(&f.ctx, "hetzner").unwrap();
+    let offered: Vec<String> = list_existing_servers(&f.ctx, fresh)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(offered, vec!["555".to_string()]);
+    // The relay that runs on it still sees its own server.
+    let own: Vec<String> = list_existing_servers(&f.ctx, live)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(own.contains(&"123".to_string()));
+}
+

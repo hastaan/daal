@@ -45,6 +45,9 @@ pub mod phase;
 // an interrupted setup and checking the hosting account, the health
 // check, and renewing everyone's files after a rebuild.
 pub mod provision_journal;
+// Backup and restore of everything a publisher needs to carry on from
+// another phone: one file, encrypted under twelve recovery words.
+pub mod publisher_backup;
 pub mod publisher_key;
 pub mod recipient_book;
 pub mod recipient_identity;

@@ -602,3 +602,224 @@ fn d1_the_account_check_finds_and_deletes_a_server_another_phone_stranded() {
     assert_eq!(fips[0]["id"], theirs["id"]);
     assert_eq!(len(&st, "unmodelled"), 0, "{st:#}");
 }
+
+// ======================================================= backup wave
+//
+// The backup wave end to end: one store is "phone A", a second store
+// with its own custody stub (its own binding salt, so A's wrapped keys
+// cannot open there) is "phone B". The backup file is the only thing
+// that crosses between them.
+
+use daal_wizard::publisher_backup as pb;
+
+fn users_on(st: &Value) -> Vec<String> {
+    let mut u: Vec<String> =
+        server_of(st)["users"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    u.sort();
+    u
+}
+
+#[test]
+fn bk_a_backup_restored_on_an_empty_phone_keeps_serving_the_family() {
+    let Some(w) = World::start() else { return };
+    let a = w.phone("phone-a");
+    let op = provisioned(&w, &a);
+    let mut people = Vec::new();
+    for n in ["Bahar", "Dara", "Sima"] {
+        let (_p, addr) = person(&w, n);
+        people.push(recipient_provision(&a, op, &addr, n).expect("add a person"));
+    }
+    let removed = recipient_revoke(&a, op, people[1].id).expect("remove Dara");
+    let row_a = a.db.get(op).unwrap();
+
+    // Phone A: recovery words, confirmed, then the backup file.
+    let words = pb::words_new(&a).unwrap().words;
+    assert_eq!(words.len(), 12);
+    let answers: Vec<pb::WordAnswer> =
+        [0u32, 6, 11].iter().map(|&i| pb::WordAnswer { index: i, word: words[i as usize].clone() }).collect();
+    pb::words_confirm(&a, &answers).expect("confirm the words");
+    let made = pb::backup_make_file(&a, None).expect("make the backup");
+    pb::backup_mark_made(&a, &made).unwrap();
+    let st_a = pb::backup_status(&a).unwrap();
+    assert!(st_a.last_backup_at_unix > 0 && !st_a.stale, "{st_a:?}");
+    let bytes = std::fs::read(&made.path).unwrap();
+    for secret in [TOKEN, row_a.publisher_pub_hex.as_str(), "Bahar", "Sima"] {
+        assert!(!bytes.windows(secret.len()).any(|x| x == secret.as_bytes()), "{secret:?} is readable in the file");
+    }
+
+    // Phone B: freshly installed, but it is also someone's own phone.
+    let b = w.phone("phone-b");
+    let b_ident = daal_wizard::recipient_identity::get_or_create(&b).unwrap();
+    let picked = b.staging_dir.join("picked");
+    std::fs::create_dir_all(&picked).unwrap();
+    let file = picked.join("x.bin");
+    std::fs::copy(&made.path, &file).unwrap();
+    assert!(pb::backup_inspect(&b, &file).unwrap().existing.is_none(), "an empty phone needs no replace");
+    let typed = words.join(" ");
+    let pv = pb::backup_open(&b, &file, &typed).expect("open the backup");
+    assert!(pv.replace.is_none());
+    assert_eq!(pv.contents.relays.len(), 1);
+    assert_eq!(pv.contents.relays[0].people, 2, "{pv:?}");
+    assert_eq!(pv.contents.relays[0].removed_people, 1, "{pv:?}");
+    assert!(pv.contents.includes_hosting_key);
+    pb::backup_restore(&b, &file, &typed, None).expect("restore");
+
+    let row_b = b.db.get(op).unwrap();
+    assert_eq!(row_b.publisher_pub_hex, row_a.publisher_pub_hex);
+    assert_eq!(row_b.mgmt_tls_fingerprint, row_a.mgmt_tls_fingerprint);
+    assert_eq!(row_b.helper_ip, "", "phone B finds its own address");
+    assert_eq!(daal_wizard::recipient_identity::get_or_create(&b).unwrap().address, b_ident.address, "B's own identity is untouched");
+    let st_b = pb::backup_status(&b).unwrap();
+    assert!(st_b.restore_notice.is_some() && !st_b.restore_pending && !st_b.stale, "{st_b:?}");
+
+    // From phone B: the health check (after the address detection the
+    // relay page does when the stored one is empty).
+    let e = daal_wizard::relay_health::relay_health(&b, op, true).expect_err("no address yet");
+    assert!(e.to_string().starts_with("E_HELPER_IP_MISSING"), "the UI detects on this code: {e}");
+    set_helper_ip(&b, op, "127.0.0.1", "manual").unwrap();
+    let h = daal_wizard::relay_health::relay_health(&b, op, true).expect("health from phone B");
+    assert_eq!(h.overall, "working", "{h:#?}");
+    assert_eq!(h.management, "answers", "{h:#?}");
+    assert_eq!(h.keys_match, Some(true), "{h:#?}");
+    assert_eq!(h.people_missing, Some(0), "{h:#?}");
+
+    // A third person, added from phone B.
+    let (kian_phone, kian_addr) = person(&w, "Kian");
+    let kian = recipient_provision(&b, op, &kian_addr, "Kian").expect("add a person from phone B");
+    assert!(
+        people.iter().all(|p| p.name != kian.name),
+        "the name counter came along: {} is new",
+        kian.name
+    );
+    let mut want = vec![people[0].name.clone(), people[2].name.clone(), kian.name.clone()];
+    want.sort();
+    assert_eq!(users_on(&w.state()), want);
+    assert!(pb::backup_status(&b).unwrap().stale, "a new person makes the backup out of date");
+
+    // Kian's file, made on phone B, opens on Kian's phone and is signed
+    // by the relay's ORIGINAL publisher key.
+    let sent = kian_phone.staging_dir.join("from-b.sbpx");
+    std::fs::copy(&kian.sbpx_path, &sent).unwrap();
+    let plain = import_sbpx(&kian_phone, &sent).expect("only Kian's phone opens it");
+    verify_plain(&plain);
+    let sbp = bundle_rs::parse_sbp(&std::fs::read(&plain).unwrap()).unwrap();
+    assert_eq!(hex::encode(&sbp.publisher_pub), row_a.publisher_pub_hex, "signed by the key phone A made");
+
+    // The relay is rebuilt from phone B; one press renews everyone, and
+    // the person removed on phone A stays removed.
+    rotate_execute(
+        &b,
+        op,
+        RotateExecuteInput {
+            level: "L4".into(),
+            reason: "e2e".into(),
+            helper_ip: Some("127.0.0.1".into()),
+            new_region: Some("hel1".into()),
+            ..Default::default()
+        },
+        &mut |_| {},
+    )
+    .expect("rebuild the relay from phone B");
+    assert!(users_on(&w.state()).is_empty(), "a new server knows nobody");
+    let rep = daal_wizard::renew::renew_everyone(&b, op, &mut |_| {}).expect("renew from phone B");
+    assert!(rep.all_done, "{rep:#?}");
+    assert!(
+        rep.items.iter().all(|i| i.recipient_id != Some(removed.id) || i.status == "removed_from_server"),
+        "{rep:#?}"
+    );
+    assert_eq!(users_on(&w.state()), want, "exactly the people not removed are on the new server");
+    assert!(!users_on(&w.state()).contains(&removed.name));
+    assert_eq!(len(&w.state(), "unmodelled"), 0);
+}
+
+/// PA-1: an address an earlier try could not give back, on a relay that
+/// then finished, is given back on its own; the live server is not
+/// touched.
+#[test]
+fn pa1_an_address_left_by_an_earlier_try_is_given_back_and_the_relay_keeps_running() {
+    let Some(w) = World::start() else { return };
+    let ctx = w.phone("publisher");
+    let id = ready_to_build(&ctx);
+    let server_id = killed_setup(&w, &ctx, id);
+    let relay = server_of(&w.state())["name"].as_str().unwrap().to_string();
+    let sid: i64 = server_id.parse().unwrap();
+    let fip = w.http(
+        "POST",
+        "/reserve-address",
+        &serde_json::json!({"labels":{"managed-by":"daal-deploy","daal-relay":relay},"server":sid}).to_string(),
+    );
+    let ip = fip["ip"].as_str().unwrap().to_string();
+    w.http("POST", "/fail-fip-deletes?n=1", "");
+    let rep = setup_remove_server(&ctx, id).expect("delete what the setup made");
+    assert!(rep.server_deleted && rep.addresses.iter().any(|a| a.ip == ip && a.code == "release_failed"), "{rep:?}");
+
+    // Started again; this time the relay finishes.
+    provision_run(&ctx, id, "", &mut |_| {}).expect("set up again");
+    assert_eq!(ctx.db.get(id).unwrap().status, "provisioned");
+    let s = list_operators(&ctx).unwrap().into_iter().find(|s| s.id == id).unwrap();
+    assert_eq!(s.unreleased_addresses, vec![ip.clone()], "the card still says it costs money");
+    let st = w.state();
+    let live = server_of(&st)["id"].clone();
+    assert_eq!(len(&st, "floating_ips"), 1);
+
+    // "Try again" on the live relay.
+    let r = daal_wizard::commands::release_address(&ctx, id, &ip).expect("give the address back");
+    assert_eq!(r.code, "released", "{r:?}");
+    assert!(r.still_billing.is_empty(), "{r:?}");
+    let st = w.state();
+    assert_eq!(len(&st, "floating_ips"), 0, "{st:#}");
+    assert_eq!(server_of(&st)["id"], live, "the live server is still there");
+    assert_eq!(server_of(&st)["status"], "running", "{st:#}");
+    assert!(list_operators(&ctx).unwrap().into_iter().find(|s| s.id == id).unwrap().unreleased_addresses.is_empty());
+    let h = daal_wizard::relay_health::relay_health(&ctx, id, true).expect("health");
+    assert_eq!(h.overall, "working", "{h:#?}");
+    assert_eq!(len(&st, "unmodelled"), 0, "{st:#}");
+}
+
+/// PA-3: the recorded server id is stale (the server was deleted at the
+/// hosting company's website and a new one made there with the same
+/// name). Deleting the relay finds the server by its derived name and
+/// does NOT delete it unasked; the account check offers it, and it is
+/// deleted once the person picks it.
+#[test]
+fn pa3_a_stale_server_id_is_caught_by_the_relays_name_and_deleted_once_picked() {
+    let Some(w) = World::start() else { return };
+    let ctx = w.phone("publisher");
+    let op = provisioned(&w, &ctx);
+    let st = w.state();
+    let sid = server_of(&st)["id"].as_i64().unwrap();
+    let name = server_of(&st)["name"].as_str().unwrap().to_string();
+    let nid = w.http("POST", &format!("/servers/{sid}/replace-in-console"), "")["id"].as_i64().unwrap();
+    assert_ne!(nid, sid);
+
+    let rep = relay_destroy(&ctx, op, true).expect("a report, not a failure");
+    assert!(!rep.server_deleted, "{rep:?}");
+    assert_eq!(rep.other_server_id, nid.to_string(), "{rep:?}");
+    assert_eq!(rep.other_server_name, name, "{rep:?}");
+    assert!(!rep.local_removed && !rep.retry_needed, "{rep:?}");
+    assert!(rep.warnings.iter().all(|x| !x.contains("daal-deploy ")), "{rep:?}");
+    let st = w.state();
+    assert_eq!(server_of(&st)["id"].as_i64().unwrap(), nid, "nothing was deleted unasked");
+    let row = ctx.db.get(op).expect("the relay is kept");
+    assert!(!row.cloud_token_keystore_alias.is_empty(), "and its hosting key");
+
+    // "Check my hosting account".
+    let chk = daal_wizard::setup_recovery::account_check(&ctx).expect("account check");
+    let acc = &chk.accounts[0];
+    let item = acc.items.iter().find(|i| i.kind == "server" && i.id == nid.to_string()).expect("the server is listed");
+    assert!(item.can_delete && item.billing, "{item:?}");
+    assert_eq!(item.belongs_to_relay_id, Some(op), "{item:?}");
+    let picked = vec![daal_wizard::cli_bridge::ResourceRef { kind: "server".into(), id: item.id.clone() }];
+    let out = daal_wizard::setup_recovery::account_cleanup(&ctx, &acc.account_key, &picked).expect("cleanup");
+    assert!(out.outcomes.iter().any(|o| o.id == nid.to_string() && o.code == "deleted"), "{out:#?}");
+    assert_eq!(len(&w.state(), "servers"), 0);
+
+    // Deleting the relay again: nothing carries its name any more.
+    let rep = relay_destroy(&ctx, op, true).expect("delete the relay");
+    assert!(rep.server_deleted && rep.local_removed && rep.other_server_id.is_empty(), "{rep:?}");
+    assert!(list_operators(&ctx).unwrap().iter().all(|s| s.id != op));
+    let st = w.state();
+    assert_eq!(len(&st, "servers"), 0, "{st:#}");
+    assert_eq!(len(&st, "floating_ips"), 0, "{st:#}");
+    assert_eq!(len(&st, "unmodelled"), 0, "{st:#}");
+}

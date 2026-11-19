@@ -56,6 +56,11 @@ pub struct RelayHealth {
     pub keys_match: Option<bool>,
     pub people_missing: Option<i64>,
     pub everyone_missing: Option<bool>,
+    /// People (`r<n>`) the relay lets in that this phone's book has
+    /// never had: added on another phone after the backup this book was
+    /// restored from. `None` when the users list was not read.
+    #[serde(default)]
+    pub people_unknown: Option<i64>,
     pub ways: Vec<HealthWay>,
     /// Raw text, for a Details disclosure only.
     pub details: Vec<String>,
@@ -203,6 +208,7 @@ pub(crate) fn assess(
         keys_match,
         people_missing,
         everyone_missing,
+        people_unknown: None,
         ways,
         details,
     }
@@ -290,6 +296,41 @@ pub fn relay_health(ctx: &WizardCtx, operator_id: i64, force: bool) -> Result<Re
         },
     );
     health.details.extend(notes);
+    if let Some(users) = report.management.users.as_ref() {
+        let book: std::collections::BTreeSet<String> = ctx
+            .db
+            .list_recipients(operator_id)?
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        let numbered: Vec<(i64, &String)> = users
+            .iter()
+            .filter_map(|u| {
+                u.strip_prefix('r')
+                    .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|d| d.parse::<i64>().ok())
+                    .filter(|n| *n >= 1)
+                    .map(|n| (n, u))
+            })
+            .collect();
+        let unknown: Vec<&String> = numbered
+            .iter()
+            .filter(|(_, u)| !book.contains(*u))
+            .map(|(_, u)| *u)
+            .collect();
+        health.people_unknown = Some(unknown.len() as i64);
+        if !unknown.is_empty() {
+            health.details.push(format!(
+                "on the relay, not in this phone's list: {}",
+                unknown.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        // The next person added here must not take a name the relay
+        // already has, or the relay answers "already exists".
+        if let Some(max) = numbered.iter().map(|(n, _)| *n).max() {
+            ctx.db.advance_recipient_name_counter(operator_id, max)?;
+        }
+    }
     let json = serde_json::to_string(&health).unwrap_or_default();
     ctx.db.set_last_health(operator_id, &json, now)?;
     Ok(health)

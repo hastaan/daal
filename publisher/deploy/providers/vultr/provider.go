@@ -554,7 +554,7 @@ func (p *Provider) resolveInstance(ctx context.Context, rec *provider.OperatorRe
 		case err == nil:
 			return inst, nil
 		case errors.Is(err, errInstanceNotFound):
-			return nil, nil
+			return nil, p.checkDerivedLabelWhenIDGone(ctx, rec, relay, rep)
 		default:
 			rep.Warnf("could not read instance %s (%v) — nothing was deleted", rec.ServerID, err)
 			rep.Preserve("instance:" + rec.ServerID)
@@ -578,6 +578,35 @@ func (p *Provider) resolveInstance(ctx context.Context, rec *provider.OperatorRe
 		rep.Preserve("instance:" + relay)
 		return nil, fmt.Errorf("vultr: look up instance %q: %w", relay, err)
 	}
+}
+
+// checkDerivedLabelWhenIDGone is PA-3 for Vultr; see the Hetzner
+// adapter's checkDerivedNameWhenIDGone. rec.ServerID is provably gone:
+// an instance that still carries the derived label AND both ownership
+// tags under another id is reported (NamedServer, ServerDeleted false,
+// ErrNamedServerRemains) and not deleted. A failed or ambiguous label
+// lookup is an error. An instance with the label but without the tags
+// is not Daal's and changes nothing (today's behaviour).
+func (p *Provider) checkDerivedLabelWhenIDGone(ctx context.Context, rec *provider.OperatorRecord, relay string, rep *provider.DecommissionReport) error {
+	if relay == "" {
+		return nil
+	}
+	inst, err := p.c.InstanceByLabel(ctx, relay)
+	switch {
+	case errors.Is(err, errInstanceNotFound), err == nil && inst == nil:
+		return nil
+	case err != nil:
+		rep.Warnf("the recorded instance is gone, but whether another instance labelled %q exists could not be checked (%v) — nothing was deleted", relay, err)
+		rep.Preserve("instance:" + relay)
+		return fmt.Errorf("vultr: look up instance %q: %w", relay, err)
+	case inst.ID == rec.ServerID, !ownsInstance(inst, relay):
+		return nil
+	}
+	rep.ServerDeleted = false
+	rep.NamedServer = &provider.NamedServer{ID: inst.ID, Name: inst.Label}
+	rep.Preserve("server:" + inst.ID)
+	rep.Warnf("the recorded instance is already gone, but your hosting account still has another instance with this relay's label (%s, id %s); it was not deleted — check your hosting account", inst.Label, inst.ID)
+	return fmt.Errorf("vultr: %w: %s (%s)", provider.ErrNamedServerRemains, inst.ID, inst.Label)
 }
 
 // decommissionFirewall deletes this relay's firewall group when it is

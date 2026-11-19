@@ -780,10 +780,13 @@ describe('D4 delete releases every reserved address', () => {
         expect(unfinished.setupRemoveServer).toHaveBeenCalledWith(2);
         expect(unfinished.relayDestroy).not.toHaveBeenCalled();
         const working = mk();
+        // PA-1: a working relay's retry is a release of the address
+        // alone, never a delete of any kind.
         expect(await retryRelease({ id: 3, status: 'provisioned' }, working)).toBeNull();
         expect(working.relayDestroy).not.toHaveBeenCalled();
         expect(working.setupRemoveServer).not.toHaveBeenCalled();
-        expect(releaseRetryFor('provisioned')).toBeNull();
+        expect(releaseRetryFor('provisioned')).toBe('release_address');
+        expect(releaseRetryFor('rebuild_failed')).toBeNull();
         expect(listSource).toContain('releaseRetryFor(op.status)');
     });
 

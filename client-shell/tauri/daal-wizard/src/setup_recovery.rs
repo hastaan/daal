@@ -443,6 +443,11 @@ pub fn setup_remove_server(ctx: &WizardCtx, operator_id: i64) -> Result<DestroyR
         ));
     }
     let cloud = destroy_cloud_resources(ctx, operator_id, &row, true, false)?;
+    // PA-3: another Daal server with this relay's name is still there;
+    // nothing was deleted, the journal and the row stay.
+    if let Some(rep) = crate::commands::named_server_report(cloud.clone()) {
+        return Ok(rep);
+    }
     let still_billing = failed_addresses(&cloud);
     let retry_needed = cloud.retry_needed || !still_billing.is_empty();
     if retry_needed {
@@ -461,6 +466,7 @@ pub fn setup_remove_server(ctx: &WizardCtx, operator_id: i64) -> Result<DestroyR
         warnings,
         addresses: cloud.addresses,
         retry_needed,
+        ..Default::default()
     })
 }
 

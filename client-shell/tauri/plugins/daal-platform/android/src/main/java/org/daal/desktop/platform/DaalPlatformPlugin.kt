@@ -3,6 +3,9 @@ package org.daal.desktop.platform
 import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
+import android.webkit.WebView
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResult
 import app.tauri.Logger
 import app.tauri.annotation.ActivityCallback
@@ -12,7 +15,9 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import org.daal.desktop.vpn.BACK_JS
 import org.daal.desktop.vpn.DaalVpnService
+import org.daal.desktop.vpn.backWasHandled
 
 @InvokeArg
 class VpnStartArgs {
@@ -43,6 +48,52 @@ class VpnStartArgs {
  */
 @TauriPlugin
 class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
+
+  /**
+   * The system Back, answered by the app itself.
+   *
+   * The UI keeps one back stack in JS (client-ui/src/lib/backStack.ts)
+   * and publishes `window.__daalBack()`: it runs the topmost handler
+   * (close a sheet, go back one page) and returns true, or returns
+   * false when nothing is open. Going through the web view's history
+   * instead does not hold: Chromium skips a history entry the page
+   * added without a touch, so the second Back in a row left the app
+   * (seen on the phone 2026-11-19).
+   *
+   * This callback is added after the web view's own, so it is asked
+   * first. When the page has nothing to close (or does not answer),
+   * it steps aside and Back goes on to the default: leave the app.
+   */
+  override fun load(webView: WebView) {
+    super.load(webView)
+    val host = activity as? ComponentActivity ?: return
+    val callback = object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val self = this
+        try {
+          webView.evaluateJavascript(BACK_JS) { result ->
+            if (!backWasHandled(result)) {
+              self.isEnabled = false
+              try {
+                host.onBackPressedDispatcher.onBackPressed()
+              } finally {
+                self.isEnabled = true
+              }
+            }
+          }
+        } catch (t: Throwable) {
+          Logger.error("DaalPlatformPlugin back failed: ${t.message}")
+          self.isEnabled = false
+          try {
+            host.onBackPressedDispatcher.onBackPressed()
+          } finally {
+            self.isEnabled = true
+          }
+        }
+      }
+    }
+    host.onBackPressedDispatcher.addCallback(host, callback)
+  }
 
   private var pendingStartArgs: VpnStartArgs? = null
   private var pendingInvoke: Invoke? = null
