@@ -1004,3 +1004,40 @@ fn one_persons_file_is_handed_out_only_while_they_are_on_the_relay() {
     let e = copy_pasteable(&f.ctx, p.op, "recipient:abc").unwrap_err();
     assert!(matches!(e, WizardError::Validation(_)));
 }
+
+#[test]
+fn a_new_relay_is_never_offered_the_server_another_relay_runs_on() {
+    use crate::cli_bridge::ExistingServer;
+    use crate::commands::{list_existing_servers, reuse_cloud_token};
+    let f = fx();
+    let live = provisioned(&f); // runs on server 123 at 203.0.113.7
+    let srv = |id: &str, ip: &str| ExistingServer {
+        id: id.into(),
+        name: format!("srv-{id}"),
+        status: "running".into(),
+        server_type: "cx22".into(),
+        region: "fsn1".into(),
+        public_ip: ip.into(),
+        public_ipv6: String::new(),
+    };
+    *f.mock.list_servers_result.lock().unwrap() = Some(Ok(vec![
+        srv("123", "203.0.113.7"),
+        srv("999", "203.0.113.7"), // same address under another id: still the live relay's
+        srv("555", "198.51.100.50"),
+    ]));
+    let fresh = reuse_cloud_token(&f.ctx, "hetzner").unwrap();
+    let offered: Vec<String> = list_existing_servers(&f.ctx, fresh)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(offered, vec!["555".to_string()]);
+    // The relay that runs on it still sees its own server.
+    let own: Vec<String> = list_existing_servers(&f.ctx, live)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(own.contains(&"123".to_string()));
+}
+

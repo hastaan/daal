@@ -3093,8 +3093,11 @@ W3 items: none moves with this wave.
   (commands.rs), "reusing a saved hosting key for a new relay"
   (backupWave.test.tsx).
 
-- [ ] **PB-26. The new-relay screen offers to wipe another relay's
-  server.** Seen on the phone 2026-11-19: step 2 of a new relay lists
+- [x] **PB-26. The new-relay screen offered to wipe another relay's
+  server.** Fixed in the shell: a server another of the person's relays
+  runs on (by id or address) is left out of the list. Test:
+  `a_new_relay_is_never_offered_the_server_another_relay_runs_on`.
+  Not yet seen on the phone. As found: Seen on the phone 2026-11-19: step 2 of a new relay lists
   "Your existing servers" and shows the live relay "Test"'s server with
   "Choosing an existing server wipes it and reinstalls it". A server
   that one of the person's relays already uses must be shown as

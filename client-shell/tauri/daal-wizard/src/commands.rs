@@ -834,7 +834,32 @@ pub fn list_existing_servers(
         .cli
         .run_list_servers(&row.cloud_provider, token.as_str())
         .map_err(|e| WizardError::Pricing(e.to_string()))?;
-    Ok(servers)
+    // "Use a server I already own" wipes the server it is given. A
+    // server another of this person's relays runs on is never a
+    // candidate: choosing it would destroy that relay (seen offered on
+    // the phone 2026-11-19, PB-26).
+    let mut taken_ids = std::collections::HashSet::new();
+    let mut taken_ips = std::collections::HashSet::new();
+    for other in ctx.db.list()? {
+        if other.id == operator_id || other.status == "decommissioned" {
+            continue;
+        }
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(&other.operator_record_json)
+        else {
+            continue;
+        };
+        for (key, set) in [("server_id", &mut taken_ids), ("public_ip", &mut taken_ips)] {
+            if let Some(v) = rec.get(key).and_then(|v| v.as_str()) {
+                if !v.trim().is_empty() {
+                    set.insert(v.trim().to_string());
+                }
+            }
+        }
+    }
+    Ok(servers
+        .into_iter()
+        .filter(|s| !taken_ids.contains(s.id.trim()) && !taken_ips.contains(s.public_ip.trim()))
+        .collect())
 }
 
 /// List available server types for the operator's cloud provider.
