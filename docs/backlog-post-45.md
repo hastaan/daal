@@ -3102,7 +3102,7 @@ W3 items: none moves with this wave.
   "Choosing an existing server wipes it and reinstalls it". A server
   that one of the person's relays already uses must be shown as
   "used by your relay Test" and not be selectable.
-- [ ] **PB-27. "Finish setting up on this server" keeps the wording of a
+- [x] **PB-27. (Fixed: the step reads "Setting up the server you already have" whenever the setup runs on an existing server; test "the build step label".) "Finish setting up on this server" kept the wording of a
   first setup.** The progress list still says "Renting and hardening the
   server" and the log shows the old one-time key being refused for a
   while; nothing is rented. Say "Setting up the server again".
@@ -3448,7 +3448,7 @@ translated English, and it mixed words (نشانی/آدرس, تلفن/گوشی,
 - [ ] **FA-3. The owner has not read the new text yet.** It is their
   language: anything they mark goes into the style guide, not only into
   the one string.
-- [ ] **FA-4. English that the pass found unclear or wrong** (the Farsi
+- [ ] **FA-4. (Done from this list: Provider is now Publisher in the two cooldown labels; the monthly cost reads "about 5 to 8 euros" in all three places, which is what the hosting company listed on 2026-11-19.) English that the pass found unclear or wrong** (the Farsi
   follows the intended meaning where it was clear): "Provider revoked" /
   "Provider key changed" should say Publisher; "Access key" is used for
   both the hosting key and a one-time SSH key; the monthly cost is given

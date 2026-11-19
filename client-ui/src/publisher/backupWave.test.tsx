@@ -653,3 +653,15 @@ describe('forgetting an unfinished relay', () => {
     });
 });
 
+import { buildStageKey } from './PublisherWizard';
+
+describe('the build step label', () => {
+    it('does not say a server is rented when the setup runs on one that exists', () => {
+        expect(buildStageKey('provision', 'wiz.build.stage.provision', false)).toBe('wiz.build.stage.provision');
+        expect(buildStageKey('provision', 'wiz.build.stage.provision', true)).toBe('wiz.build.stage.provision.existing');
+        expect(buildStageKey('sign', 'wiz.build.stage.sign', true)).toBe('wiz.build.stage.sign');
+        expect((enMain as Record<string, string>)['wiz.build.stage.provision.existing']).not.toMatch(/rent/i);
+        expect((faMain as Record<string, string>)['wiz.build.stage.provision.existing']).not.toContain('اجاره');
+    });
+});
+

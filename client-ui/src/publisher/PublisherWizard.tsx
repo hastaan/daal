@@ -1966,7 +1966,7 @@ export default function PublisherWizard({
                                                 size={8}
                                                 pulse={active}
                                             />
-                                            <span>{t(s.key)}</span>
+                                            <span>{t(buildStageKey(s.id, s.key, !!useExisting))}</span>
                                         </li>
                                     );
                                 })}
@@ -2577,5 +2577,14 @@ export function localCancelKey(rec: SetupRecovery | null): string {
     return rec && rec.state === 'none' && !rec.check_error
         ? 'wiz.cancel.confirm.nothing'
         : 'wiz.cancel.confirm';
+}
+
+/**
+ * The label of a build step. When the setup runs on a server that
+ * already exists (the person's own, or one a stopped setup left), no
+ * server is rented, so the step must not say "Renting".
+ */
+export function buildStageKey(id: string, key: string, onExistingServer: boolean): string {
+    return id === 'provision' && onExistingServer ? 'wiz.build.stage.provision.existing' : key;
 }
 
