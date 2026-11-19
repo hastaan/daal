@@ -27,7 +27,9 @@ pub async fn vpn_start<R: Runtime>(
     app: AppHandle<R>,
     request: VpnStartRequest,
 ) -> Result<VpnStartResponse> {
-    logged("vpn_start", app.platform().vpn_start(&request.route_id))
+    // No route id (absent or empty) = connect automatically; see
+    // `VpnStartRequest::route_id`.
+    logged("vpn_start", app.platform().vpn_start(request.route()))
 }
 
 #[command]

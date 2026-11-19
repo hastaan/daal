@@ -85,6 +85,9 @@ func main() {
 	importOnly := flag.Bool("import-only", false, "import, list routes, exit")
 	idle := flag.Bool("idle", false, "after import, do NOT connect: wait for commands on stdin (tick | routes | connect <family> | stop). A phone that holds a pack and is not connected")
 	proofTargets := flag.String("proof-targets", "", "comma list of host:port: what the engine's connection check reaches through the tunnel. Written to the engine's own configuration file (engine-config.json, connection_check.targets) before engine_init, as an operator would; empty leaves the engine on its production default")
+	auto := flag.Bool("auto", false, "after import, wait for commands on stdin and connect the way the main screen's one button does: `auto` is engine_connect_auto, no route named (auto.go)")
+	livenessS := flag.Int("liveness-s", 0, "connection_check.liveness_interval_s in the engine's configuration file: how often the engine re-checks the connected route. 0 leaves the production default (180 s)")
+	recheckS := flag.Int("recheck-s", 0, "connection_check.recheck_interval_s in the engine's configuration file. 0 leaves the production default (30 s)")
 	classify := flag.Bool("classify", false, "read error texts on stdin, one per line; print the product classifier's category for each (core/diagnostics.Classify) and exit")
 	flag.Parse()
 	if *classify {
@@ -103,8 +106,22 @@ func main() {
 	// relay. Its production default is a set of public sites, which do
 	// not exist in the lab; the lab names its own through the engine's
 	// ordinary configuration file. Nothing else about the check changes.
-	if *proofTargets != "" {
-		cfg, _ := json.Marshal(map[string]any{"connection_check": map[string]any{"targets": strings.Split(*proofTargets, ",")}})
+	if *proofTargets != "" || *livenessS > 0 || *recheckS > 0 {
+		cc := map[string]any{}
+		if *proofTargets != "" {
+			cc["targets"] = strings.Split(*proofTargets, ",")
+		}
+		// The two clocks of the engine's own liveness loop, through the
+		// same file an operator would use. Nothing else about the loop
+		// changes: a rig that waited the production three minutes for
+		// every "the route stopped carrying" would not be run.
+		if *livenessS > 0 {
+			cc["liveness_interval_s"] = *livenessS
+		}
+		if *recheckS > 0 {
+			cc["recheck_interval_s"] = *recheckS
+		}
+		cfg, _ := json.Marshal(map[string]any{"connection_check": cc})
 		if err := os.WriteFile(filepath.Join(*stateDir, abi.EngineConfigFile), cfg, 0o600); err != nil {
 			emit("error", map[string]any{"stage": "init", "error": err.Error()})
 			os.Exit(1)
@@ -164,6 +181,14 @@ func main() {
 		if routesJSON, err = abi.AvailableRoutes(); err != nil {
 			fatal("routes", err)
 		}
+	}
+
+	if *auto {
+		if _, err := abi.RegisterProtectCallback(uintptr(C.wb_protect_ptr())); err != nil {
+			fatal("protect", err)
+		}
+		autoLoop(stdin, *stateDir, *tunName, func() int { return int(C.wb_protect_count()) })
+		return
 	}
 
 	id := *routeID

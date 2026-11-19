@@ -194,6 +194,12 @@ pub struct Engine {
     /// and a library without it must still load (the host then simply
     /// attempts the route and reads the refusal afterwards).
     route_precheck: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
+
+    /// `engine_connect_auto` — pick a route, try it, move on. Optional
+    /// for the same reason as `route_precheck`: a library built before
+    /// it existed must still load (the host then reports that automatic
+    /// connecting is not available and the person picks a route).
+    connect_auto: Option<extern "C" fn(*mut c_void, c_int) -> c_int>,
 }
 
 impl Engine {
@@ -474,6 +480,10 @@ impl Engine {
             >(&lib, b"engine_route_precheck")
             .ok()
             .map(|sym| *sym);
+            let connect_auto =
+                lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(&lib, b"engine_connect_auto")
+                    .ok()
+                    .map(|sym| *sym);
 
             // Reinterpret each unsafe-extern as the safe-extern variant
             // we store in the struct. The wrapper methods enforce all
@@ -543,6 +553,7 @@ impl Engine {
                 clear_tun_fd: std::mem::transmute(clear_tun_fd),
                 register_protect_callback: std::mem::transmute(register_protect_callback),
                 route_precheck: route_precheck.map(|f| std::mem::transmute(f)),
+                connect_auto: connect_auto.map(|f| std::mem::transmute(f)),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -1293,11 +1304,53 @@ impl Engine {
             .map(Some)
     }
 
+    /// `engine_connect_auto`: the engine picks among every usable route,
+    /// tries them in order and keeps the first that carries. BLOCKS for
+    /// as long as that takes (each candidate gets the same connection
+    /// check `set_route` runs); `clear_route` abandons it promptly.
+    ///
+    /// Returns the engine's JSON —
+    /// `{"connected", "route_id", "family", "tried": [...], "verdict",
+    /// "candidates"}` — whether or not anything connected: "nothing
+    /// carried" is an answer, not an error. `Ok(None)` when this library
+    /// predates the call.
+    ///
+    /// The call is made exactly ONCE, into one buffer. The shared
+    /// `call_buf` helper repeats a call whose answer filled the buffer,
+    /// which is right for a read and wrong here: the second call would
+    /// find a route connected and answer "already connected", losing
+    /// the list of what was tried. 256 KiB holds thousands of entries;
+    /// an answer that still does not fit is reported as the engine's
+    /// own buffer error.
+    pub fn connect_auto(&self) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(auto) = self.connect_auto else {
+            return Ok(None);
+        };
+        let mut buf = vec![0u8; CONNECT_AUTO_BUF];
+        let rc = (auto)(buf.as_mut_ptr() as *mut c_void, buf.len() as c_int);
+        if rc < 0 {
+            return Err(self.failed("engine_connect_auto", rc as i32));
+        }
+        let n = (rc as usize).min(buf.len());
+        buf.truncate(n);
+        String::from_utf8(buf).map(Some).map_err(|_| DesktopError::EngineUtf8)
+    }
+
+    /// Whether the loaded library has `engine_connect_auto` at all.
+    /// Makes no engine call.
+    pub fn has_connect_auto(&self) -> bool {
+        self.connect_auto.is_some()
+    }
+
     pub fn register_protect_callback(&self, fn_ptr: usize) -> Result<String> {
         self.ensure_ready()?;
         self.call_buf("engine_register_protect_callback", |buf, len| (self.register_protect_callback)(fn_ptr, buf, len))
     }
 }
+
+/// Size of the one buffer `Engine::connect_auto` hands the engine.
+const CONNECT_AUTO_BUF: usize = 256 * 1024;
 
 /// Helper: dlsym a symbol with descriptive error.
 unsafe fn lookup<'a, T>(lib: &'a Library, name: &[u8]) -> Result<Symbol<'a, T>> {
@@ -1413,6 +1466,13 @@ fn parse_utc_seconds(s: &str) -> Option<i64> {
 /// and `route_running` are passed through as the engine gave them — a
 /// string / a boolean, or JSON null when the field is absent — and the
 /// four closed codes default to "".
+///
+/// Three more fields come from the blob's `auto` object (the engine's
+/// automatic connect): `auto_mode` (true / false, or null when the
+/// engine reports no such object), and the closed codes `auto_state`
+/// (idle / trying / connected / failed) and `auto_verdict`. They are
+/// how the service learns that the engine moved to another route by
+/// itself, or ran out of routes.
 pub fn connection_state_json(diagnostics_json: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(diagnostics_json).ok()?;
     let o = v.as_object()?;
@@ -1425,6 +1485,28 @@ pub fn connection_state_json(diagnostics_json: &str) -> Option<String> {
         Some(b) => serde_json::Value::Bool(b),
         None => serde_json::Value::Null,
     };
+    let auto = o.get("auto").and_then(|x| x.as_object());
+    let auto_mode = match auto.and_then(|a| a.get("mode")).and_then(|x| x.as_bool()) {
+        Some(b) => serde_json::Value::Bool(b),
+        None => serde_json::Value::Null,
+    };
+    let auto_code = |k: &str| {
+        let s = auto.and_then(|a| a.get(k)).and_then(|x| x.as_str()).unwrap_or("");
+        closed_code(s)
+    };
+    // `switch_back`: the last switch went to a route that carried
+    // nothing and the engine went back by itself. By the time the
+    // service reads this, `route_check` describes the route the engine
+    // went BACK to (ok, no category), so the category of the route that
+    // failed is only here. `switch_back_restored` is null when there is
+    // nothing to report.
+    let sb = o.get("switch_back").and_then(|x| x.as_object());
+    let sb_route = sb.and_then(|s| s.get("failed_route")).and_then(|x| x.as_str()).unwrap_or("");
+    let sb_restored = match sb.and_then(|s| s.get("restored")).and_then(|x| x.as_bool()) {
+        Some(b) if !sb_route.is_empty() => serde_json::Value::Bool(b),
+        _ => serde_json::Value::Null,
+    };
+    let sb_category = closed_code(sb.and_then(|s| s.get("category")).and_then(|x| x.as_str()).unwrap_or(""));
     Some(
         serde_json::json!({
             "active_route": active,
@@ -1433,6 +1515,44 @@ pub fn connection_state_json(diagnostics_json: &str) -> Option<String> {
             "route_check_category": code("route_check_category"),
             "connect_refused": code("connect_refused"),
             "connect_refused_route": code("connect_refused_route"),
+            "auto_mode": auto_mode,
+            "auto_state": auto_code("state"),
+            "auto_verdict": auto_code("verdict"),
+            "switch_back_route": sb_route,
+            "switch_back_category": sb_category,
+            "switch_back_restored": sb_restored,
+        })
+        .to_string(),
+    )
+}
+
+/// A closed code as the engine writes one: short, lower-case ASCII
+/// letters, digits and `_`. Anything else is not a code and is dropped
+/// rather than carried into a log line or a status answer.
+fn closed_code(s: &str) -> String {
+    let ok = !s.is_empty()
+        && s.len() <= 48
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if ok { s.to_string() } else { String::new() }
+}
+
+/// What the Android VPN service needs out of an `engine_connect_auto`
+/// answer, and nothing else: did a route connect, which one, the closed
+/// verdict code, and two counts. Route ids and closed codes only — the
+/// `tried` list stays in the engine's diagnostics for the page. `None`
+/// when the body is not a JSON object.
+pub fn connect_auto_summary_json(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let o = v.as_object()?;
+    let route = o.get("route_id").and_then(|x| x.as_str()).unwrap_or("");
+    let connected = o.get("connected").and_then(|x| x.as_bool()).unwrap_or(false) && !route.is_empty();
+    Some(
+        serde_json::json!({
+            "connected": connected,
+            "route_id": route,
+            "verdict": closed_code(o.get("verdict").and_then(|x| x.as_str()).unwrap_or("")),
+            "tried": o.get("tried").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0),
+            "candidates": o.get("candidates").and_then(|x| x.as_u64()).unwrap_or(0),
         })
         .to_string(),
     )
@@ -1571,8 +1691,89 @@ mod connection_state_tests {
         assert_eq!(v["connect_refused_route"], "r2");
         assert_eq!(v["route_check"], "ok");
         assert_eq!(v["route_running"], true);
-        // Nothing but the six fields crosses to the JVM.
-        assert_eq!(v.as_object().unwrap().len(), 6);
+        // Nothing but the six fields, the three auto fields and the
+        // three switch_back fields crosses to the JVM.
+        assert_eq!(v.as_object().unwrap().len(), 12);
+        // No switch_back object: nothing to report.
+        assert_eq!(v["switch_back_route"], "");
+        assert!(v["switch_back_restored"].is_null());
+        // An engine with no `auto` object: unknown, not "off".
+        assert!(v["auto_mode"].is_null());
+        assert_eq!(v["auto_state"], "");
+    }
+
+    #[test]
+    fn the_engines_automatic_connect_is_passed_through_as_codes() {
+        let v = parse(
+            r#"{"active_route":"r2","route_running":true,
+                "auto":{"state":"connected","mode":true,"route_id":"r2","verdict":"moved_on",
+                        "tried":[{"route_id":"r1","family":"vless-reality","result":"not_carrying"}]}}"#,
+        );
+        assert_eq!(v["auto_mode"], true);
+        assert_eq!(v["auto_state"], "connected");
+        assert_eq!(v["auto_verdict"], "moved_on");
+        assert_eq!(v.as_object().unwrap().len(), 12);
+        // Not a code: dropped, never forwarded.
+        let v = parse(r#"{"auto":{"state":"dial tcp 203.0.113.5:443","mode":false,"verdict":"Bad Verdict"}}"#);
+        assert_eq!(v["auto_mode"], false);
+        assert_eq!(v["auto_state"], "");
+        assert_eq!(v["auto_verdict"], "");
+    }
+
+    /// SW-1: after the engine's own way back, `route_check` is the
+    /// restored route's. The reason the switch failed crosses as
+    /// `switch_back_*`, codes only.
+    #[test]
+    fn the_engines_switch_back_is_passed_through() {
+        let v = parse(
+            r#"{"active_route":"r1","route_running":true,"route_check":"ok","route_check_category":"",
+                "switch_back":{"failed_route":"r4","failed_family":"hysteria2","category":"udp_no_reply",
+                               "restored_route":"r1","restored":true}}"#,
+        );
+        assert_eq!(v["route_check_category"], "");
+        assert_eq!(v["switch_back_route"], "r4");
+        assert_eq!(v["switch_back_category"], "udp_no_reply");
+        assert_eq!(v["switch_back_restored"], true);
+        assert!(!v.to_string().contains("hysteria2"), "no family name crosses");
+        // The way back failed too.
+        let v = parse(r#"{"switch_back":{"failed_route":"r4","category":"dial 203.0.113.5","restored":false}}"#);
+        assert_eq!(v["switch_back_restored"], false);
+        assert_eq!(v["switch_back_category"], "", "not a code: dropped");
+        // Nothing to report: failed_route is "".
+        let v = parse(r#"{"switch_back":{"failed_route":"","category":"","restored":false}}"#);
+        assert!(v["switch_back_restored"].is_null());
+    }
+
+    #[test]
+    fn connect_auto_summary_carries_ids_and_codes_only() {
+        use super::connect_auto_summary_json;
+        let s = connect_auto_summary_json(
+            r#"{"connected":true,"route_id":"r2","family":"websocket-tls","verdict":"moved_on","candidates":4,
+                "tried":[{"route_id":"r1","family":"vless-reality","result":"not_carrying","category":"timeout"},
+                         {"route_id":"r2","family":"websocket-tls","result":"carried","category":""}]}"#,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["connected"], true);
+        assert_eq!(v["route_id"], "r2");
+        assert_eq!(v["verdict"], "moved_on");
+        assert_eq!(v["tried"], 2);
+        assert_eq!(v["candidates"], 4);
+        assert_eq!(v.as_object().unwrap().len(), 5);
+        assert!(!s.contains("websocket"), "no family name crosses: {s}");
+
+        // "connected" with no route named is not a connection.
+        let s = connect_auto_summary_json(r#"{"connected":true,"route_id":"","verdict":""}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["connected"], false);
+        // Nothing connected: the verdict is what is left to say.
+        let s = connect_auto_summary_json(r#"{"connected":false,"verdict":"network_down","tried":[],"candidates":3}"#)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["connected"], false);
+        assert_eq!(v["verdict"], "network_down");
+        assert!(connect_auto_summary_json("[]").is_none());
+        assert!(connect_auto_summary_json("nope").is_none());
     }
 
     #[test]

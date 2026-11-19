@@ -188,6 +188,39 @@ pub fn connect(state: &AppState, req: ConnectRequest) -> Result<()> {
     Ok(())
 }
 
+/// Connect without naming a route: the engine picks among every usable
+/// route, tries them in order and keeps the first that carries
+/// (`engine_connect_auto`). Blocks for as long as that takes;
+/// `disconnect` abandons it.
+///
+/// Returns the engine's JSON whether or not anything connected — the
+/// page turns its `verdict` code into a sentence. Tunnelled refresh is
+/// turned on only when a route is up, exactly as in [`connect`].
+///
+/// An engine library that predates the call is an error the caller can
+/// tell apart ([`DesktopError::EngineSymbol`] naming the symbol): the
+/// page then offers the list of routes instead.
+pub fn connect_auto(state: &AppState) -> Result<String> {
+    let Some(body) = state.engine.connect_auto()? else {
+        return Err(crate::DesktopError::EngineSymbol(
+            "engine_connect_auto: not in this engine library".into(),
+        ));
+    };
+    if auto_connected(&body) {
+        let _ = state.engine.set_tunnel_refresh(true);
+    }
+    Ok(body)
+}
+
+/// Did an `engine_connect_auto` answer end with a route connected?
+/// Anything unreadable is "no": refresh then stays fail-closed.
+fn auto_connected(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("connected").and_then(|c| c.as_bool()))
+        .unwrap_or(false)
+}
+
 pub fn disconnect(state: &AppState) -> Result<()> {
     // Retract the dialer BEFORE the route goes away, so no refresh can
     // be handed an inlet whose listener is already gone.
@@ -523,3 +556,21 @@ pub(crate) fn _heartbeat_unused(_d: Duration) {}
 
 /// Re-export so tests can construct an Engine in isolation.
 pub use crate::engine::Engine as RawEngine;
+
+#[cfg(test)]
+mod auto_connect_tests {
+    use super::auto_connected;
+
+    /// Tunnelled refresh is turned on after an automatic connect only
+    /// when the engine says a route is up; anything else leaves it
+    /// fail-closed.
+    #[test]
+    fn refresh_follows_only_a_connected_answer() {
+        assert!(auto_connected(r#"{"connected":true,"route_id":"r2","verdict":"moved_on"}"#));
+        assert!(!auto_connected(r#"{"connected":false,"verdict":"network_down"}"#));
+        assert!(!auto_connected(r#"{"verdict":"all_failed"}"#));
+        assert!(!auto_connected(r#"{"connected":"yes"}"#));
+        assert!(!auto_connected("not json"));
+        assert!(!auto_connected(""));
+    }
+}

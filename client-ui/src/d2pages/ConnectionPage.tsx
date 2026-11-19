@@ -22,25 +22,35 @@ import type {
     ThroughputSnapshot,
     ConnState,
     ConnMode,
+    RouteDisplayRow,
 } from '../contract/D2Contract';
 import { effectiveLocale } from '../lib/i18n';
 import { useDensity } from '../design/DensityProvider';
 import DaalButton, { type DaalConnectState } from '../components/DaalButton';
-import RouteChip from '../components/connection/RouteChip';
+import WayChooser from '../components/connection/WayChooser';
+import AutoFailure from '../components/connection/AutoFailure';
+import AddSheet from '../components/AddSheet';
+import { Button } from '../design/primitives';
+import {
+    autoFailure,
+    autoProgressText,
+    autoVerdictKey,
+    failureSignature,
+    getPinnedRoute,
+    rememberPassFailure,
+    setPinnedRoute,
+    staleFailureAfterStart,
+    startConnect,
+    type PassFailure,
+} from '../lib/autoConnect';
+import { mainScreenView, retryTarget, runMainTap } from '../lib/mainScreen';
 import StatusLine from '../components/connection/StatusLine';
 import ModeChip from '../components/connection/ModeChip';
 import WhyThisRoute from '../components/connection/WhyThisRoute';
 import RouteHealthBars from '../components/connection/RouteHealthBars';
 import PointerBanner from '../components/connection/PointerBanner';
 import ModePickerSheet from '../components/connection/ModePickerSheet';
-import {
-    checkHeadlineKey,
-    checkStateLabelKey,
-    connectRefusedKey,
-    tapAction,
-    tapLabelKey,
-} from '../lib/routeCheck';
-import { routeForDisplay, summaryExtras } from '../lib/activeRoute';
+import { idOnlyRoute, routeForDisplay, summaryExtras } from '../lib/activeRoute';
 import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
 import { EngineStartNotice, StoreResetNotice } from './PageNotices';
 import { tapAllowedWithStartProblem, useEngineStartProblem } from '../lib/engineStart';
@@ -52,21 +62,12 @@ interface Props {
     onNavigate: (s: SectionId) => void;
 }
 
-const HEADLINE_KEY: Record<ConnState, string> = {
-    disconnected: 'conn.headline_disconnected',
-    connecting: 'conn.headline_connecting',
-    connected: 'conn.headline_connected',
-    error: 'conn.headline_error',
-};
+/** How often the route list is re-read while it could not be read. */
+const ROUTES_RETRY_MS = 10_000;
 
-const STATE_LABEL_KEY: Record<ConnState, string> = {
-    disconnected: 'conn.disconnected',
-    connecting: 'conn.connecting',
-    connected: 'conn.state.routing', // "Connected · Routing" per design
-    error: 'conn.error',
-};
-
-// (copy for the connection-check states: lib/routeCheck.ts)
+// (what this page shows and what a tap does: lib/mainScreen.ts; copy
+// for the connection-check states: lib/routeCheck.ts; for automatic
+// connect: lib/autoConnect.ts)
 function toDaalConnectState(s: ConnState): DaalConnectState {
     return s;
 }
@@ -128,6 +129,37 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // ordinary "not connected" with a Connect button, as if it had read
     // that from somewhere.
     const [startProblem, reportRejection] = useEngineStartProblem();
+    // The routes on this device, read strictly: `undefined` until read,
+    // and whenever the list could not be read — which is not "none".
+    // "Add your file" is offered only on a list that was read and is
+    // empty.
+    const [routes, setRoutes] = useState<RouteDisplayRow[] | undefined>(undefined);
+    const routesReadRef = useRef<{ hint: number | undefined; atMs: number; ok: boolean } | null>(null);
+    // The route the person chose by hand (null = Automatic, the
+    // default). Remembered across launches (lib/autoConnect.ts).
+    const [pinnedRaw, setPinnedRaw] = useState<string | null>(() => getPinnedRoute());
+    const [chooserOpen, setChooserOpen] = useState(false);
+    const [showAdd, setShowAdd] = useState(false);
+    // What the connect this page last started was: automatic, or the
+    // pinned route. Chooses the words while the page is still showing
+    // its own optimistic "connecting".
+    const [intent, setIntent] = useState<'auto' | 'pinned' | null>(null);
+    // An automatic connect whose call itself failed (the host could not
+    // start it): the generic sentence, never the caught text.
+    const [hostFailed, setHostFailed] = useState(false);
+    // True once this page has seen a connection up: when the engine
+    // then moves to another route by itself the words are "that way
+    // stopped working", not a first-time "trying way 2 of 4".
+    const wasConnectedRef = useRef(false);
+    // The last automatic pass that tried something and found nothing:
+    // its sentence stays on screen when the next answer is only "the
+    // ways are resting" (lib/autoConnect.ts failureToShow).
+    const rememberedRef = useRef<PassFailure | undefined>(undefined);
+    // Every summary this page takes goes through here.
+    const applyConn = (c: ConnectionSummary) => {
+        rememberedRef.current = rememberPassFailure(rememberedRef.current, c);
+        setConn(c);
+    };
     useEffect(() => {
         if (!notice) return;
         const id = setTimeout(() => setNotice(null), 4000);
@@ -146,17 +178,24 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     contract.routeHealth(),
                 ]);
                 if (cancelled) return;
-                setConn(c);
+                applyConn(c);
                 setStoreReset(storeResetNoticeDue(summaryExtras(c).storeRecovered));
                 setWhy(w);
                 setPointer(p);
                 setHealth(h);
+                void readRoutes(c.routeCountHint, false);
                 // Clear optimistic flag as soon as the polled state
                 // agrees with what the user asked for, so the UI
                 // converges to the truth.
+                // "Connected" also answers an optimistic "connecting":
+                // nothing was connected when the person tapped, so it
+                // cannot be old news — and a quick route can be proved
+                // between two polls, which used to leave "Connecting…"
+                // over a working connection until the safety timeout.
                 setOptimistic((prev) => {
                     if (!prev) return prev;
                     if (prev === c.state) return null;
+                    if (prev === 'connecting' && c.state === 'connected') return null;
                     return prev;
                 });
             } catch (e) {
@@ -177,6 +216,30 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
             clearInterval(id);
         };
     }, [contract]);
+
+    // Reads the route list when there is a reason to: never read yet,
+    // the engine's own count moved, it could not be read last time (not
+    // more often than ROUTES_RETRY_MS), or `force` (a file was just
+    // added). Not on every poll: the list changes only when the person
+    // adds or removes something.
+    const readRoutes = async (hint: number | undefined, force: boolean) => {
+        const last = routesReadRef.current;
+        const now = Date.now();
+        if (!force && last) {
+            const retryDue = !last.ok && now - last.atMs >= ROUTES_RETRY_MS;
+            if (last.hint === hint && !retryDue) return;
+        }
+        const mark = { hint, atMs: now, ok: false };
+        routesReadRef.current = mark;
+        let rows: RouteDisplayRow[] | undefined;
+        try {
+            rows = await contract.routesStrict();
+        } catch {
+            rows = undefined;
+        }
+        mark.ok = rows !== undefined;
+        setRoutes(rows);
+    };
 
     // Throughput poll — only when state=connected, 1 s cadence.
     useEffect(() => {
@@ -199,15 +262,45 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         };
     }, [conn?.state, contract]);
 
-    // The state shown to the user. Optimistic overrides win until the
-    // next poll lands a matching ground-truth state.
-    const state: ConnState = optimistic ?? conn?.state ?? 'disconnected';
+    // Everything this page shows and what a tap does, decided in one
+    // place (lib/mainScreen.ts) from what was read and what the page
+    // itself knows.
+    const view = mainScreenView({
+        t,
+        locale,
+        nowMs: Date.now(),
+        conn,
+        optimistic,
+        connectInFlight,
+        intent,
+        hostFailed,
+        pinnedRaw,
+        routes,
+        wasConnected: wasConnectedRef.current,
+        remembered: rememberedRef.current,
+    });
+    const { state, auto, plan, failure } = view;
     const mode: ConnMode = conn?.mode ?? 'normal';
-    // What the engine's connection check says, for the copy only: the
-    // engine starting is not a connection, and while it is still
-    // proving the route the page says "Checking the connection…". Not
-    // applied over an optimistic state the poll has not confirmed yet.
-    const routeCheck = optimistic ? undefined : conn?.routeCheck;
+    // The pin that still means something: a pinned route this device no
+    // longer holds is no choice at all (back to Automatic).
+    const pinnedId = view.pinnedId;
+    useEffect(() => {
+        if (pinnedRaw && pinnedId === null) {
+            setPinnedRoute(null);
+            setPinnedRaw(null);
+        }
+    }, [pinnedRaw, pinnedId]);
+    if (state === 'connected') wasConnectedRef.current = true;
+    else if (!view.holding && (state === 'disconnected' || state === 'error')) wasConnectedRef.current = false;
+
+    // A failed pass has just rested some routes: the list read before it
+    // does not know. Read it again, so the panel can say how long the
+    // wait is and switch off a "Try again" that could do nothing.
+    const failureSig = failureSignature(conn);
+    useEffect(() => {
+        if (failureSig !== undefined) void readRoutes(conn?.routeCountHint, true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [failureSig]);
 
     // The loaded engine has no data plane linked: engine_set_route will
     // refuse (core/abi/dataplane.go), and it refuses precisely because
@@ -227,45 +320,28 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         return () => clearTimeout(id);
     }, [optimistic]);
 
-    // "In flight" includes the seconds after a tap in which the page
-    // is still showing its own optimistic "connecting": on Android the
-    // connect call has already resolved by then (the VPN service does
-    // the work), and a second tap must cancel, not start a second one.
-    // The category lets a tap try the same route again after the two
-    // failed connects whose headline says to (too slow, the server has
-    // no internet): the engine rests nothing for those and the error
-    // never clears by itself.
-    const action = tapAction(
-        state,
-        routeCheck,
-        connectInFlight || optimistic === 'connecting',
-        conn?.routeCheckCategory,
-    );
+    const disconnectNow = async () => {
+        // Whatever is running stops: a connected route, a route the
+        // engine is still checking (this cancels the check — the
+        // engine abandons it at once), an automatic connect wherever
+        // it has got to, or a lost connection being retried. Not gated
+        // on `busy`: the connect in flight is exactly what this is for.
+        if (connectInFlight) cancelledRef.current = true;
+        setHostFailed(false);
+        // Optimistic: immediately render disconnected so the eagle
+        // greys out the moment the user taps; the next poll confirms.
+        setOptimistic('disconnected');
+        try { await contract.disconnect(); }
+        catch { setOptimistic(null); }
+    };
 
-    const onDaalClick = async () => {
-        if (action === 'disconnect') {
-            // Whatever is running stops: a connected route, a route the
-            // engine is still checking (this cancels the check — the
-            // engine abandons it at once), or a lost connection it is
-            // retrying. Not gated on `busy`: the connect in flight is
-            // exactly what this tap is for.
-            if (connectInFlight) cancelledRef.current = true;
-            // Optimistic: immediately render disconnected so the eagle
-            // greys out the moment the user taps; the next poll
-            // confirms.
-            setOptimistic('disconnected');
-            try { await contract.disconnect(); }
-            catch { setOptimistic(null); }
-            return;
-        }
+    const connectNow = async (
+        what: { kind: 'auto' } | { kind: 'pinned'; routeId: string },
+    ) => {
         if (busy) return;
         // Daal could not start: the notice on the page says so, and a
-        // connect (or a sheet offering other connects) could only fail.
-        if (!tapAllowedWithStartProblem(startProblem, action)) return;
-        if (action === 'recovery') {
-            setShowRecovery(true);
-            return;
-        }
+        // connect could only fail.
+        if (!tapAllowedWithStartProblem(startProblem, 'connect')) return;
         // No data plane: never flip the eagle to "connecting" for a
         // connection this binary cannot make. The engine would refuse
         // anyway; showing intent-state first would be a 6-second lie.
@@ -273,41 +349,108 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
             setNotice(t('conn.no_data_plane.title'));
             return;
         }
-        // Nothing is running → if no active route, navigate to Routes;
-        // otherwise connect to the active one.
-        if (!conn?.activeRoute) {
-            onNavigate('network');
-            return;
-        }
         // Optimistic: flip to 'connecting' the instant the tap fires.
-        // The eagle pulses, the headline reads "Connecting…", and the
-        // tap registers as "something happened" even if the engine
-        // resolves in <50 ms (Stub) or several seconds (real driver).
+        // The eagle pulses, the headline reads "Looking for a way to
+        // connect…" (or "Connecting…" for a pinned route), and the tap
+        // registers as "something happened" whether the engine answers
+        // in <50 ms or after trying every route.
+        setIntent(what.kind);
+        setHostFailed(false);
         setOptimistic('connecting');
         setBusy(true);
         setConnectInFlight(true);
         cancelledRef.current = false;
+        // The failed pass on screen when the tap came, if any: the one
+        // reading that must not be mistaken for the answer to this tap.
+        const failureAtTap = what.kind === 'auto' ? failureSignature(conn) : undefined;
         try {
-            await contract.connect(conn.activeRoute.routeId);
+            const handedBack = await startConnect(contract, what);
+            // The call returning is not the answer everywhere (on
+            // Android it means "the VPN service was started"): ask the
+            // engine now rather than waiting out the poll. Where it IS
+            // the answer (desktop: the call blocks until the engine is
+            // done) this is what takes the optimistic state down.
+            try {
+                const c = await contract.connectionSummary();
+                // On Android the service may not have reached the engine
+                // yet, and the blob still shows the pass that failed
+                // BEFORE this tap. Taking the optimistic state down for
+                // it flashed the old failure back (with an enabled "Try
+                // again" that cancelled the pass just begun). It stays
+                // until a poll shows the new pass, or the safety timeout.
+                const stale = staleFailureAfterStart(handedBack !== null, failureAtTap, c);
+                if (!stale) applyConn(c);
+                if (c.state !== 'disconnected' && !stale) setOptimistic(null);
+            } catch { /* the poll will catch up */ }
         } catch {
             setOptimistic(null);
             if (!cancelledRef.current) {
-                // A connect the engine REFUSED (an old file, a route
-                // still cooling down) has its own sentence on the page;
-                // the generic recovery sheet on top of it would hide
-                // the one thing the person can act on.
-                let refused = false;
+                // What happened is in the engine's own account: a
+                // connect it REFUSED (an old file, a route still
+                // cooling down) and an automatic connect that found
+                // nothing each have their own sentence on the page; a
+                // sheet on top would hide the one thing the person can
+                // act on.
+                let said = false;
                 try {
                     const c = await contract.connectionSummary();
-                    setConn(c);
-                    refused = !!c.connectRefused;
+                    applyConn(c);
+                    said = !!c.connectRefused || autoFailure(c) !== undefined;
                 } catch { /* the poll will catch up */ }
-                if (!refused) setShowRecovery(true);
+                if (!said) {
+                    // Automatic has no "other route" to offer: it says
+                    // it could not connect, with Try again. A pinned
+                    // route gets the sheet of other choices.
+                    if (what.kind === 'auto') setHostFailed(true);
+                    else setShowRecovery(true);
+                }
             }
         } finally {
             setBusy(false);
             setConnectInFlight(false);
         }
+    };
+
+    const openAddFile = () => setShowAdd(true);
+
+    const onDaalClick = () =>
+        runMainTap(plan, {
+            disconnect: disconnectNow,
+            addFile: () => {
+                if (!tapAllowedWithStartProblem(startProblem, 'connect')) return;
+                openAddFile();
+            },
+            recovery: () => {
+                if (busy) return;
+                if (!tapAllowedWithStartProblem(startProblem, 'recovery')) return;
+                setShowRecovery(true);
+            },
+            connect: connectNow,
+        });
+
+    const onPickRoute = (routeId: string) => {
+        setPinnedRoute(routeId);
+        setPinnedRaw(routeId);
+        setChooserOpen(false);
+    };
+    const onBackToAuto = () => {
+        setPinnedRoute(null);
+        setPinnedRaw(null);
+        setChooserOpen(false);
+        // Connected on a way picked by hand: hand it to the engine NOW.
+        // engine_connect_auto on a connected engine starts nothing and
+        // takes charge of the route that is up, so "Automatic" on the
+        // chip is true from this moment, not from the next connect.
+        if (state === 'connected' && !view.engineAuto && !busy) {
+            void contract.connectAuto().catch(() => { /* the chip keeps saying what is true */ });
+        }
+    };
+    // "Let Daal choose" after the route the person chose did not work:
+    // back to automatic, and connect.
+    const onLetDaalChoose = () => {
+        setPinnedRoute(null);
+        setPinnedRaw(null);
+        void connectNow({ kind: 'auto' });
     };
 
     const onPickMode = async (m: ConnMode) => {
@@ -336,14 +479,15 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         }
     };
 
-    const daalLabel = t(tapLabelKey(action, state, routeCheck));
-    // The engine refused the last connect before trying anything. Shown
-    // only while nothing is running: once a route is up (or being
-    // checked) the refusal is about a tap that no longer matters.
-    const refusedKey =
-        conn?.connectRefused && !optimistic && (state === 'disconnected' || state === 'error')
-            ? connectRefusedKey(conn.connectRefused)
-            : undefined;
+    const daalLabel = view.tapLabel;
+    const { refusedKey, headline, stateLabel, needFile, noRoutes, showProgress } = view;
+    const connectedNote = view.connectedNoteKey;
+    // The row for the pinned route: its details when the list has them,
+    // an id-only row (our own words for its name) when it does not.
+    const pinnedRow = pinnedId
+        ? routeForDisplay(routes?.find((r) => r.routeId === pinnedId) ?? idOnlyRoute(pinnedId), t) ?? null
+        : null;
+    const somethingRunning = state === 'connected' || state === 'connecting';
 
     // Layout: phone → single column, rail stacks under hero.
     // tablet  → single column with wider hero, rail collapses to
@@ -460,9 +604,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     </div>
                 )}
 
-                <div className={`d2-conn-state-label ${state}`}>
-                    {t(checkStateLabelKey(state, routeCheck) ?? STATE_LABEL_KEY[state])}
-                </div>
+                <div className={`d2-conn-state-label ${state}`}>{stateLabel}</div>
 
                 <DaalButton
                     state={toDaalConnectState(state)}
@@ -472,24 +614,123 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
 
                 <h1
                     className="d2-conn-headline"
-                    style={{ marginBlockStart: 24, marginBlockEnd: 10 }}
+                    // A verdict is a whole sentence, not three words:
+                    // at headline size it filled the phone's screen and
+                    // pushed "Try again" off it.
+                    style={{
+                        marginBlockStart: 24,
+                        marginBlockEnd: 10,
+                        ...(failure
+                            ? { fontSize: 20, lineHeight: 1.4, maxWidth: 520, textAlign: 'center' as const }
+                            : {}),
+                    }}
                 >
-                    {t(
-                        checkHeadlineKey(state, routeCheck, conn?.routeCheckCategory) ??
-                            HEADLINE_KEY[state],
-                    )}
+                    {headline}
                 </h1>
 
-                <RouteChip
-                    // A route whose details could not be read still has
-                    // an id: it gets our own words, never "No route
-                    // selected" under "You're connected."
-                    row={routeForDisplay(conn?.activeRoute, t)}
-                    locale={locale}
-                    t={t}
-                    onClick={() => onNavigate('network')}
-                    disabled={busy}
-                />
+                {/* While automatic connect works through its candidates
+                    the progress sentence above is the whole story; the
+                    same words again, a little longer, when the engine
+                    moved by itself. */}
+                {showProgress && wasConnectedRef.current && (
+                    <div style={{ fontSize: 13, color: 'var(--ink-soft)', marginBlockEnd: 10 }}>
+                        {autoProgressText(t, locale, auto)}
+                    </div>
+                )}
+
+                {connectedNote && (
+                    <div
+                        style={{
+                            maxWidth: 520,
+                            fontSize: 13,
+                            color: 'var(--ink-soft)',
+                            textAlign: 'center',
+                            marginBlockEnd: 12,
+                        }}
+                    >
+                        {t(connectedNote)}
+                    </div>
+                )}
+
+                {view.holding ? (
+                    // Android: the VPN is kept closed while Daal retries.
+                    // The phone has no internet meanwhile, so this says
+                    // so, and offers both ways out.
+                    <AutoFailure
+                        t={t}
+                        lead={failure ? t(autoVerdictKey(failure.verdict)) : undefined}
+                        actionText={t('auto.holding.body')}
+                        tried={failure?.tried ?? []}
+                        verdict={failure?.verdict ?? ''}
+                        retryLabel={t('auto.holding.try_now')}
+                        onRetry={() => void connectNow({ kind: 'auto' })}
+                        onDisconnect={() => void disconnectNow()}
+                    />
+                ) : failure ? (
+                    <AutoFailure
+                        t={t}
+                        actionText={failure.actionText}
+                        restText={failure.restText}
+                        retryOff={failure.retryOff}
+                        tried={failure.tried}
+                        verdict={failure.verdict}
+                        onRetry={failure.noRetry ? undefined : () => void connectNow(retryTarget(pinnedId))}
+                        onChoose={failure.wantsChooser ? () => setChooserOpen(true) : undefined}
+                        onAddFile={failure.wantsFile || noRoutes ? openAddFile : undefined}
+                    />
+                ) : view.pinnedFailed ? (
+                    // The way the person chose did not work. The way
+                    // forward is Daal choosing — not a list to pick from.
+                    <div
+                        role="alert"
+                        style={{
+                            maxWidth: 520,
+                            marginBlockEnd: 16,
+                            textAlign: 'center',
+                            fontSize: 14,
+                            color: 'var(--fg)',
+                        }}
+                    >
+                        <div style={{ marginBlockEnd: 12 }}>{t('auto.pinned_failed.do')}</div>
+                        <Button onClick={onLetDaalChoose}>{t('auto.let_daal_choose')}</Button>
+                    </div>
+                ) : null}
+
+                {needFile ? (
+                    // Nothing imported: say that a file is needed and
+                    // offer the way to add one. Never an empty list.
+                    <div
+                        style={{
+                            maxWidth: 520,
+                            textAlign: 'center',
+                            marginBlockEnd: 16,
+                            fontSize: 14,
+                            color: 'var(--ink-soft)',
+                        }}
+                    >
+                        <div style={{ marginBlockEnd: 12 }}>{t('auto.need_file.body')}</div>
+                        <Button onClick={openAddFile}>{t('auto.add_file')}</Button>
+                    </div>
+                ) : noRoutes ? null : (
+                    <WayChooser
+                        t={t}
+                        pinned={pinnedRow}
+                        routes={routes}
+                        // A route whose details could not be read still
+                        // has an id: it gets our own words, never an
+                        // empty name under "You're connected."
+                        running={
+                            state === 'connected' ? routeForDisplay(conn?.activeRoute, t) : undefined
+                        }
+                        engineAuto={view.engineAuto}
+                        busy={somethingRunning}
+                        open={chooserOpen}
+                        onToggle={() => setChooserOpen((v) => !v)}
+                        onPick={onPickRoute}
+                        onBackToAuto={onBackToAuto}
+                        onManage={() => onNavigate('network')}
+                    />
+                )}
 
                 <StatusLine
                     locale={locale}
@@ -637,6 +878,18 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     current={mode}
                     onPick={onPickMode}
                     onClose={() => setShowMode(false)}
+                />
+            )}
+
+            {showAdd && (
+                <AddSheet
+                    t={t}
+                    initialTab="file"
+                    onClose={() => {
+                        setShowAdd(false);
+                        void readRoutes(conn?.routeCountHint, true);
+                    }}
+                    onImported={() => void readRoutes(conn?.routeCountHint, true)}
                 />
             )}
 

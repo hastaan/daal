@@ -22,6 +22,8 @@ package org.daal.desktop.platform
  *   engine_set_tunnel_refresh(on)      ← DaalCoreBridge.setTunnelRefresh
  *   engine_scheduler_tick()            ← DaalCoreBridge.schedulerTick
  *   engine_route_precheck(routeId)     ← DaalCoreBridge.routePrecheck
+ *   engine_connect_auto()              ← DaalCoreBridge.connectAuto
+ *                                         (five fields of its answer)
  *   engine_export_diagnostics()        ← DaalCoreBridge.engineState
  *                                         (six fields of it)
  *
@@ -121,10 +123,30 @@ object DaalCoreBridge {
   external fun routePrecheck(routeId: String): String?
 
   /**
+   * `engine_connect_auto`: the engine picks among every usable route,
+   * tries them in order (the one that last worked on this network
+   * first) and keeps the first that carries. BLOCKS for all of it — one
+   * connection check per route tried — so, like [setRoute], it MUST
+   * NOT be called from the main thread. [clearRoute] abandons it.
+   *
+   * Returns `{"connected": bool, "route_id": id | "", "verdict": code
+   * | "", "tried": n, "candidates": n}`, or null when the engine is
+   * not loaded, the call failed, or the engine has no such call. Ids,
+   * closed codes and counts only; the list of routes tried stays in
+   * the engine's diagnostics (`auto`), where the page reads it.
+   *
+   * Uses the TUN already handed over with [setTunFd], as setRoute
+   * does. When a route is already connected it changes nothing and
+   * names that route.
+   */
+  external fun connectAuto(): String?
+
+  /**
    * The engine's own account of the connection, from its memory (not
    * the route store): `{"active_route": id | "" | null,
    * "route_running": bool | null, "route_check", "route_check_category",
-   * "connect_refused", "connect_refused_route"}`, or null when it
+   * "connect_refused", "connect_refused_route", "auto_mode": bool | null,
+   * "auto_state", "auto_verdict"}`, or null when it
    * cannot be asked. Ids and closed codes only. DaalVpnService reads it
    * after a setRoute that did not return 0, to learn whether the route
    * that was connected before is still up.

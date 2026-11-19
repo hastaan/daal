@@ -1343,6 +1343,14 @@ Gate at close, the tree as it stood BEFORE the pin moved:
   selection wave supplies it (`abi.CheckActiveRoute`,
   `diagnostics.ClassifyObservation` are the plug points). Belongs with
   B1/B2. Acceptance: the `CEN-4` known-findings entry goes stale.
+  *2026-11-19, half done (stays open):* the automatic connect supplies
+  the second observation where another route to the same address gives
+  one — dead address vs UDP stopped is decided (section 15, AC-43).
+  Still open: a route connected by hand has one observation; all UDP
+  dropped, a QUIC-only filter and a dead UDP port are all
+  `udp_blocked_here` (AC-19); name- vs address-keyed reset needs two
+  names on one address and port, which no pack has. The CEN-4 entry
+  was narrowed, not removed (×15 in the full run).
 - [x] **TW-6. The import screens show which routes were left out**
   (F-003 remainder). The file, paste and QR lanes render the verdict's
   `Unavailable` list on the screen that says "Imported."
@@ -1746,6 +1754,9 @@ test; **none of this has been seen on a phone.**
   connection for the length of the check (rig finding SW-1, open).**
   The service goes back to A afterwards; closing the gap means the
   engine proving B beside A and swapping only then.
+  *2026-11-19:* the engine itself now goes back to A and re-proves it
+  (AC-34; SW-1 fixed on the rig). The gap for the length of B's check
+  is still there; this item stays open for that.
 - [ ] **PH-9. The Gradle task for the plugin's unit tests has never
   run.** `:tauri-plugin-daal-platform:testDebugUnitTest` configures and
   compiles offline but `junit:junit:4.13.2` is not in the Gradle cache
@@ -1782,17 +1793,322 @@ Seen on the phone, with logcat recording (tags `daalengine`,
 
 Opened by this pass:
 
-- [ ] **PH-25. "Press to connect" with no route chosen does not
+- [x] **PH-25. "Press to connect" with no route chosen does not
   connect; it opens the Connections list.** A person with a valid file
   and no knowledge of routes is left looking at `vless-reality`,
   `websocket-tls`, `naive`, `hysteria2`. The main control must pick and
   try routes itself. This is the first item of the selection stage.
-- [ ] **PH-26. A stale route id is asked for every two seconds.** After
+  *2026-11-19:* in the tree, not yet seen on a phone — section 15,
+  AC-28, AC-36; rig `op:auto`. Stays to be confirmed by the phone list
+  there.
+- [x] **PH-26. A stale route id is asked for every two seconds.** After
   the store reset the shell kept calling `route_summary` for a route
   that no longer exists (`sql: no rows in result set`, logged each
   time). Harmless, noisy; stop asking once the route is gone.
-- [ ] **PH-27. The add sheet speaks in protocol names and contradicts
+  *2026-11-19:* in the tree, not yet seen on a phone (AC-37).
+- [x] **PH-27. The add sheet speaks in protocol names and contradicts
   itself.** "Paste a .sbp/.sbpx blob, a subscription URL, or a vless://
   / vmess:// / trojan:// / wg:// link", and for a sealed file both
   "enter the PIN" and "It will open automatically" (no PIN was asked).
   The imported row is labelled "pasted" although it came from a file.
+  *2026-11-19:* in the tree, not yet seen on a phone (AC-38). Rows
+  imported before this build have no recorded origin and read "added
+  on this phone".
+
+## 15. Selection stage, first slice: the main button connects by itself (2026-11-19)
+
+The wave that answers PH-25: one "connect" in the engine that picks,
+tries, moves on, remembers and explains (`engine_connect_auto`, ABI 61),
+the Android service and shell that call it, and a main screen whose tap
+connects. A review of the wave found twenty-two things; the repair pass
+closed twenty-one with tests and worded the last honestly.
+
+How far it is checked: `./daal test` green (Go `core` with and without
+the data plane, the rig driver, `daal-desktop-core`, 67 Android JVM
+tests), `go vet` green in every module, vitest 36 files / 483 tests,
+`./daal e2e full` PASS (6195 checks, 21 worlds, known: CEN-4 ×15,
+AUTO-1 ×1) — run after the repair. "[x]" below means **in the tree,
+not yet seen on a phone**. The rig's client is Go calling the engine
+in the service's order on a real TUN; the Kotlin service, the Rust
+plugin and the pages themselves are not in that loop (AC-26, AC-27).
+
+Built by the wave (numbered after the repair items, which were written
+first):
+
+- [x] **AC-28. One call connects.** `engine_connect_auto` builds the
+  list of every usable route across all imported files (not revoked,
+  not expired, not needing a new file, not resting, experimental
+  families only with the gate on), tries them one after another with
+  the existing carrying check, and stays on the first that carries.
+  The answer names the route, every route tried and why it was left,
+  and one closed verdict. Pinned by
+  `TestConnectAuto_MovesOnToTheFirstRouteThatCarries`,
+  `TestConnectAuto_VerdictsEndToEnd`, `TestDeriveAuto_VerdictTable`,
+  `TestVerdictWithoutCandidates_Table` (core/abi); rig `op:auto`
+  `first.*`, `blocked.*` (FINDINGS AUTO-0).
+- [x] **AC-29. It remembers what carried on this network.** The route
+  that last carried here is tried first, then the ranking, routes that
+  failed here recently last; kept inside the encrypted per-network
+  record (hour buckets, no network named in clear), forgotten with the
+  route and by the panic wipe.
+  `TestConnectAuto_OrderIsMemoryThenRankingThenRecentFailures`,
+  `TestAutoMemory_PersistsAndIsWiped`,
+  `TestAutoMemory_NoWriteOnPolledPaths`,
+  `netmem.TestRouteMemory_RecordOrderAndIsolation`; rig
+  `blocked.again.remembered_route_first`,
+  `memory.connect.remembered_route_ahead_of_the_ranking`.
+- [x] **AC-30. A dead route costs seconds, not half a minute.** 4 s
+  for an address that is silent, 8 s for a swallowed first flight
+  (`ProofConfig.StopAtUnreachedRelay`).
+  `TestConnectAuto_UsesTheShorterCheckBudget`,
+  `engine.TestRunProof_StopAtUnreachedRelay`. Four dead routes still
+  measure 29 s on the rig before the person is told anything final.
+- [x] **AC-31. Cancel is prompt.** A disconnect, a route picked by
+  hand or a newer press abandons the pass, also during a check in
+  flight. `TestConnectAuto_ClearRouteCancelsDuringACheck`,
+  `_ManualSetRouteTakesOver`, `_NewerPassAbandonsTheOlder`; Android
+  `aStopCancelsAnAutoInFlightAndNothingIsUndoneByIt`; rig
+  `all-blocked.cancel.*` (returns within 2 s).
+- [x] **AC-32. While automatic, the engine moves on by itself when the
+  route stops carrying**, inside the same TUN; the host replaces
+  nothing. If nothing else carries, the old route is put back and
+  re-checked. What starts the move is the engine's own clock only: a
+  check every 180 s ±25 %, or at once on `engine_network_changed`;
+  first failed check, a second 5 s later, then the move (AC-2). On
+  Android `engine_network_changed` comes only from the page, so with
+  the app in the background the move waits for the timer (AC-33 open).
+  `TestAutoMode_FallsOverWhenTheRouteStopsCarrying`,
+  `TestManualMode_DoesNotFallOver`,
+  `TestAutoMode_NothingElseCarriesThenTheRouteComesBack`; rig
+  `fall-over.moved.*` (liveness set to 3 s: proves that it moves, not
+  how soon — FINDINGS AUTO-O1).
+- [x] **AC-43. A verdict says only what two observations prove**
+  (TW-5, first half). UDP silent while a TCP route to the same address
+  answered → `udp_blocked_here`; every route to one address silent at
+  connect → `relay_unreachable`; `name_blocked` / `address_blocked`
+  only for two names on one address and port. The single-route
+  categories are unchanged. `TestDeriveAuto_VerdictTable`; rig
+  `memory.udp.verdict`, `all-blocked.connect.verdict`,
+  `relay-ip-block` world.
+- [x] **AC-34. A switch that fails goes back** (rig SW-1, PH-8). From
+  a carrying A, `engine_set_route(B)` where B carries nothing returns
+  the error and the engine reconnects and re-proves A; diagnostics
+  `switch_back`. `TestSetRoute_FailedSwitchGoesBackToTheRouteThatWasCarrying`,
+  `_FailedSwitchAndFailedWayBack`, `_FailedFirstConnectHasNoWayBack`;
+  rig `check-rotate.unreachable.*.old_route_still_connected`,
+  `switch_back_recorded`. The SW-1 entry is gone from
+  `known-findings.json`. A is still down for the length of B's check.
+- [x] **AC-35. The Android service starts "automatic" from a start
+  with no route id** (one rule on every layer: absent or empty id; no
+  flag), shows the route the engine actually runs, follows the
+  engine's own moves without rebuilding anything, keeps a route that
+  still carries when a pass gives up, and tears down after a pass the
+  person asked for that found nothing. `StartSequenceTest` (`runAuto`
+  cases, e.g. `autoWithAnEngineThatCannotBeAskedBuildsNoTun`,
+  `autoThatGivesUpWhileARouteStillCarriesStaysOnIt`,
+  `reconnectThatFindsNoRouteKeepsTheTun`), `SwitchPolicyTest`
+  (`aRoutePickedByHandIsNeverFollowedAway`,
+  `whileTheEngineIsStillTryingWhatIsShownStays`); Rust
+  `connection_state_tests`, `engine_gate` against the tree's library;
+  `connectThreading.test.ts` reads the service's locking. Only the
+  pure decisions run on the JVM (AC-27).
+- [x] **AC-36. The main button connects (PH-25).** Tap → automatic
+  connect, or the saved choice if the person pinned one; no routes →
+  "Add your file"; "Trying way 2 of 4…" with Cancel at every moment;
+  one plain sentence and one action per verdict in English and Farsi,
+  unknown code → the generic sentence; the list of ways only under
+  "Choose one yourself (advanced)", with "Back to automatic".
+  `lib/autoConnect.test.ts`, `lib/mainScreen.test.ts`,
+  `components/connection/AutoUi.test.tsx`, `backends/tauri.test.ts`
+  (follows the engine r1→r2 without ever showing "disconnected"),
+  `lib/i18nAuto.test.ts` (mirror equals source, EN/FA parity).
+- [x] **AC-37. A route that is gone is asked for once (PH-26).** A
+  failed `route_summary` is followed by one list read; a route the
+  list no longer holds is not asked again until an import or a
+  removal. `lib/missingRoutes.test.ts`, three cases in
+  `backends/tauri.test.ts` (one call where there were five).
+- [x] **AC-38. The add sheet speaks plainly and says one thing about a
+  sealed file (PH-27).** Protocol kinds only behind "What can I
+  paste?"; a sealed file gets one line chosen by whether the phone's
+  key is open; a row says where it came from (file, scan, paste) and
+  "added on this phone" when that was not recorded.
+  `components/PickedFileNote.test.tsx`, `lib/importOrigin.test.ts`.
+
+Closed by the repair pass (each with a test that fails without it):
+
+- [x] **AC-1. One failed automatic pass no longer rests every route.**
+  A pass in which nothing at all answered (every failure silence:
+  `tcp_connect_timeout`, `udp_no_reply`, `dns_timeout`,
+  `network_offline`) lifts the cooldowns it set and writes nothing
+  durable; candidates never feed the family's three-in-an-hour count
+  (`pathmanager.FailedCandidate`, `abi.autoSettleLocked`).
+  `TestConnectAuto_APassWhereNothingAnsweredCoolsNothingDown`,
+  `_AnAnsweredFailureStillCoolsItsRouteDown`,
+  `_RepeatedFailedPassesNeverStartTheFamilyLadder`; rig
+  `all-blocked.again.every_candidate_tried_again`.
+- [x] **AC-2. The engine does not bounce a tunnel that may still
+  carry.** No fall-over for `path_too_slow`, `relay_no_egress`,
+  `network_offline`; a second failed check in a row (5 s later) before
+  the first fall-over; engine-started passes back off 5/10/20/40/60 min
+  per outage (`route_check.go` startLivenessLocked, `autoFallBackoff`).
+  `TestAutoMode_OneFailedCheckDoesNotMoveOn`,
+  `_DoesNotMoveOffARouteThatMayStillCarry`, `_EnginePassesBackOff`.
+- [x] **AC-3. Tunnelled refresh follows instances the engine starts
+  itself** (`rearmTunnelRefresh`: fall-over, the same route put back,
+  the way back from a failed switch).
+  `TestTunnelRefresh_FollowsTheInstancesTheEngineStartsItself`.
+- [x] **AC-4. After the engine's own switch-back the Android note keeps
+  the reason** (`switch_back_*` through `connection_state_json` into
+  `SwitchPolicy.EngineView`; no second `setRoute` for a route whose way
+  back already failed). Rust `the_engines_switch_back_is_passed_through`;
+  two cases each in `StartSequenceTest` and `SwitchPolicyTest`.
+- [x] **AC-5. `engine_connect_auto` on a connected engine takes charge**
+  (`auto.mode` true), so a service that reports "automatic" is telling
+  the truth, and "Back to automatic" while connected is true at once.
+  `TestConnectAuto_TakesChargeOfARoutePickedByHand`.
+- [x] **AC-6. An unreadable route store is `store_unreadable`, not
+  `no_routes`.** `TestConnectAuto_AnUnreadableStoreIsNotNoRoutes`.
+- [x] **AC-7. An explicit connect during an engine fall-over inherits
+  the route being moved away from** (put back if nothing carries).
+  `TestConnectAuto_DuringAFallOverPassStillPutsTheRouteBack`.
+- [x] **AC-8. `engine_shutdown` during a pass starts nothing more.**
+  `TestShutdown_DuringAPassStartsNothingMore`.
+- [x] **AC-9. `none_usable` has its own sentence and "Choose one
+  yourself"**; a pinned tap after an automatic failure connects the pin.
+- [x] **AC-10. "Try again" is never futile**: the sentence of the pass
+  that tried stays, the wait is said, the button is off while every way
+  is known to be resting; no sentence promises "in a moment".
+- [x] **AC-11. A way picked on the Connections page is pinned only once
+  it is connected**; a pinned way that failed says so and offers "Let
+  Daal choose".
+- [x] **AC-12. Panic wipe, publisher delete and route delete clear the
+  webview's own records** (publisher fingerprints, the pinned route id).
+- [x] **AC-13. `relay_unreachable` and the "some ways are blocked"
+  lines say only what was seen** (EN + FA).
+- [x] **AC-14. Android "holding" is shown as what it is**:
+  `vpn_status.holding`, headline "Connection lost. Daal keeps trying.",
+  the phone-has-no-internet line, main tap = Disconnect, "Try now".
+- [x] **AC-15. The chooser says what is true now** and shows a choice
+  for next time as a separate line; no route name or id on the main
+  path in automatic mode.
+- [x] **AC-16. The service's failure note no longer outlives the
+  engine's verdict; "Try again" on Android does not flash the old
+  failure back.**
+- [x] **AC-17. The main screen's wiring is tested** where it can break
+  (`lib/mainScreen.ts` + `mainScreen.test.ts`, driven by the harness
+  contract): tap → connectAuto once and no navigation; empty list → add
+  sheet; failed pass → verdict sentence + Try again; trying → Cancel
+  disconnects.
+
+Open:
+
+- [ ] **AC-18. The engine still cannot tell "no working internet" from
+  "the relay is dead"** (rig AUTO-1). It has no observation outside its
+  routes; a total blackout is `relay_unreachable`. The sentence now
+  names both and asks the person to check other apps. A reachability
+  probe is a design decision (what to probe, without becoming a
+  fingerprint), not a fix.
+- [ ] **AC-19. `udp_blocked_here` proves less than its name.** Worded
+  honestly in the UI and documented in the engine and the spec; the
+  code name is the contract's. Telling a network that drops UDP from a
+  relay whose UDP service is down needs a second UDP observation (a
+  second UDP route on another port or relay) — the open half of CEN-4.
+- [ ] **AC-20. A network that ANSWERS and breaks everything (a captive
+  portal intercepting TLS) still rests every route**, for up to 30 min:
+  only silence is forgiven. Whether a pass can recognise a portal is
+  open.
+- [ ] **AC-21. A liveness failure of the connected route still counts
+  toward its family's three-in-an-hour ladder** (once per outage), in
+  automatic mode too. A route that flaps three times in an hour rests
+  its family for 5 min and up. Left as the path manager designed it;
+  revisit with field data.
+- [ ] **AC-22. The Android service's retry while holding now runs a
+  whole pass each time nothing answers** (nothing is resting): at most
+  one pass per 5 min after the first few. Watch battery and radio
+  wake-ups on a phone.
+- [ ] **AC-23. Desktop does not read `switch_back`**: after a failed
+  switch that went back, the Connections page shows the generic
+  sentence (Android has the service's note). Small; needs the summary
+  to carry the field.
+- [ ] **AC-24. The Connections page line "You chose one way yourself.
+  Daal uses only that one." is shown from the saved choice**, also
+  while the engine is connected automatically on another way (the main
+  screen's chooser was corrected; this line was not).
+- [ ] **AC-25. A phone holding only experimental-family routes is told
+  to choose by hand.** Whether automatic connect should use them when
+  there is nothing else is a product decision.
+- [ ] **AC-26. No page is rendered in a test** (the repo has no DOM
+  test environment): ConnectionPage and NetworkPage are drawn from
+  tested decisions, and their JSX is not exercised.
+- [ ] **AC-27. Not compiled or run**: the Android service
+  (`DaalVpnService.kt`, `DaalPlatformPlugin.kt` — only the pure
+  `SwitchPolicy.kt` / `StartSequence.kt` run on the JVM; the follow
+  timer, the retry while holding, the notification text and the start
+  with no intent have no test), `src-tauri/src/lib.rs` (the
+  `connect_auto` command and its JNI twin) and the
+  `tauri-plugin-daal-platform` crate (no GTK and no NDK on the build
+  machine). The first real compile is the APK build. The gomobile
+  binding does not vet (`abi/share_gomobile.go`, older than this wave).
+- [ ] **AC-33. Nothing on the phone tells the engine the network
+  changed unless the page is open.** `engine_network_changed` is called
+  from the webview only, with the kind (wifi / mobile) as the whole
+  identity; with the app in the background a dead route is noticed by
+  the 3-minute timer. A `ConnectivityManager` callback in the service
+  closes it, and gives the per-network memory a real key.
+- [ ] **AC-39. A tor route ahead of a working one can hold a pass for
+  minutes** (90 s per attempt, not shortened). Not on the rig.
+- [ ] **AC-40. The APK must carry a `libdaalcore.so` that exports
+  `engine_connect_auto`**; with an older one the main button builds a
+  TUN, releases it and shows the generic sentence
+  (`auto_unavailable`). See the three staleness layers.
+- [ ] **AC-41. Farsi of every new sentence needs a native reader**
+  (`auto.*`, `network.auto.*`, `network.pinned.*`, `add.*`), and the
+  service's notification text is English only (older gap).
+- [ ] **AC-42. Papers that still say otherwise**: the ABI count in
+  `specs/frp-track-v1.md`, `development-phases/README.md`,
+  `docs/build-and-release.md`, `CHANGELOG.md`;
+  `specs/network-memory-v1.md` does not describe `route_memory`.
+
+To check on the phone (build with the new `.so`, same signing key):
+
+1. Fresh install or wiped store. Main screen says to add a file. Add
+   the four-route file from the file tab: no protocol name on the way,
+   the row says it came from a file.
+2. Press the main button. Expect "Trying way 1 of 4…", then connected,
+   no list shown, no route name on the main screen. Note the seconds.
+3. Disconnect, press again: connected at once on the same way (memory).
+4. Block nothing, leave it connected ten minutes with the screen off:
+   still connected, same way, no reconnect in the notification.
+5. Open "Choose one yourself (advanced)", pick another way, connect:
+   "Only this one: …". Then "Back to automatic" while connected: stays
+   connected, the line changes at once.
+6. Connections page: tap a way while connected automatically — it
+   switches without losing the tunnel and is pinned only once it
+   carries.
+7. Airplane mode on, press the main button: one plain sentence within
+   about half a minute (expected today: the "server did not answer /
+   check other apps" sentence, AC-18), Try again offered, nothing left
+   running, no VPN key in the status bar. Airplane mode off, Try again:
+   connects.
+8. Connected automatically, switch wifi → mobile data with the app
+   open: stays or comes back connected by itself; repeat with the app
+   in the background and note how long it takes (AC-33).
+9. Cancel while it says "Trying way…": back to the start within a
+   couple of seconds, nothing running.
+
+### Seen on the phone (2026-11-19, Samsung S25, relay "Test")
+
+- [x] The APK builds from this tree (the Android service, the plugin and
+  the shell command compile; AC-27's "not compiled" is closed, AC-40 is
+  met: the packaged engine exports `engine_connect_auto`).
+- [x] Main screen says "Automatic — Daal chooses the best way". One press
+  with nothing chosen: `auto start candidates=4`, r1 tried and carrying
+  in 0.3 s, "You're connected."; the browser's exit address is the
+  relay's. Disconnect and a second press: the same, r1 first.
+- [ ] Not seen on the phone, only on the rig: moving on past a blocked
+  route, the failure sentences, the engine moving by itself, pin and
+  back to automatic, cancel while trying. The home network blocks
+  nothing; these need a network that does, or the checks in "To check
+  on the phone" done by hand.
+- [ ] `route_summary` for a missing route was still asked once at launch
+  (one log line, not a loop).

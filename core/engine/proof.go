@@ -87,6 +87,17 @@ type ProofConfig struct {
 	LivenessInterval time.Duration
 	LivenessJitter   float64
 	RecheckInterval  time.Duration
+	// StopAtUnreachedRelay ends the ordinary attempts after the first
+	// one that never got as far as the relay (diagnostics.PhaseReach,
+	// nothing seen moving). The attempts differ only in the far-side
+	// TARGET, and a target is not consulted until the relay has
+	// answered: a second attempt at a relay whose address is silent
+	// asks the same question again and makes the person wait
+	// AttemptTimeout for the same answer. Off by default (a connect to
+	// one route the person picked keeps every attempt); the automatic
+	// connect sets it, because it has other routes to get to
+	// (core/abi/connect_auto.go). Not part of the configuration file.
+	StopAtUnreachedRelay bool
 }
 
 // ProofTarget is one default far-side host and who runs it.
@@ -346,6 +357,9 @@ func runProofWith(ctx context.Context, cfg ProofConfig, rnd func(int) int, attem
 	}
 	for i := 0; i < cfg.Attempts && ctx.Err() == nil; i++ {
 		if try(cfg.AttemptTimeout, attempt) {
+			break
+		}
+		if cfg.StopAtUnreachedRelay && res.Observation.Phase == diagnostics.PhaseReach && !res.Observation.Progress {
 			break
 		}
 	}

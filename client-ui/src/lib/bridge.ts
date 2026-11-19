@@ -99,6 +99,32 @@ export async function connect(routeId: string): Promise<void> {
     return invoke<void>('connect', { routeId });
 }
 
+/** "Connect" with no route named: the engine picks, tries each usable
+ *  route in turn and keeps the first that carries traffic
+ *  (`engine_connect_auto`).
+ *
+ *  Android: the same `vpn_start` the per-route connect uses, with an
+ *  EMPTY route id — the plugin's one rule for "connect automatically"
+ *  (VpnStartRequest in plugins/daal-platform/src/models.rs; there is no
+ *  separate flag). The call resolves when the VPN service has been
+ *  started; the engine's answer arrives through the `auto` block of
+ *  export_diagnostics (and, for a failure the engine could not report,
+ *  the service's `vpn_status.last_switch` note), so this resolves to
+ *  null.
+ *
+ *  Desktop: the `connect_auto` command, which blocks like `connect`
+ *  and hands back the engine's JSON answer (returned as received —
+ *  lib/autoConnect.ts parseAutoResult reads it). */
+export async function connectAuto(): Promise<unknown> {
+    if (isAndroid()) {
+        await invoke<unknown>('plugin:daal-platform|vpn_start', {
+            request: { routeId: '' },
+        });
+        return null;
+    }
+    return invoke<unknown>('connect_auto');
+}
+
 export async function disconnect(): Promise<void> {
     if (isAndroid()) {
         try {
@@ -230,6 +256,11 @@ export interface DiagnosticsBlob {
     // set it aside (the saved connections are gone until the file is
     // added again). Absent or false otherwise.
     store_recovered?: boolean;
+    // What automatic connect is doing, from engine memory:
+    // {state, mode, trying, index, total, tried[], verdict, route_id}.
+    // Left untyped on purpose — lib/autoConnect.ts parseAuto is the one
+    // reading, and an engine that predates the block sends nothing.
+    auto?: unknown;
 }
 
 // Phase 2D: PIN-vault unlock outcome.

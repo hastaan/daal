@@ -10,6 +10,9 @@
 
 import type {
     AddSubscriptionRequest,
+    AutoConnectResult,
+    AutoStatus,
+    AutoTried,
     BootstrapStatus,
     BurnpressureVerdict,
     ConnectionSummary,
@@ -39,15 +42,53 @@ import type {
 import { buildPublisherTree, deriveBurnpressureVerdict } from '../contract/derive_tree';
 import { activeScenario, type Scenario } from '../harness/scenarios';
 
+const AUTO_IDLE: AutoStatus = {
+    state: 'idle',
+    mode: false,
+    trying: '',
+    index: 0,
+    total: 0,
+    tried: [],
+    verdict: '',
+    routeId: '',
+};
+
+/** Would this canned route carry traffic? The harness has no network,
+ *  so the scenario's own numbers decide: a route measured below 50% is
+ *  one that "does not work here". Unmeasured routes carry. */
+function harnessCarries(r: RouteDisplayRow): boolean {
+    return typeof r.healthPct !== 'number' || r.healthPct >= 50;
+}
+
 export class HarnessContract implements D2Contract {
     private cellLabels = new Map<string, string>();
+    // What the person did in this harness session, laid over the
+    // scenario's canned connection: connect, connectAuto and disconnect
+    // move a small state machine shaped like the engine's, so the main
+    // screen can be driven in a browser. null = untouched scenario.
+    private sim: ConnectionSummary | null = null;
+    // Bumped by every connect/disconnect: an automatic connect in
+    // flight sees it changed and stops (how the engine's cancel looks
+    // from here).
+    private gen = 0;
+
+    /** `stepMs`: how long each simulated route check takes. Tests pass
+     *  a few ms; the browser default is long enough to read "Trying way
+     *  2 of 4…". `scenario`: a fixed scenario instead of the one named
+     *  in the URL (tests). */
+    constructor(private readonly opts: { stepMs?: number; scenario?: Scenario } = {}) {}
 
     private get s(): Scenario {
-        return activeScenario();
+        return this.opts.scenario ?? activeScenario();
+    }
+
+    private wait(): Promise<void> {
+        const ms = this.opts.stepMs ?? 900;
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     async connectionSummary(): Promise<ConnectionSummary> {
-        return this.s.connection;
+        return this.sim ?? this.s.connection;
     }
 
     async whyThisRoute(): Promise<WhyThisRouteSummary | null> {
@@ -83,7 +124,7 @@ export class HarnessContract implements D2Contract {
 
     async statusPagePayload(): Promise<StatusPagePayload> {
         return {
-            connection: this.s.connection,
+            connection: await this.connectionSummary(),
             why: this.s.why ?? null,
             pointer: this.s.pointer ?? null,
             routeHealth: this.s.routeHealth ?? [],
@@ -91,13 +132,142 @@ export class HarnessContract implements D2Contract {
         };
     }
 
-    async connect(_routeId: string): Promise<void> {
-        // In harness mode actions are no-ops. A future iteration may
-        // tick scenario.connection.state across a fake "connecting"
-        // sequence via a manual state machine.
+    // A connect by hand: that route, checked, up. Ends automatic mode,
+    // as engine_set_route does.
+    async connect(routeId: string): Promise<void> {
+        this.gen++;
+        const row = (this.s.availableRoutes ?? []).find((r) => r.routeId === routeId);
+        if (!row) throw new Error('harness: no such route');
+        this.sim = {
+            ...this.s.connection,
+            state: 'connected',
+            activeRoute: row,
+            routeCheck: 'ok',
+            routeRunning: true,
+            connectRefused: undefined,
+            auto: AUTO_IDLE,
+        };
     }
 
-    async disconnect(): Promise<void> { /* no-op */ }
+    // The engine's engine_connect_auto, in miniature: every usable route
+    // in listed order, one check each, the first that carries stays up.
+    // Blocks until it is over, like the desktop command; the `auto`
+    // block of connectionSummary says where it is meanwhile.
+    async connectAuto(): Promise<AutoConnectResult | null> {
+        const now = await this.connectionSummary();
+        if (now.state === 'connected' && now.activeRoute) {
+            // Already connected: nothing is started, the running route
+            // is named — and, as in the engine, automatic connect takes
+            // charge of it from here on.
+            this.sim = {
+                ...now,
+                auto: { ...AUTO_IDLE, state: 'connected', mode: true, routeId: now.activeRoute.routeId },
+            };
+            return {
+                connected: true,
+                routeId: now.activeRoute.routeId,
+                family: now.activeRoute.family,
+                tried: [],
+                verdict: '',
+                candidates: 0,
+            };
+        }
+        const gen = ++this.gen;
+        const base = this.s.connection;
+        const all = this.s.availableRoutes ?? [];
+        const dialable = all.filter((r) => r.familyMaturity !== 'unsupported');
+        const candidates = dialable.filter((r) => r.inCooldown !== true);
+        const tried: AutoTried[] = [];
+        const fail = (verdict: string): AutoConnectResult => {
+            this.sim = {
+                ...base,
+                state: 'error',
+                activeRoute: undefined,
+                routeCheck: undefined,
+                routeRunning: false,
+                auto: { ...AUTO_IDLE, state: 'failed', tried: [...tried], verdict, total: candidates.length },
+            };
+            return { connected: false, routeId: '', family: '', tried: [...tried], verdict, candidates: candidates.length };
+        };
+        if (all.length === 0) return fail('no_routes');
+        if (candidates.length === 0) return fail(dialable.length > 0 ? 'all_cooling_down' : 'all_failed');
+        for (let i = 0; i < candidates.length; i++) {
+            const r = candidates[i];
+            this.sim = {
+                ...base,
+                state: 'connecting',
+                activeRoute: r,
+                routeCheck: 'verifying',
+                routeRunning: true,
+                auto: {
+                    state: 'trying',
+                    mode: true,
+                    trying: r.routeId,
+                    index: i + 1,
+                    total: candidates.length,
+                    tried: [...tried],
+                    verdict: '',
+                    routeId: '',
+                },
+            };
+            await this.wait();
+            if (gen !== this.gen) {
+                // Cancelled (a disconnect, or a newer connect): whoever
+                // did that owns the state now.
+                tried.push({ routeId: r.routeId, family: r.family, result: 'cancelled', category: '' });
+                return { connected: false, routeId: '', family: '', tried, verdict: '', candidates: candidates.length };
+            }
+            if (harnessCarries(r)) {
+                tried.push({ routeId: r.routeId, family: r.family, result: 'carried', category: '' });
+                const verdict = i > 0 ? 'moved_on' : '';
+                this.sim = {
+                    ...base,
+                    state: 'connected',
+                    activeRoute: r,
+                    routeCheck: 'ok',
+                    routeRunning: true,
+                    auto: {
+                        state: 'connected',
+                        mode: true,
+                        trying: '',
+                        index: i + 1,
+                        total: candidates.length,
+                        tried: [...tried],
+                        verdict,
+                        routeId: r.routeId,
+                    },
+                };
+                return {
+                    connected: true,
+                    routeId: r.routeId,
+                    family: r.family,
+                    tried: [...tried],
+                    verdict,
+                    candidates: candidates.length,
+                };
+            }
+            tried.push({ routeId: r.routeId, family: r.family, result: 'not_carrying', category: 'no_reply' });
+        }
+        return fail('all_failed');
+    }
+
+    async routesStrict(): Promise<RouteDisplayRow[] | undefined> {
+        return this.s.availableRoutes ?? [];
+    }
+
+    // Stops whatever is running and cancels an automatic connect in
+    // flight; ends automatic mode.
+    async disconnect(): Promise<void> {
+        this.gen++;
+        this.sim = {
+            ...this.s.connection,
+            state: 'disconnected',
+            activeRoute: undefined,
+            routeCheck: undefined,
+            routeRunning: false,
+            auto: AUTO_IDLE,
+        };
+    }
 
     async setMode(_mode: ConnectionSummary['mode']): Promise<void> { /* no-op */ }
 

@@ -175,10 +175,202 @@ class SwitchPolicyTest {
   }
 
   @Test
+  fun afterTheEnginesOwnSwitchBackTheNoteCarriesTheFailedRoutesCategory() {
+    // The engine went back to r1 and re-proved it: route_check is ok,
+    // its category "". Why r2 failed is in switch_back.
+    val back = view(active = "r1", running = true)
+      .copy(switchBackRoute = "r2", switchBackCategory = "udp_no_reply", switchBackRestored = true)
+    assertEquals(AfterFailure.Keep("r1"), SwitchPolicy.afterFailedStart("r2", "r1", back))
+    assertEquals(
+      SwitchPolicy.SwitchNote("r2", "r1", "failed", "udp_no_reply"),
+      SwitchPolicy.describeFailure("r2", "r1", back),
+    )
+    // A switch_back about some OTHER, earlier switch says nothing here.
+    val stale = view(active = "", running = false, category = "timeout")
+      .copy(switchBackRoute = "r7", switchBackCategory = "udp_no_reply", switchBackRestored = true)
+    assertEquals("timeout", SwitchPolicy.describeFailure("r2", "r1", stale).reason)
+  }
+
+  @Test
+  fun whenTheEnginesWayBackFailedTooThereIsNothingToRestore() {
+    val gone = view(active = "", running = false, category = "timeout")
+      .copy(switchBackRoute = "r2", switchBackCategory = "tcp_reset", switchBackRestored = false)
+    assertEquals(AfterFailure.TearDown, SwitchPolicy.afterFailedStart("r2", "r1", gone))
+    assertEquals("tcp_reset", SwitchPolicy.describeFailure("r2", null, gone).reason)
+    // An engine that reports no switch_back (older library): as before.
+    assertEquals(
+      AfterFailure.Restore("r1"),
+      SwitchPolicy.afterFailedStart("r2", "r1", view(active = "", running = false, category = "timeout")),
+    )
+  }
+
+  @Test
+  fun holdingIsATunWithNothingBehindItUnderAnAutomaticConnect() {
+    assertTrue(SwitchPolicy.holding(auto = true, tunHeld = true, connected = false))
+    // Connected: not holding. Torn down (no TUN): not holding, even
+    // though the automatic flag outlives the service instance.
+    assertFalse(SwitchPolicy.holding(auto = true, tunHeld = true, connected = true))
+    assertFalse(SwitchPolicy.holding(auto = true, tunHeld = false, connected = false))
+    // A route picked by hand that failed is torn down or restored,
+    // never held.
+    assertFalse(SwitchPolicy.holding(auto = false, tunHeld = true, connected = false))
+  }
+
+  @Test
   fun aRefusalOfAnotherRouteIsNotThisRoutesRefusal() {
     val other = view(active = "r1", running = true, refused = "cooldown", refusedRoute = "r9")
     assertFalse(SwitchPolicy.wasRefused(other, "r2"))
     assertTrue(SwitchPolicy.wasRefused(other, "r9"))
     assertFalse(SwitchPolicy.wasRefused(null, "r2"))
+  }
+
+  // ---- automatic connect ----
+
+  private fun auto(
+    active: String? = "",
+    running: Boolean? = false,
+    mode: Boolean? = true,
+    state: String = "",
+    verdict: String = "",
+  ) = EngineView(active, running, "", "", "", autoMode = mode, autoState = state, autoVerdict = verdict)
+
+  @Test
+  fun failedAutoWithNothingRunningTearsDown() {
+    assertEquals(AfterFailure.TearDown, SwitchPolicy.afterFailedAuto(null, auto(state = "failed")))
+    // Even with a route that was good before: the engine tried every
+    // route, that one included, and none carries.
+    assertEquals(AfterFailure.TearDown, SwitchPolicy.afterFailedAuto("r1", auto(state = "failed")))
+  }
+
+  @Test
+  fun failedAutoKeepsTheRouteThatWasConnectedAndStillIs() {
+    assertEquals(
+      AfterFailure.Keep("r1"),
+      SwitchPolicy.afterFailedAuto("r1", auto(active = "r1", running = true, mode = false)),
+    )
+    // Running unknown, active known: still the same route.
+    assertEquals(
+      AfterFailure.Keep("r1"),
+      SwitchPolicy.afterFailedAuto("r1", auto(active = "r1", running = null)),
+    )
+  }
+
+  @Test
+  fun failedAutoDoesNotKeepARouteThatIsOnlyBeingTried() {
+    // An instance is up for r3 but nothing says it carries.
+    assertEquals(
+      AfterFailure.TearDown,
+      SwitchPolicy.afterFailedAuto("r1", auto(active = "r3", running = true, state = "trying")),
+    )
+    // The engine itself calls it connected: keep that one.
+    assertEquals(
+      AfterFailure.Keep("r3"),
+      SwitchPolicy.afterFailedAuto(null, auto(active = "r3", running = true, state = "connected")),
+    )
+  }
+
+  @Test
+  fun failedAutoWithAnEngineThatCannotBeAsked() {
+    assertEquals(AfterFailure.TearDown, SwitchPolicy.afterFailedAuto(null, null))
+    assertEquals(AfterFailure.Restore("r1"), SwitchPolicy.afterFailedAuto("r1", null))
+  }
+
+  @Test
+  fun autoNoteNamesNoRouteAndCarriesTheVerdict() {
+    val n = SwitchPolicy.describeAutoFailure(null, "udp_blocked_here")
+    assertEquals("", n.requestedRouteId)
+    assertEquals(null, n.keptRouteId)
+    assertEquals("failed", n.outcome)
+    assertEquals("udp_blocked_here", n.reason)
+    assertTrue(n.auto)
+    // A note about a route picked by hand is not an automatic one.
+    assertFalse(SwitchPolicy.describeFailure("r2", "r1", view(active = "r1", running = true)).auto)
+  }
+
+  // ---- following the engine while it is in charge ----
+
+  @Test
+  fun engineThatMovedByItselfIsFollowedNotTreatedAsAnError() {
+    val engine = auto(active = "r3", running = true, state = "connected", verdict = "moved_on")
+    assertEquals(SwitchPolicy.Follow.Moved("r3"), SwitchPolicy.follow("r1", engine))
+    // Holding (nothing shown) and the engine is up again.
+    assertEquals(SwitchPolicy.Follow.Moved("r3"), SwitchPolicy.follow(null, engine))
+  }
+
+  @Test
+  fun sameRouteIsNothingToFollow() {
+    val engine = auto(active = "r1", running = true, state = "connected")
+    assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r1", engine))
+  }
+
+  @Test
+  fun whileTheEngineIsStillTryingWhatIsShownStays() {
+    // r1 stopped carrying, the engine is checking r2: not yet a move,
+    // and not a loss.
+    val engine = auto(active = "r2", running = true, state = "trying")
+    assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r1", engine))
+    assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r1", auto(active = "", running = false, state = "trying")))
+  }
+
+  @Test
+  fun engineOutOfRoutesIsALossWithItsVerdict() {
+    val engine = auto(active = "", running = false, state = "failed", verdict = "network_down")
+    assertEquals(SwitchPolicy.Follow.Lost("network_down"), SwitchPolicy.follow("r1", engine))
+    // "failed" while an instance is still said to run is not acted on.
+    assertEquals(
+      SwitchPolicy.Follow.None,
+      SwitchPolicy.follow("r1", auto(active = "r1", running = true, state = "failed")),
+    )
+  }
+
+  @Test
+  fun aRoutePickedByHandIsNeverFollowedAway() {
+    // Mode off (manual) or unknown (an engine that does not report it):
+    // the engine does not move by itself, and an odd reading must not
+    // change what the service says.
+    assertEquals(
+      SwitchPolicy.Follow.None,
+      SwitchPolicy.follow("r1", auto(active = "r2", running = true, mode = false, state = "connected")),
+    )
+    assertEquals(
+      SwitchPolicy.Follow.None,
+      SwitchPolicy.follow("r1", auto(active = "", running = false, mode = null, state = "failed")),
+    )
+    assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r1", null))
+    // A connected state that names no route moves nothing.
+    assertEquals(
+      SwitchPolicy.Follow.None,
+      SwitchPolicy.follow("r1", auto(active = null, running = null, state = "connected")),
+    )
+  }
+
+  @Test
+  fun retriesBackOffAndAreBounded() {
+    assertEquals(10_000L, SwitchPolicy.retryDelayMs(1))
+    assertEquals(20_000L, SwitchPolicy.retryDelayMs(2))
+    assertEquals(40_000L, SwitchPolicy.retryDelayMs(3))
+    assertEquals(160_000L, SwitchPolicy.retryDelayMs(5))
+    assertEquals(300_000L, SwitchPolicy.retryDelayMs(6))
+    assertEquals(300_000L, SwitchPolicy.retryDelayMs(1000))
+    assertEquals(10_000L, SwitchPolicy.retryDelayMs(0))
+    var last = 0L
+    for (i in 1..40) {
+      val d = SwitchPolicy.retryDelayMs(i)
+      assertTrue(d >= last)
+      last = d
+    }
+  }
+
+  // ---- cancelling an automatic connect uses the same discipline ----
+
+  @Test
+  fun aStopOrANewerStartCancelsAnAutoInsideTheEngine() {
+    // Start 7 is an automatic connect inside connectAuto (checkingGen).
+    assertEquals(CancelStep.CANCEL, SwitchPolicy.cancelStep(stopping = true, pendingStart = 7, finishedStart = 6, checkingGen = 7))
+    assertEquals(CancelStep.CANCEL, SwitchPolicy.cancelStep(stopping = false, pendingStart = 7, finishedStart = 6, checkingGen = 7))
+    // A newer start does not clear the route before the older one is in
+    // the engine: until then the connected route is still the old one.
+    assertEquals(CancelStep.WAIT, SwitchPolicy.cancelStep(stopping = false, pendingStart = 7, finishedStart = 6, checkingGen = 0))
+    assertEquals(CancelStep.DONE, SwitchPolicy.cancelStep(stopping = true, pendingStart = 7, finishedStart = 7, checkingGen = 0))
   }
 }

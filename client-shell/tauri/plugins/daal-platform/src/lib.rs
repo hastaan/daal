@@ -11,7 +11,8 @@
 //! Commands (declared in build.rs and exposed in `commands.rs`):
 //!   - `vpn_start(route_id)` → on Android, prepares the VPN consent
 //!     prompt if needed and starts `DaalVpnService` with the chosen
-//!     route. The Kotlin side `Builder.establish()`s the TUN, detaches
+//!     route. An absent or empty `route_id` is an AUTOMATIC connect:
+//!     the service asks the engine to pick a route, try it and move on. The Kotlin side `Builder.establish()`s the TUN, detaches
 //!     the fd, and forwards it to the engine via
 //!     `engine_set_tun_fd`. Desktop branch returns Ok with
 //!     `{ "applied": true, "platform": "desktop" }`.
@@ -69,6 +70,7 @@ impl<R: Runtime> Clone for PlatformHandle<R> {
 
 #[cfg(mobile)]
 impl<R: Runtime> PlatformHandle<R> {
+    /// `route_id` "" = connect automatically.
     pub fn vpn_start(&self, route_id: &str) -> Result<models::VpnStartResponse> {
         self.inner.vpn_start(route_id)
     }
@@ -98,6 +100,8 @@ impl<R: Runtime> PlatformHandle<R> {
             route_id: None,
             platform: "desktop".into(),
             last_switch: None,
+            auto: false,
+            holding: false,
         })
     }
 }

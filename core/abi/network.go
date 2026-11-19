@@ -204,6 +204,12 @@ func captureAndPersist(store *netmem.Store, outID string, c *Core, now time.Time
 	snap := netmem.Snapshot{
 		Mode: c.mode,
 	}
+	// What the automatic connect remembers about the routes on this
+	// network is written when a route carries or fails, not here, and
+	// must survive this rewrite of everything else.
+	if prev, err := store.Get(outID); err == nil {
+		snap.RouteMemory, snap.RouteMemorySeq = prev.RouteMemory, prev.RouteMemorySeq
+	}
 	if eng := budgetEngineIfPresent(); eng != nil {
 		usage, bucket := eng.CaptureNetwork()
 		snap.BudgetUsage = usage

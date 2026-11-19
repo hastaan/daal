@@ -49,6 +49,7 @@ var (
 // Returns a small JSON envelope describing the applied state.
 func SetTunnelSocks(host string, port int, username, password string) (string, error) {
 	if host == "" {
+		tunnelRefreshWanted.Store(false)
 		clearTunnel()
 		body, _ := json.Marshal(map[string]any{
 			"applied":  true,
@@ -137,6 +138,7 @@ func currentTunnel() *tunnelEndpoint {
 // resetTunnelForShutdown clears the override on Shutdown so a
 // subsequent Init() in the same process starts fresh.
 func resetTunnelForShutdown() {
+	tunnelRefreshWanted.Store(false)
 	clearTunnel()
 }
 

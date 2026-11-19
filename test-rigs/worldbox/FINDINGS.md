@@ -26,7 +26,14 @@ is `docs/release-runbook.md`, Part 2 onwards. **Since the first phone pass
 live session (ops `switch`, `switch-all`): SW-0 and SW-2 are fixed, SW-1
 is open and in `known-findings.json`. Gate on that branch, 2026-11-19:
 `./daal e2e full` → `PASS — 5901 checks`, 20 worlds, known findings
-reproduced: CEN-4 and SW-1 only. Below, "the pinned release"
+reproduced: CEN-4 and SW-1 only. **Since the second phone pass
+(2026-11-19, branch `auto-connect`)** the rig presses the one button (op
+`auto`: engine_connect_auto on a real TUN — sections AUTO-0, AUTO-1,
+AUTO-O1): SW-1 is fixed and its entry deleted, CEN-4 is narrowed, AUTO-1
+is new and open. Gate on that branch, 2026-11-19: `./daal e2e quick` →
+`PASS — 1960 checks` (17 worlds, 79 s; known: CEN-4), `./daal e2e full` →
+`PASS — 6195 checks` (21 worlds, 225 s; known findings reproduced: CEN-4
+×15, AUTO-1 ×1). None of it has been run on a phone. Below, "the pinned release"
 / "the pinned box" in text written before 2026-11-19 means relay-v1.5.0.
 Reproductions are run from `test-rigs/worldbox/`. "quick"/"full" are the
 modes of `./daal e2e` (`./e2e.sh`); a world name is a row of its report.
@@ -80,18 +87,21 @@ here fails without its fix. None has a `known-findings.json` entry.
 | REV-8 | low (fingerprint) | The bare TCP reach check ran on every timed-out attempt, not only when the timeout hides its phase: one payload-less connect-and-close to the relay's port per failed proof, every 30 s on a failed route | **fixed** in `core/engine/proof_singbox.go` (`timeoutPhaseIsUnknown` gates it) | counting hop in front of an in-process relay: "2 of 4 connections to the relay's port carried nothing" | unit `TestProveSubject_CarryTimeoutMakesNoBareConnectToTheRelay` (`-tags singbox`) |
 | REV-9 | low (security, defence in depth; on the relay) | Request binding ignored the query string (`/users/list?name=…` rode a token for `/users/list`; `POST /users/revoke?name=r2` changed the config), and three token field checks were held by no test | **fixed** in `cmd/daal-relay-mgmt/main.go` (`requireAuth`): any query string, even a bare `?`, is 400 before the token is read. Released as relay-v1.5.1 (2026-11-19) | the requests above: 200 | unit `TestQueryStringIsRefused`, `TestTokenFieldChecksHold` (each check proven by mutation in a scratch copy) |
 
-### Open — need a decision, a release or a dependency fix (3)
+### Open — need a decision, a release or a dependency fix (4 rows; open: CEN-4, AUTO-1)
 
 | id | severity | one line | status | reproduce | pinned by |
 |---|---|---|---|---|---|
-| CEN-4 | medium | One route cannot tell apart what needs two observations: every silent UDP route is `udp_no_reply` (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is `tls_sni_or_cert_block_suspected` whether the filter is keyed on the name or on the address | open — the prober's job (selection stage): a second datagram / a second name. What the engine says is true, cools down only the one route, and is never the wrong network-wide claim | `./run.sh --mgmt=tree relay-ip-block hysteria2` → `engine.category expect=udp_address_blocked got=udp_no_reply`; `./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality` → `expect=tcp_reset got=tls_sni_or_cert_block_suspected` | known-findings.json `CEN-4` (14 checks in full: 11 UDP, 3 reset); the report's ENGINE CATEGORY line lists each truth → reported pair |
+| CEN-4 | medium | One route cannot tell apart what needs two observations: a route connected BY HAND that is silent on UDP is `udp_no_reply` (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is `tls_sni_or_cert_block_suspected` whether the filter is keyed on the name or on the address. **Narrowed 2026-11-19 by the automatic connect:** a pass that tries a second route to the same address now says `refined: relay_unreachable` (the address does not answer TCP either) or `refined: udp_blocked_here` (it does) — dead address vs UDP stopped is decided. Still one answer: all UDP dropped, a QUIC-only filter and one dead UDP port (all `udp_blocked_here`); name-keyed vs address-keyed reset (needs two names on one address AND port; today's packs have none) | open — narrowed. What is left needs an observation outside the routes (a non-QUIC datagram to the same endpoint; a second name), which is the prober's job. What the engine says is true and cools down only the one route | `./run.sh --mgmt=tree relay-ip-block hysteria2` → `engine.category expect=udp_address_blocked got=udp_no_reply`; `./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality` → `expect=tcp_reset got=tls_sni_or_cert_block_suspected`; `./run.sh --mgmt=tree --ops auto clean vless-reality hysteria2` → `quic-only.connect.refined expect=quic_blocked_here got=udp_blocked_here` (and, green: `memory.udp.refined`, `all-blocked.connect.refined`) | known-findings.json `CEN-4` (family phase: 11 UDP + 3 reset in full; `op:auto quic-only.connect.refined`); the report's ENGINE CATEGORY line lists each truth → reported pair |
 | SW-2 | **high** (user-visible on a TUN kept across a switch; a leak otherwise) | The engine never stops the packet reader of a sing-box instance it closes. On a TUN that is REPLACED at a switch that reader sleeps for ever, holding the old interface open. On a TUN that is KEPT across a switch (what the Android service does since the phone pass) it wakes for every packet and takes about half of them away from the new instance: most new connections are reset or refused, for good, while the engine says Connected | **fixed 2026-11-19** — a dependency defect (sing-tun 0.8.9, `LinkEndpointFilter.Attach` never passed the "detach" on). The engine now builds against `third_party/sing-tun` (0.8.9 + that one line, via `replace` in every module that links it; `third_party/DAAL-PATCH.md`); pinned by `core/engine/singtun_detach_singbox_test.go` | `./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2` → `keep.vless-reality>hysteria2.tunnel expect=pass got=blocked` and `rotate.session.old_tuns_released got=held` | `keep.*.tunnel` and `*.session.old_tuns_released` are ordinary green checks now: a regression is an unexpected red |
-| SW-1 | low-to-medium | A switch to a route that turns out to carry nothing ends with NOTHING connected: `engine_set_route(B)` stops the connected route A before it has learned whether B works. (A route the engine can refuse without trying — cooling down, revoked, expired — leaves A alone; that is checked and green) | open — needs a decision: prove B beside A and swap only then, or keep "the host goes back to A" (what `vpn/StartSequence.kt` does) and accept the gap | same command → `check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected expect=pass got=disconnected`; the next rows show the way back to A working | known-findings.json `SW-1` (1 check, quick and full) |
+| SW-1 | low-to-medium | A switch to a route that turns out to carry nothing ended with NOTHING connected: `engine_set_route(B)` stops the connected route A before it has learned whether B works | **fixed 2026-11-19** (engine) — when B carries nothing the engine reconnects A, re-proves it, returns the error for B and records `switch_back` in the diagnostics. There is still a gap of B's check plus A's reconnect; nothing is left disconnected | `./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2` → `check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected`, `.switch_back_recorded`, `.tunnel`, `.wire` green with the host doing nothing after the failed call | those four checks (quick and full); unit `TestSetRoute_FailedSwitchGoesBackToTheRouteThatWasCarrying` (core/abi). known-findings.json entry deleted |
+| AUTO-1 | low | A border that forwards nothing at all reads as ONE relay not answering: the automatic connect sees only its own routes, all to one address, so under `total-blackout` its verdict is `relay_unreachable` — true as far as it goes, and the same words a burned address gets — and never `network_down` | open — needs the engine's reachability probe (`ProbeTCP443` is a stub); `network_down` is given today only when the OS itself says there is no network | `./run.sh --mgmt=tree --ops auto total-blackout vless-reality hysteria2` → `scenario.connect.verdict expect=network_down got=relay_unreachable` | known-findings.json `AUTO-1` (1 check, full) |
 
 ### Observations (no verdict; recorded so the day they change is visible)
 
 | id | one line | where to see it |
 |---|---|---|
+| AUTO-O1 | The move from a route that stopped carrying is driven by the engine's own clock and by nothing on the host: one liveness check every 180 s ±25 % (30 s while failed). The rig sets 3 s for the fall-over phone and so proves THAT the engine moves by itself in the same TUN, not how soon a phone would | `op:auto fall-over.moved.*` (`waited_ms`, `liveness_interval_s` in the evidence); section AUTO-0 |
+| AUTO-O2 | `udp_blocked_here` means "UDP to this relay was silent while TCP to the same address was answered" — it is also what a QUIC-only filter and a dead UDP port give (CEN-4). The sentence a person reads for it must not promise more than that | `op:auto quic-only.connect.refined` (red, known) beside `memory.udp.refined` (green) |
 | O-1 | The protect callback the phone registers is never called; only the uid exclusion keeps the engine out of its own TUN | `engine_protect_calls` in every `control.after` |
 | O-2 | **Fixed in the tree.** Disconnect blocked ~5 s when the relay was blackholed (vless-reality, websocket-tls): closing sing-box waited out a dial already in flight. The instance's context is now cancelled before it is closed, and a connection check in flight is abandoned, not waited for | unit `TestCloseInstance_DoesNotWaitForADialToADeadRelay` (core/engine, `-tags singbox`), `TestClearRoute_DoesNotWaitForAConnectionCheck` (core/abi). The rig no longer reaches the old state: a blackholed route never becomes connected |
 | O-3 | Backlog W5-1, **fixed with FAM-4, released as relay-v1.5.1 (2026-11-19)**: a default relay no longer binds `ss-in`/`anytls-in`. Only on a relay provisioned fresh from this release (the family set is written by cloud-init); none older is in service | `listener_on_box` in `mint/* not_served` — `false` on `--mgmt=tree` worlds; the pinned daemon is now the same code |
@@ -2188,6 +2198,38 @@ minutes: on an address-keyed reset that is the harsher of the two.
 ./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality   # expect=tcp_reset got=tls_sni_or_cert_block_suspected
 ```
 
+**Narrowed by the automatic connect (2026-11-19).** `engine_connect_auto`
+tries route after route, and two routes of one pack to one address are
+two observations. What one route reports is unchanged (`category` in
+`tried[]`, `route_check_category`, the table above — a route connected by
+hand still has only itself); the pass adds `refined` beside it
+(core/abi/connect_auto_verdict.go `deriveAuto`):
+
+| the censor does | the QUIC route alone | another route of the pass saw | `refined` | rig check (`op:auto`) |
+|---|---|---|---|---|
+| every UDP datagram dropped, to anyone | `udp_no_reply` | TCP to the same address carried | `udp_blocked_here` | `memory.udp.refined` — green |
+| the relay's address null-routed | `udp_no_reply` | TCP SYNs to the same address unanswered | `relay_unreachable` | `all-blocked.connect.refined` — green; scenario relay-ip-block: `scenario.connect.verdict` |
+| QUIC Initials dropped, plain UDP delivered | `udp_no_reply` | TCP to the same address carried | `udp_blocked_here` | `quic-only.connect.refined` expects `quic_blocked_here` — **red, known** |
+
+So "is it the address or is it UDP" is decided, which is the question
+that sends a person for a new file or not. What is still one answer:
+
+* **all UDP dropped / a QUIC-only filter / one dead UDP port** — all
+  `udp_blocked_here`. No route of a pack sends a non-QUIC datagram to the
+  relay, so no pass can separate them (AUTO-O2: the wording for the code
+  must say "the fast ways did not get through", not "UDP is blocked").
+* **name-keyed vs address-keyed reset** — `name_blocked` /
+  `address_blocked` need two routes with different TLS names to the same
+  address AND port. Today's packs put every family on its own port, so
+  the rig has no world in which the engine could say either, and
+  `tcp-reset-mid-handshake` stays as it was.
+* **a route connected by hand** — one observation, as before.
+
+The second observation exists only when the QUIC route is actually
+tried, and a fresh phone tries the TCP routes first and connects: the
+three rows above are staged by first connecting the QUIC route (so the
+phone remembers it carried here and tries it first).
+
 **Not done.** The second observation is a probe the device sends outside
 any route (another host, another port, another name) — what it sends and
 to whom is a fingerprinting decision and belongs to the prober of the
@@ -2802,7 +2844,21 @@ WB_TUN_BLOCKING=1 …   # the same with a blocking TUN fd: no different
 
 Acceptance (met): both checks green and the entry deleted.
 
-## SW-1 — a switch to a route that carries nothing leaves nothing connected
+## SW-1 — a switch to a route that carries nothing left nothing connected (fixed)
+
+**Fixed 2026-11-19 (engine, branch `auto-connect`).** `engine_set_route(B)`
+from a carrying A still stops A to try B — one TUN, one instance — but
+when B carries nothing the engine now reconnects A, re-proves it, returns
+B's error and records the episode in the diagnostics
+(`switch_back: {failed_route, failed_family, category, restored_route,
+restored}`). The rig's client does nothing between the failed call and
+its look at the engine, and `check-rotate.unreachable.*` is green:
+`old_route_still_connected`, `switch_back_recorded` (new), then `tunnel`
+and `wire` on A's endpoint with B still dropped. The `restore.*` rows —
+the host setting A again — no longer run, because there is nothing to
+restore. The gap described below (B's check plus A's reconnect) is still
+there; what is gone is ending up disconnected. The known-findings entry
+is deleted. The text below is the finding as it was found.
 
 **What.** `engine_set_route(B)` while A is connected stops A's instance
 before B's is started, and learns whether B carries anything only
@@ -2831,3 +2887,110 @@ the engine means proving B beside A and swapping only then.
 ./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2
 #   check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected  expect=pass got=disconnected
 ```
+
+## AUTO-0 — the main screen's button did not connect; the engine now picks, tries, moves on, remembers and explains (rig coverage)
+
+**What the phone showed (second phone pass, 2026-11-19).** One signed
+file, four routes (vless-reality, websocket-tls, naive, hysteria2). The
+main screen said "Press to connect." and pressing it opened a list of
+protocol names. Every route connected when picked by hand. Nothing in
+the engine used its ranking, its per-network memory, its carrying check
+and its failure categories together.
+
+**What changed.** `engine_connect_auto` (core/abi/connect_auto.go), and
+the service, shell and UI that call it. This section is what the rig
+proves of it — on a real TUN, against a real relay, with the lab censor
+acting in between — and what it does not. **Nothing here was run on a
+phone.**
+
+**Proved (op `auto`, README "Client-side ops"; quick world `auto`, full
+worlds `clean.auto`, `relay-ip-block`, `total-blackout`, `quic-drop`).**
+
+* The first-ranked route blocked → it is tried first and named
+  `not_carrying`, the engine moves on, `moved_on`, and verified bytes
+  travel on the endpoint of the route it says it is on.
+* A second Connect on the same network tries the route that carried
+  there first (`why: carried_here`) — also when that route is the LAST in
+  the ranking (connected once by hand), so the order is memory and not a
+  side effect of the failed route cooling down.
+* Everything blocked → `connected:false`, every candidate tried, verdict
+  `relay_unreachable`, nothing running, the TUN released, no file of the
+  app's closed, the verdict still in the diagnostics after the host's
+  teardown; pressed again at once → every candidate tried again, the
+  same verdict (revised 2026-11-19: a pass in which nothing answered
+  rests no route; before, this press answered `all_cooling_down` with
+  nothing started. Run on the rig after the change: `./daal e2e full`,
+  6195 checks, `all-blocked.again.every_candidate_tried_again` and
+  `all-blocked.again.verdict` green).
+* Cancel during a check in flight → the call returns within 2 s,
+  `cancelled`, nothing running.
+* UDP dropped network-wide vs a dead address → `udp_blocked_here` vs
+  `relay_unreachable` on the QUIC route (CEN-4, narrowed).
+* Connected by the button, then the running route's endpoint dropped →
+  the engine moves to another route in the same TUN with the host doing
+  nothing, and verified bytes flow again.
+* A failed manual switch goes back to the route that carried (SW-1).
+
+**How it is known the checks can fail.** The quick world was run against
+an engine with three mutations applied through `go build -overlay` (the
+tree untouched): `routeMemory` returns nothing, `autoFallOver` returns at
+once, `deriveAuto` skips the UDP refinement. Result: `FAIL — 8 unexpected
+red check(s) … of 174`: `blocked.again.remembered_route_first`,
+`memory.connect.remembered_route_ahead_of_the_ranking`,
+`memory.udp.quic_route_tried_and_silent`, `memory.udp.verdict`,
+`all-blocked.connect.verdict`, `all-blocked.connect.refined`,
+`all-blocked.connect.nothing_left_running` (the kept verdict),
+`fall-over.moved.engine_moved_by_itself`. Everything else stayed green.
+
+**Not proved here.**
+
+* How soon a phone moves off a dead route (AUTO-O1): the engine's clock
+  is 180 s ±25 %, and on Android the only earlier kick,
+  `engine_network_changed`, is sent by the page (client-ui App.tsx), so
+  with the app in the background nothing else wakes it. The rig sets 3 s.
+* The Android service, the Rust shell and the page: the rig's client is
+  Go calling the same abi in the same order. Their own tests are the JVM
+  and vitest suites; the first real compile of the service glue is the
+  APK build.
+* A pass with a tor route ahead of a working one (90 s per attempt, not
+  shortened), parallel probing (there is none), and a second network.
+* `name_blocked` / `address_blocked`: no world has two names on one
+  address and port (CEN-4).
+
+**Reproduce.**
+
+```
+./run.sh --mgmt=tree --ops auto clean vless-reality hysteria2     # the quick world, ~75 s
+./e2e.sh full --only clean.auto,relay-ip-block,total-blackout,quic-drop
+```
+
+## AUTO-1 — a border that forwards nothing reads as one relay not answering
+
+**What.** Under `total-blackout` (every packet beyond the censor dropped,
+the link itself up) one press of Connect tries every route, each fails
+at TCP connect or in UDP silence, and the verdict is `relay_unreachable`:
+"the server did not answer from this network". That is true. It is also
+exactly what `relay-ip-block` gets, where one burned address is the whole
+problem and a new file is the cure — and in a blackout a new file changes
+nothing. The contract's `network_down` ("nothing at all answers") is
+given only when every route's own category is `network_offline`, i.e.
+when the OS says there is no network; the engine has no observation
+outside its routes (`ProbeTCP443` is a stub), and every route of a pack
+goes to the same address.
+
+**Severity.** Low: nothing false is said, nothing is left running, and
+the wording for `relay_unreachable` promises no more than was seen. The
+cost is a person sent to look for a new file during a shutdown.
+
+**Reproduce.**
+
+```
+./run.sh --mgmt=tree --ops auto total-blackout vless-reality hysteria2
+#   scenario.connect.verdict  expect=network_down got=relay_unreachable
+```
+
+**What would close it.** One plain reachability observation that does not
+go to the relay (what it is sent to is a fingerprinting decision — the
+same prober CEN-4 waits for). The day the verdict becomes `network_down`
+the entry in `known-findings.json` fails the run as "did not reproduce".
+

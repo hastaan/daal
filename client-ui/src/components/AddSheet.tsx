@@ -24,7 +24,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useContract } from '../contract/ContractProvider';
 import type { PreviewedBundle } from '../contract/D2Contract';
-import { PickedFile, Sbpx } from '../recipient/recipientCommands';
+import { DeviceCustody, PickedFile, Sbpx } from '../recipient/recipientCommands';
+import PickedFileNote, { sealedCustody, type SealedCustody } from './PickedFileNote';
+import { recordImportOrigin } from '../lib/importOrigin';
 import { detectPastedContainer } from '../lib/pastedBundle';
 import { Sheet, Button } from '../design/primitives';
 import TrustPrompt from './TrustPrompt';
@@ -52,9 +54,12 @@ interface Props {
     t: (k: string) => string;
     onClose: () => void;
     onImported?: () => void;
+    /** Which tab to open on. "Add your file" on the main screen opens
+     *  straight on the file tab. */
+    initialTab?: Tab;
 }
 
-type Tab = 'paste' | 'file';
+export type Tab = 'paste' | 'file';
 
 /** Best-effort client-side classifier for the paste box. The engine
  *  is the source of truth — this only drives the "What I see" pill. */
@@ -86,12 +91,14 @@ function classifyPaste(s: string): PasteKind {
     return 'unknown';
 }
 
-export default function AddSheet({ t, onClose, onImported }: Props) {
+export default function AddSheet({ t, onClose, onImported, initialTab }: Props) {
     const contract = useContract();
-    const [tab, setTab] = useState<Tab>('paste');
+    const [tab, setTab] = useState<Tab>(initialTab ?? 'paste');
     const [pasted, setPasted] = useState('');
     const [filePath, setFilePath] = useState('');
     const [isSbpx, setIsSbpx] = useState(false);
+    // Whether a sealed file will open by itself (components/PickedFileNote.tsx).
+    const [custody, setCustody] = useState<SealedCustody>('unknown');
     const [preview, setPreview] = useState<PreviewedBundle | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -115,9 +122,24 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
             setIsSbpx(false);
             return;
         }
+        setCustody('unknown');
         Sbpx.sniff(filePath)
-            .then((b) => {
-                if (!cancelled) setIsSbpx(b);
+            .then(async (b) => {
+                if (cancelled) return;
+                // A sealed file opens with this phone's key: ask
+                // whether that key can be used right now, so the note
+                // under the button says the one thing that is true.
+                let unlocked: boolean | undefined;
+                if (b) {
+                    try {
+                        unlocked = await DeviceCustody.isUnlocked();
+                    } catch {
+                        unlocked = undefined;
+                    }
+                }
+                if (cancelled) return;
+                setCustody(sealedCustody(unlocked));
+                setIsSbpx(b);
             })
             .catch(() => {
                 if (!cancelled) setIsSbpx(false);
@@ -202,6 +224,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                 return;
             }
             // KIND_IMPORTED, KIND_ROTATION_ACCEPTED, or unknown-but-no-error
+            noteOrigin(v?.Fingerprint || preview?.fingerprintHex);
             setDoneVerdict(v);
             setDone(true);
             onImported?.();
@@ -217,6 +240,15 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
      *  bundle before committing, so it can refuse at this point; this
      *  used to set `done`, which renders the full-sheet "added"
      *  confirmation, no matter what came back. */
+    /** The Connections page badges a publisher with how its routes
+     *  arrived; only this sheet knows (lib/importOrigin.ts). */
+    const noteOrigin = (fingerprintHex: string | undefined) => {
+        recordImportOrigin(
+            fingerprintHex,
+            tab === 'paste' ? 'paste' : isSbpx ? 'sealed_file' : 'file',
+        );
+    };
+
     const onTrustResolved = (r: TrustResolution) => {
         setAwaitingTrust(false);
         if (r.decision === 2) {
@@ -230,6 +262,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
         }
         // The routes committed in resolveTrustPrompt, so ITS verdict is
         // the one that lists what was left out.
+        noteOrigin(r.verdict?.Fingerprint || preview?.fingerprintHex);
         setDoneVerdict(r.verdict);
         setDone(true);
         onImported?.();
@@ -279,6 +312,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                     setError(friendlyReason(t, v.Reason || ''));
                     return;
                 }
+                noteOrigin(v?.Fingerprint);
                 setDoneVerdict(v);
             } else if (kind === 'uri') {
                 const res = await contract.uriImport(pasted.trim());
@@ -376,6 +410,7 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
 
             {tab === 'paste' && (
                 <div>
+                    <div style={ledeStyle()}>{t('add.lede.paste')}</div>
                     <textarea
                         value={pasted}
                         onChange={(e) => setPasted(e.target.value)}
@@ -384,6 +419,13 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                         style={inputStyle()}
                     />
                     <DetectPill t={t} kind={kind} />
+                    {/* The kinds of link Daal understands are named
+                        here and only here: behind a question the person
+                        chooses to ask, never in the box they type in. */}
+                    <details style={{ marginTop: 10, fontSize: 12, color: 'var(--paper-dim)' }}>
+                        <summary style={{ cursor: 'pointer' }}>{t('add.paste_help.title')}</summary>
+                        <div style={{ marginTop: 6, lineHeight: 1.6 }}>{t('add.paste_help.body')}</div>
+                    </details>
                     {awaitingTrust && preview && (
                         <TrustPrompt
                             t={t}
@@ -399,29 +441,9 @@ export default function AddSheet({ t, onClose, onImported }: Props) {
                     <Button variant="secondary" onClick={chooseFile} disabled={busy}>
                         {filePath ? t('add.file.change') : t('add.file.choose')}
                     </Button>
-                    {filePath && (
-                        <div
-                            style={{
-                                fontSize: 12,
-                                color: 'var(--paper-dim)',
-                            }}
-                        >
-                            {isSbpx
-                                ? t('add.file.picked_sbpx')
-                                : t('add.file.picked')}
-                        </div>
-                    )}
-                    {filePath && isSbpx && (
-                        <div
-                            style={{
-                                fontSize: 12,
-                                color: 'var(--paper-dim)',
-                                fontStyle: 'italic',
-                            }}
-                        >
-                            {t('add.file.sbpx_custody_hint')}
-                        </div>
-                    )}
+                    {/* ONE line, and for a sealed file the one that is
+                        true (PickedFileNote.tsx). */}
+                    {filePath && <PickedFileNote t={t} sealed={isSbpx} custody={custody} />}
                     {preview && !awaitingTrust && (
                         <div
                             style={{
@@ -566,6 +588,14 @@ function DetectPill({ t, kind }: { t: (k: string) => string; kind: PasteKind }) 
             {label}
         </div>
     );
+}
+
+function ledeStyle() {
+    return {
+        fontSize: 14,
+        color: 'var(--paper)',
+        marginBottom: 8,
+    };
 }
 
 function inputStyle() {

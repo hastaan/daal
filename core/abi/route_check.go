@@ -99,6 +99,39 @@ type routeCheck struct {
 	// the next SetRoute that gets past its refusals and by a ClearRoute
 	// that stops something. One that finds nothing running keeps it.
 	refused, refusedRoute string
+	// switchBack: the last manual switch went to a route that carried
+	// nothing and the engine went back to the route that was connected
+	// (SetRoute). Cleared by the next SetRoute that gets past its
+	// refusals, by an automatic connect and by a disconnect.
+	switchBack SwitchBack
+}
+
+// SwitchBack is `switch_back` in the diagnostics blob: what became of
+// the last switch to a route that turned out to carry nothing.
+// FailedRoute "" means there is nothing to report.
+type SwitchBack struct {
+	// FailedRoute / FailedFamily / Category: the route the person
+	// switched to, and the category it failed with.
+	FailedRoute  string `json:"failed_route"`
+	FailedFamily string `json:"failed_family"`
+	Category     string `json:"category"`
+	// RestoredRoute is the route that was connected before the switch;
+	// Restored says whether it carried again when the engine went back
+	// to it. false: it did not, and nothing is connected.
+	RestoredRoute string `json:"restored_route"`
+	Restored      bool   `json:"restored"`
+}
+
+func (rc *routeCheck) setSwitchBack(sb SwitchBack) {
+	rc.mu.Lock()
+	rc.switchBack = sb
+	rc.mu.Unlock()
+}
+
+func (rc *routeCheck) getSwitchBack() SwitchBack {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.switchBack
 }
 
 // Why a SetRoute was refused before anything was started. A closed
@@ -186,9 +219,27 @@ func (e *routeFailure) Unwrap() error { return ErrRouteNotCarrying }
 // Called with mu held. RouteConnectPrecheck runs the same function, so
 // "would this be refused" and "this was refused" cannot drift apart.
 func (c *Core) prepareRouteLocked(routeID string) (routestore.RouteRow, []byte, error) {
+	return c.prepareRouteOpts(routeID, true, false)
+}
+
+// prepareRouteOpts is prepareRouteLocked with the two things the
+// automatic connect needs to vary (connect_auto.go):
+//
+//   - record=false leaves connect_refused alone. The automatic connect
+//     asks about every route the person holds; "refused: cooldown" for
+//     a route nobody picked is not something to tell them.
+//   - ignoreCooldown=true skips the cooldown check and nothing else.
+//     Only for putting BACK the instance of a route that was connected
+//     and stopped carrying, after everything else was tried: that is
+//     not a new attempt at the route, it is the instance that was
+//     already running. Revocation, expiry and the endpoint guard are
+//     never skipped.
+func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (routestore.RouteRow, []byte, error) {
 	refuse := func(err error) (routestore.RouteRow, []byte, error) {
 		code := refusedCode(err)
-		c.check.setRefused(code, routeID)
+		if record {
+			c.check.setRefused(code, routeID)
+		}
 		return routestore.RouteRow{}, nil, &routeRefusal{code: code, err: err}
 	}
 	row, err := c.store.GetRoute(routeID)
@@ -201,7 +252,7 @@ func (c *Core) prepareRouteLocked(routeID string) (routestore.RouteRow, []byte, 
 	case "expired":
 		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteExpired))
 	}
-	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok {
+	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok && !ignoreCooldown {
 		return refuse(fmt.Errorf("abi: %s%.0w", reason, errRouteCooling))
 	}
 	profile, err := c.store.GetSecret("route:" + routeID)
@@ -336,6 +387,8 @@ func (c *Core) expireFailedConnect() {
 	}
 	c.check.set(RouteCheckNone, "")
 	c.advancePosture(pathmanager.EventDisconnected, pathmanager.PostureNoRoute)
+	// The automatic connect's verdict was about the same pass.
+	c.auto.expireFailed()
 }
 
 // set records a state other than failed; whether an instance is running
@@ -511,6 +564,18 @@ func (c *Core) routeUpLocked(routeID, family string, res engine.ProofResult) {
 // refresh stays tunnel-required — and the state the user is shown is
 // "failed", not "Connected", until a later proof succeeds.
 func (c *Core) routeDownLocked(routeID, family string, cat diagnostics.Category, reason string, teardown bool) {
+	c.routeDownOptsLocked(routeID, family, cat, reason, teardown, false)
+}
+
+// routeDownOptsLocked is routeDownLocked with one thing varied.
+//
+// candidate: the route failed as one candidate of an automatic pass.
+// Its cooldown is the same; it does not feed the family's
+// three-in-an-hour count (pathmanager.FailedCandidate), and its durable
+// failure row and this network's memory of it are NOT written here —
+// the pass writes them, or forgives the failure altogether, when it
+// knows whether anything at all answered (autoSettleLocked).
+func (c *Core) routeDownOptsLocked(routeID, family string, cat diagnostics.Category, reason string, teardown, candidate bool) {
 	c.driver.PublishFailure(cat, reason)
 	if teardown {
 		_ = c.driver.Stop()
@@ -521,7 +586,11 @@ func (c *Core) routeDownLocked(routeID, family string, cat diagnostics.Category,
 	engine.LogInfo(fmt.Sprintf("route down route=%s family=%s result=failed category=%s running=%t",
 		engine.LogID(routeID), engine.LogID(family), engine.LogID(string(cat)), !teardown))
 	c.pm.Resume(routeID, family)
-	c.pm.Failed(routeID, family, cat)
+	if candidate {
+		c.pm.FailedCandidate(routeID, family, cat)
+	} else {
+		c.pm.Failed(routeID, family, cat)
+	}
 	until := pmCooldownUntil(c, routeID)
 	if cat == diagnostics.PathTooSlow {
 		// Nothing completed on a path that was seen moving. That is not
@@ -530,7 +599,7 @@ func (c *Core) routeDownLocked(routeID, family string, cat diagnostics.Category,
 		// a network signal) — and it is not a success either, so the
 		// route's durable record is left exactly as it was.
 		until = time.Time{}
-	} else {
+	} else if !candidate {
 		// Persist the outcome the FSM just computed (privacy shape: hour
 		// bucket + closed category vocabulary, one row per route — see
 		// routestore.RecordFailure).
@@ -561,7 +630,9 @@ type CheckResult struct {
 // CheckActiveRoute proves the connected route once, now, and moves it
 // between ok / degraded / failed accordingly. It is the function the
 // liveness timer, the network-change signal and (next stage) the prober
-// call; it never selects or switches a route.
+// call; it never selects or switches a route. (The liveness LOOP does,
+// after this returns "failed", when the automatic connect is in charge:
+// startLivenessLocked, autoFallOver.)
 //
 // A route that fails is recorded exactly as a failed connect is — the
 // classified category, the FSM cooldown, the durable failure row,
@@ -602,18 +673,65 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 	switch {
 	case res.OK:
 		c.routeUpLocked(routeID, family, res)
-	case prev == RouteCheckFailed:
+		if prev == RouteCheckFailed {
+			// Back after an outage: worth remembering for this network,
+			// and the automatic connect is connected again.
+			c.rememberRoute(routeID, true, "")
+			c.auto.recovered(routeID, family)
+			c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
+		}
+	case prev == RouteCheckFailed && (autoFallsOverFor(prevCat) || !autoFallsOverFor(res.Category())):
 		// Still down. Keep the first classification of this outage.
 		return CheckResult{RouteID: routeID, State: prev, Category: string(prevCat), Checked: true}
 	default:
+		// A new failure — or one that has changed in kind: a route that
+		// was only slow (or whose relay had no way out, or whose device
+		// had no network) and now gets no answer at all is a different
+		// outage, and the one the automatic connect moves away from.
 		c.routeDownLocked(routeID, family, res.Category(), proofFailureText(res), false)
+		c.rememberRoute(routeID, false, res.Category())
 	}
 	st, cat := c.check.get()
 	return CheckResult{RouteID: routeID, State: st, Category: string(cat), Checked: true}
 }
 
+// autoConfirmAfter is how soon a connected route that has just failed a
+// check is checked AGAIN before the automatic connect moves away from
+// it (never longer than RecheckInterval). One failed check is one lost
+// round trip: right after a network change it is usually the new
+// network not being usable yet, and moving on it would restart the
+// instance under every open connection and mark the other routes as
+// failing on a network nothing has been tried on.
+const autoConfirmAfter = 5 * time.Second
+
+// autoFallsOverFor: is a liveness failure of this category a reason to
+// try the other routes? Not when the instance may still be carrying
+// (path_too_slow: the path was seen moving; relay_no_egress: the relay
+// answered, and what it could not reach was the check's own targets) and
+// not when the device itself says there is no network — no other route
+// would fare better, and replacing the instance resets every connection
+// the person has open.
+func autoFallsOverFor(cat diagnostics.Category) bool {
+	switch cat {
+	case diagnostics.PathTooSlow, diagnostics.RelayNoEgress, diagnostics.NetworkOffline:
+		return false
+	}
+	return true
+}
+
 // startLivenessLocked starts the loop that re-proves the connected
 // route. Called with Core.mu held, after a successful connect.
+//
+// WHAT MOVES THE AUTOMATIC CONNECT. This loop, and nothing else: no host
+// call. It checks the route every LivenessInterval (and at once on
+// engine_network_changed: kickLiveness). When a check fails with a
+// category that autoFallsOverFor, and the automatic connect is in
+// charge, it checks once more after autoConfirmAfter; a second failure
+// in a row calls autoFallOver, which tries the other routes. After a
+// pass in which nothing else carried the route's own instance is back,
+// re-checked every RecheckInterval, and the next pass the engine starts
+// by itself waits out a back-off that doubles per pass of the outage
+// (autoFallBackoff).
 func (c *Core) startLivenessLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	kick := make(chan struct{}, 1)
@@ -625,10 +743,15 @@ func (c *Core) startLivenessLocked() {
 	c.check.mu.Unlock()
 	cfg := c.proofCfg
 	go func() {
+		// failedInARow: consecutive failed checks seen by THIS loop.
+		failedInARow := 0
 		for {
 			wait := cfg.LivenessInterval
-			if st, _ := c.check.get(); st == RouteCheckFailed {
+			if st, cat := c.check.get(); st == RouteCheckFailed {
 				wait = cfg.RecheckInterval
+				if _, mode := c.auto.snapshot(); mode && failedInARow == 1 && autoFallsOverFor(cat) && autoConfirmAfter < wait {
+					wait = autoConfirmAfter
+				}
 			}
 			t := time.NewTimer(jittered(wait, cfg.LivenessJitter))
 			select {
@@ -639,9 +762,29 @@ func (c *Core) startLivenessLocked() {
 				t.Stop()
 			case <-t.C:
 			}
-			c.checkActiveRoute(ctx)
+			res := c.checkActiveRoute(ctx)
 			if ctx.Err() != nil {
 				return
+			}
+			if !res.Checked {
+				continue
+			}
+			if res.State != RouteCheckFailed {
+				failedInARow = 0
+				continue
+			}
+			failedInARow++
+			// The automatic connect: a route that has stopped carrying
+			// is not waited for while another may work — once a second
+			// check in a row has said so. A pass that starts anything
+			// replaces this loop (its context is cancelled by the
+			// start); one that finds nothing to try leaves it running,
+			// and the route is checked again.
+			if failedInARow >= 2 {
+				c.autoFallOver(ctx)
+				if ctx.Err() != nil {
+					return
+				}
 			}
 		}
 	}()

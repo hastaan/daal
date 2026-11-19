@@ -303,6 +303,39 @@ func (m *Manager) Disconnect() {
 // `route_health[routeID]` is updated on every call; it carries the
 // V0.3 category and the cooldown expiry into the diagnostics blob.
 func (m *Manager) Failed(routeID, family string, cat diagnostics.Category) {
+	m.failed(routeID, family, cat, true)
+}
+
+// FailedCandidate is Failed for a route that was one candidate of an
+// automatic pass (abi.ConnectAuto). The route cools down exactly as it
+// does after Failed, and a family-class category still cools the family
+// at once. What it leaves out is the "three failures of a family in an
+// hour" count: that count measures somebody trying one family again and
+// again, and a pass that walks every route the person holds — started by
+// a button, by the host's retry loop or by the engine itself — would
+// trip it for every family at once and then climb the 5 min … 24 h
+// ladder for as long as an outage lasts.
+func (m *Manager) FailedCandidate(routeID, family string, cat diagnostics.Category) {
+	m.failed(routeID, family, cat, false)
+}
+
+// Forgive lifts the cooldown of ONE route and nothing else: the reason
+// it last failed stays in RouteHealth, the FSM state and any family
+// cooldown are untouched. For a failure that turned out to say nothing
+// about the route (abi: a pass in which nothing at all answered — the
+// device had no working network, and every route "failed" alike).
+func (m *Manager) Forgive(routeID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.routeCooldown, routeID)
+	if h, ok := m.routeHealth[routeID]; ok {
+		h.InCooldown = false
+		h.CooldownUntil = time.Time{}
+		m.routeHealth[routeID] = h
+	}
+}
+
+func (m *Manager) failed(routeID, family string, cat diagnostics.Category, countFamily bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
@@ -342,7 +375,7 @@ func (m *Manager) Failed(routeID, family string, cat diagnostics.Category) {
 		step := m.familyEscalation[famKey]
 		m.familyCooldown[famKey] = now.Add(FamilyCooldownStep(step))
 		m.familyLastReason[famKey] = cat
-	} else {
+	} else if countFamily {
 		// Per-route class: track failures within the current hour
 		// bucket on this (family, network) and trip family cooldown
 		// after 3 (preserves legacy 2A behaviour for these classes,

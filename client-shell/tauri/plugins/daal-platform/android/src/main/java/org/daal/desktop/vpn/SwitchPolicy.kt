@@ -47,6 +47,27 @@ object SwitchPolicy {
     val refusedRoute: String,
     /** Category of a failed connection check, else "". */
     val failedCategory: String,
+    /**
+     * The engine's automatic connect is in charge of the connection
+     * (diagnostics `auto.mode`); null = the engine did not say.
+     */
+    val autoMode: Boolean? = null,
+    /** `auto.state`: "idle", "trying", "connected", "failed"; "" = unknown. */
+    val autoState: String = "",
+    /** `auto.verdict`, a closed code; "" when there is none. */
+    val autoVerdict: String = "",
+    /**
+     * `switch_back`: the last switch went to [switchBackRoute], which
+     * carried nothing, and the engine went back by itself to the route
+     * that was connected. [switchBackCategory] is why the switch failed
+     * — by then `route_check` (and so [failedCategory]) describes the
+     * route the engine went back to. [switchBackRestored]: that route
+     * carried again (true), or the way back failed too (false); null
+     * when there is nothing to report. "" = no such switch.
+     */
+    val switchBackRoute: String = "",
+    val switchBackCategory: String = "",
+    val switchBackRestored: Boolean? = null,
   )
 
   /** What to do after a start that did not come up and is still the newest request. */
@@ -82,6 +103,11 @@ object SwitchPolicy {
     // was connected (a re-tap on the connected route whose check then
     // failed), asking for it again at once only meets its cooldown.
     if (requested == lastGood) return AfterFailure.TearDown
+    // The engine has already gone back to the route that was connected
+    // and THAT did not carry either: it is cooling down now, and asking
+    // for it again is only refused (and would replace the reason the
+    // person is shown with that refusal).
+    if (engine.switchBackRoute == requested && engine.switchBackRestored == false) return AfterFailure.TearDown
     return AfterFailure.Restore(lastGood)
   }
 
@@ -156,8 +182,16 @@ object SwitchPolicy {
     val keptRouteId: String?,
     /** "refused" (never started) or "failed" (started, carried nothing). */
     val outcome: String,
-    /** The refusal code or the failure category; "" when unknown. */
+    /**
+     * The refusal code or the failure category; "" when unknown. For an
+     * automatic connect ([auto]) it is the engine's verdict code.
+     */
     val reason: String,
+    /**
+     * True when this is about an automatic connect that found no route
+     * that carries; [requestedRouteId] is then "".
+     */
+    val auto: Boolean = false,
   )
 
   @JvmStatic
@@ -165,6 +199,172 @@ object SwitchPolicy {
     if (wasRefused(engine, requested)) {
       SwitchNote(requested, kept, "refused", engine!!.refusedCode)
     } else {
-      SwitchNote(requested, kept, "failed", engine?.failedCategory ?: "")
+      SwitchNote(requested, kept, "failed", failureReason(requested, engine))
     }
+
+  /**
+   * Why [requested] failed its connection check. When the engine went
+   * back to the old route by itself, its `route_check` is about THAT
+   * route by now (ok, no category — or, if the way back failed, about
+   * whichever failed last); the category of the route the person asked
+   * for is the one `switch_back` kept.
+   */
+  private fun failureReason(requested: String, engine: EngineView?): String {
+    if (engine == null) return ""
+    if (engine.switchBackRoute.isNotEmpty() && engine.switchBackRoute == requested) return engine.switchBackCategory
+    return engine.failedCategory
+  }
+
+  // ---------------------------------------------------------------
+  // Automatic connect (engine_connect_auto): the engine picks a route,
+  // tries it and moves on. The service does not choose; it starts the
+  // engine's search, publishes what the engine ended on, and keeps
+  // following it, because while the engine is in charge it may move to
+  // another route by itself when the one in use stops carrying.
+  // ---------------------------------------------------------------
+
+  /**
+   * What `engine_connect_auto` answered, cut down to what the service
+   * decides on (the list of routes tried stays in the engine's
+   * diagnostics for the page).
+   */
+  data class AutoResult(
+    /** A route is connected, and [routeId] names it. */
+    val connected: Boolean,
+    /** The route the engine ended on; "" when none. */
+    val routeId: String,
+    /** The engine's closed verdict code; "" = connected on the first try. */
+    val verdict: String,
+    val tried: Int = 0,
+    val candidates: Int = 0,
+  )
+
+  /**
+   * The verdict the service reports when the engine has no automatic
+   * connect to ask (an engine library older than the app). Not one of
+   * the engine's codes: the page shows its general sentence for it.
+   */
+  const val VERDICT_UNAVAILABLE = "auto_unavailable"
+
+  /**
+   * An automatic connect ended with the engine saying nothing was
+   * connected by it, and this start is still the newest request.
+   *
+   * The engine tried every route it could, so there is no route to "go
+   * back to" by asking again — with one exception: a route that was
+   * connected BEFORE the call and that the engine still carries (the
+   * call was a no-op the engine answered oddly, or it failed before it
+   * replaced anything). Then stay on it.
+   *
+   * @param lastGood the route that last passed its check on the TUN
+   *                 held, or null
+   * @param engine   what the engine reports now, or null
+   */
+  @JvmStatic
+  fun afterFailedAuto(lastGood: String?, engine: EngineView?): AfterFailure {
+    if (engine == null) {
+      // Cannot be asked. With a route that worked, reconnecting it is
+      // right whether or not it is still up (see afterFailedStart).
+      return if (lastGood.isNullOrEmpty()) AfterFailure.TearDown else AfterFailure.Restore(lastGood)
+    }
+    val active = engine.activeRoute
+    if (engine.routeRunning != false && !active.isNullOrEmpty()) {
+      // Something is running. It is kept only if it is known to carry:
+      // the route that was good before this call, or one the engine
+      // itself calls connected.
+      if (active == lastGood || engine.autoState == AUTO_CONNECTED) return AfterFailure.Keep(active)
+    }
+    return AfterFailure.TearDown
+  }
+
+  /** The note vpnStatus carries after an automatic connect that found nothing. */
+  @JvmStatic
+  fun describeAutoFailure(kept: String?, verdict: String): SwitchNote =
+    SwitchNote(requestedRouteId = "", keptRouteId = kept, outcome = "failed", reason = verdict, auto = true)
+
+  const val AUTO_TRYING = "trying"
+  const val AUTO_CONNECTED = "connected"
+  const val AUTO_FAILED = "failed"
+
+  /** What the service does about the engine's own state while connected automatically. */
+  sealed class Follow {
+    /** Nothing to do. */
+    object None : Follow()
+
+    /** The engine moved to [routeId] by itself and it carries: publish it. */
+    data class Moved(val routeId: String) : Follow()
+
+    /**
+     * The engine ran out of routes: nothing is carried any more.
+     * [verdict] is its closed code for why.
+     */
+    data class Lost(val verdict: String) : Follow()
+  }
+
+  /**
+   * While an automatic connect is in charge, the engine replaces a
+   * route that stopped carrying with the next one WITHOUT the service
+   * asking (the service keeps the TUN; nothing is rebuilt). That is not
+   * an error and must not be treated as one: the service only has to
+   * notice, so that vpnStatus and the notification name the route that
+   * is actually running.
+   *
+   * @param shown  the route the service currently reports, or null
+   * @param engine what the engine reports now, or null
+   */
+  @JvmStatic
+  fun follow(shown: String?, engine: EngineView?): Follow {
+    // Unknown is never a reason to change anything.
+    if (engine == null || engine.autoMode != true) return Follow.None
+    val active = engine.activeRoute
+    return when (engine.autoState) {
+      AUTO_CONNECTED ->
+        if (!active.isNullOrEmpty() && engine.routeRunning != false && active != shown) {
+          Follow.Moved(active)
+        } else {
+          Follow.None
+        }
+      // Still looking: what is shown stays until the engine has decided.
+      AUTO_FAILED ->
+        if (engine.routeRunning == false || active == "") Follow.Lost(engine.autoVerdict) else Follow.None
+      else -> Follow.None
+    }
+  }
+
+  /**
+   * How long to wait before asking the engine to search again after it
+   * ran out of routes while connected automatically. The first retry is
+   * soon (a network that dropped for a moment); later ones back off, so
+   * a phone with no network at all is not kept busy. A retry is a whole
+   * pass: routes the engine is resting after a failure that ANSWERED are
+   * left out, but after a pass in which nothing answered at all (no
+   * usable network) the engine rests nothing, so every route is tried
+   * again — at most once per [RETRY_MAX_MS].
+   *
+   * @param attempt 1 for the first retry
+   */
+  @JvmStatic
+  fun retryDelayMs(attempt: Int): Long {
+    val n = if (attempt < 1) 1 else attempt
+    if (n >= 6) return RETRY_MAX_MS
+    val d = RETRY_FIRST_MS shl (n - 1)
+    return if (d > RETRY_MAX_MS) RETRY_MAX_MS else d
+  }
+
+  /**
+   * Is the service HOLDING — the VPN interface up, nothing connected
+   * behind it, an automatic connect in charge? That is the state after
+   * the engine ran out of routes while the person was connected (the
+   * service retries on a timer), and for the seconds of a first
+   * automatic connect before a route is up. vpnStatus reports it so the
+   * page can say that other apps have no internet meanwhile and offer
+   * Disconnect; the page prefers the engine's own "trying" when it says
+   * so. After a teardown the TUN is gone and this is false, whatever
+   * [auto] still reads.
+   */
+  @JvmStatic
+  fun holding(auto: Boolean, tunHeld: Boolean, connected: Boolean): Boolean = auto && tunHeld && !connected
+
+  const val RETRY_FIRST_MS = 10_000L
+  const val RETRY_MAX_MS = 300_000L
 }

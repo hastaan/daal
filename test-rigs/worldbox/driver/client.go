@@ -38,6 +38,13 @@ type ClientOpts struct {
 	// Idle: import, then wait for commands (Client.Send) instead of
 	// connecting — a phone that holds a pack with the VPN off.
 	Idle bool
+	// Auto: import, then wait for commands and connect the way the main
+	// screen's one button does (labclient/auto.go): `auto`, no route named.
+	Auto bool
+	// LivenessS / RecheckS: the engine's liveness clocks for this phone
+	// (seconds; 0 = the production 180 s / 30 s), through the engine's own
+	// configuration file.
+	LivenessS, RecheckS int
 	// Hosts / CAFile: the phone's view of the public internet for names
 	// the lab hosts itself (ops_freshness.go): an /etc/hosts to see
 	// instead of the laptop's, and the lab CA as the system trust store.
@@ -97,6 +104,15 @@ func StartClient(p Paths, label string, o ClientOpts) (*Client, error) {
 	}
 	if o.Idle {
 		args = append(args, "--idle")
+	}
+	if o.Auto {
+		args = append(args, "--auto")
+	}
+	if o.LivenessS > 0 {
+		args = append(args, "--liveness-s", strconv.Itoa(o.LivenessS))
+	}
+	if o.RecheckS > 0 {
+		args = append(args, "--recheck-s", strconv.Itoa(o.RecheckS))
 	}
 	if o.Hosts != "" {
 		args = append([]string{"unshare", "--mount", "--propagation", "private", "sh", "-c",

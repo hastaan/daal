@@ -50,6 +50,9 @@ struct StartArgs<'a> {
     // and the Kotlin lateinit `routeId` is never set, failing the
     // post-consent start with "lateinit property routeId has not been
     // initialized".
+    //
+    // "" = connect automatically (the Kotlin side treats an empty or
+    // absent routeId as "let the engine pick").
     route_id: &'a str,
 }
 

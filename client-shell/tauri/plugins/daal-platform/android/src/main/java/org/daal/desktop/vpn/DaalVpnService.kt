@@ -58,6 +58,29 @@ import org.daal.desktop.vpn.StartSequence.Outcome
  * still carries it, reconnected if it does not, and only with nothing
  * to go back to does the service stop.
  *
+ * AUTOMATIC CONNECT — `ACTION_START` with no route id (and a start by
+ * the system: always-on VPN, a restart after the process was killed).
+ * The service does not choose a route. Steps 1–2, then step 4 (a TUN
+ * only if none is held), then DaalCoreBridge.connectAuto(): the engine
+ * picks among every usable route, tries them in order and keeps the
+ * first that carries (StartSequence.runAuto). The route it ended on is
+ * what the service reports; when it found none, the engine's verdict
+ * code is left in the note vpnStatus carries and everything is
+ * released.
+ *
+ * While connected this way THE ENGINE MAY MOVE TO ANOTHER ROUTE BY
+ * ITSELF when the one in use stops carrying. That is not an error and
+ * needs nothing rebuilt (the TUN is the service's and stays). The
+ * service only follows: `followOnce` reads the engine's state every
+ * FOLLOW_SECONDS, and whenever the page asks for vpnStatus, and
+ * publishes the route that is actually running (SwitchPolicy.follow).
+ * If the engine runs out of routes, the TUN is KEPT — the person did
+ * not ask to be disconnected, and releasing it would put their traffic
+ * back on the open network without a word — and the service asks the
+ * engine to search again, backing off (SwitchPolicy.retryDelayMs),
+ * until a route carries or the person disconnects. The notification
+ * names no route in this mode.
+ *
  * On `ACTION_STOP` / `onRevoke` / `onDestroy`:
  *   1. stop the scheduler pump
  *   2. DaalCoreBridge.setTunnelRefresh(false)
@@ -127,65 +150,17 @@ class DaalVpnService : VpnService() {
 
   private val mainHandler = Handler(Looper.getMainLooper())
 
+  override fun onCreate() {
+    super.onCreate()
+    live = this
+  }
+
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
       ACTION_START -> {
-        val routeId = intent.getStringExtra(EXTRA_ROUTE_ID)
-        if (routeId.isNullOrEmpty()) {
-          Log.w(TAG, "ACTION_START with no route_id; ignoring")
-          stopSelf()
-          return START_NOT_STICKY
-        }
-        // Main thread: only what Android requires here, promptly.
-        promoteToForeground(routeId)
-        // Everything else — including the seconds-long connection
-        // check inside setRoute — on the control thread.
-        val gen: Int
-        val previousStart: Int
-        synchronized(lifecycleLock) {
-          previousStart = lastStartGen
-          gen = generation.incrementAndGet()
-          lastStartGen = gen
-        }
-        Log.i(TAG, "start requested gen=$gen route=$routeId")
-        if (finishedStartGen < previousStart) {
-          // An older start is queued or running. This one is queued
-          // BEHIND it on the control thread, and the older one may be
-          // inside a connection check that lasts seconds (minutes, on a
-          // cold tor route): it is cancelled, not waited for.
-          Log.i(TAG, "supersede: start gen=$gen replaces start gen=$previousStart still in flight")
-          cancelInFlight(previousStart, stopping = false)
-        }
-        control.execute {
-          val outcome = try {
-            start(routeId, gen)
-          } catch (t: Throwable) {
-            Log.e(TAG, "start gen=$gen route=$routeId threw: ${t.javaClass.simpleName}: ${t.message}")
-            // Where it stopped is unknown, so nothing is assumed to be
-            // up: release everything.
-            teardownEngine("start gen=$gen threw")
-            Outcome.DOWN
-          } finally {
-            // Under cancelLock: a cancel thread checks this and calls
-            // clearRoute under the same lock, so once this start is
-            // marked finished no late cancel can land on the start
-            // queued behind it.
-            synchronized(cancelLock) { finishedStartGen = gen }
-          }
-          Log.i(TAG, "start end gen=$gen route=$routeId outcome=$outcome connected=$connected on=${activeRouteId ?: "-"}")
-          if (outcome == Outcome.DOWN && generation.get() == gen) {
-            // Nothing is connected and nothing replaced this request:
-            // there is no tunnel to keep a foreground service for. (If
-            // a stop or a newer start superseded this one, the service's
-            // fate is theirs to decide.)
-            mainHandler.post {
-              if (generation.get() == gen) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-              }
-            }
-          }
-        }
+        // No route id = connect automatically: the engine picks.
+        val routeId = intent.getStringExtra(EXTRA_ROUTE_ID)?.trim().orEmpty()
+        beginStart(routeId.ifEmpty { null }, reconnect = false, attempt = 0, why = "ACTION_START")
         return START_STICKY
       }
       ACTION_STOP -> {
@@ -194,14 +169,112 @@ class DaalVpnService : VpnService() {
         return START_NOT_STICKY
       }
       else -> {
-        // Restart after a system OOM kill: we don't have the route
-        // id, so the safest behaviour is to stop and let the user
-        // re-connect.
-        Log.i(TAG, "onStartCommand with no action (restart after kill); stopping")
-        stopSelf()
-        return START_NOT_STICKY
+        // Started by the system, with no route: always-on VPN (and the
+        // start at boot that comes with it), or a restart after the
+        // process was killed. There is no route id to go back to and
+        // none is needed — the engine picks. When the engine is not
+        // loaded in this process (it is loaded by the app's activity),
+        // runAuto finds that out before it builds anything, and the
+        // service stops as it always did.
+        Log.i(TAG, "onStartCommand by the system (action=${if (intent == null) "none" else "other"}); connecting automatically")
+        beginStart(null, reconnect = false, attempt = 0, why = "system start")
+        return START_STICKY
       }
     }
+  }
+
+  /**
+   * Main thread. Queues a start on the control thread: of [routeId], or
+   * — when it is null — an automatic connect. [reconnect] marks the
+   * service's own retry after the engine ran out of routes ([attempt]
+   * counts them); it is never set for a request by a person.
+   */
+  private fun beginStart(routeId: String?, reconnect: Boolean, attempt: Int, why: String) {
+    val auto = routeId == null
+    // Main thread: only what Android requires here, promptly. A start
+    // by the system may not be allowed to go foreground (Android 12+,
+    // from the background); the connect is still attempted.
+    try {
+      promoteToForeground(
+        when {
+          reconnect -> NOTE_RECONNECTING
+          auto -> NOTE_CONNECTING
+          else -> noteActive(routeId)
+        },
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "could not go foreground ($why): ${t.javaClass.simpleName}")
+    }
+    // Everything else — including the seconds-long connection
+    // check inside setRoute / connectAuto — on the control thread.
+    val gen: Int
+    val previousStart: Int
+    synchronized(lifecycleLock) {
+      previousStart = lastStartGen
+      gen = generation.incrementAndGet()
+      lastStartGen = gen
+      // A route picked by hand takes the connection back from the
+      // engine's automatic connect; an automatic start hands it over.
+      autoMode = auto
+    }
+    val what = if (auto) "auto" else "route=$routeId"
+    Log.i(TAG, "start requested gen=$gen $what ($why)" + if (reconnect) " retry=$attempt" else "")
+    if (finishedStartGen < previousStart) {
+      // An older start is queued or running. This one is queued
+      // BEHIND it on the control thread, and the older one may be
+      // inside a connection check that lasts seconds (minutes, on a
+      // cold tor route): it is cancelled, not waited for.
+      Log.i(TAG, "supersede: start gen=$gen replaces start gen=$previousStart still in flight")
+      cancelInFlight(previousStart, stopping = false)
+    }
+    control.execute {
+      val outcome = try {
+        start(routeId, gen, reconnect)
+      } catch (t: Throwable) {
+        Log.e(TAG, "start gen=$gen $what threw: ${t.javaClass.simpleName}: ${t.message}")
+        // Where it stopped is unknown, so nothing is assumed to be
+        // up: release everything.
+        teardownEngine("start gen=$gen threw")
+        Outcome.DOWN
+      } finally {
+        // Under cancelLock: a cancel thread checks this and calls
+        // clearRoute under the same lock, so once this start is
+        // marked finished no late cancel can land on the start
+        // queued behind it.
+        synchronized(cancelLock) { finishedStartGen = gen }
+      }
+      Log.i(TAG, "start end gen=$gen $what outcome=$outcome connected=$connected on=${activeRouteId ?: "-"}")
+      if (outcome == Outcome.DOWN && generation.get() == gen) {
+        // Nothing is connected and nothing replaced this request:
+        // there is no tunnel to keep a foreground service for. (If
+        // a stop or a newer start superseded this one, the service's
+        // fate is theirs to decide.)
+        mainHandler.post {
+          if (generation.get() == gen) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+          }
+        }
+      }
+      if (outcome == Outcome.HOLDING) scheduleRetry(gen, attempt + 1)
+    }
+  }
+
+  /**
+   * Any thread. The engine ran out of routes while the person was
+   * connected automatically; ask it to search again after a pause.
+   * Dropped if anything else is asked for in the meantime (a stop, a
+   * route picked by hand, another Connect): [gen] is then no longer the
+   * newest request.
+   */
+  private fun scheduleRetry(gen: Int, attempt: Int) {
+    val delay = SwitchPolicy.retryDelayMs(attempt)
+    Log.i(TAG, "auto: retry=$attempt in ${delay / 1000}s (after gen=$gen)")
+    mainHandler.postDelayed({
+      if (generation.get() == gen && autoMode && !connected) {
+        beginStart(null, reconnect = true, attempt = attempt, why = "retry")
+      }
+    }, delay)
   }
 
   override fun onRevoke() {
@@ -211,6 +284,7 @@ class DaalVpnService : VpnService() {
 
   override fun onDestroy() {
     requestStop("onDestroy")
+    if (live === this) live = null
     super.onDestroy()
   }
 
@@ -220,7 +294,7 @@ class DaalVpnService : VpnService() {
    * does not come up — is StartSequence (pure, unit tested); this
    * supplies the Android and engine halves of each step.
    */
-  private fun start(routeId: String, gen: Int): Outcome {
+  private fun start(routeId: String?, gen: Int, reconnect: Boolean): Outcome {
     val host = object : StartSequence.Host {
       override fun superseded() = generation.get() != gen
       override fun tunHeld() = tunUp
@@ -239,13 +313,16 @@ class DaalVpnService : VpnService() {
         try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) {}
       }
       override fun setRoute(routeId: String) = checkedSetRoute(routeId, gen)
+      override fun connectAuto() = checkedConnectAuto(gen)
+      override fun hold(verdict: String) = this@DaalVpnService.hold(gen)
       override fun engineView() = this@DaalVpnService.engineView()
       override fun routeIsUp(routeId: String) = this@DaalVpnService.routeIsUp(routeId, gen)
       override fun teardown(why: String) = teardownEngine("start gen=$gen: $why")
       override fun note(note: SwitchPolicy.SwitchNote?) { lastSwitch = note }
       override fun log(message: String) { Log.i(TAG, "start gen=$gen $message") }
     }
-    return StartSequence(host).run(routeId)
+    val sequence = StartSequence(host)
+    return if (routeId == null) sequence.runAuto(reconnect) else sequence.run(routeId)
   }
 
   /**
@@ -345,6 +422,146 @@ class DaalVpnService : VpnService() {
   }
 
   /**
+   * Control thread. `engine_connect_auto`, marked exactly as
+   * [checkedSetRoute] marks a setRoute: the engine's cancel
+   * (clearRoute) abandons the whole search, including the connection
+   * check in flight, so a stop or a newer start does not wait behind
+   * it. Null when this start is no longer the newest request, when the
+   * engine cannot be asked, or when it has no such call.
+   */
+  private fun checkedConnectAuto(gen: Int): SwitchPolicy.AutoResult? {
+    val go = synchronized(cancelLock) {
+      if (generation.get() != gen) {
+        false
+      } else {
+        checkingGen = gen
+        true
+      }
+    }
+    if (!go) return null
+    val raw = try {
+      DaalCoreBridge.connectAuto()
+    } catch (t: Throwable) {
+      // UnsatisfiedLinkError included: a native library older than
+      // this class.
+      Log.w(TAG, "start gen=$gen automatic connect unavailable: ${t.javaClass.simpleName}")
+      null
+    } finally {
+      synchronized(cancelLock) { checkingGen = 0 }
+    } ?: return null
+    return try {
+      val o = JSONObject(raw)
+      SwitchPolicy.AutoResult(
+        connected = o.optBoolean("connected", false),
+        routeId = o.optString("route_id", ""),
+        verdict = o.optString("verdict", ""),
+        tried = o.optInt("tried", 0),
+        candidates = o.optInt("candidates", 0),
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "start gen=$gen automatic connect answer was not readable: ${t.javaClass.simpleName}")
+      null
+    }
+  }
+
+  /**
+   * Control thread. Nothing is connected any more but the TUN stays
+   * (see AUTOMATIC CONNECT): stop saying a route is up, and take the
+   * engine's own fetches off a route that is gone. They fail closed
+   * until a route is up again.
+   */
+  private fun hold(gen: Int) {
+    val lost = synchronized(lifecycleLock) {
+      if (generation.get() != gen) {
+        true
+      } else {
+        connected = false
+        activeRouteId = null
+        false
+      }
+    }
+    if (lost) return
+    lastGoodRouteId = null
+    try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) {}
+    mainHandler.post {
+      if (generation.get() == gen && !connected) {
+        try { promoteToForeground(NOTE_RECONNECTING) } catch (_: Throwable) {}
+      }
+    }
+  }
+
+  /**
+   * Any thread. Queue one look at the engine's own state on the control
+   * thread, if an automatic connect is in charge and none is queued.
+   */
+  private fun queueFollow() {
+    if (!autoMode) return
+    if (!followQueued.compareAndSet(false, true)) return
+    control.execute {
+      try {
+        followOnce()
+      } catch (t: Throwable) {
+        Log.w(TAG, "follow threw: ${t.javaClass.simpleName}")
+      } finally {
+        followQueued.set(false)
+      }
+    }
+  }
+
+  /**
+   * Control thread. While the engine's automatic connect is in charge
+   * it may have moved to another route, or run out of routes, since the
+   * last look. Does nothing unless the newest request is an automatic
+   * start that has finished and still holds its TUN — a start in flight
+   * or a stop decides for itself.
+   */
+  private fun followOnce() {
+    val gen = generation.get()
+    if (!autoMode || gen != lastStartGen || finishedStartGen != gen || !tunUp) return
+    when (val f = SwitchPolicy.follow(activeRouteId, engineView())) {
+      SwitchPolicy.Follow.None -> {}
+      is SwitchPolicy.Follow.Moved -> {
+        val was = activeRouteId
+        val lost = synchronized(lifecycleLock) {
+          if (generation.get() != gen) {
+            true
+          } else {
+            activeRouteId = f.routeId
+            connected = true
+            false
+          }
+        }
+        if (lost) return
+        lastGoodRouteId = f.routeId
+        // Whatever an earlier attempt left to explain is over.
+        lastSwitch = null
+        // The engine's own fetches rode the instance that is gone; the
+        // new instance has its own inlet. Fail-closed if this fails.
+        val refreshRc = try { DaalCoreBridge.setTunnelRefresh(true) } catch (_: Throwable) { RC_THREW }
+        Log.i(
+          TAG,
+          "auto: the engine moved by itself from=${was ?: "-"} to=${f.routeId} " +
+            "set_tunnel_refresh_rc=$refreshRc (gen=$gen)",
+        )
+        mainHandler.post {
+          if (generation.get() == gen && connected) {
+            try { promoteToForeground(noteActive(null)) } catch (_: Throwable) {}
+          }
+        }
+      }
+      is SwitchPolicy.Follow.Lost -> {
+        // Already holding: a retry is scheduled.
+        if (!connected) return
+        val verdict = f.verdict.ifEmpty { "all_failed" }
+        Log.i(TAG, "auto: the engine ran out of routes (verdict=$verdict) on=${activeRouteId ?: "-"}; keeping the TUN closed (gen=$gen)")
+        hold(gen)
+        lastSwitch = SwitchPolicy.describeAutoFailure(null, verdict)
+        scheduleRetry(gen, 1)
+      }
+    }
+  }
+
+  /**
    * Control thread. The engine is carrying [routeId]; make the service
    * say so, unless a stop or a newer start arrived meanwhile.
    */
@@ -411,9 +628,16 @@ class DaalVpnService : VpnService() {
       if (!superseded()) startSchedulerPump()
     }
     // The notification was set to the route that was asked for; it may
-    // not be the route that is up.
+    // not be the route that is up. In automatic mode it names none: the
+    // engine may change route without telling anyone.
     mainHandler.post {
-      if (generation.get() == gen && connected) promoteToForeground(routeId)
+      if (generation.get() == gen && connected) {
+        try {
+          promoteToForeground(noteActive(if (autoMode) null else routeId))
+        } catch (t: Throwable) {
+          Log.w(TAG, "could not update the notification: ${t.javaClass.simpleName}")
+        }
+      }
     }
     return Outcome.UP
   }
@@ -457,6 +681,12 @@ class DaalVpnService : VpnService() {
         refusedCode = o.optString("connect_refused", ""),
         refusedRoute = o.optString("connect_refused_route", ""),
         failedCategory = o.optString("route_check_category", ""),
+        autoMode = if (o.isNull("auto_mode")) null else o.optBoolean("auto_mode"),
+        autoState = o.optString("auto_state", ""),
+        autoVerdict = o.optString("auto_verdict", ""),
+        switchBackRoute = o.optString("switch_back_route", ""),
+        switchBackCategory = o.optString("switch_back_category", ""),
+        switchBackRestored = if (o.isNull("switch_back_restored")) null else o.optBoolean("switch_back_restored"),
       )
     } catch (t: Throwable) {
       Log.w(TAG, "engine state was not readable: ${t.javaClass.simpleName}")
@@ -476,6 +706,9 @@ class DaalVpnService : VpnService() {
     synchronized(lifecycleLock) {
       gen = generation.incrementAndGet()
       pendingStart = lastStartGen
+      // The person (or the system) is taking the connection down: the
+      // engine's automatic connect is no longer followed or retried.
+      autoMode = false
       // Before the dialer is retracted (in teardownEngine), as always.
       stopSchedulerPump()
     }
@@ -708,6 +941,14 @@ class DaalVpnService : VpnService() {
         Log.w(TAG, "scheduler tick threw: ${t.message}")
       }
     }, 0L, TICK_SECONDS, TimeUnit.SECONDS)
+    // The follower (see AUTOMATIC CONNECT). It only queues a look on
+    // the control thread, and only while an automatic connect is in
+    // charge; it shares this executor, so a tick that is inside a slow
+    // refresh delays it — the page's own vpnStatus polls do not wait
+    // for it (pokeFollow).
+    pump.scheduleWithFixedDelay({
+      try { queueFollow() } catch (_: Throwable) {}
+    }, FOLLOW_SECONDS, FOLLOW_SECONDS, TimeUnit.SECONDS)
   }
 
   private fun stopSchedulerPump() {
@@ -719,7 +960,11 @@ class DaalVpnService : VpnService() {
     schedulerPump = null
   }
 
-  private fun promoteToForeground(routeId: String) {
+  /** Notification text for a connected tunnel; names no route when [routeId] is null. */
+  private fun noteActive(routeId: String?) =
+    if (routeId.isNullOrEmpty()) "Tunnel active" else "Tunnel active — $routeId"
+
+  private fun promoteToForeground(text: String) {
     ensureChannel()
     val tapIntent = packageManager.getLaunchIntentForPackage(packageName)
     val pi = if (tapIntent != null) {
@@ -731,7 +976,7 @@ class DaalVpnService : VpnService() {
     val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.ic_lock_lock)
       .setContentTitle("Daal")
-      .setContentText("Tunnel active — $routeId")
+      .setContentText(text)
       .setOngoing(true)
       .setContentIntent(pi)
       .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
@@ -771,6 +1016,13 @@ class DaalVpnService : VpnService() {
     // decides what is actually due, and the shortest cadence it can be
     // asked for (a subscription's ProfileUpdateMin) is minutes.
     private const val TICK_SECONDS = 60L
+
+    // How often the service looks at where the engine's automatic
+    // connect is (it also looks whenever the page asks for vpnStatus).
+    private const val FOLLOW_SECONDS = 10L
+
+    private const val NOTE_CONNECTING = "Connecting…"
+    private const val NOTE_RECONNECTING = "Reconnecting…"
     private const val TAG = "DaalVpnService"
 
     // How often a stop repeats the engine's cancel while a start is in
@@ -791,7 +1043,7 @@ class DaalVpnService : VpnService() {
      * service established and has not released (clearTunFd). A start
      * that finds it true is a switch and builds no new TUN.
      */
-    private var tunUp: Boolean = false
+    @Volatile private var tunUp: Boolean = false
 
     /**
      * CONTROL THREAD ONLY. The route that last passed its connection
@@ -805,6 +1057,19 @@ class DaalVpnService : VpnService() {
      * right now, 0 when none is. Written under cancelLock.
      */
     @Volatile private var checkingGen: Int = 0
+
+    /**
+     * True while the engine's automatic connect is in charge: from an
+     * automatic start until a stop or a start of a route picked by
+     * hand. Written under lifecycleLock.
+     */
+    @Volatile private var autoMode: Boolean = false
+
+    /** The service instance alive in this process, for [pokeFollow]. */
+    @Volatile private var live: DaalVpnService? = null
+
+    /** One follow at most is queued on the control thread. */
+    private val followQueued = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** The last switch that did not take; see SwitchPolicy.SwitchNote. */
     @Volatile private var lastSwitch: SwitchPolicy.SwitchNote? = null
@@ -844,5 +1109,23 @@ class DaalVpnService : VpnService() {
     @JvmStatic fun isConnected(): Boolean = connected
     @JvmStatic fun currentRouteId(): String? = activeRouteId
     @JvmStatic fun lastSwitchNote(): SwitchPolicy.SwitchNote? = lastSwitch
+
+    /** The engine's automatic connect is in charge of the connection. */
+    @JvmStatic fun isAuto(): Boolean = autoMode
+
+    /**
+     * The TUN is held with no route behind it while an automatic
+     * connect is in charge (see [SwitchPolicy.holding]): every other
+     * app is cut off until a route is up or the person disconnects.
+     */
+    @JvmStatic fun isHolding(): Boolean = SwitchPolicy.holding(autoMode, tunUp, connected)
+
+    /**
+     * Any thread; returns at once. Called when the page asks for
+     * vpnStatus: if the engine may have moved to another route by
+     * itself, look now rather than at the next timer turn. The answer
+     * the page gets is the one already known; the next one is current.
+     */
+    @JvmStatic fun pokeFollow() { live?.queueFollow() }
   }
 }

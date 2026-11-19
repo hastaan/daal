@@ -35,6 +35,7 @@ import {
     acceptPending,
     listView,
     pendingFailureKey,
+    pinAfterTap,
     resolvePending,
     rowAction,
     rowActionDisabled,
@@ -50,24 +51,18 @@ import {
 import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
 import { EngineStartNotice, FailureBox, StoreResetNotice } from './PageNotices';
 import { useEngineStartProblem } from '../lib/engineStart';
+import { autoIsUsing, getPinnedRoute, setPinnedRoute } from '../lib/autoConnect';
+import { importOriginOf, sourceBadgeKey } from '../lib/importOrigin';
 
 interface Props {
     t: (k: string) => string;
 }
 
+// Where a publisher's routes came from. The lane the add sheet wrote
+// down wins over the guess from the trust class, whose fallback used to
+// call a file chosen with the file picker "pasted" (lib/importOrigin.ts).
 function sourceBadge(p: PublisherTreeRow, t: (k: string) => string): string {
-    switch (p.sourceKind) {
-        case 'sbpx':
-            return t('network.badge.sealed');
-        case 'sbp':
-            return t('network.badge.signed');
-        case 'subscription':
-            return t('network.badge.subscription');
-        case 'pasted':
-            return t('network.badge.pasted');
-        case 'mixed':
-            return t('network.badge.mixed');
-    }
+    return t(sourceBadgeKey(p.sourceKind, importOriginOf(p.publisherId)));
 }
 
 function trustGlyph(level: string): string {
@@ -137,6 +132,14 @@ export default function NetworkPage({ t }: Props) {
     // build instruction. `undefined` is "unknown", not "none": an older
     // engine emits no field and must not be accused.
     const [noDataPlane, setNoDataPlane] = useState(false);
+    // The route the person chose by hand, or null for Automatic.
+    // Connecting a route from this page IS choosing it: the main screen
+    // then connects that one, and says so with the way back
+    // (lib/autoConnect.ts).
+    const [pinnedId, setPinnedId] = useState<string | null>(() => getPinnedRoute());
+    // The route automatic connect has up, or null: marked on its row so
+    // the person can see which one Daal picked.
+    const [autoRouteId, setAutoRouteId] = useState<string | null>(null);
     // Why the engine refused the last connect, as a closed code. On
     // Android it is the only way the reason arrives (the connect call
     // resolves when the VPN service starts, before the engine decides).
@@ -177,6 +180,7 @@ export default function NetworkPage({ t }: Props) {
         // route in its cooldown (refused) and left no way to stop
         // it from this page.
         setActiveRouteId(runningRouteId(s));
+        setAutoRouteId(autoIsUsing(s.auto, runningRouteId(s)) ? runningRouteId(s) : null);
         setVerifying(runningPhase(s));
         setRefused(s.connectRefused);
         // A "could not connect" sentence about a route the engine now
@@ -194,6 +198,11 @@ export default function NetworkPage({ t }: Props) {
         const outcome = resolvePending(p, s, Date.now());
         if (outcome === 'waiting') return;
         setPending(null);
+        const pin = pinAfterTap(p.routeId, outcome);
+        if (pin) {
+            setPinnedRoute(pin);
+            setPinnedId(pin);
+        }
         const note = summaryExtras(s).lastSwitch;
         const noteIsOurs = note?.routeId === p.routeId;
         if (outcome === 'refused') {
@@ -281,6 +290,10 @@ export default function NetworkPage({ t }: Props) {
         // Cancel meanwhile.
         if (pendingRef.current) return;
         cancelledRef.current = false;
+        // Picking a route by hand pins it — once it is CONNECTED
+        // (applySummary). Pinning at the tap left the main button bound
+        // to a route that then failed, was refused or was cancelled,
+        // with automatic connect switched off behind the person's back.
         setPending(startPending(routeId, Date.now(), lastSummaryRef.current));
         // Read through a function: the ref changes while this handler is
         // suspended (the poll answers, the person cancels), which the
@@ -489,6 +502,36 @@ export default function NetworkPage({ t }: Props) {
                 />
             )}
 
+            {view === 'list' && (
+                <div
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        flexWrap: 'wrap',
+                        fontSize: 13,
+                        color: 'var(--muted)',
+                        marginBottom: 12,
+                    }}
+                >
+                    <span style={{ flex: 1, minWidth: 180 }}>
+                        {t(pinnedId ? 'network.pinned.line' : 'network.auto.line')}
+                    </span>
+                    {pinnedId && (
+                        <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => {
+                                setPinnedRoute(null);
+                                setPinnedId(null);
+                            }}
+                        >
+                            {t('auto.chooser.back')}
+                        </Button>
+                    )}
+                </div>
+            )}
+
             {view === 'loading' ? (
                 <EmptyState text={t('common.loading')} />
             ) : view === 'failed' ? null : view === 'empty' || tree === null ? (
@@ -510,6 +553,8 @@ export default function NetworkPage({ t }: Props) {
                             pendingId={pendingId}
                             verifying={verifying}
                             activeRouteId={activeRouteId}
+                            autoRouteId={autoRouteId}
+                            pinnedId={pinnedId}
                             onDisconnect={onDisconnect}
                             onConnectRoute={onConnectRoute}
                             onCool={async (routeId) => {
@@ -640,6 +685,10 @@ interface PublisherRowProps {
     verifying: RunningPhase;
     /** Route id the engine currently has running, or null. */
     activeRouteId: string | null;
+    /** Route id automatic connect has up, or null. */
+    autoRouteId: string | null;
+    /** Route id the person chose by hand, or null. */
+    pinnedId: string | null;
     /** Tear down the active tunnel (also cancels a connection check). */
     onDisconnect: () => void | Promise<void>;
 }
@@ -658,6 +707,8 @@ function PublisherRowView({
     pendingId,
     verifying,
     activeRouteId,
+    autoRouteId,
+    pinnedId,
     onDisconnect,
 }: PublisherRowProps) {
     // The "trivial" case: one publisher with one cell and one route.
@@ -767,6 +818,8 @@ function PublisherRowView({
                                 pendingId={pendingId}
                                 verifying={verifying}
                                 activeRouteId={activeRouteId}
+                                autoRouteId={autoRouteId}
+                                pinnedId={pinnedId}
                                 onDisconnect={onDisconnect}
                             />
                         ))}
@@ -875,6 +928,8 @@ function CellRowView({
     pendingId,
     verifying,
     activeRouteId,
+    autoRouteId,
+    pinnedId,
     onDisconnect,
 }: {
     t: (k: string) => string;
@@ -885,6 +940,8 @@ function CellRowView({
     pendingId: string | null;
     verifying: RunningPhase;
     activeRouteId: string | null;
+    autoRouteId: string | null;
+    pinnedId: string | null;
     onDisconnect: () => void | Promise<void>;
 }) {
     return (
@@ -977,6 +1034,10 @@ function CellRowView({
                                 {r.familyMaturity === 'unsupported' &&
                                     ` · ${t('network.family.unsupported')}`}
                                 {stateLabel && ` · ${t(stateLabel)}`}
+                                {/* Which one Daal picked, and which one
+                                    the person did. */}
+                                {r.routeId === autoRouteId && ` · ${t('network.auto.mark')}`}
+                                {r.routeId === pinnedId && ` · ${t('network.pinned.mark')}`}
                                 {/* Presence, not truthiness: a missing
                                     healthPct means "never measured" and
                                     must not print as 0%. */}

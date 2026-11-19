@@ -16,7 +16,11 @@ import org.daal.desktop.vpn.DaalVpnService
 
 @InvokeArg
 class VpnStartArgs {
-  lateinit var routeId: String
+  /**
+   * The route to connect. ABSENT OR EMPTY = connect automatically: the
+   * service asks the engine to pick a route, try it and move on.
+   */
+  var routeId: String? = null
 }
 
 /**
@@ -24,7 +28,9 @@ class VpnStartArgs {
  * `commands::vpn_*` surface declared in src/commands.rs.
  *
  *   vpnStart(routeId): prepares VpnService (system consent dialog
- *       if needed) and starts DaalVpnService with the chosen route.
+ *       if needed) and starts DaalVpnService with the chosen route —
+ *       or, with no routeId, lets the engine choose (automatic
+ *       connect). The consent flow is the same either way.
  *   vpnStop():          stops DaalVpnService (engine_clear_tun_fd).
  *   vpnStatus():        thin status read; the engine itself does
  *                       not currently expose a "connected" boolean,
@@ -114,10 +120,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
 
   @Command
   fun vpnStatus(invoke: Invoke) {
+    // While the engine's automatic connect is in charge it may have
+    // moved to another route by itself; have the service look.
+    DaalVpnService.pokeFollow()
     val response = JSObject().apply {
       put("connected", DaalVpnService.isConnected())
+      // The route actually running, as the service last learned it from
+      // the engine — not necessarily the one that was asked for.
       put("route_id", DaalVpnService.currentRouteId())
       put("platform", "android")
+      put("auto", DaalVpnService.isAuto())
+      // The VPN interface is up with nothing behind it (the engine ran
+      // out of routes; the service is retrying): the page says so and
+      // offers Disconnect.
+      put("holding", DaalVpnService.isHolding())
       // The last switch that did not take (see SwitchPolicy.SwitchNote):
       // which route was asked for, which one the service stayed on, and
       // a closed code for why. Absent when there is nothing to say.
@@ -129,6 +145,7 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
             put("kept_route_id", n.keptRouteId)
             put("outcome", n.outcome)
             put("reason", n.reason)
+            put("auto", n.auto)
           },
         )
       }
@@ -136,10 +153,11 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve(response)
   }
 
-  private fun startService(routeId: String) {
+  /** [routeId] null or empty = automatic connect (no extra is sent). */
+  private fun startService(routeId: String?) {
     val intent = Intent(activity, DaalVpnService::class.java).apply {
       action = DaalVpnService.ACTION_START
-      putExtra(DaalVpnService.EXTRA_ROUTE_ID, routeId)
+      if (!routeId.isNullOrBlank()) putExtra(DaalVpnService.EXTRA_ROUTE_ID, routeId)
     }
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
       activity.startForegroundService(intent)

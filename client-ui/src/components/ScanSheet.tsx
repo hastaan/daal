@@ -33,6 +33,7 @@
 // bundle sat unresolved in the engine's pending store. A rejected
 // bundle looked exactly the same: silent success.
 
+import { recordImportOrigin } from '../lib/importOrigin';
 import { useState } from 'react';
 import RecipientImport from '../recipient/RecipientImport';
 import TrustPrompt from './TrustPrompt';
@@ -71,6 +72,8 @@ export default function ScanSheet({ t, onClose, onImported }: Props) {
     /** Close after a successful import — unless there is something the
      *  person should read first. */
     const finish = (v: ImportVerdict | null) => {
+        // For the Connections page's badge (lib/importOrigin.ts).
+        recordImportOrigin(v?.Fingerprint, 'scan');
         onImported?.();
         if (unavailableLines(t, v).length > 0) {
             setLeftOut(v);

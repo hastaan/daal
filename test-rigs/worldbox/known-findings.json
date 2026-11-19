@@ -2,7 +2,7 @@
   {
     "id": "CEN-4",
     "severity": "medium",
-    "title": "one route cannot tell apart what needs two observations: every silent UDP route is udp_no_reply (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is tls_sni_or_cert_block_suspected whether the filter is keyed on the name or the address",
+    "title": "one route cannot tell apart what needs two observations: a route connected by hand that is silent on UDP is udp_no_reply whatever the cause, and a reset after the ClientHello is tls_sni_or_cert_block_suspected whether the filter is keyed on the name or the address. The automatic connect adds the second observation where another route to the same address gives one (dead address vs UDP stopped: decided); it cannot tell a QUIC-only filter from all UDP dropped",
     "match": [
       {
         "phase": "family",
@@ -20,18 +20,25 @@
         "family": "vless-reality,websocket-tls,anytls",
         "check": "engine.category",
         "got": "tls_sni_or_cert_block_suspected"
+      },
+      {
+        "phase": "op:auto",
+        "family": "hysteria2,tuic",
+        "check": "quic-only.connect.refined",
+        "got": "udp_blocked_here"
       }
     ]
   },
   {
-    "id": "SW-1",
+    "id": "AUTO-1",
     "severity": "low",
-    "title": "a switch to a route that carries nothing leaves nothing connected: engine_set_route stops the connected route before it knows whether the new one works",
+    "title": "a border that forwards nothing at all reads as one relay not answering: the automatic connect has no observation outside its routes, so total-blackout gets the verdict relay_unreachable and never network_down",
     "match": [
       {
-        "phase": "op:switch",
-        "check": "check-rotate.unreachable.*.old_route_still_connected",
-        "got": "disconnected"
+        "scenario": "total-blackout",
+        "phase": "op:auto",
+        "check": "scenario.connect.verdict",
+        "got": "relay_unreachable"
       }
     ]
   }
