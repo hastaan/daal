@@ -63,6 +63,7 @@ import (
 	"daal/publisher/deploy/providers/hetzner"
 	"daal/publisher/deploy/providers/stark"
 	"daal/publisher/deploy/providers/vultr"
+	"daal/publisher/deploy/provjournal"
 	"daal/publisher/deploy/relaypack"
 	"daal/publisher/deploy/rotation"
 )
@@ -137,6 +138,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runUsersRevoke(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-list":
 		return runUsersList(ctx, rest, os.Stdin, stdout, stderr)
+	case "users-renew":
+		return runUsersRenew(ctx, rest, os.Stdin, stdout, stderr)
+	case "relay-health":
+		return runRelayHealth(ctx, rest, os.Stdin, stdout, stderr)
 	case "relay-identity":
 		return runRelayIdentity(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-pack-sbp":
@@ -175,6 +180,9 @@ Subcommands:
                 Emits a per-resource JSON report on stdout (server_deleted /
                 ssh_key_deleted / firewall_deleted / preserved / warnings).
                 Exit 1 means the billing server survived — keep the record.
+                --release-addresses also gives back every address Daal reserved
+                for this relay (report: "addresses"); exit 6 means the server is
+                gone but an address could not be released and still bills.
   pricing       Print live per-hour cost for a record's server type.
   assign-fip    Attach a floating IP to a record's server AND bind it on the
                 relay so the box actually answers there. Needs --priv-key and
@@ -191,9 +199,11 @@ Subcommands:
   account-reclaim  Delete what account-audit PROVED orphaned: an unattached
                 address whose relay is gone, a one-shot SSH key that will block
                 the next provision, a firewall behind which nothing exists.
-                Prints the plan and stops unless --yes. Never deletes a server,
-                never touches a resource a --record-file names, and refuses
-                everything if the account's server list cannot be read.
+                Prints the plan and stops unless --yes. Never deletes a server
+                unless --include-unclaimed-servers AND --only server:<id> name
+                it and it is provably Daal's and unclaimed; never touches a
+                resource a --record-file names, and refuses everything if the
+                account's server list cannot be read.
   verify        Validate OperatorRecord JSON.
   bind-and-sign Bind OperatorRecord -> signed RelayPack .sbp (FRP-4b).
                 --freshness-mirror provider=url (REPEAT, min 2, distinct
@@ -218,6 +228,16 @@ Subcommands:
                 (rotate-tls, a rebuild, the first recipient on a relay that
                 serves shadowsocks). Exit 3: the relay's software predates it.
   qr-fountain   Stream LT-fountain frames for a .sbp (FRP-4b).
+  users-renew   After a rebuild: re-create people on the relay in ONE firewall
+                window. --ensure rN (keep if present, add if absent), --replace rN
+                (fresh credentials either way), --revoke rN (make sure they are
+                gone); REPEATABLE, handled in argv order. Credentials go to stdout
+                only. Exit 1: nothing could be done; 3: relay too old.
+  relay-health  Read-only. Does the server run at the provider (with
+                --token-file), does the relay's management answer a signed call,
+                does each way in answer from HERE. Exit 0 whenever a report was
+                produced. Says nothing about whether the relay is blocked inside
+                a censored country — nobody outside can see that.
   rotate-recommend
                 Read an Explanation JSON on stdin (or a context flag set)
                 and emit a RotationRecommendation JSON on stdout (FRP-7).
@@ -291,6 +311,13 @@ func parseFlags(fs *flag.FlagSet, args []string) int {
 
 const Version = "daal-deploy 0.2.0+frp-4b"
 
+// Provision exit codes beyond 0/1/2 (publisher-alone wave contract D1).
+const (
+	exitResumeUnsupported = 3 // this hosting company cannot finish setup on an existing server
+	exitServerExists      = 4 // a server for this relay already exists; nothing was created
+	exitJournal           = 5 // journal busy (a setup is still running) or not writable; nothing was created
+)
+
 //	runProvision: daal-deploy provision --pubkey-file ... --region ... \
 //	  --server-type ... --toolbox-profile ... --helper-ip ... [--dry-run]
 //	  [--token-file ... ] [--cover-sni ...] -o record.json
@@ -320,6 +347,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	rollbackOnFailure := fs.Bool("rollback-on-failure", false, "destroy the server if provisioning fails after it was created (default: keep it and name it in the error, so a slow boot stays recoverable)")
 	outFile := fs.String("o", "", "write OperatorRecord JSON here (default: stdout)")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per provisioning step on stderr (FRP-4b)")
+	journalPath := fs.String("journal", "", "append a JSON-lines record of everything this run creates, as it creates it, to this file (locked for the run's life); see provjournal")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -385,15 +413,78 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		}
 	}
 
-	p, err := buildProvider(*providerName, *tokenFile, *dryRun)
+	// The journal is opened (and locked) BEFORE the provider exists, so
+	// a journal that cannot be written, or a setup that is still running
+	// for this relay, stops the run with nothing created (exit 5).
+	var journal *provjournal.Journal
+	if *journalPath != "" {
+		if *providerName == "stark" {
+			emitProgress(*progressJSON, stderr, "journal_warning", "this hosting company does not support the setup journal; continuing without one", nil)
+		} else {
+			journal, err = provjournal.Open(*journalPath, provjournal.Static{
+				Provider:         *providerName,
+				Region:           *region,
+				ServerType:       *serverType,
+				ToolboxProfile:   *toolboxProfile,
+				PublisherPubKey:  pub,
+				ExistingServerID: *existingServerID,
+			}, func(ev string, werr error) {
+				emitProgress(*progressJSON, stderr, "journal_warning", fmt.Sprintf("could not write the %s line: %v", ev, werr), nil)
+			})
+			if err != nil {
+				code := provider.CodeJournalError
+				if errors.Is(err, provjournal.ErrBusy) {
+					code = provider.CodeJournalBusy
+				}
+				emitProgress(*progressJSON, stderr, "provision_error", err.Error(), map[string]any{"code": code})
+				fmt.Fprintf(stderr, "provision: %v\n", err)
+				return exitJournal
+			}
+			defer journal.Close()
+		}
+	}
+	// fail records a failure the process lives to report, on the journal
+	// and on the progress channel, and maps it to the exit code.
+	fail := func(perr error) int {
+		code, serverID := provider.ProvisionErrorCode(perr)
+		extra := map[string]any{"code": code}
+		if serverID != "" {
+			extra["server_id"] = serverID
+		}
+		if journal != nil {
+			if jerr := journal.Failed(code); jerr != nil {
+				emitProgress(*progressJSON, stderr, "journal_warning", fmt.Sprintf("could not write the failed line: %v", jerr), nil)
+			}
+		}
+		emitProgress(*progressJSON, stderr, "provision_error", perr.Error(), extra)
+		fmt.Fprintf(stderr, "provision: %v\n", perr)
+		switch code {
+		case provider.CodeServerExists:
+			return exitServerExists
+		case provider.CodeResumeUnsupported:
+			return exitResumeUnsupported
+		case provider.CodeJournalBusy, provider.CodeJournalError:
+			return exitJournal
+		}
+		return 1
+	}
+
+	p, err := buildProviderFn(*providerName, *tokenFile, *dryRun)
 	if err != nil {
 		fmt.Fprintf(stderr, "build provider: %v\n", err)
+		if journal != nil {
+			_ = journal.Failed(provider.CodeBadInput)
+		}
 		return 1
 	}
 
 	emitProgress(*progressJSON, stderr, "provision_start", "starting provisioning", nil)
 	emitProgress(*progressJSON, stderr, "provision_cloud_call", "calling cloud provider", map[string]any{"provider": *providerName, "region": *region})
 
+	var pj provider.ProvisionJournal
+	if journal != nil {
+		pj = journal
+	}
 	rec, err := p.Provision(ctx, provider.ProvisionOpts{
 		PublisherPubKey:   pub,
 		Region:            *region,
@@ -411,11 +502,18 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		OnProgress: func(step, msg string) {
 			emitProgress(*progressJSON, stderr, step, msg, nil)
 		},
+		Journal: pj,
 	})
 	if err != nil {
-		emitProgress(*progressJSON, stderr, "provision_error", err.Error(), nil)
-		fmt.Fprintf(stderr, "provision: %v\n", err)
-		return 1
+		return fail(err)
+	}
+	// The finished record goes into the journal BEFORE anything reaches
+	// stdout: an app killed between the two still finds it on the next
+	// launch and saves it, without renting anything.
+	if journal != nil {
+		if jerr := journal.Done(rec); jerr != nil {
+			emitProgress(*progressJSON, stderr, "journal_warning", fmt.Sprintf("could not write the done line: %v", jerr), nil)
+		}
 	}
 	emitProgress(*progressJSON, stderr, "provision_done", "OperatorRecord ready", map[string]any{
 		"server_id": rec.ServerID, "public_ip": rec.PublicIP.String(), "candidates": len(rec.Candidates),
@@ -556,6 +654,7 @@ func runDecommission(ctx context.Context, args []string, stdout, stderr io.Write
 	recordFile := fs.String("record-file", "", "OperatorRecord JSON path")
 	tokenFile := fs.String("token-file", "", "Hetzner API token file")
 	_ = fs.Bool("json", false, "emit the report as JSON (always on; accepted for compatibility)")
+	releaseAddrs := fs.Bool("release-addresses", false, "after the server is gone, give back every address Daal reserved for this relay (report: addresses; exit 6 if one could not be released); warnings then carry no command lines")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -584,6 +683,10 @@ func runDecommission(ctx context.Context, args []string, stdout, stderr io.Write
 			rep.Warnf("%v", decErr)
 		}
 	}
+	addrFailed := false
+	if *releaseAddrs {
+		addrFailed = releaseRelayAddresses(ctx, p, rec, rep, decErr)
+	}
 	body, mErr := json.MarshalIndent(rep, "", "  ")
 	if mErr != nil {
 		fmt.Fprintf(stderr, "marshal decommission report: %v\n", mErr)
@@ -597,7 +700,79 @@ func runDecommission(ctx context.Context, args []string, stdout, stderr io.Write
 	for _, w := range rep.Warnings {
 		fmt.Fprintf(stderr, "decommission warning: %s\n", w)
 	}
+	if addrFailed {
+		fmt.Fprintln(stderr, "decommission: the server is gone, but at least one address Daal reserved could not be released and still bills; run the same command again")
+		return exitAddressStillReserved
+	}
 	return 0
+}
+
+// exitAddressStillReserved: decommission --release-addresses deleted the
+// server, but at least one Daal address came back release_failed.
+const exitAddressStillReserved = 6
+
+// releaseRelayAddresses is the --release-addresses half of decommission.
+// It runs only once the server is provably gone (decErr nil and
+// ServerDeleted): an address is the one thing a live relay is reached
+// on. It fills rep.Addresses, drops the decommission's own address
+// warnings and preserved entries for addresses it handled (the
+// addresses list is the statement now), and strips every command line
+// from the remaining warnings. Reports whether any release failed.
+func releaseRelayAddresses(ctx context.Context, p providerFace, rec *provider.OperatorRecord, rep *provider.DecommissionReport, decErr error) bool {
+	addrs := []provider.AddressOutcome{}
+	rep.Addresses = &addrs
+	defer func() { rep.Warnings = provider.PlainWarnings(rep.Warnings) }()
+	if decErr != nil || !rep.ServerDeleted {
+		return false
+	}
+	ar, ok := p.(provider.AddressReleaser)
+	if !ok {
+		if rec.FloatingIPID != "" {
+			addrs = append(addrs, provider.AddressOutcome{ID: rec.FloatingIPID, Code: provider.AddrReleaseFailed,
+				Error: "this hosting company's adapter cannot release addresses"})
+			return true
+		}
+		return false
+	}
+	addrs = append(addrs, ar.ReleaseRelayAddresses(context.WithoutCancel(ctx), rec, rep.ServerID)...)
+	failed := false
+	handled := map[string]bool{}
+	released := map[string]bool{}
+	for _, a := range addrs {
+		if a.Released {
+			released[a.ID] = true
+		}
+		if a.Code == provider.AddrReleaseFailed {
+			failed = true
+		}
+		if a.ID != "" && a.Code != provider.AddrReleaseFailed {
+			handled[a.ID] = true
+		}
+	}
+	// The decommission's own words about rec.FloatingIPID ("stays
+	// reserved and keeps billing ... run ...") are superseded by the
+	// outcome above whenever that address was handled.
+	if rec.FloatingIPID != "" && handled[rec.FloatingIPID] {
+		kept := rep.Warnings[:0]
+		for _, w := range rep.Warnings {
+			if strings.Contains(w, rec.FloatingIPID) && (strings.Contains(w, "floating IP") || strings.Contains(w, "reserved IP")) {
+				continue
+			}
+			kept = append(kept, w)
+		}
+		rep.Warnings = kept
+	}
+	if rec.FloatingIPID != "" && released[rec.FloatingIPID] {
+		pres := rep.Preserved[:0]
+		for _, r := range rep.Preserved {
+			if r == "floating-ip:"+rec.FloatingIPID || r == "reserved-ip:"+rec.FloatingIPID {
+				continue
+			}
+			pres = append(pres, r)
+		}
+		rep.Preserved = pres
+	}
+	return failed
 }
 
 func runPricing(ctx context.Context, args []string, stdout, stderr io.Writer) int {

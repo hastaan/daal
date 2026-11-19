@@ -116,6 +116,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "relay_identity",
         sql: include_str!("../migrations/V015__relay_identity.sql"),
     },
+    Migration {
+        version: 16,
+        name: "publisher_alone",
+        sql: include_str!("../migrations/V016__publisher_alone.sql"),
+    },
 ];
 
 /// V015: one relay's identity as last learned, and the identity its
@@ -1860,8 +1865,9 @@ impl OperatorDb {
             "INSERT INTO recipients
                  (operator_id, name, display_name, address_str, pubkey_x25519_hex,
                   fingerprint_hex, vless_uuid, reality_short_id, hy2_password,
-                  naive_password, ws_path, provisioned_at_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  naive_password, ws_path, provisioned_at_unix, creds_box_fp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         COALESCE((SELECT mgmt_tls_fingerprint FROM operators WHERE id = ?1), ''))",
             params![
                 row.operator_id,
                 row.name,
@@ -1905,7 +1911,9 @@ impl OperatorDb {
         let affected = conn.execute(
             "UPDATE recipients
                 SET vless_uuid = ?3, reality_short_id = ?4, hy2_password = ?5,
-                    naive_password = ?6, ws_path = ?7, provisioned_at_unix = ?8
+                    naive_password = ?6, ws_path = ?7, provisioned_at_unix = ?8,
+                    creds_box_fp = COALESCE(
+                        (SELECT mgmt_tls_fingerprint FROM operators WHERE id = ?2), '')
               WHERE id = ?1 AND operator_id = ?2",
             params![
                 recipient_id,
@@ -1920,6 +1928,146 @@ impl OperatorDb {
         )?;
         if affected == 0 {
             return Err(DbError::NotFound(recipient_id));
+        }
+        Ok(())
+    }
+
+    // ---- V016 publisher-alone ------------------------------------
+    //
+    // Every write of a person's credentials (insert_recipient,
+    // update_recipient_creds) stamps `creds_box_fp` with the relay's
+    // CURRENT management fingerprint inside the same statement, so no
+    // caller can forget to — rotate_credentials, repack, provision and
+    // renew all go through those two.
+
+    /// `recipient id -> creds_box_fp` for one relay.
+    pub fn recipient_box_fps(
+        &self,
+        operator_id: i64,
+    ) -> Result<std::collections::HashMap<i64, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, creds_box_fp FROM recipients WHERE operator_id = ?1")?;
+        let rows = stmt.query_map(params![operator_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for r in rows {
+            let (id, fp): (i64, String) = r?;
+            out.insert(id, fp);
+        }
+        Ok(out)
+    }
+
+    /// Live people whose credentials were minted on a different box than
+    /// the one the relay runs now.
+    pub fn count_people_needing_renewal(&self, operator_id: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let c: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recipients r JOIN operators o ON o.id = r.operator_id
+              WHERE r.operator_id = ?1 AND r.revoked_at_unix = 0
+                AND r.creds_box_fp <> o.mgmt_tls_fingerprint",
+            params![operator_id],
+            |r| r.get(0),
+        )?;
+        Ok(c)
+    }
+
+    /// The everyone file's marker.
+    pub fn shared_box_fp(&self, operator_id: i64) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT shared_box_fp FROM operators WHERE id = ?1",
+            params![operator_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(DbError::NotFound(operator_id))
+    }
+
+    /// Stamp the everyone file's marker with the current fingerprint.
+    pub fn stamp_shared_box_fp(&self, operator_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET shared_box_fp = mgmt_tls_fingerprint WHERE id = ?1",
+            params![operator_id],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(operator_id));
+        }
+        Ok(())
+    }
+
+    /// The last health check: `(json, at_unix)`; `("", 0)` when none.
+    pub fn last_health(&self, operator_id: i64) -> Result<(String, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_health_json, last_health_at_unix FROM operators WHERE id = ?1",
+            params![operator_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or(DbError::NotFound(operator_id))
+    }
+
+    pub fn set_last_health(&self, operator_id: i64, json: &str, at_unix: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET last_health_json = ?2, last_health_at_unix = ?3 WHERE id = ?1",
+            params![operator_id, json, at_unix],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(operator_id));
+        }
+        Ok(())
+    }
+
+    /// Addresses still reserved (and billing) after the server went.
+    pub fn unreleased_addresses(&self, operator_id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let j: Option<String> = conn
+            .query_row(
+                "SELECT unreleased_addresses_json FROM operators WHERE id = ?1",
+                params![operator_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let j = j.ok_or(DbError::NotFound(operator_id))?;
+        Ok(serde_json::from_str(&j).unwrap_or_default())
+    }
+
+    /// Replace the list of addresses still reserved for a relay.
+    pub fn set_unreleased_addresses(&self, operator_id: i64, addresses: &[String]) -> Result<()> {
+        let j = serde_json::to_string(addresses).unwrap_or_else(|_| "[]".into());
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET unreleased_addresses_json = ?2 WHERE id = ?1",
+            params![operator_id, j],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(operator_id));
+        }
+        Ok(())
+    }
+
+    /// Record a teardown that killed the server but could not give back
+    /// every address: the row stays (so the token is still there for the
+    /// retry) and says `decommissioned`.
+    pub fn mark_decommissioned_with_unreleased(
+        &self,
+        operator_id: i64,
+        at_unix: i64,
+        addresses: &[String],
+    ) -> Result<()> {
+        let j = serde_json::to_string(addresses).unwrap_or_else(|_| "[]".into());
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE operators SET status = 'decommissioned',
+                                  decommissioned_at_unix = COALESCE(decommissioned_at_unix, ?2),
+                                  unreleased_addresses_json = ?3
+              WHERE id = ?1",
+            params![operator_id, at_unix, j],
+        )?;
+        if n == 0 {
+            return Err(DbError::NotFound(operator_id));
         }
         Ok(())
     }
@@ -3243,6 +3391,65 @@ mod tests {
             row.mgmt_tls_fingerprint, "",
             "V1.5 record must default to empty fingerprint"
         );
+    }
+
+    /// V016 on a database that already holds relays and people: every
+    /// existing person is stamped with their relay's CURRENT management
+    /// fingerprint (assumed fine), the everyone-file marker likewise,
+    /// and the new columns get their defaults.
+    #[test]
+    fn v016_backfills_the_box_markers_from_the_current_fingerprint() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", &"ON").unwrap();
+        let db = OperatorDb {
+            conn: Mutex::new(conn),
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                     name TEXT NOT NULL, applied_at_unix INTEGER NOT NULL)",
+            )
+            .unwrap();
+            for m in MIGRATIONS.iter().filter(|m| m.version < 16) {
+                conn.execute_batch(m.sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_migrations VALUES (?1, ?2, 0)",
+                    params![m.version, m.name],
+                )
+                .unwrap();
+            }
+        }
+        let fp = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let a = db.insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1).unwrap();
+        let b = db.insert_pre_provision("{}", "cd", "k2", "hetzner", "t2", 1).unwrap();
+        db.record_mgmt_plane(a, 42424, fp).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (op, name, pk) in [(a, "r1", "11"), (b, "r1", "22")] {
+                conn.execute(
+                    "INSERT INTO recipients (operator_id, name, address_str, pubkey_x25519_hex,
+                         fingerprint_hex, vless_uuid, reality_short_id, hy2_password,
+                         naive_password, ws_path, provisioned_at_unix)
+                     VALUES (?1, ?2, 'daal1x', ?3, 'f', 'u', 's', 'h', 'n', '/w', 1)",
+                    params![op, name, pk.repeat(32)],
+                )
+                .unwrap();
+            }
+        }
+        db.run_migrations().unwrap();
+        let fps_a = db.recipient_box_fps(a).unwrap();
+        assert_eq!(fps_a.values().next().unwrap(), fp);
+        let fps_b = db.recipient_box_fps(b).unwrap();
+        assert_eq!(fps_b.values().next().unwrap(), "", "a relay with no mgmt key yet");
+        assert_eq!(db.shared_box_fp(a).unwrap(), fp);
+        assert_eq!(db.count_people_needing_renewal(a).unwrap(), 0);
+        assert_eq!(db.last_health(a).unwrap(), (String::new(), 0));
+        assert!(db.unreleased_addresses(a).unwrap().is_empty());
+        // And a rebuild (new fingerprint) is what makes them stale.
+        let fp2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        db.record_mgmt_plane(a, 42424, fp2).unwrap();
+        assert_eq!(db.count_people_needing_renewal(a).unwrap(), 1);
     }
 
     #[test]

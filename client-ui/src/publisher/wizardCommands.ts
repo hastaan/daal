@@ -134,6 +134,13 @@ export type PublisherErrorCode =
     | 'E_HELPER_IP_STALE'
     | 'E_RELAY_TOO_OLD'
     | 'E_RELAY_KEYS_CHANGED'
+    // Publisher-alone wave (D1-D5). See the contract in the wave notes.
+    | 'E_SETUP_RUNNING'
+    | 'E_SERVER_EXISTS'
+    | 'E_NOT_SUPPORTED'
+    | 'E_RELAY_UNREACHABLE'
+    | 'E_FILE_MISSING'
+    | 'E_DEPLOY_TOO_OLD'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -158,7 +165,32 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     // means (the server, or the path to it, may be someone else's) and
     // that the way forward is a rebuild.
     'E_RELAY_KEYS_CHANGED',
+    // A setup is still running for this relay (its journal is locked).
+    // Not a failure: the answer is "wait, then look again".
+    'E_SETUP_RUNNING',
+    // Provision refused because a server for this relay already exists.
+    // The tail after ": " starts with the server id. The wizard answers
+    // it by asking `setupRecovery` what is there — never by retrying.
+    'E_SERVER_EXISTS',
+    // This hosting company cannot do this (finish in place on Vultr).
+    'E_NOT_SUPPORTED',
+    // The relay's management did not answer, so nothing was changed.
+    'E_RELAY_UNREACHABLE',
+    // The requested file does not exist on this phone.
+    'E_FILE_MISSING',
+    // The app's bundled setup helper is older than this screen and lacks
+    // the verb. Not retryable: only an app update fixes it.
+    'E_DEPLOY_TOO_OLD',
 ];
+
+/** The server id carried by an `E_SERVER_EXISTS: <id> ...` rejection,
+ *  or "" when the error is not one or names no id. */
+export function serverIdFromExists(e: unknown): string {
+    const msg =
+        typeof e === 'string' ? e : e instanceof Error ? e.message : String(e ?? '');
+    const m = /^E_SERVER_EXISTS:\s*(\S+)/.exec(msg);
+    return m ? m[1] : '';
+}
 
 /**
  * Classify a thrown Tauri error by its stable prefix. Returns null for
@@ -235,6 +267,20 @@ export interface OperatorSummary {
      *  the confirm sheet projects the result from this array and
      *  refuses a profile change that would remove nothing. */
     served_families: string[];
+    // ---- Publisher-alone wave. Optional on this side only because a
+    // shell built before the wave does not send them; absent reads as
+    // the safe answer (no token, nothing interrupted, nothing owed).
+    /** A cloud token is stored for this relay (custody is not read). */
+    has_cloud_token?: boolean;
+    /** The row is pre-provision and a setup journal exists: a setup
+     *  started and did not finish, so a server may be billing. */
+    setup_interrupted?: boolean;
+    /** Live people whose credentials were minted on a server that is no
+     *  longer this relay's (D2). */
+    people_needing_renewal?: number;
+    /** Addresses Daal reserved for this relay that a delete could not
+     *  release; they still cost money (D4). */
+    unreleased_addresses?: string[];
 }
 
 /**
@@ -672,8 +718,165 @@ export interface DestroyReport {
     ssh_key_deleted: boolean;
     firewall_deleted: boolean;
     local_removed: boolean;
-    /** Non-fatal provider errors. Show verbatim — do not summarise. */
+    /** Non-fatal provider errors. Details disclosure only — some carry a
+     *  command line, which the main copy must never show. */
     warnings: string[];
+    /** D4: every address Daal reserved for this relay and what became of
+     *  it. Optional because an older shell does not send it. */
+    addresses?: AddressOutcome[];
+    /** D4: the server is gone but an address is still reserved and
+     *  billing; the same `relayDestroy(op, true)` call is the retry. */
+    retry_needed?: boolean;
+}
+
+export interface AddressOutcome {
+    id: string;
+    ip: string;
+    released: boolean;
+    code: 'released' | 'not_daal' | 'still_attached' | 'release_failed';
+}
+
+// ---- Publisher-alone wave: D1 interrupted setup + account check ----
+
+export interface SetupRecovery {
+    state: 'none' | 'running' | 'finished_unsaved' | 'server_running' | 'nothing_billing' | 'unknown';
+    provider: string;
+    server_origin: 'created' | 'yours' | '';
+    /** true only for hetzner + created + server_running, or finished_unsaved */
+    can_finish_here: boolean;
+    server_id: string; // "" if unknown
+    public_ip: string; // "" if unknown
+    billing: 'yes' | 'no' | 'unknown';
+    leftovers: {
+        kind: 'server' | 'floating-ip' | 'ssh-key' | 'firewall';
+        id: string;
+        name: string;
+        billing: boolean;
+    }[];
+    check_error: '' | 'no_token' | 'offline' | 'account_unreadable' | 'custody_locked' | 'failed';
+    started_at_unix: number; // journal begin ts, 0 if none
+    details: string[]; // raw, Details disclosure only
+}
+
+export interface ResourceRef {
+    kind: 'server' | 'floating-ip' | 'ssh-key' | 'firewall';
+    id: string;
+}
+
+export interface AccountItem extends ResourceRef {
+    name: string;
+    address: string;
+    billing: boolean;
+    verdict: 'in-use' | 'unclaimed' | 'orphan' | 'unproven';
+    finding:
+        | 'yours_in_use'
+        | 'unfinished_setup'
+        | 'not_on_this_phone'
+        | 'second_server_for_relay'
+        | 'leftover'
+        | 'cannot_tell';
+    belongs_to_relay_id: number | null;
+    can_delete: boolean;
+}
+
+export interface AccountCheckAccount {
+    account_key: string;
+    provider: string;
+    relay_ids: number[];
+    /** server list could be read; false ⇒ nothing deletable */
+    complete: boolean;
+    error_code: '' | 'offline' | 'token_rejected' | 'unsupported_provider' | 'custody_locked' | 'failed';
+    items: AccountItem[];
+    details: string[];
+}
+
+export interface AccountCheck {
+    accounts: AccountCheckAccount[];
+    checked_at_unix: number;
+}
+
+export type AccountCleanupCode =
+    | 'deleted'
+    | 'released'
+    | 'kept_in_use'
+    | 'kept_claimed'
+    | 'kept_not_daal'
+    | 'kept_unproven'
+    | 'kept_list_unreadable'
+    | 'kept_unsupported'
+    | 'delete_failed'
+    | 'already_gone';
+
+export interface AccountCleanupReport {
+    outcomes: (ResourceRef & { name: string; deleted: boolean; code: AccountCleanupCode })[];
+    details: string[];
+}
+
+// ---- D2: renew everyone's files ----
+
+export interface RenewItem {
+    /** null = the everyone file */
+    recipient_id: number | null;
+    name: string;
+    display_name: string;
+    status: 'done' | 'already_done' | 'failed' | 'not_attempted' | 'removed_from_server';
+    reason:
+        | ''
+        | 'relay_unreachable'
+        | 'relay_full'
+        | 'relay_too_old'
+        | 'file_write_failed'
+        | 'signing_failed'
+        | 'other';
+    /** "" for the everyone file / failures */
+    sbpx_path: string;
+    /** raw, Details only */
+    detail: string;
+}
+
+export interface RenewReport {
+    operator_id: number;
+    items: RenewItem[];
+    everyone_file: RenewItem | null;
+    all_done: boolean;
+}
+
+export interface RenewEvent {
+    operator_id: number;
+    index: number;
+    total: number;
+    recipient_id: number | null;
+    display_name: string;
+    status: 'working' | RenewItem['status'];
+}
+
+// ---- D3: health check ----
+
+export type HealthWayState = 'answers' | 'no_answer' | 'wrong_server' | 'not_testable_here';
+
+export interface RelayHealth {
+    operator_id: number;
+    checked_at_unix: number;
+    from_cache: boolean;
+    overall: 'working' | 'partly' | 'not_working' | 'unknown';
+    server: 'running' | 'stopped' | 'starting' | 'missing' | 'not_checked' | 'error';
+    management: 'answers' | 'no_answer' | 'refused' | 'too_old' | 'not_checked' | 'error';
+    management_reason: '' | 'address_may_have_changed' | 'timeout' | 'refused';
+    keys_match: boolean | null;
+    people_missing: number | null;
+    everyone_missing: boolean | null;
+    ways: { family: string; state: HealthWayState }[];
+    details: string[];
+}
+
+// ---- D5: which file a QR / paste carries ----
+
+/** `'shared'` is the everyone file, `'raw'` the credential-free build
+ *  artifact, `recipient:<id>` one person's own sealed file. */
+export type PackArtifact = 'shared' | 'raw' | `recipient:${number}`;
+
+export function recipientArtifact(recipient_id: number): PackArtifact {
+    return `recipient:${recipient_id}`;
 }
 
 // ---- Commands (one wrapper per #[tauri::command]) ----
@@ -755,10 +958,14 @@ export const Wizard = {
      * and that orphan makes the next provision in the same region fail
      * on a name collision. `warnings` is provider text — show verbatim.
      */
-    relayDestroy: (operator_id: number, delete_server: boolean) =>
+    relayDestroy: (operator_id: number, delete_server: boolean, delete_own_server = false) =>
         invoke<DestroyReport>('wizard_relay_destroy', {
             operatorId: operator_id,
             deleteServer: delete_server,
+            // The person's answer to "Delete my server" for a server they
+            // brought themselves. Only then may the shell take that
+            // server's id from the setup journal.
+            deleteOwnServer: delete_own_server,
         }),
 
     /**
@@ -901,7 +1108,7 @@ export const Wizard = {
      */
     qrRender: (
         operator_id: number,
-        artifact: 'shared' | 'raw',
+        artifact: PackArtifact,
         block_size: number,
         max_frames: number,
         seed: number,
@@ -928,7 +1135,7 @@ export const Wizard = {
      * `artifact` carries the same meaning, and the same absence of a
      * default, as in `qrRender`.
      */
-    copyPasteable: (operator_id: number, artifact: 'shared' | 'raw') =>
+    copyPasteable: (operator_id: number, artifact: PackArtifact) =>
         invoke<string>('wizard_copy_pasteable', {
             operatorId: operator_id,
             artifact,
@@ -1244,6 +1451,34 @@ export const Wizard = {
         invoke<RotateTlsSummary>('wizard_rotate_tls', {
             operatorId: operator_id,
         }),
+
+    // ---- Publisher-alone wave ----------------------------------------
+
+    /** D1. Read-only: what an interrupted setup left behind, from the
+     *  setup journal and (when a token is stored) the hosting account. */
+    setupRecovery: (operator_id: number) =>
+        invoke<SetupRecovery>('wizard_setup_recovery', { operatorId: operator_id }),
+    /** D1. Deletes the cloud side of an unfinished setup and KEEPS the
+     *  relay row, so setup can start again without the token. */
+    setupRemoveServer: (operator_id: number) =>
+        invoke<DestroyReport>('wizard_setup_remove_server', { operatorId: operator_id }),
+    /** D1. "Is anything of Daal's still running in my account?" */
+    accountCheck: () => invoke<AccountCheck>('wizard_account_check'),
+    /** D1. Delete the chosen Daal-labelled leftovers in one account. */
+    accountCleanup: (account_key: string, items: ResourceRef[]) =>
+        invoke<AccountCleanupReport>('wizard_account_cleanup', {
+            accountKey: account_key,
+            items,
+        }),
+    /** D2. Re-create every non-revoked person on the relay's current
+     *  server and rewrite their files. Safe to press twice. Progress on
+     *  `wizard://renew-event` (see `onRenewEvent`). */
+    renewEveryone: (operator_id: number) =>
+        invoke<RenewReport>('wizard_renew_everyone', { operatorId: operator_id }),
+    /** D3. Rust returns a cached result younger than 10 minutes unless
+     *  `force` is true. Read-only. */
+    relayHealth: (operator_id: number, force: boolean) =>
+        invoke<RelayHealth>('wizard_relay_health', { operatorId: operator_id, force }),
 };
 
 // ---- Streaming events ----
@@ -1264,3 +1499,7 @@ export const onQrFrame = (
     cb: (frame: QrFountainFrame) => void,
 ): Promise<UnlistenFn> =>
     listen<QrFountainFrame>('wizard://qr-frame', (e) => cb(e.payload));
+
+/** D2: one line per person while `renewEveryone` runs. */
+export const onRenewEvent = (cb: (ev: RenewEvent) => void): Promise<UnlistenFn> =>
+    listen<RenewEvent>('wizard://renew-event', (e) => cb(e.payload));

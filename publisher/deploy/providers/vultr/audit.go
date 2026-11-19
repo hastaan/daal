@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ var _ provider.AccountAuditor = (*Provider)(nil)
 // recordClaims is the record side of the join, precomputed once.
 type recordClaims struct {
 	relays      map[string]*provider.OperatorRecord
+	relayIndex  map[string]int
 	instanceIDs map[string]string // instance id -> relay
 	reservedIPs map[string]string // reserved ip id -> relay
 }
@@ -54,10 +56,11 @@ type recordClaims struct {
 func claimsFrom(records []*provider.OperatorRecord) recordClaims {
 	c := recordClaims{
 		relays:      map[string]*provider.OperatorRecord{},
+		relayIndex:  map[string]int{},
 		instanceIDs: map[string]string{},
 		reservedIPs: map[string]string{},
 	}
-	for _, rec := range records {
+	for i, rec := range records {
 		if rec == nil {
 			continue
 		}
@@ -65,6 +68,8 @@ func claimsFrom(records []*provider.OperatorRecord) recordClaims {
 		if len(rec.PublisherPubKey) > 0 && rec.Region != "" {
 			relay = derivedInstanceLabel(rec.PublisherPubKey, rec.Region)
 			c.relays[relay] = rec
+			// The same record c.relays keeps (the last one for a relay).
+			c.relayIndex[relay] = i
 		}
 		if rec.ServerID != "" {
 			c.instanceIDs[rec.ServerID] = relay
@@ -185,7 +190,7 @@ func (p *Provider) AuditAccount(ctx context.Context, records []*provider.Operato
 
 	// --- the record side of the join ---
 	for relay, rec := range claims.relays {
-		k := provider.KnownRelay{Relay: relay, RecordServerID: rec.ServerID, Region: rec.Region}
+		k := provider.KnownRelay{Relay: relay, RecordServerID: rec.ServerID, Region: rec.Region, RecordIndex: claims.relayIndex[relay]}
 		if live, ok := byRelay[relay]; ok {
 			k.LiveServerID = live.ID
 			switch {
@@ -225,7 +230,7 @@ func (p *Provider) auditInstances(audit *provider.AccountAudit, instances []*Ins
 			// claimed.
 			if looksLikeDerivedRelayLabel(inst.Label) {
 				audit.Add(provider.AuditedResource{
-					Kind: provider.KindServer, ID: inst.ID, Name: inst.Label,
+					Kind: provider.KindServer, ID: inst.ID, Name: inst.Label, Address: ipv4String(inst.MainIP),
 					Verdict: provider.VerdictUnproven, Billing: true,
 					Reason: "labelled like a daal relay but carries no " + tagManagedBy + " tag, so this tool cannot tell whether it built this instance or you did",
 					Hint:   "check it in the Vultr console (Products → Compute → " + inst.Label + "); if it is a relay you provisioned with an older build, tear it down with `daal-deploy decommission`",
@@ -235,6 +240,7 @@ func (p *Provider) auditInstances(audit *provider.AccountAudit, instances []*Ins
 		}
 		res := provider.AuditedResource{
 			Kind: provider.KindServer, ID: inst.ID, Name: inst.Label, Relay: relay, Billing: true,
+			Address: ipv4String(inst.MainIP),
 		}
 		claimRelay, byRelay := claims.relays[relay]
 		_, claimedByID := claims.instanceIDs[inst.ID]
@@ -274,6 +280,7 @@ func (p *Provider) auditReservedIPs(ctx context.Context, audit *provider.Account
 		}
 		res := provider.AuditedResource{
 			Kind: provider.KindFloatingIP, ID: rip.ID, Name: rip.Label, Relay: relay, Billing: true,
+			Address: ipv4String(rip.IP),
 		}
 		switch {
 		case !audit.ServerListComplete:
@@ -380,6 +387,13 @@ func (p *Provider) auditFirewallGroups(ctx context.Context, audit *provider.Acco
 // description of the past, and deleting against it is how a sweep eats
 // a live relay.
 func (p *Provider) ReclaimOrphans(ctx context.Context, records []*provider.OperatorRecord, only []provider.ResourceRef) (*provider.ReclaimReport, error) {
+	return p.ReclaimOrphansWithOpts(ctx, records, only, provider.ReclaimOpts{})
+}
+
+// ReclaimOrphansWithOpts is ReclaimOrphans with the one widening the
+// app needs: an explicitly named, provably-Daal, unclaimed SERVER (see
+// provider.ReclaimOpts and reclaimServer).
+func (p *Provider) ReclaimOrphansWithOpts(ctx context.Context, records []*provider.OperatorRecord, only []provider.ResourceRef, opts provider.ReclaimOpts) (*provider.ReclaimReport, error) {
 	rep := provider.NewReclaimReport("vultr")
 	audit, err := p.AuditAccount(ctx, records)
 	if err != nil {
@@ -391,6 +405,10 @@ func (p *Provider) ReclaimOrphans(ctx context.Context, records []*provider.Opera
 	// about the whole instance list; without it there is no such claim
 	// to act on.
 	if !audit.ServerListComplete {
+		for _, r := range only {
+			rep.Add(provider.ReclaimOutcome{Kind: r.Kind, ID: r.ID, Code: provider.ReclaimKeptListUnreadable,
+				Reason: "refused: the account's server list could not be read, so nothing can be proven safe to delete"})
+		}
 		return rep, errors.New("vultr: refusing to reclaim anything — the account's instance list could not be read, and \"nothing is behind this resource\" is a statement about that list. Fix the API access and re-run")
 	}
 
@@ -406,12 +424,17 @@ func (p *Provider) ReclaimOrphans(ctx context.Context, records []*provider.Opera
 			continue
 		}
 		seen[ref] = true
+		if res.Kind == provider.KindServer && opts.IncludeUnclaimedServers && want[ref] {
+			p.reclaimServer(ctx, res, claimsFrom(records), rep)
+			continue
+		}
 		if !res.Reclaimable {
 			// Named, never silently skipped: an operator who asked for
 			// a specific resource must be told why it survived.
 			rep.Add(provider.ReclaimOutcome{
 				Kind: res.Kind, ID: res.ID, Name: res.Name, Deleted: false,
 				Reason: "refused (" + string(res.Verdict) + "): " + res.Reason,
+				Code:   provider.KeptCode(res),
 			})
 			continue
 		}
@@ -535,6 +558,17 @@ func (p *Provider) reclaimOne(ctx context.Context, res provider.AuditedResource)
 // or truncated record is exactly the kind the operator still has after
 // a crash), and testing the map's VALUE instead of its presence would
 // classify the address that record names as an orphan and delete it.
+// ipv4String renders an address for the audit's "address" field.
+func ipv4String(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	if len(ip) > 0 {
+		return ip.String()
+	}
+	return ""
+}
+
 func mapHasKey(m map[string]string, k string) bool {
 	_, ok := m[k]
 	return ok

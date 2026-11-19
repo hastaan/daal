@@ -84,12 +84,15 @@ func (s *provisionScope) unwind(ctx context.Context, opts provider.ProvisionOpts
 	ctx = context.WithoutCancel(ctx)
 	var left []leftover
 
+	j := opts.J()
 	if s.instanceID == "" {
 		// Exit 1: nothing is billing. Clean up unconditionally.
 		if s.firewallGroupID != "" {
 			if err := s.p.c.FirewallGroupDelete(ctx, s.firewallGroupID); err != nil {
 				left = append(left, leftover{"firewalls", s.firewallGroupID,
 					fmt.Sprintf("firewall group (could not delete: %v)", err)})
+			} else {
+				j.Deleted(provider.KindFirewall, s.firewallGroupID)
 			}
 		}
 		if len(left) == 0 {
@@ -129,10 +132,13 @@ func (s *provisionScope) unwind(ctx context.Context, opts provider.ProvisionOpts
 		progress("provision_orphan", "Rollback failed: "+renderLeftovers(left)+". "+auditPointer)
 		return fmt.Errorf("%w [rollback failed, %s: %s. %s]", cause, where, renderLeftovers(left), auditPointer)
 	}
+	j.Deleted(provider.KindServer, s.instanceID)
 	if s.firewallGroupID != "" {
 		if err := s.p.c.FirewallGroupDelete(ctx, s.firewallGroupID); err != nil {
 			left = append(left, leftover{"firewalls", s.firewallGroupID,
 				fmt.Sprintf("firewall group (nothing is billing for it; could not delete: %v)", err)})
+		} else {
+			j.Deleted(provider.KindFirewall, s.firewallGroupID)
 		}
 	}
 	if len(left) > 0 {

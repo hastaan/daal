@@ -37,7 +37,23 @@ import {
     type BindResult,
     type ServerTypeOption,
     type ExistingServer,
+    type DestroyReport,
+    type SetupRecovery,
 } from './wizardCommands';
+import { SetupRecoveryCard, CancelSetupSheet } from './SetupRecoveryCard';
+import {
+    afterRecovery,
+    cancelDelete,
+    cancelPlan,
+    existingAfterFailure,
+    isMissingCommand,
+    performRecovery,
+    recoveryCheckFailed,
+    recoveryFixture,
+} from './setupRecovery';
+import type { RecoveryButton } from './setupRecovery';
+import { explainFailure } from './failureText';
+import { RelayDestroySheet } from './RelayListPage';
 import { RELAYPACK_PHASE } from './phase';
 import { MoreWaysToConnect } from './MoreWaysToConnect';
 import {
@@ -383,6 +399,31 @@ export default function PublisherWizard({
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
 
+    // D1 — what an interrupted setup left behind. Asked before a resume
+    // does anything that costs money; `null` while the question is out.
+    const [recovery, setRecovery] = useState<SetupRecovery | null>(null);
+    /** The shell predates the command: fall back to the plain consent
+     *  card, which at least never auto-rents. */
+    const [recoveryUnavailable, setRecoveryUnavailable] = useState(false);
+    const [recoveryBusy, setRecoveryBusy] = useState(false);
+    const [recoveryError, setRecoveryError] = useState<{ message: string; detail: string } | null>(null);
+    const [recoveryOutcome, setRecoveryOutcome] = useState<DestroyReport | null>(null);
+    /** A recovery delete removed (or is removing) the relay itself: the
+     *  card shows its report and a Done that leaves. */
+    const [recoveryLeaving, setRecoveryLeaving] = useState(false);
+    /** The delete button whose report is on the card: its Try again. */
+    const [recoveryRetryButton, setRecoveryRetryButton] = useState<RecoveryButton | null>(null);
+    /** The server id "Finish setting up on this server" chose: Daal's
+     *  own, rolled back (deleted) on failure. */
+    const adoptedIdRef = useRef<string | null>(null);
+    // Cancel: the sheet for a setup that may have rented something, or
+    // the two-choice teardown for one that already has a server.
+    const [cancelRec, setCancelRec] = useState<SetupRecovery | null>(null);
+    const [cancelBusy, setCancelBusy] = useState(false);
+    const [cancelOutcome, setCancelOutcome] = useState<DestroyReport | null>(null);
+    const [cancelError, setCancelError] = useState<{ message: string; detail: string } | null>(null);
+    const [cancelDestroyOpen, setCancelDestroyOpen] = useState(false);
+
     // ---- Streaming logs ----
 
     // Provision and sign both stream into ONE combined log. The old
@@ -534,15 +575,200 @@ export default function PublisherWizard({
         try {
             return await fn();
         } catch (e) {
+            const code = classifyPublisherError(e);
+            // D1: provision found a server for this relay already there,
+            // or another setup still holds the journal. Neither is a
+            // failure to retry — ask what exists and show the card that
+            // says so, which never rents a second server.
+            if (
+                s === 'provision' &&
+                (code === 'E_SERVER_EXISTS' || code === 'E_SETUP_RUNNING') &&
+                operatorId
+            ) {
+                setStage('idle');
+                setFailedAt(null);
+                setError(null);
+                // The effect below asks setupRecovery when this flips.
+                setAwaitingBuildConsent(true);
+                return STAGE_FAILED;
+            }
             setError(String(e));
             setFailedAt(s);
             setStage('failed');
-            const code = classifyPublisherError(e);
             if (code === 'E_HELPER_IP_MISSING' || code === 'E_HELPER_IP_STALE') {
                 const guess = await detectPublicIp();
                 setHelperIpRepair(guess?.ip ?? '');
             }
             return STAGE_FAILED;
+        }
+    };
+
+    // ---- D1: interrupted setup ----
+
+    /** Ask the shell what an interrupted setup left behind. */
+    async function queryRecovery(opId: number): Promise<SetupRecovery | null> {
+        setRecovery(null);
+        setRecoveryError(null);
+        if (!live) {
+            const r = recoveryFixture(harnessRecoverState() ?? 'none');
+            setRecovery(r);
+            return r;
+        }
+        try {
+            const r = await Wizard.setupRecovery(opId);
+            setRecovery(r);
+            setRecoveryUnavailable(false);
+            return r;
+        } catch (e) {
+            if (isMissingCommand(e)) {
+                // An app whose shell predates the command: keep the old
+                // consent card, which at least never rents by itself.
+                setRecoveryUnavailable(true);
+                setRecoveryError(explainFailure(t, e));
+                return null;
+            }
+            // Any other failure is "we couldn't check", never the old
+            // card that says the next step rents a server: a server may
+            // already be billing.
+            const r = recoveryCheckFailed(e);
+            setRecovery(r);
+            setRecoveryUnavailable(false);
+            return r;
+        }
+    }
+
+    const onRecoveryButton = async (b: RecoveryButton) => {
+        if (!operatorId || !recovery) return;
+        const opId = operatorId;
+        setRecoveryBusy(true);
+        setRecoveryError(null);
+        setRecoveryOutcome(null);
+        try {
+            const res = await performRecovery(b, opId, recovery, {
+                // The auto-start effect runs the chain once consent is
+                // given; setting the id first makes that run adopt the
+                // server that exists instead of renting another.
+                setExisting: (id) => {
+                    setUseExisting(id);
+                    adoptedIdRef.current = b === 'finish_here' ? id : null;
+                },
+                runBuild: () => {
+                    setAwaitingBuildConsent(false);
+                },
+                setupRemoveServer: (op) =>
+                    live ? Wizard.setupRemoveServer(op) : Promise.resolve(mockDestroyReport()),
+                relayDestroy: (op, del, own) =>
+                    live ? Wizard.relayDestroy(op, del, own) : Promise.resolve(mockDestroyReport()),
+            });
+            const next = afterRecovery(b, res);
+            if (res.kind === 'deleted') {
+                // The report stays on the card until the person has read
+                // it; a relay that is gone leaves only through Done.
+                setRecoveryOutcome(res.report);
+                setRecoveryRetryButton(b);
+            }
+            if (next.leave) setRecoveryLeaving(true);
+            if (next.requery) await queryRecovery(opId);
+        } catch (e) {
+            setRecoveryError(explainFailure(t, e));
+        } finally {
+            setRecoveryBusy(false);
+        }
+    };
+
+    /** Forget everything about the relay that was being built. */
+    function resetAfterCancel() {
+        setOperatorId(null);
+        setStepIdx(0);
+        setCompleted(NO_MARKS);
+        setStage('idle');
+        setFailedAt(null);
+        setFp(null);
+        setAlreadyProvisioned(false);
+        setAlreadySigned(false);
+        setHasStoredToken(false);
+        setCancelRec(null);
+        setCancelDestroyOpen(false);
+        setRecoveryLeaving(false);
+        setRecoveryOutcome(null);
+        onCancel();
+    }
+
+    /** Cancel. Deleting what a setup rented is offered whenever there is
+     *  a token to do it with; forgetting the relay alone is left for the
+     *  case where nothing was rented or nothing can be looked at. */
+    const onCancelPress = async () => {
+        if (operatorId == null) return;
+        const opId = operatorId;
+        if (live && alreadyProvisioned) {
+            // A server exists and is recorded: the same two-choice
+            // teardown the relay list uses.
+            setCancelDestroyOpen(true);
+            return;
+        }
+        let rec: SetupRecovery | null = null;
+        if (live) {
+            try {
+                rec = await Wizard.setupRecovery(opId);
+            } catch (e) {
+                // With a token stored, "could not look" must not turn
+                // into a local-only cancel that strands a paid server:
+                // offer the delete, which refuses safely if it cannot
+                // look either.
+                rec = hasStoredToken
+                    ? recoveryFixture('unknown', {
+                          provider: '',
+                          check_error: 'failed',
+                          started_at_unix: 0,
+                          details: [String(e)],
+                      })
+                    : null;
+            }
+        } else if (harnessRecoverState()) {
+            rec = recoveryFixture(harnessRecoverState()!);
+        }
+        if (rec && cancelPlan(rec) !== 'local') {
+            setCancelOutcome(null);
+            setCancelError(null);
+            setCancelRec(rec);
+            return;
+        }
+        if (!window.confirm(t('wiz.cancel.confirm'))) return;
+        if (live) {
+            const ok = await run(() => Wizard.cancelAndCleanup(opId));
+            if (ok === null) return;
+        }
+        resetAfterCancel();
+    };
+
+    const onCancelDelete = async () => {
+        if (operatorId == null) return;
+        setCancelBusy(true);
+        setCancelError(null);
+        try {
+            // The report is shown in the sheet; the wizard leaves only
+            // when the person presses Done (CancelSetupSheet.onDone).
+            const { report } = await cancelDelete(operatorId, cancelPlan(cancelRec), (op, del, own) =>
+                live ? Wizard.relayDestroy(op, del, own) : Promise.resolve(mockDestroyReport()),
+            );
+            setCancelOutcome(report);
+        } catch (e) {
+            setCancelError(explainFailure(t, e));
+        } finally {
+            setCancelBusy(false);
+        }
+    };
+
+    const onCancelKeep = async () => {
+        if (operatorId == null) return;
+        setCancelBusy(true);
+        try {
+            if (live) await Wizard.cancelAndCleanup(operatorId);
+            resetAfterCancel();
+        } catch (e) {
+            setCancelError(explainFailure(t, e));
+        } finally {
+            setCancelBusy(false);
         }
     };
 
@@ -628,8 +854,9 @@ export default function PublisherWizard({
     // Ordering is a hard constraint: selectProfile writes region +
     // server_type into the pre-provision record and publisherKeygen
     // writes the pubkey into it; provisionRun reads all three back out.
-    const runBuild = async () => {
+    const runBuild = async (existingOverride?: string) => {
         if (!operatorId) return;
+        const existingId = existingOverride ?? useExisting ?? undefined;
         const opId = operatorId;
         setError(null);
         setFailedAt(null);
@@ -686,7 +913,7 @@ export default function PublisherWizard({
                 const p = await stageRun('provision', () =>
                     live
                         ? withHelperIp(opId, () =>
-                              Wizard.provisionRun(opId, useExisting ?? undefined),
+                              Wizard.provisionRun(opId, existingId),
                           )
                         : fakeProgress('provision', [
                               ['create server', 10],
@@ -695,7 +922,16 @@ export default function PublisherWizard({
                               ['done', 100],
                           ]),
                 );
-                if (p === STAGE_FAILED) return;
+                if (p === STAGE_FAILED) {
+                    // A failed finish-on-this-server was rolled back,
+                    // which deleted that server: its id must not ride
+                    // into the next try. The person's own server is
+                    // never rolled back and stays chosen.
+                    const origin = existingId && existingId === adoptedIdRef.current ? 'created' : 'yours';
+                    setUseExisting((cur) => existingAfterFailure(cur, origin));
+                    adoptedIdRef.current = null;
+                    return;
+                }
                 setAlreadyProvisioned(true);
             } else {
                 setStage('provision');
@@ -772,6 +1008,23 @@ export default function PublisherWizard({
     // plan screen said "no new charges". Hetzner's idempotency is keyed
     // on the derived name, which an existing server does not have, so
     // nothing catches it. Ask before spending money.
+    // A resume that would rent a server first asks what is already
+    // there (D1). Re-asked whenever the card comes back.
+    useEffect(() => {
+        if (!awaitingBuildConsent || !operatorId) return;
+        if (STEPS[stepIdx]?.id !== 'build') return;
+        void queryRecovery(operatorId);
+    }, [awaitingBuildConsent, operatorId, stepIdx]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Harness preview: `?recover=<state>` lands on the recovery card.
+    useEffect(() => {
+        if (live) return;
+        if (!harnessRecoverState()) return;
+        setOperatorId((id) => id ?? 1);
+        setStepIdx(2);
+        setAwaitingBuildConsent(true);
+    }, [live]);
+
     const runBuildRef = useRef(runBuild);
     runBuildRef.current = runBuild;
     useEffect(() => {
@@ -1472,7 +1725,27 @@ export default function PublisherWizard({
                                 does the "use a server I already own"
                                 choice — auto-starting here would silently
                                 create a SECOND billable box. */}
-                            {awaitingBuildConsent && stage === 'idle' && (
+                            {awaitingBuildConsent && stage === 'idle' && !recoveryUnavailable && (
+                                <SetupRecoveryCard
+                                    t={t}
+                                    rec={recovery}
+                                    busy={recoveryBusy}
+                                    error={recoveryError}
+                                    outcome={recoveryOutcome}
+                                    onButton={(b) => void onRecoveryButton(b)}
+                                    onRetry={
+                                        recoveryRetryButton
+                                            ? () => void onRecoveryButton(recoveryRetryButton)
+                                            : undefined
+                                    }
+                                    onDone={recoveryLeaving ? () => resetAfterCancel() : undefined}
+                                    onReview={() => {
+                                        setAwaitingBuildConsent(false);
+                                        setStepIdx(1);
+                                    }}
+                                />
+                            )}
+                            {awaitingBuildConsent && stage === 'idle' && recoveryUnavailable && (
                                 <Card
                                     style={{
                                         marginBottom: 14,
@@ -1841,30 +2114,40 @@ export default function PublisherWizard({
                     the only way to abandon a half-built relay and stop it
                     being resumed forever. */}
                 {operatorId != null && !building && (
-                    <Button
-                        variant="ghost"
-                        onClick={async () => {
-                            if (!window.confirm(t('wiz.cancel.confirm'))) return;
-                            if (live) {
-                                const ok = await run(() =>
-                                    Wizard.cancelAndCleanup(operatorId),
-                                );
-                                if (ok === null) return;
-                            }
-                            setOperatorId(null);
-                            setStepIdx(0);
-                            setCompleted(NO_MARKS);
-                            setStage('idle');
-                            setFailedAt(null);
-                            setFp(null);
-                            setAlreadyProvisioned(false);
-                            setAlreadySigned(false);
-                            setHasStoredToken(false);
-                            onCancel();
-                        }}
-                    >
+                    <Button variant="ghost" onClick={() => void onCancelPress()}>
                         {t('wiz.cancel')}
                     </Button>
+                )}
+                {cancelRec && (
+                    <CancelSetupSheet
+                        t={t}
+                        rec={cancelRec}
+                        busy={cancelBusy}
+                        outcome={cancelOutcome}
+                        error={cancelError}
+                        onDelete={() => void onCancelDelete()}
+                        onKeep={() => void onCancelKeep()}
+                        onCheckAgain={async () => {
+                            if (operatorId == null || !live) return;
+                            try {
+                                setCancelRec(await Wizard.setupRecovery(operatorId));
+                            } catch (e) {
+                                setCancelError(explainFailure(t, e));
+                            }
+                        }}
+                        onClose={() => setCancelRec(null)}
+                        onDone={() => resetAfterCancel()}
+                    />
+                )}
+                {cancelDestroyOpen && operatorId != null && (
+                    <RelayDestroySheet
+                        t={t}
+                        target={{ operatorId, name: nickname.trim() || `#${operatorId}`, where: '' }}
+                        onClose={(removed) => {
+                            setCancelDestroyOpen(false);
+                            if (removed) resetAfterCancel();
+                        }}
+                    />
                 )}
             </div>
         </div>
@@ -2113,4 +2396,32 @@ function EventList({ events }: { events: ProgressEvent[] }) {
             ))}
         </ul>
     );
+}
+
+/** Harness only: `?recover=<state>` previews the recovery card. */
+function harnessRecoverState(): SetupRecovery['state'] | null {
+    if (typeof window === 'undefined') return null;
+    const q = new URLSearchParams(window.location.search || window.location.hash.split('?')[1] || '');
+    const v = q.get('recover');
+    const states: SetupRecovery['state'][] = [
+        'none',
+        'running',
+        'finished_unsaved',
+        'server_running',
+        'nothing_billing',
+        'unknown',
+    ];
+    return v && (states as string[]).includes(v) ? (v as SetupRecovery['state']) : null;
+}
+
+function mockDestroyReport(): DestroyReport {
+    return {
+        server_deleted: true,
+        ssh_key_deleted: true,
+        firewall_deleted: true,
+        local_removed: false,
+        warnings: [],
+        addresses: [],
+        retry_needed: false,
+    };
 }

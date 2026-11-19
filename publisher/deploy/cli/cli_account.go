@@ -243,6 +243,7 @@ func runAccountReclaim(ctx context.Context, args []string, stdout, stderr io.Wri
 	// that deletes must not be reachable by a bare invocation that
 	// looks like the read-only one with a typo in it.
 	yes := fs.Bool("yes", false, "actually delete; without it this prints what WOULD be reclaimed and stops")
+	includeServers := fs.Bool("include-unclaimed-servers", false, "also delete a SERVER, but only one named with --only server:<id> that carries both of Daal's ownership labels, has the derived name, and that no --record-file claims; its firewall, one-shot keys and unrecorded reserved addresses go with it")
 	var records stringList
 	var only stringList
 	fs.Var(&records, "record-file", "OperatorRecord JSON path (REPEATABLE; a record protects everything it names)")
@@ -286,8 +287,28 @@ func runAccountReclaim(ctx context.Context, args []string, stdout, stderr io.Wri
 		return 0
 	}
 
-	rep, err := aud.ReclaimOrphans(ctx, recs, refs)
+	var rep *provider.ReclaimReport
+	if sr, ok := aud.(provider.ServerReclaimer); ok {
+		rep, err = sr.ReclaimOrphansWithOpts(ctx, recs, refs, provider.ReclaimOpts{IncludeUnclaimedServers: *includeServers})
+	} else {
+		rep, err = aud.ReclaimOrphans(ctx, recs, refs)
+		if *includeServers && rep != nil {
+			// An adapter that cannot reclaim servers says so per server.
+			for i, o := range rep.Outcomes {
+				if o.Kind == provider.KindServer && !o.Deleted {
+					rep.Outcomes[i].Code = provider.ReclaimKeptUnsupported
+				}
+			}
+		}
+	}
 	if err != nil {
+		if *asJSON && rep != nil {
+			// The app still gets one outcome per item it asked about
+			// (kept_list_unreadable when the server list was unreadable).
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rep)
+		}
 		// The report still prints: a refusal that names what it
 		// refused is more useful than an error alone.
 		printReclaim(stderr, rep)
@@ -339,7 +360,7 @@ func printReclaimPlan(w io.Writer, a *provider.AccountAudit, only []provider.Res
 	for _, r := range plan {
 		fmt.Fprintf(w, "  %-12s %s %s\n      %s\n", r.Kind, r.ID, r.Name, r.Reason)
 	}
-	fmt.Fprintln(w, "\nnothing else is touched. Servers are never deleted by this verb.")
+	fmt.Fprintln(w, "\nnothing else is touched. Servers are never deleted by this verb unless --include-unclaimed-servers is given and --only server:<id> names one.")
 }
 
 func printReclaim(w io.Writer, rep *provider.ReclaimReport) {

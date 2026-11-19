@@ -172,6 +172,7 @@ fn make_ctx() -> WizardCtx {
     WizardCtx {
         db: Arc::new(db),
         keystore: Arc::new(ks),
+        journal_dir: staging_dir.join("provision-journal"),
         staging_dir,
         cli: Arc::new(MockRunner::new(Pricing {
             provider: "hetzner".into(),
@@ -426,4 +427,106 @@ fn copy_pasteable_refuses_an_unknown_artifact() {
         copy_pasteable(&ctx, operator_id, "raw").is_err(),
         "raw must resolve to <id>.sbp, which was never staged here"
     );
+}
+
+// ---- one person's own file, as text and as a QR code (D5) -----------
+
+/// What `users-pack-sbpx` writes for one person, as far as this test
+/// rig can produce it: the sealed-file magic in front of the signed
+/// bundle (the mock seals by prefixing; the Go lane's round-trip test
+/// covers the real age envelope). The signature inside is real.
+fn seed_person_with_file(ctx: &WizardCtx, inner: &[u8]) -> (i64, i64) {
+    use daal_wizard::operator_db::NewRecipientRow;
+    let op = seed_signed_operator(ctx);
+    let rid = ctx
+        .db
+        .insert_recipient(NewRecipientRow {
+            operator_id: op,
+            name: "r1".into(),
+            display_name: "Bahar".into(),
+            address_str: "daal1test".into(),
+            pubkey_x25519_hex: "11".repeat(32),
+            fingerprint_hex: "22".repeat(32),
+            vless_uuid: "00000000-0000-0000-0000-000000000000".into(),
+            reality_short_id: "deadbeef".into(),
+            hy2_password: "h".into(),
+            naive_password: "n".into(),
+            ws_path: "/w".into(),
+            provisioned_at_unix: 1_700_000_000,
+        })
+        .expect("insert recipient");
+    let mut sealed = SBPX_MAGIC.to_vec();
+    sealed.extend_from_slice(inner);
+    std::fs::write(ctx.staging_dir.join(format!("{op}.r1.sbpx")), sealed).expect("write sbpx");
+    (op, rid)
+}
+
+fn verify_plain(path: &std::path::Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let sbp = bundle_rs::parse_sbp(&bytes).map_err(|e| e.code().to_string())?;
+    bundle_rs::verify_bundle_at(&sbp, fixture_clock()).map_err(|e| e.code().to_string())
+}
+
+#[test]
+fn a_persons_file_copied_as_text_opens_on_their_phone_and_still_verifies() {
+    use daal_wizard::commands::copy_pasteable;
+    let ctx = make_ctx();
+    daal_wizard::recipient_identity::get_or_create(&ctx).expect("identity");
+    let (op, rid) = seed_person_with_file(&ctx, &fixture("valid-v2.sbp"));
+
+    let text = copy_pasteable(&ctx, op, &format!("recipient:{rid}")).expect("copy as text");
+    let staged = stage_pasted_text(&ctx.staging_dir, &mangle_sbpx_text(&text)).expect("stage");
+    assert_eq!(staged.kind, PastedKind::Sbpx, "routed to the identity gate");
+    let plain = import_sbpx(&ctx, &staged.path).expect("unseal");
+    verify_plain(&plain).expect("signature, revocation and expiry still hold");
+}
+
+#[test]
+fn a_persons_file_received_by_qr_opens_on_their_phone_and_still_verifies() {
+    let ctx = make_ctx();
+    daal_wizard::recipient_identity::get_or_create(&ctx).expect("identity");
+    let (op, _rid) = seed_person_with_file(&ctx, &fixture("valid-v2.sbp"));
+    // The engine's fountain decoder hands back exactly these bytes as
+    // `sealed_b64` (core/abi/share_sealed_test.go pins that half).
+    let sealed = std::fs::read(ctx.staging_dir.join(format!("{op}.r1.sbpx"))).unwrap();
+    let staged = daal_wizard::recipient_paste::stage_sealed_b64(&ctx.staging_dir, &STANDARD.encode(&sealed))
+        .expect("stage");
+    assert_eq!(std::fs::read(&staged.path).unwrap(), sealed, "bytes intact");
+    assert!(staged.path.starts_with(ctx.staging_dir.join("paste")), "swept like a paste");
+    let plain = import_sbpx(&ctx, &staged.path).expect("unseal");
+    verify_plain(&plain).expect("verifies");
+}
+
+#[test]
+fn a_tampered_persons_file_received_by_qr_is_still_refused() {
+    use daal_wizard::recipient_paste::stage_sealed_bytes;
+    let ctx = make_ctx();
+    daal_wizard::recipient_identity::get_or_create(&ctx).expect("identity");
+    let mut sealed = SBPX_MAGIC.to_vec();
+    sealed.extend_from_slice(&fixture("invalid-signature.sbp"));
+    let staged = stage_sealed_bytes(&ctx.staging_dir, sealed).expect("stage");
+    let plain = import_sbpx(&ctx, &staged.path).expect("unseal");
+    assert!(verify_plain(&plain).is_err(), "a bad signature must not survive the QR lane");
+}
+
+#[test]
+fn the_qr_sealed_lane_takes_only_sealed_files() {
+    use daal_wizard::recipient_paste::stage_sealed_bytes;
+    let ctx = make_ctx();
+    // A plain bundle must go through the engine's own importer, never
+    // through this side door.
+    let err = stage_sealed_bytes(&ctx.staging_dir, fixture("valid-v2.sbp")).unwrap_err();
+    assert!(matches!(err, PasteError::NotDaalText), "got {err:?}");
+    let mut huge = SBPX_MAGIC.to_vec();
+    huge.extend(std::iter::repeat(0u8).take(2 * 1024 * 1024));
+    assert!(matches!(
+        stage_sealed_bytes(&ctx.staging_dir, huge).unwrap_err(),
+        PasteError::TooLarge
+    ));
+}
+
+/// What a messenger does to the copied text: surrounding prose and
+/// bidi marks.
+fn mangle_sbpx_text(text: &str) -> String {
+    format!("\u{200f}این فایل توست:\u{200e}\n{text}\n")
 }

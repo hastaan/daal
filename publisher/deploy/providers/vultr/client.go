@@ -94,6 +94,7 @@ type InstanceInfo struct {
 	Hostname        string
 	Status          string
 	ServerStatus    string
+	PowerStatus     string // running | stopped
 	Plan            string
 	Region          string
 	MainIP          net.IP

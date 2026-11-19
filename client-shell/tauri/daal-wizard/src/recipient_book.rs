@@ -437,11 +437,34 @@ pub fn produce_shared_sbp(
     // does every time anyway.
     crate::relay_identity::heal_after_reply(ctx, operator_id, &(&creds).into(), &mut |_| {})?;
 
+    let out = rewrite_shared_sbp(ctx, operator_id, &creds, &row.operator_record_json)?;
+    // The everyone file now carries credentials minted on THIS box.
+    ctx.db
+        .stamp_shared_box_fp(operator_id)
+        .map_err(WizardError::Db)?;
+    Ok(out)
+}
+
+/// The rewrite half of [`produce_shared_sbp`]: build `<op>.shared.sbp`
+/// from the signed `.sbp` and the shared user's credentials. Renew calls
+/// it with credentials it minted itself.
+pub(crate) fn rewrite_shared_sbp(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    creds: &crate::cli_bridge::UserCredsResult,
+    record_json: &str,
+) -> Result<SharedSbpSummary, WizardError> {
+    let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
+    if !in_sbp_path.exists() {
+        return Err(WizardError::Pricing(
+            "no signed bundle yet — finish the Sign step first".into(),
+        ));
+    }
     // Build the creds JSON the rewrite reads. Box-wide material
     // (reality pubkey, tls pin) falls back to the OperatorRecord when the
     // mgmt response omits it (pre-Tier-2 box); tls_cert_pem comes straight
     // from the mgmt response (needed for naive).
-    let rec_val = serde_json::from_str::<serde_json::Value>(&row.operator_record_json)
+    let rec_val = serde_json::from_str::<serde_json::Value>(record_json)
         .unwrap_or(serde_json::Value::Null);
     let field = |k: &str| -> String {
         rec_val.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string()
@@ -452,7 +475,7 @@ pub fn produce_shared_sbp(
             "operator record has no public_ip — reprovision the box".into(),
         ));
     }
-    let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
+    let mut creds_val = serde_json::to_value(creds).unwrap_or(serde_json::Value::Null);
     fill_box_material_from_record(&mut creds_val, &rec_val);
     let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
     let record_cover_sni = field("cover_sni");
@@ -873,6 +896,7 @@ mod tests {
         let ctx = WizardCtx {
             db,
             keystore,
+            journal_dir: staging_dir.join("provision-journal"),
             staging_dir,
             cli,
             clock: Arc::new(|| 1_700_000_500),

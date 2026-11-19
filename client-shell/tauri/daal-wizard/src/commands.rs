@@ -161,6 +161,22 @@ pub const E_RELAY_TOO_OLD: &str = "E_RELAY_TOO_OLD";
 /// chooses. Not retryable.
 pub const E_RELAY_KEYS_CHANGED: &str = "E_RELAY_KEYS_CHANGED";
 
+/// A setup is still running for this relay: its journal is locked by a
+/// live `daal-deploy` child.
+pub const E_SETUP_RUNNING: &str = "E_SETUP_RUNNING";
+/// Provision refused because a server for this relay already exists.
+/// The tail after `": "` starts with that server's id.
+pub const E_SERVER_EXISTS: &str = "E_SERVER_EXISTS";
+/// This hosting company cannot do what was asked (e.g. finish a setup
+/// in place on Vultr).
+pub const E_NOT_SUPPORTED: &str = "E_NOT_SUPPORTED";
+/// The relay's management did not answer, so nothing was changed.
+pub const E_RELAY_UNREACHABLE: &str = "E_RELAY_UNREACHABLE";
+/// The requested file does not exist on this phone.
+pub const E_FILE_MISSING: &str = "E_FILE_MISSING";
+/// The setup helper bundled with this app lacks the verb asked for.
+pub const E_DEPLOY_TOO_OLD: &str = "E_DEPLOY_TOO_OLD";
+
 /// Build a [`WizardError::Coded`] from a code constant and a tail.
 pub(crate) fn coded(code: &str, tail: impl std::fmt::Display) -> WizardError {
     WizardError::Coded(format!("{code}: {tail}"))
@@ -280,6 +296,10 @@ pub type Result<T> = std::result::Result<T, WizardError>;
 /// `WizardCtx` carries the dependencies the command surface uses.
 /// The Tauri shell builds one of these on app startup and passes
 /// it into each `#[tauri::command]` shim via Tauri's State<>.
+///
+/// `Clone` is cheap (every field is an `Arc` or a path) and lets an
+/// async command move a context onto the blocking pool.
+#[derive(Clone)]
 pub struct WizardCtx {
     pub db: Arc<OperatorDb>,
     /// **Legacy.** The PIN-sealed store. Read only by the one-time
@@ -288,6 +308,11 @@ pub struct WizardCtx {
     /// `panic_wipe`. No live operation opens a secret from here.
     pub keystore: Arc<Keystore>,
     pub staging_dir: PathBuf,
+    /// Where `daal-deploy provision --journal` writes what it creates,
+    /// one file per relay (`provision_journal`). Durable app-private
+    /// storage next to `wizard.db` — NOT `staging_dir`, which is
+    /// scratch and is swept.
+    pub journal_dir: PathBuf,
     pub cli: Arc<dyn CliRunner>,
     pub clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// Device Custody v1 — the custody surface for **every** secret
@@ -496,6 +521,22 @@ pub struct OperatorSummary {
     /// change. The confirm sheet computes that from this field and
     /// refuses it.
     pub served_families: Vec<String>,
+    /// A cloud token is stored for this relay (the alias is set; custody
+    /// is not read).
+    #[serde(default)]
+    pub has_cloud_token: bool,
+    /// Pre-provision, and a setup journal exists: a setup was started
+    /// and did not finish.
+    #[serde(default)]
+    pub setup_interrupted: bool,
+    /// Live people whose credentials were minted on a box this relay no
+    /// longer runs on (D2).
+    #[serde(default)]
+    pub people_needing_renewal: i64,
+    /// Addresses still reserved (and billing) after the server was
+    /// deleted (D4).
+    #[serde(default)]
+    pub unreleased_addresses: Vec<String>,
 }
 
 /// `OperatorState` is the full resumable state returned by
@@ -807,7 +848,7 @@ pub fn account_audit(
     let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let report = ctx
         .cli
-        .run_account_audit(&row.cloud_provider, token.as_str())
+        .run_account_audit(&row.cloud_provider, token.as_str(), &[])
         .map_err(|e| WizardError::Pricing(e.to_string()))?;
     Ok(report)
 }
@@ -1426,7 +1467,7 @@ pub fn rotate_cdn_origin(ctx: &WizardCtx, input: &RotateCdnOriginInput) -> Resul
 /// Minimal RFC3339 → unix seconds helper. The wizard already
 /// pulls `chrono` indirectly via tauri but we keep this local to
 /// avoid a runtime dep on chrono just for this one call.
-fn parse_rfc3339_unix(s: &str) -> std::result::Result<i64, String> {
+pub(crate) fn parse_rfc3339_unix(s: &str) -> std::result::Result<i64, String> {
     // Format expected: YYYY-MM-DDThh:mm:ssZ (UTC, no fractional).
     // We split into year-month-day and hour-min-sec.
     let s = s.trim_end_matches('Z');
@@ -1529,7 +1570,7 @@ fn provider_can_reserve_address(provider: &str) -> bool {
 /// has no reason to model the whole CandidateMeta; only the family
 /// name is read, and a row without one is skipped rather than
 /// producing an empty-string family that no profile can match.
-fn record_served_families(rec: &PreProvisionRecord) -> Vec<String> {
+pub(crate) fn record_served_families(rec: &PreProvisionRecord) -> Vec<String> {
     if !rec.enabled_families.is_empty() {
         return rec.enabled_families.clone();
     }
@@ -1559,7 +1600,13 @@ pub fn list_operators(ctx: &WizardCtx) -> Result<Vec<OperatorSummary>> {
             serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
         let can_reserve_address = provider_can_reserve_address(&rec.provider);
         let served_families = record_served_families(&rec);
+        let setup_interrupted = row.status == "pre-provision"
+            && crate::provision_journal::journal_path(&ctx.journal_dir, row.id).exists();
         out.push(OperatorSummary {
+            has_cloud_token: !row.cloud_token_keystore_alias.is_empty(),
+            setup_interrupted,
+            people_needing_renewal: ctx.db.count_people_needing_renewal(row.id)?,
+            unreleased_addresses: ctx.db.unreleased_addresses(row.id)?,
             id: row.id,
             status: row.status,
             provider: rec.provider,
@@ -1662,6 +1709,10 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     // dir), so without this a "removed" relay left its signing key in
     // the clear on disk forever.
     let _ = std::fs::remove_dir_all(ctx.staging_dir.join("subkeys").join(operator_id.to_string()));
+    // The setup journal names cloud objects of a relay the person just
+    // removed; keeping it would resurrect a "setup stopped" card for an
+    // id that may be reused.
+    crate::provision_journal::remove(&ctx.journal_dir, operator_id);
     Ok(())
 }
 
@@ -1685,6 +1736,23 @@ pub struct DestroyReport {
     pub local_removed: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// One entry per reserved address the teardown looked at (D4).
+    #[serde(default)]
+    pub addresses: Vec<crate::cli_bridge::AddressOutcome>,
+    /// The server is gone but an address Daal reserved is still
+    /// reserved and billing; the same call again retries.
+    #[serde(default)]
+    pub retry_needed: bool,
+}
+
+/// Addresses a teardown could not give back: the IP when known, else
+/// the provider id.
+pub(crate) fn failed_addresses(res: &DecommissionResult) -> Vec<String> {
+    res.addresses
+        .iter()
+        .filter(|a| a.code == "release_failed")
+        .map(|a| if a.ip.is_empty() { a.id.clone() } else { a.ip.clone() })
+        .collect()
 }
 
 /// `relay_destroy`: remove a relay, optionally destroying the cloud
@@ -1710,6 +1778,20 @@ pub fn relay_destroy(
     operator_id: i64,
     delete_server: bool,
 ) -> Result<DestroyReport> {
+    relay_destroy_with(ctx, operator_id, delete_server, false)
+}
+
+/// [`relay_destroy`], and `delete_own_server`: the person said "Delete my
+/// server" about a server they brought themselves ("use a server I
+/// already own"). Only then may a teardown take that server's id from
+/// the setup journal — it carries no Daal label, so nothing else would
+/// ever prove it is meant to go.
+pub fn relay_destroy_with(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    delete_server: bool,
+    delete_own_server: bool,
+) -> Result<DestroyReport> {
     if !delete_server {
         cancel_and_cleanup(ctx, operator_id)?;
         return Ok(DestroyReport {
@@ -1732,9 +1814,43 @@ pub fn relay_destroy(
         Err(e) => return Err(WizardError::Db(e)),
     };
 
+    // A setup still running would keep creating things behind our back.
+    let jpath = crate::provision_journal::journal_path(&ctx.journal_dir, operator_id);
+    if crate::provision_journal::is_locked(&jpath) {
+        return Err(coded(
+            E_SETUP_RUNNING,
+            "a setup is still running for this relay; wait for it to stop, then try again",
+        ));
+    }
+
     // Cloud first. A failure here propagates and the local state — row,
     // token, staged record — survives untouched for the retry.
-    let cloud = destroy_cloud_resources(ctx, operator_id, &row)?;
+    let cloud = destroy_cloud_resources(ctx, operator_id, &row, true, delete_own_server)?;
+
+    // The server is gone but an address Daal reserved is still reserved
+    // and billing. Forgetting the relay now would forget the only
+    // credential that can give it back, so the row stays — marked
+    // decommissioned, naming what still bills — and the same call is the
+    // retry (a server that no longer exists counts as deleted).
+    let still_billing = failed_addresses(&cloud);
+    if cloud.retry_needed || !still_billing.is_empty() {
+        ctx.db.mark_decommissioned_with_unreleased(
+            operator_id,
+            (ctx.clock)(),
+            &still_billing,
+        )?;
+        let mut warnings = cloud.warnings;
+        warnings.extend(cloud.bridge_notes);
+        return Ok(DestroyReport {
+            server_deleted: cloud.server_deleted,
+            ssh_key_deleted: cloud.ssh_key_deleted,
+            firewall_deleted: cloud.firewall_deleted,
+            local_removed: false,
+            warnings,
+            addresses: cloud.addresses,
+            retry_needed: true,
+        });
+    }
 
     // The local sweep is reported, never propagated. Past this point the
     // VPS is already gone, and `?` here would throw that fact away: the
@@ -1744,6 +1860,7 @@ pub fn relay_destroy(
     // in `warnings` is what the report shape (and
     // `pub.relays.destroy.report.local_kept`) exists for.
     let mut warnings = cloud.warnings;
+    warnings.extend(cloud.bridge_notes);
     let local_removed = match cancel_and_cleanup(ctx, operator_id) {
         Ok(()) => true,
         Err(e) => {
@@ -1761,6 +1878,8 @@ pub fn relay_destroy(
         firewall_deleted: cloud.firewall_deleted,
         local_removed,
         warnings,
+        addresses: cloud.addresses,
+        retry_needed: false,
     })
 }
 
@@ -1771,17 +1890,42 @@ pub fn relay_destroy(
 /// has no server id, no region and no publisher key, so there is no
 /// name to derive and nothing to sweep. Failing that case would block
 /// the user from deleting a row that costs nothing.
-fn destroy_cloud_resources(
+pub(crate) fn destroy_cloud_resources(
     ctx: &WizardCtx,
     operator_id: i64,
     row: &OperatorRow,
+    release_addresses: bool,
+    include_own_server: bool,
 ) -> Result<DecommissionResult> {
-    let record_json = row.operator_record_json.trim();
-    let rec: Option<PreProvisionRecord> = if record_json.is_empty() {
+    let mut record_json = row.operator_record_json.trim().to_string();
+    let mut rec: Option<PreProvisionRecord> = if record_json.is_empty() {
         None
     } else {
-        serde_json::from_str(record_json).ok()
+        serde_json::from_str(&record_json).ok()
     };
+    // A setup killed after the server was rented never wrote the server
+    // id into the record: the journal is where it is. Without it the
+    // teardown could only find the server by its derived name.
+    //
+    // Not every journal id is safe to hand to a delete that does no
+    // label check (`decommission` with a server id deletes that id):
+    // the person's own server is taken only when they asked for it, and
+    // an id is not taken at all when the last run's server create was
+    // never answered (the empty id makes decommission find the new
+    // server by its name). See `JournalSummary::teardown_server_id`.
+    if let Some(r) = rec.as_mut() {
+        if r.server_id.trim().is_empty() {
+            if let Some(sid) = crate::provision_journal::read(&ctx.journal_dir, operator_id)
+                .and_then(|j| j.teardown_server_id(include_own_server).map(str::to_string))
+            {
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&record_json) {
+                    v["server_id"] = serde_json::Value::String(sid.clone());
+                    record_json = v.to_string();
+                }
+                r.server_id = sid;
+            }
+        }
+    }
     // `server_id` alone is not the test. A provision that failed
     // partway leaves `server_id` empty while an ephemeral SSH key
     // named from (publisher pubkey, region) is already orphaned in the
@@ -1809,6 +1953,7 @@ fn destroy_cloud_resources(
                  delete"
                     .to_string(),
             ],
+            ..Default::default()
         });
     }
 
@@ -1829,6 +1974,7 @@ fn destroy_cloud_resources(
     let res = ctx.cli.run_decommission(DecommissionArgs {
         record_path: &record_path,
         token: token.as_str(),
+        release_addresses,
     });
     // Erase the staged record on both paths; it carries no secret but
     // leaving it behind after a failure would desync the next retry.
@@ -1856,8 +2002,33 @@ pub fn provision_run(
     existing_server_id: &str,
     on_progress: &mut dyn FnMut(ProgressEvent),
 ) -> Result<()> {
-    let helper_ip = require_helper_ip(ctx, operator_id)?;
+    // The journal first: it decides whether there is anything to run.
+    let journal = crate::provision_journal::prepare(&ctx.journal_dir, operator_id)
+        .map_err(|e| WizardError::Pricing(format!("prepare setup journal: {e}")))?;
+    if crate::provision_journal::is_locked(&journal) {
+        return Err(coded(
+            E_SETUP_RUNNING,
+            "a setup is still running for this relay; wait a minute, then check again",
+        ));
+    }
     let row = ctx.db.get(operator_id)?;
+    // The setup finished on the server while the app was gone (killed
+    // after the child wrote `done`, before the app saved it). The record
+    // is in the journal: save it exactly as the success path below does.
+    // No child, no second server.
+    if row.status == "pre-provision" {
+        if let Some(record) = crate::provision_journal::read(&ctx.journal_dir, operator_id)
+            .and_then(|j| j.done_record)
+        {
+            let json = record.to_string();
+            ctx.db.update_record_json(operator_id, &json)?;
+            persist_mgmt_plane_if_present(ctx, operator_id, &json)?;
+            ctx.db.mark_provisioned(operator_id, (ctx.clock)())?;
+            crate::provision_journal::remove(&ctx.journal_dir, operator_id);
+            return Ok(());
+        }
+    }
+    let helper_ip = require_helper_ip(ctx, operator_id)?;
     let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
     let rec: PreProvisionRecord =
         serde_json::from_str(&row.operator_record_json).map_err(StagingError::from)?;
@@ -1873,6 +2044,15 @@ pub fn provision_run(
         .map_err(|e| WizardError::Pricing(format!("write pubkey: {e}")))?;
 
     let families: Vec<&str> = rec.enabled_families.iter().map(|s| s.as_str()).collect();
+    // The last `provision_error` line: on a refusal it carries the code
+    // and, for `server_exists`, the id of the server already there.
+    let mut last_error: Option<ProgressEvent> = None;
+    let mut forward = |ev: ProgressEvent| {
+        if ev.step == "provision_error" {
+            last_error = Some(ev.clone());
+        }
+        on_progress(ev);
+    };
     let stdout_json = ctx
         .cli
         .run_provision(
@@ -1897,20 +2077,63 @@ pub fn provision_run(
                 // id anywhere in the app and no reusable mgmt port. See
                 // ProvisionArgs::rollback_on_failure.
                 rollback_on_failure: true,
+                journal_path: Some(&journal),
             },
-            on_progress,
-        )
-        .map_err(map_deploy_err)?;
-
-    // Wipe pubkey file on disk; the OperatorRecord we get back
-    // already carries the pub bytes inside its JSON.
+            &mut forward,
+        );
     let _ = std::fs::remove_file(&pubkey_path);
+    let stdout_json = stdout_json.map_err(|e| map_provision_err(e, last_error.as_ref()))?;
 
     ctx.db.update_record_json(operator_id, &stdout_json)?;
     persist_mgmt_plane_if_present(ctx, operator_id, &stdout_json)?;
     let now = (ctx.clock)();
     ctx.db.mark_provisioned(operator_id, now)?;
+    // Only now is what the journal recorded safely in the database.
+    crate::provision_journal::remove(&ctx.journal_dir, operator_id);
     Ok(())
+}
+
+/// Map a `provision` failure onto the error contract.
+///
+/// Not `map_rotation_err`: exit 3 means "this hosting company cannot
+/// resume" here, not "the relay is too old".
+pub(crate) fn map_provision_err(
+    e: crate::cli_bridge::BridgeError,
+    last_error: Option<&ProgressEvent>,
+) -> WizardError {
+    let code_of = |ev: &ProgressEvent, k: &str| -> String {
+        match ev.extra.get(k) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    };
+    let ev_code = last_error.map(|ev| code_of(ev, "code")).unwrap_or_default();
+    if let crate::cli_bridge::BridgeError::SubprocessFailed { rc, stderr } = &e {
+        match *rc {
+            4 => {
+                let sid = last_error.map(|ev| code_of(ev, "server_id")).unwrap_or_default();
+                return coded(
+                    E_SERVER_EXISTS,
+                    format!("{sid} a server for this relay already exists; nothing new was rented"),
+                );
+            }
+            3 => {
+                return coded(
+                    E_NOT_SUPPORTED,
+                    format!("this hosting company cannot finish a setup on an existing server: {}", stderr.trim()),
+                )
+            }
+            5 if ev_code == "journal_busy" || stderr.contains("journal_busy") => {
+                return coded(
+                    E_SETUP_RUNNING,
+                    "a setup is still running for this relay; wait a minute, then check again",
+                )
+            }
+            _ => {}
+        }
+    }
+    map_deploy_err(e)
 }
 
 fn persist_mgmt_plane_if_present(
@@ -2122,12 +2345,38 @@ fn artifact_sbp_path(
     artifact: &str,
     caller: &str,
 ) -> Result<std::path::PathBuf> {
+    // `recipient:<id>` is ONE person's sealed file. It only opens on
+    // that person's phone, so showing it as a QR code or copying it as
+    // text hands out nothing anyone else can use — but a revoked person
+    // is never handed a file again.
+    if let Some(id) = artifact.strip_prefix("recipient:") {
+        let rid: i64 = id.trim().parse().map_err(|_| {
+            WizardError::Validation(format!("{caller}: not a person id: {id:?}"))
+        })?;
+        let r = ctx
+            .db
+            .get_recipient(operator_id, rid)?
+            .ok_or_else(|| WizardError::Validation(format!("{caller}: no such person on this relay")))?;
+        if r.revoked_at_unix != 0 {
+            return Err(WizardError::Validation(format!(
+                "{caller}: this person was removed, so no file is handed out for them"
+            )));
+        }
+        let p = ctx.staging_dir.join(format!("{operator_id}.{}.sbpx", r.name));
+        if !p.exists() {
+            return Err(coded(
+                E_FILE_MISSING,
+                "this person's file is not on this phone; make it again first",
+            ));
+        }
+        return Ok(p);
+    }
     let sbp_path = match artifact {
         "shared" => ctx.staging_dir.join(format!("{operator_id}.shared.sbp")),
         "raw" => ctx.staging_dir.join(format!("{operator_id}.sbp")),
         other => {
             return Err(WizardError::Pricing(format!(
-                "{caller}: unknown artifact {other:?} (want \"shared\" or \"raw\")"
+                "{caller}: unknown artifact {other:?} (want \"shared\", \"raw\" or \"recipient:<id>\")"
             )))
         }
     };
@@ -3300,6 +3549,8 @@ fn rotate_execute_inner(
                 .decode(rec.publisher_pub_key.as_bytes())
                 .map_err(|e| WizardError::Pricing(format!("pubkey base64: {e}")))?;
             let pubkey_path = ctx.staging_dir.join(format!("{operator_id}.rotate.pub"));
+            let rotate_journal =
+                crate::provision_journal::prepare(&ctx.journal_dir, operator_id).ok();
             std::fs::write(&pubkey_path, &pub_bytes)
                 .map_err(|e| WizardError::Pricing(format!("write rotation pubkey: {e}")))?;
 
@@ -3405,6 +3656,9 @@ fn rotate_execute_inner(
                         // kept half-built box would be invisible to the
                         // app and still billing.
                         rollback_on_failure: true,
+                        // Journalled like a first setup, so a rebuild
+                        // killed half way is found by the account check.
+                        journal_path: rotate_journal.as_deref(),
                     },
                     on_progress,
                 )
@@ -3462,7 +3716,18 @@ fn rotate_execute_inner(
                 warnings.push(w);
             }
             ctx.db.update_record_json(operator_id, &provisioned)?;
+            // The new box has a new management certificate. Every mgmt
+            // call reads it from the record, but the column is what
+            // says which box each person's credentials were minted on
+            // (V016 `creds_box_fp`): left stale, a rebuild would look
+            // like nothing happened and "Renew everyone's files" would
+            // never be offered. The box is built either way, so a
+            // partial field set is a warning, not a failure.
+            if let Err(e) = persist_mgmt_plane_if_present(ctx, operator_id, &provisioned) {
+                warnings.push(format!("could not record the new server's management key: {e}"));
+            }
             ctx.db.mark_provisioned(operator_id, (ctx.clock)())?;
+            crate::provision_journal::remove(&ctx.journal_dir, operator_id);
             // L5 ONLY: the relay now lives on the new provider, so the
             // credential the app manages it with has to be the new
             // provider's too. Until this runs the operator owns a box
@@ -4631,6 +4896,7 @@ mod tests {
             WizardCtx {
                 db,
                 keystore: ks,
+                journal_dir: staging_dir.join("provision-journal"),
                 staging_dir,
                 cli,
                 clock: clock_arc,
@@ -4656,6 +4922,7 @@ mod tests {
             WizardCtx {
                 db,
                 keystore: ks,
+                journal_dir: staging_dir.join("provision-journal"),
                 staging_dir,
                 cli: cli.clone(),
                 clock: clock_arc,
@@ -4955,6 +5222,7 @@ mod tests {
                 firewall_deleted: true,
                 local_removed: true,
                 warnings: vec![],
+                ..Default::default()
             }
         );
 
@@ -5034,6 +5302,7 @@ mod tests {
                     ssh_key_deleted: false,
                     firewall_deleted: true,
                     warnings: vec!["hetzner: delete ssh key: 409 conflict".into()],
+                    ..Default::default()
                 },
             )),
         );
@@ -5088,6 +5357,7 @@ mod tests {
                     ssh_key_deleted: true,
                     firewall_deleted: false,
                     warnings: vec![],
+                    ..Default::default()
                 },
             )),
         );
@@ -5398,6 +5668,7 @@ mod tests {
             WizardCtx {
                 db: Arc::new(OperatorDb::open_in_memory().unwrap()),
                 keystore: Arc::new(Keystore::new_in_memory(dir.path())),
+                journal_dir: dir.path().join("staging").join("provision-journal"),
                 staging_dir: dir.path().join("staging"),
                 cli: Arc::new(MockRunner::new(Pricing {
                     provider: "hetzner".into(),
@@ -5534,6 +5805,7 @@ mod tests {
             WizardCtx {
                 db: Arc::new(OperatorDb::open_in_memory().unwrap()),
                 keystore: Arc::new(Keystore::new_in_memory(dir.path())),
+                journal_dir: dir.path().join("staging").join("provision-journal"),
                 staging_dir: dir.path().join("staging"),
                 cli: Arc::new(MockRunner::new(Pricing {
                     provider: "hetzner".into(),
@@ -5591,6 +5863,7 @@ mod tests {
         let ctx = WizardCtx {
             db: Arc::new(OperatorDb::open_in_memory().unwrap()),
             keystore: Arc::new(Keystore::new_in_memory(dir.path())),
+            journal_dir: dir.path().join("staging").join("provision-journal"),
             staging_dir: dir.path().join("staging"),
             cli: Arc::new(MockRunner::new(Pricing {
                 provider: "hetzner".into(),
@@ -5826,6 +6099,7 @@ mod tests {
             WizardCtx {
                 db,
                 keystore: ks,
+                journal_dir: staging_dir.join("provision-journal"),
                 staging_dir,
                 cli,
                 clock: clock_arc,
@@ -6030,6 +6304,7 @@ mod tests {
         let ctx_ = WizardCtx {
             db,
             keystore: ks,
+            journal_dir: dir.path().join("staging").join("provision-journal"),
             staging_dir: dir.path().join("staging"),
             cli: mock,
             clock: Arc::new(|| 1_700_000_000),
@@ -6651,6 +6926,7 @@ mod tests {
         let ctx2 = WizardCtx {
             db: ctx.db.clone(),
             keystore: ctx.keystore.clone(),
+            journal_dir: ctx.journal_dir.clone(),
             staging_dir: ctx.staging_dir.clone(),
             cli: mock,
             clock: ctx.clock.clone(),
@@ -7765,6 +8041,10 @@ mod tests {
         );
         let (ctx, _dir, mock) = ctx_with_mock(1_700_000_000, mock);
         let id = make_provisioned_op(&ctx);
+        // The box being replaced has its own management key.
+        ctx.db
+            .record_mgmt_plane(id, 42424, &"a".repeat(64))
+            .unwrap();
         let mut on_prog = |_e: ProgressEvent| {};
 
         rotate_execute(
@@ -7812,6 +8092,19 @@ mod tests {
             "L4 carried the old region's cover host into the new neighbourhood"
         );
         assert_eq!(ctx.db.list_signed_sbps_history(id).unwrap().len(), 1);
+        // The new box's management key is recorded: it is what tells
+        // the people whose credentials were minted on the old box from
+        // the rest (V016), so "Renew everyone's files" is offered.
+        assert_eq!(
+            ctx.db.get(id).unwrap().mgmt_tls_fingerprint,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        // And the rebuild was journalled like a first setup.
+        assert_eq!(
+            mock.provision_journal_paths.lock().unwrap().clone(),
+            vec![Some(crate::provision_journal::journal_path(&ctx.journal_dir, id))]
+        );
+        assert!(!crate::provision_journal::journal_path(&ctx.journal_dir, id).exists());
     }
 
     /// PRESENCE IS NOT VIABILITY — the guard the destroying rungs

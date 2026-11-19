@@ -91,7 +91,7 @@ func (c *Client) Identity(ctx context.Context, rec *provider.OperatorRecord, pri
 		return nil, fmt.Errorf("%w (status %d)", ErrIdentityUnsupported, resp.StatusCode)
 	default:
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("mgmt: identity %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, &StatusError{Op: "identity", Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {

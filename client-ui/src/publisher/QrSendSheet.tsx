@@ -10,8 +10,12 @@
 //
 // WHAT IT SENDS
 //
-// The everyone pack (`<id>.shared.sbp`) — the file that can actually
-// connect somebody. Not the raw signed bundle, which relay detail
+// Whatever `artifact` names: the everyone pack (`<id>.shared.sbp`), or
+// one person's own sealed file (`recipient:<id>`, D5) — only that
+// person's phone can open it, and the receiving app unwraps it the same
+// way it unwraps a pasted one. Never a default: the caller says which.
+//
+// The everyone pack is the file that can actually connect somebody. Not the raw signed bundle, which relay detail
 // itself labels "not connectable"; see `wcmd::qr_render`, which now
 // refuses to guess between the two.
 //
@@ -39,6 +43,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { Wizard, onQrFrame } from './wizardCommands';
+import type { PackArtifact } from './wizardCommands';
+import { failureKey } from './failureText';
 import { Button, Card, Sheet, Segmented } from '../design/primitives';
 import { modulePxFor, paintFrame, paintedModules } from '../qr/paint';
 import {
@@ -56,6 +62,10 @@ interface Props {
     operatorId: number;
     /** What the user calls this relay, for the "what am I sending" line. */
     relayName: string;
+    /** Which file to stream. No default — see qrRender. */
+    artifact: PackArtifact;
+    /** Replaces the "what am I sending" line, e.g. for one person's file. */
+    label?: string;
     onClose: () => void;
 }
 
@@ -65,7 +75,16 @@ const TARGET_CSS_PX = 340;
 
 type Speed = 'steady' | 'slow';
 
-export function QrSendSheet({ t, operatorId, relayName, onClose }: Props) {
+/** The sentence under a failed stream. The everyone-file hint ("press
+ *  Make the file first") is only true for the everyone file; for one
+ *  person's file the plain explanation of the error is (most often
+ *  "that file is not on this phone any more"). */
+export function qrErrorBody(t: (k: string) => string, artifact: PackArtifact, error: unknown): string {
+    if (artifact === 'shared') return t('qr.send.error.body');
+    return t(failureKey(error));
+}
+
+export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose }: Props) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const streamRef = useRef(new FrameStream());
     const inFlightRef = useRef(false);
@@ -96,7 +115,7 @@ export function QrSendSheet({ t, operatorId, relayName, onClose }: Props) {
         try {
             await Wizard.qrRender(
                 operatorId,
-                'shared',
+                artifact,
                 QR_BLOCK_SIZE,
                 BATCH_FRAMES,
                 // A fresh seed per batch: the LT degree/block choice is
@@ -114,7 +133,7 @@ export function QrSendSheet({ t, operatorId, relayName, onClose }: Props) {
         } finally {
             inFlightRef.current = false;
         }
-    }, [operatorId]);
+    }, [operatorId, artifact]);
 
     useEffect(() => {
         let unlisten: UnlistenFn | null = null;
@@ -244,7 +263,7 @@ export function QrSendSheet({ t, operatorId, relayName, onClose }: Props) {
         >
             <div style={{ display: 'grid', gap: 12 }}>
                 <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-                    {t('qr.send.what').replace('{relay}', relayName)}
+                    {label ?? t('qr.send.what').replace('{relay}', relayName)}
                 </div>
 
                 {/* The symbol. White surround always: a QR is not a
@@ -372,7 +391,7 @@ export function QrSendSheet({ t, operatorId, relayName, onClose }: Props) {
                             {error}
                         </div>
                         <div style={{ fontSize: 12, marginTop: 8 }}>
-                            {t('qr.send.error.body')}
+                            {qrErrorBody(t, artifact, error)}
                         </div>
                     </Card>
                 )}

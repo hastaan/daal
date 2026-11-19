@@ -655,6 +655,10 @@ fn panic_wipe(
     if staging.exists() {
         let _ = std::fs::remove_dir_all(&staging);
     }
+    // 6b. Setup journals. They live under state_dir and step 7 removes
+    //     that too, but they name cloud servers and addresses: do not
+    //     let a failed engine nuke leave them behind.
+    let _ = std::fs::remove_dir_all(&wstate.0.journal_dir);
 
     // 7. Engine-owned nuke — last because it removes wizard.db
     //    so step 2's audit event is gone after this.
@@ -1073,10 +1077,141 @@ fn wizard_relay_destroy(
     wstate: State<'_, WizardStateMgr>,
     operator_id: i64,
     delete_server: bool,
+    delete_own_server: Option<bool>,
 ) -> Result<wcmd::DestroyReport, String> {
     cmdlog::logged("wizard_relay_destroy", || {
-    wcmd::relay_destroy(&wstate.0, operator_id, delete_server).map_err(|e| e.to_string())
+    // `delete_own_server`: the person's answer to "Delete my server" for
+    // a server they brought themselves; absent from older callers.
+    wcmd::relay_destroy_with(
+        &wstate.0,
+        operator_id,
+        delete_server,
+        delete_own_server.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
     })
+}
+
+// ---- publisher-alone wave ------------------------------------------
+//
+// Every one of these may reach the hosting company or the relay, so
+// they run on the blocking pool: a plain command runs on the thread
+// that drives the window, and the app would freeze for as long as the
+// provider takes to answer.
+
+/// Run `f` on the blocking pool with a clone of the wizard context.
+async fn on_blocking_pool<T, F>(wstate: &WizardStateMgr, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&wcmd::WizardCtx) -> Result<T, String> + Send + 'static,
+{
+    let ctx = wstate.0.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&ctx))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+/// D1, read-only: what happened to a setup that did not finish.
+#[tauri::command]
+async fn wizard_setup_recovery(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::setup_recovery::SetupRecovery, String> {
+    cmdlog::result(
+        "wizard_setup_recovery",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::setup_recovery::setup_recovery(ctx, operator_id).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// D1: delete the cloud side of an unfinished setup and keep the relay
+/// row (and its token) so the setup can start again.
+#[tauri::command]
+async fn wizard_setup_remove_server(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<wcmd::DestroyReport, String> {
+    cmdlog::result(
+        "wizard_setup_remove_server",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::setup_recovery::setup_remove_server(ctx, operator_id)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// D1, read-only: is anything of Daal's still in the hosting accounts
+/// this phone holds a token for?
+#[tauri::command]
+async fn wizard_account_check(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<daal_wizard::setup_recovery::AccountCheck, String> {
+    cmdlog::result(
+        "wizard_account_check",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::setup_recovery::account_check(ctx).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// D1, DESTRUCTIVE: delete exactly the items the person ticked in the
+/// account-check sheet. `account-reclaim` re-checks every guard.
+#[tauri::command]
+async fn wizard_account_cleanup(
+    wstate: State<'_, WizardStateMgr>,
+    account_key: String,
+    items: Vec<daal_wizard::cli_bridge::ResourceRef>,
+) -> Result<daal_wizard::setup_recovery::AccountCleanupReport, String> {
+    cmdlog::result(
+        "wizard_account_cleanup",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::setup_recovery::account_cleanup(ctx, &account_key, &items)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// D2: re-create every person not removed on the relay's (new) server
+/// and rewrite their files. Progress on `wizard://renew-event`.
+#[tauri::command]
+async fn wizard_renew_everyone(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::renew::RenewReport, String> {
+    cmdlog::result(
+        "wizard_renew_everyone",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            let mut on_event = |ev: daal_wizard::renew::RenewEvent| {
+                let _ = app.emit("wizard://renew-event", ev);
+            };
+            daal_wizard::renew::renew_everyone(ctx, operator_id, &mut on_event)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// D3: is the relay working? Cached for ten minutes unless `force`.
+#[tauri::command]
+async fn wizard_relay_health(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    force: bool,
+) -> Result<daal_wizard::relay_health::RelayHealth, String> {
+    cmdlog::result(
+        "wizard_relay_health",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::relay_health::relay_health(ctx, operator_id, force)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
 }
 
 // ---- FRP-4b live operations ----------------------------------------
@@ -1097,6 +1232,7 @@ async fn wizard_provision_run(
     let db = wstate.0.db.clone();
     let keystore = wstate.0.keystore.clone();
     let staging_dir = wstate.0.staging_dir.clone();
+    let journal_dir = wstate.0.journal_dir.clone();
     let cli = wstate.0.cli.clone();
     let clock = wstate.0.clock.clone();
     let custody = wstate.0.custody.clone();
@@ -1108,7 +1244,7 @@ async fn wizard_provision_run(
     eprintln!("[provision] start op={} esid={:?}", operator_id, esid);
     let result = tauri::async_runtime::spawn_blocking(move || {
         eprintln!("[provision] spawn_blocking entered");
-        let ctx = wcmd::WizardCtx { db, keystore, staging_dir, cli, clock, custody };
+        let ctx = wcmd::WizardCtx { db, keystore, staging_dir, journal_dir, cli, clock, custody };
         let mut event_count = 0u32;
         let mut on_progress = |ev: ProgressEvent| {
             event_count += 1;
@@ -1170,6 +1306,7 @@ async fn wizard_sign_relaypack(
     let db = wstate.0.db.clone();
     let keystore = wstate.0.keystore.clone();
     let staging_dir = wstate.0.staging_dir.clone();
+    let journal_dir = wstate.0.journal_dir.clone();
     let cli = wstate.0.cli.clone();
     let clock = wstate.0.clock.clone();
     let custody = wstate.0.custody.clone();
@@ -1179,6 +1316,7 @@ async fn wizard_sign_relaypack(
             db,
             keystore,
             staging_dir,
+            journal_dir,
             cli,
             clock,
             custody,
@@ -1233,6 +1371,7 @@ async fn wizard_qr_render(
     let db = wstate.0.db.clone();
     let keystore = wstate.0.keystore.clone();
     let staging_dir = wstate.0.staging_dir.clone();
+    let journal_dir = wstate.0.journal_dir.clone();
     let cli = wstate.0.cli.clone();
     let clock = wstate.0.clock.clone();
     let custody = wstate.0.custody.clone();
@@ -1242,6 +1381,7 @@ async fn wizard_qr_render(
             db,
             keystore,
             staging_dir,
+            journal_dir,
             cli,
             clock,
             custody,
@@ -1288,6 +1428,7 @@ fn wizard_copy_pasteable(
         db: wstate.0.db.clone(),
         keystore: wstate.0.keystore.clone(),
         staging_dir: wstate.0.staging_dir.clone(),
+        journal_dir: wstate.0.journal_dir.clone(),
         cli: wstate.0.cli.clone(),
         clock: wstate.0.clock.clone(),
         custody: wstate.0.custody.clone(),
@@ -2241,6 +2382,7 @@ fn recipient_qr_session_new(rstate: State<'_, RecipientStateMgr>) -> String {
 #[tauri::command]
 fn recipient_qr_feed_frame(
     state: State<'_, AppState>,
+    wstate: State<'_, WizardStateMgr>,
     rstate: State<'_, RecipientStateMgr>,
     session_id: String,
     index: u32,
@@ -2252,8 +2394,44 @@ fn recipient_qr_feed_frame(
     rstate.0.ensure(&session_id)?;
     let body =
         cmd::fountain_feed_frame(&state, &session_id, &data_b64).map_err(|e| e.to_string())?;
+    let body = open_sealed_qr_payload(&state, &wstate, &body)?;
     rstate.0.record_engine_response(&session_id, &body)
     })
+}
+
+/// A per-person file (`.sbpx`) that arrived by QR comes back from the
+/// engine's fountain decoder as `sealed_b64` with no verdict: it is
+/// sealed to this phone's recipient key, which only this shell holds.
+/// Open it exactly as a picked or pasted `.sbpx` is opened — identity
+/// gate, unseal, then the engine's normal import, which checks the
+/// signature, revocation and expiry — and put that verdict where the
+/// engine would have, so the QR session contract is unchanged.
+///
+/// Any other response passes through untouched.
+fn open_sealed_qr_payload(
+    state: &State<'_, AppState>,
+    wstate: &State<'_, WizardStateMgr>,
+    body: &str,
+) -> Result<String, String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("core fountain response JSON: {e}"))?;
+    let Some(sealed_b64) = v.get("sealed_b64").and_then(|x| x.as_str()).map(str::to_string) else {
+        return Ok(body.to_string());
+    };
+    let staged = daal_wizard::recipient_paste::stage_sealed_b64(&wstate.0.staging_dir, &sealed_b64)
+        .map_err(|e| render_paste_err(&e))?;
+    let _staged_guard = StagedTemp(staged.path.clone());
+    let plain = daal_wizard::recipient_sbpx::import_sbpx(&wstate.0, &staged.path)
+        .map_err(|e| render_sbpx_err(&e))?;
+    let _plain_guard = StagedTemp(plain.clone());
+    let verdict = cmd::import_sbp(state, plain).map_err(|e| render_bundle_err(&e))?;
+    let verdict: serde_json::Value =
+        serde_json::from_str(&verdict).map_err(|e| format!("import verdict JSON: {e}"))?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("sealed_b64");
+        obj.insert("verdict".into(), verdict);
+    }
+    Ok(v.to_string())
 }
 
 #[tauri::command]
@@ -2368,6 +2546,10 @@ fn build_wizard_ctx(state_dir: &PathBuf) -> Result<wcmd::WizardCtx, String> {
         db,
         keystore,
         staging_dir,
+        // Durable app-private storage next to wizard.db, NOT the swept
+        // staging dir: a setup's journal has to survive the app being
+        // killed and the phone rebooting (provision_journal).
+        journal_dir: state_dir.join("provision-journal"),
         cli,
         clock,
         custody,
@@ -2898,6 +3080,12 @@ pub fn run() {
             wizard_get_operator_state,
             wizard_cancel_and_cleanup,
             wizard_relay_destroy,
+            wizard_setup_recovery,
+            wizard_setup_remove_server,
+            wizard_account_check,
+            wizard_account_cleanup,
+            wizard_renew_everyone,
+            wizard_relay_health,
             wizard_provision_run,
             wizard_sign_relaypack,
             wizard_qr_render,
@@ -3022,6 +3210,15 @@ pub fn run() {
                 if let Some(wstate) = app.try_state::<WizardStateMgr>() {
                     let now = (wstate.0.clock)();
                     let _ = daal_wizard::recipient_sbpx::sweep_stale(&wstate.0, 600);
+                    // A setup killed mid-run never gets to delete the
+                    // 0600 file its cloud token was handed in. The
+                    // child reads it once, at start, so 15 minutes is
+                    // far past any live child's need for it.
+                    let _ = daal_wizard::cli_bridge::sweep_stale_token_files(
+                        &std::env::temp_dir(),
+                        now,
+                        15 * 60,
+                    );
                     let _ = daal_wizard::recipient_paste::sweep_stale_pastes(
                         &wstate.0.staging_dir,
                         now,

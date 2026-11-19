@@ -646,6 +646,7 @@ mod tests {
         let ctx = WizardCtx {
             db,
             keystore,
+            journal_dir: staging_dir.join("provision-journal"),
             staging_dir,
             cli,
             clock: Arc::new(|| 1_700_000_500),

@@ -395,6 +395,35 @@ pub struct AuditedResourceRow {
     /// 0.00 and lost the one fact the panel exists to report.
     #[serde(default)]
     pub billing: bool,
+    /// The derived relay name this resource is stamped for, from
+    /// Daal's own label or name. "" when it could not be told.
+    #[serde(default)]
+    pub relay: String,
+    /// The IPv4 address of a server or a reserved address; "" for
+    /// everything else (and from a `daal-deploy` older than the field).
+    #[serde(default)]
+    pub address: String,
+}
+
+/// One record handed to the audit, joined to what the provider has
+/// (provider.KnownRelay). `record_index` is the 0-based position of the
+/// `--record-file` that produced it — the only way back to the row,
+/// because the Go side sorts this list by relay name.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct KnownRelayRow {
+    #[serde(default)]
+    pub relay: String,
+    #[serde(default)]
+    pub record_server_id: String,
+    #[serde(default)]
+    pub live_server_id: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub note: String,
+    /// `None` from a `daal-deploy` that predates the field.
+    #[serde(default)]
+    pub record_index: Option<usize>,
 }
 
 /// The account audit, mirroring provider.AccountAudit.
@@ -409,12 +438,15 @@ pub struct AuditedResourceRow {
 pub struct AccountAuditReport {
     #[serde(default)]
     pub provider: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub resources: Vec<AuditedResourceRow>,
     #[serde(default)]
     pub server_list_complete: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub warnings: Vec<String>,
+    /// The record side of the join, one per `--record-file`.
+    #[serde(default, deserialize_with = "null_default")]
+    pub known: Vec<KnownRelayRow>,
 }
 
 /// An existing server on the user's cloud account.
@@ -428,6 +460,202 @@ pub struct ExistingServer {
     pub public_ip: String,
     #[serde(default)]
     pub public_ipv6: String,
+}
+
+/// One cloud object, named the way `account-reclaim --only` takes it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceRef {
+    pub kind: String,
+    pub id: String,
+}
+
+/// Args for `daal-deploy account-reclaim --yes --json`.
+pub struct AccountReclaimArgs<'a> {
+    pub provider: &'a str,
+    pub token: &'a str,
+    /// Every record this phone holds on that provider: a record protects
+    /// everything it names.
+    pub record_files: &'a [PathBuf],
+    /// What the person ticked. Never empty from the app: an empty list
+    /// means "every proven orphan" to the CLI, which is not a choice the
+    /// person made.
+    pub only: &'a [ResourceRef],
+    /// Allow deleting a labelled server no record claims. Only ever set
+    /// together with an explicit `--only server:<id>`.
+    pub include_unclaimed_servers: bool,
+}
+
+/// One line of `account-reclaim --json` (provider.ReclaimOutcome).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ReclaimOutcomeRow {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub reason: String,
+    /// Closed set (contract D1-GO); "" from an older binary.
+    #[serde(default)]
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct AccountReclaimReport {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub outcomes: Vec<ReclaimOutcomeRow>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub warnings: Vec<String>,
+}
+
+/// Args for `daal-deploy users-renew`.
+pub struct UsersRenewArgs<'a> {
+    pub record_path: &'a Path,
+    pub helper_ip: &'a str,
+    pub token: &'a str,
+    pub ensure: &'a [String],
+    pub replace: &'a [String],
+    pub revoke: &'a [String],
+}
+
+/// One name's outcome in `users-renew`. `creds` is present only for
+/// `provisioned`, and carries secrets: it is never logged.
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct RenewResultRow {
+    pub name: String,
+    /// `kept` | `provisioned` | `revoked` | `absent`.
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub ok: bool,
+    /// `""` | `unreachable` | `relay_full` | `too_old` | `refused` | `other`.
+    #[serde(default)]
+    pub error_code: String,
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub creds: Option<UserCredsResult>,
+}
+
+impl std::fmt::Debug for RenewResultRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenewResultRow")
+            .field("name", &self.name)
+            .field("action", &self.action)
+            .field("ok", &self.ok)
+            .field("error_code", &self.error_code)
+            .field("creds", &self.creds.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct UsersRenewResult {
+    #[serde(default, deserialize_with = "null_default")]
+    pub users_before: Vec<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub results: Vec<RenewResultRow>,
+}
+
+/// Args for `daal-deploy relay-health` (read-only).
+pub struct RelayHealthArgs<'a> {
+    pub record_path: &'a Path,
+    pub helper_ip: &'a str,
+    /// `None` = no cloud token stored: the server and management legs
+    /// come back `not_checked`.
+    pub token: Option<&'a str>,
+    pub timeout_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HealthServerLeg {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HealthManagementLeg {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub error: String,
+    /// The relay's `/identity` document, verbatim.
+    #[serde(default)]
+    pub identity: Option<serde_json::Value>,
+    #[serde(default)]
+    pub users: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HealthWayLeg {
+    pub family: String,
+    #[serde(default)]
+    pub port: i64,
+    #[serde(default)]
+    pub udp: bool,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+/// stdout of `daal-deploy relay-health`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct RelayHealthReport {
+    #[serde(default)]
+    pub v: i64,
+    #[serde(default)]
+    pub checked_at: String,
+    #[serde(default)]
+    pub server: HealthServerLeg,
+    #[serde(default)]
+    pub management: HealthManagementLeg,
+    #[serde(default, deserialize_with = "null_default")]
+    pub ways: Vec<HealthWayLeg>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub limits: Vec<String>,
+}
+
+/// What `decommission --release-addresses` did with one address.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct AddressOutcome {
+    pub id: String,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub released: bool,
+    /// `released` | `not_daal` | `still_attached` | `release_failed`.
+    #[serde(default)]
+    pub code: String,
+    /// Raw provider text. Details only.
+    #[serde(default)]
+    pub error: String,
+}
+
+/// Is this the bundled `daal-deploy` refusing a flag it does not know
+/// (Go's flag package, exit 2)? Only then may a caller retry without it.
+pub fn flag_not_defined(e: &BridgeError, flag: &str) -> bool {
+    match e {
+        BridgeError::SubprocessFailed { rc: 2, stderr } => {
+            stderr.contains("flag provided but not defined") && stderr.contains(flag)
+        }
+        _ => false,
+    }
+}
+
+/// Is this the bundled `daal-deploy` not knowing the verb at all?
+pub fn verb_unknown(e: &BridgeError) -> bool {
+    match e {
+        BridgeError::SubprocessFailed { rc: 2, stderr } => {
+            stderr.to_ascii_lowercase().contains("unknown subcommand")
+        }
+        _ => false,
+    }
 }
 
 /// Trait so tests can substitute a mock without spawning a process.
@@ -450,7 +678,32 @@ pub trait CliRunner: Send + Sync {
     /// in the window where the wizard's record write never happened, so
     /// a lookup driven by the app's own rows would be blind to exactly
     /// the resource it was opened to find.
-    fn run_account_audit(&self, provider: &str, token: &str) -> Result<AccountAuditReport>;
+    fn run_account_audit(
+        &self,
+        provider: &str,
+        token: &str,
+        record_files: &[PathBuf],
+    ) -> Result<AccountAuditReport>;
+
+    /// `daal-deploy account-reclaim --yes --json`. DESTRUCTIVE, and
+    /// only ever called with an explicit `--only` list the person ticked.
+    fn run_account_reclaim(&self, args: AccountReclaimArgs<'_>) -> Result<AccountReclaimReport>;
+
+    /// `daal-deploy users-renew`: re-create people on a relay in one
+    /// firewall window. Progress names only, never credentials.
+    fn run_users_renew(
+        &self,
+        args: UsersRenewArgs<'_>,
+        priv_key: &[u8],
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<UsersRenewResult>;
+
+    /// `daal-deploy relay-health`: read-only.
+    fn run_relay_health(
+        &self,
+        args: RelayHealthArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RelayHealthReport>;
 
     fn run_pricing(
         &self,
@@ -1067,6 +1320,10 @@ pub struct ProvisionArgs<'a> {
     /// stops the meter at the moment of failure and frees the derived
     /// name so "Try again" works.
     pub rollback_on_failure: bool,
+    /// Where the child journals every cloud object BEFORE and AS it is
+    /// created (`--journal`). The child holds an exclusive lock on it
+    /// for its whole life. `None` only from callers that predate it.
+    pub journal_path: Option<&'a Path>,
 }
 
 /// Static shape passed to `daal-deploy cdn-provision`.
@@ -1357,6 +1614,9 @@ pub struct ReleaseFipOutcome {
 pub struct DecommissionArgs<'a> {
     pub record_path: &'a Path,
     pub token: &'a str,
+    /// `--release-addresses`: also give back every address Daal
+    /// reserved for this relay once the server is gone.
+    pub release_addresses: bool,
 }
 
 /// JSON returned by `daal-deploy decommission --json`, one flag per
@@ -1372,8 +1632,53 @@ pub struct DecommissionResult {
     pub server_deleted: bool,
     pub ssh_key_deleted: bool,
     pub firewall_deleted: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub warnings: Vec<String>,
+    /// One entry per address `--release-addresses` looked at.
+    #[serde(default, deserialize_with = "null_default")]
+    pub addresses: Vec<AddressOutcome>,
+    /// The server is gone but at least one Daal address is still
+    /// reserved (exit 6, or any `release_failed`). Set by the bridge.
+    #[serde(default)]
+    pub retry_needed: bool,
+    /// Raw notes from the bridge itself (e.g. "this helper is too old
+    /// for --release-addresses"). Details only.
+    #[serde(default, deserialize_with = "null_default")]
+    pub bridge_notes: Vec<String>,
+    /// What the helper deliberately left in place, as `kind:id`
+    /// (`floating-ip:42`, `reserved-ip:abc`, `firewall:…`). Read by the
+    /// bridge when an old helper could not be asked to release
+    /// addresses; raw otherwise.
+    #[serde(default, deserialize_with = "null_default")]
+    pub preserved: Vec<String>,
+}
+
+/// An old helper that could not be sent `--release-addresses` left every
+/// address it reports as preserved still reserved — and billing. Say so
+/// in the closed-set shape the screens already read, so the relay (and
+/// the only token that can give the address back) is kept and the card
+/// names it, instead of a Details-only note.
+fn addresses_an_old_helper_kept(res: &mut DecommissionResult) {
+    for p in &res.preserved {
+        let Some(id) = p
+            .strip_prefix("floating-ip:")
+            .or_else(|| p.strip_prefix("reserved-ip:"))
+        else {
+            continue;
+        };
+        if id.is_empty() || res.addresses.iter().any(|a| a.id == id) {
+            continue;
+        }
+        res.addresses.push(AddressOutcome {
+            id: id.to_string(),
+            ip: String::new(),
+            released: false,
+            code: "release_failed".into(),
+            error: "the setup helper bundled with this app is too old to release reserved \
+                    addresses; update the app, then try again"
+                .into(),
+        });
+    }
 }
 
 /// Static shape passed to `run_bind_and_sign`. Field names follow
@@ -1445,6 +1750,7 @@ impl SubprocessRunner {
         &self,
         args: &DecommissionArgs<'_>,
         want_json: bool,
+        release_addresses: bool,
     ) -> Result<std::process::Output> {
         let tmp = tempfile_with_secret(args.token)?;
         let token_path = tmp.path().to_path_buf();
@@ -1457,6 +1763,9 @@ impl SubprocessRunner {
             .arg(&token_path);
         if want_json {
             cmd.arg("--json");
+        }
+        if release_addresses {
+            cmd.arg("--release-addresses");
         }
         let out = cmd
             .apply_env()
@@ -1471,6 +1780,100 @@ impl SubprocessRunner {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(BridgeError::BinaryMissing),
             Err(e) => Err(BridgeError::Io(e)),
         }
+    }
+
+    fn provision_once(
+        &self,
+        args: &ProvisionArgs<'_>,
+        journal: Option<&Path>,
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<String> {
+        // Token tempfile (mode 0o600); zeroized on drop.
+        let tmp = tempfile_with_secret(args.token)?;
+        let token_path = tmp.path().to_path_buf();
+
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("provision")
+            .arg("--provider")
+            .arg(args.provider)
+            .arg("--region")
+            .arg(args.region)
+            .arg("--server-type")
+            .arg(args.server_type)
+            .arg("--toolbox-profile")
+            .arg(args.toolbox_profile)
+            .arg("--helper-ip")
+            .arg(args.helper_ip)
+            .arg("--pubkey-file")
+            .arg(args.pubkey_file)
+            .arg("--token-file")
+            .arg(&token_path)
+            .arg("--progress-json");
+        if !args.families.is_empty() {
+            cmd.arg("--families").arg(args.families.join(","));
+        }
+        if !args.existing_server_id.is_empty() {
+            cmd.arg("--existing-server-id").arg(args.existing_server_id);
+        }
+        if !args.cover_sni.is_empty() {
+            cmd.arg("--cover-sni").arg(args.cover_sni);
+        }
+        if args.rollback_on_failure {
+            cmd.arg("--rollback-on-failure");
+        }
+        if args.dry_run {
+            cmd.arg("--dry-run");
+        }
+        if let Some(j) = journal {
+            cmd.arg("--journal").arg(j);
+        }
+        let mut child = cmd
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+
+        let stderr = child.stderr.take().expect("piped");
+        let stdout_handle = child.stdout.take().expect("piped");
+        // Reader thread for stdout (final OperatorRecord JSON).
+        let stdout_join = std::thread::spawn(move || {
+            let mut buf = String::new();
+            let mut r = BufReader::new(stdout_handle);
+            let _ = r.read_to_string(&mut buf);
+            buf
+        });
+
+        // Stream progress lines off stderr in this thread (callback runs here).
+        let mut stderr_tail = String::new();
+        let r = BufReader::new(stderr);
+        for line in r.lines().map_while(std::result::Result::ok) {
+            // Try to parse as ProgressEvent. If parse fails the line is
+            // human prose (Go's `fmt.Fprintln` calls in the CLI); we
+            // append to stderr_tail for the SubprocessFailed message.
+            match serde_json::from_str::<ProgressEvent>(&line) {
+                Ok(ev) => on_progress(ev),
+                Err(_) => {
+                    stderr_tail.push_str(&line);
+                    stderr_tail.push('\n');
+                }
+            }
+        }
+
+        let status = child.wait().map_err(BridgeError::Io)?;
+        let stdout_text = stdout_join.join().unwrap_or_default();
+        drop(tmp);
+        if !status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: status.code().unwrap_or(-1),
+                stderr: stderr_tail,
+            });
+        }
+        Ok(stdout_text)
     }
 }
 
@@ -1505,8 +1908,11 @@ impl CliRunner for SubprocessRunner {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             return Err(BridgeError::SubprocessFailed { rc, stderr });
         }
-        let servers: Vec<ExistingServer> = serde_json::from_slice(&out.stdout)?;
-        Ok(servers)
+        // An empty account prints `null` from a helper built before the
+        // listing returned an empty array: that is "no servers", not a
+        // parse failure (which used to block the step for a new account).
+        let servers: Option<Vec<ExistingServer>> = serde_json::from_slice(&out.stdout)?;
+        Ok(servers.unwrap_or_default())
     }
 
     fn run_list_server_types(
@@ -1545,21 +1951,32 @@ impl CliRunner for SubprocessRunner {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             return Err(BridgeError::SubprocessFailed { rc, stderr });
         }
-        let types: Vec<ServerTypeOption> = serde_json::from_slice(&out.stdout)?;
-        Ok(types)
+        // `null` = nothing sold here (older helpers print it for an
+        // empty list): an empty choice, not a parse error.
+        let types: Option<Vec<ServerTypeOption>> = serde_json::from_slice(&out.stdout)?;
+        Ok(types.unwrap_or_default())
     }
 
-    fn run_account_audit(&self, provider: &str, token: &str) -> Result<AccountAuditReport> {
+    fn run_account_audit(
+        &self,
+        provider: &str,
+        token: &str,
+        record_files: &[PathBuf],
+    ) -> Result<AccountAuditReport> {
         let tmp = tempfile_with_secret(token)?;
         let token_path = tmp.path().to_path_buf();
 
-        let out = Command::new(&self.binary)
-            .arg("account-audit")
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("account-audit")
             .arg("--provider")
             .arg(provider)
             .arg("--token-file")
             .arg(&token_path)
-            .arg("--json")
+            .arg("--json");
+        for r in record_files {
+            cmd.arg("--record-file").arg(r);
+        }
+        let out = cmd
             .apply_env()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1581,6 +1998,165 @@ impl CliRunner for SubprocessRunner {
         }
         let report: AccountAuditReport = serde_json::from_slice(&out.stdout)?;
         Ok(report)
+    }
+
+    fn run_account_reclaim(&self, args: AccountReclaimArgs<'_>) -> Result<AccountReclaimReport> {
+        if args.only.is_empty() {
+            // The CLI reads an empty --only list as "every proven
+            // orphan". The app never asks for that.
+            return Ok(AccountReclaimReport {
+                provider: args.provider.to_string(),
+                ..Default::default()
+            });
+        }
+        let tmp = tempfile_with_secret(args.token)?;
+        let token_path = tmp.path().to_path_buf();
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("account-reclaim")
+            .arg("--provider")
+            .arg(args.provider)
+            .arg("--token-file")
+            .arg(&token_path)
+            .arg("--yes")
+            .arg("--json");
+        for r in args.record_files {
+            cmd.arg("--record-file").arg(r);
+        }
+        for r in args.only {
+            cmd.arg("--only").arg(format!("{}:{}", r.kind, r.id));
+        }
+        if args.include_unclaimed_servers {
+            cmd.arg("--include-unclaimed-servers");
+        }
+        let out = cmd
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        drop(tmp);
+        let out = match out {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BridgeError::BinaryMissing)
+            }
+            Err(e) => return Err(BridgeError::Io(e)),
+        };
+        if !out.status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            });
+        }
+        Ok(serde_json::from_slice(&out.stdout)?)
+    }
+
+    fn run_users_renew(
+        &self,
+        args: UsersRenewArgs<'_>,
+        priv_key: &[u8],
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<UsersRenewResult> {
+        let tmp = tempfile_with_secret(args.token)?;
+        let token_path = tmp.path().to_path_buf();
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("users-renew")
+            .arg("--record-file")
+            .arg(args.record_path)
+            .arg("--helper-ip")
+            .arg(args.helper_ip)
+            .arg("--token-file")
+            .arg(&token_path)
+            .arg("--priv-key")
+            .arg("-")
+            .arg("--progress-json");
+        for n in args.ensure {
+            cmd.arg("--ensure").arg(n);
+        }
+        for n in args.replace {
+            cmd.arg("--replace").arg(n);
+        }
+        for n in args.revoke {
+            cmd.arg("--revoke").arg(n);
+        }
+        let mut child = cmd
+            .apply_env()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        {
+            let mut stdin = child.stdin.take().expect("piped");
+            let buf = Zeroizing::new(priv_key.to_vec());
+            stdin.write_all(buf.as_slice())?;
+        }
+        let stdout_handle = child.stdout.take().expect("piped");
+        let stderr_handle = child.stderr.take().expect("piped");
+        // stdout carries credentials: held in a Zeroizing buffer and
+        // never echoed anywhere.
+        let stdout_join = std::thread::spawn(move || {
+            let mut buf = Zeroizing::new(String::new());
+            let _ = BufReader::new(stdout_handle).read_to_string(&mut buf);
+            buf
+        });
+        let mut stderr_tail = String::new();
+        for line in BufReader::new(stderr_handle).lines().map_while(std::result::Result::ok) {
+            match serde_json::from_str::<ProgressEvent>(&line) {
+                Ok(ev) => on_progress(ev),
+                Err(_) => {
+                    stderr_tail.push_str(&line);
+                    stderr_tail.push('\n');
+                }
+            }
+        }
+        let status = child.wait().map_err(BridgeError::Io)?;
+        drop(tmp);
+        let stdout_text = stdout_join.join().unwrap_or_default();
+        if !status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: status.code().unwrap_or(-1),
+                stderr: stderr_tail,
+            });
+        }
+        Ok(serde_json::from_str(stdout_text.as_str())?)
+    }
+
+    fn run_relay_health(
+        &self,
+        args: RelayHealthArgs<'_>,
+        priv_key: &[u8],
+    ) -> Result<RelayHealthReport> {
+        let tmp = match args.token {
+            Some(t) => Some(tempfile_with_secret(t)?),
+            None => None,
+        };
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("relay-health")
+            .arg("--record-file")
+            .arg(args.record_path)
+            .arg("--helper-ip")
+            .arg(args.helper_ip)
+            .arg("--priv-key")
+            .arg("-")
+            .arg("--timeout")
+            .arg(format!("{}s", args.timeout_secs.max(1)));
+        if let Some(t) = tmp.as_ref() {
+            cmd.arg("--token-file").arg(t.path());
+        }
+        let out = run_with_piped_priv_key(cmd, priv_key);
+        drop(tmp);
+        let out = out?;
+        if !out.status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: out.status.code().unwrap_or(-1),
+                stderr: out.stderr,
+            });
+        }
+        Ok(serde_json::from_str(out.stdout.trim())?)
     }
 
     fn run_pricing(
@@ -1637,89 +2213,24 @@ impl CliRunner for SubprocessRunner {
         args: ProvisionArgs<'_>,
         on_progress: &mut dyn FnMut(ProgressEvent),
     ) -> Result<String> {
-        // Token tempfile (mode 0o600); zeroized on drop.
-        let tmp = tempfile_with_secret(args.token)?;
-        let token_path = tmp.path().to_path_buf();
-
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("provision")
-            .arg("--provider")
-            .arg(args.provider)
-            .arg("--region")
-            .arg(args.region)
-            .arg("--server-type")
-            .arg(args.server_type)
-            .arg("--toolbox-profile")
-            .arg(args.toolbox_profile)
-            .arg("--helper-ip")
-            .arg(args.helper_ip)
-            .arg("--pubkey-file")
-            .arg(args.pubkey_file)
-            .arg("--token-file")
-            .arg(&token_path)
-            .arg("--progress-json");
-        if !args.families.is_empty() {
-            cmd.arg("--families").arg(args.families.join(","));
-        }
-        if !args.existing_server_id.is_empty() {
-            cmd.arg("--existing-server-id").arg(args.existing_server_id);
-        }
-        if !args.cover_sni.is_empty() {
-            cmd.arg("--cover-sni").arg(args.cover_sni);
-        }
-        if args.rollback_on_failure {
-            cmd.arg("--rollback-on-failure");
-        }
-        if args.dry_run {
-            cmd.arg("--dry-run");
-        }
-        let mut child = cmd
-            .apply_env()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
-                _ => BridgeError::Io(e),
-            })?;
-
-        let stderr = child.stderr.take().expect("piped");
-        let stdout_handle = child.stdout.take().expect("piped");
-        // Reader thread for stdout (final OperatorRecord JSON).
-        let stdout_join = std::thread::spawn(move || {
-            let mut buf = String::new();
-            let mut r = BufReader::new(stdout_handle);
-            let _ = r.read_to_string(&mut buf);
-            buf
-        });
-
-        // Stream progress lines off stderr in this thread (callback runs here).
-        let mut stderr_tail = String::new();
-        let r = BufReader::new(stderr);
-        for line in r.lines().flatten() {
-            // Try to parse as ProgressEvent. If parse fails the line is
-            // human prose (Go's `fmt.Fprintln` calls in the CLI); we
-            // append to stderr_tail for the SubprocessFailed message.
-            match serde_json::from_str::<ProgressEvent>(&line) {
-                Ok(ev) => on_progress(ev),
-                Err(_) => {
-                    stderr_tail.push_str(&line);
-                    stderr_tail.push('\n');
-                }
+        // `--journal` is new. A bundled helper that predates it refuses
+        // the flag at parse time, before any cloud call, so one retry
+        // without it is safe — the run is then simply not journalled
+        // (the account check still finds what it creates by its labels).
+        match self.provision_once(&args, args.journal_path, on_progress) {
+            Err(e) if args.journal_path.is_some() && flag_not_defined(&e, "journal") => {
+                on_progress(ProgressEvent {
+                    step: "journal_unsupported".into(),
+                    message: "the bundled setup helper cannot keep a setup journal; continuing \
+                              without one"
+                        .into(),
+                    ts: String::new(),
+                    extra: Default::default(),
+                });
+                self.provision_once(&args, None, on_progress)
             }
+            other => other,
         }
-
-        let status = child.wait().map_err(BridgeError::Io)?;
-        let stdout_text = stdout_join.join().unwrap_or_default();
-        drop(tmp);
-        if !status.success() {
-            return Err(BridgeError::SubprocessFailed {
-                rc: status.code().unwrap_or(-1),
-                stderr: stderr_tail,
-            });
-        }
-        Ok(stdout_text)
     }
 
     fn run_cdn_provision(&self, args: CdnProvisionArgs<'_>) -> Result<CdnFrontResult> {
@@ -2149,28 +2660,63 @@ impl CliRunner for SubprocessRunner {
         // so an old binary rejecting the flag (flag-parse failures exit
         // 2) must degrade instead of turning a routine teardown into a
         // dead end. Retry once without it and read the legacy output.
-        let (out, sent_json_flag) = match self.decommission_once(&args, true) {
-            Ok(o) if o.status.code() == Some(2) => (self.decommission_once(&args, false)?, false),
-            Ok(o) => (o, true),
-            Err(e) => return Err(e),
-        };
-        if !out.status.success() {
+        //
+        // `--release-addresses` is newer still and degrades first, on
+        // its own: a helper that knows `--json` but not the release flag
+        // still reports per resource, and the note says what it could
+        // not do.
+        let mut notes: Vec<String> = Vec::new();
+        let mut release = args.release_addresses;
+        let mut out = self.decommission_once(&args, true, release)?;
+        if out.status.code() == Some(2) && release {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            if stderr.contains("flag provided but not defined") && stderr.contains("release-addresses")
+            {
+                notes.push(
+                    "the setup helper bundled with this app cannot release reserved addresses \
+                     (--release-addresses); retried without it"
+                        .to_string(),
+                );
+                release = false;
+                out = self.decommission_once(&args, true, false)?;
+            }
+        }
+        let mut sent_json_flag = true;
+        if out.status.code() == Some(2) {
+            out = self.decommission_once(&args, false, false)?;
+            sent_json_flag = false;
+        }
+        // Exit 6: the server is gone, a Daal address is still reserved.
+        // That is a REPORT, not a failure: the JSON on stdout says which.
+        let exit6 = release && out.status.code() == Some(6);
+        if !out.status.success() && !exit6 {
             return Err(BridgeError::SubprocessFailed {
                 rc: out.status.code().unwrap_or(-1),
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
             });
         }
+        let release_dropped = args.release_addresses && !release;
+        let finish = |mut res: DecommissionResult| -> DecommissionResult {
+            if release_dropped && res.server_deleted {
+                addresses_an_old_helper_kept(&mut res);
+            }
+            res.retry_needed = res.retry_needed
+                || exit6
+                || res.addresses.iter().any(|a| a.code == "release_failed");
+            res.bridge_notes.extend(notes.iter().cloned());
+            res
+        };
         let stdout = String::from_utf8_lossy(&out.stdout);
         let body = stdout.trim();
         let parse_err = match serde_json::from_str::<DecommissionResult>(body) {
-            Ok(res) => return Ok(res),
+            Ok(res) => return Ok(finish(res)),
             Err(e) => e,
         };
         // The verb may narrate before it reports; take the last
         // non-empty line as the result document.
         if let Some(last) = body.lines().rev().find(|l| !l.trim().is_empty()) {
             if let Ok(res) = serde_json::from_str::<DecommissionResult>(last.trim()) {
-                return Ok(res);
+                return Ok(finish(res));
             }
         }
         // Legacy binary: exit 0 means the server call returned, and
@@ -2178,7 +2724,7 @@ impl CliRunner for SubprocessRunner {
         // firewall are gone here would be a lie the user acts on, so
         // report them unconfirmed and say why.
         if !sent_json_flag || body.contains("decommissioned") {
-            return Ok(DecommissionResult {
+            return Ok(finish(DecommissionResult {
                 server_deleted: true,
                 ssh_key_deleted: false,
                 firewall_deleted: false,
@@ -2187,7 +2733,8 @@ impl CliRunner for SubprocessRunner {
                      the cloud firewall may still exist in your provider account"
                         .to_string(),
                 ],
-            });
+                ..Default::default()
+            }));
         }
         Err(BridgeError::Parse(parse_err))
     }
@@ -3086,6 +3633,57 @@ pub struct MockRunner {
     /// the read-back only on the Ok path lose the new cover host exactly
     /// here.
     pub rotate_tls_err: Mutex<Option<String>>,
+
+    // ---- publisher-alone wave ------------------------------------
+    /// `--journal` each `run_provision` was handed.
+    pub provision_journal_paths: Mutex<Vec<Option<PathBuf>>>,
+    /// `--existing-server-id` each `run_provision` was handed.
+    pub provision_existing_ids: Mutex<Vec<String>>,
+    /// Fail `run_provision` with this exit code and stderr, after
+    /// emitting `provision_fail_events` and writing
+    /// `provision_journal_text` to the journal (a run that got as far
+    /// as creating something, then died).
+    pub provision_fail: Mutex<Option<(i32, String)>>,
+    pub provision_fail_events: Mutex<Vec<ProgressEvent>>,
+    pub provision_journal_text: Mutex<Option<String>>,
+    /// `(provider, token, record bodies)` per account-audit call.
+    pub account_audit_record_calls: Mutex<Vec<(String, String, Vec<String>)>>,
+    /// Per-provider audit answers; falls back to `account_audit_result`.
+    pub account_audit_by_provider: Mutex<std::collections::HashMap<String, AccountAuditReport>>,
+    pub account_audit_error: Mutex<Option<(i32, String)>>,
+    /// Recorded reclaim calls and the canned answer.
+    pub account_reclaim_calls: Mutex<Vec<MockReclaimCall>>,
+    pub account_reclaim_result: Mutex<Option<AccountReclaimReport>>,
+    /// The users on the mock box that `users-renew` sees and changes.
+    pub box_users: Mutex<std::collections::BTreeSet<String>>,
+    /// Every `users-renew` call, and every box WRITE it made
+    /// (`provision <name>` / `revoke <name>`).
+    pub users_renew_calls: Mutex<Vec<MockRenewCall>>,
+    pub renew_box_writes: Mutex<Vec<String>>,
+    /// Fail the whole `users-renew` run (exit code, stderr).
+    pub users_renew_error: Mutex<Option<(i32, String)>>,
+    /// Per-name failure: name -> error_code.
+    pub renew_fail_names: Mutex<std::collections::HashMap<String, String>>,
+    /// `relay-health`: calls, canned answer, injected failure.
+    pub relay_health_calls: Mutex<Vec<bool>>,
+    pub relay_health_result: Mutex<Option<RelayHealthReport>>,
+    pub relay_health_error: Mutex<Option<(i32, String)>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MockReclaimCall {
+    pub provider: String,
+    pub token: String,
+    pub records: Vec<String>,
+    pub only: Vec<ResourceRef>,
+    pub include_unclaimed_servers: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MockRenewCall {
+    pub ensure: Vec<String>,
+    pub replace: Vec<String>,
+    pub revoke: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3176,6 +3774,7 @@ pub struct MockDecommissionCall {
     pub record_path: PathBuf,
     pub record_json: String,
     pub token: String,
+    pub release_addresses: bool,
 }
 
 impl MockRunner {
@@ -3236,6 +3835,24 @@ impl MockRunner {
             rotate_tls_calls: Mutex::new(0),
             rotate_tls_result: Mutex::new(None),
             rotate_tls_err: Mutex::new(None),
+            provision_journal_paths: Mutex::new(Vec::new()),
+            provision_existing_ids: Mutex::new(Vec::new()),
+            provision_fail: Mutex::new(None),
+            provision_fail_events: Mutex::new(Vec::new()),
+            provision_journal_text: Mutex::new(None),
+            account_audit_record_calls: Mutex::new(Vec::new()),
+            account_audit_by_provider: Mutex::new(Default::default()),
+            account_audit_error: Mutex::new(None),
+            account_reclaim_calls: Mutex::new(Vec::new()),
+            account_reclaim_result: Mutex::new(None),
+            box_users: Mutex::new(Default::default()),
+            users_renew_calls: Mutex::new(Vec::new()),
+            renew_box_writes: Mutex::new(Vec::new()),
+            users_renew_error: Mutex::new(None),
+            renew_fail_names: Mutex::new(Default::default()),
+            relay_health_calls: Mutex::new(Vec::new()),
+            relay_health_result: Mutex::new(None),
+            relay_health_error: Mutex::new(None),
         }
     }
 
@@ -3348,6 +3965,62 @@ impl MockRunner {
     }
 }
 
+impl MockRunner {
+    /// The credentials the mock box mints for `name`.
+    pub fn mock_creds(&self, name: &str) -> UserCredsResult {
+        let (reality_public_key, tls_cert_sha256, cover_sni, serves_ss) = {
+            let mut relay = self.relay.lock().unwrap();
+            if relay.serves_shadowsocks && relay.ss_server_key.is_empty() {
+                relay.ss_server_key = "bW9jay1ib3gtaXBzay0xNg==".into();
+            }
+            (
+                relay.reality_public_key.clone(),
+                relay.tls_cert_sha256.clone(),
+                relay.cover_sni.clone(),
+                relay.serves_shadowsocks,
+            )
+        };
+        UserCredsResult {
+            name: name.to_string(),
+            vless_uuid: "00000000-0000-0000-0000-000000000000".into(),
+            reality_short_id: "deadbeef".into(),
+            hy2_password: "mockhy2password0000000".into(),
+            naive_password: "mocknaivepassword00000".into(),
+            ws_path: format!("/{}/cafebabe", name),
+            provisioned_at_unix: 1_700_000_000,
+            reality_public_key,
+            tls_cert_sha256,
+            tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
+            cover_sni,
+            mux_inbound: true,
+            // A box that DOES serve shadowsocks-2022: the password is
+            // already the colon-joined "<iPSK>:<uPSK>" the outbound
+            // wants, both halves padded base64-std of 16 bytes, which is
+            // what the method requires.
+            ss_password: if serves_ss {
+                "bW9jay1ib3gtaXBzay0xNg==:bW9jay11c2VyLXVwc2sxNg==".into()
+            } else {
+                String::new()
+            },
+            ss_method: if serves_ss {
+                "2022-blake3-aes-128-gcm".into()
+            } else {
+                String::new()
+            },
+            // A box that DOES serve tuic. A relay whose profile left the
+            // family off sends both of these empty, and the minter then
+            // refuses the route — see the field docs.
+            tuic_uuid: "33333333-3333-3333-3333-333333333333".into(),
+            tuic_password: "mocktuicpassword000000".into(),
+            // A box that serves anytls. The password is opaque to the
+            // protocol (hashed into the session key), so any non-empty
+            // string is a faithful mock; empty would mean "this relay
+            // does not serve the family".
+            anytls_password: "mockanytlspassword0000".into(),
+        }
+    }
+}
+
 impl CliRunner for MockRunner {
     fn run_list_servers(&self, _provider: &str, _token: &str) -> Result<Vec<ExistingServer>> {
         Ok(vec![])
@@ -3401,8 +4074,27 @@ impl CliRunner for MockRunner {
         ])
     }
 
-    fn run_account_audit(&self, provider: &str, _token: &str) -> Result<AccountAuditReport> {
+    fn run_account_audit(
+        &self,
+        provider: &str,
+        token: &str,
+        record_files: &[PathBuf],
+    ) -> Result<AccountAuditReport> {
         *self.account_audit_calls.lock().unwrap() += 1;
+        self.account_audit_record_calls.lock().unwrap().push((
+            provider.to_string(),
+            token.to_string(),
+            record_files
+                .iter()
+                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+                .collect(),
+        ));
+        if let Some((rc, stderr)) = self.account_audit_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
+        if let Some(r) = self.account_audit_by_provider.lock().unwrap().get(provider) {
+            return Ok(r.clone());
+        }
         if let Some(r) = self.account_audit_result.lock().unwrap().as_ref() {
             return Ok(r.clone());
         }
@@ -3411,6 +4103,172 @@ impl CliRunner for MockRunner {
             resources: vec![],
             server_list_complete: true,
             warnings: vec![],
+            known: vec![],
+        })
+    }
+
+    fn run_account_reclaim(&self, args: AccountReclaimArgs<'_>) -> Result<AccountReclaimReport> {
+        self.account_reclaim_calls.lock().unwrap().push(MockReclaimCall {
+            provider: args.provider.to_string(),
+            token: args.token.to_string(),
+            records: args
+                .record_files
+                .iter()
+                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+                .collect(),
+            only: args.only.to_vec(),
+            include_unclaimed_servers: args.include_unclaimed_servers,
+        });
+        if let Some(r) = self.account_reclaim_result.lock().unwrap().clone() {
+            return Ok(r);
+        }
+        Ok(AccountReclaimReport {
+            provider: args.provider.to_string(),
+            outcomes: args
+                .only
+                .iter()
+                .map(|r| ReclaimOutcomeRow {
+                    kind: r.kind.clone(),
+                    id: r.id.clone(),
+                    deleted: true,
+                    code: if r.kind == "floating-ip" { "released" } else { "deleted" }.into(),
+                    ..Default::default()
+                })
+                .collect(),
+            warnings: vec![],
+        })
+    }
+
+    fn run_users_renew(
+        &self,
+        args: UsersRenewArgs<'_>,
+        _priv_key: &[u8],
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<UsersRenewResult> {
+        self.users_renew_calls.lock().unwrap().push(MockRenewCall {
+            ensure: args.ensure.to_vec(),
+            replace: args.replace.to_vec(),
+            revoke: args.revoke.to_vec(),
+        });
+        if let Some((rc, stderr)) = self.users_renew_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
+        let before: Vec<String> = self.box_users.lock().unwrap().iter().cloned().collect();
+        let mut results = Vec::new();
+        let fails = self.renew_fail_names.lock().unwrap().clone();
+        let mut ops: Vec<(&str, &String)> = Vec::new();
+        ops.extend(args.ensure.iter().map(|n| ("ensure", n)));
+        ops.extend(args.replace.iter().map(|n| ("replace", n)));
+        ops.extend(args.revoke.iter().map(|n| ("revoke", n)));
+        for (op, name) in ops {
+            on_progress(ProgressEvent {
+                step: "renew_user".into(),
+                message: String::new(),
+                ts: String::new(),
+                extra: serde_json::json!({"name": name, "status": "working"})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+            if let Some(code) = fails.get(name) {
+                results.push(RenewResultRow {
+                    name: name.clone(),
+                    action: String::new(),
+                    ok: false,
+                    error_code: code.clone(),
+                    error: format!("mock failure for {name}"),
+                    creds: None,
+                });
+                continue;
+            }
+            let present = self.box_users.lock().unwrap().contains(name);
+            let provision = |me: &Self| {
+                me.box_users.lock().unwrap().insert(name.clone());
+                me.renew_box_writes.lock().unwrap().push(format!("provision {name}"));
+                RenewResultRow {
+                    name: name.clone(),
+                    action: "provisioned".into(),
+                    ok: true,
+                    creds: Some(me.mock_creds(name)),
+                    ..Default::default()
+                }
+            };
+            let row = match (op, present) {
+                ("ensure", true) => RenewResultRow {
+                    name: name.clone(),
+                    action: "kept".into(),
+                    ok: true,
+                    ..Default::default()
+                },
+                ("ensure", false) | ("replace", false) => provision(self),
+                ("replace", true) => {
+                    self.renew_box_writes.lock().unwrap().push(format!("revoke {name}"));
+                    provision(self)
+                }
+                ("revoke", true) => {
+                    self.box_users.lock().unwrap().remove(name);
+                    self.renew_box_writes.lock().unwrap().push(format!("revoke {name}"));
+                    RenewResultRow {
+                        name: name.clone(),
+                        action: "revoked".into(),
+                        ok: true,
+                        ..Default::default()
+                    }
+                }
+                _ => RenewResultRow {
+                    name: name.clone(),
+                    action: "absent".into(),
+                    ok: true,
+                    ..Default::default()
+                },
+            };
+            results.push(row);
+        }
+        Ok(UsersRenewResult {
+            users_before: before,
+            results,
+        })
+    }
+
+    fn run_relay_health(
+        &self,
+        args: RelayHealthArgs<'_>,
+        _priv_key: &[u8],
+    ) -> Result<RelayHealthReport> {
+        self.relay_health_calls
+            .lock()
+            .unwrap()
+            .push(args.token.is_some());
+        if let Some((rc, stderr)) = self.relay_health_error.lock().unwrap().clone() {
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
+        if let Some(r) = self.relay_health_result.lock().unwrap().clone() {
+            return Ok(r);
+        }
+        let users: Vec<String> = self.box_users.lock().unwrap().iter().cloned().collect();
+        let identity: serde_json::Value =
+            serde_json::from_str(&self.relay.lock().unwrap().identity_json()).unwrap_or_default();
+        Ok(RelayHealthReport {
+            v: 1,
+            checked_at: "2026-11-19T10:00:00Z".into(),
+            server: HealthServerLeg {
+                state: if args.token.is_some() { "running" } else { "not_checked" }.into(),
+                error: String::new(),
+            },
+            management: HealthManagementLeg {
+                state: "answers".into(),
+                error: String::new(),
+                identity: Some(identity),
+                users: Some(users),
+            },
+            ways: vec![HealthWayLeg {
+                family: "vless-reality".into(),
+                port: 443,
+                udp: false,
+                state: "answers".into(),
+                error: String::new(),
+            }],
+            limits: vec!["inside_country_unknown".into()],
         })
     }
 
@@ -3436,6 +4294,23 @@ impl CliRunner for MockRunner {
         on_progress: &mut dyn FnMut(ProgressEvent),
     ) -> Result<String> {
         *self.provision_calls.lock().unwrap() += 1;
+        self.provision_journal_paths
+            .lock()
+            .unwrap()
+            .push(args.journal_path.map(|p| p.to_path_buf()));
+        self.provision_existing_ids
+            .lock()
+            .unwrap()
+            .push(args.existing_server_id.to_string());
+        if let (Some(j), Some(text)) = (args.journal_path, self.provision_journal_text.lock().unwrap().clone()) {
+            let _ = std::fs::write(j, text);
+        }
+        if let Some((rc, stderr)) = self.provision_fail.lock().unwrap().clone() {
+            for ev in self.provision_fail_events.lock().unwrap().iter() {
+                on_progress(ev.clone());
+            }
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
         if let Some(e) = self.provision_error.lock().unwrap().clone() {
             return Err(BridgeError::SubprocessFailed { rc: 1, stderr: e });
         }
@@ -3771,6 +4646,7 @@ impl CliRunner for MockRunner {
                 record_path: args.record_path.to_path_buf(),
                 record_json: std::fs::read_to_string(args.record_path).unwrap_or_default(),
                 token: args.token.to_string(),
+                release_addresses: args.release_addresses,
             });
         if let Some(stderr) = self.decommission_error.lock().unwrap().clone() {
             return Err(BridgeError::SubprocessFailed { rc: 1, stderr });
@@ -3782,7 +4658,7 @@ impl CliRunner for MockRunner {
             server_deleted: true,
             ssh_key_deleted: true,
             firewall_deleted: true,
-            warnings: Vec::new(),
+            ..Default::default()
         })
     }
 
@@ -4017,56 +4893,7 @@ impl CliRunner for MockRunner {
             }
             return Ok(r);
         }
-        let (reality_public_key, tls_cert_sha256, cover_sni, serves_ss) = {
-            let mut relay = self.relay.lock().unwrap();
-            if relay.serves_shadowsocks && relay.ss_server_key.is_empty() {
-                relay.ss_server_key = "bW9jay1ib3gtaXBzay0xNg==".into();
-            }
-            (
-                relay.reality_public_key.clone(),
-                relay.tls_cert_sha256.clone(),
-                relay.cover_sni.clone(),
-                relay.serves_shadowsocks,
-            )
-        };
-        Ok(UserCredsResult {
-            name: args.name.to_string(),
-            vless_uuid: "00000000-0000-0000-0000-000000000000".into(),
-            reality_short_id: "deadbeef".into(),
-            hy2_password: "mockhy2password0000000".into(),
-            naive_password: "mocknaivepassword00000".into(),
-            ws_path: format!("/{}/cafebabe", args.name),
-            provisioned_at_unix: 1_700_000_000,
-            reality_public_key,
-            tls_cert_sha256,
-            tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n".into(),
-            cover_sni,
-            mux_inbound: true,
-            // A box that DOES serve shadowsocks-2022: the password is
-            // already the colon-joined "<iPSK>:<uPSK>" the outbound
-            // wants, both halves padded base64-std of 16 bytes, which is
-            // what the method requires.
-            ss_password: if serves_ss {
-                "bW9jay1ib3gtaXBzay0xNg==:bW9jay11c2VyLXVwc2sxNg==".into()
-            } else {
-                String::new()
-            },
-            ss_method: if serves_ss {
-                "2022-blake3-aes-128-gcm".into()
-            } else {
-                String::new()
-            },
-            // A box that DOES serve tuic. A relay whose profile left the
-            // family off sends both of these empty, and the minter then
-            // refuses the route — see the field docs.
-            tuic_uuid: "33333333-3333-3333-3333-333333333333".into(),
-            tuic_password: "mocktuicpassword000000".into(),
-            // A box that serves anytls. The password is opaque to the
-            // protocol (hashed into the session key), so any non-empty
-            // string is a faithful mock; empty would mean "this relay
-            // does not serve the family".
-            anytls_password: "mockanytlspassword0000".into(),
-        })
+        Ok(self.mock_creds(args.name))
     }
 
     fn run_users_revoke(
@@ -4283,9 +5110,273 @@ fn tempfile_with_secret(secret: &str) -> Result<tempfile::NamedTempFile> {
     Ok(f)
 }
 
+/// Delete `daal-token-*.tok` files in `dir` older than `older_than_secs`.
+///
+/// Every token handed to `daal-deploy` goes through a 0600 tempfile that
+/// is removed when the call returns. An app killed while a setup runs
+/// never returns, so the file stays — a cloud API token in the clear in
+/// the temp dir, indefinitely. Called at launch with 15 minutes: the
+/// child reads its token file once, at start, so a file that old is
+/// never one a live child still needs. Returns how many were removed.
+pub fn sweep_stale_token_files(dir: &Path, now_unix: i64, older_than_secs: i64) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let cutoff = now_unix - older_than_secs;
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("daal-token-") && name.ends_with(".tok")) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+        if matches!(mtime, Some(m) if m < cutoff) && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_token_files_are_swept_and_fresh_ones_and_strangers_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("daal-token-abc.tok");
+        let fresh = dir.path().join("daal-token-def.tok");
+        let other = dir.path().join("someone-else.tok");
+        for p in [&old, &fresh, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // Pretend the clock is 20 minutes ahead for `old` by sweeping
+        // with a cutoff in the future, then check only matching names go.
+        assert_eq!(sweep_stale_token_files(dir.path(), now, 900), 0, "nothing is old yet");
+        let n = sweep_stale_token_files(dir.path(), now + 1200, 900);
+        assert_eq!(n, 2, "both daal token files are older than the cutoff now");
+        assert!(!old.exists() && !fresh.exists());
+        assert!(other.exists(), "a file Daal did not name is never touched");
+    }
+
+    /// A shell script standing in for an OLD bundled `daal-deploy`: it
+    /// refuses `flag` the way Go's flag package does (exit 2), and
+    /// otherwise prints `ok_stdout` and exits `ok_rc`. Every argv is
+    /// appended to `<dir>/argv.log`.
+    #[cfg(unix)]
+    fn old_helper(dir: &Path, flag: &str, ok_stdout: &str, ok_rc: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("fake-daal-deploy");
+        let log = dir.join("argv.log");
+        let script = format!(
+            "#!/bin/sh\n[ \"$1\" = \"--probe\" ] && exit 0\necho \"$*\" >> '{log}'\nfor a in \"$@\"; do\n  if [ \"$a\" = \"--{flag}\" ]; then\n    echo 'flag provided but not defined: -{flag}' >&2\n    exit 2\n  fi\ndone\ncat <<'EOF'\n{ok_stdout}\nEOF\nexit {ok_rc}\n",
+            log = log.display(),
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Another test thread may fork while our write fd is still open
+        // in its not-yet-exec'd child, which makes exec fail with
+        // ETXTBSY for a moment. Wait it out before handing the script on.
+        for _ in 0..200 {
+            match Command::new(&bin).arg("--probe").status() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                _ => break,
+            }
+        }
+        bin
+    }
+
+    /// A helper built before the listings returned `[]` prints `null`
+    /// for an empty account (found by tests/publisher_alone_e2e.rs).
+    /// That is "nothing there", not a parse error that blocks the step.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_account_listed_as_null_is_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        // "--nothing" is never passed, so the script just prints null.
+        let bin = old_helper(dir.path(), "nothing", "null", 0);
+        let runner = SubprocessRunner::new(Some(bin));
+        assert!(runner.run_list_servers("hetzner", "tok").expect("no servers").is_empty());
+        assert!(runner
+            .run_list_server_types("hetzner", "fsn1", "tok")
+            .expect("nothing sold")
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_helper_without_journal_is_retried_once_without_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = old_helper(dir.path(), "journal", r#"{"server_id":"1"}"#, 0);
+        let runner = SubprocessRunner::new(Some(bin));
+        let pubkey = dir.path().join("pub");
+        std::fs::write(&pubkey, b"k").unwrap();
+        let journal = dir.path().join("j.jsonl");
+        let mut steps = Vec::new();
+        let out = runner
+            .run_provision(
+                ProvisionArgs {
+                    provider: "hetzner",
+                    region: "fsn1",
+                    server_type: "cx22",
+                    toolbox_profile: "iran-default",
+                    helper_ip: "198.51.100.1",
+                    pubkey_file: &pubkey,
+                    token: "tok",
+                    families: vec![],
+                    existing_server_id: "",
+                    cover_sni: "",
+                    dry_run: false,
+                    rollback_on_failure: true,
+                    journal_path: Some(&journal),
+                },
+                &mut |ev| steps.push(ev.step),
+            )
+            .expect("the retry without --journal succeeds");
+        assert_eq!(out.trim(), r#"{"server_id":"1"}"#);
+        let argv = std::fs::read_to_string(dir.path().join("argv.log")).unwrap();
+        let runs: Vec<&str> = argv.lines().collect();
+        assert_eq!(runs.len(), 2, "exactly one retry: {argv}");
+        assert!(runs[0].contains("--journal"));
+        assert!(!runs[1].contains("--journal"));
+        assert!(steps.iter().any(|s| s == "journal_unsupported"), "{steps:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_helper_that_fails_is_not_retried() {
+        // Exit 2 WITHOUT "flag provided but not defined" is a real
+        // usage error from a helper that knows the flag: no retry.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = old_helper(dir.path(), "never-sent", "", 2);
+        let runner = SubprocessRunner::new(Some(bin));
+        let pubkey = dir.path().join("pub");
+        std::fs::write(&pubkey, b"k").unwrap();
+        let journal = dir.path().join("j.jsonl");
+        let err = runner
+            .run_provision(
+                ProvisionArgs {
+                    provider: "hetzner",
+                    region: "fsn1",
+                    server_type: "cx22",
+                    toolbox_profile: "iran-default",
+                    helper_ip: "198.51.100.1",
+                    pubkey_file: &pubkey,
+                    token: "tok",
+                    families: vec![],
+                    existing_server_id: "",
+                    cover_sni: "",
+                    dry_run: false,
+                    rollback_on_failure: true,
+                    journal_path: Some(&journal),
+                },
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::SubprocessFailed { rc: 2, .. }));
+        let argv = std::fs::read_to_string(dir.path().join("argv.log")).unwrap();
+        assert_eq!(argv.lines().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_helper_without_release_addresses_still_decommissions_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = old_helper(
+            dir.path(),
+            "release-addresses",
+            r#"{"server_deleted":true,"ssh_key_deleted":true,"firewall_deleted":true,"warnings":null}"#,
+            0,
+        );
+        let runner = SubprocessRunner::new(Some(bin));
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, b"{}").unwrap();
+        let res = runner
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+                release_addresses: true,
+            })
+            .expect("decommission");
+        assert!(res.server_deleted);
+        assert!(!res.retry_needed);
+        assert!(
+            res.bridge_notes.iter().any(|n| n.contains("release-addresses")),
+            "{:?}",
+            res.bridge_notes
+        );
+        let argv = std::fs::read_to_string(dir.path().join("argv.log")).unwrap();
+        let runs: Vec<&str> = argv.lines().collect();
+        assert_eq!(runs.len(), 2, "{argv}");
+        assert!(runs[0].contains("--release-addresses") && runs[0].contains("--json"));
+        assert!(!runs[1].contains("--release-addresses") && runs[1].contains("--json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_helper_that_kept_a_reserved_address_needs_a_retry_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = old_helper(
+            dir.path(),
+            "release-addresses",
+            r#"{"server_deleted":true,"ssh_key_deleted":true,"firewall_deleted":true,"preserved":["floating-ip:42"],"warnings":["floating IP 42 was left reserved; run `daal-deploy floating-ip release --fip-id 42`"]}"#,
+            0,
+        );
+        let runner = SubprocessRunner::new(Some(bin));
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, b"{}").unwrap();
+        let res = runner
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+                release_addresses: true,
+            })
+            .expect("decommission");
+        assert!(res.server_deleted);
+        assert!(res.retry_needed, "the address still bills: keep the relay and its token");
+        assert_eq!(res.addresses.len(), 1);
+        assert_eq!(res.addresses[0].id, "42");
+        assert_eq!(res.addresses[0].code, "release_failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_6_is_a_report_that_needs_a_retry_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = old_helper(
+            dir.path(),
+            "never-sent",
+            r#"{"server_deleted":true,"ssh_key_deleted":true,"firewall_deleted":true,"addresses":[{"id":"42","ip":"198.51.100.9","released":false,"code":"release_failed","error":"503"}]}"#,
+            6,
+        );
+        let runner = SubprocessRunner::new(Some(bin));
+        let rec = dir.path().join("rec.json");
+        std::fs::write(&rec, b"{}").unwrap();
+        let res = runner
+            .run_decommission(DecommissionArgs {
+                record_path: &rec,
+                token: "tok",
+                release_addresses: true,
+            })
+            .expect("exit 6 carries a report");
+        assert!(res.retry_needed);
+        assert_eq!(res.addresses[0].code, "release_failed");
+    }
 
     // THE CURRENCY SURVIVES THE HOP.
     //
@@ -4540,6 +5631,7 @@ mod tests {
             .run_decommission(DecommissionArgs {
                 record_path: &rec,
                 token: "tok",
+                release_addresses: false,
             })
             .unwrap();
         assert_eq!(
@@ -4549,6 +5641,7 @@ mod tests {
                 ssh_key_deleted: true,
                 firewall_deleted: false,
                 warnings: vec!["firewall 422".into()],
+                ..Default::default()
             }
         );
     }
@@ -4594,6 +5687,7 @@ echo 'decommission warning: could not confirm the one-shot SSH key is gone' >&2"
             .run_decommission(DecommissionArgs {
                 record_path: &rec,
                 token: "tok",
+                release_addresses: false,
             })
             .unwrap();
         assert_eq!(
@@ -4603,6 +5697,8 @@ echo 'decommission warning: could not confirm the one-shot SSH key is gone' >&2"
                 ssh_key_deleted: false,
                 firewall_deleted: true,
                 warnings: vec!["could not confirm the one-shot SSH key is gone".into()],
+                preserved: vec!["ssh-key:daal-fsn1-000000-ephemeral*".into()],
+                ..Default::default()
             }
         );
     }
@@ -4633,6 +5729,7 @@ echo decommissioned"#,
             .run_decommission(DecommissionArgs {
                 record_path: &rec,
                 token: "tok",
+                release_addresses: false,
             })
             .unwrap();
         assert!(got.server_deleted);
@@ -4655,6 +5752,7 @@ echo decommissioned"#,
             .run_decommission(DecommissionArgs {
                 record_path: &rec,
                 token: "tok",
+                release_addresses: false,
             })
             .unwrap_err();
         match err {
