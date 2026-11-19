@@ -2789,6 +2789,38 @@ Open:
   already refused by the audit verdict, so removing the guard fails no
   test. Kept; noted so nobody reads its absence of a test as coverage.
 
+- [ ] **PA-25. Back closes the whole app instead of the open sheet.**
+  Seen on the phone 2026-11-19: with the per-person QR sheet open, the
+  system Back gesture finished the activity and the process exited. A
+  sheet should take Back first. Check what Back does while connected.
+- [ ] **PA-26. A second activity in the same process aborts at start.**
+  Seen once, right after `adb install -r` followed at once by
+  `am start`: Android had already restarted the activity, the second
+  create hit `ndk-context` (`assertion failed: previous.is_none()`) in
+  `WryActivity.create` and the app aborted. The next start was clean.
+  Not seen in normal use; find out whether any normal path creates the
+  activity twice in one process (for instance while the tunnel service
+  keeps the process alive).
+
+Seen on the phone, 2026-11-19 (build of this tree, device key, installed
+over the old one; the real relay "Test" on Hetzner):
+- Migration V016 ran; the relay, its person and its files are intact.
+- PA-13: the relay page ran the health check on opening. "Working, as
+  far as this phone can tell": server exists and is on, the relay
+  answers, three ways answer from here, the fast way "can't be tested
+  from this phone", and the note that nobody outside can see blocking
+  inside. Read-only on the account apart from the usual short firewall
+  window.
+- PA-11: the "Check my hosting account" button is on the relay list
+  (not pressed).
+- PA-15: "Show as QR code" and "Copy as text" are on the person's card;
+  the QR sheet opened and played 204 frames for the one person's file.
+  The receiving side (PA-22) needs a second phone.
+- Connecting after the update worked ("Works well here").
+- Not tried, because each needs a real server to be rented, rebuilt or
+  deleted: killed setup (PA-8 to PA-10, PA-18), renew after a rebuild
+  (PA-12), address release (PA-14).
+
 To check on the phone, with a real account (each step bills a little;
 the owner decides):
 
