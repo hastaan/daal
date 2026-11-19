@@ -138,6 +138,9 @@ interface Props {
         setErr: (s: string | null) => void,
     ) => Promise<boolean>;
     onDone: () => void;
+    /** D2: open "Renew everyone's files". The rebuilt server knows none
+     *  of the people on it, so that is the next thing to do. */
+    onRenew?: () => void;
 }
 
 const BODY: React.CSSProperties = {
@@ -246,6 +249,7 @@ export function RelayRebuild({
     disabled,
     runMgmt,
     onDone,
+    onRenew,
 }: Props) {
     const [mode, setMode] = useState<RebuildLevel | null>(null);
     const [step, setStep] = useState<'choose' | 'confirm'>('choose');
@@ -1120,16 +1124,31 @@ export function RelayRebuild({
                     onClose={() => setDone(null)}
                     width={520}
                     footer={
-                        <Button onClick={() => setDone(null)}>{t('common.close')}</Button>
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                            <Button variant="secondary" onClick={() => setDone(null)}>
+                                {t('common.close')}
+                            </Button>
+                            {onRenew && (
+                                <Button
+                                    onClick={() => {
+                                        setDone(null);
+                                        onRenew();
+                                    }}
+                                >
+                                    {t('pub.renew.action')}
+                                </Button>
+                            )}
+                        </span>
                     }
                 >
                     <div style={{ display: 'grid', gap: 10 }}>
                         <div style={BODY}>{t('pub.danger.rebuild.done.body')}</div>
-                        <div style={BODY}>
-                            {mirrorsInPack > 0
-                                ? t('pub.danger.rebuild.done.by_hand_fresh')
-                                : t('pub.danger.rebuild.done.by_hand')}
-                        </div>
+                        {/* D2: one action renews everyone — no more
+                            "press Replace their file for each person". */}
+                        <div style={BODY}>{t('pub.renew.after_rebuild')}</div>
+                        {mirrorsInPack > 0 && (
+                            <div style={BODY}>{t('pub.renew.after_rebuild.fresh')}</div>
+                        )}
                         {/* The rebuild carries a reserved address
                             forward in the record but does NOT re-attach
                             it, and an L5-shaped move cannot carry it at

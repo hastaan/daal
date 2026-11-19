@@ -41,6 +41,10 @@ pub mod keystore;
 // makes the suite look like it still covers a surface it does not.
 pub mod operator_db;
 pub mod phase;
+// Publisher-alone wave: what a setup journalled, finishing or deleting
+// an interrupted setup and checking the hosting account, the health
+// check, and renewing everyone's files after a rebuild.
+pub mod provision_journal;
 pub mod publisher_key;
 pub mod recipient_book;
 pub mod recipient_identity;
@@ -53,6 +57,11 @@ pub mod recipient_sbpx;
 // What the relay says it is, and keeping the signed pack true to it:
 // the relay is asked before every signature, and a reply that no longer
 // matches what the pack commits to signs again.
+pub mod relay_health;
 pub mod relay_identity;
 pub mod relay_rotation;
+pub mod renew;
+pub mod setup_recovery;
+#[cfg(test)]
+mod publisher_alone_tests;
 pub mod staging;

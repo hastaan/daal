@@ -193,6 +193,7 @@ mod tests {
         WizardCtx {
             db: Arc::new(db),
             keystore: Arc::new(ks),
+            journal_dir: staging_dir.join("provision-journal"),
             staging_dir,
             cli: Arc::new(MockRunner::new(Pricing {
                 provider: "hetzner".into(),
@@ -296,6 +297,7 @@ mod tests {
         let ctx = WizardCtx {
             db: Arc::new(db),
             keystore: Arc::new(ks),
+            journal_dir: staging_dir.join("provision-journal"),
             staging_dir,
             cli: Arc::new(MockRunner::new(Pricing {
                 provider: "hetzner".into(),

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -146,7 +147,7 @@ func (c *Client) ProvisionUser(ctx context.Context, rec *provider.OperatorRecord
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("mgmt: users/provision %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, &StatusError{Op: "users/provision", Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 	}
 	var out UserCreds
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -177,7 +178,7 @@ func (c *Client) RevokeUser(ctx context.Context, rec *provider.OperatorRecord, p
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("mgmt: users/revoke %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, &StatusError{Op: "users/revoke", Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 	}
 	var out RevokeResp
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -201,7 +202,7 @@ func (c *Client) ListUsers(ctx context.Context, rec *provider.OperatorRecord, pr
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("mgmt: users/list %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return nil, &StatusError{Op: "users/list", Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 	}
 	var out struct {
 		Users []UserMeta `json:"users"`
@@ -210,4 +211,28 @@ func (c *Client) ListUsers(ctx context.Context, rec *provider.OperatorRecord, pr
 		return nil, err
 	}
 	return out.Users, nil
+}
+
+// StatusError is a non-200 answer from the relay's management service.
+// Its text is exactly what these calls always returned ("mgmt: <op>
+// <status>: <body>"), so callers that match on the words keep working;
+// callers that need the status (users-renew's 409 and 404 handling,
+// relay-health's refused) read it with errors.As.
+type StatusError struct {
+	Op     string
+	Status int
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("mgmt: %s %d: %s", e.Op, e.Status, e.Body)
+}
+
+// HTTPStatus returns the relay's HTTP status carried by err, or 0.
+func HTTPStatus(err error) int {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Status
+	}
+	return 0
 }

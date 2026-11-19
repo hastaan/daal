@@ -1688,10 +1688,12 @@ first.)
   when re-signing had failed.** It now says what happened and what to
   do (`publisher/rotateTlsVerdict.test.ts`). The "what to do" sentence
   is read from `relay_identity::heal_after_reply`, not exercised.
-- [ ] **PH-22. A person's file cannot be shown as a QR or copied as
+- [x] **PH-22. A person's file cannot be shown as a QR or copied as
   text.** `wizard_qr_render` and `wizard_copy_pasteable` take only
   `shared | raw`; both need a per-person file, plus the variant in
-  `wizardCommands.ts`.
+  `wizardCommands.ts`. *In the tree, not seen on a phone: both take
+  `recipient:<id>` now, and the receiving side unseals a per-person QR
+  code (PA-15 in section 17; the engine import step is PA-22).*
 - [ ] **PH-23. When the engine cannot start, the shell cannot say
   why.** `engine_init` returns -1 and there is no Core to ask;
   `engine_status` reports the path only. Needs an init-error accessor
@@ -2551,3 +2553,275 @@ device key); the relay record and the saved routes survived.
   move for speed, a change Wi-Fi → mobile data (adb runs over the
   Wi-Fi; the person has to switch it by hand while Daal is connected
   and the log is read afterwards), `network_down`, a metered network.
+
+## 17. Publisher alone, first slice: an interrupted setup, renewing everyone, health, a clean delete (2026-11-19)
+
+The wave on branch `publisher-alone`, for a publisher who has only a
+phone: a setup killed half way is journalled and can be finished on the
+server that already exists or deleted with everything it made; one
+press renews everyone after a rebuild; a health check says what can be
+seen from here; a delete releases the addresses Daal reserved; one
+person's file goes out as a QR code or as text. Five lanes (Go, shell,
+UI, an integration lane with a fake hosting company, a repair pass over
+twenty review findings), then this gate.
+
+Built by the wave (each "[x]" = in the tree, not seen on a phone or a
+real provider; green in `./daal test`, which since this wave also runs
+`cargo test -p daal-wizard` with the end-to-end tests below):
+
+- [x] **PA-8. A setup is journalled before and as it creates things.**
+  `provision --journal <file>` (`publisher/deploy/provjournal/`) writes
+  one line per step, mode 0600, under a lock: `begin` (after the one
+  cloud read that picks the mode: create / adopt / reuse / refuse), then
+  `intent` before every create and `created` after it (server id, name,
+  management port, address, firewall, key), `rolled_back`, and `done`
+  before stdout. No token and no secret goes into it. The shell keeps it
+  in `<state_dir>/provision-journal` (`provision_journal.rs`), passes it
+  on every provision and rebuild, deletes it only on success, and saves a
+  `done` journal without starting the helper again. A locked journal is
+  `E_SETUP_RUNNING`. Panic wipe removes it.
+  `provjournal.TestJournal_LinesSeqModeAndRolledBack`,
+  `TestJournal_ASecondWriterIsBusyUntilTheFirstCloses`;
+  `provision_passes_a_journal_in_durable_storage_and_deletes_it_only_on_success`,
+  `a_setup_that_finished_while_the_app_was_gone_is_saved_without_renting_again`,
+  `a_locked_journal_means_a_setup_is_still_running`.
+- [x] **PA-9. An interrupted setup is finished on the server that
+  exists.** Hetzner adopts a server carrying the derived name and both
+  Daal labels (re-imaged, no second server rented); a server it cannot
+  adopt is refused with exit 4 and its id (`E_SERVER_EXISTS`); Vultr
+  cannot finish (exit 3, `E_NOT_SUPPORTED`) and the card says a new
+  server would be rented. `setup_recovery` reads the journal and the
+  account and gives one state; the card (`SetupRecoveryCard.tsx`) shows
+  exactly the buttons for it and "Finish here" passes the server id.
+  e2e `d1_a_killed_setup_is_finished_on_the_server_that_already_exists`
+  (the real helper killed with -9 during the health wait; one server
+  ever created, one rebuild, no key left); `recovery_states_from_the_account`,
+  `recovery_reads_the_journal_and_the_account`; UI "finish here builds
+  ON the server that exists (no second server)".
+- [x] **PA-10. An interrupted setup can be deleted with everything it
+  made, and Cancel offers that.** "Delete this server" removes server,
+  firewall, key and reserved address and keeps the relay ready to start
+  again; Cancel with a token and anything rented deletes, never
+  local-only; the person's own server is deleted only when they say
+  "Delete my server". Every delete goes through one confirm that names
+  what goes and whether anything still costs money.
+  e2e `d1_a_killed_setup_is_deleted_with_everything_it_made`;
+  `removing_only_the_server_keeps_the_relay_ready_to_start_again`,
+  `the_persons_own_server_is_named_and_deleted_only_when_they_say_so`,
+  `deleting_an_interrupted_setup_finds_the_server_in_the_journal`; UI
+  "with a token and anything rented, cancel deletes; never local-only".
+- [x] **PA-11. "Check my hosting account" from the relay list.** Shown
+  whenever a cloud token is stored. Rows sharing one token are checked
+  together (grouped by hash in memory; the token never leaves the
+  shell). Findings in four groups; only Daal-created leftovers can be
+  ticked. **The rule:** a thing is Daal's only if it carries Daal's own
+  ownership labels (servers, firewalls, addresses) or Daal's derived
+  name (keys); anything without them is never offered, and an unlabelled
+  address is never offered even if it looks like one of ours. Nothing is
+  deletable when the account could not be read in full.
+  e2e `d1_the_account_check_finds_and_deletes_a_server_another_phone_stranded`;
+  `the_account_check_groups_rows_by_token_and_never_shows_it`,
+  `account_findings_and_what_may_be_deleted`, `cleanup_sends_only_what_was_ticked`;
+  `TestAccountReclaimCLI_IncludeUnclaimedServersIsPassedAndCoded`; UI
+  "never offers to delete in-use, unfinished or cannot-tell…", "an
+  incomplete account offers nothing to delete and says why".
+- [x] **PA-12. "Renew everyone's files" after a rebuild.** One press
+  (`wizard_renew_everyone` → `users-renew`): one firewall window, one
+  roster read, then each person who was not removed is ensured (kept if
+  already on this box with a current file), re-created or re-keyed, and
+  their file rewritten; removed people are revoked on the box, never
+  re-created. Per-person result in plain words; a second press writes
+  nothing; a file that failed to write is redone next time, alone. The
+  rebuild now records the new box's fingerprint (it kept the old one
+  before), which is what the "renewed on this box" marker compares to.
+  e2e `d2_after_a_rebuild_one_press_renews_everyone_and_a_second_press_changes_nothing`;
+  `mgmt.TestRenewUsers_EnsureReplaceRevokeSemantics`,
+  `TestRenewUsers_SecondRunWritesNothingForEnsuredPeople`,
+  `TestRenewUsers_RefusesARevokedPersonListedForAnythingElse`;
+  `after_a_rebuild_renew_recreates_everyone_once_and_a_second_press_writes_nothing`,
+  `a_file_that_could_not_be_written_is_redone_on_the_next_press_and_only_that_one`,
+  `rotate_execute_l4_reprovisions_then_provisions_replacement` (extended);
+  UI "the confirm names only people whose access was not removed…".
+- [x] **PA-13. A health check the publisher can press.** `relay-health`:
+  does the server exist and run at the hosting company (only with a
+  token), does the management answer a signed call (the existing signed
+  `/identity` and `/users/list`, in one firewall window; no new open
+  port), and does each way in answer from here (a TLS handshake with the
+  cover name, a pin check where the way has one, a TCP connect;
+  datagram ways are "cannot be tested from here"). Runs on opening the
+  Publisher page at most every ten minutes, one relay at a time; "Check
+  now" forces it. Green only when it says working, is fresh, the box
+  knows everyone and a way answers. The limit is said once: from outside
+  the country nobody can see whether it is blocked inside.
+  e2e `d3_health_says_working_stopped_and_management_silent_from_the_real_checks`;
+  `mgmt.TestHealthWithFW_*` (four), `health.TestProbeWays_EachStateFromHere`,
+  `TestRelayHealthCLI_*` (three); `health_verdicts`,
+  `the_health_check_runs_at_most_every_ten_minutes_unless_asked`; UI
+  "green only when the last check said working and is fresh", "lines
+  are plain words, ways named by plain name, never the protocol token".
+- [x] **PA-14. Deleting a relay releases every address Daal reserved
+  for it.** `decommission --release-addresses` (Hetzner and Vultr):
+  released / not Daal's (kept) / still attached elsewhere (kept, still
+  bills) / release failed (exit 6). A failed release keeps the relay as
+  "decommissioned" with the address named, says it still costs money,
+  and offers Try again; never a command line (provider warnings only
+  under Details). A server already gone counts as deleted. A relay
+  being set up that is still running is never touched by that Try again.
+  e2e `d4_deleting_a_relay_releases_its_address_and_a_failed_release_is_retried`;
+  `hetzner.TestReleaseRelayAddresses_*` (three),
+  `vultr.TestReleaseRelayAddresses_VultrReleasesMarkedKeepsTheRest`,
+  `TestDecommissionReleaseAddresses_*` (three),
+  `TestDecommission_AServerThatIsAlreadyGoneCountsAsDeleted`;
+  `an_address_that_could_not_be_released_keeps_the_relay_for_a_retry`,
+  `an_old_helper_that_kept_a_reserved_address_needs_a_retry_naming_it`;
+  UI "Try again on a relay card never deletes a working relay…".
+- [x] **PA-15. One person's file as a QR code or as text** (closes
+  PH-22 in the tree). `recipient:<id>` is accepted by `qr_render` and
+  `copy_pasteable`; a removed person gets nothing, a missing file is
+  `E_FILE_MISSING`. Each person's row and each renewed row has "Show as
+  QR code" and "Copy as text" ("Only <name>'s phone can open it"). On the
+  receiving side the fountain decoder now hands a sealed file back as
+  `sealed_b64` and the shell unseals it with that phone's identity
+  before the usual import.
+  `TestPersonFile_SurvivesQRAndTextRoundTripAndStillVerifies`,
+  `abi.TestFountainFeedFrame_SealedFileComesBackSealed`; e2e
+  `d5_one_persons_file_survives_copy_as_text_and_the_qr_code_and_still_verifies`;
+  `a_persons_file_copied_as_text_opens_on_their_phone_and_still_verifies`,
+  `a_persons_file_received_by_qr_opens_on_their_phone_and_still_verifies`,
+  `a_tampered_persons_file_received_by_qr_is_still_refused`,
+  `one_persons_file_is_handed_out_only_while_they_are_on_the_relay`; UI
+  "the QR sheet streams the artifact it is given…".
+- [x] **PA-16. An empty hosting account no longer breaks the server
+  lists.** Go printed `null` for an empty list; both adapters now print
+  `[]` and the shell reads `null` as empty (for an older helper). This
+  blocked "use a server I already own" on a new account and the L4
+  price check. `TestEmptyAccountListsAsAnEmptyArrayNotNull`,
+  `vultr.TestListServersOnAnEmptyAccountIsAnEmptyArray`,
+  `an_empty_account_listed_as_null_is_an_empty_list`.
+- [x] **PA-17. A fake hosting company for the publisher end to end.**
+  `publisher/deploy/e2e/fakeworld/`: the Hetzner API under a test CA
+  behind a CONNECT proxy (the shipped `daal-deploy` reaches it only
+  through `HTTPS_PROXY` + `SSL_CERT_FILE`; no test hook in the binary);
+  every server becomes a box on its own 127.x address with the
+  production health handler, a management service checking every call
+  with the production `mgmt.VerifyToken`, and anytls / shadowsocks
+  listeners. Any endpoint it does not model fails the test.
+  `publisher_alone_e2e.rs` (7 tests) drives the app's real command
+  functions through the production subprocess runner.
+
+W3 items: none moves with this wave (the new wrappers all have
+callers; W3-4, W3-5 and W3-12 are untouched).
+
+Open:
+
+- [ ] **PA-1. An address left by an earlier try, on a relay that then
+  finished.** "Delete this server" on an unfinished setup can fail to
+  release an address; if the person then starts again and the relay
+  finishes, the card still says the address costs money but offers no
+  button (the only call that releases it is a delete of the whole
+  relay). Needs a release-only action for one named, Daal-labelled,
+  unattached address of a live relay (Go verb + shell command + the
+  card's Try again).
+- [ ] **PA-2. The person's own server and a rented one both live.** If
+  a setup on "a server I already own" failed and a later rented setup
+  was killed after asking for its server, the recovery card follows the
+  rented server (account check) and does not name the person's own
+  server, which Daal partly set up. It is never deleted without the
+  person saying so, but it is not mentioned either. One card naming
+  both is the fix.
+- [ ] **PA-3. Teardown by id does not double-check the derived name.**
+  The shell now leaves the server id empty when the journal's last
+  server create was never answered, so `decommission` looks the server
+  up by name. A record or journal id that is stale for another reason
+  (server removed in the hosting console, then a new one made outside
+  the journal) still makes `decommission` delete only that id. Go side:
+  when the given id is gone and a server with both ownership labels
+  still carries the derived name, report it instead of
+  `server_deleted:true`.
+- [ ] **PA-4. The QR sheet shows the raw error text outside Details.**
+  Pre-existing; the sentence under it is now right for one person's
+  file. Move the raw text under a Details disclosure.
+- [ ] **PA-5. Wizard wiring tests.** The recovery, cancel and retry
+  decisions are now pure functions with tests (`performRecovery`,
+  `afterRecovery`, `cancelDelete`, `existingAfterFailure`,
+  `retryRelease`); the wizard's own state handling around them is still
+  checked by source greps only. A rendered wizard test (mocked invoke)
+  would close that.
+- [ ] **PA-6. Old bundled helper and reserved addresses.** With a
+  `libdaal_deploy.so` that predates `--release-addresses`, a delete now
+  keeps the relay (and its token) and names the address as still
+  billing, but Try again can never release it until the app's helper is
+  updated. The release must ship the rebuilt helper.
+- [ ] **PA-7. Deleting an unfinished relay from the relay list, when it
+  was being set up on the person's own server.** The list's delete
+  sheet does not pass "delete my server", so the shell (correctly)
+  leaves their server alone, but the report then reads "the server is
+  gone". The sheet should ask the setup-recovery question first and
+  offer "Delete my server" / "Keep my server" as the wizard's Cancel
+  does.
+- [ ] **PA-18. Does the setup helper survive Android killing the
+  app?** Unknown. If it does, a resumed app finds the journal locked and
+  says a setup is still running (`E_SETUP_RUNNING`) until it ends; if it
+  does not, the journal is what the card reads. Only a phone answers it.
+- [ ] **PA-19. Vultr has no end-to-end test.** `fakeworld` models
+  Hetzner only; Vultr's journal, release, health state and reclaim rest
+  on adapter tests with httptest fakes. Vultr's `ListServerTypes` `[]`
+  fix has no test of its own.
+- [ ] **PA-20. The account check end to end covers one finding.** Only
+  "a server another phone stranded" runs through the real helper; the
+  other groups (a second server for one relay, an unfinished setup,
+  in-use, cannot tell) rest on mocked shell tests.
+- [ ] **PA-21. What the fake cannot show.** Datagram ways and port-443
+  families are not served by the test boxes, and the fake does not
+  enforce firewall rules, so "the window opened and closed" is asserted
+  by call order, not by a refused connection.
+- [ ] **PA-22. The receiving phone's import of a per-person QR code.**
+  The unsealing is tested; the last step, `cmd::import_sbp` with the
+  engine library, is not run by any test (the tests verify with
+  `bundle_rs` instead).
+- [ ] **PA-23. The desktop shell was not built.** This host has no GTK
+  development libraries; `src-tauri` was type-checked for Android only
+  (`cargo check --target aarch64-linux-android --lib`), never linked or
+  run. Publisher screens other than the wizard have no dev-harness
+  mocks.
+- [ ] **PA-24. A defence-in-depth guard no test can see.** In
+  `hetzner/reclaim_server.go`, "a record claims this server id" is
+  already refused by the audit verdict, so removing the guard fails no
+  test. Kept; noted so nobody reads its absence of a test as coverage.
+
+To check on the phone, with a real account (each step bills a little;
+the owner decides):
+
+1. Build `libdaal_deploy.so` from this tree
+   (`tools/build-deploy-android.sh`) and the APK with the device key.
+   Without the new helper, renew, health and the account check say
+   "update the app", journalling is silently off and a delete keeps
+   the relay naming its address (PA-6).
+2. Start a Hetzner setup, swipe the app away once the server shows in
+   the hosting console. Reopen: the card names the server and says it
+   costs money. "Finish here": no second server in the console. (Also
+   answers PA-18: note whether the card first said a setup was still
+   running.)
+3. Again, and this time "Delete this server": server, firewall, key
+   and address gone in the console; the relay is ready to start again.
+4. Start a setup, turn on airplane mode mid-way, Cancel: the sheet
+   names what will be deleted and says it cannot check the account;
+   after the network returns, the account check finds nothing.
+5. With a stored token, "Check my hosting account" on the relay list:
+   it lists the live relay as in use and offers nothing of it; create
+   an unlabelled address by hand in the console and confirm it is never
+   offered.
+6. Rebuild a relay with two people and one removed person: one press
+   of "Renew everyone's files" gives two "done", the removed person is
+   not back, a second press says already done; hand one file over by
+   QR and one by "Copy as text" through a messenger, and both connect
+   on the recipients' phones.
+7. Open the Publisher page twice within a few minutes: one check. Power
+   the server off in the console, "Check now": it says the server is
+   stopped, in plain words.
+8. On a relay whose address was changed once (so Daal reserved an
+   address for it), delete it with "Delete the server too": the console
+   shows no address left, and the screen says billing has stopped only
+   then.
+9. The same on Vultr (PA-19): a killed setup says it cannot be
+   finished there and offers the delete.

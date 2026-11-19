@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -156,6 +157,10 @@ type AuditedResource struct {
 	// left alone.
 	Reclaimable bool `json:"reclaimable"`
 
+	// Address is the IPv4 of a server or a floating/reserved IP, "" for
+	// every other kind. Shown to the person so they can recognise it.
+	Address string `json:"address"`
+
 	// Hint is the operator's next move in their own terms — the
 	// command to run, or the console page to open. Populated for
 	// everything that is not plainly in-use.
@@ -189,6 +194,11 @@ type KnownRelay struct {
 	// Note explains any disagreement between the two ids. Empty
 	// when they agree.
 	Note string `json:"note,omitempty"`
+
+	// RecordIndex is the 0-based position, in argv order, of the
+	// --record-file that produced this entry. It is how a caller that
+	// passed one record per local relay maps a finding back to it.
+	RecordIndex int `json:"record_index"`
 }
 
 // AccountAudit is the whole answer: what we believe, what is there,
@@ -304,6 +314,89 @@ type ReclaimOutcome struct {
 	// Reason is why it was deleted, or — far more importantly — why
 	// it was not. Every refusal names the guard that fired.
 	Reason string `json:"reason"`
+
+	// Code is the closed-set outcome the app renders in plain words
+	// (Reason is raw text for a Details disclosure): deleted, released,
+	// kept_in_use, kept_claimed, kept_not_daal, kept_unproven,
+	// kept_list_unreadable, kept_unsupported, delete_failed,
+	// already_gone.
+	Code string `json:"code"`
+}
+
+// Reclaim outcome codes.
+const (
+	ReclaimDeleted            = "deleted"
+	ReclaimReleased           = "released"
+	ReclaimKeptInUse          = "kept_in_use"
+	ReclaimKeptClaimed        = "kept_claimed"
+	ReclaimKeptNotDaal        = "kept_not_daal"
+	ReclaimKeptUnproven       = "kept_unproven"
+	ReclaimKeptListUnreadable = "kept_list_unreadable"
+	ReclaimKeptUnsupported    = "kept_unsupported"
+	ReclaimDeleteFailed       = "delete_failed"
+	ReclaimAlreadyGone        = "already_gone"
+)
+
+// ReclaimOpts widens what a reclaim may delete.
+type ReclaimOpts struct {
+	// IncludeUnclaimedServers lets a reclaim delete a SERVER — never by
+	// default, only one named explicitly with --only server:<id>, and
+	// only when every ownership proof holds (both labels, the derived
+	// name, no record claiming that id, a complete server list). With
+	// it, the server's own firewall, one-shot keys and unrecorded
+	// reserved addresses go in the same run.
+	IncludeUnclaimedServers bool
+}
+
+// ServerReclaimer is implemented by adapters that can reclaim with
+// ReclaimOpts. ReclaimOrphans is the zero-opts form of the same call.
+type ServerReclaimer interface {
+	ReclaimOrphansWithOpts(ctx context.Context, records []*OperatorRecord, only []ResourceRef, opts ReclaimOpts) (*ReclaimReport, error)
+}
+
+// KeptCode is the code for a resource the fresh audit refused to make
+// reclaimable, from its verdict.
+func KeptCode(r AuditedResource) string {
+	switch r.Verdict {
+	case VerdictInUse:
+		return ReclaimKeptInUse
+	case VerdictUnclaimed:
+		if r.Kind == KindServer {
+			// Without IncludeUnclaimedServers (or without naming it
+			// explicitly) this run does not delete servers at all.
+			return ReclaimKeptUnsupported
+		}
+		return ReclaimKeptClaimed
+	}
+	return ReclaimKeptUnproven
+}
+
+// ReclaimCodeFromReason classifies a reclaim outcome that did not set
+// its own code. The reasons are this package's adapters' own sentences;
+// this keeps the mapping in one tested place.
+func ReclaimCodeFromReason(o ReclaimOutcome) string {
+	r := strings.ToLower(o.Reason)
+	switch {
+	case o.Deleted && r == "already gone":
+		return ReclaimAlreadyGone
+	case o.Deleted && o.Kind == KindFloatingIP:
+		return ReclaimReleased
+	case o.Deleted:
+		return ReclaimDeleted
+	case strings.Contains(r, "delete failed"):
+		return ReclaimDeleteFailed
+	case strings.Contains(r, "could not re-read"):
+		return ReclaimKeptListUnreadable
+	case strings.Contains(r, "attached") || strings.Contains(r, "placed behind"):
+		return ReclaimKeptInUse
+	case strings.Contains(r, "label selector"):
+		return ReclaimKeptUnproven
+	case strings.Contains(r, "no longer") || strings.Contains(r, "different object") || strings.Contains(r, "did not find"):
+		return ReclaimKeptNotDaal
+	case strings.Contains(r, "never deletes") || strings.Contains(r, "does not delete"):
+		return ReclaimKeptUnsupported
+	}
+	return ReclaimKeptUnproven
 }
 
 // ReclaimReport is the outcome of a reclaim run.
@@ -327,7 +420,12 @@ func (r *ReclaimReport) Warnf(format string, args ...any) {
 }
 
 // Add appends one outcome.
-func (r *ReclaimReport) Add(o ReclaimOutcome) { r.Outcomes = append(r.Outcomes, o) }
+func (r *ReclaimReport) Add(o ReclaimOutcome) {
+	if o.Code == "" {
+		o.Code = ReclaimCodeFromReason(o)
+	}
+	r.Outcomes = append(r.Outcomes, o)
+}
 
 // Deleted counts the resources provably removed.
 func (r *ReclaimReport) Deleted() int {

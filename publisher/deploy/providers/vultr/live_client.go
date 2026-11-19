@@ -204,6 +204,7 @@ type wireInstance struct {
 	Hostname        string   `json:"hostname"`
 	Status          string   `json:"status"`
 	ServerStatus    string   `json:"server_status"`
+	PowerStatus     string   `json:"power_status"`
 	Plan            string   `json:"plan"`
 	Region          string   `json:"region"`
 	MainIP          string   `json:"main_ip"`
@@ -218,7 +219,7 @@ func (w *wireInstance) toInfo() *InstanceInfo {
 	}
 	out := &InstanceInfo{
 		ID: w.ID, Label: w.Label, Hostname: w.Hostname,
-		Status: w.Status, ServerStatus: w.ServerStatus,
+		Status: w.Status, ServerStatus: w.ServerStatus, PowerStatus: w.PowerStatus,
 		Plan: w.Plan, Region: w.Region, Tags: w.Tags,
 		FirewallGroupID: w.FirewallGroupID,
 	}
@@ -829,7 +830,7 @@ type ServerTypeEntry struct {
 // does not carry offers the operator a box whose create call fails.
 func (lc *ListingClient) ListServerTypes(ctx context.Context, region string) ([]ServerTypeEntry, error) {
 	want := vultrRegionOf(region)
-	var out []ServerTypeEntry
+	out := []ServerTypeEntry{} // never nil: `[]`, not `null`
 	err := lc.c.listPages(ctx, "/plans", func(raw json.RawMessage) error {
 		var page struct {
 			Plans []struct {
@@ -895,7 +896,7 @@ type ExistingServerEntry struct {
 
 // ListServers returns every instance on the account.
 func (lc *ListingClient) ListServers(ctx context.Context) ([]ExistingServerEntry, error) {
-	var out []ExistingServerEntry
+	out := []ExistingServerEntry{} // never nil: `[]`, not `null`
 	err := lc.c.listPages(ctx, "/instances", func(raw json.RawMessage) error {
 		var page struct {
 			Instances []wireInstance `json:"instances"`

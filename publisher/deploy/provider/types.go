@@ -9,6 +9,7 @@
 package provider
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -201,6 +202,11 @@ type ProvisionOpts struct {
 	// nil (no-op). The step string is machine-readable; message is
 	// human-readable.
 	OnProgress func(step, message string) `json:"-"`
+
+	// Journal, when set, is told what this run is about to create and
+	// what it created, as it happens (see ProvisionJournal). Never
+	// serialised.
+	Journal ProvisionJournal `json:"-"`
 }
 
 // ResolveMgmtPort returns the caller-supplied mgmt port after
@@ -268,6 +274,13 @@ type DecommissionReport struct {
 	// Warnings are non-fatal cloud errors and preservation reasons,
 	// rendered verbatim by the caller. Never null.
 	Warnings []string `json:"warnings"`
+
+	// Addresses is filled only by `decommission --release-addresses`:
+	// one entry per reserved address Daal made for this relay, saying
+	// whether it was given back. Absent without the flag, so an older
+	// shell sees exactly the report it always did. A pointer so that
+	// "the flag was given and there were none" is `[]`, not absent.
+	Addresses *[]AddressOutcome `json:"addresses,omitempty"`
 }
 
 // NewDecommissionReport returns a report with every boolean false
@@ -336,4 +349,33 @@ type Pricing struct {
 	Currency     string  `json:"currency,omitempty"`
 	IncludedTBM  float64 `json:"included_traffic_tb_per_month,omitempty"`
 	OverageEURGB float64 `json:"overage_eur_per_gb,omitempty"`
+}
+
+// AddressOutcome is what happened to one reserved address when its relay
+// was deleted with --release-addresses.
+type AddressOutcome struct {
+	ID       string `json:"id"`
+	IP       string `json:"ip"`
+	Released bool   `json:"released"`
+	// Code: released | not_daal | still_attached | release_failed.
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
+// Address outcome codes.
+const (
+	AddrReleased      = "released"
+	AddrNotDaal       = "not_daal"
+	AddrStillAttached = "still_attached"
+	AddrReleaseFailed = "release_failed"
+)
+
+// AddressReleaser is implemented by adapters that can give back every
+// address Daal reserved for a relay whose server is gone: the record's
+// own FloatingIPID when it is Daal's, and every address on the account
+// carrying both ownership marks for that relay. Unbinding is skipped —
+// the server is gone. An address that is not Daal's is kept (not_daal);
+// one attached to ANOTHER server is kept (still_attached).
+type AddressReleaser interface {
+	ReleaseRelayAddresses(ctx context.Context, rec *OperatorRecord, deletedServerID string) []AddressOutcome
 }

@@ -761,7 +761,9 @@ func (l *ListingClient) ListServerTypes(ctx context.Context, region string) ([]S
 	if err != nil {
 		return nil, err
 	}
-	var result []ServerTypeEntry
+	// Never nil: an empty list is `[]` on stdout, which the app reads
+	// as "nothing sold here", not `null`, which it could not read.
+	result := []ServerTypeEntry{}
 	for _, st := range types {
 		// Only shared-CPU types (cax = ARM shared, cx = x86 shared, cpx = x86 perf shared)
 		name := st.Name
@@ -833,7 +835,7 @@ func (l *ListingClient) ListServers(ctx context.Context) ([]ExistingServerEntry,
 	if err != nil {
 		return nil, err
 	}
-	var result []ExistingServerEntry
+	result := []ExistingServerEntry{} // never nil: `[]`, not `null`, for an empty account
 	for _, s := range servers {
 		entry := ExistingServerEntry{
 			ID:     strconv.FormatInt(s.ID, 10),

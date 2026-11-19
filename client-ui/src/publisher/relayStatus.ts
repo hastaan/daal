@@ -8,9 +8,13 @@
 //
 // The rule now: a badge drawn from the recorded state names that state
 // ("Set up") and is never green. "Live", in green, is reserved for a
-// reachability check that has just succeeded — `checkedJustNow`. Nothing
-// in the app runs such a check yet (the management plane has no health
-// verb), so today no relay is shown as live, which is the truth.
+// reachability check that has just succeeded — `checkedJustNow`. That
+// check now exists (D3, relayHealth.ts): the relay list and the relay
+// page run it on open, and pass `checkedWorking(health, now)` here —
+// true only when the last check said "working" and is under ten
+// minutes old. A stale or partial check falls back to the recorded
+// state. Even green means "answers from where this phone is", never
+// "reachable inside the country"; the health panel says so once.
 
 export type BadgeTone = 'good' | 'warn' | 'bad' | 'neutral' | 'gold';
 

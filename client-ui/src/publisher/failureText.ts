@@ -52,6 +52,18 @@ export function failureKey(e: unknown): string {
         case 'E_LEGACY_PIN_REQUIRED':
         case 'E_SECRET_MISSING':
             return 'pub.fail.locked';
+        case 'E_SETUP_RUNNING':
+            return 'pub.fail.setup_running';
+        case 'E_SERVER_EXISTS':
+            return 'pub.fail.server_exists';
+        case 'E_NOT_SUPPORTED':
+            return 'pub.fail.not_supported';
+        case 'E_RELAY_UNREACHABLE':
+            return 'pub.fail.unreachable';
+        case 'E_FILE_MISSING':
+            return 'pub.fail.file_missing';
+        case 'E_DEPLOY_TOO_OLD':
+            return 'pub.fail.deploy_too_old';
         default:
             break;
     }

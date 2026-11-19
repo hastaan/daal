@@ -101,7 +101,10 @@ func ruleKey(ipType, proto, subnet string, subnetSize int, port string) string {
 // made a decision about their own machine, and a provisioner that
 // silently deleted it would be taking a security decision out of their
 // hands with no record of it.
-func (p *Provider) ensureFirewallGroup(ctx context.Context, relay string, extraPorts []relayports.Endpoint) (string, bool, error) {
+func (p *Provider) ensureFirewallGroup(ctx context.Context, relay string, extraPorts []relayports.Endpoint, j provider.ProvisionJournal) (string, bool, error) {
+	if j == nil {
+		j = provider.ProvisionOpts{}.J()
+	}
 	desc := firewallGroupDescription(relay)
 	want := baselineRules(relay, extraPorts)
 
@@ -112,10 +115,14 @@ func (p *Provider) ensureFirewallGroup(ctx context.Context, relay string, extraP
 	created := false
 	groupID := ""
 	if g == nil {
+		if err := j.Intent(provider.KindFirewall, desc, ""); err != nil {
+			return "", false, provider.Coded(provider.CodeJournalError, fmt.Errorf("journal: %w", err))
+		}
 		groupID, err = p.c.FirewallGroupCreate(ctx, desc)
 		if err != nil {
 			return "", false, fmt.Errorf("create firewall group: %w", err)
 		}
+		j.Created(provider.KindFirewall, groupID, desc, nil)
 		created = true
 	} else {
 		if !markedFor(g.Description, relay) {
@@ -169,7 +176,7 @@ func (p *Provider) ReRenderFirewall(ctx context.Context, rec *provider.OperatorR
 		return errors.New("vultr: record cannot name its relay (publisher key + region required)")
 	}
 	relay := derivedInstanceLabel(rec.PublisherPubKey, rec.Region)
-	_, _, err := p.ensureFirewallGroup(ctx, relay, relayports.FirewallPortsFor(families))
+	_, _, err := p.ensureFirewallGroup(ctx, relay, relayports.FirewallPortsFor(families), nil)
 	if err != nil {
 		return fmt.Errorf("vultr: re-render firewall for %v: %w", families, err)
 	}

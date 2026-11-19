@@ -299,6 +299,18 @@ func FountainFeedFrame(sessionID, frameB64 string) (string, error) {
 		"done":         done,
 		"decoded_size": len(decoded),
 	}
+	if done && isSealedFile(decoded) {
+		// A per-person file (.sbpx) is sealed to ONE phone's key and is
+		// not a bundle the importer can read. The engine has no access
+		// to the phone's recipient key, so it hands the bytes back and
+		// the shell unseals them and runs the normal import, which
+		// checks the signature, revocation and expiry as for any file.
+		// No verdict here: a "bundle_corrupted" verdict for a perfectly
+		// good sealed file is what this branch exists to stop.
+		resp["sealed_b64"] = base64.StdEncoding.EncodeToString(decoded)
+		out, _ := json.Marshal(resp)
+		return string(out), nil
+	}
 	if done {
 		v, _ := importer.ImportBytes(decoded, mustCore().adapter, publisher.DefaultWordlists(), time.Now().UTC())
 		if v.Kind == importer.VerdictTrustPromptNeeded {
@@ -312,6 +324,14 @@ func FountainFeedFrame(sessionID, frameB64 string) (string, error) {
 	}
 	out, _ := json.Marshal(resp)
 	return string(out), nil
+}
+
+// sealedFileMagic opens every per-person sealed file (.sbpx); the
+// shell's recipient_sbpx::SBPX_MAGIC is the same six bytes.
+var sealedFileMagic = []byte{'D', 'S', 'B', 'P', 0x00, 0x01}
+
+func isSealedFile(b []byte) bool {
+	return len(b) >= len(sealedFileMagic) && string(b[:len(sealedFileMagic)]) == string(sealedFileMagic)
 }
 
 // URIDetect is engine_uri_detect.

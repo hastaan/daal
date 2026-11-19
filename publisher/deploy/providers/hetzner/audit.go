@@ -85,6 +85,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -165,6 +166,8 @@ type recordClaims struct {
 	// it. Presence means "the operator still holds a record for this
 	// relay", which is what makes a resource claimed.
 	relays map[string]*provider.OperatorRecord
+	// relayIndex is the argv position of the first record for a relay.
+	relayIndex map[string]int
 	// serverIDs are the server ids records name directly.
 	serverIDs map[string]string // server id -> relay
 	// floatingIPs are the addresses records still name. Rule 3: a
@@ -175,10 +178,11 @@ type recordClaims struct {
 func claimsFrom(records []*provider.OperatorRecord) recordClaims {
 	c := recordClaims{
 		relays:      map[string]*provider.OperatorRecord{},
+		relayIndex:  map[string]int{},
 		serverIDs:   map[string]string{},
 		floatingIPs: map[string]string{},
 	}
-	for _, rec := range records {
+	for i, rec := range records {
 		if rec == nil {
 			continue
 		}
@@ -186,6 +190,8 @@ func claimsFrom(records []*provider.OperatorRecord) recordClaims {
 		if len(rec.PublisherPubKey) > 0 && rec.Region != "" {
 			relay = derivedServerName(rec.PublisherPubKey, rec.Region)
 			c.relays[relay] = rec
+			// The same record c.relays keeps (the last one for a relay).
+			c.relayIndex[relay] = i
 		}
 		if rec.ServerID != "" {
 			c.serverIDs[rec.ServerID] = relay
@@ -230,7 +236,7 @@ func (p *Provider) AuditAccount(ctx context.Context, records []*provider.Operato
 
 	// --- the record side of the join ---
 	for relay, rec := range claims.relays {
-		k := provider.KnownRelay{Relay: relay, RecordServerID: rec.ServerID, Region: rec.Region}
+		k := provider.KnownRelay{Relay: relay, RecordServerID: rec.ServerID, Region: rec.Region, RecordIndex: claims.relayIndex[relay]}
 		if live, ok := byName[relay]; ok {
 			k.LiveServerID = live.ID
 			switch {
@@ -271,7 +277,7 @@ func (p *Provider) auditServers(audit *provider.AccountAudit, servers []*ServerI
 			// reported and never claimed.
 			if looksLikeDerivedRelayName(s.Name) {
 				audit.Add(provider.AuditedResource{
-					Kind: provider.KindServer, ID: s.ID, Name: s.Name,
+					Kind: provider.KindServer, ID: s.ID, Name: s.Name, Address: ipv4String(s.PublicIP),
 					Verdict: provider.VerdictUnproven, Billing: true,
 					Reason: "named like a daal relay but carries no managed-by=daal-deploy label, so this tool cannot tell whether it built this server or you did",
 					Hint:   "check it in the Hetzner console (Servers → " + s.Name + "); if it is a relay you provisioned with an older build, tear it down with `daal-deploy decommission`",
@@ -281,6 +287,7 @@ func (p *Provider) auditServers(audit *provider.AccountAudit, servers []*ServerI
 		}
 		res := provider.AuditedResource{
 			Kind: provider.KindServer, ID: s.ID, Name: s.Name, Relay: relay, Billing: true,
+			Address: ipv4String(s.PublicIP),
 		}
 		claimRelay, byRelay := claims.relays[relay]
 		_, byID := claims.serverIDs[s.ID]
@@ -323,7 +330,7 @@ func (p *Provider) auditFloatingIPs(ctx context.Context, audit *provider.Account
 				// per-relay label there is nothing to prove the
 				// address is not the sibling's.
 				audit.Add(provider.AuditedResource{
-					Kind: provider.KindFloatingIP, ID: f.ID, Name: f.Name, Billing: true,
+					Kind: provider.KindFloatingIP, ID: f.ID, Name: f.Name, Billing: true, Address: ipv4String(f.IP),
 					Verdict: provider.VerdictUnproven,
 					Reason:  "carries managed-by=daal-deploy but no daal-relay label, so which relay it belongs to cannot be established — on an account running more than one relay that is exactly when deleting it is wrong",
 					Hint:    "Hetzner console → Floating IPs → " + f.Name + "; release it there if you know it is spare",
@@ -336,6 +343,7 @@ func (p *Provider) auditFloatingIPs(ctx context.Context, audit *provider.Account
 		}
 		res := provider.AuditedResource{
 			Kind: provider.KindFloatingIP, ID: f.ID, Name: f.Name, Relay: relay, Billing: true,
+			Address: ipv4String(f.IP),
 		}
 		claimedByRelay, recordNamesIt := claims.floatingIPs[f.ID]
 		_, serverAlive := byName[relay]
@@ -469,6 +477,18 @@ func (p *Provider) auditFirewalls(ctx context.Context, audit *provider.AccountAu
 	}
 }
 
+// ipv4String renders an address for the audit's "address" field: the
+// IPv4 form when there is one, "" when there is none.
+func ipv4String(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	if len(ip) > 0 {
+		return ip.String()
+	}
+	return ""
+}
+
 // looksLikeDerivedRelayName reports whether a name has the shape
 // derivedServerName mints: "daal-<region>-<16 lowercase hex>".
 //
@@ -506,6 +526,13 @@ func looksLikeDerivedRelayName(name string) bool {
 // re-read, so the guard runs against the state at the moment of the
 // mutation.
 func (p *Provider) ReclaimOrphans(ctx context.Context, records []*provider.OperatorRecord, only []provider.ResourceRef) (*provider.ReclaimReport, error) {
+	return p.ReclaimOrphansWithOpts(ctx, records, only, provider.ReclaimOpts{})
+}
+
+// ReclaimOrphansWithOpts is ReclaimOrphans with the one widening the
+// app needs: an explicitly named, provably-Daal, unclaimed SERVER (see
+// provider.ReclaimOpts and reclaimServer).
+func (p *Provider) ReclaimOrphansWithOpts(ctx context.Context, records []*provider.OperatorRecord, only []provider.ResourceRef, opts provider.ReclaimOpts) (*provider.ReclaimReport, error) {
 	rep := provider.NewReclaimReport("hetzner")
 	audit, err := p.AuditAccount(ctx, records)
 	if err != nil {
@@ -517,6 +544,10 @@ func (p *Provider) ReclaimOrphans(ctx context.Context, records []*provider.Opera
 	// about the whole server list; without it there is no such claim
 	// to act on.
 	if !audit.ServerListComplete {
+		for _, r := range only {
+			rep.Add(provider.ReclaimOutcome{Kind: r.Kind, ID: r.ID, Code: provider.ReclaimKeptListUnreadable,
+				Reason: "refused: the account's server list could not be read, so nothing can be proven safe to delete"})
+		}
 		return rep, errors.New("hetzner: refusing to reclaim anything — the account's server list could not be read, and \"nothing is behind this resource\" is a statement about that list. Fix the API access and re-run")
 	}
 
@@ -532,12 +563,17 @@ func (p *Provider) ReclaimOrphans(ctx context.Context, records []*provider.Opera
 			continue
 		}
 		seen[ref] = true
+		if res.Kind == provider.KindServer && opts.IncludeUnclaimedServers && want[ref] {
+			p.reclaimServer(ctx, res, claimsFrom(records), rep)
+			continue
+		}
 		if !res.Reclaimable {
 			// Named, never silently skipped: an operator who asked
 			// for a specific resource must be told why it survived.
 			rep.Add(provider.ReclaimOutcome{
 				Kind: res.Kind, ID: res.ID, Name: res.Name, Deleted: false,
 				Reason: "refused (" + string(res.Verdict) + "): " + res.Reason,
+				Code:   provider.KeptCode(res),
 			})
 			continue
 		}

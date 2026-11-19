@@ -14,16 +14,18 @@
 //   pack state        -> "have I got something to hand out yet?"
 //   live since        -> "how long have I been paying for this?"
 //
-// One deliberate omission: there is NO health indicator. The mgmt plane
-// has no health or ping verb (cli_bridge.rs's CliRunner trait exposes
-// none), so a green dot here would be a guess dressed as a fact. The
-// chip reports what the app last recorded, in words that say so ("Set
-// up", never a green "LIVE") — see relayStatus.ts. It used to read LIVE
-// in green directly above a caption saying it was not a live check.
+// Health (D3): when the list opens, each finished relay is checked once,
+// one after another (Rust answers from a cache younger than ten
+// minutes). The chip turns green only for a check that just said the
+// relay works from here; otherwise it reports what the app last
+// recorded, in words that say so ("Set up", never a green "LIVE") — see
+// relayStatus.ts.
 
 import { useCallback, useEffect, useState } from 'react';
 import { Wizard } from './wizardCommands';
-import type { DestroyReport, OperatorSummary } from './wizardCommands';
+import type { DestroyReport, OperatorSummary, RelayHealth } from './wizardCommands';
+import { AccountCheckSheet } from './AccountCheckSheet';
+import { checkHealth, checkSequentially, checkedWorking, nowUnix, overallKey } from './relayHealth';
 import {
     Card,
     Button,
@@ -35,6 +37,9 @@ import {
 import { relayBadge } from './relayStatus';
 import { ActionButton, ActionToast, useAction } from './useAction';
 import { explainFailure, failureBlock } from './failureText';
+import { WhatIsThis } from './Disclosure';
+import { AddressLines, UnreleasedAddresses, retryNeeded, stillBills } from './DestroyAddresses';
+import { releaseRetryFor, retryRelease as runReleaseRetry } from './destroyReport';
 
 interface Props {
     t: (k: string) => string;
@@ -404,11 +409,17 @@ export function RelayDestroySheet({
                         <div
                             style={{
                                 fontSize: 13,
-                                color: 'var(--fg)',
+                                color: stillBills(report) ? 'var(--red)' : 'var(--fg)',
                                 lineHeight: 1.55,
                             }}
                         >
-                            {t('pub.relays.destroy.report.ok')}
+                            {/* "Billing has stopped" is only true when no
+                                address Daal reserved is still held. */}
+                            {retryNeeded(report)
+                                ? t('pub.relays.destroy.addr.server_gone_address_kept')
+                                : stillBills(report)
+                                  ? t('pub.relays.destroy.addr.server_gone_address_left')
+                                  : t('pub.relays.destroy.report.ok')}
                         </div>
                     )}
                     {askedForServer &&
@@ -438,24 +449,48 @@ export function RelayDestroySheet({
                         </div>
                     )}
 
-                    {/* Provider errors go through untranslated and
-                        unsummarised: they are the only thing that tells
-                        the user what to look for in their console. The
-                        `?? []` is not paranoia about the type — this
-                        view renders *after* the only chance to read the
-                        report, so a malformed field must not blank the
-                        screen. */}
-                    {(report.warnings ?? []).length > 0 && (
+                    {/* D4: every address Daal reserved for this relay,
+                        and whether it still costs money. A failed
+                        release offers the same delete again — it is
+                        idempotent, because a server that is already gone
+                        counts as deleted. */}
+                    <AddressLines
+                        t={t}
+                        addresses={report.addresses ?? []}
+                        retryBusy={busy}
+                        onRetry={() => void run()}
+                    />
+                    {failure && (
                         <div style={{ display: 'grid', gap: 6 }}>
+                            <div style={{ color: 'var(--red)', fontSize: 13, lineHeight: 1.5 }}>
+                                {t('pub.relays.destroy.addr.retry_failed')}
+                            </div>
+                            <WhatIsThis label={t('pub.fb.details')}>
+                                <div style={META} dir="ltr">
+                                    {failure}
+                                </div>
+                            </WhatIsThis>
+                        </div>
+                    )}
+
+                    {/* Provider text goes under Details, untranslated:
+                        it is what a helper works from, and some of it
+                        names a command, which the main copy never
+                        shows. The `?? []` is not paranoia about the
+                        type — this view renders *after* the only chance
+                        to read the report, so a malformed field must not
+                        blank the screen. */}
+                    {(report.warnings ?? []).length > 0 && (
+                        <WhatIsThis label={t('pub.fb.details')}>
                             <div style={LINE}>
                                 {t('pub.relays.destroy.report.warnings')}
                             </div>
                             {(report.warnings ?? []).map((w: string, i: number) => (
-                                <div key={i} style={{ ...META, color: 'var(--red)' }}>
+                                <div key={i} style={META} dir="ltr">
                                     {w}
                                 </div>
                             ))}
-                        </div>
+                        </WhatIsThis>
                     )}
                 </div>
             ) : (
@@ -565,6 +600,12 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
     // it needs no busy state of its own.
     const [destroying, setDestroying] = useState<DestroyTarget | null>(null);
 
+    // D3: the last health result per relay, filled one by one on open.
+    const [health, setHealth] = useState<Record<number, RelayHealth | null>>({});
+    const [healthStarted, setHealthStarted] = useState(false);
+    // D1: the account check sheet.
+    const [accountOpen, setAccountOpen] = useState(false);
+
     const reload = useCallback(async () => {
         setLoading(true);
         try {
@@ -590,6 +631,49 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
     useEffect(() => {
         void reload();
     }, [reload]);
+
+    useEffect(() => {
+        if (healthStarted || loading) return;
+        const ids = operators.filter((o) => o.status === 'provisioned').map((o) => o.id);
+        if (ids.length === 0) return;
+        setHealthStarted(true);
+        void checkSequentially(
+            ids,
+            (id) => checkHealth(id, false),
+            (id, h) => setHealth((m) => ({ ...m, [id]: h })),
+        );
+    }, [healthStarted, loading, operators]);
+
+    /** D4: delete again — the same call, idempotent once the server is
+     *  gone — for a relay whose reserved address is still billing. */
+    const retryRelease = useCallback(
+        async (op: OperatorSummary) => {
+            await action.run(
+                `release:${op.id}`,
+                async () => {
+                    // Never a delete of a working relay: the shell's
+                    // status decides which call (if any) is the retry.
+                    const r = await runReleaseRetry(op, {
+                        relayDestroy: (id, del) => Wizard.relayDestroy(id, del),
+                        setupRemoveServer: (id) => Wizard.setupRemoveServer(id),
+                    });
+                    if (!r || retryNeeded(r)) throw new Error('release_failed');
+                    return r;
+                },
+                {
+                    ok: (r) =>
+                        stillBills(r)
+                            ? t('pub.relays.destroy.addr.retry_ok_some_left')
+                            : t('pub.relays.destroy.addr.retry_ok'),
+                    fail: t('pub.relays.destroy.addr.retry_failed'),
+                },
+            );
+            await reload();
+        },
+        [action.run, reload, t],
+    );
+
+    const anyToken = operators.some((o) => o.has_cloud_token === true);
 
     const commitRename = useCallback(
         async (op: OperatorSummary) => {
@@ -645,6 +729,13 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                 title={t('pub.relays.title')}
                 action={<Button onClick={onNew}>{t('pub.relays.new')}</Button>}
             >
+                {anyToken && (
+                    <div style={{ marginBottom: 10 }}>
+                        <Button variant="secondary" onClick={() => setAccountOpen(true)}>
+                            {t('pub.account.open')}
+                        </Button>
+                    </div>
+                )}
                 {error && (
                     <div
                         style={{
@@ -697,7 +788,11 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                         const since =
                             op.last_provisioned_at_unix || op.created_at_unix;
                         const renaming = renamingId === op.id;
-                        const badge = relayBadge(op.status);
+                        const h = health[op.id] ?? null;
+                        const badge = relayBadge(op.status, checkedWorking(h, nowUnix()));
+                        const interrupted =
+                            op.status === 'pre-provision' && op.setup_interrupted === true;
+                        const unreleased = op.unreleased_addresses ?? [];
                         return (
                             <Card
                                 key={op.id}
@@ -843,6 +938,36 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                         it is. Badge and caption come
                                         from the same value, so they
                                         cannot disagree again. */}
+                                    {/* D1: a setup that stopped part-way may
+                                        have left a server billing. */}
+                                    {interrupted && (
+                                        <div style={{ ...LINE, color: 'var(--gold)' }}>
+                                            {t('pub.relays.interrupted')}
+                                        </div>
+                                    )}
+
+                                    {/* D3: the last check, in one line. */}
+                                    {h && !dead && (
+                                        <div style={LINE} data-testid="card-health">
+                                            {t(overallKey(h.overall))}
+                                        </div>
+                                    )}
+
+                                    {/* D4: a delete that could not release
+                                        an address Daal reserved. */}
+                                    {unreleased.length > 0 && (
+                                        <UnreleasedAddresses
+                                            t={t}
+                                            ips={unreleased}
+                                            retryBusy={action.busy === `release:${op.id}`}
+                                            onRetry={
+                                                releaseRetryFor(op.status)
+                                                    ? () => void retryRelease(op)
+                                                    : undefined
+                                            }
+                                        />
+                                    )}
+
                                     {badge.recordedOnly && !dead && (
                                         <div
                                             style={{
@@ -903,7 +1028,9 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                                                             onResume(op.id);
                                                         }}
                                                     >
-                                                        {t('pub.relays.resume')}
+                                                        {interrupted
+                                                            ? t('pub.relays.open')
+                                                            : t('pub.relays.resume')}
                                                     </Button>
                                                 )}
                                                 {!dead && (
@@ -955,6 +1082,20 @@ export default function RelayListPage({ t, onOpen, onNew, onResume }: Props) {
                         // and the list is the only place that says so.
                         setDestroying(null);
                         void reload();
+                    }}
+                />
+            )}
+
+            {accountOpen && (
+                <AccountCheckSheet
+                    t={t}
+                    onOpenRelay={(id) => {
+                        setAccountOpen(false);
+                        onResume(id);
+                    }}
+                    onClose={(changed) => {
+                        setAccountOpen(false);
+                        if (changed) void reload();
                     }}
                 />
             )}

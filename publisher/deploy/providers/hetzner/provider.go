@@ -49,10 +49,20 @@ const firewallAttachAttempts = 8
 
 var firewallAttachDelay = 3 * time.Second
 
-func (p *Provider) ensureFirewallAfterCreate(ctx context.Context, serverID string, ports []relayports.Endpoint, progress func(step, message string)) error {
+func (p *Provider) ensureFirewallAfterCreate(ctx context.Context, serverID string, ports []relayports.Endpoint, j provider.ProvisionJournal, progress func(step, message string)) error {
 	var err error
+	fwName := firewallNameForServer(serverID)
+	if jErr := j.Intent(provider.KindFirewall, fwName, ""); jErr != nil {
+		// The server exists already; a firewall the journal cannot
+		// record is still better than a relay without one. The name is
+		// derived from the server id, which IS journalled, so the audit
+		// finds it either way.
+		progress("journal_warning", fmt.Sprintf("could not journal the firewall: %v", jErr))
+	}
 	for attempt := 1; attempt <= firewallAttachAttempts; attempt++ {
-		if _, err = p.c.FirewallEnsureForServer(ctx, serverID, ports); err == nil {
+		var fwID string
+		if fwID, err = p.c.FirewallEnsureForServer(ctx, serverID, ports); err == nil {
+			j.Created(provider.KindFirewall, fwID, fwName, nil)
 			return nil
 		}
 		if attempt == firewallAttachAttempts {
@@ -97,7 +107,7 @@ func (p *Provider) setHealthWaiter(h healthWaiter) { p.health = h }
 // already exists, it is reused.
 func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (*provider.OperatorRecord, error) {
 	if err := validateProvisionOpts(opts); err != nil {
-		return nil, err
+		return nil, provider.Coded(provider.CodeBadInput, err)
 	}
 	name := derivedServerName(opts.PublisherPubKey, opts.Region)
 
@@ -119,38 +129,97 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		return p.dryRunRecord(name, opts, mgmtPort, coverSNI)
 	}
 
-	// Idempotency: if server already exists with this derived name,
-	// return the existing OperatorRecord. The caller must pass the
-	// persisted MgmtPort on retries; otherwise we would return a fresh
-	// random port that does not match the already-provisioned box.
-	if existing, err := p.c.ServerByName(ctx, name); err == nil && existing != nil {
-		if opts.MgmtPort == 0 {
-			return nil, errors.New("hetzner: existing server requires persisted MgmtPort")
-		}
-		rec, err := p.recordFromServer(existing, opts)
-		if err != nil {
-			return nil, err
-		}
-		rec.MgmtPort = mgmtPort
-		// This box already exists; its sing-box config was written at
-		// its own provision time and we are not rewriting it here. So
-		// the record must state what it ACTUALLY serves — which this
-		// code cannot know and must not invent (see ReuseCoverSNI).
-		// NOT the fresh host resolved above: that would be a claim
-		// about a config that was never installed.
-		reused, err := provider.ReuseCoverSNI(opts.CoverSNI)
-		if err != nil {
-			return nil, fmt.Errorf("hetzner: %w", err)
-		}
-		rec.CoverSNI = reused
-		return rec, nil
-	} else if err != nil && !errors.Is(err, errServerNotFound) {
-		return nil, fmt.Errorf("hetzner: lookup existing server: %w", err)
-	}
-
 	progress := opts.OnProgress
 	if progress == nil {
 		progress = func(string, string) {}
+	}
+	j := opts.J()
+
+	// SERVER SELECTION (publisher-alone wave, D1). The derived name is a
+	// pure function of (publisher key, region), so a server carrying it
+	// is this relay's — or something pretending to be. Four outcomes:
+	//
+	//   adopt          the caller names that server (--existing-server-id)
+	//                  AND it carries both ownership labels for this relay
+	//                  AND its name is the derived one. This is the box a
+	//                  killed setup left behind: re-image it in place (same
+	//                  id, same address, same bill — no second server) with
+	//                  fresh cloud-init and a fresh health token, which is
+	//                  the only way its management certificate can be
+	//                  authenticated again: the old run's health token died
+	//                  with the old process and is never persisted.
+	//   reuse          --mgmt-port given: today's behaviour, unchanged.
+	//   refuse         anything else: exit 4 / server_exists, naming the
+	//                  server, and nothing is created.
+	//   rebuild_yours  no derived-name server, --existing-server-id set:
+	//                  the person's own machine; never rolled back.
+	//   create         neither.
+	mode := provider.ModeCreate
+	existing, lookupErr := p.c.ServerByName(ctx, name)
+	switch {
+	case lookupErr != nil && !errors.Is(lookupErr, errServerNotFound):
+		return nil, fmt.Errorf("hetzner: lookup existing server: %w", lookupErr)
+	case lookupErr == nil && existing != nil:
+		switch {
+		case opts.ExistingServerID != "" && opts.ExistingServerID == existing.ID &&
+			existing.Name == name && ownsServer(existing, name):
+			mode = provider.ModeAdopt
+		case opts.MgmtPort != 0:
+			if err := j.Begin(provider.ModeReuse, name, mgmtPort, opts.CoverSNI); err != nil {
+				return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("hetzner: journal: %w", err))
+			}
+			rec, err := p.recordFromServer(existing, opts)
+			if err != nil {
+				return nil, err
+			}
+			rec.MgmtPort = mgmtPort
+			// This box already exists; its sing-box config was written at
+			// its own provision time and we are not rewriting it here. So
+			// the record must state what it ACTUALLY serves — which this
+			// code cannot know and must not invent (see ReuseCoverSNI).
+			reused, err := provider.ReuseCoverSNI(opts.CoverSNI)
+			if err != nil {
+				return nil, fmt.Errorf("hetzner: %w", err)
+			}
+			rec.CoverSNI = reused
+			return rec, nil
+		default:
+			why := "it is not the server this setup was asked to finish"
+			if !ownsServer(existing, name) {
+				why = "it does not carry Daal's ownership labels for this relay"
+			}
+			return nil, &provider.ProvisionError{
+				Code:     provider.CodeServerExists,
+				ServerID: existing.ID,
+				Err: fmt.Errorf("hetzner: a server for this relay already exists (id %s, %s, %s) and %s; "+
+					"nothing was created — finish setup on it, or delete it, first",
+					existing.ID, existing.Name, existing.PublicIP, why),
+			}
+		}
+	case opts.ExistingServerID != "":
+		mode = provider.ModeRebuildYours
+	}
+	// The server we rebuild (adopt / rebuild_yours) or "" for a create.
+	rebuildID := ""
+	switch mode {
+	case provider.ModeAdopt:
+		rebuildID = existing.ID
+	case provider.ModeRebuildYours:
+		rebuildID = opts.ExistingServerID
+	}
+	// ours: a server this tool created (or proved it created) — the one
+	// kind a rollback may delete.
+	ours := mode == provider.ModeCreate || mode == provider.ModeAdopt
+
+	if err := j.Begin(mode, name, mgmtPort, coverSNI); err != nil {
+		return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("hetzner: journal: %w", err))
+	}
+
+	if mode == provider.ModeAdopt {
+		// The killed run's one-shot key was never deleted (its defer
+		// never ran). Sweep every key labelled for this relay BEFORE this
+		// run creates its own, so the sweep cannot touch it.
+		p.sweepStaleKeysForAdopt(ctx, name, j, progress)
 	}
 
 	// Render cloud-init (needed for both create and rebuild paths).
@@ -160,6 +229,9 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: name ssh key: %w", err)
 	}
+	if err := j.Intent(provider.KindSSHKey, keyName, ""); err != nil {
+		return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("hetzner: journal: %w", err))
+	}
 	sshKeyID, err := p.c.SSHKeyCreate(ctx, keyName, pubBytes, map[string]string{
 		labelManagedBy: labelManagedByValue,
 		labelRelay:     name,
@@ -167,6 +239,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: create ssh key: %w", err)
 	}
+	j.Created(provider.KindSSHKey, sshKeyID, keyName, nil)
 	// Delete the cloud-side key resource on EVERY exit path, success
 	// included. The private half of this keypair is generated per
 	// invocation and never leaves this process's memory (supplement
@@ -188,7 +261,9 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 			progress("provision_ssh_key", fmt.Sprintf(
 				"could not remove one-shot SSH key %q (id %s): %v — delete it in your provider console",
 				keyName, sshKeyID, err))
+			return
 		}
+		j.Deleted(provider.KindSSHKey, sshKeyID)
 	}()
 
 	healthToken, err := generateHealthToken()
@@ -233,15 +308,22 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 
 	var srv *ServerInfo
-	if opts.ExistingServerID != "" {
+	if rebuildID != "" {
 		// Rebuild path: re-image the existing server with daal's
 		// cloud-init. Keeps the same IP and billing.
+		if err := j.Intent(provider.JournalKindRebuild, name, rebuildID); err != nil {
+			return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("hetzner: journal: %w", err))
+		}
 		progress("provision_rebuild_server", "Rebuilding existing server with daal configuration")
-		srv, err = p.c.ServerRebuild(ctx, opts.ExistingServerID, "ubuntu-24.04", string(userData))
+		srv, err = p.c.ServerRebuild(ctx, rebuildID, "ubuntu-24.04", string(userData))
 		if err != nil {
 			return nil, fmt.Errorf("hetzner: rebuild server: %w", err)
 		}
+		j.Created(provider.JournalKindRebuild, srv.ID, srv.Name, srv.PublicIP)
 	} else {
+		if err := j.Intent(provider.KindServer, name, ""); err != nil {
+			return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("hetzner: journal: %w", err))
+		}
 		// Create path: spin up a fresh VPS.
 		progress("provision_create_server", "Creating server on Hetzner")
 		srv, err = p.c.ServerCreate(ctx, ServerCreateOpts{
@@ -260,6 +342,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		if err != nil {
 			return nil, fmt.Errorf("hetzner: create server: %w", err)
 		}
+		j.Created(provider.KindServer, srv.ID, srv.Name, srv.PublicIP)
 	}
 	rec, err := p.recordFromServer(srv, opts)
 	if err != nil {
@@ -272,7 +355,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	// when the box's mgmt binary is too old to report anything — see
 	// OperatorRecord.CoverSNI.
 	rec.CoverSNI = coverSNI
-	if opts.ExistingServerID != "" {
+	if rebuildID != "" {
 		progress("provision_server_ready", fmt.Sprintf("Server rebuilt: %s — waiting for cloud-init (up to 5 min)", rec.PublicIP))
 	} else {
 		progress("provision_server_ready", fmt.Sprintf("Server ready: %s — waiting for boot (up to 3 min)", rec.PublicIP))
@@ -286,7 +369,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	// roster) fails with "no attached firewall" because
 	// FirewallAddEphemeralRule has nothing to mutate.
 	progress("provision_cloud_firewall", "Attaching Daal baseline firewall to server")
-	if err := p.ensureFirewallAfterCreate(ctx, rec.ServerID, dataPlanePorts, progress); err != nil {
+	if err := p.ensureFirewallAfterCreate(ctx, rec.ServerID, dataPlanePorts, j, progress); err != nil {
 		// Don't tear the whole provision down; the box-side ufw
 		// still provides surface-area minimisation for the
 		// non-mgmt ports. We just won't be able to talk to the
@@ -306,12 +389,33 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		if wait == nil { // Provider built without New(); fall back to the real poll
 			wait = p.waitForHealthy
 		}
+		j.Phase("health_wait")
 		if err := wait(ctx, rec, srv, healthToken, opts, progress); err != nil {
-			return nil, p.afterServerFailure(ctx, opts, progress, rec, err)
+			err = classifyHealthErr(err)
+			return nil, p.afterServerFailure(ctx, opts, ours, progress, rec, err)
 		}
+		j.Phase("healthy")
 	}
 	progress("provision_healthy", "Server is up and healthy")
 	return rec, nil
+}
+
+// classifyHealthErr gives a health-wait failure its closed-set code, so
+// the app can say "the server did not finish starting" rather than a
+// generic cloud error. An already-coded error is left alone.
+func classifyHealthErr(err error) error {
+	var pe *provider.ProvisionError
+	switch {
+	case errors.As(err, &pe):
+		return err
+	case errors.Is(err, context.Canceled):
+		return provider.Coded(provider.CodeCancelled, err)
+	case strings.Contains(err.Error(), "server provisioning failed"):
+		return provider.Coded(provider.CodeCloudInitFailed, err)
+	case strings.Contains(err.Error(), "timed out"), errors.Is(err, context.DeadlineExceeded):
+		return provider.Coded(provider.CodeHealthTimeout, err)
+	}
+	return err
 }
 
 // waitForHealthy blocks until the box finishes cloud-init and
@@ -474,9 +578,9 @@ poll:
 //     "provision_orphan" progress event and repeat the server id +
 //     IP inside the error, so the caller can show the user exactly
 //     what is running and offer to remove it.
-func (p *Provider) afterServerFailure(ctx context.Context, opts provider.ProvisionOpts, progress func(step, message string), rec *provider.OperatorRecord, cause error) error {
+func (p *Provider) afterServerFailure(ctx context.Context, opts provider.ProvisionOpts, ours bool, progress func(step, message string), rec *provider.OperatorRecord, cause error) error {
 	where := fmt.Sprintf("server_id=%s ip=%s region=%s", rec.ServerID, rec.PublicIP, rec.Region)
-	if opts.ExistingServerID != "" {
+	if !ours {
 		// Rebuild path. This server is the caller's own machine, which
 		// we were asked to re-image, not one we created — rollback
 		// would destroy a box we do not own. Report, never delete.
@@ -495,6 +599,18 @@ func (p *Provider) afterServerFailure(ctx context.Context, opts provider.Provisi
 	// WithoutCancel: a cancelled provision is precisely the case
 	// whose cleanup must still reach the cloud API.
 	rep, err := p.Decommission(context.WithoutCancel(ctx), rec)
+	if rep != nil {
+		j := opts.J()
+		if rep.ServerDeleted && rep.ServerID != "" {
+			j.Deleted(provider.KindServer, rep.ServerID)
+		}
+		if rep.FirewallDeleted && rep.FirewallID != "" {
+			j.Deleted(provider.KindFirewall, rep.FirewallID)
+		}
+		for _, id := range rep.DeletedSSHKeyIDs {
+			j.Deleted(provider.KindSSHKey, id)
+		}
+	}
 	if err != nil {
 		// The worst outcome this adapter can produce: a box that
 		// bills, a record the caller may be about to discard, and a
@@ -623,7 +739,7 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 		rep.FirewallDeleted = true
 	} else {
 		rep.ServerID = serverID
-		if err := p.c.ServerDelete(ctx, serverID); err != nil {
+		if err := p.c.ServerDelete(ctx, serverID); err != nil && !p.serverProvablyGone(ctx, serverID) {
 			rep.Warnf("could not delete server %s: %v", serverID, err)
 			rep.Preserve("server:" + serverID)
 			return rep, fmt.Errorf("hetzner: delete server %s: %w", serverID, err)
@@ -691,6 +807,17 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 		rep.Preserve("floating-ip:" + rec.FloatingIPID)
 	}
 	return rep, nil
+}
+
+// serverProvablyGone reports whether the provider says, in so many
+// words, that server id does not exist. It is how a delete that errored
+// is still counted as done when the server was already gone — a retried
+// teardown (the first attempt deleted the server, then failed on an
+// address) must not fail on the step that already worked. Any other
+// answer, including an unreadable one, is "not proven gone".
+func (p *Provider) serverProvablyGone(ctx context.Context, id string) bool {
+	_, err := p.c.ServerByID(ctx, id)
+	return errors.Is(err, errServerNotFound)
 }
 
 // resolveServerID returns the id of the server this record's relay
@@ -808,6 +935,39 @@ func ownsEphemeralKey(k SSHKeyInfo, relay string) bool {
 		return false
 	}
 	return k.Labels[labelManagedBy] == labelManagedByValue && k.Labels[labelRelay] == relay
+}
+
+// ownsServer reports whether s carries BOTH of this tool's ownership
+// labels for the relay named relay. A name alone is never ownership:
+// `--existing-server-id` re-images boxes daal-deploy did not create, and
+// any tool may pick any name.
+func ownsServer(s *ServerInfo, relay string) bool {
+	if s == nil || relay == "" {
+		return false
+	}
+	return s.Labels[labelManagedBy] == labelManagedByValue && s.Labels[labelRelay] == relay
+}
+
+// sweepStaleKeysForAdopt deletes the one-shot provisioning keys a killed
+// run left behind for this relay, journalling each. Best-effort: a key
+// that will not go away costs nothing per hour and cannot collide with
+// this run's randomly-suffixed name; it is reported and the run goes on.
+func (p *Provider) sweepStaleKeysForAdopt(ctx context.Context, relay string, j provider.ProvisionJournal, progress func(step, message string)) {
+	keys, err := p.c.SSHKeyList(ctx)
+	if err != nil {
+		progress("provision_ssh_key", fmt.Sprintf("could not list old one-shot SSH keys (%v); leaving them", err))
+		return
+	}
+	for _, k := range keys {
+		if !ownsEphemeralKey(k, relay) {
+			continue
+		}
+		if err := p.c.SSHKeyDelete(ctx, k.ID); err != nil {
+			progress("provision_ssh_key", fmt.Sprintf("could not remove old one-shot SSH key %q (id %s): %v", k.Name, k.ID, err))
+			continue
+		}
+		j.Deleted(provider.KindSSHKey, k.ID)
+	}
 }
 
 // auditPointer is the one sentence every "something survived and it is

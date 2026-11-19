@@ -292,6 +292,29 @@ cmd_test() {
       err "could not build libdaalcore for the desktop-core tests"
       fail=1
     fi
+    # daal-wizard: the publisher's command layer. Its end-to-end tests
+    # (tests/publisher_alone_e2e.rs) drive the REAL daal-deploy built
+    # from this tree through the app's own bridge, against the in-repo
+    # fake hosting company (publisher/deploy/e2e/fakeworld). Build both
+    # here so the run tests this tree, not whatever is on PATH.
+    local e2e_bin="$BUILD_DIR/test/publisher-e2e"
+    mkdir -p "$e2e_bin"
+    log "building daal-deploy and fakeworld from this tree for the daal-wizard end-to-end tests"
+    if ( cd "$REPO_ROOT/cmd/daal-deploy" && "$GO_BIN" build -o "$e2e_bin/daal-deploy" . ) \
+       && ( cd "$REPO_ROOT/publisher" && "$GO_BIN" build -o "$e2e_bin/fakeworld" ./deploy/e2e/fakeworld/cmd/fakeworld ); then
+      log "cargo test (client-shell/tauri daal-wizard)"
+      if ( cd "$REPO_ROOT/client-shell/tauri" \
+           && DAAL_E2E_DEPLOY_BIN="$e2e_bin/daal-deploy" DAAL_E2E_FAKEWORLD_BIN="$e2e_bin/fakeworld" \
+              "$CARGO_BIN" test -p daal-wizard ); then
+        ok "daal-wizard (with the publisher end-to-end tests)"
+      else
+        err "daal-wizard: tests failed"
+        fail=1
+      fi
+    else
+      err "could not build daal-deploy / fakeworld for the daal-wizard end-to-end tests"
+      fail=1
+    fi
   else
     warn "skip Rust tests (no cargo)"
   fi

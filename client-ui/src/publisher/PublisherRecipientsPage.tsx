@@ -82,11 +82,20 @@ import { RelayDestroySheet, relayTitle } from './RelayListPage';
 import { QrSendSheet } from './QrSendSheet';
 import { ActionButton, ActionToast, useAction } from './useAction';
 import { explainFailure, failureBlock } from './failureText';
+import type { Failure } from './failureText';
 import { Collapsible } from './Disclosure';
 import { PeopleSection, joinPeople, personLabel } from './PeopleSection';
 import { EveryoneFileSection } from './EveryoneFileSection';
 import { relayBadge } from './relayStatus';
 import { rotateTlsVerdict } from './rotateTlsVerdict';
+// Publisher-alone wave: health (D3), renew after a rebuild (D2), one
+// person's file as QR / text (D5).
+import { HealthPanel } from './HealthPanel';
+import { checkHealth, checkedWorking, healthFailure, nowUnix } from './relayHealth';
+import { RenewBanner, RenewSheet } from './RenewSheet';
+import { renewBannerText, renewBannerVisible } from './renew';
+import { recipientArtifact } from './wizardCommands';
+import type { PackArtifact, RelayHealth } from './wizardCommands';
 
 interface Props {
     t: (k: string) => string;
@@ -236,7 +245,16 @@ export default function PublisherRecipientsPage({
     /** First-build confirm. Same command as rotate, same consequence for
      *  anyone already holding a shared pack — see onBuildShared. */
     const [confirmBuild, setConfirmBuild] = useState(false);
-    const [qrSend, setQrSend] = useState(false);
+    /** Which file the QR sheet streams, and the line that says so. */
+    const [qrSend, setQrSend] = useState<{ artifact: PackArtifact; label?: string } | null>(null);
+
+    // D3: the last health check of this relay.
+    const [health, setHealth] = useState<RelayHealth | null>(null);
+    const [healthBusy, setHealthBusy] = useState(false);
+    const [healthFailed, setHealthFailed] = useState<Failure | null>(null);
+    // D2: renew sheet, and "a rebuild just finished on this screen".
+    const [renewOpen, setRenewOpen] = useState(false);
+    const [justRebuilt, setJustRebuilt] = useState(false);
 
     // Wave 3 Step 7 — the two rotations, kept apart all the way down to
     // their state. Per-recipient re-keying affects ONE person and lives
@@ -343,6 +361,30 @@ export default function PublisherRecipientsPage({
             alive = false;
         };
     }, [reloadOperator, reloadRecipients, reloadArtifacts]);
+
+    // ---- D3: health ----------------------------------------------------
+
+    const runHealth = useCallback(
+        async (force: boolean) => {
+            setHealthBusy(true);
+            setHealthFailed(null);
+            try {
+                setHealth(await checkHealth(operatorId, force));
+            } catch (e) {
+                setHealthFailed(healthFailure(t, e));
+            } finally {
+                setHealthBusy(false);
+            }
+        },
+        [operatorId, t],
+    );
+
+    // Once per opening, for a finished relay. Rust answers from its
+    // cache when the last check is younger than ten minutes.
+    const provisioned = operator?.status === 'provisioned';
+    useEffect(() => {
+        if (provisioned) void runHealth(false);
+    }, [provisioned, runHealth]);
 
     // ---- naming ------------------------------------------------------
 
@@ -600,6 +642,25 @@ export default function PublisherRecipientsPage({
 
     /** The action the owner pressed four times. It always worked; it
      *  never said so. */
+    /** D5: one person's own file as text. Only their phone can open it,
+     *  and the note says so. */
+    const onCopyPerson = useCallback(
+        async (r: RecipientSummary, label: string) => {
+            await action.run(
+                `copy:${r.id}`,
+                async () => {
+                    const text = await Wizard.copyPasteable(operatorId, recipientArtifact(r.id));
+                    await navigator.clipboard.writeText(text);
+                },
+                {
+                    ok: t('pub.person.copied').replace(/\{name\}/g, label),
+                    fail: t('pub.fb.copy.fail'),
+                },
+            );
+        },
+        [action.run, operatorId, t],
+    );
+
     const onSaveSbpx = useCallback(
         async (path: string, label: string) => {
             const name = `${label}.sbpx`;
@@ -852,7 +913,8 @@ export default function PublisherRecipientsPage({
 
     // ---- render --------------------------------------------------------
 
-    const badge = operator ? relayBadge(operator.status) : null;
+    const badge = operator ? relayBadge(operator.status, checkedWorking(health, nowUnix())) : null;
+    const showRenew = renewBannerVisible(operator, health, justRebuilt);
     const tlsVerdict = rotateTlsDone
         ? rotateTlsVerdict(rotateTlsDone, mirrorsInPack)
         : null;
@@ -991,6 +1053,29 @@ export default function PublisherRecipientsPage({
                 one failure on this ladder with no way back. */}
             {relayGone && <RelayGonePanel t={t} operatorId={operatorId} />}
 
+            {/* D2: the server is new, so every file handed out stopped
+                working. One action renews them all. */}
+            {showRenew && (
+                <RenewBanner
+                    t={t}
+                    text={renewBannerText(operator, health, justRebuilt)}
+                    onRenew={() => setRenewOpen(true)}
+                />
+            )}
+
+            {/* D3: is it working, as far as this phone can tell. */}
+            {provisioned && (
+                <HealthPanel
+                    t={t}
+                    health={health}
+                    busy={healthBusy}
+                    failed={healthFailed}
+                    now={nowUnix()}
+                    onCheck={() => void runHealth(true)}
+                    onRenew={() => setRenewOpen(true)}
+                />
+            )}
+
             {/* ---------------- 1. People ---------------- */}
             <PeopleSection
                 t={t}
@@ -1003,6 +1088,13 @@ export default function PublisherRecipientsPage({
                 }}
                 onSend={(path, label) => void onResendSbpx(path, label)}
                 onSave={(path, label) => void onSaveSbpx(path, label)}
+                onQr={(r, label) =>
+                    setQrSend({
+                        artifact: recipientArtifact(r.id),
+                        label: t('pub.person.qr.what').replace(/\{name\}/g, label),
+                    })
+                }
+                onCopy={(r, label) => void onCopyPerson(r, label)}
                 onRemake={(r) => void onRebuildSbpx(r)}
                 // Re-key this one person. It belongs on their row
                 // because that is its whole blast radius — one file
@@ -1034,7 +1126,7 @@ export default function PublisherRecipientsPage({
                 // The offline lane: the same file, travelling as light
                 // instead of as a file, for the days when sending a
                 // file is the thing that cannot happen.
-                onQr={() => setQrSend(true)}
+                onQr={() => setQrSend({ artifact: 'shared' })}
                 onCopy={() => void onCopyPasteable()}
                 onMake={() => setConfirmBuild(true)}
                 onReplace={() => setConfirmRotate(true)}
@@ -1172,10 +1264,12 @@ export default function PublisherRecipientsPage({
                         disabled={dangerBusy || rotateTlsBusy}
                         runMgmt={runMgmt}
                         onDone={() => {
+                            setJustRebuilt(true);
                             void reloadOperator();
                             void reloadArtifacts();
                             setFreshTick((n) => n + 1);
                         }}
+                        onRenew={() => setRenewOpen(true)}
                     />
                     <ListRow
                         title={t('pub.danger.decommission.title')}
@@ -1895,14 +1989,50 @@ export default function PublisherRecipientsPage({
                 </Sheet>
             )}
 
+            {renewOpen && (
+                <RenewSheet
+                    t={t}
+                    operatorId={operatorId}
+                    recipients={recipients}
+                    hasEveryoneFile={sharedArtifact?.exists === true}
+                    renew={viaMgmt(() => Wizard.renewEveryone(operatorId))}
+                    send={{
+                        onSend: (path, label) => void onResendSbpx(path, label),
+                        onSave: (path, label) => void onSaveSbpx(path, label),
+                        onQr: (id, label) =>
+                            setQrSend({
+                                artifact: recipientArtifact(id),
+                                label: t('pub.person.qr.what').replace(/\{name\}/g, label),
+                            }),
+                        onCopy: (id, label) => {
+                            const r = recipients.find((x) => x.id === id);
+                            if (r) void onCopyPerson(r, label);
+                        },
+                    }}
+                    onClose={(changed) => {
+                        setRenewOpen(false);
+                        if (changed) {
+                            setJustRebuilt(false);
+                            void reloadOperator();
+                            void reloadRecipients();
+                            void reloadArtifacts();
+                            void runHealth(true);
+                        }
+                    }}
+                />
+            )}
+
             {qrSend && (
                 <QrSendSheet
                     t={t}
                     operatorId={operatorId}
                     relayName={title}
-                    onClose={() => setQrSend(false)}
+                    artifact={qrSend.artifact}
+                    label={qrSend.label}
+                    onClose={() => setQrSend(null)}
                 />
             )}
+
 
             {confirmDestroy && (
                 <RelayDestroySheet

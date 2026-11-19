@@ -99,6 +99,10 @@ interface Props {
     onAdd: () => void;
     onSend: (path: string, label: string) => void;
     onSave: (path: string, label: string) => void;
+    /** D5: their own file as a QR code, for when they are next to you. */
+    onQr?: (r: RecipientSummary, label: string) => void;
+    /** D5: their own file as text, for a messenger that refuses files. */
+    onCopy?: (r: RecipientSummary, label: string) => void;
     /** Their file is missing on this device: make it again. */
     onRemake: (r: RecipientSummary) => void;
     /** Give them a new file and cancel the old one. */
@@ -115,6 +119,8 @@ export function PeopleSection({
     onAdd,
     onSend,
     onSave,
+    onQr,
+    onCopy,
     onRemake,
     onReplace,
     onRemoveAccess,
@@ -256,6 +262,28 @@ export function PeopleSection({
                         >
                             {t('pub.people.save')}
                         </ActionButton>
+                        {r && onQr && (
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={action.busy !== null}
+                                onClick={() => onQr(r, p.label)}
+                            >
+                                {t('pub.person.qr')}
+                            </Button>
+                        )}
+                        {r && onCopy && (
+                            <ActionButton
+                                action={action}
+                                k={`copy:${r.id}`}
+                                busyLabel={t('pub.fb.copying')}
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => onCopy(r, p.label)}
+                            >
+                                {t('pub.person.copy')}
+                            </ActionButton>
+                        )}
                     </>
                 ) : (
                     r && (

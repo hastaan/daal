@@ -82,7 +82,7 @@ const imageName = "Ubuntu 24.04 LTS x64"
 // destroying it on teardown.
 func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (*provider.OperatorRecord, error) {
 	if err := validateProvisionOpts(opts); err != nil {
-		return nil, err
+		return nil, provider.Coded(provider.CodeBadInput, err)
 	}
 	if opts.ExistingServerID != "" {
 		// Hetzner can re-image a box in place (ServerRebuild) and
@@ -92,8 +92,8 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		// existing instance. Saying so is better than pretending:
 		// a silent fresh create would leave the operator's original
 		// box running and billing next to a new one.
-		return nil, errors.New("vultr: --existing-server-id is not supported on Vultr; " +
-			"Vultr cannot re-image an instance with new cloud-init user-data, so a Daal relay must be a fresh instance")
+		return nil, provider.Coded(provider.CodeResumeUnsupported, errors.New("vultr: --existing-server-id is not supported on Vultr; "+
+			"Vultr cannot re-image an instance with new cloud-init user-data, so a Daal relay must be a fresh instance"))
 	}
 	label := derivedInstanceLabel(opts.PublisherPubKey, opts.Region)
 
@@ -127,17 +127,30 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		progress = func(string, string) {}
 	}
 
+	j := opts.J()
+
 	// Idempotency + ownership.
 	existing, err := p.c.InstanceByLabel(ctx, label)
 	switch {
 	case err == nil && existing != nil:
 		if !ownsInstance(existing, label) {
-			return nil, fmt.Errorf("vultr: an instance labelled %q already exists (id %s) but does not carry this relay's tags (%s, %s%s); "+
+			return nil, provider.Coded(provider.CodeNotOurs, fmt.Errorf("vultr: an instance labelled %q already exists (id %s) but does not carry this relay's tags (%s, %s%s); "+
 				"refusing to adopt or overwrite a machine daal-deploy did not create",
-				label, existing.ID, tagManagedBy, tagRelayPrefix, label)
+				label, existing.ID, tagManagedBy, tagRelayPrefix, label))
 		}
 		if opts.MgmtPort == 0 {
-			return nil, errors.New("vultr: existing instance requires persisted MgmtPort")
+			// A killed setup's instance. Vultr cannot re-image it with
+			// fresh cloud-init, so there is no "finish on this server":
+			// refuse, name it, create nothing (exit 4).
+			return nil, &provider.ProvisionError{
+				Code:     provider.CodeServerExists,
+				ServerID: existing.ID,
+				Err: fmt.Errorf("vultr: an instance for this relay already exists (id %s, %s, %s); nothing was created — delete it first",
+					existing.ID, existing.Label, existing.MainIP),
+			}
+		}
+		if err := j.Begin(provider.ModeReuse, label, mgmtPort, opts.CoverSNI); err != nil {
+			return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("vultr: journal: %w", err))
 		}
 		rec, err := p.recordFromInstance(existing, opts)
 		if err != nil {
@@ -196,15 +209,23 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 
 	scope := &provisionScope{p: p, relay: label, region: opts.Region}
 
+	if err := j.Begin(provider.ModeCreate, label, mgmtPort, coverSNI); err != nil {
+		return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("vultr: journal: %w", err))
+	}
+
 	progress("provision_ssh_key", "Creating SSH key")
 	keyName, err := ephemeralSSHKeyName(label)
 	if err != nil {
 		return nil, fmt.Errorf("vultr: name ssh key: %w", err)
 	}
+	if err := j.Intent(provider.KindSSHKey, keyName, ""); err != nil {
+		return nil, provider.Coded(provider.CodeJournalError, fmt.Errorf("vultr: journal: %w", err))
+	}
 	sshKeyID, err := p.c.SSHKeyCreate(ctx, keyName, pubBytes)
 	if err != nil {
 		return nil, fmt.Errorf("vultr: create ssh key: %w", err)
 	}
+	j.Created(provider.KindSSHKey, sshKeyID, keyName, nil)
 	// Delete the cloud-side key on EVERY exit path, success included.
 	// The private half is generated per invocation and never leaves
 	// this process, so the uploaded public half is dead weight the
@@ -217,12 +238,14 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 			progress("provision_ssh_key", fmt.Sprintf(
 				"could not remove one-shot SSH key %q (id %s): %v — remove it with: %s",
 				keyName, sshKeyID, err, removeCommand("ssh-keys", sshKeyID)))
+			return
 		}
+		j.Deleted(provider.KindSSHKey, sshKeyID)
 	}()
 
 	// The firewall FIRST, so the instance is born behind it.
 	progress("provision_cloud_firewall", "Creating the relay firewall ("+portsForDisplay(dataPlanePorts)+")")
-	fwGroupID, createdFW, err := p.ensureFirewallGroup(ctx, label, dataPlanePorts)
+	fwGroupID, createdFW, err := p.ensureFirewallGroup(ctx, label, dataPlanePorts, j)
 	if err != nil {
 		return nil, fmt.Errorf("vultr: firewall group: %w", err)
 	}
@@ -231,6 +254,9 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	}
 
 	progress("provision_create_server", "Creating instance on Vultr")
+	if err := j.Intent(provider.KindServer, label, ""); err != nil {
+		return nil, scope.unwind(ctx, opts, progress, provider.Coded(provider.CodeJournalError, fmt.Errorf("vultr: journal: %w", err)))
+	}
 	inst, err := p.c.InstanceCreate(ctx, InstanceCreateOpts{
 		Label:           label,
 		Hostname:        label,
@@ -246,6 +272,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	if err != nil {
 		return nil, scope.unwind(ctx, opts, progress, fmt.Errorf("vultr: create instance: %w", err))
 	}
+	j.Created(provider.KindServer, inst.ID, label, inst.MainIP)
 	scope.instanceID = inst.ID
 	if inst.MainIP != nil {
 		scope.instanceIP = inst.MainIP.String()
@@ -285,9 +312,19 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		if wait == nil {
 			wait = p.waitForHealthy
 		}
+		j.Phase("health_wait")
 		if err := wait(ctx, rec, healthToken, opts, progress); err != nil {
+			var pe *provider.ProvisionError
+			if !errors.As(err, &pe) {
+				if errors.Is(err, context.Canceled) {
+					err = provider.Coded(provider.CodeCancelled, err)
+				} else {
+					err = provider.Coded(provider.CodeHealthTimeout, err)
+				}
+			}
 			return nil, scope.unwind(ctx, opts, progress, err)
 		}
+		j.Phase("healthy")
 	}
 	progress("provision_healthy", "Instance is up and healthy")
 	return rec, nil

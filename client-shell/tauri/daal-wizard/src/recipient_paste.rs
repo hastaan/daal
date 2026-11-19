@@ -294,6 +294,44 @@ pub fn decode_pasted(text: &str) -> Result<DecodedPaste, PasteError> {
 /// a crash left behind.
 pub fn stage_pasted_text(staging_dir: &Path, text: &str) -> Result<StagedPaste, PasteError> {
     let decoded = decode_pasted(text)?;
+    stage_decoded(staging_dir, decoded)
+}
+
+/// Stage a sealed per-person file that arrived as raw bytes — the QR
+/// receive path, where the engine's fountain decoder hands back
+/// `sealed_b64` instead of a verdict because only this shell holds the
+/// key that opens it. Same private staging, same sweep, same size cap
+/// as a paste; anything that is not a sealed file is refused, so this
+/// can never become a side door around the plain importer.
+pub fn stage_sealed_bytes(staging_dir: &Path, bytes: Vec<u8>) -> Result<StagedPaste, PasteError> {
+    if bytes.len() > MAX_DECODED_BYTES {
+        return Err(PasteError::TooLarge);
+    }
+    if !crate::recipient_sbpx::is_sbpx(&bytes) {
+        return Err(PasteError::NotDaalText);
+    }
+    stage_decoded(
+        staging_dir,
+        DecodedPaste {
+            kind: PastedKind::Sbpx,
+            bytes,
+        },
+    )
+}
+
+/// [`stage_sealed_bytes`] for the engine's `sealed_b64` field
+/// (standard base64, padded).
+pub fn stage_sealed_b64(staging_dir: &Path, sealed_b64: &str) -> Result<StagedPaste, PasteError> {
+    if sealed_b64.len() > MAX_INPUT_BYTES {
+        return Err(PasteError::TooLarge);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(sealed_b64.trim().as_bytes())
+        .map_err(|_| PasteError::NotDaalText)?;
+    stage_sealed_bytes(staging_dir, bytes)
+}
+
+fn stage_decoded(staging_dir: &Path, decoded: DecodedPaste) -> Result<StagedPaste, PasteError> {
     let dir = staging_dir.join("paste");
     std::fs::create_dir_all(&dir)?;
 
