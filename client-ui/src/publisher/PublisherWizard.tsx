@@ -786,7 +786,11 @@ export default function PublisherWizard({
         }
         if (!window.confirm(t('wiz.cancel.confirm'))) return;
         if (live) {
-            const ok = await run(() => Wizard.cancelAndCleanup(opId));
+            // The command returns nothing, which arrives as null: say
+            // `true` ourselves, or success looks like run()'s failure and
+            // the wizard stays open on a relay that no longer exists
+            // (seen on the phone 2026-11-19).
+            const ok = await run(() => Wizard.cancelAndCleanup(opId).then(() => true));
             if (ok === null) return;
         }
         resetAfterCancel();
@@ -2046,11 +2050,12 @@ export default function PublisherWizard({
                                         onClick={async () => {
                                             if (!operatorId) return;
                                             const ok = await run(() =>
+                                                // Returns nothing (null): see onCancelPress.
                                                 Wizard.setHelperIp(
                                                     operatorId,
                                                     helperIpRepair.trim(),
                                                     'manual',
-                                                ),
+                                                ).then(() => true),
                                             );
                                             if (ok === null) return;
                                             setHelperIpRepair(null);

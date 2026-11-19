@@ -3110,6 +3110,20 @@ W3 items: none moves with this wave.
   account** (PA-12): the app only offers a rebuild when the server is
   gone, and deleting it at the hosting company is the owner's step.
 
+- [x] **PB-29. "Cancel & remove this relay" on a draft removed it but
+  stayed in the wizard**, on a relay that no longer existed (seen on the
+  phone 2026-11-19; the next press failed with "operator not found").
+  A command that returns nothing arrives as null, which the wizard read
+  as failure. Fixed there and in the manual "my address" repair, which
+  had the same mistake. Not yet seen fixed on the phone.
+- [ ] **PB-30. The draft cancel still uses the old system dialog** and
+  tells the person to delete a server "from your cloud provider's
+  dashboard". With nothing rented it should just say nothing was rented.
+- [ ] **PB-31. The dearer server size was preselected.** Step 2 showed
+  CPX02 (best value, 7.49/mo) and CPX12 (14.36/mo) with CPX12 selected.
+  The cheapest size that is enough should be the default. (An hour
+  earlier the same account offered CX23 at 6.86: the list is live.)
+
 ### Seen on the phone, 2026-11-19 (this tree, device key, real Hetzner account)
 
 - **Back (PA-25, PB-18).** The first build of this wave closed a sheet on
