@@ -23,6 +23,7 @@ import {
     type RecipientIdentitySummary,
     RecipientIdentity,
 } from '../recipient/recipientCommands';
+import { useBack } from '../lib/useBack';
 import { Card, ListRow } from '../design/primitives';
 
 interface Props {
@@ -360,6 +361,10 @@ interface RotateDialogProps {
 
 function RotateDialog({ t, busy, onCancel, onConfirm }: RotateDialogProps) {
     const [confirmed, setConfirmed] = useState(false);
+    // Back is Cancel, refused while the rotation runs.
+    useBack(true, () => {
+        if (!busy) onCancel();
+    });
     return (
         <div
             role="dialog"

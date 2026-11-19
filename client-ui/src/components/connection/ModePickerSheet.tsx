@@ -2,6 +2,7 @@
 // matching the dark-theme d2 design surface. Selecting a mode
 // dispatches setMode() and closes the sheet.
 import type { ConnMode } from '../../contract/D2Contract';
+import { useBack } from '../../lib/useBack';
 
 interface Props {
     t: (k: string) => string;
@@ -32,6 +33,7 @@ export default function ModePickerSheet({
     onPick,
     onClose,
 }: Props) {
+    useBack(true, onClose);
     return (
         <div
             role="dialog"

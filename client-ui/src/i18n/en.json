@@ -196,6 +196,8 @@
     "wiz.step.build.blurb": "Daal is creating the server, hardening it, and signing the file your recipients will import. This takes a few minutes.",
     "wiz.provider.soon": "Coming soon",
     "wiz.provider.token.stored": "Your access key is already saved on this device. Leave this blank to keep it.",
+    "wiz.provider.token.saved_other": "Daal will use the access key you already saved on this phone. Leave this blank, or paste a different key to use that instead.",
+    "wiz.provider.token.saved_other.named": "Daal will use the access key you already saved for “{relay}”. Leave this blank, or paste a different key to use that instead.",
     "wiz.plan.name.label": "Name this relay",
     "wiz.plan.name.default": "e.g. Family Relay",
     "wiz.plan.name.help": "Only you see this. It labels the relay here and names the file you share.",

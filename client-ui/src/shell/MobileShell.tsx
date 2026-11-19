@@ -8,6 +8,7 @@
 import { useState } from 'react';
 import type { Locale } from '../lib/i18n';
 import { Prefs } from '../lib/prefs';
+import { useBack } from '../lib/useBack';
 import ConnectionPage from '../d2pages/ConnectionPage';
 import NetworkPage from '../d2pages/NetworkPage';
 import StatusPage from '../d2pages/StatusPage';
@@ -42,6 +43,10 @@ export default function MobileShell(props: Props) {
         Prefs.publisherEnabled(),
     );
     const { t, locale, onLocaleChange, appVersion } = props;
+    // Diagnostics is an inner page of Settings: Back returns to
+    // Settings. Top-level tabs register nothing, so Back from a tab
+    // leaves the app as before.
+    useBack(section === 'settings' && showDiagnostics, () => setShowDiagnostics(false), 'page');
 
     return (
         <div

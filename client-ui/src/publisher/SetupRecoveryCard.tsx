@@ -9,6 +9,7 @@ import { Button, Card, Sheet } from '../design/primitives';
 import type { DestroyReport, SetupRecovery } from './wizardCommands';
 import { WhatIsThis } from './Disclosure';
 import { AddressLines } from './DestroyAddresses';
+import { OtherServerNote, otherServerId } from './OtherServerNote';
 import {
     DESTRUCTIVE,
     buttonKey,
@@ -78,11 +79,17 @@ export function DeleteOutcome({
 }) {
     return (
         <div style={{ display: 'grid', gap: 6 }} data-testid="setup-delete-outcome">
-            <div style={{ ...BODY, color: report.server_deleted ? 'var(--fg)' : 'var(--red)' }}>
-                {report.server_deleted
-                    ? t('pub.setup.recover.deleted.ok')
-                    : t('pub.setup.recover.deleted.server_kept')}
-            </div>
+            {otherServerId(report) !== '' ? (
+                // PA-3: not deleted because another Daal server has this
+                // relay's name; the relay is kept.
+                <OtherServerNote t={t} report={report} />
+            ) : (
+                <div style={{ ...BODY, color: report.server_deleted ? 'var(--fg)' : 'var(--red)' }}>
+                    {report.server_deleted
+                        ? t('pub.setup.recover.deleted.ok')
+                        : t('pub.setup.recover.deleted.server_kept')}
+                </div>
+            )}
             <AddressLines t={t} addresses={report.addresses ?? []} onRetry={onRetry} retryBusy={busy} />
             {(report.warnings ?? []).length > 0 && (
                 <WhatIsThis label={t('pub.fb.details')}>

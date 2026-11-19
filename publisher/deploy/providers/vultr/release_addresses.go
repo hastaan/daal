@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"daal/publisher/deploy/provider"
 )
@@ -118,4 +119,55 @@ func vultrServerState(inst *InstanceInfo) string {
 		return provider.ServerRunning
 	}
 	return provider.ServerStarting
+}
+
+var _ provider.SingleAddressReleaser = (*Provider)(nil)
+
+// ReleaseOneAddress: see the Hetzner adapter and
+// provider.SingleAddressReleaser; same rules, with Vultr's ownership
+// mark in the reserved IP's label.
+func (p *Provider) ReleaseOneAddress(ctx context.Context, rec *provider.OperatorRecord, idOrIP string) provider.AddressOutcome {
+	o := provider.AddressOutcome{}
+	if ip := net.ParseIP(idOrIP); ip != nil {
+		o.IP = ipv4String(ip)
+	} else {
+		o.ID = idOrIP
+	}
+	if rec == nil || idOrIP == "" {
+		o.Code, o.Error = provider.AddrReleaseFailed, "no relay or no address named"
+		return o
+	}
+	rips, err := p.c.ReservedIPList(ctx)
+	if err != nil {
+		o.Code, o.Error = provider.AddrReleaseFailed, fmt.Sprintf("could not list the account's reserved IPs: %v", err)
+		return o
+	}
+	var r *ReservedIPInfo
+	for _, c := range rips {
+		if c != nil && (c.ID == idOrIP || (o.IP != "" && ipv4String(c.IP) == o.IP)) {
+			r = c
+			break
+		}
+	}
+	if r == nil {
+		o.Code, o.Released = provider.AddrReleased, true
+		return o
+	}
+	o.ID, o.IP = r.ID, ipv4String(r.IP)
+	switch {
+	case (rec.FloatingIPID != "" && r.ID == rec.FloatingIPID) || (len(rec.PublicIP) > 0 && o.IP == ipv4String(rec.PublicIP)):
+		o.Code = provider.AddrInUse
+	case !ownsReservedIP(r, rec):
+		o.Code = provider.AddrNotDaal
+	case r.InstanceID != "":
+		o.Code = provider.AddrStillAttached
+		o.Error = "attached to instance " + r.InstanceID
+	default:
+		if err := p.c.ReservedIPDelete(ctx, r.ID); err != nil {
+			o.Code, o.Error = provider.AddrReleaseFailed, err.Error()
+		} else {
+			o.Code, o.Released = provider.AddrReleased, true
+		}
+	}
+	return o
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"daal/publisher/deploy/provider"
 )
@@ -120,4 +121,57 @@ func hetznerServerState(status string) string {
 		return provider.ServerMissing
 	}
 	return provider.ServerStarting
+}
+
+var _ provider.SingleAddressReleaser = (*Provider)(nil)
+
+// ReleaseOneAddress gives back one floating IP left reserved for rec's
+// live relay (PA-1). See provider.SingleAddressReleaser for the rules.
+// The account list is read once and the address matched by id or by
+// IP; the record's own address and anything attached are never
+// deleted.
+func (p *Provider) ReleaseOneAddress(ctx context.Context, rec *provider.OperatorRecord, idOrIP string) provider.AddressOutcome {
+	o := provider.AddressOutcome{}
+	if ip := net.ParseIP(idOrIP); ip != nil {
+		o.IP = ipv4String(ip)
+	} else {
+		o.ID = idOrIP
+	}
+	if rec == nil || idOrIP == "" {
+		o.Code, o.Error = provider.AddrReleaseFailed, "no relay or no address named"
+		return o
+	}
+	fips, err := p.c.FloatingIPList(ctx)
+	if err != nil {
+		o.Code, o.Error = provider.AddrReleaseFailed, fmt.Sprintf("could not list the account's floating IPs: %v", err)
+		return o
+	}
+	var f *FloatingIPInfo
+	for _, c := range fips {
+		if c != nil && (c.ID == idOrIP || (o.IP != "" && ipv4String(c.IP) == o.IP)) {
+			f = c
+			break
+		}
+	}
+	if f == nil {
+		o.Code, o.Released = provider.AddrReleased, true
+		return o
+	}
+	o.ID, o.IP = f.ID, ipv4String(f.IP)
+	switch {
+	case (rec.FloatingIPID != "" && f.ID == rec.FloatingIPID) || (len(rec.PublicIP) > 0 && o.IP == ipv4String(rec.PublicIP)):
+		o.Code = provider.AddrInUse
+	case !ownsFloatingIP(f, rec):
+		o.Code = provider.AddrNotDaal
+	case f.ServerID != "":
+		o.Code = provider.AddrStillAttached
+		o.Error = "attached to server " + f.ServerID
+	default:
+		if err := p.c.FloatingIPDelete(ctx, f.ID); err != nil {
+			o.Code, o.Error = provider.AddrReleaseFailed, err.Error()
+		} else {
+			o.Code, o.Released = provider.AddrReleased, true
+		}
+	}
+	return o
 }

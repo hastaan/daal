@@ -2714,7 +2714,7 @@ callers; W3-4, W3-5 and W3-12 are untouched).
 
 Open:
 
-- [ ] **PA-1. An address left by an earlier try, on a relay that then
+- [x] **PA-1. An address left by an earlier try, on a relay that then
   finished.** "Delete this server" on an unfinished setup can fail to
   release an address; if the person then starts again and the relay
   finishes, the card still says the address costs money but offers no
@@ -2722,6 +2722,18 @@ Open:
   relay). Needs a release-only action for one named, Daal-labelled,
   unattached address of a live relay (Go verb + shell command + the
   card's Try again).
+  **Done in the tree (section 18), not seen on a phone or a real
+  provider:** `daal-deploy release-address` (released / in_use /
+  not_daal / still_attached / release_failed; nothing on the box is
+  touched), `wizard_release_address` (refuses an address the relay does
+  not list), and Try again on a live relay calls it once per address and
+  never a delete. `TestReleaseOneAddress_EveryCode`,
+  `TestReleaseOneAddress_VultrEveryCode`,
+  `TestReleaseAddress_ExitCodesAndOneOutcome`,
+  `a_left_address_on_a_live_relay_is_given_back_on_its_own`, e2e
+  `pa1_an_address_left_by_an_earlier_try_is_given_back_and_the_relay_keeps_running`;
+  UI "PA-1 rendered: … calls wizard_release_address for each listed
+  address and never a delete". Needs the rebuilt helper (PA-6).
 - [ ] **PA-2. The person's own server and a rented one both live.** If
   a setup on "a server I already own" failed and a later rented setup
   was killed after asking for its server, the recovery card follows the
@@ -2729,7 +2741,7 @@ Open:
   server, which Daal partly set up. It is never deleted without the
   person saying so, but it is not mentioned either. One card naming
   both is the fix.
-- [ ] **PA-3. Teardown by id does not double-check the derived name.**
+- [x] **PA-3. Teardown by id does not double-check the derived name.**
   The shell now leaves the server id empty when the journal's last
   server create was never answered, so `decommission` looks the server
   up by name. A record or journal id that is stale for another reason
@@ -2738,9 +2750,23 @@ Open:
   when the given id is gone and a server with both ownership labels
   still carries the derived name, report it instead of
   `server_deleted:true`.
-- [ ] **PA-4. The QR sheet shows the raw error text outside Details.**
+  **Done in the tree (section 18), not seen on a real provider:**
+  Hetzner and Vultr re-check the derived name when the id is gone; a
+  labelled server under another id is reported (`named_server`, exit 7)
+  and nothing is deleted; the shell keeps the relay and its hosting key
+  and the sheet points to "Check my hosting account", where the person
+  picks it. `TestDecommission_IDGoneButALabelledServerKeepsTheName`,
+  `TestDecommission_VultrIDGoneButALabelledInstanceRemains`,
+  `TestDecommission_NamedServerRemainsExits7`,
+  `another_server_with_the_relays_name_keeps_the_relay`,
+  `decommission_exit_7_reports_the_named_server`, e2e
+  `pa3_a_stale_server_id_is_caught_by_the_relays_name_and_deleted_once_picked`.
+- [x] **PA-4. The QR sheet shows the raw error text outside Details.**
   Pre-existing; the sentence under it is now right for one person's
   file. Move the raw text under a Details disclosure.
+  **Done in the tree (section 18):** `QrErrorBlock` shows the title and
+  the plain sentence; the raw text is only inside Details. UI "PA-4
+  rendered: a failing per-person QR".
 - [ ] **PA-5. Wizard wiring tests.** The recovery, cancel and retry
   decisions are now pure functions with tests (`performRecovery`,
   `afterRecovery`, `cancelDelete`, `existingAfterFailure`,
@@ -2752,13 +2778,20 @@ Open:
   keeps the relay (and its token) and names the address as still
   billing, but Try again can never release it until the app's helper is
   updated. The release must ship the rebuilt helper.
-- [ ] **PA-7. Deleting an unfinished relay from the relay list, when it
+- [x] **PA-7. Deleting an unfinished relay from the relay list, when it
   was being set up on the person's own server.** The list's delete
   sheet does not pass "delete my server", so the shell (correctly)
   leaves their server alone, but the report then reads "the server is
   gone". The sheet should ask the setup-recovery question first and
   offer "Delete my server" / "Keep my server" as the wizard's Cancel
   does.
+  **Done in the tree (section 18), not seen on a phone:** the list's
+  delete of a pre-provision relay asks setup recovery first and opens
+  the wizard's keep/delete sheet; Keep never passes "delete my own
+  server" and says the server was left as it is. UI "PA-7 rendered: …
+  asks keep or delete", "Delete my server passes it, and only then", "a
+  setup still running: the sheet deletes nothing"; `listDeleteFor`
+  (pure).
 - [ ] **PA-18. Does the setup helper survive Android killing the
   app?** Unknown. If it does, a resumed app finds the journal locked and
   says a setup is still running (`E_SETUP_RUNNING`) until it ends; if it
@@ -2789,10 +2822,14 @@ Open:
   already refused by the audit verdict, so removing the guard fails no
   test. Kept; noted so nobody reads its absence of a test as coverage.
 
-- [ ] **PA-25. Back closes the whole app instead of the open sheet.**
+- [x] **PA-25. Back closes the whole app instead of the open sheet.**
   Seen on the phone 2026-11-19: with the per-person QR sheet open, the
   system Back gesture finished the activity and the process exited. A
   sheet should take Back first. Check what Back does while connected.
+  **Fixed in the tree (section 18, PB-18), NOT yet seen on the phone:**
+  one back stack over the webview history; rendered test "the
+  per-person QR sheet: Back closes it and the page behind stays
+  (PA-25)". Back while connected is still to check on the phone.
 - [ ] **PA-26. A second activity in the same process aborts at start.**
   Seen once, right after `adb install -r` followed at once by
   `am start`: Android had already restarted the activity, the second
@@ -2857,3 +2894,258 @@ the owner decides):
    then.
 9. The same on Vultr (PA-19): a killed setup says it cannot be
    finished there and offers the delete.
+
+## 18. Publisher alone, second slice: a backup that restores on another phone, and Back (2026-11-19)
+
+The wave on branch `publisher-backup`, for a publisher whose one phone
+was the only place their relays could be managed from: one backup file,
+encrypted under twelve recovery words the app makes and the person
+writes down, restores on another phone with the relays, the people and
+their files usable there; the system Back closes the open sheet or goes
+back one page instead of closing the app (PA-25); and PA-1, PA-3, PA-4
+and PA-7 from section 17. Five lanes (Go, shell, UI, an integration lane
+on the fake hosting company, a repair pass over sixteen review
+findings), then this gate.
+
+Built by the wave (each "[x]" = in the tree, not seen on a phone or a
+real provider; green in `./daal test` and in `client-ui` vitest):
+
+- [x] **PB-6. Twelve recovery words, made by the app.** 128 bits from
+  the OS written as a 12-word BIP-39 mnemonic (the canonical English
+  list, its SHA-256 pinned; the BIP-39 seed step is not used). Shown
+  once; the person types back three of them, and a wrong one is named
+  by its position, never by the word. "Check my words" and "Make new
+  words" (with a confirm) are on the backup page. Typed words are
+  normalised: Persian keyboard layout, Persian and Arabic digits,
+  full-width letters, numbering, ZWNJ, mixed case, a unique prefix of
+  four letters or more. The words live in React state only and are
+  wiped in the shell after use. `the_word_list_is_the_canonical_bip39_english_list`,
+  `bip39_vectors`, `typed_words_are_normalised`, `words_confirm_and_check`;
+  UI "words once, a wrong word caught by position, the same words shown
+  again, then saved".
+- [x] **PB-7. The file: `.daalbackup` v1.** A 76-byte header (magic,
+  version, KDF and AEAD ids, Argon2id 64 MiB / t=3 / p=1, salt, nonce,
+  a check value, length), then AES-256-GCM with the header as AAD; key
+  and check from HKDF over the Argon2id output. The check is what tells
+  "wrong words" from "damaged file". The header names no relay, person,
+  address, provider or time. Built and parsed in memory only
+  (`Zeroizing`); the only file written is the ciphertext. Argon2 time on
+  a phone is expected 1-3 s and NOT measured. `production_kdf_constants_are_pinned`,
+  `inspect_reads_only_the_header`,
+  `nothing_in_the_file_or_the_errors_reads_in_clear` (no relay name,
+  address, provider, person, token, public key or pack in the file,
+  the header, the error strings or any other file on disk).
+- [x] **PB-8. What is in it, said on the screen.** Every table and
+  every file-path column of the operator database is classified as
+  included or excluded by a guard test, so a new table cannot be
+  silently left out. The hosting key IS included; the page says that
+  whoever has the file AND the words can run up the bill, delete the
+  servers and make files the family's phones trust. The phone's own
+  recipient identity is never carried. `every_table_and_path_column_is_classified`;
+  UI "D1 the backup page".
+- [x] **PB-9. The file leaves through the existing save and share
+  paths.** Save to Downloads (staged copy deleted) or send to another
+  app; a share counts as the last backup only after the person answers
+  "Yes, I have it". The default name carries the date, hour and minute.
+  `a_backup_handed_to_another_app_counts_only_once_it_arrived`,
+  `default_name_and_sweep`; UI "a backup sent to another app is not the
+  last backup until the person says it arrived", "a save that fails says
+  so and changes nothing".
+- [x] **PB-10. The backup says when it is out of date.** The last
+  backup's date and a digest of what it held are kept; adding, removing
+  or renewing a person, replacing the hosting key or making new words
+  makes it out of date (a health check does not). The relay list shows
+  the card; the people page shows it only after a change made it stale.
+  `staleness_follows_people_files_and_keys_not_health`,
+  `new_words_make_the_last_backup_out_of_date_until_a_new_one`; UI "D1
+  the relay list card", "unconfirmed new words and confirmed new words
+  are each said on the page and the card".
+- [x] **PB-11. When a backup cannot be made, the page says why.** No
+  relays, no words yet, a setup still running, a key that cannot be
+  read (naming the relay), custody locked. `blocked_states_and_their_codes`.
+- [x] **PB-12. Restore on an empty phone.** Pick the file, enter the
+  words, see what it holds (relays, people, removed people), restore.
+  Keys are re-wrapped under the new phone's custody (a raw blob from the
+  old phone does not open on the new one), files are written 0600,
+  paths are rewritten into the new phone's staging, the name counter
+  comes along, and the new phone's own recipient identity is untouched.
+  Every relay's helper address is empty afterwards and the app asks for
+  it (`E_HELPER_IP_MISSING`). `round_trip_into_an_empty_phone_and_the_keys_still_sign`;
+  e2e `bk_a_backup_restored_on_an_empty_phone_keeps_serving_the_family`
+  (the real `daal-deploy` against the fake hosting company: health,
+  add Kian, his file verifies against the old phone's public key, an L4
+  rebuild and "renew everyone" with the removed person kept off); UI
+  "an empty phone: choose, wrong words refused, right words, restore,
+  the old-phone notice".
+- [x] **PB-13. Each refusal is its own sentence and changes nothing.**
+  Wrong words, words that are not valid, a damaged or truncated file, a
+  file from a newer version, a file that is not a backup, a file that
+  cannot be read, a database failure: the whole database and the
+  phone's directory hash the same before and after. `every_refusal_is_distinct_and_changes_nothing`,
+  `a_file_that_cannot_be_read_is_not_called_foreign_or_damaged`,
+  `a_database_failure_at_the_commit_is_not_called_damaged`; UI "a file
+  that is not a backup, a damaged one, a newer one: each its own
+  sentence, back at choosing".
+- [x] **PB-14. Restore over existing relays never merges and never
+  overwrites unasked.** It refuses unless the phone is empty; the
+  replace path names the relays that will be replaced (and those that
+  keep running and billing but leave this phone) and sends a digest of
+  what was shown, so a change made after the preview is refused.
+  `restore_over_existing_data_needs_the_named_confirmation`; UI "over
+  existing relays: the button names them and sends the digest".
+- [x] **PB-15. Restore is atomic.** Everything is validated first (with
+  a dry-run insert that is rolled back); one transaction is the commit
+  point; the roll-forward is idempotent and is finished by the next
+  `list_operators`, `custody_status`, `backup_status` or key read.
+  `a_kill_before_the_commit_leaves_the_old_state`,
+  `a_kill_after_the_commit_is_finished_by_the_next_call`,
+  `a_key_read_while_a_restore_is_pending_finishes_it_or_refuses`; UI "an
+  unfinished restore offers Try again, which finishes it".
+- [x] **PB-16. After a restore: what the old phone can still do.** The
+  notice says the old phone has the same keys; that a new hosting key
+  made at the hosting company's website and entered here stops it
+  reaching the account and the relays' management (which opens only
+  through a firewall window the hosting key opens); and that it can
+  still make files the family's phones trust, since key rotation does
+  not exist yet, so the way out is a new relay and new files. A new
+  hosting key is tried against the account first and is stored only if
+  it opens the account that has the relays. `a_new_hosting_key_replaces_the_old_only_once_it_opens_the_right_account`,
+  `a_relays_key_cannot_move_to_another_company_and_keep_a_truncated_record`;
+  UI "after a restore the list shows the old-phone notice until it is
+  dismissed".
+- [x] **PB-17. People the restored list does not know.** The relay
+  check counts relay users the list never had (people added on the old
+  phone after the backup), names them under Details, and moves the name
+  counter past them. `after_restoring_an_older_backup_people_added_later_are_seen_and_their_names_skipped`;
+  UI "people the relay lets in that this phone does not know get their
+  own line".
+- [x] **PB-18. Back, one mechanism (PA-25).** `client-ui/src/lib/backStack.ts`
+  keeps at most one history entry while anything is registered; sheets
+  and dialogs (`BottomSheet`, `Modal` and the hand-made dialogs) sit
+  above pages; Back closes the topmost, then goes back one page, and
+  with nothing registered leaves the app as before. Back on a
+  confirmation is cancel; a sheet that is working (delete, panic wipe,
+  key rotation, making a backup) refuses Back and stays; the wizard
+  steps back and never cancels, and refuses while it builds. Alt+Left
+  and BrowserBack do the same on desktop. `backStack.test.ts` (11,
+  including "only backStack.ts touches browser history or listens to
+  popstate" and "every hand-made dialog answers Back"),
+  `backRendered.test.tsx` (7, including "the per-person QR sheet: Back
+  closes it and the page behind stays (PA-25)"); UI "Back steps inside
+  the page: type-back to the words, the words ask before leaving",
+  "Back after a restore from the first-run wizard goes to the relays,
+  never to the empty wizard".
+
+From section 17, closed in the tree by this wave (see the ticks there):
+PA-1 (`release-address` verb, `wizard_release_address`, the card's Try
+again), PA-3 (decommission exit 7 with `named_server`, nothing deleted),
+PA-4 (raw QR error under Details), PA-7 (keep or delete my server from
+the list), PA-25 (PB-18).
+
+### Open
+
+- [ ] **PB-1 (medium). Restoring an older backup can bring a removed person back.**
+  - The restored list has a person who was removed on the old phone after the backup was made. "Renew everyone" then plans them as `--ensure` and creates them on the relay again with a fresh working file.
+  - The notice now says that changes after the backup day are not in the backup, and that anyone removed since must be removed again. Nothing stops the renew, though.
+  - Fix: on the first check after a restore, a person in the list whom the relay lacks is not re-created without the person confirming them by name.
+- [ ] **PB-2 (medium). People added after the backup cannot be removed from the new phone.**
+  - The relay check now counts them (`people_unknown`), names them under Details, and moves the name counter past them. There is still no remove action.
+  - Fix: the remove action needs a revoke by relay user name with no book row (the Go `users-revoke` takes a name; the shell has no path without a recipient row).
+- [ ] **PB-3 (low). Android may save a second backup in a minute under another name.**
+  - `saveToDownloads` keeps the requested name, but MediaStore may store a de-duplicated one ("… (1)"). The default name now carries the hour and minute, so only two backups made in the same minute collide.
+  - Fix: return the final display name from `MainActivity.saveToDownloads` and report that name. This needs the native patch.
+- [ ] **PB-4 (low). On desktop, "Send to another app" only opens the folder.**
+  - It opens `staging/backup-out/`, and that file is swept after a day. The backup is no longer counted until the person says it arrived, but the screen does not say where the file is on desktop.
+- [ ] **PB-5 (low). A dry-run refusal and a real failure are not both tested.**
+  - The dry run in `parse_payload` maps constraint and type errors to DAMAGED and every other database error to `E_RESTORE_FAILED`, like the commit. Only the commit path has a test, through `RestoreFault::CommitError`.
+- [ ] **PB-19. Signing-key rotation does not exist.** It is the only way
+  to stop an old phone (or anyone with the file and the words) making
+  files the family's phones trust. The notice says so and offers the
+  only way out there is (a new relay, new files, delete the old one).
+- [ ] **PB-20. The words and restore screens can be captured.**
+  FLAG_SECURE needs a native patch.
+- [ ] **PB-21. The plaintext `.daalkey` export is still there,** beside
+  a backup that now does the same job encrypted.
+- [ ] **PB-22. Plaintext copies in freed memory.** `serde_json` keeps
+  the base64 secrets in `String`s that are freed without being wiped
+  (written in the module doc of `publisher_backup.rs`).
+- [ ] **PB-23. The desktop shell was not built** (no GTK here, as
+  PA-23): the new commands and `share_path` were checked for the Android
+  target only, and the desktop branch of `share_path` is the old code
+  moved, not compiled.
+- [ ] **PB-24. The UI tests run on a small fake DOM**
+  (`client-ui/src/test/miniDom.ts`, `rig.tsx`), not a browser; the
+  rendered Back tests simulate WryActivity's history, they do not run
+  it.
+- Still cut: cloud sync of backups; one publisher on two phones at
+  once.
+
+W3 items: none moves with this wave.
+
+- [x] **PB-25. A new relay starts with the hosting key already saved.**
+  Asked for by the owner on 2026-11-19: the first screen of a new relay
+  wanted the key pasted again although another relay holds it. Now, when
+  a relay at the same company has a readable key, the screen says so
+  (naming that relay) and Next works with the box left blank; a pasted
+  key still wins. The key is copied inside custody under the new relay's
+  own alias and never passes through the UI. In the tree, not yet seen
+  on the phone. Tests: `a_new_relay_can_reuse_the_hosting_key_another_relay_saved`
+  (commands.rs), "reusing a saved hosting key for a new relay"
+  (backupWave.test.tsx).
+
+### To check on the phone
+
+Never uninstall the app on the owner's phone to test a restore: an
+uninstall deletes the operator database, which is the thing a backup
+exists to protect, and an APK signed with the wrong key forces exactly
+that uninstall (build with `release-keys/android-device-signing.jks`).
+Restore is tested on a SECOND phone, or on a test install that holds no
+real relay. Steps marked (2) need that second phone or a wiped test
+install; steps marked ($) touch a real account and bill a little; the
+owner decides.
+
+1. Build `libdaal_deploy.so` from this tree
+   (`tools/build-deploy-android.sh`, `publisher/**` changed) and the APK
+   with the device key. Without the new helper, Try again on a live
+   relay's address and the named-server report say "update the app".
+2. Back everywhere: on the per-person QR sheet (PA-25: the relay page
+   stays), on every other sheet, on a delete confirmation (= cancel,
+   nothing deleted), on a relay page (back to the list), on the words
+   screen (asks before leaving), during a setup (stays, says wait), on
+   a top-level tab (leaves the app as before). Also once while
+   connected.
+3. Make a backup, save to Downloads: the file is in Downloads, the list
+   says when. Make one more in the same day: the screen names the newer
+   file (PB-3). Send one to a messenger and dismiss the chooser: the
+   list still says only this phone can manage the relays.
+4. Time the "Making the backup" and restore steps (Argon2, expected
+   1-3 s on a mid-range phone). Type the words back with Gboard in
+   Persian layout: they are read as the English words.
+5. Add a person: the list says the backup is out of date and offers a
+   new one.
+6. (2) On the second phone, freshly installed: pick the file from
+   Downloads (and once from the messenger), wrong words, then the right
+   words: the relays, the people and their files are there. Enter the
+   helper address when asked; "Check now" says working.
+7. (2) ($) On the second phone: add a person and hand over their file;
+   it connects on their phone. Remove them; renew everyone's files after
+   a rebuild.
+8. (2) Feed the second phone a truncated copy, a file that is not a
+   backup, and the same backup again over its now-restored relays: each
+   says its own sentence; the last asks to replace and names the relays.
+9. (2) ($) After the restore, make a new hosting key at the hosting
+   company, delete the old one, enter the new one on the second phone:
+   a mistyped key and a key from another account are refused with the
+   old key kept; then on the FIRST phone the relay check can no longer
+   reach the account or the management (whether that holds is exactly
+   what PB-16 claims and nothing has shown yet).
+10. ($) PA-1: on a relay that kept an address from an earlier try, Try
+    again gives it back; the console shows it gone and the relay still
+    running.
+11. ($) PA-3: delete a relay's server in the hosting console and make a
+    new one with the same name and labels by hand; delete the relay in
+    Daal: it says another server carries the relay's name and deletes
+    nothing until it is picked in "Check my hosting account".
+12. PA-7: on an unfinished setup on the person's own server, delete from
+    the relay list: it asks keep or delete; Keep leaves the server
+    running.

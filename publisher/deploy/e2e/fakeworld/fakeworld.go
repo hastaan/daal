@@ -1053,6 +1053,42 @@ func (w *World) StopManagement(id int64) error {
 	return nil
 }
 
+// ReplaceInConsole is what a person does at the hosting company's
+// website: the server is deleted there and a new one is made by hand
+// with the same name and labels, so it has a new id that no Daal record
+// holds. The box moves to the new id (it is the same machine for the
+// relay's purposes); firewalls and addresses that named the old id let
+// go of it, as a real delete does. Returns the new id.
+func (w *World) ReplaceInConsole(id int64) (int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.servers[id]
+	if !ok {
+		return 0, errors.New("no such server")
+	}
+	delete(w.servers, id)
+	for _, fw := range w.fws {
+		kept := fw.AppliedTo[:0]
+		for _, res := range fw.AppliedTo {
+			if res.Server == nil || res.Server.ID != id {
+				kept = append(kept, res)
+			}
+		}
+		fw.AppliedTo = kept
+	}
+	for _, f := range w.fips {
+		if f.Server != nil && *f.Server == id {
+			f.Server = nil
+		}
+	}
+	nid := w.id()
+	s.ID = nid
+	s.PublicNet.IPv4.ID = nid
+	w.servers[nid] = s
+	w.created++
+	return nid, nil
+}
+
 // ReserveAddress puts a floating IP in the account with these labels,
 // as an earlier address change would have, assigned to server (0 =
 // none).
@@ -1095,6 +1131,14 @@ func (w *World) controlHandler() http.Handler {
 	})
 	m.HandleFunc("POST /servers/{id}/stop-management", func(rw http.ResponseWriter, r *http.Request) {
 		ok(rw, w.StopManagement(pathID(r)))
+	})
+	m.HandleFunc("POST /servers/{id}/replace-in-console", func(rw http.ResponseWriter, r *http.Request) {
+		nid, err := w.ReplaceInConsole(pathID(r))
+		if err != nil {
+			http.Error(rw, err.Error(), 400)
+			return
+		}
+		writeJSON(rw, 200, map[string]int64{"id": nid})
 	})
 	m.HandleFunc("POST /reserve-address", func(rw http.ResponseWriter, r *http.Request) {
 		var req struct {

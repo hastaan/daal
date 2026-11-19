@@ -95,12 +95,18 @@ import { checkHealth, checkedWorking, healthFailure, nowUnix } from './relayHeal
 import { RenewBanner, RenewSheet } from './RenewSheet';
 import { renewBannerText, renewBannerVisible } from './renew';
 import { recipientArtifact } from './wizardCommands';
-import type { PackArtifact, RelayHealth } from './wizardCommands';
+import type { BackupStatus, PackArtifact, RelayHealth } from './wizardCommands';
+import { BackupCard } from './BackupCard';
+import { backupApi } from './backupHarness';
+import type { BackupApi } from './backupHarness';
 
 interface Props {
     t: (k: string) => string;
     operatorId: number;
     onBack: () => void;
+    /** Open the backup page (the stale-backup card's button). */
+    onBackup?: () => void;
+    backup?: BackupApi;
 }
 
 // daal1… bech32 lower bound; we don't decode the bech32 here (the
@@ -192,8 +198,20 @@ export default function PublisherRecipientsPage({
     t,
     operatorId,
     onBack,
+    onBackup,
+    backup = backupApi(),
 }: Props) {
     const [operator, setOperator] = useState<OperatorSummary | null>(null);
+    // D1: after adding, removing or renewing people the backup no longer
+    // has the latest; asked after each of those, shown only when stale.
+    const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+    const recheckBackup = useCallback(async () => {
+        try {
+            setBackupStatus(await backup.status());
+        } catch {
+            setBackupStatus(null);
+        }
+    }, [backup]);
     // Wave 3 Step 8. `freshTick` is bumped after anything that re-signs
     // the pack, because the freshness panel's headline answer ("can the
     // files people hold repair themselves?") is stamped at sign time and
@@ -732,6 +750,7 @@ export default function PublisherRecipientsPage({
             setAddDisplayName('');
             setShowAdd(false);
             await reloadArtifacts();
+            void recheckBackup();
             action.report(
                 'person:add',
                 'ok',
@@ -746,6 +765,7 @@ export default function PublisherRecipientsPage({
         addAddress,
         addDisplayName,
         operatorId,
+        recheckBackup,
         reloadArtifacts,
         runMgmt,
         t,
@@ -763,13 +783,14 @@ export default function PublisherRecipientsPage({
         if (ok) {
             setConfirmRevoke(null);
             await reloadArtifacts();
+            void recheckBackup();
             action.report(
                 'person:revoke',
                 'ok',
                 t('pub.fb.access_removed').replace('{name}', personLabel(target)),
             );
         }
-    }, [action.report, confirmRevoke, operatorId, reloadArtifacts, runMgmt, t]);
+    }, [action.report, confirmRevoke, operatorId, recheckBackup, reloadArtifacts, runMgmt, t]);
 
     const onRemoveConfirm = useCallback(async () => {
         if (!confirmRemove) return;
@@ -781,6 +802,7 @@ export default function PublisherRecipientsPage({
             setRecipients((prev) => prev.filter((r) => r.id !== target.id));
             setConfirmRemove(null);
             await reloadArtifacts();
+            void recheckBackup();
             action.report(
                 'person:remove',
                 'ok',
@@ -791,7 +813,7 @@ export default function PublisherRecipientsPage({
         } finally {
             setRemoveBusy(false);
         }
-    }, [action.report, confirmRemove, operatorId, reloadArtifacts, t]);
+    }, [action.report, confirmRemove, operatorId, recheckBackup, reloadArtifacts, t]);
 
     // ---- Wave 3 Step 7: rotations ---------------------------------------
 
@@ -922,12 +944,15 @@ export default function PublisherRecipientsPage({
 
     return (
         <div style={{ padding: '12px 16px 24px 16px', display: 'grid', gap: 20 }}>
+            {/* D1: shown only after a change made the backup out of date. */}
+            <BackupCard t={t} status={backupStatus} onBackup={onBackup} onlyWhenStale />
+
             {/* ---------------- Header ---------------- */}
             <div style={{ display: 'grid', gap: 8 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {/* Android's hardware back button is not wired to any
-                        in-app navigation, so the only way out of a detail
-                        screen has to be on screen. */}
+                    {/* The system Back does the same (PublisherPage
+                        registers this page with lib/backStack.ts); the
+                        button stays because a gesture is not obvious. */}
                     <Button variant="ghost" onClick={onBack}>
                         {t('pub.relay.back')}
                     </Button>
@@ -2017,6 +2042,7 @@ export default function PublisherRecipientsPage({
                             void reloadRecipients();
                             void reloadArtifacts();
                             void runHealth(true);
+                            void recheckBackup();
                         }
                     }}
                 />

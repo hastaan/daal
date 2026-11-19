@@ -130,6 +130,11 @@ export function healthLines(t: (k: string) => string, h: RelayHealth): HealthLin
     if (h.everyone_missing === true) {
         out.push({ key: 'pub.health.everyone_missing', tone: 'bad' });
     }
+    // Let in by the relay, unknown to this phone's list: people added on
+    // another phone after the backup this list was restored from.
+    if ((h.people_unknown ?? 0) > 0) {
+        out.push({ key: 'pub.health.people_unknown', n: h.people_unknown ?? 0, tone: 'bad' });
+    }
     return out;
 }
 

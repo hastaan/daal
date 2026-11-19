@@ -727,6 +727,14 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 	if err != nil {
 		return rep, err
 	}
+	// 0b. PA-3: the recorded id may be stale (removed in the console,
+	// then a new server made outside the record). Before trusting
+	// "that id is gone" as "nothing bills", look the derived name up.
+	if rec.ServerID != "" {
+		if err := p.checkDerivedNameWhenIDGone(ctx, rec, rep); err != nil {
+			return rep, err
+		}
+	}
 
 	// 1. The VPS — the thing that costs money. First, and fatal.
 	if serverID == "" {
@@ -807,6 +815,47 @@ func (p *Provider) Decommission(ctx context.Context, rec *provider.OperatorRecor
 		rep.Preserve("floating-ip:" + rec.FloatingIPID)
 	}
 	return rep, nil
+}
+
+// checkDerivedNameWhenIDGone is PA-3. When rec.ServerID is provably
+// gone, a server that still carries this relay's derived name and BOTH
+// ownership labels under another id is this relay's server as far as
+// the account can tell — reporting server_deleted:true would tell the
+// person the billing stopped while it did not. That server is not
+// deleted either: the caller asked for one id, and a server made
+// outside the record is for the person to look at. The report names
+// it, ServerDeleted stays false, and the error wraps
+// provider.ErrNamedServerRemains (decommission exits 7).
+//
+// A failed name lookup proves nothing and is an error (exit 1, nothing
+// deleted). A server with the name but without the labels is not
+// Daal's: today's behaviour holds (the id is gone, so it is deleted).
+// An id that is not provably gone (it exists, or it could not be read)
+// is left to the delete path as before.
+func (p *Provider) checkDerivedNameWhenIDGone(ctx context.Context, rec *provider.OperatorRecord, rep *provider.DecommissionReport) error {
+	if len(rec.PublisherPubKey) == 0 || rec.Region == "" {
+		return nil
+	}
+	if !p.serverProvablyGone(ctx, rec.ServerID) {
+		return nil
+	}
+	relay := derivedServerName(rec.PublisherPubKey, rec.Region)
+	srv, err := p.c.ServerByName(ctx, relay)
+	switch {
+	case errors.Is(err, errServerNotFound), err == nil && srv == nil:
+		return nil
+	case err != nil:
+		rep.Warnf("the recorded server is gone, but whether another server named %q exists could not be checked (%v) — nothing was deleted", relay, err)
+		rep.Preserve("server:" + relay)
+		return fmt.Errorf("hetzner: look up server %q: %w", relay, err)
+	case srv.ID == rec.ServerID, !ownsServer(srv, relay):
+		return nil
+	}
+	rep.ServerDeleted = false
+	rep.NamedServer = &provider.NamedServer{ID: srv.ID, Name: srv.Name}
+	rep.Preserve("server:" + srv.ID)
+	rep.Warnf("the recorded server is already gone, but your hosting account still has another server with this relay's name (%s, id %s); it was not deleted — check your hosting account", srv.Name, srv.ID)
+	return fmt.Errorf("hetzner: %w: %s (%s)", provider.ErrNamedServerRemains, srv.ID, srv.Name)
 }
 
 // serverProvablyGone reports whether the provider says, in so many

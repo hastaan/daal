@@ -2,6 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { useEffect } from 'react';
+import { useBack } from '../../lib/useBack';
 
 interface Props {
     title?: ReactNode;
@@ -11,6 +12,10 @@ interface Props {
 }
 
 export function BottomSheet({ title, children, onClose, footer }: Props) {
+    // System Back (and Alt+Left) is the same close as Escape or a tap
+    // outside: the cancel path. A sheet whose onClose refuses while busy
+    // refuses Back the same way.
+    useBack(true, onClose);
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') onClose();

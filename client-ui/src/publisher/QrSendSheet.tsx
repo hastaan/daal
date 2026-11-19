@@ -45,6 +45,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import { Wizard, onQrFrame } from './wizardCommands';
 import type { PackArtifact } from './wizardCommands';
 import { failureKey } from './failureText';
+import { WhatIsThis } from './Disclosure';
 import { Button, Card, Sheet, Segmented } from '../design/primitives';
 import { modulePxFor, paintFrame, paintedModules } from '../qr/paint';
 import {
@@ -82,6 +83,40 @@ type Speed = 'steady' | 'slow';
 export function qrErrorBody(t: (k: string) => string, artifact: PackArtifact, error: unknown): string {
     if (artifact === 'shared') return t('qr.send.error.body');
     return t(failureKey(error));
+}
+
+/** PA-4: a failed stream, in plain words. The raw error text is for a
+ *  helper and goes under Details only. */
+export function QrErrorBlock({
+    t,
+    artifact,
+    error,
+}: {
+    t: (k: string) => string;
+    artifact: PackArtifact;
+    error: string;
+}) {
+    return (
+        <Card>
+            <div data-testid="qr-error" style={{ display: 'grid', gap: 6 }}>
+                <div style={{ fontSize: 13, color: 'var(--red)' }}>{t('qr.send.error.title')}</div>
+                <div style={{ fontSize: 12 }}>{qrErrorBody(t, artifact, error)}</div>
+                <WhatIsThis label={t('pub.fb.details')}>
+                    <div
+                        dir="ltr"
+                        style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 11,
+                            color: 'var(--muted)',
+                            wordBreak: 'break-word',
+                        }}
+                    >
+                        {error}
+                    </div>
+                </WhatIsThis>
+            </div>
+        </Card>
+    );
 }
 
 export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose }: Props) {
@@ -369,32 +404,7 @@ export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose
                     />
                 </div>
 
-                {error && (
-                    <Card>
-                        <div
-                            style={{
-                                fontSize: 13,
-                                color: 'var(--red)',
-                                marginBottom: 6,
-                            }}
-                        >
-                            {t('qr.send.error.title')}
-                        </div>
-                        <div
-                            style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 11,
-                                color: 'var(--muted)',
-                                wordBreak: 'break-word',
-                            }}
-                        >
-                            {error}
-                        </div>
-                        <div style={{ fontSize: 12, marginTop: 8 }}>
-                            {qrErrorBody(t, artifact, error)}
-                        </div>
-                    </Card>
-                )}
+                {error && <QrErrorBlock t={t} artifact={artifact} error={error} />}
             </div>
         </Sheet>
     );
