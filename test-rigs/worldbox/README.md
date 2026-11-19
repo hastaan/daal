@@ -135,8 +135,8 @@ your user (`/etc/subuid`, `newuidmap`), `/dev/net/tun`, nftables with
 conntrack and NFQUEUE usable inside a user namespace, and `go gcc ip nft tc
 ss python3(+PyYAML) openssl flock timeout`. `run.sh --preflight` checks all
 of it and says what is missing (exit 77). The release artefacts this
-tree PINS must be staged in `dist-release/relay-v1.5.0/` (`gh release
-download relay-v1.5.0 --dir dist-release/relay-v1.5.0`, as CI does). The
+tree PINS must be staged in `dist-release/relay-v1.5.1/` (`gh release
+download relay-v1.5.1 --dir dist-release/relay-v1.5.1`, as CI does). The
 release script builds a release FROM THIS TREE into its own tag's
 directory and, without `--upload`, publishes nothing;
 `tools/release/README.md` says how the "pinned" box is pointed at such a

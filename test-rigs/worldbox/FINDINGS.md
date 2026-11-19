@@ -14,43 +14,47 @@ delete the entry there and mark the finding fixed here. So a fix is noticed
 the day it lands, and nothing in that file can become a blanket excuse
 (`driver/known_test.go` holds both files to that).
 
-Repo state: `main @ 062f809` (the "truth wave" merge) + the uncommitted
-work that rides the one relay re-release (token v2 bound to the relay
-and the request, the authenticated bootstrap, `GET /identity`, the
-certificate re-issue on `rotate-tls`, UDP on naive). Last gate
-2026-11-19: this tree — 16 of 18 worlds green in full, the two pinned
-worlds stop at `provision` (REL-1, BOOT-1); the same tree with the pin
-bump applied to a scratch copy — `PASS — 5388 checks`, 18 worlds, twice.
-What the owner does next is `docs/release-runbook.md`.
+Repo state: the release-ready wave (branch `release-ready-wave`) with the
+pin moved to relay-v1.5.1, published 2026-11-19 (GitHub releases
+`relay-v1.5.1` and `relay-v1.5.1-mirror`, byte-identical to the candidate
+the rig proved). Last gate 2026-11-19: `./daal e2e full` →
+`PASS — 5388 checks`, 18 worlds, the three pinned worlds (`release`,
+`release.lifecycle`, `release.all-families`) green; the only known
+finding is CEN-4. **Not yet run on a phone or on a rented relay** — that
+is `docs/release-runbook.md`, Part 2 onwards. Below, "the pinned release"
+/ "the pinned box" in text written before 2026-11-19 means relay-v1.5.0.
 Reproductions are run from `test-rigs/worldbox/`. "quick"/"full" are the
 modes of `./daal e2e` (`./e2e.sh`); a world name is a row of its report.
 
-### Fixed in this tree (22)
+### Fixed in this tree (25)
 
 | id | severity | one line | status | reproduce (before the fix) | pinned by |
 |---|---|---|---|---|---|
-| BOOT-1 | **high** (security) | The management-TLS fingerprint the publisher pins — and then believes every relay reply on, including the keys it signs into a pack — was read from a plain-HTTP health reply: a machine on the path during provisioning swapped one JSON field and the publisher signed the attacker's REALITY key and TLS pin | **fixed** in `publisher/deploy/health` (`bootstrap.go`, `poll.go`, `handler.go`): the fingerprint is accepted only with a MAC under the health token, which reaches the box in cloud-init user-data and is no longer sent (the URL carries a derived value); no unauthenticated fallback. Second line in the wizard (`relay_identity.rs`): a relay that was not rebuilt and states a different REALITY key or TLS pin than the signed one is refused, not re-signed. Spec `daal-relay-mgmt-v1.md` §2.1. **Rides the relay re-release**: the pinned `daal-relay-health` cannot authenticate, so a relay built from the pinned release now fails at `provision` (closed), before REL-1's `mint` | unit, at `062f809`: a proxy that rewrites `mgmt_tls_fingerprint` in the health reply → `Poller.WaitForMgmtFingerprint` returns the attacker's value, no error | unit `TestPoller_RefusesAFingerprintRewrittenOnThePath`, `TestPoller_NeverSendsTheHealthToken`, `TestFingerprintMAC` (wire vector), `TestHandler_MakesTheMACItself`, `TestWaitForMgmtFingerprint_StopsOnAStandingRefusal` (publisher/deploy/health); wizard `a_relay_that_states_new_keys_without_a_rebuild_is_refused_not_signed`, `a_rebuilt_relay_is_signed_with_its_new_keys`, `only_a_committed_key_stated_differently_is_a_key_changed_in_place`; rig: every tree world provisions through the authenticated bootstrap (`--mgmt=tree` now also runs the tree's `daal-relay-health`). **No rig check plays the on-path attacker** (the censor sits between client and relay, not between publisher and relay) |
+| BOOT-1 | **high** (security) | The management-TLS fingerprint the publisher pins — and then believes every relay reply on, including the keys it signs into a pack — was read from a plain-HTTP health reply: a machine on the path during provisioning swapped one JSON field and the publisher signed the attacker's REALITY key and TLS pin | **fixed** in `publisher/deploy/health` (`bootstrap.go`, `poll.go`, `handler.go`): the fingerprint is accepted only with a MAC under the health token, which reaches the box in cloud-init user-data and is no longer sent (the URL carries a derived value); no unauthenticated fallback. Second line in the wizard (`relay_identity.rs`): a relay that was not rebuilt and states a different REALITY key or TLS pin than the signed one is refused, not re-signed. Spec `daal-relay-mgmt-v1.md` §2.1. **Released as relay-v1.5.1 (2026-11-19)**: the pinned `daal-relay-health` authenticates, and the three pinned worlds provision through it. A relay built from relay-v1.5.0 fails at `provision` (closed); none is in service | unit, at `062f809`: a proxy that rewrites `mgmt_tls_fingerprint` in the health reply → `Poller.WaitForMgmtFingerprint` returns the attacker's value, no error | unit `TestPoller_RefusesAFingerprintRewrittenOnThePath`, `TestPoller_NeverSendsTheHealthToken`, `TestFingerprintMAC` (wire vector), `TestHandler_MakesTheMACItself`, `TestWaitForMgmtFingerprint_StopsOnAStandingRefusal` (publisher/deploy/health); wizard `a_relay_that_states_new_keys_without_a_rebuild_is_refused_not_signed`, `a_rebuilt_relay_is_signed_with_its_new_keys`, `only_a_committed_key_stated_differently_is_a_key_changed_in_place`; rig: every world, tree and pinned, provisions through the authenticated bootstrap (`--mgmt=tree` also runs the tree's `daal-relay-health`). **No rig check plays the on-path attacker** (the censor sits between client and relay, not between publisher and relay) |
 | FAM-1 | **high** (user-visible) | On naive, an app's name lookups (plain UDP/53) get no answer: "connected", nothing loads | **fixed** in `core/engine/config.go` — **names only** — and since FAM-6's fix the naive pack carries UDP itself, so on naive this path no longer runs (lookups ride the tunnel); it still covers every TCP-only outbound (naive, http, tor, ssh, shadowtls, `network:tcp`), but the rig exercises naive only; needs one phone retest (Private DNS off, naive route and tor route, open a site by name) | revert the `hijack-dns` hunk, `./run.sh clean naive` → `family/naive dns` blocked | unit `TestBuildSingBoxConfigHijacksDNSForUDPLessOutbounds`, `TestTCPOnlyOutboundTypesMatchSingBox` (core/engine), and under `-tags singbox` (now run by `./daal test`) `TestHijackedDNSConfigIsAcceptedBySingBox` — the linked sing-box parses and starts the rule together with the legacy-format dns block; rig check `family/naive dns` in quick and full |
-| LC-1 | low-to-medium (security, defence in depth) | A mgmt token already used once could be replayed with a different body (`users-revoke` against another recipient, etc.) | **fixed** twice over in `cmd/daal-relay-mgmt/main.go` + `publisher/deploy/mgmt/token.go` + spec §3: every mutating token is single-use (in memory), and — token format v2 — the signature now covers the method, the path and the SHA-256 of the body, so a token is good for ONE request whatever the daemon remembers (the restart residual is closed; what is left is stated in the section). The v1 format is refused. **open on released relays** until the next mgmt release (REL-1: this tree cannot drive the pinned daemon at all until then) | `./run.sh --ops mgmtauth clean @default` (pinned release, at `062f809`) → `replay.users-revoke` honoured | unit `TestTokenIsBoundToTheRequest` (a signed token with another body is refused, never-used and after a restart), `TestV1TokenIsRefused`, `TestMutatingTokensAreSingleUse`, `TestAddressTokenIsSingleUse`, `TestTokenV2Vector_BoxAcceptsWhatThePublisherSigns` (cmd/daal-relay-mgmt); `TestToken_SignsTheRequestNotJustTheOp`, `TestTokenV2Vector_PublisherProducesTheFixture` (publisher/deploy/mgmt); rig `op:mgmtauth replay.users-revoke`, `signed_for_another_body`, `signed_for_no_body`, `v1_token` green on the tree build in quick and full; on the pinned box tracked in known-findings.json (`LC-1`, box=pinned) |
+| LC-1 | low-to-medium (security, defence in depth) | A mgmt token already used once could be replayed with a different body (`users-revoke` against another recipient, etc.) | **fixed** twice over in `cmd/daal-relay-mgmt/main.go` + `publisher/deploy/mgmt/token.go` + spec §3: every mutating token is single-use (in memory), and — token format v2 — the signature now covers the method, the path and the SHA-256 of the body, so a token is good for ONE request whatever the daemon remembers (the restart residual is closed; what is left is stated in the section). The v1 format is refused. **Released as relay-v1.5.1 (2026-11-19)**; no relay older than relay-v1.5.1 is in service | `./run.sh --ops mgmtauth clean @default` (pinned release, at `062f809`) → `replay.users-revoke` honoured | unit `TestTokenIsBoundToTheRequest` (a signed token with another body is refused, never-used and after a restart), `TestV1TokenIsRefused`, `TestMutatingTokensAreSingleUse`, `TestAddressTokenIsSingleUse`, `TestTokenV2Vector_BoxAcceptsWhatThePublisherSigns` (cmd/daal-relay-mgmt); `TestToken_SignsTheRequestNotJustTheOp`, `TestTokenV2Vector_PublisherProducesTheFixture` (publisher/deploy/mgmt); rig `op:mgmtauth replay.users-revoke`, `signed_for_another_body`, `signed_for_no_body`, `v1_token` green on the tree build in quick and full, and on the pinned box in world release.lifecycle (full) since the pin moved — the `LC-1` entry is gone from known-findings.json |
 | FAM-5 | low (latent) | Off Android the engine could never load Cronet from beside its own binary (a failed first try is cached for the process) | **fixed** in `core/engine/cronet_state.go`, `cronet_loader_naive.go` | revert, `./run.sh clean naive` → `tunnel` refused, "cronet: failed to load library" | unit `TestCronetLibraryArg` + `TestLoadCronetUsesCronetLibraryArg` (core/engine); rig: every `family/naive tunnel`. Android unchanged by construction, not device-tested |
 | FAM-6 | medium (user-visible) | naive carried **no app UDP except DNS**: QUIC without a TCP fallback, calls, games got nothing while the route was "Connected" | **fixed** in `publisher/deploy/relaypack/client_outbound.go`: the minted naive outbound asks for `udp_over_tcp` (version 2); the relay's naive inbound accepts it with no change (sing-box 1.13.12 `protocol/naive/inbound.go`), the signed-endpoint check and the freshness merge keep it. **Packs already minted do not change: re-mint.** Not verified: a phone (datagrams over one TCP stream through Cronet — throughput, battery), and no soak | at `062f809`: `./run.sh clean naive` → `family/naive udp expect=blocked got=blocked` | `family/naive udp` = pass in every world and under every censor scenario (`families/naive.json`); unit `TestClientOutbound_NaiveCarriesUDP` (relaypack: minted, accepted by `bundle.CheckOutbound`, kept by `MergeEndpoint`), `TestClientOutboundMatrixIsCurrent` + the core/engine matrix test (the linked sing-box parses it) |
-| INT-2 | medium (intermittent; on the relay) | naive: sing-box 1.13.12 decides the naive inbound's ALPN with a start-up race; about 1 start in 1000 leaves naive/TCP answering every ClientHello with alert 120 (`no_application_protocol`; Cronet `net_error -107`) for the whole life of that sing-box process. Nothing is logged; the engine says Connected | **fixed** in `cmd/daal-relay-mgmt/singbox_users.go` (the daemon now writes `alpn` into `naive-in`, so nothing is left to race; an older inbound is healed on the next recipient add); **open on released relays** until the next mgmt release (the one F-002 and LC-1 need). Root cause is upstream sing-box, worth reporting there | `repro/int2-naive-alpn-race.sh` (no Daal involved: 3 dead instances in 3000 starts; `… pinned` → 0 in 3000) | unit `TestAppendNaiveUserCreatesInbound`, `TestNaiveALPNHealsAnOlderInbound` (cmd/daal-relay-mgmt); on the pinned box tracked in known-findings.json `INT-2` (box=pinned, signature `net_error -107`, budget 4); on a tree box the same face is an unexpected red |
+| INT-2 | medium (intermittent; on the relay) | naive: sing-box 1.13.12 decides the naive inbound's ALPN with a start-up race; about 1 start in 1000 leaves naive/TCP answering every ClientHello with alert 120 (`no_application_protocol`; Cronet `net_error -107`) for the whole life of that sing-box process. Nothing is logged; the engine says Connected | **fixed** in `cmd/daal-relay-mgmt/singbox_users.go` (the daemon now writes `alpn` into `naive-in`, so nothing is left to race; an older inbound is healed on the next recipient add); **released as relay-v1.5.1 (2026-11-19)**. Root cause is upstream sing-box, worth reporting there | `repro/int2-naive-alpn-race.sh` (no Daal involved: 3 dead instances in 3000 starts; `… pinned` → 0 in 3000) | unit `TestAppendNaiveUserCreatesInbound`, `TestNaiveALPNHealsAnOlderInbound` (cmd/daal-relay-mgmt); the `INT-2` entry (box=pinned, signature `net_error -107`, budget 4) is gone from known-findings.json since the pin moved: on any box the same face is an unexpected red |
 | F-004 | **high** (security, design) | A pack's outbound profiles were not authenticated: anyone could rewrite the server address under the publisher's fingerprint | **fixed** — "signed endpoint, local credential": every route's server, port and server-authentication material is committed in the signed manifest (`_endpoint`), the importer refuses an outbound that disagrees (`endpoint_mismatch`, before any trust prompt), `SetRoute` re-checks. `bundle/go/bundle/endpoint.go`, `bundle/go/importer/endpoint_plan.go`, `publisher/deploy/relaypack/endpoint.go`, `core/abi/endpoint_guard.go`; spec `relaypack-v1.md` §"Endpoint commitment". **Not covered:** bundles that are not RelayPacks (section below) | at `257238a`: `./run.sh --ops tamper clean vless-reality` → `import_of_tampered_pack got=pass` | `op:tamper import_of_tampered_pack` and `.port` / `.tls_pin` / `.reality_public_key` / `.trusted_certificate` / `.tls_insecure` / `.folded_key` / `.shadowsocks_server_key`, `commitment_stripped.import`, `credential_rewrite.*` (quick + full); `tampered_pack.connect` (a phone told to connect with the tampered pack stops at import: no route listed, engine never started); `TestSetRoute_EndpointRefusalComesBeforeAnyConnectionAttempt` (core/abi: a refused route starts no engine, runs no connection check, records no attempt); `TestCheckOutbound_RefusesEveryEndpointRewrite`, `TestCheckOutbound_RefusesFoldedKeySpellings` (a second, case-folded spelling of a checked member name), `TestImport_TamperedEndpointIsRefusedNotPrompted`, `TestImportSBP_RefusesAPackWhoseEndpointWasRewritten` |
 | F-006 | medium (security) | A bundle with no `relay_pack` slot — same publisher, same route ids, profiles rewritten with no key — silently replaced committed routes and deleted their commitments | **fixed** — a commitment is sticky: an import that carries no signed endpoint for a route the device already holds with one (stored commitment or `relay_pack_id`, in any trust state) is refused whole, `endpoint_downgrade`, before any trust prompt; the store refuses the same write itself, before writing anything. `bundle/go/importer/endpoint_plan.go` (rule 5), `core/trust/state.go` (`RouteCommitted`, `SaveImport`); specs `relaypack-v1.md` §"A commitment is sticky", `sbp-v1.md` §"What the signature covers". **Not covered:** a plain bundle's routes under NEW ids are still unauthenticated (section below) | with both guards switched off: `./run.sh --mgmt=tree --ops tamper clean vless-reality` → `uncommitted_replacement.import expect=refused got=pass` | `TestImport_BundleWithoutCommitmentsDoesNotReplaceCommittedRoutes` (bundle/go/importer); `TestStoreAdapter_CommitmentIsSticky`, `TestStoreAdapter_KeepsWhenARouteEndpointWasSigned` (core/trust); `op:tamper uncommitted_replacement.{control.new_routes.import,import,routes_kept}` |
 | LC-2 | **high** | The freshness channel could only deliver the credential-less signed skeleton, which REPLACED a polling recipient's working pack with one that could not connect | **fixed** — a signed pack with no credentials is MERGED: the device keeps its credentials and takes the new signed endpoint; a profile with no outbound never replaces one that has one; the same file imported on a phone that holds nothing is refused (`pack_has_no_credentials`). After L2 and L3 a polling phone recovers with **no new file**. **Still needs a new file:** L1 (that one recipient) and L4–L6 (everyone) — section below | at `257238a`: `./run.sh --mgmt=tree --ops freshness clean vless-reality` → `unchanged.signed-pack-hosted.tunnel got=refused` | `op:freshness unchanged.signed-pack-hosted.{tunnel,routes_kept}`, `signed-pack-alone.import`, `published.*.holds_no_credentials`, `rotated.polled.tunnel`; `op:l2 no-new-file.cover-host-moved.*` (7 families); `op:l3 no-new-file.address-blocked.*` — including `.route_checked`: the merged route passed the engine's own connection check (`route_check=ok`) before it was Connected; `TestSetRoute_MergedRouteIsConnectedOnlyAfterTheConnectionCheck`, `TestSetRoute_MergedRouteThatCarriesNothingIsNotConnected` (core/abi); `TestApplyVerifiedRefresh_MergesSignedEndpointIntoDeviceCredentials`, `TestRotationHealsAnImportedPackOverTheNetwork` |
 | LC-4 | medium (security) | A signed, credential-less pack from BEFORE a rotation, handed over as a file, was merged into a phone that had already moved on: its routes went back to the old cover host / port / relay key, silently (the publisher is already trusted) | **fixed** — a file only moves a route forward: outside the freshness path a merge needs the incoming manifest's `bundle.created_at` to be strictly later than the one the route's commitment came from (kept by the store beside the commitment); the manifest the route is already on is a no-op. An older one is reported `older_than_device` (`pack_is_older` when nothing else is in the file) and the route is untouched. Section below | importer: import v1, merge v2's skeleton (same pack id, REALITY key rotated), import v1's skeleton → `Imported, Merged=2`, both routes back on the old key. Rig, with the rule switched off: `./run.sh --mgmt=tree --ops freshness clean vless-reality` → `rotated.stale-signed-pack-by-file.tunnel got=blocked` (`reality verification failed`) | `TestImport_AnOlderSkeletonDoesNotRollARouteBack`, `TestImport_AnOlderSkeletonRouteIsReportedAndLeftAlone`, `TestImport_SkeletonDoesNotMergeIntoARouteOfUnknownAge` (bundle/go/importer); `TestStoreAdapter_KeepsWhenARouteEndpointWasSigned` (core/trust); `op:freshness rotated.stale-signed-pack-by-file.{not_merged,routes_kept,tunnel}` |
-| LC-3 | medium | After an L3 address move naive could not connect to the new address (the box certificate named only the first-boot address) | **fixed for relays provisioned from this tree** — cloud-init adds one stable DNS name to the certificate; naive verifies against it when (and only when) the address it dials is not in the certificate (`bundle.NaiveVerificationName`). **And the name now follows the cover host**: `rotate-tls` re-issues the certificate on the same key with the new cover host first and the old names kept (`cmd/daal-relay-mgmt/tlscert.go`), so after L2 → L3 a re-minted file presents the CURRENT cover host and files from before both rotations keep connecting. A relay provisioned BEFORE this wave has no such name and still loses naive on L3 until it is rebuilt; a phone handed nothing keeps presenting the old name (section below). The "engine says Connected" half was CEN-1 | at `257238a`: `./run.sh --mgmt=tree --ops l3 clean naive hysteria2` → naive `new-file.address-blocked got=blocked` | `op:l3/naive new-file.address-blocked.{tunnel,wire}` and `no-new-file.address-blocked.tunnel` (full); `op:l2 box.certificate_follows_cover_host`; `op:l3/naive after-l2.new-file.presents_current_cover_host` and `op:l3/* no-new-file.after-l2.address-blocked.*` (world clean.rotation runs l2 THEN l3); `TestNaiveVerificationName`, `TestClientOutbound_NaiveVerificationNameFollowsTheCertificate`; `TestRotateTLS_ReissuesTheCertificateForTheNewCoverHost`, `_FailedReloadPutsTheOldCertificateBack`, `_CertificateTroubleDoesNotStopTheRotation`, `_WSPathOnlyLeavesTheCertificateAlone` (cmd/daal-relay-mgmt) |
+| LC-3 | medium | After an L3 address move naive could not connect to the new address (the box certificate named only the first-boot address) | **fixed for relays provisioned from this tree** — cloud-init adds one stable DNS name to the certificate; naive verifies against it when (and only when) the address it dials is not in the certificate (`bundle.NaiveVerificationName`). **And the name now follows the cover host**: `rotate-tls` re-issues the certificate on the same key with the new cover host first and the old names kept (`cmd/daal-relay-mgmt/tlscert.go`; released as relay-v1.5.1, 2026-11-19), so after L2 → L3 a re-minted file presents the CURRENT cover host and files from before both rotations keep connecting. The stable name is written by cloud-init, so only a relay provisioned FRESH from this release has it (a relay provisioned before this wave would lose naive on L3 until rebuilt; none is in service); a phone handed nothing keeps presenting the old name (section below). The "engine says Connected" half was CEN-1 | at `257238a`: `./run.sh --mgmt=tree --ops l3 clean naive hysteria2` → naive `new-file.address-blocked got=blocked` | `op:l3/naive new-file.address-blocked.{tunnel,wire}` and `no-new-file.address-blocked.tunnel` (full); `op:l2 box.certificate_follows_cover_host`; `op:l3/naive after-l2.new-file.presents_current_cover_host` and `op:l3/* no-new-file.after-l2.address-blocked.*` (world clean.rotation runs l2 THEN l3); `TestNaiveVerificationName`, `TestClientOutbound_NaiveVerificationNameFollowsTheCertificate`; `TestRotateTLS_ReissuesTheCertificateForTheNewCoverHost`, `_FailedReloadPutsTheOldCertificateBack`, `_CertificateTroubleDoesNotStopTheRotation`, `_WSPathOnlyLeavesTheCertificateAlone` (cmd/daal-relay-mgmt) |
 | F-003 | medium | Routes the minter "dropped" still imported, listed and could be activated on the client | **fixed** — a RelayPack route whose profile holds no outbound is not stored: it is not listed, not selectable, not activatable; the import verdict names it (`Unavailable`, reason `not_offered` / `no_credentials` / `needs_new_file`) and the app has copy for each | at `257238a`: `./run.sh clean anytls` (pinned): `routes` lists r5–r7, `error` carries a parse error | `family/* import.unconnectable_not_listed` in every session of every world (red only where a pack has a dropped route: world release.all-families); `TestImport_RoutesTheMinterDroppedAreNotStored`, `TestDroppedRouteIsNeitherListedNorActivatable` |
 | INT-1 | **high** (intermittent) | naive: the whole engine process died with SIGSEGV inside Cronet when a connection was closed at the moment its stream terminated — a use-after-free race in the pinned `cronet-go` (`Close`→`Cancel` against `terminate`→`Destroy`). Seen in the rig only; never observed on a device | **fixed** by bumping `cronet-go` (and `cronet-go/all`, `lib/*`) in `core/go.mod` to `v0.0.0-20260912104727-0d28acc44093`, the first module build with upstream `172bb4ede18c` "Fix bidirectional stream cancel racing with destroy" (it is what sing-box 1.14.1 ships; it builds against the pinned sing-box 1.13.12). **Linux proven here; Android NOT verified, and the phone needs a rebuilt `libcronet.so`** — the bump changes the library's C ABI (see the section) | `for i in 1 2 3 4; do WB_RESTART_CYCLES=25 ./run.sh --mgmt=tree --ops restarts clean naive & done; wait` → before: 3 engine deaths in 520 naive sessions; after: 0 in 1040 | unit `TestCronetGoCarriesTheCancelDestroyFix`, `TestCronetLibModulesMoveTogether`, `TestCronetGoCloseCancelsUnderTheLock` (`core/engine/cronet_pin_test.go`); rig: `*/naive engine.survived` is no longer excused by anything — one engine death fails the run; `tools/cronet/check-libcronet-stamp.sh` refuses a mismatched Android library |
-| FAM-2 | medium | The app could not enable shadowsocks, anytls or tuic at all: the wizard hard-coded an empty family list | **fixed** in `client-ui/src/publisher/` — a collapsed, default-off "More ways to connect" section on the plan screen (`MoreWaysToConnect.tsx`, `extraFamilies.ts`), en+fa. **The switches are locked, with the reason, until F-002's release** (`cloudinit.PinnedMgmtServesOptInFamilies`; section below). *Basis: unit-tested and type-checked; the app itself was not run* | `grep -n enabledFamilies client-ui/src/publisher/PublisherWizard.tsx` (was a constant `[]`) | vitest `src/publisher/extraFamilies.test.tsx` (26 tests); not pinned by the rig (above the ABI) |
-| FAM-3 | medium | `provision --families` was a silent filter: a typo dropped the family, a short list dropped the defaults, exit 0 either way | **fixed** in `publisher/deploy/cli/cli_families.go`: a name the profile does not offer is exit 2 before any cloud call, naming the value and the valid set; what the list drops is stated (stderr, or a `provision_families` progress event) — as "will be asked to serve", naming what the pinned release cannot serve, until F-002's release. L6 keeps working: `reprovision` narrows the record it hands on | `daal-deploy provision … --dry-run --families vless-reality,tiuc` (section below) | unit `publisher/deploy/cli/cli_families_test.go`; not pinned by the rig |
-| FAM-4 | low | De-selecting a default family did not take it off the box: 4 open, listening ports the pack never mentions | **fixed in the tree** (cloud-init + `daal-relay-mgmt` + both firewalls; backlog W5-1 with it); reaches a relay only with the planned re-release and a fresh provision | `./run.sh --mgmt=tree --relay-families shadowsocks,anytls clean shadowsocks anytls` | rig world narrow-relay (full): `mint/* not_served` green with `listener_on_box: false`, and `censor/prove.relay-tls-answers` asserted CLOSED on a relay without a 443/tcp family; unit `TestProvision_NarrowRelayBindsOnlyItsFamilies` and neighbours (`cmd/daal-relay-mgmt/families_test.go`), `TestFirewallPortsForFollowsTheFamilySet`, `TestSingBoxConfig_EveryInboundFollowsTheFamilySet`, `TestProvision_NarrowFamilySetLeavesNothingElseOpen` (hetzner, vultr), `TestRender_UFWOpensExactlyTheDataPlanePorts` |
+| FAM-2 | medium | The app could not enable shadowsocks, anytls or tuic at all: the wizard hard-coded an empty family list | **fixed** in `client-ui/src/publisher/` — a collapsed, default-off "More ways to connect" section on the plan screen (`MoreWaysToConnect.tsx`, `extraFamilies.ts`), en+fa. The switches were locked, with the reason, until F-002's release; **unlocked since relay-v1.5.1 (2026-11-19)** — `cloudinit.PinnedMgmtServesOptInFamilies` and its UI mirror are true (section below). *Basis: unit-tested and type-checked; the app itself was not run* | `grep -n enabledFamilies client-ui/src/publisher/PublisherWizard.tsx` (was a constant `[]`) | vitest `src/publisher/extraFamilies.test.tsx` (26 tests); not pinned by the rig (above the ABI) |
+| FAM-3 | medium | `provision --families` was a silent filter: a typo dropped the family, a short list dropped the defaults, exit 0 either way | **fixed** in `publisher/deploy/cli/cli_families.go`: a name the profile does not offer is exit 2 before any cloud call, naming the value and the valid set; what the list drops is stated (stderr, or a `provision_families` progress event) — as "will be asked to serve", naming the family, whenever the pinned release cannot serve one (none since relay-v1.5.1, 2026-11-19: the line is "will serve"). L6 keeps working: `reprovision` narrows the record it hands on | `daal-deploy provision … --dry-run --families vless-reality,tiuc` (section below) | unit `publisher/deploy/cli/cli_families_test.go`; not pinned by the rig |
+| FAM-4 | low | De-selecting a default family did not take it off the box: 4 open, listening ports the pack never mentions | **fixed** (cloud-init + `daal-relay-mgmt` + both firewalls; backlog W5-1 with it); the daemon half is **released as relay-v1.5.1 (2026-11-19)**. The family set and the firewall are cloud-init: only a relay provisioned FRESH from this release has them | `./run.sh --mgmt=tree --relay-families shadowsocks,anytls clean shadowsocks anytls` | rig world narrow-relay (full): `mint/* not_served` green with `listener_on_box: false`, and `censor/prove.relay-tls-answers` asserted CLOSED on a relay without a 443/tcp family; unit `TestProvision_NarrowRelayBindsOnlyItsFamilies` and neighbours (`cmd/daal-relay-mgmt/families_test.go`), `TestFirewallPortsForFollowsTheFamilySet`, `TestSingBoxConfig_EveryInboundFollowsTheFamilySet`, `TestProvision_NarrowFamilySetLeavesNothingElseOpen` (hetzner, vultr), `TestRender_UFWOpensExactlyTheDataPlanePorts` |
 | F-001 | low (latent) | `daal-fetch-verify` failed with a misleading message when `/tmp` and `/usr/local/bin` are different mounts | **fixed** in `publisher/deploy/cloudinit/shim.sh.tmpl` (stages beside the destination, prints the per-mirror reason); shim hash and cloud-init golden re-pinned; reaches a relay with the next provision | mount a tmpfs on the box's `/tmp` in `box/init.py` (section below) | unit `TestVerifierShim_InstallsAcrossMounts`, `_SaysWhyAMirrorFailed`, `_RefusesBadSignature`, `_FallsBackToSecondMirror` (`shim_exec_test.go` — they run the embedded shim) |
 | CEN-1 | **high** | A route that carried nothing was "Connected", recorded as a success, and came out `proven: true`, `health_pct: 100`; the engine never classified a data-plane failure | **fixed** — a route is Connected only after one real round trip through its own outbound (`core/engine/proof.go`, `core/abi/route_check.go`): `verifying` → `ok` / `degraded` / `failed`; a failed proof is torn down, classified, cooled down and recorded, and `SetRoute` returns the error; a connected route is re-proved every ~3 min (jittered) and on a network change. Spec `engine-abi-v1.md`. **Not verified:** the phone (SetRoute now blocks for the proof, up to 8 s on a dead route, 90 s per attempt on tor) and the default public targets, which the lab cannot reach | at `257238a`: `./run.sh --mgmt=tree relay-ip-block vless-reality hysteria2` → `engine.category got=none`, posture `ImportedActive`, `proven_after=true` | `family/* engine.category` in every blocking scenario (40 sessions in full: 26 named exactly, 14 named as the coarser thing one route can see — CEN-4); unit `TestSetRoute_StartedButCarriesNothingIsNotConnected`, `TestSetRoute_IsVerifyingUntilProved`, `TestCheckActiveRoute_ConnectedToFailedAndBack`, `TestLiveness_TimerAndNetworkChange`, `TestSetRoute_RefusedLeavesTheConnectedRouteWatched`, `TestSetRoute_RefusedForCooldownKeepsTheRecoveryLoop` (a refused `SetRoute` used to stop the liveness loop of the route that stayed up — review finding, fixed), `TestSetRoute_RefusedLeavesTheCheckInFlightRunning` (a refused `SetRoute` used to cancel the connection check of another `SetRoute` still in flight and strand its instance in `verifying`, unproven and unwatched — review finding, fixed) (core/abi), `TestProveInstance_*` (core/engine, `-tags singbox`); vitest `src/lib/routeCheck.test.ts` |
 | CEN-2 | medium | `diagnostics.Classify` could not tell a reset after the ClientHello from a reset of the address, and filed a TLS-phase timeout under `tcp_connect_timeout` | **fixed as far as one route can see** — the engine classifies a failed proof from an observation (phase reach / handshake / carry, UDP or TCP, TLS first flight or not: `core/diagnostics/observe.go`, `ClassifyObservation`); the locked string table is unchanged and still decides where the observation settles nothing. Name-keyed vs address-keyed reset is CEN-4 | at `257238a`: `echo 'read tcp4 1.2.3.4:5->6.7.8.9:443: i/o timeout' \| bin/wb-client --classify` → `tcp_connect_timeout` | `family/* engine.category` under sni-rst, sni-rst-stateless, sni-drop (the engine's category equals the raw probe's); unit `TestClassifyObservation_PhaseSeparatesWhatTheStringCannot`, `_FallsBackToTheLockedTable`, `TestSetRoute_FailedProofIsClassifiedByPhase`, `TestProveInstance_SwallowedHelloIsNotADeadAddress` |
 | CEN-3 | medium (spec) | The failure taxonomy had no word for three things a censor does: UDP dropped toward ONE address, UDP dropped on ONE port, and "connects but too slow to use" | **fixed** — `specs/failure-taxonomy-v1.md` revision 2 adds `udp_address_blocked`, `udp_port_blocked`, `path_too_slow` (a degraded outcome, never a failure or a cooldown) and `udp_no_reply` (what one silent UDP route can honestly say). The engine produces `udp_no_reply` and `path_too_slow`; the two narrower UDP words need a second observation (CEN-4) | at `257238a`: scenarios relay-ip-block, port-whitelist, throttle-56k declared the nearest category (`unknown`, `udp_unavailable`, `none`) | `censor/* truth.category` now declares and raw-proves the new words; `family/* engine.category` under throttle-56k (`path_too_slow` where the proof sees it); unit `TestSetRoute_SlowProofIsDegradedNotFailed`, `TestPathTooSlowIsNotACooldownClass`, `TestClassifyObservation_SilentUDPIsNeverANetworkClaim`; `driver/censor_test.go` |
 | CEN-5 | **high** (user-visible) | After a connect that failed the app said "Connecting…" for good while nothing was running — on Android with no error at all (the connect call resolves before the engine has tried the route). Same words as a connected route the engine really is retrying | **fixed** — the diagnostics blob says `route_running` (true exactly while an engine instance for a route is up); the app shows a failed connect as an error, "Could not connect on this route. Try another one.", and a lost connection as "Connection lost. Trying again…" (en + fa). Spec `engine-abi-v1.md`. **Not verified:** on a phone; the rig does not render the app, it checks the engine field the app reads. **Still open:** while a lost connection is being retried the main button does not disconnect (section below) | at `257238a` + CEN-1: any blocked session, e.g. `./run.sh --mgmt=tree relay-ip-block vless-reality` → the error event's `diag` has `posture: Recovery`, `route_check: failed` and nothing that says the engine stopped; `connStateWithCheck('connecting','failed')` → `connecting` → headline "Connecting…" / «در حال اتصال…» | `family/* engine.failed_connect_not_running` in every blocked session; unit `TestRouteRunning_TellsAFailedConnectFromALostConnection`, `TestRouteRunning_LostConnectionKeepsRunning` (core/abi); vitest `src/lib/routeCheck.test.ts` |
 | CEN-6 | **high** (the rig hid it; one product defect under it) | throttle-56k could not go red: a first phone whose connect FAILED ("the route started but carried no traffic", `tls_handshake_failed` / `unknown`, a 5–30 min cooldown) was replaced by a fresh phone and only that one was judged; the cell accepted `path_too_slow|none`; and a connect that took 4.7–5.5 s read plain "Connected" | **fixed** — engine: a proof is slow when the WHOLE proof took longer than `slow_after_ms`, failed attempts included (`core/engine/proof.go` `proofWasSlow`; specs `engine-abi-v1.md`, `failure-taxonomy-v1.md`). Rig: every connect attempt is recorded and the first is judged alone (`engine.first_verdict`); the scenario declares `path_too_slow` and the cell is decided per connect by its time; a session waits for the censor's shaper to drain the session before it (the first-phone failures were the previous QUIC family's queue — rig cross-talk, measured). **Left as it is:** what the engine says on a link that already has seconds of queue (CEN-O5) | before: `./run.sh --mgmt=tree throttle-56k` → exit 0 with `connect_attempts: 2` on naive and vless-reality and `route_check: ok` after `set_route_ms` ≈ 5000. Now, the same failure made visible: `WB_NO_QUIET=1 ./run.sh --mgmt=tree throttle-56k` → `engine.first_verdict` red | `family/* engine.first_verdict`, `family/* engine.category` under throttle-56k; unit `TestRunProofTimedOutCarryAttemptThenSuccessIsSlow`, `TestProofWasSlowJudgesTheWholeProof` (core/engine); `driver/first_verdict_test.go` |
+| F-002 | **high** | A relay provisioned from `main` could not serve shadowsocks, anytls or tuic: the then-pinned `daal-relay-mgmt` (relay-v1.5.0) predated them | **fixed — released as relay-v1.5.1, 2026-11-19**: the code was right and the fix was the release. The pinned `daal-relay-mgmt` serves all three; `PinnedMgmtServesOptInFamilies` and `RELEASED_RELAY_SERVES_EXTRA_FAMILIES` are true, which unlocks the wizard's switches and `provision --families` (FAM-2, FAM-3). Not run on a rented relay or a phone | at relay-v1.5.0: `./run.sh clean` (pinned) vs `./run.sh --mgmt=tree clean` | world release.all-families (full) all green on the pinned box, 7 families — it downloads through the real verifier, so a wrong hash or signature fails it too; unit `TestPinnedMgmtOptInGateMatchesThePin` (publisher/deploy/cloudinit) |
+| F-005 | **high** (the app; code-reading) | The app signed a relay BEFORE it had the relay's connection material: `bind-and-sign` could commit a route only to what the OperatorRecord carries, and the wizard passed nothing else | **fixed — released as relay-v1.5.1, 2026-11-19**: the relay states its public identity over the management plane (`GET /identity`, read-only, authenticated); the wizard asks before every signature (`daal-deploy relay-identity` → `bind-and-sign --relay-identity`) on every provider, remembers what the pack commits to, and signs again when a later reply disagrees (the first recipient on a relay that serves shadowsocks; a disguise change; a rebuild). The pinned daemon serves `/identity`; the fallback is left for a relay too old to answer, and none is in service. *The desktop app itself was still not run: the wizard is proven against its fake relay in cargo tests, and the order of operations against a real daemon by the rig through the CLI* | at `062f809`: `daal-deploy bind-and-sign` on a record with no `reality_public_key`/`tls_cert_sha256` → exit 1 | `mint verb.relay-identity.before-first-recipient`, `verb.bind-and-sign.before-first-recipient`, `bind-and-sign.before-first-recipient.only_pending_families_uncommitted`, `resign.after-first-recipient`, then every `family/*` session of the world (the pack that connects was signed that way) — on tree worlds and, since the pin moved, on the three pinned worlds; `a_relay_whose_record_has_no_keys_is_signed_from_what_the_relay_says`, `the_first_recipient_makes_the_wizard_sign_again_so_shadowsocks_is_committed`, `an_older_relay_with_an_empty_record_is_learned_from_its_first_reply` (daal-wizard); `TestBindAndSign_RelayIdentity_SignsARecordThatKnowsNothing` (publisher/deploy/cli); `TestIdentity_BeforeAnyRecipient` (cmd/daal-relay-mgmt) |
+| REL-1 | **high** (was release-blocking) | This tree could not manage a relay built from the then-PINNED release, relay-v1.5.0: the publisher mints token format v2 (the request is signed — LC-1's full fix) and that `daal-relay-mgmt` only understands v1, so every authenticated verb was 401; since BOOT-1's fix such a relay stopped one phase sooner, at `provision` (its health binary cannot authenticate the management fingerprint) | **fixed — released as relay-v1.5.1, 2026-11-19**: the pin moved to a daemon and a health binary built from this tree, byte-identical to the candidate the rig proved (`tools/release/relay-v1.5.1.sh`). The one release also carries F-002, LC-1, INT-2, INT-O1, FAM-4 and TW-11. There is still, deliberately, no compatibility path: a publisher from this tree cannot manage a relay-v1.5.0 box (a publisher that would sign less for an older relay is the downgrade); none is in service | at relay-v1.5.0: `./run.sh clean @default` (pinned) → `mint verb.users-provision.r1 got=fail` — `401: unauthorized: malformed token (need nonce:ts:op:sig)` | the three pinned worlds are green — quick: `release`; full: also `release.lifecycle`, `release.all-families` (`./daal e2e full` → `PASS — 5388 checks`, 18 worlds). It was never excused: a pinned world that stops before a client session is an unexpected red and `./daal e2e` exits 1 |
 
 ### Found in review, not by the rig — repaired 2026-11-19 (9, and BOOT-1 above)
 
@@ -62,22 +66,19 @@ here fails without its fix. None has a `known-findings.json` entry.
 |---|---|---|---|---|---|
 | REV-1 | **high** (user-visible, Android) | The VPN service calls `engine_clear_route` right after a start that did not come up and again from `onDestroy`; that call reset `route_check`, `connect_refused` and the posture before the page's first poll, so every failed or refused connect on a phone ended on a silent "Press to connect." | **fixed** in `core/abi/abi.go`: `ClearRoute` erases only what it stops — with nothing running and no check in flight the last connect's verdict stays (spec `engine-abi-v1.md`). Not seen on a phone | replay the service's call sequence against `core/abi`: `route_check = ""` after the teardown | unit `TestClearRoute_KeepsTheVerdictOfAConnectThatAlreadyFailed`, `TestClearRoute_KeepsARefusalWhenNothingWasRunning`, `TestClearRoute_StillClearsWhatItStops` (core/abi) |
 | REV-2 | medium (the app; silent) | One transient failure of the automatic re-sign latched for good: the relay's reply was marked handled before the signature existed, so later files were built from a pack known to disagree with the relay | **fixed** in `client-shell/tauri/daal-wizard/src/relay_identity.rs` (`heal_after_reply`): marked handled only after `resign_and_republish` returns Ok. Not run in a window | one identity-ask timeout, then a clean `produce_shared_sbp`: 1 signature where 2 were expected | `a_failed_automatic_resign_is_tried_again_on_the_next_reply` (daal-wizard, `cargo test`) |
-| REV-3 | medium (privacy; on the relay) | The certificate `rotate-tls` re-issues listed EVERY global address the box held, including one bound after first boot: an unauthenticated TLS handshake to the old address disclosed the new one | **fixed in the tree** in `cmd/daal-relay-mgmt/tlscert.go`: the re-issued certificate names the addresses the old one named and no others (spec `daal-relay-mgmt-v1.md` §4.2). Rides the re-release | handshake with no credentials, read the IP SANs: `[203.0.113.10 203.0.113.77]` | unit `TestRotateTLS_ReissuedCertificateDoesNotNameALaterBoundAddress`; rig `op:l2 box.certificate_follows_cover_host`, `op:l3/naive no-new-file.after-l2.address-blocked.*` still green |
+| REV-3 | medium (privacy; on the relay) | The certificate `rotate-tls` re-issues listed EVERY global address the box held, including one bound after first boot: an unauthenticated TLS handshake to the old address disclosed the new one | **fixed** in `cmd/daal-relay-mgmt/tlscert.go`: the re-issued certificate names the addresses the old one named and no others (spec `daal-relay-mgmt-v1.md` §4.2). Released as relay-v1.5.1 (2026-11-19) | handshake with no credentials, read the IP SANs: `[203.0.113.10 203.0.113.77]` | unit `TestRotateTLS_ReissuedCertificateDoesNotNameALaterBoundAddress`; rig `op:l2 box.certificate_follows_cover_host`, `op:l3/naive no-new-file.after-l2.address-blocked.*` still green |
 | REV-4 | medium (user-visible; regression) | Network page: a connect refused while ANOTHER route was connected showed nothing at all (the banner needed "nothing active") | **fixed** in `client-ui/src/d2pages/NetworkPage.tsx` + `lib/routeCheck.ts` (`refusedToShow`): a tap on this page always gets its sentence. Traced, not driven | code reading; the helper's old condition | vitest `refusedToShow` (3 cases) in `lib/routeCheck.test.ts` |
 | REV-5 | medium (user-visible) | Network page: a failed connection check was reported as the shell's raw `engine call returned -1` | **fixed** — `connectFailedKey`: the Connection page's sentence by the same category rule, or "Could not connect. Try again, or try another route." (en+fa) | code reading (`daal-desktop-core/src/errors.rs:11` is the text) | vitest `connectFailedKey` (4 cases, one reads the page source for the raw error) |
 | REV-6 | medium (user-visible) | "Try again in a moment" had no button that tries again: in the error state the main button said Connect and opened the recovery sheet, which has no retry, and neither `path_too_slow` nor `relay_no_egress` ever clears | **fixed** in `lib/routeCheck.ts` (`tapAction`, `retryableFailure`): for those two categories the main button connects the same route again | the new test against the old `tapAction`: `expected 'recovery' to be 'connect'` | vitest "a failed connect the engine does not rest can be retried" |
-| REV-7 | low (security, defence in depth; on the relay) | A management token was not bound to the relay it was minted for: two relays under one publisher key both honoured the same token and body | **fixed in the tree** — signing input line 2 is the SHA-256 of that relay's management certificate (still format v2; the wire token is unchanged). Rides the re-release | two daemons, one publisher key, one `users-revoke` token: 200 from both | unit `TestTokenIsBoundToTheRelay`, `TestTokenAudienceIsTheServedCertificate` (daemon), the shared fixture under `publisher/deploy/mgmt/testdata/`; rig `op:mgmtauth` |
+| REV-7 | low (security, defence in depth; on the relay) | A management token was not bound to the relay it was minted for: two relays under one publisher key both honoured the same token and body | **fixed** — signing input line 2 is the SHA-256 of that relay's management certificate (still format v2; the wire token is unchanged). Released as relay-v1.5.1 (2026-11-19) | two daemons, one publisher key, one `users-revoke` token: 200 from both | unit `TestTokenIsBoundToTheRelay`, `TestTokenAudienceIsTheServedCertificate` (daemon), the shared fixture under `publisher/deploy/mgmt/testdata/`; rig `op:mgmtauth` |
 | REV-8 | low (fingerprint) | The bare TCP reach check ran on every timed-out attempt, not only when the timeout hides its phase: one payload-less connect-and-close to the relay's port per failed proof, every 30 s on a failed route | **fixed** in `core/engine/proof_singbox.go` (`timeoutPhaseIsUnknown` gates it) | counting hop in front of an in-process relay: "2 of 4 connections to the relay's port carried nothing" | unit `TestProveSubject_CarryTimeoutMakesNoBareConnectToTheRelay` (`-tags singbox`) |
-| REV-9 | low (security, defence in depth; on the relay) | Request binding ignored the query string (`/users/list?name=…` rode a token for `/users/list`; `POST /users/revoke?name=r2` changed the config), and three token field checks were held by no test | **fixed in the tree** in `cmd/daal-relay-mgmt/main.go` (`requireAuth`): any query string, even a bare `?`, is 400 before the token is read. Rides the re-release | the requests above: 200 | unit `TestQueryStringIsRefused`, `TestTokenFieldChecksHold` (each check proven by mutation in a scratch copy) |
+| REV-9 | low (security, defence in depth; on the relay) | Request binding ignored the query string (`/users/list?name=…` rode a token for `/users/list`; `POST /users/revoke?name=r2` changed the config), and three token field checks were held by no test | **fixed** in `cmd/daal-relay-mgmt/main.go` (`requireAuth`): any query string, even a bare `?`, is 400 before the token is read. Released as relay-v1.5.1 (2026-11-19) | the requests above: 200 | unit `TestQueryStringIsRefused`, `TestTokenFieldChecksHold` (each check proven by mutation in a scratch copy) |
 
-### Open — need a decision, a release or a dependency fix (4)
+### Open — need a decision, a release or a dependency fix (1)
 
 | id | severity | one line | status | reproduce | pinned by |
 |---|---|---|---|---|---|
 | CEN-4 | medium | One route cannot tell apart what needs two observations: every silent UDP route is `udp_no_reply` (network-wide UDP loss, a QUIC-only filter, a dead address, a dead port), and a reset after the ClientHello is `tls_sni_or_cert_block_suspected` whether the filter is keyed on the name or on the address | open — the prober's job (selection stage): a second datagram / a second name. What the engine says is true, cools down only the one route, and is never the wrong network-wide claim | `./run.sh --mgmt=tree relay-ip-block hysteria2` → `engine.category expect=udp_address_blocked got=udp_no_reply`; `./run.sh --mgmt=tree tcp-reset-mid-handshake vless-reality` → `expect=tcp_reset got=tls_sni_or_cert_block_suspected` | known-findings.json `CEN-4` (14 checks in full: 11 UDP, 3 reset); the report's ENGINE CATEGORY line lists each truth → reported pair |
-| F-002 | **high** | A relay provisioned from `main` cannot serve shadowsocks, anytls or tuic: the pinned `daal-relay-mgmt` predates them | open — needs a release (release key); the code is right | `./run.sh clean` (pinned) vs `./run.sh --mgmt=tree clean` | known-findings.json `F-002` (box=pinned): world release.all-families in full. Acceptance after the release: that world all green, and the run then fails with "F-002 did not reproduce" until the entry is deleted |
-| F-005 | **high** (the app; code-reading) | The app signed a relay BEFORE it had the relay's connection material: `bind-and-sign` could commit a route only to what the OperatorRecord carries, and the wizard passed nothing else | **fixed** — the relay states its public identity over the management plane (`GET /identity`, read-only, authenticated); the wizard asks before every signature (`daal-deploy relay-identity` → `bind-and-sign --relay-identity`) on every provider, remembers what the pack commits to, and signs again when a later reply disagrees (the first recipient on a relay that serves shadowsocks; a disguise change; a rebuild). *The desktop app itself was still not run: the wizard is proven against its fake relay in cargo tests, and the order of operations against a real daemon by the rig through the CLI*. **open on released relays** until the next mgmt release: the pinned daemon has no `/identity`, the app is on its fallback there | at `062f809`: `daal-deploy bind-and-sign` on a record with no `reality_public_key`/`tls_cert_sha256` → exit 1 | `mint verb.relay-identity.before-first-recipient`, `verb.bind-and-sign.before-first-recipient`, `bind-and-sign.before-first-recipient.only_pending_families_uncommitted`, `resign.after-first-recipient`, then every `family/*` session of the world (the pack that connects was signed that way); `a_relay_whose_record_has_no_keys_is_signed_from_what_the_relay_says`, `the_first_recipient_makes_the_wizard_sign_again_so_shadowsocks_is_committed`, `an_older_relay_with_an_empty_record_is_learned_from_its_first_reply` (daal-wizard); `TestBindAndSign_RelayIdentity_SignsARecordThatKnowsNothing` (publisher/deploy/cli); `TestIdentity_BeforeAnyRecipient` (cmd/daal-relay-mgmt); on the pinned box `verb.relay-identity.*` (got `cannot-say`) is tracked in known-findings.json (`F-005`, box=pinned) |
-| REL-1 | **high** (release-blocking) | This tree cannot manage a relay built from the PINNED release: the publisher mints token format v2 (the request body is signed — LC-1's full fix) and the pinned `daal-relay-mgmt` only understands v1, so every authenticated verb is 401. Provisioning succeeded and the first `users-provision` failed — **since BOOT-1's fix a pinned world no longer gets that far: it stops at `provision`** (the pinned health binary cannot authenticate the management fingerprint), and would stop at `mint` for this reason if it did | open — by design, until the one re-release that also carries F-002, LC-1, INT-2, INT-O1, FAM-4 and TW-11: there is deliberately no compatibility path (a publisher that would sign less for an older relay is the downgrade). The candidate build is staged and proven (`tools/release/relay-v1.5.1.sh`, section below) | `./run.sh clean @default` (pinned) → `mint verb.users-provision.r1 got=fail` — `401: unauthorized: malformed token (need nonce:ts:op:sig)` | **deliberately NOT in known-findings.json**: every pinned world stops at `provision` (BOOT-1; before that fix, at `mint`) with one red check, unexcused, so `./daal e2e` exits 1 (quick: world `release`; full: also `release.lifecycle`, `release.all-families`) until the pin moves — the rig refuses to give a verdict on a world that never reaches a client session, and excusing the check would turn the run into "BROKEN, no verdict" (exit 2). Until then the rig says NOTHING about released relays. Acceptance after the release: those three worlds all green |
 
 ### Observations (no verdict; recorded so the day they change is visible)
 
@@ -85,13 +86,13 @@ here fails without its fix. None has a `known-findings.json` entry.
 |---|---|---|
 | O-1 | The protect callback the phone registers is never called; only the uid exclusion keeps the engine out of its own TUN | `engine_protect_calls` in every `control.after` |
 | O-2 | **Fixed in the tree.** Disconnect blocked ~5 s when the relay was blackholed (vless-reality, websocket-tls): closing sing-box waited out a dial already in flight. The instance's context is now cancelled before it is closed, and a connection check in flight is abandoned, not waited for | unit `TestCloseInstance_DoesNotWaitForADialToADeadRelay` (core/engine, `-tags singbox`), `TestClearRoute_DoesNotWaitForAConnectionCheck` (core/abi). The rig no longer reaches the old state: a blackholed route never becomes connected |
-| O-3 | Backlog W5-1, **fixed in the tree with FAM-4**: a default relay no longer binds `ss-in`/`anytls-in`. A relay built from the pinned release still does (firewalled) | `listener_on_box` in `mint/* not_served` — `false` on `--mgmt=tree` worlds |
+| O-3 | Backlog W5-1, **fixed with FAM-4, released as relay-v1.5.1 (2026-11-19)**: a default relay no longer binds `ss-in`/`anytls-in`. Only on a relay provisioned fresh from this release (the family set is written by cloud-init); none older is in service | `listener_on_box` in `mint/* not_served` — `false` on `--mgmt=tree` worlds; the pinned daemon is now the same code |
 | O-4 | The three opt-in families connect with the experimental-families gate OFF | every session of anytls, shadowsocks, tuic |
 | LC-O1 | `rotate-tls` said every recipient needs a new pack; only vless-reality stops working — **fixed**: the verb, the wizard and the screen now say who, if anyone, needs a new file | `op:l2 old-pack.tunnel` per family; `op:l2 rotate-tls.does_not_claim_everyone_needs_a_file` |
-| LC-O2 | **Fixed in the tree.** `/whoami` had a handler and no caller that could authenticate to it (`MintToken` refused the op). The op is now in the minter's route table and `mgmt.Client.WhoAmI` calls it; nothing above the client uses it yet | unit `TestClient_WhoAmI_AuthenticatesAndReadsTheAddress`, `_OlderBoxIsNotAFailureOfAnythingElse`, `TestToken_EveryOpHasOneRoute` (publisher/deploy/mgmt); `TestTokenIsBoundToTheRequest` (the GET it is signed for) |
+| LC-O2 | **Fixed** (publisher side; the v2 token it signs is what relay-v1.5.1, released 2026-11-19, accepts). `/whoami` had a handler and no caller that could authenticate to it (`MintToken` refused the op). The op is now in the minter's route table and `mgmt.Client.WhoAmI` calls it; nothing above the client uses it yet | unit `TestClient_WhoAmI_AuthenticatesAndReadsTheAddress`, `_OlderBoxIsNotAFailureOfAnythingElse`, `TestToken_EveryOpHasOneRoute` (publisher/deploy/mgmt); `TestTokenIsBoundToTheRequest` (the GET it is signed for) |
 | LC-O3 | The first freshness poll after an import always downloads the whole pack | `op:freshness` evidence |
-| LC-O4 | L1, L2, L3, revoke and multi-recipient all work end to end on the pinned release artefacts (default families) | world release.lifecycle (full) |
-| INT-O1 | **Fixed in the tree.** The kick wrapper's `SIGUSR2` ("graceful inbound drop") was a no-op — sing-box 1.13.12 registers handlers for INT, TERM and HUP only — so every kick was `sleep 2` + a full restart, and `users-revoke` / `rotate-credentials` kicked twice (~4.7 s, two restarts). Now one in-process reload (SIGHUP via `ExecReload`, verified in `cmd/sing-box/cmd_run.go`): the verbs take ~0.1 s and the relay's sing-box pid does not change. A relay on the pinned daemon still applies twice (two reloads, no sleep) until the re-release | relay `sing-box.service.lifecycle.log` (one `start`, no restarts); `ms` of the verbs in `publisher-verbs.jsonl`; unit `TestUsersRevoke_RemovesAndReloadsExactlyOnce`, `TestRotateCreds_ReloadsExactlyOnce`, `TestRenderV2_ApplyWrapperIsOneReloadAndNoSleep` |
+| LC-O4 | L1, L2, L3, revoke and multi-recipient all work end to end on the pinned release artefacts (default families; relay-v1.5.0 when first recorded, relay-v1.5.1 since 2026-11-19) | world release.lifecycle (full) |
+| INT-O1 | **Fixed; released as relay-v1.5.1 (2026-11-19).** The kick wrapper's `SIGUSR2` ("graceful inbound drop") was a no-op — sing-box 1.13.12 registers handlers for INT, TERM and HUP only — so every kick was `sleep 2` + a full restart, and `users-revoke` / `rotate-credentials` kicked twice (~4.7 s, two restarts). Now one in-process reload (SIGHUP via `ExecReload`, verified in `cmd/sing-box/cmd_run.go`): the verbs take ~0.1 s and the relay's sing-box pid does not change. The `ExecReload` line is in the unit cloud-init writes, so only a relay provisioned fresh from this release reloads this way; none older is in service | relay `sing-box.service.lifecycle.log` (one `start`, no restarts); `ms` of the verbs in `publisher-verbs.jsonl`; unit `TestUsersRevoke_RemovesAndReloadsExactlyOnce`, `TestRotateCreds_ReloadsExactlyOnce`, `TestRenderV2_ApplyWrapperIsOneReloadAndNoSleep` |
 | CEN-O1 | The relay's shadowsocks and anytls ports answer a few opaque bytes with a TCP reset within a millisecond; naive and websocket-tls wait, REALITY forwards — an active-probing tell. **Root-caused in sing-box 1.13.12's source: no configuration changes it** (it needs upstream code; recorded, not forked). Both families stay `probing_risk_class: moderate`, and `docs/transport-family-inventory.md` carries the tell for the recommender | section below |
 | CEN-O2 | Only vless-reality puts a name on the wire; its ClientHello is 600 bytes in one TCP segment, so even a first-packet-only SNI filter reads it | scenarios sni-rst, sni-rst-stateless |
 | CEN-O3 | Under 30% random loss the QUIC families still complete the fetch (7–11 s) and every TCP family fails it | scenario heavy-loss |
@@ -100,7 +101,14 @@ here fails without its fix. None has a `known-findings.json` entry.
 
 ---
 
-## BOOT-1 — the pin every relay reply is believed on was learned over plain HTTP (fixed in the tree; rides the relay re-release)
+## BOOT-1 — the pin every relay reply is believed on was learned over plain HTTP (fixed; released 2026-11-19 as relay-v1.5.1)
+
+**Released 2026-11-19.** The `daal-relay-health` half is in relay-v1.5.1
+(`407581d6…d055`), which `publisher/deploy/cloudinit/artifacts.go` now
+pins. Proof: the three pinned worlds (`release`, `release.lifecycle`,
+`release.all-families`) provision through the authenticated bootstrap and
+are green — `./daal e2e full` → `PASS — 5388 checks`, 18 worlds. Not yet
+done against a rented relay.
 
 **What.** `mgmt.Client` believes a relay's replies because the TLS session
 is pinned to `OperatorRecord.MgmtTLSFingerprint`. All three provider
@@ -130,22 +138,24 @@ been rebuilt (same management certificate) and states a different REALITY
 key or TLS pin than the active pack commits to is refused with
 `E_RELAY_KEYS_CHANGED` — nothing signed, no note published.
 
-**No fallback, so it rides the release.** The pinned `daal-relay-health`
-(relay-v1.5.0) answers the derived path with 404 and has no MAC to give.
-The publisher stops ten seconds after the box comes up:
+**No fallback, so it rode the release.** The `daal-relay-health` of
+relay-v1.5.0 answers the derived path with 404 and has no MAC to give.
+Against such a box — the pinned one until 2026-11-19 — the publisher
+stops ten seconds after the box comes up:
 
 ```
-./run.sh clean vless-reality       (pinned)
+./run.sh clean vless-reality       (pinned = relay-v1.5.0, before the pin moved)
   FAIL provision  verb.provision  expect=pass got=fail
        hetzner: health: the relay's health endpoint does not recognise this provisioning secret (status 404) — its software may predate the authenticated bootstrap
 ```
 
-So every pinned world now stops at `provision` instead of at REL-1's
-`mint`; same exit status, same reason it is not excused (see REL-1). The
-candidate under `dist-release/relay-v1.5.1/` must be **re-staged**
-(`tools/release/relay-v1.5.1.sh`): its health binary was built before this
-fix. `--mgmt=tree` runs the tree's `daal-relay-health` as well as its
-`daal-relay-mgmt`, so the tree worlds exercise both halves.
+So until the pin moved every pinned world stopped at `provision` instead
+of at REL-1's `mint`; same exit status, same reason it was not excused
+(see REL-1). The release was built after this fix (the candidate staged
+before it was re-staged with `tools/release/relay-v1.5.1.sh`), and the
+pinned worlds now provision. `--mgmt=tree` runs the tree's
+`daal-relay-health` as well as its `daal-relay-mgmt`, so the tree worlds
+exercise both halves too.
 
 **Not closed here.** (1) The Hetzner adapter still reads `reality.pub` and
 the TLS pin into the record over SSH with `InsecureIgnoreHostKey`; with a
@@ -156,15 +166,29 @@ the rebuild path that same SSH session authenticates with the root
 password Hetzner returned, to a host key nobody checks. (3) No rig world
 puts an attacker between the publisher and the relay.
 
-## REL-1 — this tree cannot manage a relay built from the pinned release (by design, until the re-release)
+## REL-1 — this tree could not manage a relay built from the then-pinned release, relay-v1.5.0 (released 2026-11-19 as relay-v1.5.1)
+
+**Fixed 2026-11-19: the release happened and the pin moved.** GitHub
+releases `relay-v1.5.1` and `relay-v1.5.1-mirror` carry sing-box 1.13.12
+(`989e8486…06ea2`), `daal-relay-health` (`407581d6…d055`) and
+`daal-relay-mgmt` (`4f13e453…f9de`), byte-identical to the candidate the
+rig proved; `publisher/deploy/cloudinit/artifacts.go` pins them. Proof:
+`./daal e2e full` → `PASS — 5388 checks`, 18 worlds, with `release`,
+`release.lifecycle` and `release.all-families` — the pinned worlds — all
+green. Not yet run on a rented relay or a phone. What is left of the
+finding is deliberate: a publisher from this tree cannot manage a
+relay-v1.5.0 box, and no such relay is in service. The rest of this
+section is the finding as it stood before the release; "pinned" in it
+means relay-v1.5.0.
 
 **What.** LC-1's full fix changed the management token on both ends
 (format v2: the signature covers the method, the path and the body's
 digest; spec `daal-relay-mgmt-v1.md` §3). The publisher in this tree mints
-v2 and nothing else. The `daal-relay-mgmt` pinned in
+v2 and nothing else. The `daal-relay-mgmt` then pinned in
 `publisher/deploy/cloudinit/artifacts.go` (relay-v1.5.0, `e8cb16e8…`) was
 built before that and accepts v1 only. So a relay provisioned from this
-tree boots, passes health — and refuses every authenticated call:
+tree with that pin booted, passed health — and refused every
+authenticated call:
 
 ```
 ./run.sh clean @default            (pinned)
@@ -178,26 +202,26 @@ it, and nothing is fielded that would need it. The daemon side is the
 same: the tree daemon refuses v1 from anybody (`TestV1TokenIsRefused`,
 rig `op:mgmtauth v1_token`).
 
-**Severity: high, and release-blocking — nothing built from this tree may
-ship before the relay re-release.** It is the same release F-002, LC-1,
-INT-2, INT-O1, FAM-4 and TW-11 wait for; this makes it mandatory rather
-than merely overdue.
+**Severity: high, and it was release-blocking — nothing built from this
+tree could ship before the relay re-release.** It was the same release
+F-002, LC-1, INT-2, INT-O1, FAM-4 and TW-11 waited for; this made it
+mandatory rather than merely overdue.
 
-**What the rig can and cannot say meanwhile.** Every world on the pinned
+**What the rig said until the pin moved.** Every world on the pinned
 box (`release` in quick; `release.lifecycle`, `release.all-families` in
-full) stops early — at `mint` for this reason, and since BOOT-1's fix one
-phase sooner, at `provision` — reported `STOPPED EARLY` with that one check
-UNEXPECTED — so **`./daal e2e` exits 1, and the pre-push hook fails, until
-the pin-bump commit.** That is on purpose and is not excused in
+full) stopped early — at `mint` for this reason, and since BOOT-1's fix
+one phase sooner, at `provision` — reported `STOPPED EARLY` with that one
+check UNEXPECTED — so `./daal e2e` exited 1, and the pre-push hook failed,
+until the pin bump. That was on purpose and was never excused in
 known-findings.json: an entry there was tried and the matrix answered
 `BROKEN — the world never reached a client session` (exit 2, no verdict),
 which is the rig refusing to let one excuse stand in for a whole world.
-The red check is the true state: this tree and the pinned release do not
-work together. The tree worlds (`--mgmt=tree`: 14 of quick's 15, 15 of
-full's 18) are unaffected and are where everything in this tree is
-judged.
+The red check was the true state: this tree and relay-v1.5.0 do not work
+together. The tree worlds (`--mgmt=tree`: 14 of quick's 15, 15 of full's
+18) were unaffected.
 
-**The candidate is built and proven.** `tools/release/relay-v1.5.1.sh`
+**The candidate was built and proven before anything was uploaded.**
+`tools/release/relay-v1.5.1.sh`
 (no `--upload`) stages it under `dist-release/relay-v1.5.1/`; the build is
 reproducible (same hashes and signatures from a copy of the tree at
 another path, same toolchain — go1.26.8; the toolchain is recorded in
@@ -205,21 +229,34 @@ another path, same toolchain — go1.26.8; the toolchain is recorded in
 to a scratch copy of the tree (every edit the script prints), the box
 verified the candidate against the real pins and signature and
 `./run.sh clean` — world `release.all-families` — was all green, 7
-families × every column (2026-11-18). **Nothing was uploaded.** The tag
-moves to `relay-v1.5.1` because the artefact file names do not change:
+families × every column (2026-11-18; again on 2026-11-19 after the
+candidate was re-staged for BOOT-1 — `PASS — 5388 checks`, twice).
+Nothing had been uploaded at that point; the same bytes were published on
+2026-11-19. The tag moved to `relay-v1.5.1` because the artefact file names do not change:
 new bytes under an already-pinned URL would break the builds that pin the
 old hash and let a cache answer the new pin with the old bytes.
 
-**When it is fixed:** the pin-bump commit
-(`tools/release/README.md`, "The pin bump"; `tools/release/pin-bump.py`
-does the mechanical part) — mark this fixed there, together with F-002,
-LC-1 and INT-2, whose known-findings entries it deletes.
+**What fixed it:** the pin bump (`tools/release/README.md`, "The pin
+bump"; `tools/release/pin-bump.py` does the mechanical part), done
+2026-11-19. It closed F-002, LC-1, INT-2 and F-005 on released relays
+with it, and their known-findings entries are deleted.
 
 ---
 
-## F-002 — the pinned mgmt artefact predates Wave 5; three families are unprovisionable from main
+## F-002 — the pinned mgmt artefact predated Wave 5; three families were unprovisionable from main (released 2026-11-19 as relay-v1.5.1)
 
-**What.** `publisher/deploy/cloudinit/artifacts.go` pins
+**Fixed 2026-11-19 by the release.** relay-v1.5.1 is published and
+pinned; its `daal-relay-mgmt` (`4f13e453…f9de`) is built from this tree
+and serves shadowsocks, anytls and tuic. `PinnedMgmtServesOptInFamilies`
+and `RELEASED_RELAY_SERVES_EXTRA_FAMILIES` are true. Proof: world
+`release.all-families` — `./run.sh clean` with no `--mgmt=tree`, through
+the real verifier — is green on all seven families (`./daal e2e full` →
+`PASS — 5388 checks`, 18 worlds), and the `F-002` entry is deleted from
+`known-findings.json`. Not yet run on a rented relay or a phone. What
+follows is the finding as it stood before the release; "pinned" in it
+means relay-v1.5.0.
+
+**What.** `publisher/deploy/cloudinit/artifacts.go` pinned
 `daal-relay-mgmt-0.1.0-linux-amd64` at SHA-256 `e8cb16e8…65df66b` (the file
 was last changed 2026-08-18 09:14). The mgmt-side support for shadowsocks,
 anytls and tuic users landed in `a656a27` ("Wave 5: every family a
@@ -227,7 +264,7 @@ self-hosted relay can actually serve", 2026-08-18 15:30) and the pin was not
 moved. A build of today's tree with the release flags hashes to
 `f11cf36a…38bc5dcc`.
 
-So every relay provisioned from `main` downloads a mgmt daemon that:
+So every relay provisioned from `main` downloaded a mgmt daemon that:
 
 * never creates `ss-in` / `anytls-in` (nothing listens on 8446/tcp, 8447/tcp
   even though both firewalls open them),
@@ -251,7 +288,7 @@ bytes shadowsocks-2022, anytls and tuic have carried in this project.
 **Reproduce.**
 
 ```
-./run.sh clean                 # pinned: 3 families red
+./run.sh clean                 # pinned (relay-v1.5.0): 3 families red
 ./run.sh --mgmt=tree clean     # tree build of cmd/daal-relay-mgmt: all green
 ```
 
@@ -265,24 +302,23 @@ FAIL mint/shadowsocks  relay.listens        — nothing listening on 8446/tcp in
 FAIL family/anytls|shadowsocks|tuic tunnel  expect=pass got=refused — engine: option parse: outbounds[0]: unknown outbound type:
 ```
 
-**Not fixed here** because the fix is a release, not a code change: rebuild
-with `tools/release/relay-v1.5.1.sh` (the tag moved: see REL-1), sign with the release
-key, upload, bump `Sha256` + `SigHex` in `artifacts.go` **and, in the same
-commit, set `PinnedMgmtServesOptInFamilies` (same file) and its mirror
+**The fix was a release, not a code change** (done 2026-11-19): rebuilt
+with `tools/release/relay-v1.5.1.sh` (the tag moved: see REL-1), signed with the release
+key, uploaded, `Sha256` + `SigHex` bumped in `artifacts.go` **and, with the
+same change, `PinnedMgmtServesOptInFamilies` (same file) and its mirror
 `RELEASED_RELAY_SERVES_EXTRA_FAMILIES` (`client-ui/src/publisher/
-extraFamilies.ts`) to `true`** — that is what unlocks the wizard's "More
-ways to connect" switches and turns `provision --families`' "will be
-asked to serve" back into "will serve" (FAM-2, FAM-3). `go test
+extraFamilies.ts`) set to `true`** — that is what unlocked the wizard's
+"More ways to connect" switches and turned `provision --families`' "will
+be asked to serve" back into "will serve" (FAM-2, FAM-3). `go test
 ./deploy/cloudinit/` fails on a bump without the flip and on a flip
-without a bump. After that,
+without a bump.
 `./run.sh clean` (no flag) is the acceptance test: it downloads through the
 real verifier, so a wrong hash or signature fails it too.
 
-Worth adding to the release checklist: `./daal e2e full` before a tag. Its
-world `release.all-families` is exactly `./run.sh clean` without
-`--mgmt=tree`; once the release is out it goes green and the run reports
-"F-002 did not reproduce" until the entry is deleted from
-`known-findings.json`.
+`./daal e2e full` before a tag is in the release runbook
+(`docs/release-runbook.md`). Its world `release.all-families` is exactly
+`./run.sh clean` without `--mgmt=tree`; it is green since the release,
+and the `F-002` entry is deleted from `known-findings.json`.
 
 ---
 
@@ -534,7 +570,7 @@ release.all-families, through F-002), and by
 
 ---
 
-## F-005 — the app signs before it has what a signed endpoint needs
+## F-005 — the app signs before it has what a signed endpoint needs (released 2026-11-19 as relay-v1.5.1)
 
 **FIXED (truth wave, lane A).** Both halves of "What it takes" below were
 built, because either alone leaves an ordering trap:
@@ -555,14 +591,14 @@ built, because either alone leaves an ordering trap:
   a moved cover host, a rebuilt relay — signs again and republishes the
   refresh note, *before* the file for that reply is built.
 
-**Open on released relays** until the re-release (TW-1): the pinned
-`daal-relay-mgmt` has no `/identity`, so `relay-identity` answers "cannot
-say" (exit 3) and the app is on its fallback. The rig expects every
-relay to state its identity; on the pinned box the red
-`verb.relay-identity.*` (got `cannot-say`, nothing else) is tracked in
-known-findings.json (`F-005`, box=pinned) and goes with the pin bump —
-with the candidate as the pinned box the entry "did not reproduce" and
-all eleven checks are green (`tools/release/pin-bump.py` deletes it).
+**Released 2026-11-19 (TW-1).** The pinned `daal-relay-mgmt`
+(relay-v1.5.1) serves `/identity`. The rig expects every relay to state
+its identity, and on the pinned box `verb.relay-identity.*` is now green
+in all three pinned worlds (`./daal e2e full` → `PASS — 5388 checks`);
+the `F-005` entry (box=pinned) is deleted from known-findings.json.
+Before the pin moved the pinned daemon (relay-v1.5.0) had no `/identity`,
+`relay-identity` answered "cannot say" (exit 3) and the app would have
+been on its fallback there. Not yet run against a rented relay.
 
 A relay too old to answer (`404` → exit 3) falls back to the same
 machinery fed from a `users-provision` reply; with a record that carries
@@ -576,9 +612,9 @@ not the app's order. `mint` now runs the app's order through the CLI:
 `relay-identity` → `bind-and-sign` with nobody on the relay → the first
 recipient → `bind-and-sign` again iff the reply disagrees with what was
 signed (it must, exactly when a family was pending) → the pack every
-`family/*` session then connects with. On the pinned release artefact,
-which predates the route, `relay-identity` must answer exit 3 and the
-old order is used.
+`family/*` session then connects with. On relay-v1.5.0, the pinned
+release artefact until 2026-11-19, which predates the route,
+`relay-identity` had to answer exit 3 and the old order was used.
 
 **Found on the way** (and fixed): an identity saved before an L2 and
 reused after it outranked the record and signed the *old* cover host —
@@ -589,9 +625,9 @@ let an identity older than 15 minutes outrank the record on the cover
 host (`TestBindAndSign_AnOldIdentityDoesNotOutrankTheRecordOnTheCoverHost`).
 
 **Not verified.** The desktop app was not run, on any provider; no real
-cloud API was called. A relay running the *released* `daal-relay-mgmt`
-has no `/identity` until TW-1's re-release, so until then the app is on
-its fallback path on real relays.
+cloud API was called. The *released* `daal-relay-mgmt` serves
+`/identity` since relay-v1.5.1 (TW-1, 2026-11-19), but no real relay has
+been provisioned from it yet.
 
 What follows is the finding as it was written.
 
@@ -921,7 +957,8 @@ reading `cli_bridge.rs`, not by running it.
 **Review finding on this fix (high): the switches offered what the
 released relay cannot serve — fixed by locking them until F-002's
 release.** With F-002 open, the only `daal-relay-mgmt` an app-provisioned
-relay downloads serves none of the three. Reproduced on the pinned box:
+relay downloaded (relay-v1.5.0) served none of the three. Reproduced on
+the box pinned then:
 
 ```
 ./run.sh clean anytls vless-reality      # pinned
@@ -937,7 +974,8 @@ copy that said only "newer and used far less".
 
 Whether the pinned artefact serves these families is now one build
 constant beside the pin, `PinnedMgmtServesOptInFamilies` in
-`publisher/deploy/cloudinit/artifacts.go` (false today), mirrored for the
+`publisher/deploy/cloudinit/artifacts.go` (false when this was written;
+**true since the pin moved to relay-v1.5.1, 2026-11-19**), mirrored for the
 UI as `RELEASED_RELAY_SERVES_EXTRA_FAMILIES` in `extraFamilies.ts`. While
 it is false the section is still there and still explains each option,
 but every switch is disabled and unticked, one line says why ("You cannot
@@ -945,9 +983,9 @@ turn these on yet. The software that a new server installs does not
 include them…", en+fa), the collapsed line reads "Not available yet", and
 `enabledFamiliesFor` returns `[]` whatever was ticked or remembered in
 `localStorage` — the wizard cannot ask a server for them. The feature is
-not removed: flipping the two constants in the commit that bumps the pin
-restores exactly the behaviour described above, and that state keeps its
-tests (they run with the gate open).
+not removed: flipping the two constants with the pin bump — done
+2026-11-19 — restores exactly the behaviour described above, and the
+locked state keeps its tests.
 
 Held by: `TestPinnedMgmtOptInGateMatchesThePin` (stale hash ⇔ gate shut;
 a bump that forgets the flip, or a flip without a bump, fails),
@@ -955,9 +993,10 @@ a bump that forgets the flip, or a flip without a bump, fails),
 `tools/check-toolbox-profiles.mjs` §5 and the vitest suite "while the
 released relay software cannot serve them" (which also reads the Go
 constant). **Not pinned by the rig** (above the ABI), and, as before,
-**the app was not run**. The rig evidence for the underlying fact is
-unchanged: F-002 stays open and `release.all-families` stays KNOWN-red
-until the release.
+**the app was not run**. The rig evidence for the underlying fact:
+F-002 is closed by relay-v1.5.1 and `release.all-families` is green on
+the pinned box (2026-11-19). Nobody has turned a switch on in a real
+window yet.
 
 ---
 
@@ -1035,7 +1074,10 @@ provisions a relay whose daemon is newer than the pin (`--mgmt=tree` in
 this rig, a release being tested), where the families do carry traffic.
 The `provision_families` event gains `unserved_by_release`. Unit:
 `TestFamilySummary_DoesNotPromiseWhatTheReleaseCannotServe`,
-`TestResolveFamilies_UnservedComesFromThePin`.
+`TestResolveFamilies_UnservedComesFromThePin`. Since the pin moved to
+relay-v1.5.1 (2026-11-19) `NotServedByPinnedMgmt` returns nothing, so the
+line is "will serve" again; the request wording stays for the next time
+the pin is behind a family.
 
 **Not verified**: an L6 run through the app, or against a cloud — the
 rig has no L6 op. `--provider stark` is exempt from the check: that
@@ -1063,8 +1105,8 @@ mentions.
 
 (`listener_on_box: true` for all four in the check's evidence.)
 
-**Fixed in the tree** — the box now learns its own family set, and
-everything follows it:
+**Fixed** (the daemon half released as relay-v1.5.1, 2026-11-19) — the
+box now learns its own family set, and everything follows it:
 
 * `relayports.FirewallPortsFor(families)` is the complete port set of a
   relay; there is no unconditional 443 any more, in the cloud firewall
@@ -1099,11 +1141,13 @@ Contract: `specs/per-recipient-credentials-v1.md` §2.3. The cloud-init
 golden moved and is re-pinned (`template_test.go`).
 
 **What it does not reach.** Relays are built from pinned artefacts and
-cloud-init has no upgrade path: this needs the planned relay re-release
-(new `daal-relay-mgmt`) AND a fresh provision. A relay with new
-cloud-init and the currently pinned daemon serves the default set
-correctly (world `release`) but still creates `ss-in`/`anytls-in`, and
-cannot be provisioned at all without vless-reality (the old daemon
+cloud-init has no upgrade path: this needed the relay re-release (new
+`daal-relay-mgmt` — relay-v1.5.1, 2026-11-19) AND needs a fresh
+provision: the family file and both firewalls are written at first boot,
+so only a relay provisioned from this release has them. No older relay is
+in service. For the record, new cloud-init with the relay-v1.5.0 daemon
+served the default set correctly but still created `ss-in`/`anytls-in`,
+and could not be provisioned at all without vless-reality (that daemon
 requires `vless-in`: `/users/provision` answers 500, nothing is minted).
 `rotate-credentials` on a relay without vless-reality makes the CLI warn
 that the relay "did not echo its cover host / REALITY public key" — true,
@@ -1147,12 +1191,13 @@ The rig only ever exercises the linux branch.
 
 ---
 
-## O-3 — W5-1, observed (fixed in the tree with FAM-4)
+## O-3 — W5-1, observed (fixed with FAM-4; released 2026-11-19 as relay-v1.5.1)
 
 **Now:** on a `--mgmt=tree` world the same checks record
-`listener_on_box: false` — the tree daemon creates inbounds only for the
-families in `/etc/daal/families` (FAM-4). A relay on the pinned daemon
-still binds both. As found:
+`listener_on_box: false` — the daemon creates inbounds only for the
+families in `/etc/daal/families` (FAM-4). That daemon is the pinned one
+since relay-v1.5.1 (2026-11-19); the file is written by cloud-init, so it
+holds for a relay provisioned fresh from this release. As found:
 
 `./run.sh --mgmt=tree clean vless-reality`: the `not_served` checks for
 shadowsocks and anytls pass (both firewalls shut, no route in the pack) and
@@ -1369,8 +1414,8 @@ naive      pass            blocked                   pass                      p
   dies on L3 (the minter emits the route as before, and it fails the name
   check). Rebuild the relay to get it.
 * ~~After an L3, naive presents the cover host the relay was provisioned
-  with, even if a later L2 moved it.~~ **Fixed in the tree daemon
-  (2026-11-18, rides the re-release).** `rotate-tls` now re-issues the
+  with, even if a later L2 moved it.~~ **Fixed in the daemon
+  (2026-11-18; released as relay-v1.5.1, 2026-11-19).** `rotate-tls` now re-issues the
   certificate when the cover host moves (`cmd/daal-relay-mgmt/tlscert.go`,
   spec `daal-relay-mgmt-v1.md` §4.2 step 5): the SAME key, so no pin and
   no signed endpoint moves; the new cover host as the FIRST DNS name;
@@ -1462,7 +1507,15 @@ OLDER full file (one that carries their credentials) still imports and
 replaces what the phone holds, as any re-import does. That file is not
 public, so it is a different threat; it is left as it was.
 
-## LC-1 — a mgmt token already used once could be replayed with a different body (fixed in the tree; shipped relays still accept it)
+## LC-1 — a mgmt token already used once could be replayed with a different body (fixed; released 2026-11-19 as relay-v1.5.1)
+
+**Released 2026-11-19.** The daemon with single-use tokens and token
+format v2 is the pinned `daal-relay-mgmt` of relay-v1.5.1. Proof: world
+`release.lifecycle` (pinned box) runs `op:mgmtauth` green in
+`./daal e2e full` → `PASS — 5388 checks`, and the `LC-1` entry
+(box=pinned) is deleted from known-findings.json. No relay older than
+relay-v1.5.1 is in service. The reproduction below is against
+relay-v1.5.0.
 
 **What.** A `Daal-Mgmt-Token` signs `nonce:ts:op` and not the request body.
 `daal-relay-mgmt` made the two address verbs single-use in Wave 3c for
@@ -1525,7 +1578,7 @@ never seen it. Line 2 of the signing input is now the lower-case hex
 SHA-256 of the management TLS certificate of the relay the token is for —
 the publisher signs the fingerprint it pins the session on, the box
 verifies with the fingerprint of the certificate it serves and refuses
-everything if it has none. Done inside v2 (no v2 verifier was released).
+everything if it has none. Done inside v2 (no v2 verifier had been released then).
 Unit: `TestTokenIsBoundToTheRelay`, `TestTokenAudienceIsTheServedCertificate`
 (cmd/daal-relay-mgmt), `TestToken_NamesTheRelay`,
 `TestClient_SignsForTheRelayItPinned` (publisher/deploy/mgmt), and the
@@ -1551,10 +1604,10 @@ exercised by the rig: `mgmtauth` does not restart the daemon mid-op (the
 unit test does the equivalent); it does present a never-used token signed
 for another body, and a correctly signed v1 token — both refused.
 
-**Still true of every relay in the field**, and of every relay provisioned
-until the mgmt artefact is rebuilt, signed and re-pinned (the same release
-F-002 needs). `./run.sh --ops mgmtauth clean vless-reality` (pinned) is red
-on `replay.users-revoke`; `--mgmt=tree` is green.
+**Until relay-v1.5.1** this stayed true of any relay provisioned from the
+old pin: `./run.sh --ops mgmtauth clean vless-reality` against
+relay-v1.5.0 was red on `replay.users-revoke` while `--mgmt=tree` was
+green. Since the pin moved (2026-11-19) both are green.
 
 **Everything else the op tried was refused** on both binaries: no
 `Authorization`, a valid token under `Bearer`, garbage, an empty signature,
@@ -1599,7 +1652,7 @@ phones would have connected on another route anyway. Not changed: what the
 screen should say depends on which route a recipient's phone picks, which
 is route selection.
 
-## LC-O2 — `/whoami` could not be called by the publisher (fixed in the tree)
+## LC-O2 — `/whoami` could not be called by the publisher (fixed; released 2026-11-19 as relay-v1.5.1)
 
 The box serves `/whoami` behind a token whose op must be `whoami`
 (`opFromPath`). `mgmt.MintToken` refused to mint that op, and nothing
@@ -1614,7 +1667,9 @@ tells "older box / unusable answer" (`ErrWhoAmIUnsupported`: 404, 405, a
 body that is not an address — spec §4.7 says these must never fail a
 publisher action) apart from a relay that refuses the token. Since token
 v2 the method is under the signature, so the publisher's `GET` token is
-refused on a `POST`. **Nothing above the client calls it yet** — no CLI
+refused on a `POST`. The fix itself is on the publisher's side; the v2
+token it signs is accepted by the released daemon since relay-v1.5.1
+(2026-11-19). **Nothing above the client calls it yet** — no CLI
 verb, and the wizard's "verified helper address" slot is still filled by
 the echo services. That wiring is app work.
 
@@ -1632,7 +1687,8 @@ close both.
 ## LC-O4 — L1, L2 and L3 work end to end on the release artefacts
 
 Not a defect; recorded because none of it had run outside unit tests. With
-the **pinned** `daal-relay-mgmt` (the one relays in the field run),
+the then-**pinned** `daal-relay-mgmt` (relay-v1.5.0; world release.lifecycle
+is green on relay-v1.5.1 since 2026-11-19),
 `./run.sh --ops lifecycle clean vless-reality websocket-tls naive hysteria2`:
 four recipients with distinct credentials all connect; a revoked one is cut
 off and the others are not; `rotate-credentials` on one recipient kills
@@ -2502,7 +2558,13 @@ outbound: process SIGSEGV in `cronet-go` `BidirectionalConn.Close` →
 cronet-go 172bb4ede18c, shipped in 1.14.1); 1.13.21 still pins
 cronet-go ec9a39c5ba3b, which has the race."
 
-## INT-2 — naive: a relay whose naive inbound refuses every TLS handshake until sing-box restarts (root-caused: sing-box start-up race; fixed in the tree daemon)
+## INT-2 — naive: a relay whose naive inbound refuses every TLS handshake until sing-box restarts (root-caused: sing-box start-up race; fixed in the daemon, released 2026-11-19 as relay-v1.5.1)
+
+**Released 2026-11-19.** The daemon that writes the `alpn` key is the
+pinned `daal-relay-mgmt` of relay-v1.5.1; the `INT-2` entry (box=pinned,
+intermittent, budget 4) is deleted from known-findings.json, so a naive
+session with this face is an unexpected red on any box. Last full run:
+`PASS — 5388 checks`, 18 worlds. The upstream race itself is not fixed.
 
 **Classification: product, on the relay — an upstream sing-box defect that
 Daal's box config exposes.** It was filed as "unclassified: product or
@@ -2549,7 +2611,7 @@ provisions a recipient and stops there may have handed out a relay on
 which naive never works; the recipient sees "Connected" and nothing
 loads (CEN-1), and nothing on the box says why.
 
-**Fix (in the tree).** `appendNaiveUser` now writes
+**Fix (released as relay-v1.5.1).** `appendNaiveUser` now writes
 `"alpn": ["h2", "h3"]` into `naive-in`'s tls block — exactly the value the
 usual interleaving produces, so a good start behaves as before — and with
 the key present neither branch writes, so there is no race. It is applied
@@ -2561,13 +2623,10 @@ be thin; the argument is the source — with the key set there is no write.
 
 **What is still open.**
 
-- **Released relays.** The pinned `daal-relay-mgmt` does not write the
-  key, so every fielded relay still runs the race until a mgmt release
-  ships AND a recipient is added afterwards (the heal runs on add; a
-  relay nobody touches keeps its old `naive-in`). `known-findings.json`
-  therefore keeps INT-2 for `box=pinned` only, as an intermittent with a
-  budget of 4. On a tree box a naive session with this face is now an
-  unexpected red.
+- ~~**Released relays.**~~ Closed 2026-11-19: the pinned
+  `daal-relay-mgmt` (relay-v1.5.1) writes the key. A relay built from
+  relay-v1.5.0 would run the race on every start; no such relay is in
+  service.
 - **Upstream.** The race is sing-box's; it should be reported there. A
   sing-box bump does not need Daal's key removed.
 - **Not checked:** whether other sing-box inbounds that serve both TCP and

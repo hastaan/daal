@@ -66,9 +66,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p dist-release/relay-v1.5.0
-          gh release download relay-v1.5.0 --repo "$GITHUB_REPOSITORY" --dir dist-release/relay-v1.5.0
-          chmod +x dist-release/relay-v1.5.0/*-linux-amd64
+          mkdir -p dist-release/relay-v1.5.1
+          gh release download relay-v1.5.1 --repo "$GITHUB_REPOSITORY" --dir dist-release/relay-v1.5.1
+          chmod +x dist-release/relay-v1.5.1/*-linux-amd64
       - name: Rig dependencies (libcronet for the naive family)
         run: go mod download
         working-directory: test-rigs/worldbox/labclient

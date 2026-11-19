@@ -29,7 +29,7 @@ set -euo pipefail
 RIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$RIG/../.." && pwd)"
 BIN="${WB_BIN:-$RIG/bin}"
-ART="${WB_ARTIFACTS:-$REPO/dist-release/relay-v1.5.0}"
+ART="${WB_ARTIFACTS:-$REPO/dist-release/relay-v1.5.1}"
 # The tag set tools/build-engine-android.sh ships (minus cshared): naive is
 # part of the phone's engine, so it is part of the lab's.
 ENGINE_TAGS="singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego"
@@ -81,7 +81,7 @@ unshare --map-root-user --map-auto true 2>/dev/null || cannot "need a subordinat
 unshare -Urn sh -c 'nft add table inet wb_pre && nft add chain inet wb_pre f "{ type filter hook forward priority 0; }" && nft add rule inet wb_pre f ct state new counter && nft add rule inet wb_pre f tcp dport 1 queue num 1' 2>/dev/null \
   || cannot "nftables with conntrack and NFQUEUE is not usable inside a user namespace (modules nf_tables, nf_conntrack, nfnetlink_queue)"
 for f in sing-box-1.13.12-linux-amd64 daal-relay-mgmt-0.1.0-linux-amd64 daal-relay-health-0.1.0-linux-amd64; do
-  [[ -f "$ART/$f" ]] || cannot "release artefact $ART/$f is missing — stage the release this tree pins: gh release download relay-v1.5.0 --dir $ART (see tools/release/README.md)"
+  [[ -f "$ART/$f" ]] || cannot "release artefact $ART/$f is missing — stage the release this tree pins: gh release download relay-v1.5.1 --dir $ART (see tools/release/README.md)"
 done
 [[ -n "$preflight_only" ]] && { echo "worldbox: this machine can host the rig"; exit 0; }
 
@@ -120,7 +120,7 @@ if [[ "$mgmt" == tree ]]; then
   # The health endpoint is the other half of the provisioning bootstrap
   # (publisher/deploy/health): the tree's publisher pins a management
   # fingerprint only from a box that authenticates it, which the pinned
-  # relay-v1.5.0 health binary cannot. A tree world runs the tree's.
+  # relay-v1.5.1 health binary cannot. A tree world runs the tree's.
   (cd "$REPO/cmd/daal-relay-health" && CGO_ENABLED=0 go build -o "$BIN/daal-relay-health.tree" .) || die "build failed: daal-relay-health"
 fi
 fi # WB_NO_BUILD

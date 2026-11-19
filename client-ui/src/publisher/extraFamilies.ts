@@ -52,7 +52,7 @@ import { profileBySlug } from './rebuildPlan';
  * commit that bumps the pin). tools/check-toolbox-profiles.mjs and
  * extraFamilies.test.tsx fail when the two disagree.
  */
-export const RELEASED_RELAY_SERVES_EXTRA_FAMILIES = false;
+export const RELEASED_RELAY_SERVES_EXTRA_FAMILIES = true;
 
 /** One opt-in family as the wizard shows it. */
 export interface ExtraFamilyOption {

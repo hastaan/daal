@@ -17,7 +17,8 @@ package cloudinit
 // change when somebody rebuilds, re-signs and re-releases them. So any
 // feature whose two halves live on opposite sides of that line is live
 // on one side and absent on the other for as long as the pin is stale,
-// and nothing in the build detects it. Two currently outstanding:
+// and nothing in the build detects it. The couplings so far (none is
+// outstanding since the 2026-11-19 pin, relay-v1.5.1):
 //
 //   - COVER SNI (Wave 2 Step 4). RESOLVED 2026-08-17: the pin below was
 //     bumped to an artefact built from this tree, so a freshly provisioned
@@ -55,35 +56,46 @@ package cloudinit
 //     the route works exactly as before — it just gets none of the
 //     benefit until the artefact ships.
 //
-//   - OPT-IN FAMILIES (Wave 5: shadowsocks, anytls, tuic). OPEN — the
-//     pin below predates them (finding F-002). Unlike multiplex this
-//     does NOT fail safe on its own: the operator-facing half (the
-//     wizard's "More ways to connect", `provision --families`) lives on
-//     the publisher's side and would offer them regardless. It is held
-//     shut by PinnedMgmtServesOptInFamilies, below the manifests.
+//   - OPT-IN FAMILIES (Wave 5: shadowsocks, anytls, tuic). RESOLVED
+//     2026-11-19 (finding F-002): the pin below serves them. Unlike
+//     multiplex this does NOT fail safe on its own: the operator-facing
+//     half (the wizard's "More ways to connect", `provision --families`)
+//     lives on the publisher's side and would offer them regardless of
+//     the pin. It is gated by PinnedMgmtServesOptInFamilies, below the
+//     manifests, which was false until this pin.
 //
-//   - MGMT TOKEN v2 (finding REL-1). OPEN, AND IT DOES NOT FAIL SAFE.
-//     The publisher in this tree signs the request body into every
-//     management token (mgmt.MintToken, format v2) and the daemon built
-//     from this tree refuses anything else. The pin below is a v1
-//     daemon: a relay provisioned from this build boots, passes health,
-//     and answers 401 to the first users-provision. There is
-//     deliberately no fallback to v1 in either direction. NOTHING BUILT
-//     FROM THIS TREE MAY SHIP BEFORE THE PIN MOVES to an artefact built
-//     from it (tools/release/relay-v1.5.1.sh).
+//   - MGMT TOKEN v2 (finding REL-1). RESOLVED 2026-11-19, AND IT DOES
+//     NOT FAIL SAFE. The publisher in this tree signs the request into
+//     every management token (mgmt.MintToken, format v2) and the daemon
+//     built from this tree refuses anything else. The previous pin
+//     (relay-v1.5.0) was a v1 daemon: a relay provisioned with it
+//     booted, passed health, and answered 401 to the first
+//     users-provision. There is deliberately no fallback to v1 in
+//     either direction, so the pin and the publisher move together.
 //
-//   - AUTHENTICATED BOOTSTRAP (daal-relay-health). OPEN, FAILS CLOSED.
-//     The publisher in this tree pins a management-TLS fingerprint only
-//     when the health reply authenticates it with the provisioning
-//     secret, and asks for it under a path token derived from that
-//     secret (publisher/deploy/health/bootstrap.go, spec
-//     daal-relay-mgmt-v1.md §2.1). The pinned daal-relay-health predates
-//     both: it answers the derived path with 404, and Provision stops
-//     with health.ErrBootstrapRefused about ten seconds after the box
-//     comes up. No fallback, for the reason MGMT TOKEN v2 has none. So
-//     daal-relay-health is now coupled to this tree exactly as
-//     daal-relay-mgmt is: any change under publisher/deploy/health or
-//     cmd/daal-relay-health means the release script runs again.
+//   - AUTHENTICATED BOOTSTRAP (daal-relay-health; finding BOOT-1).
+//     RESOLVED 2026-11-19, FAILS CLOSED. The publisher in this tree
+//     pins a management-TLS fingerprint only when the health reply
+//     authenticates it with the provisioning secret, and asks for it
+//     under a path token derived from that secret
+//     (publisher/deploy/health/bootstrap.go, spec
+//     daal-relay-mgmt-v1.md §2.1). The daal-relay-health of
+//     relay-v1.5.0 predates both: it answers the derived path with 404,
+//     and Provision stops with health.ErrBootstrapRefused about ten
+//     seconds after the box comes up. No fallback, for the reason MGMT
+//     TOKEN v2 has none. So daal-relay-health is coupled to this tree
+//     exactly as daal-relay-mgmt is: any change under
+//     publisher/deploy/health or cmd/daal-relay-health means the
+//     release script runs again.
+//
+//   - RELAY-V1.5.1. 2026-11-19: the pin below moved to relay-v1.5.1,
+//     built from this tree. It carries token v2 (bound to method, path,
+//     body digest and relay), the authenticated bootstrap (BOOT-1),
+//     GET /identity, the opt-in families on the box (F-002), single-use
+//     tokens, the naive ALPN key (INT-2), the single reload, and the
+//     certificate re-issue on rotate-tls. A publisher from this tree
+//     cannot manage a relay-v1.5.0 box, and that is deliberate: there
+//     is no upgrade path and no downgrade — provision a new one.
 //
 // When re-releasing, bump BOTH Sha256 and SigHex for
 // daal-relay-mgmt-* AND daal-relay-health-*, flip PinnedMgmtServesOptInFamilies (and its TS
@@ -115,18 +127,18 @@ var V15Artifacts = ArtifactManifest{
 			Sha256:    "989e848637725005fdac7f1d3fa3d6eeb16992c5e0a68789da96b6b3fde06ea2",
 			SigHex:    "ff5ba04d6dddee1bd3350cccb828f366efc6f95d5b73ea98f49679001a45be543810fbfeb3c9d0737b12e0dd3fb050c48b7d629278d74bd0f9e4a4a1630eb10a",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/sing-box-1.13.12-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/sing-box-1.13.12-linux-amd64",
 			},
 		},
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "2afc4c5bdfd88b75736c6b7673b33367f04ad769a67f23c5ed386bb1651ac01c",
-			SigHex:    "0a2b095d9dd81d63f4459b5cf69217e760de4a93970241cfd58625e59665c82b762349124a65764b1da94a78295d7c1da96efef8c623a064f81315646031430a",
+			Sha256:    "407581d6b583d5d55f477b473087ed6e6cab65e6b9b88a0ba8eb1b196a76d055",
+			SigHex:    "deb98a9a8f855a0e3975544923586a7952f822fb6999d679d08fc9da8f08998355e56d8023827b6986d91df6ad2a561dfb034eab375d97190da63b1ec4bd1300",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/daal-relay-health-0.1.0-linux-amd64",
 			},
 		},
 	},
@@ -141,28 +153,28 @@ var V2Artifacts = ArtifactManifest{
 			Sha256:    "989e848637725005fdac7f1d3fa3d6eeb16992c5e0a68789da96b6b3fde06ea2",
 			SigHex:    "ff5ba04d6dddee1bd3350cccb828f366efc6f95d5b73ea98f49679001a45be543810fbfeb3c9d0737b12e0dd3fb050c48b7d629278d74bd0f9e4a4a1630eb10a",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/sing-box-1.13.12-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/sing-box-1.13.12-linux-amd64",
 			},
 		},
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "2afc4c5bdfd88b75736c6b7673b33367f04ad769a67f23c5ed386bb1651ac01c",
-			SigHex:    "0a2b095d9dd81d63f4459b5cf69217e760de4a93970241cfd58625e59665c82b762349124a65764b1da94a78295d7c1da96efef8c623a064f81315646031430a",
+			Sha256:    "407581d6b583d5d55f477b473087ed6e6cab65e6b9b88a0ba8eb1b196a76d055",
+			SigHex:    "deb98a9a8f855a0e3975544923586a7952f822fb6999d679d08fc9da8f08998355e56d8023827b6986d91df6ad2a561dfb034eab375d97190da63b1ec4bd1300",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-health-0.1.0-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/daal-relay-health-0.1.0-linux-amd64",
 			},
 		},
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "e8cb16e8ef021dd60d5d7aee60bd4b93e495e571d3d514a0b75c0695765df66b",
-			SigHex:    "de2e6fe16590aab97934831f8fbb6fbfdaf8dc0d293fe804a2049b61c295014c9db93d74a1d63cbcbf76988227008a90e7ce262f10220d1b8f230ce8155c1806",
+			Sha256:    "4f13e4538e5299c35ecd648c48754790d3859fac6b03695aecda42354e61f9de",
+			SigHex:    "884b0d52f9b91a14920b7e6b0138b04926ab4087b98441bba33a72555bf2b47562c6969896dc857af4ba544bed747a07346b5c1ee8689bcfa0a8a6c1baceab09",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0/daal-relay-mgmt-0.1.0-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/daal-relay-mgmt-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
 			},
 		},
 	},
@@ -199,7 +211,7 @@ var V2Artifacts = ArtifactManifest{
 // and on a flip without a bump. The acceptance test for the flip is the
 // rig world `release.all-families` (`./run.sh clean`, pinned) going
 // green.
-const PinnedMgmtServesOptInFamilies = false
+const PinnedMgmtServesOptInFamilies = true
 
 // mgmtPinBeforeOptInFamilies is the SHA-256 of the last released
 // daal-relay-mgmt that predates the opt-in families. While the pin

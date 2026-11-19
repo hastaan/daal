@@ -1105,8 +1105,18 @@ tried on a phone.** TW-1…TW-4 are what turns it into something a user has.
 on top of the above (BOOT-1 and REV-1…REV-9 in FINDINGS; each is noted on
 the item it belongs to below). **The ordered steps the owner performs —
 release, pin-bump commit, native libraries + APK + signature, a fresh
-relay, the phone checklist — are `docs/release-runbook.md`.** Gate at
-close, this tree as it stands:
+relay, the phone checklist — are `docs/release-runbook.md`.**
+
+**Pin moved 2026-11-19 — TW-1 is done.** GitHub releases `relay-v1.5.1`
+and `relay-v1.5.1-mirror` are published, byte-identical to the candidate
+the rig proved, and `publisher/deploy/cloudinit/artifacts.go` pins them
+(both family constants `true`; `known-findings.json` holds CEN-4 only).
+`./daal e2e full` on this tree: `PASS — 5388 checks`, 18 worlds, the
+pinned worlds `release`, `release.lifecycle`, `release.all-families`
+green. **Nothing has run on a phone or on a rented relay yet** (runbook
+Part 2 onwards; TW-3, TW-4 below).
+
+Gate at close, the tree as it stood BEFORE the pin moved:
 
 - `bash tools/hooks/pre-push`: every step green except `daal e2e quick`,
   which fails on ONE check — world `release` (pinned box) `STOPPED at
@@ -1155,12 +1165,13 @@ close, this tree as it stands:
 - [x] **Routes the minter dropped are not routes** (F-003): not stored, not
   listed, not selectable; the import verdict names them.
 - [x] **Families** — FAM-1 (names resolve on naive/tor), FAM-2 (the wizard
-  has the opt-in switches — locked until TW-1), FAM-3 (`--families` refuses
+  has the opt-in switches — unlocked by TW-1, 2026-11-19), FAM-3 (`--families` refuses
   a typo and says what it drops), FAM-4 + **W5-1** (a relay binds and opens
   only what it serves), FAM-5 (Cronet loads off Android).
 - [x] **Relay daemon** — LC-1 (mutating mgmt tokens are single-use), INT-2
   (naive ALPN race), INT-O1 (one in-process reload per verb, no restart).
-  All three reach a relay only with TW-1.
+  All three are in relay-v1.5.1 (TW-1, done 2026-11-19); INT-O1's
+  `ExecReload` unit is cloud-init, so it needs a fresh provision.
 - [x] **INT-1** — the Cronet use-after-free that killed the engine process:
   `cronet-go` bumped. Linux proven (0 deaths in 1040 sessions, was 3 in
   520); Android is TW-3.
@@ -1169,8 +1180,16 @@ close, this tree as it stands:
 
 ### Opened — do these, roughly in this order
 
-- [ ] **TW-1. Re-release `daal-relay-mgmt` and re-pin it** (F-002; release
-  key). One release carries: shadowsocks/anytls/tuic on the box (F-002),
+- [x] **TW-1. Re-release `daal-relay-mgmt` and re-pin it** (F-002; release
+  key). **Done 2026-11-19, relay-v1.5.1**: published as GitHub releases
+  `relay-v1.5.1` and `relay-v1.5.1-mirror` (sing-box 1.13.12
+  `989e8486…`, health `407581d6…`, mgmt `4f13e453…`), byte-identical to
+  the proven candidate; pins moved, both constants `true`, the four
+  known-findings entries deleted, F-002 / F-005 / REL-1 marked fixed in
+  FINDINGS; `./daal e2e full` → `PASS — 5388 checks`, 18 worlds, the
+  three pinned worlds green. **Not yet done:** any relay provisioned from
+  it on a real provider, any phone (TW-3, TW-4, TW-16 b). The rest of
+  this item is the plan as it was written. One release carries: shadowsocks/anytls/tuic on the box (F-002),
   the family set (FAM-4/W5-1), single-use tokens (LC-1), the naive ALPN key
   (INT-2), the single reload (INT-O1). In the SAME commit as the pin bump:
   set `PinnedMgmtServesOptInFamilies` (`publisher/deploy/cloudinit/
@@ -1222,7 +1241,7 @@ close, this tree as it stands:
   fallback (spec `daal-relay-mgmt-v1.md` §2.1). And the wizard refuses,
   instead of re-signing, when a relay that was not rebuilt states a
   different REALITY key or TLS pin (`E_RELAY_KEYS_CHANGED`, en+fa).
-  **Rides TW-1** (above). **Left:** (a) Hetzner still reads the record's
+  **Released with TW-1** (relay-v1.5.1, 2026-11-19). **Left:** (a) Hetzner still reads the record's
   REALITY key / TLS pin over SSH without checking the host key —
   outranked by `/identity` on a current relay, but give the box's SSH
   host key the same treatment or stop reading them; (b) the rebuild path
@@ -1244,10 +1263,11 @@ close, this tree as it stands:
   relay that serves shadowsocks, the in-place disguise change
   (`rotate_tls` used to leave both to the operator), a rebuild. The rig
   mints in the app's order (`mint verb.*before-first-recipient`,
-  `resign.after-first-recipient`). **Rides TW-1:** a relay on the
-  *released* `daal-relay-mgmt` has no `/identity`, so until the
-  re-release the app is on its fallback (keys from the record, or from
-  the reply to adding the shared `r0`). **Still not done:** the desktop
+  `resign.after-first-recipient`). **Released with TW-1** (2026-11-19):
+  the released `daal-relay-mgmt` serves `/identity` since relay-v1.5.1;
+  the fallback (keys from the record, or from the reply to adding the
+  shared `r0`) is left for a relay too old to answer, and none is in
+  service. **Still not done:** the desktop
   app was not run; `rotate_tls` cannot upload the newly signed file to
   the download address (Daal publishes the note, never the file) — the
   result panel tells the operator to; `recipient_provision` builds no
@@ -1291,7 +1311,8 @@ close, this tree as it stands:
   **Still open:** (a) re-run `build-engine-android.sh` and
   `build-deploy-android.sh` before every `npm run android:build` — they
   compile the working tree, and the publisher library embeds the relay
-  pins, so it must be rebuilt after the TW-1 pin bump; (b) sign with
+  pins, so it must be rebuilt now that the TW-1 pin bump is done
+  (2026-11-19); (b) sign with
   `release-keys/android-device-signing.jks`; (c) **nothing was loaded on
   a device** — that the relinked library `dlopen()`s and carries a naive
   session is TW-4 (c)/(d); (e) the `x86` slice with no engine in it is
@@ -1421,7 +1442,7 @@ close, this tree as it stands:
   (`TestProveSubject_CarryTimeoutMakesNoBareConnectToTheRelay`, measured
   at a counting hop in front of an in-process relay, not on a network).
 - [x] **TW-11. The certificate follows the cover host** (LC-3 leftover;
-  rides TW-1). `rotate-tls` re-issues the box certificate on the SAME key
+  released with TW-1, relay-v1.5.1). `rotate-tls` re-issues the box certificate on the SAME key
   (no pin, no signed endpoint moves): new cover host first, old names
   kept, the addresses the certificate ALREADY named and no others, 90
   days (review repair 2026-11-19, REV-3: it used to add every address
@@ -1444,7 +1465,7 @@ close, this tree as it stands:
   all: rebuild it. Not verified on Android's Cronet (that it accepts the
   re-issued certificate under the old one as root; linux Cronet does).
 - [x] **TW-12. The request is signed into the mgmt token** (LC-1
-  residual; rides TW-1). Token format v2: the Ed25519 signature covers
+  residual; released with TW-1, relay-v1.5.1). Token format v2: the Ed25519 signature covers
   the relay the token is for (its mgmt TLS fingerprint — one publisher
   key can serve several relays, and a token minted for one was honoured
   by all of them until this line was added, 2026-11-19; REV-7,
@@ -1496,9 +1517,9 @@ close, this tree as it stands:
   here so the next pass starts from one list.
   (a) Nothing of this wave has run on a device or in a desktop window:
   the Kotlin threading, the surviving reason, every new sentence
-  (runbook Part 5). (b) The upload, the real provider and the real
-  download path of `relay-v1.5.1` are untried — the rig serves the
-  candidate from a lab mirror under the pinned addresses. (c) TW-15
+  (runbook Part 5). (b) `relay-v1.5.1` is uploaded (2026-11-19), but no
+  relay on a real provider has downloaded it yet — the rig serves the
+  same bytes from a lab mirror under the pinned addresses. (c) TW-15
   (a)–(d): Hetzner's unchecked SSH host key for the record fallback and
   the rebuild password; no rig world with an attacker between publisher
   and relay; `E_RELAY_KEYS_CHANGED` in plain words on one screen of
@@ -1511,5 +1532,6 @@ close, this tree as it stands:
   left-out route, so TW-4 (e) / runbook P17 may only ever show the
   "older than this phone has" line — or a refusal. (h) The APK still
   packages an `x86` slice with no engine in it (C1; the gate warns).
-  (i) The pre-push hook and CI are red on this tree until the pin-bump
-  commit; the wave and that commit must be pushed together.
+  (i) ~~The pre-push hook and CI are red on this tree until the pin
+  bump~~ — the pin moved 2026-11-19 (TW-1); the wave and the pin bump
+  must still be pushed together.

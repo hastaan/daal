@@ -388,7 +388,7 @@ func (rc *RunCtx) provision() bool {
 	for inst, art := range map[string]string{"sing-box": "sing-box-*-linux-amd64", "daal-relay-mgmt": "daal-relay-mgmt-*-linux-amd64", "daal-relay-health": "daal-relay-health-*-linux-amd64"} {
 		installed := fileSum(filepath.Join(box, "rootfs", "usr", "local", "bin", inst))
 		ev[inst] = installed
-		matches, _ := filepath.Glob(filepath.Join(p.Repo, "dist-release", "relay-v1.5.0", art))
+		matches, _ := filepath.Glob(filepath.Join(p.Repo, "dist-release", "relay-v1.5.1", art))
 		same := false
 		for _, m := range matches {
 			same = same || (installed != "" && fileSum(m) == installed)
