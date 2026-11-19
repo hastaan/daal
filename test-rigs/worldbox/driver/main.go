@@ -8,6 +8,7 @@
 //	wb storage …                  static hosting the insider can reach without a tunnel (ops_freshness.go)
 //	wb mgmtprobe …                hand-built requests to a relay's mgmt API (ops_mgmtauth.go)
 //	wb dpi | rawprobe | elsewhere the censor's payload box and its Daal-free probes (censor_*.go)
+//	wb flows …                    the censor's packet log of the client's connections to the relay (flowtap.go)
 //	wb summary …                  many worlds → one report and one exit status (summary.go)
 //
 // `run` must be PID 1 of a fresh user+net+mount+pid namespace; run.sh
@@ -45,6 +46,8 @@ func main() {
 		os.Exit(cmdSummary(os.Args[2:]))
 	case "dpi": // the censor's payload-aware box (censor_dpi.go)
 		os.Exit(cmdDPI(os.Args[2:]))
+	case "flows": // when the client opened each connection to the relay (flowtap.go)
+		os.Exit(cmdFlows(os.Args[2:]))
 	case "rawprobe": // a Daal-free probe from the client's seat (censor_probe.go)
 		os.Exit(cmdRawProbe(os.Args[2:]))
 	case "elsewhere": // the unblocked control host (censor_probe.go)

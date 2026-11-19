@@ -6,20 +6,31 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.daal.desktop.platform.DaalCoreBridge
+import org.daal.desktop.platform.R
 import org.daal.desktop.vpn.StartSequence.Outcome
 
 /**
@@ -80,6 +91,27 @@ import org.daal.desktop.vpn.StartSequence.Outcome
  * engine to search again, backing off (SwitchPolicy.retryDelayMs),
  * until a route carries or the person disconnects. The notification
  * names no route in this mode.
+ *
+ * THE NETWORK UNDER THE TUNNEL. The engine cannot see the phone's
+ * network; this service can, and tells it (DaalCoreBridge.networkFacts:
+ * kind, an opaque id, validated, metered). A
+ * ConnectivityManager.NetworkCallback is registered from the first
+ * start until the stop — also while holding, which is when "the
+ * network is back" matters most — for the DEFAULT network of this app.
+ * That is the network under the tunnel and never the tunnel itself:
+ * the app is excluded from its own VPN (establishTun), so its default
+ * network is the real one, and an event that is about a VPN network
+ * all the same is dropped. What is sent and when — the first facts at
+ * once, later changes after they settle, identical facts once, a lost
+ * network as kind "none" — is NetworkWatch (pure, unit tested). The
+ * engine calls are made on a thread of their own (`network`), never
+ * the control thread: a connect in flight there can block for the
+ * whole search, and that is exactly when the engine should learn that
+ * the phone has no network. While holding, a network that has just
+ * appeared (or just been validated) starts a search at once instead of
+ * waiting out the retry backoff (NetworkWatch.retryNow). Needs ACCESS_NETWORK_STATE
+ * (a normal permission: no dialog), declared in this module's
+ * manifest. No location permission: no SSID is read.
  *
  * On `ACTION_STOP` / `onRevoke` / `onDestroy`:
  *   1. stop the scheduler pump
@@ -150,6 +182,15 @@ class DaalVpnService : VpnService() {
 
   private val mainHandler = Handler(Looper.getMainLooper())
 
+  /** MAIN THREAD ONLY. Non-null exactly while the callback is registered. */
+  private var netCallback: ConnectivityManager.NetworkCallback? = null
+
+  /** Decides what the engine is told about the network, and when. */
+  private val netWatch = NetworkWatch()
+
+  /** Main thread. Asks [netWatch] what is due and sends it. */
+  private val netFlush = Runnable { flushNetwork() }
+
   override fun onCreate() {
     super.onCreate()
     live = this
@@ -197,14 +238,20 @@ class DaalVpnService : VpnService() {
     try {
       promoteToForeground(
         when {
-          reconnect -> NOTE_RECONNECTING
-          auto -> NOTE_CONNECTING
+          reconnect -> noteHolding()
+          auto -> getString(R.string.daal_vpn_note_connecting)
           else -> noteActive(routeId)
         },
       )
     } catch (t: Throwable) {
       Log.w(TAG, "could not go foreground ($why): ${t.javaClass.simpleName}")
     }
+    // Before the connect is queued: the engine should know what
+    // network it is on (or that there is none) while it searches.
+    // [firstFacts] is released once the first report has reached the
+    // engine (null: the watch was already running, or Android has not
+    // described the network yet); the connect below waits for it.
+    val firstFacts = startNetworkWatch()
     // Everything else — including the seconds-long connection
     // check inside setRoute / connectAuto — on the control thread.
     val gen: Int
@@ -228,6 +275,16 @@ class DaalVpnService : VpnService() {
       cancelInFlight(previousStart, stopping = false)
     }
     control.execute {
+      // The engine's order of routes, and whether it tries one alone or
+      // two together, depend on which network it believes it is on.
+      // Bounded: a connect is never held up for long by a report.
+      try {
+        if (firstFacts != null && !firstFacts.await(NetworkWatch.FIRST_FACTS_WAIT_MS, TimeUnit.MILLISECONDS)) {
+          Log.w(TAG, "network: the first report had not reached the engine when start gen=$gen began")
+        }
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+      }
       val outcome = try {
         start(routeId, gen, reconnect)
       } catch (t: Throwable) {
@@ -251,6 +308,7 @@ class DaalVpnService : VpnService() {
         // fate is theirs to decide.)
         mainHandler.post {
           if (generation.get() == gen) {
+            stopNetworkWatch()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
           }
@@ -485,9 +543,225 @@ class DaalVpnService : VpnService() {
     try { DaalCoreBridge.setTunnelRefresh(false) } catch (_: Throwable) {}
     mainHandler.post {
       if (generation.get() == gen && !connected) {
-        try { promoteToForeground(NOTE_RECONNECTING) } catch (_: Throwable) {}
+        try { promoteToForeground(noteHolding()) } catch (_: Throwable) {}
       }
     }
+  }
+
+  // ---------------------------------------------------------------
+  // The network under the tunnel (see the class comment).
+  // ---------------------------------------------------------------
+
+  /**
+   * Main thread. Idempotent: a switch or a retry finds it running.
+   *
+   * Returns a latch that opens when the FIRST facts have been handed to
+   * the engine, when Android could describe the default network right
+   * here (it usually can); null otherwise.
+   */
+  private fun startNetworkWatch(): CountDownLatch? {
+    if (netCallback != null) return null
+    val cm = try {
+      getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+    } catch (_: Throwable) {
+      null
+    }
+    if (cm == null) {
+      Log.w(TAG, "network: no ConnectivityManager; the engine is not told about the network")
+      return null
+    }
+    val cb = object : ConnectivityManager.NetworkCallback() {
+      override fun onAvailable(network: Network) {
+        netEvent(netWatch.available(network.networkHandle, netNow()))
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+          // Before Android 8 the two descriptions below are not
+          // promised to follow by themselves; ask once.
+          try {
+            cm.getNetworkCapabilities(network)?.let { onCapabilitiesChanged(network, it) }
+            cm.getLinkProperties(network)?.let { onLinkPropertiesChanged(network, it) }
+          } catch (_: Throwable) {}
+        }
+      }
+
+      override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+        netEvent(netWatch.capabilities(network.networkHandle, capsOf(caps), netNow()))
+      }
+
+      override fun onLinkPropertiesChanged(network: Network, link: LinkProperties) {
+        netEvent(netWatch.link(network.networkHandle, linkOf(link), netNow()))
+      }
+
+      override fun onLost(network: Network) {
+        netEvent(netWatch.lost(network.networkHandle, netNow()))
+      }
+    }
+    try {
+      // Android calls nothing back when there is no network at all, so
+      // whether one exists is asked once, before listening.
+      val active = cm.activeNetwork
+      val has = active != null
+      lastNetFacts = null
+      lastNetRetryAt = 0L
+      // What Android already knows about it, asked once: the callbacks
+      // say the same a moment later, by way of two more threads, and
+      // the connect must not start before the engine has been told.
+      var first: NetworkWatch.Facts? = null
+      if (active != null) {
+        val caps = try { cm.getNetworkCapabilities(active)?.let { capsOf(it) } } catch (_: Throwable) { null }
+        val link = try { cm.getLinkProperties(active)?.let { linkOf(it) } } catch (_: Throwable) { null }
+        first = netWatch.startDescribed(active.networkHandle, caps, link, netNow())
+        netEvent(netWatch.nextIn(netNow()))
+      } else {
+        netEvent(netWatch.start(false, netNow()))
+        first = netWatch.due(netNow())
+      }
+      cm.registerDefaultNetworkCallback(cb)
+      netCallback = cb
+      reportingNetwork = true
+      Log.i(TAG, "network: watching (a default network ${if (has) "exists" else "does not exist"}; described at once=${first != null})")
+      val facts = first ?: return null
+      val latch = CountDownLatch(1)
+      network.execute {
+        try {
+          sendNetwork(facts)
+        } finally {
+          latch.countDown()
+        }
+      }
+      return latch
+    } catch (t: Throwable) {
+      // SecurityException without ACCESS_NETWORK_STATE in the merged
+      // manifest; RuntimeException past the system's callback limit.
+      netWatch.stop()
+      mainHandler.removeCallbacks(netFlush)
+      Log.w(TAG, "network: could not watch: ${t.javaClass.simpleName}; the engine is not told about the network")
+      return null
+    }
+  }
+
+  /** Main thread. Idempotent. */
+  private fun stopNetworkWatch() {
+    val cb = netCallback ?: return
+    netCallback = null
+    reportingNetwork = false
+    netWatch.stop()
+    mainHandler.removeCallbacks(netFlush)
+    lastNetFacts = null
+    try {
+      (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)?.unregisterNetworkCallback(cb)
+    } catch (_: Throwable) {}
+    Log.i(TAG, "network: no longer watching")
+  }
+
+  private fun netNow() = SystemClock.elapsedRealtime()
+
+  /** Any thread. [delayMs] is what a [NetworkWatch] call answered. */
+  private fun netEvent(delayMs: Long?) {
+    if (delayMs == null) return
+    mainHandler.removeCallbacks(netFlush)
+    mainHandler.postDelayed(netFlush, delayMs)
+  }
+
+  /** Main thread. */
+  private fun flushNetwork() {
+    if (netCallback == null) return
+    val facts = netWatch.due(netNow())
+    if (facts != null) network.execute { sendNetwork(facts) }
+    netEvent(netWatch.nextIn(netNow()))
+  }
+
+  /**
+   * `network` thread. One engine call. The log line carries the kind
+   * and the two flags; of the id only whether there is one.
+   */
+  private fun sendNetwork(facts: NetworkWatch.Facts) {
+    if (!reportingNetwork) return
+    val rc = try {
+      DaalCoreBridge.networkFacts(facts.kind, facts.id, facts.validated, facts.metered)
+    } catch (t: Throwable) {
+      RC_THREW
+    }
+    Log.i(
+      TAG,
+      "network: kind=${facts.kind} validated=${facts.validated} metered=${facts.metered} " +
+        "id=${if (facts.id.isEmpty()) "none" else "set"} engine_rc=$rc",
+    )
+    netEvent(netWatch.delivered(facts, rc >= 0, netNow()))
+    if (rc < 0) return
+    val before = lastNetFacts
+    lastNetFacts = facts
+    val gen = generation.get()
+    // Only a search the service itself would start: an automatic
+    // connect in charge, the interface held, nothing connected, and no
+    // start queued or running (a pass in flight is not replaced).
+    fun idleHolding() =
+      generation.get() == gen && isHolding() && finishedStartGen == lastStartGen
+    if (!idleHolding()) return
+    val now = netNow()
+    val retry = NetworkWatch.retryNow(true, before, facts, now - lastNetRetryAt)
+    if (retry) lastNetRetryAt = now
+    mainHandler.post {
+      if (!idleHolding()) return@post
+      if (retry) {
+        Log.i(TAG, "network: a network to try while holding; searching now (after gen=$gen)")
+        beginStart(null, reconnect = true, attempt = 1, why = "network is back")
+      } else {
+        // Still holding: say whether it is the phone that has no network.
+        try { promoteToForeground(noteHolding()) } catch (_: Throwable) {}
+      }
+    }
+  }
+
+  private fun capsOf(caps: NetworkCapabilities): NetworkWatch.Caps {
+    val cellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+    return NetworkWatch.Caps(
+      wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+      cellular = cellular,
+      ethernet = caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+      vpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ||
+        !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN),
+      validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+      notMetered = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) ||
+        (
+          Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED)
+          ),
+      operator = if (cellular) simOperator() else "",
+    )
+  }
+
+  /**
+   * The operator code of the SIM that carries mobile data (digits; ""
+   * when it cannot be read). Needs no permission. It is the SIM's
+   * operator, not the tower's, so it does not change while roaming.
+   */
+  private fun simOperator(): String = try {
+    var tm = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+    val sub = SubscriptionManager.getDefaultDataSubscriptionId()
+    if (tm != null && sub != SubscriptionManager.INVALID_SUBSCRIPTION_ID) tm = tm.createForSubscriptionId(sub)
+    tm?.simOperator.orEmpty()
+  } catch (_: Throwable) {
+    ""
+  }
+
+  private fun linkOf(link: LinkProperties): NetworkWatch.Link {
+    val subnets = ArrayList<String>()
+    var gw4 = ""
+    var gw6 = ""
+    try {
+      for (la in link.linkAddresses) {
+        val a = la.address
+        if (a is Inet4Address) subnets.add(NetworkWatch.subnet(a.address, la.prefixLength))
+      }
+      for (r in link.routes) {
+        if (!r.isDefaultRoute) continue
+        val g = r.gateway ?: continue
+        if (g.isAnyLocalAddress) continue
+        if (g is Inet4Address && gw4.isEmpty()) gw4 = g.hostAddress.orEmpty()
+        if (g is Inet6Address && gw6.isEmpty()) gw6 = g.hostAddress.orEmpty()
+      }
+    } catch (_: Throwable) {}
+    return NetworkWatch.Link(subnets, gw4, gw6)
   }
 
   /**
@@ -541,6 +815,7 @@ class DaalVpnService : VpnService() {
         Log.i(
           TAG,
           "auto: the engine moved by itself from=${was ?: "-"} to=${f.routeId} " +
+            "why=${if (f.faster) "faster" else "not_carrying"} " +
             "set_tunnel_refresh_rc=$refreshRc (gen=$gen)",
         )
         mainHandler.post {
@@ -712,6 +987,8 @@ class DaalVpnService : VpnService() {
       // Before the dialer is retracted (in teardownEngine), as always.
       stopSchedulerPump()
     }
+    // requestStop runs on the main thread, where the watch lives.
+    stopNetworkWatch()
     val inFlight = finishedStartGen < pendingStart
     Log.i(
       TAG,
@@ -960,9 +1237,33 @@ class DaalVpnService : VpnService() {
     schedulerPump = null
   }
 
-  /** Notification text for a connected tunnel; names no route when [routeId] is null. */
-  private fun noteActive(routeId: String?) =
-    if (routeId.isNullOrEmpty()) "Tunnel active" else "Tunnel active — $routeId"
+  /**
+   * Notification text for a connected tunnel; names no route when
+   * [routeId] is null. While the engine's automatic connect is in
+   * charge it is always null — the engine may change route by itself,
+   * for a route that stopped carrying or for a faster one, and a
+   * notification that names none is true before and after.
+   */
+  private fun noteActive(routeId: String?): String =
+    if (routeId.isNullOrEmpty()) {
+      getString(R.string.daal_vpn_note_active)
+    } else {
+      getString(R.string.daal_vpn_note_active_route, routeId)
+    }
+
+  /**
+   * Notification text while nothing is connected behind the interface:
+   * that the phone itself has no network, when the phone says so, else
+   * that Daal is reconnecting.
+   */
+  private fun noteHolding(): String =
+    getString(
+      if (NetworkWatch.noNetwork(lastNetFacts)) {
+        R.string.daal_vpn_note_waiting_for_network
+      } else {
+        R.string.daal_vpn_note_reconnecting
+      },
+    )
 
   private fun promoteToForeground(text: String) {
     ensureChannel()
@@ -975,8 +1276,10 @@ class DaalVpnService : VpnService() {
     } else null
     val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.ic_lock_lock)
-      .setContentTitle("Daal")
+      .setContentTitle(getString(R.string.daal_vpn_title))
       .setContentText(text)
+      // The no-network line is longer than one row.
+      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
       .setOngoing(true)
       .setContentIntent(pi)
       .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
@@ -997,10 +1300,10 @@ class DaalVpnService : VpnService() {
     if (nm.getNotificationChannel(CHANNEL_ID) != null) return
     val ch = NotificationChannel(
       CHANNEL_ID,
-      "Daal tunnel",
+      getString(R.string.daal_vpn_channel_name),
       NotificationManager.IMPORTANCE_LOW,
     )
-    ch.description = "Foreground notification while the Daal tunnel is active"
+    ch.description = getString(R.string.daal_vpn_channel_description)
     nm.createNotificationChannel(ch)
   }
 
@@ -1021,8 +1324,6 @@ class DaalVpnService : VpnService() {
     // connect is (it also looks whenever the page asks for vpnStatus).
     private const val FOLLOW_SECONDS = 10L
 
-    private const val NOTE_CONNECTING = "Connecting…"
-    private const val NOTE_RECONNECTING = "Reconnecting…"
     private const val TAG = "DaalVpnService"
 
     // How often a stop repeats the engine's cancel while a start is in
@@ -1084,6 +1385,24 @@ class DaalVpnService : VpnService() {
       Thread(r, "daal-vpn-control").apply { isDaemon = true }
     }
 
+    /**
+     * The one thread the engine is told about the network on. Not
+     * [control]: a connect blocked there for the length of a search
+     * must not hold back "the phone has no network".
+     */
+    private val network: ExecutorService = Executors.newSingleThreadExecutor { r ->
+      Thread(r, "daal-vpn-network").apply { isDaemon = true }
+    }
+
+    /** True while the service's network callback is registered. */
+    @Volatile private var reportingNetwork: Boolean = false
+
+    /** The facts the engine last accepted since the watch started. */
+    @Volatile private var lastNetFacts: NetworkWatch.Facts? = null
+
+    /** When a search was last started by the network coming back (elapsedRealtime). */
+    @Volatile private var lastNetRetryAt: Long = 0L
+
     /** Guards generation/starting/connected transitions and the pump. */
     private val lifecycleLock = Any()
 
@@ -1112,6 +1431,13 @@ class DaalVpnService : VpnService() {
 
     /** The engine's automatic connect is in charge of the connection. */
     @JvmStatic fun isAuto(): Boolean = autoMode
+
+    /**
+     * The service is up and is itself telling the engine about the
+     * phone's network. The page must then not send its own, poorer
+     * fact (it knows neither the kind nor the identity).
+     */
+    @JvmStatic fun isReportingNetwork(): Boolean = reportingNetwork
 
     /**
      * The TUN is held with no route behind it while an automatic

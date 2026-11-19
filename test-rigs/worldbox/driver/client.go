@@ -51,6 +51,10 @@ type ClientOpts struct {
 	// Neither touches any product trust decision.
 	Hosts  string
 	CAFile string
+	// EngineLog: the engine's own log lines (already scrubbed by the
+	// engine) go to the phone's stderr.log (DAAL_ENGINE_LOG, the engine's
+	// switch for exactly that off Android).
+	EngineLog bool
 }
 
 var clientSeq int
@@ -120,8 +124,11 @@ func StartClient(p Paths, label string, o ClientOpts) (*Client, error) {
 	}
 	argv := inNS(NSClient, args...)
 	cmd := exec.Command(argv[0], argv[1:]...)
-	if o.Hosts != "" || o.CAFile != "" {
+	if o.Hosts != "" || o.CAFile != "" || o.EngineLog {
 		cmd.Env = os.Environ()
+		if o.EngineLog {
+			cmd.Env = append(cmd.Env, "DAAL_ENGINE_LOG=1")
+		}
 		if o.Hosts != "" {
 			cmd.Env = append(cmd.Env, "WB_HOSTS="+o.Hosts)
 		}

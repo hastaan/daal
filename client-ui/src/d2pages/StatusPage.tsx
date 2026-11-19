@@ -1,5 +1,6 @@
 // StatusPage.tsx — health card on top + 3 accordions.
 
+import { gradeText } from '../lib/measured';
 import { useEffect, useRef, useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type {
@@ -508,7 +509,7 @@ export default function StatusPage({ t }: Props) {
                                     </div>
                                     <span style={{ color: 'var(--muted)' }}>
                                         {r.pct === undefined
-                                            ? t('network.unmeasured')
+                                            ? gradeText(t, r.measured) ?? t('network.unmeasured')
                                             : `${r.pct}%`}
                                     </span>
                                 </li>

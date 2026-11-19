@@ -11,7 +11,7 @@ import { translate } from './i18n';
 
 const EN = srcEn as Record<string, string>;
 const FA = srcFa as Record<string, string>;
-const OURS = /^(auto\.|network\.auto\.|network\.pinned\.|network\.badge\.|add\.lede\.|add\.paste_help\.|add\.file\.sealed)/;
+const OURS = /^(auto\.|measure\.|network\.chip\.|network\.auto\.|network\.pinned\.|network\.badge\.|add\.lede\.|add\.paste_help\.|add\.file\.sealed)/;
 
 describe('selection-wave strings', () => {
     it('the mirror the app bundles is the source of truth, byte for byte', () => {
@@ -34,6 +34,25 @@ describe('selection-wave strings', () => {
             const ph = (s: string) => (s.match(/\{[a-z]+\}/g) ?? []).sort().join(',');
             expect(ph(FA[k]), k).toBe(ph(EN[k]));
         }
+    });
+    it('the measuring wave: every sentence it added exists in both, and Persian digits are Persian', () => {
+        const added = [
+            'measure.grade.good', 'measure.grade.ok', 'measure.grade.slow', 'measure.grade.failing', 'measure.grade.unknown',
+            'measure.connected.good', 'measure.connected.slow_auto', 'measure.connected.slow_own',
+            'measure.details.title', 'measure.details.intro', 'measure.details.none', 'measure.details.setup',
+            'measure.details.counts',
+            'auto.trying_two', 'auto.note.moved_faster',
+            'network.pinned.next', 'network.auto.next', 'network.pinned.now',
+            'network.chip.worked_here', 'network.chip.score',
+        ];
+        for (const k of added) {
+            expect(EN[k], k).toBeTruthy();
+            expect(FA[k], k).toMatch(/[؀-ۿ]/);
+            expect(FA[k], k).not.toMatch(/[0-9]/);
+            expect(OURS.test(k), k).toBe(true);
+        }
+        expect(translate('fa', 'measure.grade.unknown')).toBe(FA['measure.grade.unknown']);
+        expect(translate('en', 'measure.grade.unknown')).toBe('Not tried here yet');
     });
     it('reach the app through translate()', () => {
         expect(translate('en', 'auto.chooser.automatic')).toBe('Automatic');

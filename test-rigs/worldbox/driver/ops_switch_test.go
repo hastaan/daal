@@ -80,6 +80,27 @@ func TestSwitchFindingsExcuseOnlyTheirOwnCells(t *testing.T) {
 		chk("total-blackout", BoxTree, "op:auto", "", "scenario.connect.not_connected", Blocked, Pass),
 		chk("relay-ip-block", BoxTree, "op:auto", "", "scenario.connect.verdict", "relay_unreachable", "all_failed"),
 		chk("relay-ip-block", BoxTree, "op:auto", "", "scenario.connect.verdict", "relay_unreachable", "network_down"),
+		// The second slice: what is open is two cells (below). A race
+		// that is not faster than one after the other, a third route in
+		// flight, a side instance that leaves something, a move that
+		// does not happen or does not hold — none is excused.
+		red("op:auto", "naive", "race.connect.faster_than_one_after_another", Pass, Fail),
+		red("op:auto", "", "race.connect.at_most_two_routes_in_flight", Pass, Fail),
+		red("op:auto", "", "race.connect.both_dropped_routes_checked_together", Pass, Fail),
+		red("op:auto", "naive", "race.again.remembered_route_alone", Pass, Fail),
+		red("op:auto", "vless-reality", "first.connect.measured", Pass, Fail),
+		red("op:auto-deep", "", "leak-stopped.race.a_side_instance_leaves_nothing", Pass, Fail),
+		red("op:auto-deep", "", "leak-cancel.race.a_side_instance_leaves_nothing", Pass, Fail),
+		red("op:auto-deep", "", "leak-cancel.cycle.a_connect_and_a_disconnect_leave_nothing", Pass, Fail),
+		red("op:auto-deep", "vless-reality", "speed.moved.engine_moved_for_speed", Pass, Blocked),
+		red("op:auto-deep", "websocket-tls", "speed.hold.stays_after_a_move_for_speed", Pass, Fail),
+		red("op:auto-deep", "vless-reality", "metered.slow.no_probe_on_a_metered_network", Pass, Fail),
+		red("op:auto-deep", "", "networks.down.verdict", "network_down", "relay_unreachable"),
+		// A network the platform has not validated is not "no internet":
+		// calling a dead relay on it network_down is an unexpected red.
+		red("op:auto-deep", "", "networks.unvalidated.verdict", "relay_unreachable", "network_down"),
+		red("op:auto-deep", "", "networks.dead-relay.verdict", "relay_unreachable", "network_down"),
+		red("op:auto-deep", "", "networks.ids.the_clear_id_is_in_no_file", Pass, Fail),
 	} {
 		if id := knownFor(ks, c); id != "" {
 			t.Errorf("%s %s got=%s is excused by %s; it must be an unexpected red", c.Phase, c.Check, c.Got, id)
@@ -89,8 +110,14 @@ func TestSwitchFindingsExcuseOnlyTheirOwnCells(t *testing.T) {
 		// CEN-4, what is left of it in a pass: a QUIC-only filter gets the
 		// answer all-UDP-dropped gets.
 		"CEN-4": red("op:auto", "hysteria2", "quic-only.connect.refined", AutoRefinedQUICOnly, "udp_blocked_here"),
-		// AUTO-1: a border that forwards nothing reads as one relay.
+		// AUTO-1 (a border that forwards nothing, the link up, read as
+		// one relay): open. Only a host that says "no network at all" gets
+		// network_down; "not validated" is not taken for it.
 		"AUTO-1": chk("total-blackout", BoxTree, "op:auto", "", "scenario.connect.verdict", "network_down", "relay_unreachable"),
+		// AUTO-2: a silent address costs two attempt budgets, not one.
+		"AUTO-2": red("op:auto", "naive", "race.connect.a_silent_address_costs_one_attempt", Pass, Fail),
+		// SW-3: a connect and a disconnect leave one open file behind.
+		"SW-3": red("op:auto-deep", "", "leak-stopped.cycle.a_connect_and_a_disconnect_leave_nothing", Pass, Fail),
 	} {
 		if id := knownFor(ks, c); id != want {
 			t.Errorf("%s got=%s: excused by %q, want %s (fixed? then delete this case with the entry)", c.Check, c.Got, id, want)

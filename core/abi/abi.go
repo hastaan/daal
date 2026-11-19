@@ -18,6 +18,7 @@ import (
 	"daal/bundle-go/publisher"
 	"daal/core/diagnostics"
 	"daal/core/engine"
+	"daal/core/netmem"
 	"daal/core/pathmanager"
 	"daal/core/refresh"
 	"daal/core/routestore"
@@ -203,6 +204,12 @@ type Core struct {
 	// shuttingDown: Shutdown has taken this core. Nothing starts an
 	// engine instance after it is set. Guarded by mu.
 	shuttingDown bool
+	// side / race: the side-probe limits and the race in flight
+	// (connect_race.go). speed: the move to a faster route
+	// (connect_speed.go). All guarded by mu.
+	side  sideLimits
+	race  *raceHandle
+	speed speedState
 
 	// activeSnap mirrors activeRoute/activeFamily for readers that must
 	// not wait for mu (SetRoute holds it across driver.Start): the
@@ -411,11 +418,19 @@ func Shutdown() error {
 	c.shuttingDown = true
 	c.routeEpoch++
 	c.auto.gen++
+	c.cancelRaceLocked()
 	c.check.abandon()
 	if c.driver != nil {
 		_ = c.driver.Stop()
 	}
 	c.mu.Unlock()
+	// Side instances (a race, a speed check) are cancelled above or by
+	// the liveness loop's context; this waits until each is closed, so
+	// nothing of the engine is still dialling when the store goes away.
+	// Outside the lock: a probe's caller takes it to file its result.
+	if sp, ok := c.driver.(engine.SideProber); ok {
+		sp.StopSideProbes()
+	}
 	resetSchedulerForShutdown()
 	resetBudgetForShutdown()
 	resetRefreshForShutdown()
@@ -538,6 +553,10 @@ type connectOpts struct {
 	// restore: going back to the route that was connected before a
 	// switch that failed. Leaves the switch_back record alone.
 	restore bool
+	// noMemory: a success is not written to this network's memory — the
+	// caller already has (the side probe that just proved the route is
+	// the measurement; this attempt is its hand-over to the tunnel).
+	noMemory bool
 }
 
 // connectOutcome is what one attempt at one route came to. result is
@@ -552,6 +571,9 @@ type connectOutcome struct {
 	// is "not_carrying". In memory only; it can carry addresses.
 	obs diagnostics.Observation
 	err error
+	// setupMs: for "carried", the time from starting the instance to
+	// the first completed round trip.
+	setupMs int
 }
 
 // connectRouteLocked is one attempt to connect one route: the refusals,
@@ -606,6 +628,7 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 		engine.LogInfo(fmt.Sprintf("route switch from=%s to=%s family=%s", engine.LogID(prev), engine.LogID(routeID), engine.LogID(family)))
 	}
 	c.pm.Attempt(routeID, family)
+	started := time.Now()
 	if err := c.driver.Start(context.Background(), body); err != nil {
 		// Start failed: there is no instance. Classified from the error
 		// text alone — a config or start-up error has no phase.
@@ -655,13 +678,16 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 		return connectOutcome{result: AutoResultNotCarrying, family: family, category: cat, obs: res.Observation,
 			err: &routeFailure{routeID: routeID, category: cat, reason: reason}}
 	}
+	setupMs := setupOf(time.Since(started), res)
 	c.routeUpLocked(routeID, family, res)
 	c.startLivenessLocked()
-	c.rememberRoute(routeID, true, "")
+	if !o.noMemory {
+		c.rememberOutcome(routeID, netmem.RouteOutcome{Carried: true, HasSetup: true, SetupMs: setupMs, Slow: res.Slow})
+	}
 	// A host that turned tunnelled refresh on is pointed at THIS
 	// instance's inlet: it may not know this instance exists.
 	rearmTunnelRefresh()
-	return connectOutcome{result: AutoResultCarried, family: family}
+	return connectOutcome{result: AutoResultCarried, family: family, setupMs: setupMs}
 }
 
 // ClearRoute is engine_clear_route. It stops whatever is running or
@@ -1016,6 +1042,14 @@ func ExportDiagnostics() (string, error) {
 		// present. `state` is "idle", "trying", "connected" or "failed";
 		// `mode` is true while the engine is the one choosing the route.
 		"auto": c.auto.block(),
+		// `network`: what the HOST last said about the network the device
+		// is on (engine_network_facts) — {from_host, kind, validated,
+		// metered}. from_host false: no host has said anything, and the
+		// other three are "", -1, -1. kind is "wifi", "cellular",
+		// "ethernet", "vpn", "other" or "none"; validated / metered are
+		// 1, 0 or -1 (unknown). The network's identity is never here:
+		// see current_network_id. Always present.
+		"network": hostFacts().block(),
 		// `switch_back`: the last manual switch went to a route that
 		// carried nothing and the engine went back to the route that was
 		// connected — {failed_route, failed_family, category,

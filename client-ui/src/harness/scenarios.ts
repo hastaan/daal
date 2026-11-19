@@ -10,6 +10,9 @@
 // Adding a new scenario: append to SCENARIOS, and it picks up in all
 // three consumers.
 
+// `last` as the real engine sends it (Unix seconds of an hour) and the
+// app shows it — not a hand-written string the engine never produces.
+import { lastBucketText } from '../lib/measured';
 import type {
     ConnectionSummary,
     PointerRotationSummary,
@@ -104,6 +107,56 @@ const ROUTE_UNSUPPORTED_WG: RouteDisplayRow = {
     familyMaturity: 'unsupported',
     proven: false,
 };
+
+// Four ways from one file, as an engine that MEASURES reports them on
+// the network the phone is on now (`measured`, lib/measured.ts): one
+// that works well here, one that works slowly, one that did not work
+// here last time, one never tried here. The harness's own automatic
+// connect reads these the way the engine reads its memory: the one
+// that carried here goes first, alone.
+const way = (
+    n: number,
+    nickname: string,
+    family: string,
+    measured: RouteDisplayRow['measured'],
+): RouteDisplayRow => ({
+    routeId: `tehran-way-${n}`,
+    publisherId: 'pars-relays',
+    publisherName: 'Pars Relays',
+    routeNickname: nickname,
+    trustClass: 'trusted',
+    family,
+    familyMaturity: 'stable',
+    inCooldown: false,
+    budgetExhausted: false,
+    measured,
+    sourceName: 'Pars Relays',
+});
+
+const WAY_GOOD = way(1, 'Way 1', 'vless-reality', {
+    grade: 'good', setupMs: 320, samples: 9, carried: 9, failed: 0, last: lastBucketText(1795082400),
+});
+const WAY_SLOW = way(2, 'Way 2', 'websocket-tls', {
+    grade: 'slow', setupMs: 5200, samples: 4, carried: 3, failed: 1, last: lastBucketText(1795035600),
+});
+const WAY_FAILING = way(3, 'Way 3', 'hysteria2', {
+    grade: 'failing', samples: 3, carried: 0, failed: 3, last: lastBucketText(1795078800),
+});
+const WAY_UNTRIED = way(4, 'Way 4', 'trojan', {
+    grade: 'unknown', samples: 0, carried: 0, failed: 0,
+});
+const MEASURED_ROUTES: RouteDisplayRow[] = [WAY_GOOD, WAY_SLOW, WAY_FAILING, WAY_UNTRIED];
+
+// The same file on a network the phone has never been on: nothing is
+// remembered, so automatic connect tries two at a time. The first two
+// do not get through here (`healthPct` below 50 is the harness's "does
+// not work here"); one of the second pair does.
+const NEW_NETWORK_ROUTES: RouteDisplayRow[] = [
+    { ...way(1, 'Way 1', 'hysteria2', { grade: 'unknown', samples: 0, carried: 0, failed: 0 }), healthPct: 10 },
+    { ...way(2, 'Way 2', 'vless-reality', { grade: 'unknown', samples: 0, carried: 0, failed: 0 }), healthPct: 10 },
+    way(3, 'Way 3', 'tuic', { grade: 'unknown', samples: 0, carried: 0, failed: 0 }),
+    way(4, 'Way 4', 'websocket-tls', { grade: 'unknown', samples: 0, carried: 0, failed: 0 }),
+];
 
 // ---- scenario type ----
 
@@ -210,6 +263,10 @@ const WHY_NOT_EVALUATED: WhyThisRouteSummary = {
 const CONN_BASE: ConnectionSummary = {
     state: 'disconnected',
     mode: 'normal',
+    // The host has told the engine which network this is (on a phone:
+    // the VPN service's network callback) — what the rows say about
+    // "here" is about this network.
+    network: { fromHost: true, kind: 'wifi', validated: 1, metered: 0 },
     networkLabel: 'Wi-Fi',
     pointerValidDays: 14,
 };
@@ -351,7 +408,188 @@ export const SCENARIOS: Scenario[] = [
         availableRoutes: DEFAULT_AVAILABLE_ROUTES,
     },
 
+    // Measurement, trying two at once, moving for speed, and the phone
+    // itself being offline (lib/measured.ts, lib/autoConnect.ts).
+    {
+        id: 'connection-auto-racing',
+        title: 'Connection · automatic, trying two ways at once',
+        screen: 'connection',
+        state: 'connecting',
+        connection: {
+            ...CONN_BASE,
+            state: 'connecting',
+            routeRunning: true,
+            routeCheck: 'verifying',
+            activeRoute: NEW_NETWORK_ROUTES[2],
+            auto: {
+                state: 'trying',
+                mode: true,
+                trying: NEW_NETWORK_ROUTES[2].routeId,
+                racing: [NEW_NETWORK_ROUTES[2].routeId, NEW_NETWORK_ROUTES[3].routeId],
+                index: 3,
+                total: 4,
+                tried: [
+                    { routeId: NEW_NETWORK_ROUTES[0].routeId, family: 'hysteria2', result: 'not_carrying', category: 'udp_no_reply', racedWith: NEW_NETWORK_ROUTES[1].routeId },
+                    { routeId: NEW_NETWORK_ROUTES[1].routeId, family: 'vless-reality', result: 'start_failed', category: 'tcp_connect_timeout', racedWith: NEW_NETWORK_ROUTES[0].routeId },
+                ],
+                verdict: '',
+                routeId: '',
+            },
+        },
+        availableRoutes: NEW_NETWORK_ROUTES,
+    },
+    {
+        // Press the main control: nothing is remembered on this
+        // network, so the harness tries two at a time.
+        id: 'connection-new-network',
+        title: 'Connection · a network never seen before (press to connect)',
+        screen: 'connection',
+        state: 'disconnected',
+        connection: { ...CONN_BASE, state: 'disconnected' },
+        availableRoutes: NEW_NETWORK_ROUTES,
+    },
+    {
+        // Press the main control: the way that worked here goes first,
+        // alone, and carries.
+        id: 'connection-measured',
+        title: 'Connection · measured on this network (press to connect)',
+        screen: 'connection',
+        state: 'disconnected',
+        connection: { ...CONN_BASE, state: 'disconnected' },
+        availableRoutes: MEASURED_ROUTES,
+    },
+    {
+        id: 'connection-connected-good',
+        title: 'Connection · connected, works well here',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: WAY_GOOD,
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 1,
+                total: 3,
+                tried: [{ routeId: WAY_GOOD.routeId, family: WAY_GOOD.family, result: 'carried', category: '', setupMs: 310 }],
+                verdict: '',
+                routeId: WAY_GOOD.routeId,
+            },
+        },
+        availableRoutes: MEASURED_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
+    },
+    {
+        id: 'connection-connected-slow',
+        title: 'Connection · connected, slow here',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'degraded',
+            routeCheckCategory: 'path_too_slow',
+            activeRoute: WAY_SLOW,
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 1,
+                total: 3,
+                tried: [{ routeId: WAY_SLOW.routeId, family: WAY_SLOW.family, result: 'carried', category: '', setupMs: 5400 }],
+                verdict: '',
+                routeId: WAY_SLOW.routeId,
+            },
+        },
+        availableRoutes: MEASURED_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
+    },
+    {
+        id: 'connection-moved-faster',
+        title: 'Connection · automatic, moved to a faster way',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: WAY_GOOD,
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 0,
+                total: 0,
+                tried: [{ routeId: WAY_GOOD.routeId, family: WAY_GOOD.family, result: 'carried', category: '', setupMs: 330 }],
+                verdict: 'moved_faster',
+                routeId: WAY_GOOD.routeId,
+            },
+        },
+        availableRoutes: MEASURED_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
+    },
+    {
+        // The phone itself says it has no internet: nothing was tried.
+        id: 'connection-network-down',
+        title: 'Connection · this phone has no internet',
+        screen: 'connection',
+        state: 'error',
+        connection: {
+            ...CONN_BASE,
+            state: 'error',
+            routeRunning: false,
+            auto: {
+                state: 'failed',
+                mode: false,
+                trying: '',
+                index: 0,
+                total: 4,
+                tried: [],
+                verdict: 'network_down',
+                routeId: '',
+            },
+        },
+        availableRoutes: MEASURED_ROUTES,
+    },
+
     // --- Routes ---
+    {
+        // Every grade on one page, and a way saved by hand earlier while
+        // Daal is connected automatically on another.
+        id: 'routes-measured',
+        title: 'Routes · measured on this network',
+        screen: 'network',
+        initialRoute: '/routes',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: WAY_GOOD,
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 1,
+                total: 3,
+                tried: [{ routeId: WAY_GOOD.routeId, family: WAY_GOOD.family, result: 'carried', category: '', setupMs: 310 }],
+                verdict: '',
+                routeId: WAY_GOOD.routeId,
+            },
+        },
+        availableRoutes: MEASURED_ROUTES,
+        routeHealth: MEASURED_ROUTES.map((r) => ({
+            routeId: r.routeId,
+            label: `Pars · ${r.routeNickname}`,
+            measured: r.measured,
+        })),
+    },
     {
         id: 'routes-populated',
         title: 'Routes · populated',
@@ -378,9 +616,10 @@ export const SCENARIOS: Scenario[] = [
         availableRoutes: [ROUTE_PARS_RESCUE_03, ROUTE_PARS_RESCUE_01],
     },
     {
-        // The fresh-install truth: nothing measured, nothing claimed.
-        // Every row must read "not measured yet" and the unsupported
-        // family must read "unsupported", not "experimental".
+        // The fresh-install truth on an engine that sends no
+        // measurement: nothing measured, nothing claimed. No row says
+        // anything about how it does here, and the unsupported family
+        // must read "unsupported", not "experimental".
         id: 'routes-unmeasured',
         title: 'Routes · nothing measured yet',
         screen: 'network',

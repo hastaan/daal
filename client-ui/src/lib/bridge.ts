@@ -81,7 +81,7 @@ export async function resolveTrustPrompt(
 // engine_set_route fails closed with ErrNoDataPlane
 // (core/abi/dataplane.go) before the missing fd could matter. See
 // docs/capability-matrix.md, "Connect / disconnect".
-function isAndroid(): boolean {
+export function isAndroid(): boolean {
     if (typeof navigator === 'undefined') return false;
     // Tauri's Android WebView reports "Android" in the UA string; the
     // desktop wry shells (GTK / WebView2 / WKWebView) do not. This is
@@ -261,6 +261,15 @@ export interface DiagnosticsBlob {
     // Left untyped on purpose — lib/autoConnect.ts parseAuto is the one
     // reading, and an engine that predates the block sends nothing.
     auto?: unknown;
+    // What the host last told the engine about the network:
+    // {from_host, kind, validated, metered}. Read through
+    // lib/networkFacts.ts parseHostNetwork.
+    network?: unknown;
+    // What became of the last switch by hand to a route that carried
+    // nothing: {failed_route, failed_family, category, restored_route,
+    // restored}. failed_route '' = nothing to report. Read through
+    // lib/activeRoute.ts parseSwitchBack.
+    switch_back?: unknown;
 }
 
 // Phase 2D: PIN-vault unlock outcome.

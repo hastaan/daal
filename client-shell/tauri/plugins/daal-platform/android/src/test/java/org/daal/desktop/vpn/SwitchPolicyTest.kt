@@ -298,6 +298,24 @@ class SwitchPolicyTest {
   }
 
   @Test
+  fun aMoveForSpeedIsFollowedAndKnownAsOne() {
+    // r1 still carried but had become slow; the engine measured r3 as
+    // clearly better and moved. Nothing was ever down.
+    val engine = auto(active = "r3", running = true, state = "connected", verdict = "moved_faster")
+    assertEquals(SwitchPolicy.Follow.Moved("r3", faster = true), SwitchPolicy.follow("r1", engine))
+    // A move because the route stopped carrying is not one for speed.
+    val failedOver = auto(active = "r3", running = true, state = "connected", verdict = "moved_on")
+    assertEquals(SwitchPolicy.Follow.Moved("r3", faster = false), SwitchPolicy.follow("r1", failedOver))
+    // The verdict stays in the engine's state after the move has been
+    // followed: the same route is nothing new.
+    assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r3", engine))
+    // While the engine is only CHECKING the faster route beside the
+    // one in use, what is shown stays.
+    val checking = auto(active = "r1", running = true, state = "connected")
+    assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r1", checking))
+  }
+
+  @Test
   fun sameRouteIsNothingToFollow() {
     val engine = auto(active = "r1", running = true, state = "connected")
     assertEquals(SwitchPolicy.Follow.None, SwitchPolicy.follow("r1", engine))

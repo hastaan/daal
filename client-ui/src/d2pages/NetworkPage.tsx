@@ -33,6 +33,9 @@ import { runningRouteId, summaryExtras } from '../lib/activeRoute';
 import { errorText } from '../lib/errorText';
 import {
     acceptPending,
+    connectionsModeLine,
+    modeLineTexts,
+    rowMetaText,
     listView,
     pendingFailureKey,
     pinAfterTap,
@@ -52,6 +55,8 @@ import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotic
 import { EngineStartNotice, FailureBox, StoreResetNotice } from './PageNotices';
 import { useEngineStartProblem } from '../lib/engineStart';
 import { autoIsUsing, getPinnedRoute, setPinnedRoute } from '../lib/autoConnect';
+import { chipHereText, chipScoreText } from '../lib/measured';
+import { effectiveLocale } from '../lib/i18n';
 import { importOriginOf, sourceBadgeKey } from '../lib/importOrigin';
 
 interface Props {
@@ -140,6 +145,11 @@ export default function NetworkPage({ t }: Props) {
     // The route automatic connect has up, or null: marked on its row so
     // the person can see which one Daal picked.
     const [autoRouteId, setAutoRouteId] = useState<string | null>(null);
+    // The sentence above the list: what the ENGINE is doing now, with
+    // the saved choice as a line about next time when the two differ
+    // (lib/networkRows.ts connectionsModeLine).
+    const [summaryNow, setSummaryNow] = useState<ConnectionSummary | null>(null);
+    const modeTexts = modeLineTexts(t, connectionsModeLine(pinnedId, summaryNow));
     // Why the engine refused the last connect, as a closed code. On
     // Android it is the only way the reason arrives (the connect call
     // resolves when the VPN service starts, before the engine decides).
@@ -173,6 +183,7 @@ export default function NetworkPage({ t }: Props) {
     // including the answer to a tap that is still waiting for one.
     const applySummary = (s: ConnectionSummary) => {
         lastSummaryRef.current = s;
+        setSummaryNow(s);
         // "Active" is whatever the engine has RUNNING, not only
         // what it has finished proving: a route still being
         // checked, or lost and being retried, must be stoppable
@@ -341,8 +352,13 @@ export default function NetworkPage({ t }: Props) {
                 setRefused(code);
                 setTapRefused(code);
             } else {
+                // Desktop: the engine went back to the route that was
+                // connected and says so (`switch_back`) — the person is
+                // told whether they are still connected, not only that
+                // the new way failed.
+                const wentBackKey = summary ? pendingFailureKey(routeId, 'failed', summary) : undefined;
                 setFailure({
-                    key: connectFailedKey(summary?.routeCheck, summary?.routeCheckCategory),
+                    key: wentBackKey ?? connectFailedKey(summary?.routeCheck, summary?.routeCheckCategory),
                     detail: errorText(e),
                     routeId,
                 });
@@ -515,7 +531,12 @@ export default function NetworkPage({ t }: Props) {
                     }}
                 >
                     <span style={{ flex: 1, minWidth: 180 }}>
-                        {t(pinnedId ? 'network.pinned.line' : 'network.auto.line')}
+                        {modeTexts.now}
+                        {modeTexts.next && (
+                            <span data-next style={{ display: 'block' }}>
+                                {modeTexts.next}
+                            </span>
+                        )}
                     </span>
                     {pinnedId && (
                         <Button
@@ -1030,26 +1051,15 @@ function CellRowView({
                                         : 'var(--dim)',
                                 }}
                             >
-                                {r.family}
-                                {r.familyMaturity === 'unsupported' &&
-                                    ` · ${t('network.family.unsupported')}`}
-                                {stateLabel && ` · ${t(stateLabel)}`}
-                                {/* Which one Daal picked, and which one
-                                    the person did. */}
-                                {r.routeId === autoRouteId && ` · ${t('network.auto.mark')}`}
-                                {r.routeId === pinnedId && ` · ${t('network.pinned.mark')}`}
-                                {/* Presence, not truthiness: a missing
-                                    healthPct means "never measured" and
-                                    must not print as 0%. */}
-                                {typeof r.healthPct === 'number'
-                                    ? ` · ${r.healthPct}%`
-                                    : ` · ${t('network.unmeasured')}`}
-                                {/* `=== true` on purpose: undefined here
-                                    means the path manager has not looked
-                                    at this route, which is not the same
-                                    as "not cooled" — so we claim neither. */}
-                                {r.inCooldown === true && ` · ${t('network.cooled')}`}
-                                {r.budgetExhausted === true && ` · ${t('network.budget_full')}`}
+                                {/* The whole line is lib/networkRows.ts
+                                    rowMetaText: the kind, the state,
+                                    who picked it, how it has done on
+                                    this network in plain words, resting. */}
+                                {rowMetaText(t, r, {
+                                    stateLabelKey: stateLabel,
+                                    isAuto: r.routeId === autoRouteId,
+                                    isPinned: r.routeId === pinnedId,
+                                })}
                             </div>
                         </div>
                         <RouteActionButton
@@ -1094,6 +1104,7 @@ function FamilyChipView({
     chip: FamilyChip;
 }) {
     const [open, setOpen] = useState(false);
+    const locale = effectiveLocale();
     const cooled = chip.cooledCount > 0;
     // Three grades now reach this chip, not one boolean:
     //   unsupported — this build cannot dial the family at all
@@ -1150,13 +1161,18 @@ function FamilyChipView({
     // a route so labelled cannot be dialled AND an AmneziaWG config the
     // user pastes becomes an ordinary WireGuard route, which is a
     // different fact and the one they will otherwise be surprised by.
-    const detail = cooled
+    const about = cooled
         ? `${t('network.cooled')}${chip.lastErrorTag ? ` · ${chip.lastErrorTag}` : ''}`
         : unsupported
         ? `${t('network.family.unsupported.help')}${famHelp ? ` ${famHelp}` : ''}`
         : exp
         ? famHelp || t('network.family.experimental.help')
         : famHelp;
+    // The old "· 87%" on the chip face: a score, not a success rate.
+    // It is kept, said as what it is, in the text a tap opens.
+    const score = unsupported ? undefined : chipScoreText(t, locale, chip.healthPct);
+    const detail = [about, score].filter(Boolean).join(' ') || undefined;
+    const here = unsupported ? undefined : chipHereText(t, locale, chip.here);
 
     // TAP TO REVEAL, NOT HOVER TO REVEAL.
     //
@@ -1201,11 +1217,7 @@ function FamilyChipView({
             {unsupported && !cooled && '⛔ '}
             {exp && !cooled && '⚡ '}
             {chip.family} · {chip.count}
-            {unsupported
-                ? ` · ${t('network.family.unsupported')}`
-                : typeof chip.healthPct === 'number'
-                ? ` · ${chip.healthPct}%`
-                : ` · ${t('network.unmeasured')}`}
+            {unsupported ? ` · ${t('network.family.unsupported')}` : here ? ` · ${here}` : ''}
             {detail && (open ? ' ▴' : ' ▾')}
         </button>
         {detail && open && (

@@ -8,10 +8,11 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **61 release symbols** (verified 2026-11-19
-with `nm` against a library built from the tree — see the ABI ledger at
+Current surface count: **62 release symbols** (61 verified 2026-11-19
+with `nm` against a library built from the tree; `engine_network_facts`
+added the same day and counted from the source — see the ABI ledger at
 the end of this document, which is the authoritative count). The source
-tree carries **64** `//export engine_*` declarations; the extra three
+tree carries **65** `//export engine_*` declarations; the extra three
 are `//go:build cshared && soak` and are never present in a release
 build.
 
@@ -525,9 +526,10 @@ A route is connected only once it has carried one real round trip
   ```
   {"connected":true|false,"route_id":"r2","family":"websocket-tls",
    "tried":[{"route_id":"r1","family":"vless-reality",
-             "result":"carried|not_carrying|start_failed|refused|cancelled",
+             "result":"carried|not_carrying|start_failed|refused|cancelled|stopped",
              "category":"<failure category or empty>",
-             "refined":"","refused":"","why":"ranked","relay":1}],
+             "refined":"","refused":"","why":"ranked","relay":1,
+             "raced_with":"","setup_ms":0}],
    "verdict":"<code>","candidates":4,"already_connected":false}
   ```
 
@@ -646,7 +648,115 @@ A route is connected only once it has carried one real round trip
     when the host's last call was `enabled=1`. A host need not (and on
     a same-route restart cannot) notice.
   - **`engine_shutdown` during a pass** ends it: no further candidate
-    is started (`verdict: "cancelled"`).
+    is started (`verdict: "cancelled"`), and it returns only when every
+    side instance (below) is closed.
+  - **Two at a time, where the driver can** (added 2026-11-19;
+    `core/abi/connect_race.go`, `core/engine/side_singbox.go`). The
+    "one at a time" rule above is what a pass falls back to. Where the
+    route can be proved in a SIDE instance — a second, short-lived
+    sing-box built from the route's own config with every inbound
+    removed: no TUN, no refresh inlet, sockets protected through the
+    same registered protect callback, closed before the probe returns —
+    the pass checks the next TWO candidates beside each other and starts
+    the tunnel's instance on the first that proves (the same attempt as
+    above, so the winner is proved a second time through the tunnel:
+    that second round trip is the cost).
+    - Side-probeable: outbound types `vless`, `vmess`, `trojan`,
+      `shadowsocks`, `anytls`, `hysteria`, `hysteria2`, `tuic`, `http`,
+      `socks`, not detoured — the families vless-reality,
+      websocket-tls, hysteria2, tuic, shadowsocks, anytls. Never:
+      naive (process-wide Cronet), tor, wireguard / amneziawg
+      (endpoints), anything else. Those are tried alone, in order.
+    - Never more than 2 probes in flight. Never two probes to the same
+      relay address AND port number. Preferred partner: the other
+      transport kind (stream / datagram), then another port; a route
+      that failed here recently is not pulled ahead of one that did not.
+      The second probe starts 150–450 ms (uniform) after the first.
+    - The route whose last outcome on this network was a round trip
+      (`why: "carried_here"`, grade not `failing`) is tried ALONE first.
+      The last candidate left is tried alone.
+    - At most 12 side probes per network per hour (in memory); a route
+      side-probed in the last 3 minutes is not side-probed again. When
+      either limit is hit the pass continues one at a time.
+    - On a network the host reports as metered
+      (`engine_network_facts`) a pass the ENGINE starts (fall-over) does
+      not side-probe; a pass the person asked for may.
+    - A probe stopped because the other proved first is reported as
+      `result: "stopped"` — a NEW value of `result` — and records
+      nothing. A side probe that failed is charged exactly as a failed
+      candidate (route cooldown, never the family's three-in-an-hour
+      count, settled with the pass). A fall-over pass leaves the
+      instance of the route it is moving away from running until
+      something else has proved.
+    - `tried[]` entries gain `"raced_with":"<route id or empty>"` and
+      `"setup_ms":<int>` (this attempt's time from starting the route to
+      its first round trip; 0 for a route that did not carry). The
+      `auto` block gains `"racing":["r1","r4"]` while two are in flight
+      (`[]` otherwise); `trying` is the first of the pair.
+  - **Measurement** (added 2026-11-19; `core/netmem/measure.go`). Per
+    (network, route), inside `route_memory`: `setup_ms` (smoothed: each
+    sample moves it three tenths of the way; rounded to 10 ms),
+    `samples`, `carried`, `failed`, and the hour buckets already kept.
+    Fed by every connect outcome (automatic, by hand, a side probe that
+    ran to its end) and by the liveness check when its result CHANGES or
+    is slow — never by a read. `engine_route_summary` and every row of
+    `engine_available_routes` carry, for the network the device is on,
+    `"measured":{"grade":"unknown|good|ok|slow|failing","setup_ms":N,
+    "samples":N,"carried":N,"failed":N,"last":<unix s of the hour, 0 =
+    never>}` — always an object. Grade: `unknown` nothing recorded;
+    `failing` two failures in a row since it last carried, or failed
+    and never carried here; `slow` two slow checks in a row, or two
+    setup samples in a row over 4000 ms; `ok` two in a row within
+    1501–4000 ms (or carried and never timed); `good` two in a row at or
+    under 1500 ms. One sample never moves a settled grade (the first
+    sample ever sets it); the one exception is that a route that
+    carries stops being `failing` at once.
+  - **Moving for speed** (added 2026-11-19; `core/abi/connect_speed.go`).
+    Automatic mode only. When the connected route's check is `degraded`
+    twice in a row and this network's memory holds another usable,
+    side-probeable route graded `good` / `ok` here or never tried here
+    (and not already timed at more than the limit below), that ONE
+    route is proved in a side instance. The engine moves to it only if
+    it proved, its own proof was not slow, and its setup time is at most
+    50 % of the time the running route's last check took; the verdict on
+    the connected `auto` block is then `moved_faster`. Otherwise it
+    stays. No further speed probe for 15 minutes after one that did not
+    lead to a move, and none for 30 minutes after a move. Never on a
+    metered network; a candidate that fails is not cooled down.
+  - **Network facts from the host** — `engine_network_facts(kind, id,
+    validated, metered, out, out_len)` (added 2026-11-19;
+    `core/abi/network_facts.go`):
+
+    ```c
+    int engine_network_facts(const char* kind, const char* id,
+                             int validated, int metered,
+                             void* out, int out_len);
+    ```
+
+    `kind` ∈ {wifi, cellular, ethernet, vpn, other, none} — the
+    underlying (non-VPN) default network; `id` an opaque per-network
+    string, hashed on entry with the hash `engine_network_changed` uses
+    (`netmem.HashID(kind, "host-network", id)`) and never stored, logged
+    or returned in clear; `validated` and `metered` 1 / 0 / -1
+    (unknown). Writes `{"network_id":"<16hex>","kind":"…","validated":N,
+    "metered":N,"changed":bool,"fresh":bool}`; returns the bytes
+    written, or -1 for an unknown kind or an engine that is not
+    initialised. It never waits for a connection check.
+    - The hashed id is the key of the per-network memory. The first
+      network of a kind a host names takes over the route memory of the
+      old kind-only record (`engine_network_changed("wifi","","")`,
+      then the "unset" record), which is then deleted.
+    - Another network, a network after `none`, or `validated` becoming
+      1 asks for a liveness check at once. `none` asks for nothing.
+    - `kind: "none"` or `validated: 0` turns the verdict of a pass in
+      which NOTHING AT ALL answered into `network_down`. `validated: 0`
+      stops nothing from being tried. `kind: "none"` keeps the engine
+      from starting a fall-over pass by itself.
+    - `metered: 1` keeps the engine from starting side probes by itself.
+    - Once it has been called, `engine_network_changed` is answered
+      (`"superseded":true`) and changes nothing.
+    - `engine_export_diagnostics` member `network` (always present):
+      `{"from_host":bool,"kind":"…","validated":N,"metered":N}`.
   - `engine_export_diagnostics` member `auto` (always present, from
     memory): `{"state":"idle|trying|connected|failed","mode":bool,
     "trying":"r2","index":2,"total":4,"tried":[…],"verdict":"…",
@@ -1123,10 +1233,11 @@ nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_
 grep -rh '^//export engine_' core/ | wc -l
 ```
 
-**Release surface: 61.  Source surface: 64.** (2026-11-19. It was 58 /
-61 on 2026-08-17; `engine_set_tunnel_refresh`, `engine_route_precheck`
-and `engine_connect_auto` were added since, the first without this
-ledger being updated.)
+**Release surface: 62.  Source surface: 65.** (2026-11-19. It was 58 /
+61 on 2026-08-17; `engine_set_tunnel_refresh`, `engine_route_precheck`,
+`engine_connect_auto` and `engine_network_facts` were added since, the
+first without this ledger being updated. 62 / 65 is counted from the
+source: a library built before `engine_network_facts` exports 61.)
 
 ### Caveat on `./daal release-check`
 
@@ -1162,6 +1273,7 @@ Added after that pass (append-only, no existing signature changed):
 | `engine_set_tunnel_refresh` | `(int enabled, void *out, int out_len) -> int` | puts the engine's own scheduled fetches on its in-process loopback inlet, or takes them off; -1 when there is no live inlet (before `engine_set_route` has succeeded) — refresh then stays fail-closed, never direct |
 | `engine_route_precheck` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; see "Connection check" above |
 | `engine_connect_auto` | `(void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; blocking; see "Automatic connect" above |
+| `engine_network_facts` | `(const char *kind, const char *id, int validated, int metered, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 for an unknown kind or an engine that is not initialised; never blocks on a connection check; see "Network facts from the host" above |
 
 The TUN triplet was specified only in
 `development-phases/45-gap-dataplane-and-delivery.md` and never merged
@@ -1184,8 +1296,9 @@ client.
 
 Every one of these was stale before the 2026-08-17 pass. If the surface
 grows again, update the live ones together (the count was 60 in each as
-of 2026-11-19; `engine_connect_auto` made it 61 the same day, and only
-`daal` `EXPECTED_ABI` and this document were updated with it; the last three are dated history and keep the number
+of 2026-11-19; `engine_connect_auto` made it 61 and
+`engine_network_facts` 62 the same day, and only
+`daal` `EXPECTED_ABI` and this document were updated with them; the last three are dated history and keep the number
 they were written with):
 
 - `daal` `EXPECTED_ABI`

@@ -459,3 +459,167 @@ describe('wipe and delete forget what the webview wrote down', () => {
         expect(s.holding).toBe(false);
     });
 });
+
+describe('the measuring wave, through the Tauri backend', () => {
+    const asAndroid = () => vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Linux; Android 15) wv' });
+    const measured = { grade: 'slow', setup_ms: 2900, samples: 4, carried: 3, failed: 1, last: '2026-11-18T21' };
+
+    // The host has told the engine which network this is, and — on a
+    // phone — its service is still watching it.
+    const told = { from_host: true, kind: 'wifi', validated: 1, metered: 0 };
+    const serviceUp = () => handlers.set('plugin:daal-platform|vpn_status', () => ({ connected: true, holding: false }));
+    const list = () =>
+        handlers.set('available_routes', () =>
+            JSON.stringify({ routes: [{ ...ROUTE('r1'), measured }, ROUTE('r2'), { ...ROUTE('r3'), measured: { grade: 'superb' } }] }),
+        );
+
+    it('the route list carries `measured` for the current network; a route without it claims nothing', async () => {
+        asAndroid();
+        serviceUp();
+        handlers.set('export_diagnostics', diag({ network: told }));
+        list();
+        const rows = await new TauriContract().routesStrict();
+        expect(rows?.[0].measured).toEqual({ grade: 'slow', setupMs: 2900, samples: 4, carried: 3, failed: 1, last: '2026-11-18T21' });
+        expect(rows?.[1].measured).toBeUndefined();
+        expect(rows?.[2].measured).toBeUndefined();
+        vi.unstubAllGlobals();
+    });
+
+    it('before the phone\'s service has told the engine which network this is, NO row says anything about "here"', async () => {
+        // The app was just opened: the engine is on no network in
+        // particular and its record there is empty — "unknown" for a way
+        // that has worked on this Wi-Fi every day.
+        const unknown = { grade: 'unknown', setup_ms: 0, samples: 0, carried: 0, failed: 0, last: 0 };
+        asAndroid();
+        handlers.set('plugin:daal-platform|vpn_status', () => ({ connected: false, holding: false }));
+        handlers.set('export_diagnostics', diag({ network: { from_host: false, kind: '', validated: -1, metered: -1 } }));
+        handlers.set('available_routes', () => JSON.stringify({ routes: [{ ...ROUTE('r1'), measured: unknown }, { ...ROUTE('r2'), measured }] }));
+        handlers.set('route_summary', (a) => JSON.stringify({ ...ROUTE(String(a?.routeId)), measured: unknown }));
+        const c = new TauriContract();
+        for (const rows of [await c.routesStrict(), await c.availableRoutes()]) {
+            expect(rows?.map((r) => r.measured)).toEqual([undefined, undefined]);
+            expect(rows?.map((r) => r.routeId)).toEqual(['r1', 'r2']);
+        }
+        expect((await c.routeSummary('r1'))?.measured).toBeUndefined();
+        expect((await c.connectionSummary()).network).toEqual({ fromHost: false, kind: '', validated: -1, metered: -1 });
+
+        // The service ran earlier in this process and has stopped: the
+        // engine still holds the network it was last told about, and the
+        // phone may have moved. Still no claim.
+        handlers.set('export_diagnostics', diag({ network: told }));
+        expect((await c.routesStrict())?.map((r) => r.measured)).toEqual([undefined, undefined]);
+        // …and with the service up, the rows speak.
+        serviceUp();
+        expect((await c.routesStrict())?.map((r) => r.measured?.grade)).toEqual(['unknown', 'slow']);
+        vi.unstubAllGlobals();
+    });
+
+    it('desktop: no shell reports the network there, so there is no "here" to grade', async () => {
+        handlers.set('export_diagnostics', diag({}));
+        list();
+        expect((await new TauriContract().routesStrict())?.map((r) => r.measured)).toEqual([undefined, undefined, undefined]);
+    });
+
+    it('the connected route carries it too, and the auto block its racing pair', async () => {
+        asAndroid();
+        serviceUp();
+        handlers.set(
+            'export_diagnostics',
+            diag({
+                posture: 'Recovery',
+                route_running: true,
+                route_check: 'verifying',
+                network: told,
+                auto: { state: 'trying', mode: true, trying: 'r1', racing: ['r1', 'r3'], index: 1, total: 4, tried: [] },
+            }),
+        );
+        handlers.set('route_summary', (a) => JSON.stringify({ ...ROUTE(String(a?.routeId)), measured }));
+        const s = await new TauriContract().connectionSummary();
+        expect(s.state).toBe('connecting');
+        expect(s.auto?.racing).toEqual(['r1', 'r3']);
+        expect(s.activeRoute?.routeId).toBe('r1');
+        expect(s.activeRoute?.measured?.grade).toBe('slow');
+        expect(s.network).toEqual({ fromHost: true, kind: 'wifi', validated: 1, metered: 0 });
+        vi.unstubAllGlobals();
+    });
+
+    it('AC-23, desktop: the engine\'s `switch_back` becomes the note about the switch that did not take', async () => {
+        handlers.set(
+            'export_diagnostics',
+            diag({
+                active_route: 'r1',
+                route_check: 'ok',
+                route_running: true,
+                switch_back: { failed_route: 'r2', failed_family: 'hysteria2', category: 'udp_no_reply', restored_route: 'r1', restored: true },
+            }),
+        );
+        const s = await new TauriContract().connectionSummary();
+        expect(s.lastSwitch).toEqual({ routeId: 'r2', keptRouteId: 'r1', outcome: 'failed', reason: 'udp_no_reply' });
+        // An empty record is nothing.
+        handlers.set(
+            'export_diagnostics',
+            diag({ active_route: 'r1', switch_back: { failed_route: '', restored_route: '', restored: false } }),
+        );
+        expect((await new TauriContract().connectionSummary()).lastSwitch).toBeUndefined();
+    });
+
+    it('Android: the service\'s own note wins over the engine\'s record', async () => {
+        asAndroid();
+        try {
+            handlers.set(
+                'export_diagnostics',
+                diag({ active_route: 'r1', switch_back: { failed_route: 'r9', category: 'x', restored_route: 'r1', restored: true } }),
+            );
+            handlers.set('plugin:daal-platform|vpn_status', () => ({
+                connected: true,
+                last_switch: { route_id: 'r2', kept_route_id: 'r1', outcome: 'refused', reason: 'cooldown' },
+            }));
+            const s = await new TauriContract().connectionSummary();
+            expect(s.lastSwitch?.routeId).toBe('r2');
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    describe('networkChanged from the webview', () => {
+        const sent = () => callArgs.filter(([c]) => c === 'network_changed');
+        beforeEach(() => handlers.set('network_changed', () => '{"network_id":"h"}'));
+
+        it('desktop: sent, as before, and the VPN service is not asked', async () => {
+            expect(await new TauriContract().networkChanged('unknown', '', '')).toBe('{"network_id":"h"}');
+            expect(sent()).toEqual([['network_changed', { kind: 'unknown', carrier: '', ssid: '' }]]);
+            expect(calls).not.toContain('plugin:daal-platform|vpn_status');
+        });
+        it('Android while the VPN service is up: NOT sent — the service\'s fuller fact stands', async () => {
+            asAndroid();
+            try {
+                for (const status of [{ connected: true }, { connected: false, holding: true }]) {
+                    handlers.set('plugin:daal-platform|vpn_status', () => status);
+                    expect(await new TauriContract().networkChanged('unknown', '', '')).toBe('');
+                }
+                expect(sent()).toEqual([]);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+        it('Android with the service not running: sent', async () => {
+            asAndroid();
+            try {
+                handlers.set('plugin:daal-platform|vpn_status', () => ({ connected: false, holding: false }));
+                await new TauriContract().networkChanged('unknown', '', '');
+                expect(sent().length).toBe(1);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+        it('Android with a status that cannot be read: not sent', async () => {
+            asAndroid();
+            try {
+                expect(await new TauriContract().networkChanged('unknown', '', '')).toBe('');
+                expect(sent()).toEqual([]);
+            } finally {
+                vi.unstubAllGlobals();
+            }
+        });
+    });
+});

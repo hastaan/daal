@@ -32,13 +32,39 @@
   {
     "id": "AUTO-1",
     "severity": "low",
-    "title": "a border that forwards nothing at all reads as one relay not answering: the automatic connect has no observation outside its routes, so total-blackout gets the verdict relay_unreachable and never network_down",
+    "title": "a border that forwards nothing at all, the link itself up, reads as one relay not answering: the automatic connect has no observation outside its routes, and what the host knows of such a network (not validated) is also true of a network that only filters the platform's own check, so total-blackout gets the verdict relay_unreachable and never network_down. Only a host saying kind none gets network_down",
     "match": [
       {
         "scenario": "total-blackout",
         "phase": "op:auto",
         "check": "scenario.connect.verdict",
         "got": "relay_unreachable"
+      }
+    ]
+  },
+  {
+    "id": "AUTO-2",
+    "severity": "low",
+    "title": "a route whose address answers nothing costs a pass two attempt budgets (8 s), not the one (4 s) the automatic connect is meant to stop at: a timed-out connect does not say which phase it died in, the check that settles it runs beside the second attempt, and the stop is looked at between attempts only. Checked two at a time, two silent routes are done in 8.3 s where the stated budget gives 4.5 s",
+    "match": [
+      {
+        "scenario": "clean",
+        "phase": "op:auto",
+        "check": "race.connect.a_silent_address_costs_one_attempt",
+        "got": "fail"
+      }
+    ]
+  },
+  {
+    "id": "SW-3",
+    "severity": "low",
+    "title": "every connect that had the TUN leaves one open file behind for the life of the process: the stop eventfd of gVisor's fd endpoint, which nothing closes when the instance is closed",
+    "match": [
+      {
+        "scenario": "clean",
+        "phase": "op:auto-deep",
+        "check": "leak-stopped.cycle.a_connect_and_a_disconnect_leave_nothing",
+        "got": "fail"
       }
     ]
   }

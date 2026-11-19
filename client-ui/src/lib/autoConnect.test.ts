@@ -77,6 +77,8 @@ describe('parseAuto: the `auto` block of export_diagnostics', () => {
             state: 'trying',
             mode: true,
             trying: 'r2',
+            // Nothing said about a second route: it is tried alone.
+            racing: [],
             index: 2,
             total: 4,
             tried: [{ routeId: 'r1', family: 'vless-reality', result: 'not_carrying', category: 'no_reply' }],
@@ -92,7 +94,7 @@ describe('parseAuto: the `auto` block of export_diagnostics', () => {
     });
     it('tolerates missing and malformed fields without inventing any', () => {
         const a = parseAuto({ state: 'failed', tried: [null, { family: 'x' }, { route_id: 'r9' }], index: -3, total: 'four' });
-        expect(a).toEqual(auto({ state: 'failed', tried: [{ routeId: 'r9', family: '', result: '', category: '' }] }));
+        expect(a).toEqual(auto({ state: 'failed', racing: [], tried: [{ routeId: 'r9', family: '', result: '', category: '' }] }));
     });
 });
 
@@ -443,10 +445,13 @@ describe('verdicts: one plain sentence each, in both languages', () => {
         }
     });
     it('every result of a tried route has our words; an unknown one too', () => {
-        for (const r of ['carried', 'not_carrying', 'start_failed', 'refused', 'cancelled']) {
+        for (const r of ['carried', 'not_carrying', 'start_failed', 'refused', 'cancelled', 'stopped']) {
             expect(EN[autoResultKey(r)]).toBeTruthy();
             expect(FA[autoResultKey(r)]).toBeTruthy();
         }
+        // A check that was stopped because another route answered first
+        // (the engine's racing) has its own words, not "no result".
+        expect(autoResultKey('stopped')).toBe('auto.result.stopped');
         expect(autoResultKey('exploded')).toBe('auto.result.other');
         expect(EN['auto.result.other']).toBeTruthy();
     });

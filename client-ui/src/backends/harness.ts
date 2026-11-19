@@ -13,6 +13,7 @@ import type {
     AutoConnectResult,
     AutoStatus,
     AutoTried,
+    Measured,
     BootstrapStatus,
     BurnpressureVerdict,
     ConnectionSummary,
@@ -41,6 +42,7 @@ import type {
 } from '../contract/D2Contract';
 import { buildPublisherTree, deriveBurnpressureVerdict } from '../contract/derive_tree';
 import { activeScenario, type Scenario } from '../harness/scenarios';
+import { lastBucketText } from '../lib/measured';
 
 const AUTO_IDLE: AutoStatus = {
     state: 'idle',
@@ -54,10 +56,58 @@ const AUTO_IDLE: AutoStatus = {
 };
 
 /** Would this canned route carry traffic? The harness has no network,
- *  so the scenario's own numbers decide: a route measured below 50% is
- *  one that "does not work here". Unmeasured routes carry. */
+ *  so the scenario's own numbers decide: a route graded 'failing' on
+ *  this network does not, one graded better does; where no grade says,
+ *  a route scored below 50 is one that "does not work here". Anything
+ *  else carries. */
 function harnessCarries(r: RouteDisplayRow): boolean {
+    const g = r.measured?.grade;
+    if (g !== undefined && g !== 'unknown') return g !== 'failing';
     return typeof r.healthPct !== 'number' || r.healthPct >= 50;
+}
+
+/** Carried on this network before and is not failing now: the engine
+ *  tries such a route first, and ALONE. */
+function remembered(r: RouteDisplayRow): boolean {
+    const m = r.measured;
+    return !!m && m.carried > 0 && m.grade !== 'failing';
+}
+
+/** How long a canned route takes to prove it carries. */
+function harnessSetupMs(r: RouteDisplayRow): number {
+    return r.measured?.setupMs ?? 400;
+}
+
+/** The engine's order and grouping, in miniature (contract 2 of the
+ *  measuring wave). With routes that carry a `measured` block: the one
+ *  remembered here first and alone, then the rest TWO AT A TIME — never
+ *  more — with those that failed here last. Routes without the block
+ *  model an engine that predates measurement: one after another, in
+ *  listed order. */
+export function harnessSteps(candidates: readonly RouteDisplayRow[]): RouteDisplayRow[][] {
+    if (!candidates.some((r) => r.measured !== undefined)) return candidates.map((r) => [r]);
+    const rank = (r: RouteDisplayRow) => (remembered(r) ? 0 : r.measured?.grade === 'failing' ? 2 : 1);
+    const order = [...candidates].sort((a, b) => rank(a) - rank(b));
+    const steps: RouteDisplayRow[][] = [];
+    let i = 0;
+    if (order.length > 0 && remembered(order[0])) steps.push([order[i++]]);
+    for (; i < order.length; i += 2) steps.push(order.slice(i, i + 2));
+    return steps;
+}
+
+/** What one more attempt does to a route's record here. A first result
+ *  gives a first grade; after that one sample does not flip it. */
+function afterAttempt(m: Measured, carried: boolean, setupMs: number): Measured {
+    const next: Measured = {
+        ...m,
+        samples: m.samples + 1,
+        carried: m.carried + (carried ? 1 : 0),
+        failed: m.failed + (carried ? 0 : 1),
+        last: lastBucketText(Math.floor(Date.now() / 3600_000) * 3600),
+    };
+    if (carried && m.setupMs === undefined) next.setupMs = setupMs;
+    if (m.grade === 'unknown') next.grade = carried ? 'ok' : 'failing';
+    return next;
 }
 
 export class HarnessContract implements D2Contract {
@@ -71,6 +121,24 @@ export class HarnessContract implements D2Contract {
     // flight sees it changed and stops (how the engine's cancel looks
     // from here).
     private gen = 0;
+    // What this session's attempts added to the scenario's canned
+    // measurements, per route — so a row that said "Not tried here yet"
+    // says something else after Daal has tried it.
+    private measuredNow = new Map<string, Measured>();
+
+    /** The scenario's routes with this session's measurements laid
+     *  over them. */
+    private rows(): RouteDisplayRow[] {
+        return (this.s.availableRoutes ?? []).map((r) => {
+            const m = this.measuredNow.get(r.routeId);
+            return m ? { ...r, measured: m } : r;
+        });
+    }
+
+    private record(r: RouteDisplayRow, carried: boolean): void {
+        const m = this.measuredNow.get(r.routeId) ?? r.measured;
+        if (m) this.measuredNow.set(r.routeId, afterAttempt(m, carried, harnessSetupMs(r)));
+    }
 
     /** `stepMs`: how long each simulated route check takes. Tests pass
      *  a few ms; the browser default is long enough to read "Trying way
@@ -104,11 +172,11 @@ export class HarnessContract implements D2Contract {
     }
 
     async availableRoutes(): Promise<RouteDisplayRow[]> {
-        return this.s.availableRoutes ?? [];
+        return this.rows();
     }
 
     async routeSummary(routeId: string): Promise<RouteDisplayRow | null> {
-        const rows = this.s.availableRoutes ?? [];
+        const rows = this.rows();
         return rows.find((r) => r.routeId === routeId) ?? null;
     }
 
@@ -136,7 +204,7 @@ export class HarnessContract implements D2Contract {
     // as engine_set_route does.
     async connect(routeId: string): Promise<void> {
         this.gen++;
-        const row = (this.s.availableRoutes ?? []).find((r) => r.routeId === routeId);
+        const row = this.rows().find((r) => r.routeId === routeId);
         if (!row) throw new Error('harness: no such route');
         this.sim = {
             ...this.s.connection,
@@ -174,7 +242,7 @@ export class HarnessContract implements D2Contract {
         }
         const gen = ++this.gen;
         const base = this.s.connection;
-        const all = this.s.availableRoutes ?? [];
+        const all = this.rows();
         const dialable = all.filter((r) => r.familyMaturity !== 'unsupported');
         const candidates = dialable.filter((r) => r.inCooldown !== true);
         const tried: AutoTried[] = [];
@@ -191,19 +259,37 @@ export class HarnessContract implements D2Contract {
         };
         if (all.length === 0) return fail('no_routes');
         if (candidates.length === 0) return fail(dialable.length > 0 ? 'all_cooling_down' : 'all_failed');
-        for (let i = 0; i < candidates.length; i++) {
-            const r = candidates[i];
+        // One step is one route, or two tried at the same moment (never
+        // more). The first of a pair that carries wins; the other is
+        // stopped.
+        let done = 0;
+        // Did a way Daal came to BEFORE the one that connected fail?
+        let movedOn = false;
+        for (const step of harnessSteps(candidates)) {
+            const first = step[0];
+            const racing = step.length === 2 ? step.map((r) => r.routeId) : [];
+            const other = (r: RouteDisplayRow) =>
+                step.length === 2 ? step.find((x) => x !== r)!.routeId : undefined;
+            const entry = (r: RouteDisplayRow, result: string, category: string): AutoTried => ({
+                routeId: r.routeId,
+                family: r.family,
+                result,
+                category,
+                ...(result === 'carried' ? { setupMs: harnessSetupMs(r) } : {}),
+                ...(other(r) ? { racedWith: other(r) } : {}),
+            });
             this.sim = {
                 ...base,
                 state: 'connecting',
-                activeRoute: r,
+                activeRoute: first,
                 routeCheck: 'verifying',
                 routeRunning: true,
                 auto: {
                     state: 'trying',
                     mode: true,
-                    trying: r.routeId,
-                    index: i + 1,
+                    trying: first.routeId,
+                    racing,
+                    index: done + 1,
                     total: candidates.length,
                     tried: [...tried],
                     verdict: '',
@@ -214,45 +300,67 @@ export class HarnessContract implements D2Contract {
             if (gen !== this.gen) {
                 // Cancelled (a disconnect, or a newer connect): whoever
                 // did that owns the state now.
-                tried.push({ routeId: r.routeId, family: r.family, result: 'cancelled', category: '' });
+                for (const r of step) tried.push(entry(r, 'cancelled', ''));
                 return { connected: false, routeId: '', family: '', tried, verdict: '', candidates: candidates.length };
             }
-            if (harnessCarries(r)) {
-                tried.push({ routeId: r.routeId, family: r.family, result: 'carried', category: '' });
-                const verdict = i > 0 ? 'moved_on' : '';
+            // Of a pair that both carry, the quicker one proves first.
+            const winner = step
+                .filter(harnessCarries)
+                .sort((x, y) => harnessSetupMs(x) - harnessSetupMs(y))[0];
+            for (const r of step) {
+                if (r === winner) continue;
+                if (harnessCarries(r)) {
+                    // Stopped because the other one won: nothing was
+                    // learned about it. The engine's word for this is
+                    // 'stopped'; 'cancelled' is the person's cancel.
+                    tried.push(entry(r, 'stopped', ''));
+                } else {
+                    // A partner that failed beside the way that then
+                    // connected is not something Daal moved on from
+                    // (the engine's rule: core/abi deriveAuto).
+                    if (!(winner && r === step[1])) movedOn = true;
+                    tried.push(entry(r, 'not_carrying', 'no_reply'));
+                    this.record(r, false);
+                }
+            }
+            done += step.length;
+            if (winner) {
+                tried.push(entry(winner, 'carried', ''));
+                this.record(winner, true);
+                const up = this.rows().find((x) => x.routeId === winner.routeId) ?? winner;
+                const verdict = movedOn ? 'moved_on' : '';
                 this.sim = {
                     ...base,
                     state: 'connected',
-                    activeRoute: r,
+                    activeRoute: up,
                     routeCheck: 'ok',
                     routeRunning: true,
                     auto: {
                         state: 'connected',
                         mode: true,
                         trying: '',
-                        index: i + 1,
+                        index: done,
                         total: candidates.length,
                         tried: [...tried],
                         verdict,
-                        routeId: r.routeId,
+                        routeId: up.routeId,
                     },
                 };
                 return {
                     connected: true,
-                    routeId: r.routeId,
-                    family: r.family,
+                    routeId: up.routeId,
+                    family: up.family,
                     tried: [...tried],
                     verdict,
                     candidates: candidates.length,
                 };
             }
-            tried.push({ routeId: r.routeId, family: r.family, result: 'not_carrying', category: 'no_reply' });
         }
         return fail('all_failed');
     }
 
     async routesStrict(): Promise<RouteDisplayRow[] | undefined> {
-        return this.s.availableRoutes ?? [];
+        return this.rows();
     }
 
     // Stops whatever is running and cancels an automatic connect in

@@ -41,7 +41,8 @@ No sudo, no network, no VPS, no phone.
 | | `clean.recipients`, `clean.rotation` | the whole lifecycle on the tree daemon × all 7 families: recipients, revoke, wrong credentials, tamper, mgmt-auth, repeated relay restarts; then L1, **L2 then L3** (the cover host moves, then the address — the order in which naive's certificate matters), freshness, capability honesty |
 | | `clean.switch` | one phone, many routes: `switch`, then `switch-all` — a live switch between **every ordered pair** of the 7 families (42) in one session |
 | | `clean.auto` | op `auto` with all 7 families' routes on the phone (three of them behind the experimental gate, which the op leaves off) |
-| | `relay-ip-block`, `total-blackout`, `quic-drop` (+`auto`) | one press of the button **under the scenario**: nothing can carry (and the verdict that must come back), or only the QUIC routes are stopped |
+| | `auto-deep` | op `auto-deep`: what the automatic connect does on its own clock or at the cost of a whole failed pass — grades a slow route, moves off one for speed and holds, stays put on a metered network, keeps each network's memory apart, says `network_down` on the host's word, leaves nothing of a side instance behind |
+| | `relay-ip-block`, `total-blackout`, `quic-drop` (+`auto`) | one press of the button **under the scenario**, the phone reporting the network as Android would: nothing can carry (and the verdict that must come back), or only the QUIC routes are stopped |
 | | `release.lifecycle` | the whole lifecycle again on the pinned release artefacts × the default families |
 | | `udp-blackhole` (+ops) | recipients and the three rotation rungs (L1, L3, L2 — the other order) **under a censor** |
 | | `release.all-families` | the pinned artefacts × all 7 families — FINDINGS F-002, kept visible until the release. **Until the pin moves, every pinned world stops at `provision`: this tree's publisher will not pin a management fingerprint the pinned health binary cannot authenticate (FINDINGS BOOT-1), and could not authenticate to the pinned daemon if it did (REL-1)** |
@@ -254,7 +255,7 @@ driver/                the `wb` binary (stdlib + hcloud schema types)
   publisher.go         one helper per daal-deploy verb
   client.go            wb-client and probe control
   fakecloud.go inet.go target.go probe.go labca.go     the outside world
-  ops.go ops_*.go      publisher-side operations, ONE FILE EACH (ops_switch.go, ops_auto.go: the client-side ones — a live route switch; the automatic connect)
+  ops.go ops_*.go      publisher-side operations, ONE FILE EACH (ops_switch.go, ops_auto.go + ops_auto_race.go, ops_auto_deep.go: the client-side ones — a live route switch; the automatic connect; flowtap.go: the censor's packet log they read)
   lifecycle.go         shared plumbing for the lifecycle ops (verb helpers, Rebuild, box views, --ops lifecycle)
   fakecloud_fip.go     floating IPs (the cloud half of L3)
   mgmtprobe.go         hand-built mgmt requests (`wb mgmtprobe`)
@@ -728,19 +729,37 @@ running, `ClearRoute` + `ClearTunFD` — on these commands: `auto`,
 `auto-cancel <ms>` (Connect, then Cancel: `ClearRoute` every 100 ms until
 the call returns), `connect <family>` (a route picked by hand),
 `disconnect` (the process and its memory stay), `diag` (the diagnostics
-and nothing else), `stop`. The censor's part is a private nft table
-(`wb_auto`, or `wb_switch` for one endpoint) for the length of a step.
+and nothing else), `net <kind> <id|-> <validated> <metered>` (the
+service's network callback: `engine_network_facts`), `auto-net …` (the
+same report on its own thread at the moment a Connect starts, as
+`DaalVpnService` does it), `listing` (what the Connections page reads:
+the route list and the connected route's summary, with `measured`),
+`res` (the process's open files and goroutines), `stop`. The censor's
+part is a private nft table (`wb_auto`, or `wb_switch` for one endpoint)
+for the length of a step, and — op `auto-deep` — a delay on one endpoint
+(`wb_slow`: a prio qdisc on `to-relay` with netem on a band that only
+packets marked for that endpoint enter).
+
+**The flow tap** (`driver/flowtap.go`, `wb flows`): a packet socket on
+the censor's client-side interface logs when the client opens each
+connection to the relay (`flows.jsonl` in the evidence directory). Every
+press of both ops is asked `at_most_two_routes_in_flight`: at no moment
+did the censor see new connections to more than two of the relay's
+endpoints, and the engine's own `auto.racing` never named more than two
+routes. What that can and cannot see is at the top of that file and in
+FINDINGS AUTO-O3.
 
 In a world whose scenario blocks nothing, seven phones, each a fresh
 state directory (`<phone>.<step>.<check>`):
 
 | phone | what happens | the checks that carry it |
 |---|---|---|
-| `first` | Connect with nothing in the way; Connect again; Disconnect | `first_route_first_try` (one route tried, the ranking's first; no verdict; experimental routes left out as `experimental_off`), `already_connected_is_a_no_op`, `disconnect.clean` (nothing running, `auto` idle, mode false) |
-| `blocked` | the censor drops the first-ranked route's endpoint; Connect; Disconnect; block lifted; Connect | `blocked_route_tried_and_named` (tried FIRST, `not_carrying`, a category), `verdict` = `moved_on`, `progress_visible` (a page polling the diagnostics saw `trying` 1 of n, 2 of n), `again.remembered_route_first` (`why: carried_here`) |
+| `first` | Connect with nothing in the way; Connect again; Disconnect | `first_route_first_try` (one route carried, the ranking's first; no verdict; the route checked beside it, if any, named `stopped` and nothing else; experimental routes left out as `experimental_off`), `measured` (the route list and the summary grade, time and count the route that carried on this network; routes nothing was asked of say `unknown`), `already_connected_is_a_no_op`, `disconnect.clean` (nothing running, `auto` idle, mode false) |
+| `blocked` | the censor drops the first-ranked route's endpoint; Connect; Disconnect; block lifted; Connect | `blocked_route_tried_and_named` (checked first; beside another route it is `stopped` when that one proves — no category, no verdict; alone it is `not_carrying` and the pass is `moved_on`), `a_stopped_check_is_not_a_failure` (nothing is remembered against it), `progress_visible` (a page polling the diagnostics saw the pair in `auto.racing`, `trying` its first), `again.remembered_route_first` (`why: carried_here`) |
+| `race` | the censor drops the TWO routes a fresh phone checks first (the pair phone `first` saw); Connect; Disconnect; Connect, the block still there | `both_dropped_routes_checked_together` (`not_carrying`, each the other's `raced_with`), `faster_than_one_after_another` (done within 10.95 s; one after the other they cost 16 s), `a_silent_address_costs_one_attempt` (within 6.95 s — red, FINDINGS AUTO-2), `second_route_starts_after_a_delay` (at the censor), `verdict` = `moved_on`, `measured` (the dropped routes `failing`, the one that carried graded), `again.remembered_route_alone` (one route tried, nothing beside it, new connections to ONE endpoint at the censor) |
 | `memory` | the last-ranked (QUIC) route connected by hand once; Disconnect; Connect. Then every UDP datagram dropped; Connect | `by-hand.connected` (`auto.mode` false: a hand-picked route is the person's), `remembered_route_ahead_of_the_ranking` (r4 first where the ranking says r1), `udp.quic_route_tried_and_silent`, `udp.refined` = `udp_blocked_here`, `udp.verdict` = `moved_on` |
 | `quic-only` | the same start; QUIC Initials dropped, plain UDP delivered; Connect | `refined` expects `quic_blocked_here` and gets `udp_blocked_here` — red, FINDINGS CEN-4 (what is left of it) |
-| `all-blocked` | the relay's address null-routed. Cancel 1.5 s into a Connect; Connect; Connect again | `cancelled_promptly` (back within 2 s, `cancelled`), `every_candidate_tried_none_connected`, `verdict` = `relay_unreachable`, `refined` = `relay_unreachable` on the QUIC route (a dead address, not blocked UDP), `nothing_left_running` (no route, TUN released, the verdict still readable after the teardown, mode false), `again.verdict` = `all_cooling_down` with nothing started |
+| `all-blocked` | the relay's address null-routed. Cancel 1.5 s into a Connect; Connect; Connect again | `cancelled_promptly` (back within 2 s, `cancelled`), `every_candidate_tried_none_connected`, `verdict` = `relay_unreachable`, `refined` = `relay_unreachable` on the QUIC route (a dead address, not blocked UDP), `nothing_left_running` (no route, TUN released, the verdict still readable after the teardown, mode false), `again.every_candidate_tried_again` and the same verdict |
 | `fall-over` | connected by the button; the censor starts dropping the running route; the host only looks | `engine_moved_by_itself`, `says_what_happened` (`tried[0]` is the lost route, `why: was_connected`; `moved_on`; mode still true), `same_tun`, `fds_intact`, then `tunnel` + `wire` on the new route |
 
 Every "connected" is the switch op's `tunnel` + `wire` (a verified fetch,
@@ -756,18 +775,40 @@ either case — that is what the phone proves; how long a real phone waits
 is not measured here (FINDINGS AUTO-O1).
 
 In a world whose scenario blocks something there is one phone,
-`scenario`: one press under the scenario as it stands.
+`scenario`: one press under the scenario as it stands, with the network
+reported as Android would report it (validated, except under
+`total-blackout`, where nothing the phone sends gets anywhere).
 `tried_agrees_with_the_censor` (no route the scenario stops is reported
 as carrying, none it spares as failed); then either `connected` +
 `tunnel` + `wire` on a route the scenario spares, or `not_connected`,
 `verdict` (the one `AutoVerdictUnder` declares for the scenario:
 relay-ip-block → `relay_unreachable`; total-blackout → `network_down`,
-red and known as FINDINGS AUTO-1) and `nothing_left_running`.
+which the engine can say because it was told — FINDINGS AUTO-1) and
+`nothing_left_running`. Under `total-blackout` a second phone,
+`scenario-untold`, presses with no report: `relay_unreachable`, what a
+host with no network observer still gets.
+
+`auto-deep` (`driver/ops_auto_deep.go`; full only, its own world) is the
+slow half of the same button. Five phones:
+
+| phone | what happens | the checks that carry it |
+|---|---|---|
+| `slow` | a route connected by hand; then the censor delays every packet to its endpoint by 2.5 s; the person does nothing | `a_connect_by_hand_is_measured`, `graded_slow_here` (the list says `slow` within a few of the engine's own checks), `slow_is_not_failing` |
+| `speed` | connected by the button on the remembered route; the censor starts delaying it; the host only looks. Then the censor delays the NEW route and frees the old | `engine_moved_for_speed`, `says_what_happened` (`moved_faster`; the old route `carried` / `path_too_slow`; the new one with its time), `same_tun`, `fds_intact`, `one_route_probed_beside_the_running_one` (at the censor), `tunnel` + `wire`, `the_route_left_is_graded_slow`, `hold.stays_after_a_move_for_speed` (still there after 30 s, no new connection to any other endpoint) |
+| `metered` | the same start on a network the host calls metered | `engine_calls_it_degraded`, `no_probe_on_a_metered_network` (stays; the censor sees nothing new beside the running route) |
+| `networks` | network X: Connect, Disconnect. Network Y (another id). Back on X. Kind `none`. Then the relay null-routed, twice: the host says validated 0, then 1 | `facts_answered_with_a_hashed_id`, `diagnostics_say_what_the_host_said`, `another_id_is_another_network`, `nothing_is_remembered_on_a_new_network`, `the_route_remembered_elsewhere_is_not_pulled_ahead`, `the_same_id_is_the_same_network`, `x-again.remembered_route_alone`, `a_press_is_never_refused_for_the_host_fact`, `down.verdict` = `network_down`, `dead-relay.verdict` = `relay_unreachable`, `the_clear_id_is_in_no_file` |
+| `leak-stopped`, `leak-cancel` | a baseline of connects by hand; then, on a network of its own, a pair in which one check is stopped because the other proved / a pair cancelled in flight | `a_side_instance_leaves_nothing` (open files, goroutines, sing-box goroutines: no more than the same number of connects by hand leave), `cycle.a_connect_and_a_disconnect_leave_nothing` (red, FINDINGS SW-3) |
+
+`WB_AUTO_ONLY=speed,metered` runs only those phones of an op (phone
+`first` of op `auto` always runs).
 
 That every one of those can fail: the op was run against an engine built
 with three one-line mutations (no per-network memory; no fall-over; no
 UDP refinement) through `go build -overlay`, the tree untouched — 8 red
 checks, exactly the ones that name those behaviours (FINDINGS AUTO-0).
+The second slice the same way, twelve mutations in three builds
+(FINDINGS AUTO-3, with the two checks that turned out weaker than their
+names).
 
 Controls: `connect.control.before` / `disconnect.control.after` (no
 tunnel, no path); the wire tap (bytes on B's endpoint are not bytes on
@@ -905,7 +946,7 @@ the `nf_conntrack` module, which `nft … ct state` loads or finds loaded.
 * **sshd on the box**, so the provisioning log observer and the
   `reality.pub` read run for real.
 * **Reconnecting from existing state across a process restart**: op `auto` keeps one engine process through connects, disconnects and the engine's own move from one route to the next, but a phone that is killed and started again with its state directory is not modelled — every phone here starts fresh.
-* **The network changing under the phone** (`engine_network_changed`): every phone of op `auto` sits on one network, the engine's "none reported" bucket. That a route remembered on one network is not preferred on another is covered by the engine's unit tests only.
+* **The network changing under the phone**: op `auto-deep`'s `networks` phone reports two networks (`engine_network_facts`) and proves their memory apart, but nothing changes while a route is connected: the liveness kick on a change, and the service's own settle and retry rules (`vpn/NetworkWatch.kt`), are covered by unit tests only. What Android reports and when — a network not yet validated for its first second, one that is never validated because the check itself is filtered — is not modelled (FINDINGS AUTO-O5).
 * **The liveness clock of a real phone**: see FINDINGS AUTO-O1.
 * **Sessions run one at a time** in the single client namespace; a blocked
   family costs its timeout (~5–10 s). More client namespaces would

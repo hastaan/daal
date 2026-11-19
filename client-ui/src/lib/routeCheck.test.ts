@@ -327,6 +327,10 @@ describe('connectFailedKey', () => {
         // the page folds under "Details". The sentence is always a key.
         expect(handler.match(/errorText\(/g)).toHaveLength(1);
         expect(handler).toMatch(/detail: errorText\(e\)/);
-        expect(handler).toMatch(/key: connectFailedKey\(/);
+        // ...either the one for a switch that went back to the route
+        // that was connected (a key too: lib/networkRows.ts), or the
+        // engine's verdict.
+        expect(handler).toMatch(/key: wentBackKey \?\? connectFailedKey\(/);
+        expect(handler).toMatch(/const wentBackKey = summary \? pendingFailureKey\(/);
     });
 });

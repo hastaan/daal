@@ -62,6 +62,10 @@ type Stub struct {
 	// startHook, when set, is called on every successful Start (tests:
 	// what a real driver does at that moment — publish a new inlet).
 	startHook func()
+	// side / sideHook: the side probes in flight and, for the Stub
+	// itself, what answers them (side.go).
+	side     sideSet
+	sideHook func(ctx context.Context, configJSON []byte, cfg ProofConfig) (ProofResult, error)
 }
 
 // SetStartHook installs f to be called, with the stub's lock released,

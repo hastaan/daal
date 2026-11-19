@@ -23,7 +23,7 @@ const NO_CORE_NEEDED: &[&str] = &["load", "init", "shutdown", "version_str", "he
 
 /// Methods of `impl Engine` that make no engine call at all.
 const NOT_A_CALL: &[&str] =
-    &["is_ready", "unavailable_reason", "ensure_ready", "failed", "call_buf", "has_connect_auto"];
+    &["is_ready", "unavailable_reason", "ensure_ready", "failed", "call_buf", "has_connect_auto", "has_network_facts"];
 
 #[test]
 fn every_core_call_is_gated() {
@@ -67,6 +67,7 @@ fn every_core_call_is_gated() {
             .find("(self.")
             .or_else(|| text.find("self.route_precheck"))
             .or_else(|| text.find("self.connect_auto"))
+            .or_else(|| text.find("self.network_facts"))
             .unwrap_or_else(|| panic!("{name}: expected an engine call"));
         let gate = text
             .find("self.ensure_ready()?;")
@@ -243,6 +244,49 @@ fn failed_init_leaves_a_usable_process() {
             eprintln!(
                 "SKIPPED (not a pass): this engine library has no engine_connect_auto; \
                  the automatic-connect binding was not exercised"
+            );
+        }
+    }
+    // What the host knows about the network. With `engine_network_facts`
+    // in the library it takes all four facts; without it the kind alone
+    // goes through the older call, and "no network" is not said at all.
+    // Either way: an answer, no crash, and the opaque id is in no
+    // answer and no error.
+    {
+        use daal_desktop_core::engine::{report_network, NetworkReport};
+        const ID: &str = "3f9a1c0de4b7a2550c1d9e8f7a6b5c4d";
+        let r = report_network(&engine, "wifi", ID, 1, 0).expect("report wifi");
+        match (&r, engine.has_network_facts()) {
+            (NetworkReport::Facts(body), true) | (NetworkReport::KindOnly(body), false) => {
+                let v: serde_json::Value = serde_json::from_str(body).expect("network status json");
+                assert!(v.is_object(), "{body}");
+                assert!(!body.contains(ID), "the host's id came back in clear");
+            }
+            other => panic!("unexpected report for wifi: {other:?}"),
+        }
+        let r = report_network(&engine, "none", "", 0, -1).expect("report none");
+        if engine.has_network_facts() {
+            assert!(matches!(r, NetworkReport::Facts(_)), "{r:?}");
+        } else {
+            assert_eq!(r, NetworkReport::NotSaid);
+        }
+        // Not one of the closed kinds: refused on this side.
+        let err = report_network(&engine, "Starbucks WiFi", ID, 1, 0).unwrap_err();
+        assert!(!err.to_string().contains(ID), "{err}");
+        assert!(!err.to_string().contains("Starbucks"), "{err}");
+        // The diagnostics do not carry the id in clear either.
+        let diag = engine.export_diagnostics().expect("diagnostics");
+        assert!(!diag.contains(ID), "the host's network id is in the diagnostics in clear");
+        if !engine.has_network_facts() {
+            // As for engine_connect_auto above: a library built from
+            // this tree has the call, and there its absence is a failure.
+            assert!(
+                std::env::var("DAAL_REQUIRE_ENGINE_LIB").as_deref() != Ok("1"),
+                "DAAL_REQUIRE_ENGINE_LIB=1 but the engine library has no engine_network_facts"
+            );
+            eprintln!(
+                "SKIPPED (not a pass): this engine library has no engine_network_facts; \
+                 only the fallback to engine_network_changed was exercised"
             );
         }
     }

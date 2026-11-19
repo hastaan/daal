@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Farsi for the VPN service's notification. See values/strings.xml. -->
+<resources>
+    <string name="daal_vpn_channel_name">اتصال دال</string>
+    <string name="daal_vpn_channel_description">اعلان همیشگی تا وقتی اتصال دال برقرار است</string>
+    <string name="daal_vpn_note_active">اتصال برقرار است</string>
+    <string name="daal_vpn_note_active_route">اتصال برقرار است — %1$s</string>
+    <string name="daal_vpn_note_connecting">در حال اتصال…</string>
+    <string name="daal_vpn_note_reconnecting">در حال اتصال دوباره…</string>
+    <string name="daal_vpn_note_waiting_for_network">این گوشی الان اینترنت ندارد. دال با برگشتن اینترنت دوباره وصل می‌شود.</string>
+</resources>

@@ -29,6 +29,8 @@ import { useDensity } from '../design/DensityProvider';
 import DaalButton, { type DaalConnectState } from '../components/DaalButton';
 import WayChooser from '../components/connection/WayChooser';
 import AutoFailure from '../components/connection/AutoFailure';
+import MeasuredDetails from '../components/connection/MeasuredDetails';
+import { anyMeasured } from '../lib/measured';
 import AddSheet from '../components/AddSheet';
 import { Button } from '../design/primitives';
 import {
@@ -74,7 +76,7 @@ function toDaalConnectState(s: ConnState): DaalConnectState {
 
 // `bps` is nullable on purpose: null means the build has no byte
 // accounting, which is NOT the same as a measured zero. The caller
-// renders `network.unmeasured` in that case rather than "0 B/s"; see
+// shows no speed line in that case rather than "0 B/s"; see
 // ThroughputSnapshot in contract/D2Contract.ts.
 function formatBps(bps: number): string {
     if (!Number.isFinite(bps) || bps <= 0) return '0 B/s';
@@ -732,6 +734,18 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     />
                 )}
 
+                {/* For the person helping: how each way has done on this
+                    network, with the numbers. Folded away; absent when
+                    the engine measured nothing. */}
+                {routes && anyMeasured(routes) && (
+                    <MeasuredDetails
+                        t={t}
+                        locale={locale}
+                        routes={routes}
+                        onOpen={() => void readRoutes(conn?.routeCountHint, true)}
+                    />
+                )}
+
                 <StatusLine
                     locale={locale}
                     t={t}
@@ -752,7 +766,13 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     />
                 )}
 
-                {state === 'connected' && throughput && (
+                {/* A build without byte accounting shows no speed line
+                 * at all: "not measured yet" under "You're connected."
+                 * read as a verdict on the route (seen on the phone). */}
+                {state === 'connected' &&
+                    throughput &&
+                    throughput.upBytesPerSec !== null &&
+                    throughput.downBytesPerSec !== null && (
                     <div
                         className="d2-throughput"
                         style={{
@@ -765,10 +785,6 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                             letterSpacing: '0.08em',
                         }}
                     >
-                        {throughput.upBytesPerSec === null ||
-                        throughput.downBytesPerSec === null ? (
-                            <span>{t('network.unmeasured')}</span>
-                        ) : (
                             <>
                                 <span aria-label={t('conn.throughput.up')}>
                                     ↑ {formatBps(throughput.upBytesPerSec)}
@@ -777,7 +793,6 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                                     ↓ {formatBps(throughput.downBytesPerSec)}
                                 </span>
                             </>
-                        )}
                     </div>
                 )}
             </section>

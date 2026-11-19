@@ -11,9 +11,9 @@
 #
 # quick   no censor × all 7 families (tree daemon) with a live route switch
 #         (TCP family ↔ QUIC family), revoke, L1 rotation, mgmt-auth and
-#         tamper; the automatic connect (the one button: pick, try, move
-#         on, remember, explain, fall over) on a default relay's four
-#         routes; the pinned RELEASE artefacts × the default
+#         tamper; the automatic connect (the one button: pick, try two at
+#         a time, move on, remember, measure, explain, fall over) on a
+#         default relay's four routes; the pinned RELEASE artefacts × the default
 #         families; and every censor scenario × one TCP and one QUIC family.
 # full    every censor scenario × all 7 families; the whole lifecycle
 #         (recipients, revoke, L1, L2, L3, freshness, mgmt-auth, capability
@@ -22,7 +22,9 @@
 #         the pinned release artefacts; rotation under a censor; a live
 #         route switch between every ordered pair of families; the
 #         automatic connect on all 7 families' routes and under the
-#         scenarios where nothing, or only QUIC, is stopped; and the
+#         scenarios where nothing, or only QUIC, is stopped, and what it
+#         does on its own clock (grade a slow route, move for speed and
+#         hold, per-network memory, network_down on the host's word); and the
 #         pinned artefacts × all 7 families (FINDINGS F-002, kept visible);
 #         and a relay provisioned with two opt-in families only (FAM-4).
 #
@@ -47,7 +49,7 @@ while (($#)); do
     -j) jobs="$2"; shift ;;
     --only) only="$2"; shift ;;
     --plan) plan_only=1 ;;
-    -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "e2e: unknown argument $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -71,6 +73,7 @@ else
   plan+=("clean.recipients"$'\t'"--mgmt=tree --ops recipients,revoke,wrongcreds,tamper,mgmtauth,restarts clean")
   plan+=("clean.switch"$'\t'"--mgmt=tree --ops switch,switch-all clean")   # one phone, many routes: every ordered pair of families (FINDINGS SW-0, SW-1, SW-2)
   plan+=("clean.auto"$'\t'"--mgmt=tree --ops auto clean")   # the one button: pick, try, move on, remember, explain, fall over
+  plan+=("auto-deep"$'\t'"--mgmt=tree --ops auto-deep clean vless-reality hysteria2")   # …and what it does on its own clock or at the cost of a whole failed pass: grade a slow route, move off one for speed and hold, stay put on a metered network, keep each network's memory apart, say network_down when the host says so, leave nothing of a side instance behind
   for s in "${scenarios[@]}"; do
     if [[ "$s" == udp-blackhole ]]; then
       plan+=("$s"$'\t'"--mgmt=tree --ops recipients,l1,l3,l2,caps $s")   # rotation under a censor

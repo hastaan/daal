@@ -15,6 +15,7 @@ import {
     diagNamesActiveRoute,
     idOnlyRoute,
     parseLastSwitch,
+    parseSwitchBack,
     pickActiveRouteId,
     type ConnectionSummaryPlus,
 } from '../lib/activeRoute';
@@ -22,6 +23,8 @@ import { errorText } from '../lib/errorText';
 import { parseAuto, parseAutoNote, parseAutoResult, parseHolding, stateWithAuto } from '../lib/autoConnect';
 import { clearLocalTraces, forgetPublisher, forgetRoute } from '../lib/localTraces';
 import { MissingRoutes } from '../lib/missingRoutes';
+import { parseMeasured, rowForThisNetwork } from '../lib/measured';
+import { gradesAreForThisNetwork, parseHostNetwork, webviewMayReportNetwork } from '../lib/networkFacts';
 import { invoke } from '@tauri-apps/api/core';
 import type {
     AddSubscriptionRequest,
@@ -66,6 +69,7 @@ import { buildPublisherTree, deriveBurnpressureVerdict } from '../contract/deriv
 import {
     diagnostics as bridgeDiagnostics,
     vpnServiceStatus as bridgeVpnServiceStatus,
+    isAndroid as bridgeIsAndroid,
     diagnosticsExplain,
     pointerRotationStatus,
     exportDiagnostics as bridgeExportDiag,
@@ -107,6 +111,11 @@ interface RawRouteSummary {
     budget_exhausted: boolean | null;
     health_pct: number | null;
     proven?: boolean;
+    // What the engine measured for this route on the CURRENT network:
+    // {grade, setup_ms, samples, carried, failed, last}. Untyped on
+    // purpose — lib/measured.ts parseMeasured is the one reading, and
+    // an engine that predates measurement sends nothing.
+    measured?: unknown;
 }
 
 // Mirrors core/bootstrap.PointerRotationStatus, field for field. Every
@@ -200,7 +209,15 @@ function deriveMaturity(m: unknown): FamilyMaturity | undefined {
         : undefined;
 }
 
-function rawToRow(r: RawRouteSummary): RouteDisplayRow {
+/** `here`: what the engine remembers is filed under the network the
+ *  device is on NOW (TauriContract.knowsHere). When it is not, the row
+ *  goes out without its `measured` block, and no page says anything
+ *  about "here" for it. */
+function rawToRow(r: RawRouteSummary, here: boolean): RouteDisplayRow {
+    return rowForThisNetwork(rawToRowAll(r), here);
+}
+
+function rawToRowAll(r: RawRouteSummary): RouteDisplayRow {
     return {
         routeId: r.route_id,
         publisherId: r.publisher_id,
@@ -216,6 +233,7 @@ function rawToRow(r: RawRouteSummary): RouteDisplayRow {
         cooldownUntilUnixMs: r.cooldown_until_unix_ms,
         budgetExhausted: r.budget_exhausted ?? undefined,
         healthPct: typeof r.health_pct === 'number' ? r.health_pct : undefined,
+        measured: parseMeasured(r.measured),
         proven: !!r.proven,
     };
 }
@@ -340,8 +358,25 @@ export class TauriContract implements D2Contract {
         this.missing.clear();
     }
 
+    /** Is the engine's per-network memory about the network the device
+     *  is on now? See lib/networkFacts.ts gradesAreForThisNetwork. An
+     *  engine that cannot be asked: no. */
+    private async knowsHere(d?: Awaited<ReturnType<typeof bridgeDiagnostics>>, vpnStatus?: unknown): Promise<boolean> {
+        try {
+            const blob = d ?? (await bridgeDiagnostics());
+            const android = bridgeIsAndroid();
+            const status = !android ? null : vpnStatus !== undefined ? vpnStatus : await bridgeVpnServiceStatus();
+            return gradesAreForThisNetwork({ android, network: parseHostNetwork(blob.network), vpnStatus: status });
+        } catch {
+            return false;
+        }
+    }
+
     async connectionSummary(): Promise<ConnectionSummaryPlus> {
         const d = await bridgeDiagnostics();
+        // Android only (null elsewhere). Never throws.
+        const vpnStatus = await bridgeVpnServiceStatus();
+        const here = await this.knowsHere(d, vpnStatus);
         // The posture does not advance until the engine has PROVED the
         // route; `route_check` says what is happening meanwhile.
         const routeCheck = parseRouteCheck(d.route_check);
@@ -390,7 +425,7 @@ export class TauriContract implements D2Contract {
             const r = await this.rawRouteSummary(activeId);
             activeRoute =
                 r && r.route_id
-                    ? rawToRow(r)
+                    ? rawToRow(r, here)
                     : idOnlyRoute(activeId, d.active_route_family);
         }
 
@@ -405,9 +440,6 @@ export class TauriContract implements D2Contract {
                 (await pointerRotationStatus()) as RawPointerRotationStatus,
             );
         } catch { /* engine not up yet; claim nothing */ }
-
-        // Android only (null elsewhere). Never throws.
-        const vpnStatus = await bridgeVpnServiceStatus();
 
         return {
             state,
@@ -433,10 +465,13 @@ export class TauriContract implements D2Contract {
                     : undefined,
             storeRecovered: d.store_recovered === true,
             auto,
+            network: parseHostNetwork(d.network),
             routeCountHint: typeof d.route_count === 'number' ? d.route_count : undefined,
             // Android only (null elsewhere): the VPN service's note
             // about a switch that did not take. Never throws.
-            lastSwitch: parseLastSwitch(vpnStatus),
+            // Where there is no service (desktop) — or it has no note —
+            // the engine's own record of a switch that went back.
+            lastSwitch: parseLastSwitch(vpnStatus) ?? parseSwitchBack(d.switch_back),
             autoFailedNote: parseAutoNote(vpnStatus),
             holding: parseHolding(vpnStatus),
             // Only 'none' and 'singbox' are meaningful. Anything else —
@@ -473,6 +508,7 @@ export class TauriContract implements D2Contract {
             // This test is self-clearing: once Decide is fed the full
             // route set (Wave 3, §5), the shortlist covers it and the
             // real list starts rendering with no change here.
+            const here = await this.knowsHere();
             const known = await rawAvailableRoutes();
             const shortlisted = exp.shortlist?.length ?? 0;
             const comparisonRan = known.length > 1 && shortlisted >= known.length;
@@ -484,7 +520,7 @@ export class TauriContract implements D2Contract {
                     const r = await this.rawRouteSummary(f.route_id);
                     if (r) {
                         skipped.push({
-                            route: rawToRow(r),
+                            route: rawToRow(r, here),
                             reason: f.classification,
                             reasonToken: f.tag ?? f.classification,
                         });
@@ -499,7 +535,7 @@ export class TauriContract implements D2Contract {
             const skippedFamilies = await this.skippedFamilies();
 
             return {
-                active: rawToRow(active),
+                active: rawToRow(active, here),
                 reasonText: exp.reason ?? '',
                 skipped,
                 skippedFamilies: skippedFamilies ?? undefined,
@@ -530,6 +566,7 @@ export class TauriContract implements D2Contract {
 
     async routeHealth(): Promise<RouteHealthDisplayRow[]> {
         const d = await bridgeDiagnostics();
+        const here = await this.knowsHere(d);
         const out: RouteHealthDisplayRow[] = [];
         for (const r of d.route_health ?? []) {
             const summary = await this.rawRouteSummary(r.route_id);
@@ -550,6 +587,7 @@ export class TauriContract implements D2Contract {
                 label,
                 pct,
                 severity: pct === undefined ? undefined : deriveSeverity(pct),
+                measured: here ? parseMeasured(summary?.measured) : undefined,
                 proven: !!summary?.proven,
             });
         }
@@ -557,13 +595,13 @@ export class TauriContract implements D2Contract {
     }
 
     async availableRoutes(): Promise<RouteDisplayRow[]> {
-        const raw = await rawAvailableRoutes();
-        return raw.map(rawToRow);
+        const [raw, here] = await Promise.all([rawAvailableRoutes(), this.knowsHere()]);
+        return raw.map((r) => rawToRow(r, here));
     }
 
     async routeSummary(routeId: string): Promise<RouteDisplayRow | null> {
         const r = await this.rawRouteSummary(routeId);
-        return r ? rawToRow(r) : null;
+        return r ? rawToRow(r, await this.knowsHere()) : null;
     }
 
     async throughputSnapshot(): Promise<ThroughputSnapshot> {
@@ -599,7 +637,8 @@ export class TauriContract implements D2Contract {
         try {
             const raw = await rawAvailableRoutesStrict();
             this.missing.listed(raw.map((r) => r.route_id));
-            return raw.map(rawToRow);
+            const here = await this.knowsHere();
+            return raw.map((r) => rawToRow(r, here));
         } catch {
             return undefined;
         }
@@ -804,7 +843,14 @@ export class TauriContract implements D2Contract {
         return toProbeResult(await invoke<number>('probe_tcp443', { timeoutMs }));
     }
 
+    // The webview's own, poor network fact (a browser online/offline
+    // event). On Android the VPN service reports the real one while it
+    // runs; this call then stays silent rather than overwrite it
+    // (lib/networkFacts.ts). '' = nothing was sent.
     async networkChanged(kind: string, carrier: string, ssid: string): Promise<string> {
+        const android = bridgeIsAndroid();
+        const vpnStatus = android ? await bridgeVpnServiceStatus() : null;
+        if (!webviewMayReportNetwork({ android, vpnStatus })) return '';
         return invoke<string>('network_changed', { kind, carrier, ssid });
     }
 
@@ -932,12 +978,13 @@ export class TauriContract implements D2Contract {
         // phone pass a failed subscription_list blanked the whole page
         // while every route was still usable.
         const [routes, subs, skipped] = await Promise.all([
-            rawAvailableRoutesStrict().then((raw) => {
+            rawAvailableRoutesStrict().then(async (raw) => {
                 // Also the page's refresh after an import that did not
                 // go through this class (the QR lane): what is listed
                 // exists.
                 this.missing.listed(raw.map((r) => r.route_id));
-                return raw.map(rawToRow);
+                const here = await this.knowsHere();
+                return raw.map((r) => rawToRow(r, here));
             }),
             this.subscriptionList().catch((e): SubscriptionRow[] => {
                 console.warn('daal: subscription list unavailable:', errorText(e));

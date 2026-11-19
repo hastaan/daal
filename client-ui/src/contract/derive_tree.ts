@@ -7,6 +7,7 @@
 // a dedicated `list_publishers` aggregator (deferred to a follow-up),
 // this function is the single source of truth for the tree shape.
 
+import { familyHere } from '../lib/measured';
 import type {
     BurnpressureVerdict,
     CellRow,
@@ -173,7 +174,10 @@ function chipFor(
     // Only measured routes contribute a health number. Averaging in a
     // placeholder — or emitting 0 when there is nothing to average —
     // would fabricate a score, so an all-unmeasured family gets
-    // `healthPct: undefined` and the chip renders "not measured yet".
+    // `healthPct: undefined`. The number is a score, not a success
+    // rate, and the chip no longer prints it as a percentage: it says
+    // how many of the family's routes worked on this network (`here`)
+    // and keeps the score, in words, for its tap-to-open text.
     const measured = routes.filter((r) => typeof r.healthPct === 'number');
     const totalPct = measured.reduce((acc, r) => acc + (r.healthPct ?? 0), 0);
     // `inCooldown` is itself measured-or-unknown: `undefined` must not
@@ -188,6 +192,7 @@ function chipFor(
             measured.length === 0
                 ? undefined
                 : Math.round(totalPct / measured.length),
+        here: familyHere(routes),
         proven: routes.some((r) => r.proven === true),
         cooledCount: skip ? Math.max(cooledCount, 1) : cooledCount,
         // The engine's per-route `family_maturity` wins when present.

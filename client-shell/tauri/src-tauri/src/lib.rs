@@ -3152,6 +3152,7 @@ pub fn run() {
 //   engineState(): String?
 //   routePrecheck(routeId: String): String?
 //   connectAuto(): String?
+//   networkFacts(kind: String, id: String, validated: Int, metered: Int): Int
 //
 // We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
 // (Kotlin's class-mangling rule for object companions), reach the
@@ -3421,6 +3422,56 @@ mod jni_bridge {
         match env.new_string(summary) {
             Ok(s) => s.into_raw(),
             Err(_) => null,
+        }
+    }
+
+    /// What the phone knows about the network under the tunnel
+    /// (DaalVpnService's ConnectivityManager callback): `kind` (wifi /
+    /// cellular / ethernet / other / none), an opaque per-network `id`,
+    /// and whether the system calls the network validated and metered
+    /// (1 / 0 / -1 unknown).
+    ///
+    /// Goes to `engine_network_facts`; with an engine library that has
+    /// no such call, the kind alone goes to `engine_network_changed`
+    /// (see `daal_desktop_core::engine::report_network`). Returns 0 =
+    /// all four facts delivered, 1 = the kind alone, 2 = that older
+    /// engine has no word for these facts and was told nothing, -1 =
+    /// the engine cannot be asked or the call failed.
+    ///
+    /// The log line carries the kind, the two flags and the code. The
+    /// id is never logged; an engine error is scrubbed before it is.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_networkFacts<'local>(
+        mut env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        kind: JString<'local>,
+        id: JString<'local>,
+        validated: jint,
+        metered: jint,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        let kind: String = match env.get_string(&kind) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+        let id: String = match env.get_string(&id) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+        match daal_desktop_core::engine::report_network(&eng, &kind, &id, validated, metered) {
+            Ok(report) => report.code(),
+            Err(e) => {
+                let kind = if daal_desktop_core::engine::NETWORK_KINDS.contains(&kind.as_str()) {
+                    kind.as_str()
+                } else {
+                    "invalid"
+                };
+                log::warn!(
+                    "DaalCoreBridge.networkFacts(kind={kind} validated={validated} metered={metered}) failed: {}",
+                    daal_desktop_core::cmdlog::scrub(&e.to_string())
+                );
+                -1
+            }
         }
     }
 

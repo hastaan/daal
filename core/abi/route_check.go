@@ -14,6 +14,7 @@ import (
 
 	"daal/core/diagnostics"
 	"daal/core/engine"
+	"daal/core/netmem"
 	"daal/core/pathmanager"
 	"daal/core/refresh"
 	"daal/core/routestore"
@@ -670,13 +671,21 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 		return CheckResult{RouteID: routeID}
 	}
 	prev, prevCat := c.check.get()
+	c.speed.lastCheck = res.Elapsed
 	switch {
 	case res.OK:
 		c.routeUpLocked(routeID, family, res)
+		if res.Slow || prev != RouteCheckOK {
+			// This network's memory is fed by what CHANGES and by every
+			// slow check — not by every check of a route that is simply
+			// still fine (one store write every three minutes, for
+			// nothing). No setup time: this was a round trip on a route
+			// that was already up.
+			c.rememberOutcome(routeID, netmem.RouteOutcome{Carried: true, Slow: res.Slow})
+		}
 		if prev == RouteCheckFailed {
-			// Back after an outage: worth remembering for this network,
-			// and the automatic connect is connected again.
-			c.rememberRoute(routeID, true, "")
+			// Back after an outage: the automatic connect is connected
+			// again.
 			c.auto.recovered(routeID, family)
 			c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
 		}
@@ -743,8 +752,9 @@ func (c *Core) startLivenessLocked() {
 	c.check.mu.Unlock()
 	cfg := c.proofCfg
 	go func() {
-		// failedInARow: consecutive failed checks seen by THIS loop.
-		failedInARow := 0
+		// failedInARow / slowInARow: consecutive failed, and consecutive
+		// slow, checks seen by THIS loop.
+		failedInARow, slowInARow := 0, 0
 		for {
 			wait := cfg.LivenessInterval
 			if st, cat := c.check.get(); st == RouteCheckFailed {
@@ -771,8 +781,24 @@ func (c *Core) startLivenessLocked() {
 			}
 			if res.State != RouteCheckFailed {
 				failedInARow = 0
+				if res.State != RouteCheckDegraded {
+					slowInARow = 0
+					continue
+				}
+				// Slow, and still carrying. The automatic connect looks
+				// for a clearly faster route once a second check in a
+				// row has said so (connect_speed.go). A move replaces
+				// this loop.
+				slowInARow++
+				if slowInARow >= speedSlowChecks {
+					c.autoSpeedMove(ctx)
+					if ctx.Err() != nil {
+						return
+					}
+				}
 				continue
 			}
+			slowInARow = 0
 			failedInARow++
 			// The automatic connect: a route that has stopped carrying
 			// is not waited for while another may work — once a second
