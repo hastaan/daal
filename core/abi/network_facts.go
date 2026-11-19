@@ -178,6 +178,9 @@ func NetworkFacts(kind, id string, validated, metered int) (string, error) {
 			kind, next.validated, next.metered, netChanged, kick))
 	}
 	if kick {
+		if netChanged {
+			c.resetDriverNetwork()
+		}
 		c.kickLiveness()
 	}
 	body, _ := json.Marshal(map[string]any{

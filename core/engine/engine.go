@@ -50,6 +50,7 @@ type Driver interface {
 type Stub struct {
 	mu        sync.Mutex
 	connected bool
+	resets    int
 	subs      []chan<- Event
 	failure   error
 	// proofs is the queue of results InjectProof staged; proofHook, when
@@ -164,6 +165,21 @@ func (s *Stub) SetProofHook(f func(ctx context.Context, cfg ProofConfig) ProofRe
 }
 
 // ProofCount reports how many times Prove has run on a live stub.
+// ResetNetwork implements NetworkResetter: the Stub has no connections,
+// it counts the calls (ResetCount) so a test can see the ABI asked.
+func (s *Stub) ResetNetwork() {
+	s.mu.Lock()
+	s.resets++
+	s.mu.Unlock()
+}
+
+// ResetCount is how many times ResetNetwork was called.
+func (s *Stub) ResetCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resets
+}
+
 func (s *Stub) ProofCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -248,4 +264,18 @@ func hourBucket(t time.Time) string {
 // this string at build time.
 func (s *Stub) Version() string {
 	return fmt.Sprintf("daal-core stub-engine 0.2.0 (no sing-box)")
+}
+
+// NetworkResetter is a Driver that can drop what its running instance
+// holds from the network the device has just LEFT: open connections and
+// what the outbounds pool (a multiplexed session, a QUIC connection, a
+// DNS transport). Seen on a phone (2026-11-19): mobile data -> Wi-Fi
+// leaves the mobile network up but in the background for ~30 s, and a
+// connection on it neither works nor fails; the route's check failed
+// twice on such a connection and the engine left a route that was
+// fine. sing-box does this itself where it watches interfaces; this
+// embedding has no interface monitor, so the ABI asks for it when the
+// host says the network changed. A no-op with no instance.
+type NetworkResetter interface {
+	ResetNetwork()
 }

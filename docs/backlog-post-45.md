@@ -2515,6 +2515,37 @@ device key); the relay record and the saved routes survived.
   the speed line of a build without byte counts
   (`network.unmeasured` in `ConnectionPage.tsx`), and read as a verdict
   on the route. The line is no longer drawn when there are no counts.
+- [x] **MP-48. With the tunnel up the service heard nothing about the
+  network.** First toggle Wi-Fi → mobile data → Wi-Fi with Daal
+  connected: the tunnel survived, but not one `network:` line. Android
+  had moved this app's default-network request onto the app's own VPN
+  (`accepting network in place of [WIFI]` for the request, in
+  `dumpsys connectivity`), although the package is excluded from it;
+  events about a VPN are dropped by design, so nothing was left. Fix:
+  `registerBestMatchingNetworkCallback` for internet + NOT_VPN
+  (Android 12+; `registerNetworkCallback` with the same request
+  before), and one log line per available / lost event. Second toggle:
+  `network facts kind=cellular validated=1 metered=1` 0.8 s after the
+  loss, `kind=wifi … metered=0` 0.8 s after Wi-Fi returned.
+- [x] **MP-49. Back on Wi-Fi the engine left a route that was fine.**
+  Same toggle: 8 s after `kind=wifi` the check of r1 failed, failed
+  again, and a pass moved to r2 22 s after the change (`auto race
+  first=r2 second=r4`, `winner=r2 setup_ms=210`, r4 `stopped`,
+  `verdict=moved_on` — the first race of two seen on a phone, and it
+  behaved). Cause: mobile data stays up in the background for ~30 s
+  after Wi-Fi returns and a connection left on it neither works nor
+  fails; the check ran on those. Fix: a change of network drops the
+  running instance's connections first (`engine.NetworkResetter`,
+  sing-box `Router().ResetNetwork()`, called from
+  `engine_network_facts` / `engine_network_changed` before the check).
+  `TestNetworkFacts_AChangeOfNetworkDropsTheOldConnectionsFirst`.
+  Third toggle: `network changed: connections from the old network
+  dropped` on both changes, no failed check, no move; the person's
+  words: "was smooth".
+- [ ] **MP-50. Before Android 12 the fallback listener takes the
+  network that spoke last** when Wi-Fi and mobile data are both held
+  up; never run on such a phone. And r1 keeps the two failures MP-49's
+  bug recorded for it on this Wi-Fi until it carries here again.
 - [ ] **MP-47. Not seen on the phone:** a race of two (needs a network
   where the remembered route is blocked or a network never used), a
   move for speed, a change Wi-Fi → mobile data (adb runs over the
