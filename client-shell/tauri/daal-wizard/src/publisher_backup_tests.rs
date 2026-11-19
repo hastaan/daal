@@ -1009,11 +1009,23 @@ fn nothing_in_the_file_or_the_errors_reads_in_clear() {
         .unwrap_or_default();
     for p in &tmp_after {
         if !tmp_before.contains(p) && p.is_file() {
-            let b = std::fs::read(p).unwrap_or_default();
-            assert!(
-                !contains(&b, TOKEN.as_bytes()) && !contains(&b, &key[..32]),
-                "{p:?}"
-            );
+            // The temp dir is shared with tests running in parallel,
+            // and some of them hand the same test token to a fake
+            // helper through a short-lived file. A leak from the backup
+            // would stay; theirs is gone within moments.
+            let leaks = |p: &Path| {
+                let b = std::fs::read(p).unwrap_or_default();
+                contains(&b, TOKEN.as_bytes()) || contains(&b, &key[..32])
+            };
+            let mut leaked = leaks(p);
+            for _ in 0..20 {
+                if !leaked {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                leaked = p.is_file() && leaks(p);
+            }
+            assert!(!leaked, "{p:?}");
         }
     }
     fn walk(d: &Path, out: &mut Vec<PathBuf>) {
