@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"daal/bundle-go/bundle"
+	"daal/bundle-go/fieldreport"
 	"daal/bundle-go/relaypackvalidate"
 	"daal/publisher/deploy/freshness"
 	"daal/publisher/deploy/modifiers"
@@ -116,7 +117,26 @@ type BindOpts struct {
 	// publisher.pub. The bundle is emitted at spec_version=4 with
 	// trust/subkey-cert.json.
 	SubkeyCertJSON []byte
+
+	// ReportTo, when set, is the publisher's network-test report
+	// address (`daal1…`, from `report-keygen`). It is written into
+	// every route's signed family_specific_config as `_report_to`
+	// (specs/field-probe-v2.md, specs/relaypack-v1.md): that marks this
+	// pack's relay as the Test relay, and the app seals each network
+	// test result to it. Every route gets it, because the app refuses
+	// a Test relay whose address also serves a route without it
+	// (`test_relay_shared`). Empty = an ordinary pack, byte for byte as
+	// before.
+	ReportTo string
 }
+
+// ReportToKey is the reserved family_specific_config key naming the
+// network-test report address.
+const ReportToKey = "_report_to"
+
+// ErrBadReportTo is returned when BindOpts.ReportTo is not a valid
+// `daal1…` address.
+var ErrBadReportTo = errors.New("relaypack: ReportTo must be a daal1… report address")
 
 // BindResult is returned by BindAndSign. Carries the signed .sbp
 // bytes plus the metadata the wizard renders on screen 6.
@@ -246,6 +266,12 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	if err != nil {
 		return nil, err
 	}
+	reportTo := strings.TrimSpace(opts.ReportTo)
+	if reportTo != "" {
+		if _, err := fieldreport.DecodeAddress(reportTo); err != nil {
+			return nil, ErrBadReportTo
+		}
+	}
 
 	now := opts.Now.UTC()
 	expiry := opts.Expiry
@@ -271,6 +297,11 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	rendered, err := renderCandidates(rec, material, createdAt, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("relaypack: render candidates: %w", err)
+	}
+	if reportTo != "" {
+		if err := rendered.setReportTo(reportTo); err != nil {
+			return nil, fmt.Errorf("relaypack: %w", err)
+		}
 	}
 	// A pack in which not one servable route has a signed endpoint is a
 	// pack every recipient's client will refuse. Do not sign it.

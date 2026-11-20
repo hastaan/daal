@@ -503,6 +503,73 @@ pub fn stats_redacted(state: &AppState) -> Result<String> {
     state.engine.stats_redacted()
 }
 
+// ---- network test (engine_field_probe_*) ------------------------------
+//
+// specs/field-probe-v2.md. A library without the calls is an error the
+// page can tell apart (EngineSymbol naming the call): it then does not
+// offer the test.
+
+fn field_probe_missing(call: &str) -> DesktopError {
+    DesktopError::EngineSymbol(format!("{call}: not in this engine library"))
+}
+
+/// Look for a newer signed relay file now (the "check for a new
+/// address" action). `relay_pack_id` "" means every held file.
+pub fn relaypack_refresh(state: &AppState, relay_pack_id: &str) -> Result<String> {
+    state
+        .engine
+        .relaypack_refresh(relay_pack_id)?
+        .ok_or_else(|| field_probe_missing("engine_relaypack_refresh"))
+}
+
+pub fn field_probe_start(state: &AppState, opts_json: &str) -> Result<String> {
+    state
+        .engine
+        .field_probe_start(opts_json)?
+        .ok_or_else(|| field_probe_missing("engine_field_probe_start"))
+}
+
+pub fn field_probe_status(state: &AppState) -> Result<String> {
+    state
+        .engine
+        .field_probe_status()?
+        .ok_or_else(|| field_probe_missing("engine_field_probe_status"))
+}
+
+pub fn field_probe_cancel(state: &AppState, reason: &str) -> Result<bool> {
+    state
+        .engine
+        .field_probe_cancel(reason)?
+        .ok_or_else(|| field_probe_missing("engine_field_probe_cancel"))
+}
+
+/// The page never chooses where a file goes: only its note and which
+/// kept result to seal cross over. The file is always a share
+/// (`transient`), written by the engine inside its own state directory
+/// (`<state_dir>/fieldprobe-out/`, removed by discard, shutdown and panic
+/// wipe); a "save to file" is the shell's own dialog copying it out.
+pub fn field_probe_seal(state: &AppState, opts_json: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_str(opts_json).unwrap_or(serde_json::Value::Null);
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let opts = serde_json::json!({
+        "notes": text("notes"),
+        "net_kind": text("net_kind"),
+        "transient": true,
+    })
+    .to_string();
+    state
+        .engine
+        .field_probe_seal(&opts)?
+        .ok_or_else(|| field_probe_missing("engine_field_probe_seal"))
+}
+
+pub fn field_probe_discard(state: &AppState) -> Result<i32> {
+    state
+        .engine
+        .field_probe_discard()?
+        .ok_or_else(|| field_probe_missing("engine_field_probe_discard"))
+}
+
 pub fn redistribute_route(state: &AppState, route_id: &str, recipient_fp: &str) -> Result<String> {
     state.engine.redistribute_route(route_id, recipient_fp)
 }

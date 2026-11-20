@@ -1827,6 +1827,11 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     aliases.push(pub_alias(operator_id));
     aliases.push(cloud_alias(operator_id));
     aliases.push(cloudflare_alias(operator_id));
+    // The network test's report key, live and retired. It goes with the
+    // relay: reports are opened only with the keys of relays still in
+    // the list, and an id used again must not inherit a live key (its
+    // pack would silently be signed as a Test relay).
+    aliases.extend(crate::report_key::optional_aliases(operator_id));
     aliases.sort();
     aliases.dedup();
 
@@ -2475,6 +2480,9 @@ pub fn sign_relaypack_with(
         crate::relay_identity::stage_for_signing(ctx, operator_id, identity_freshness)?;
 
     let row = ctx.db.get(operator_id)?;
+    // Network test: a relay with a live report key is the Test relay,
+    // and every route of its pack carries the address (`_report_to`).
+    let report_to = crate::report_key::report_to_for_signing(ctx, operator_id)?;
 
     let active_subkey = ctx.db.active_subkey(operator_id)?;
     let subkey_cert_path = active_subkey
@@ -2525,6 +2533,7 @@ pub fn sign_relaypack_with(
                 // none.
                 freshness_mirrors: &mirrors,
                 relay_identity_path: identity_path.as_deref(),
+                report_to: report_to.as_deref(),
             },
             priv_buf.as_slice(),
             on_progress,
@@ -2536,7 +2545,17 @@ pub fn sign_relaypack_with(
     if let Some(p) = identity_path.as_ref() {
         let _ = std::fs::remove_file(p);
     }
-    let res = res.map_err(|e| WizardError::Pricing(e.to_string()))?;
+    let res = res.map_err(|e| {
+        // A helper from before the network test: it cannot sign the
+        // Test relay's pack, and saying so beats its flag error.
+        if report_to.is_some() && crate::cli_bridge::flag_not_defined(&e, "report-to") {
+            return coded(
+                E_DEPLOY_TOO_OLD,
+                "the setup helper bundled with this app cannot sign a test relay",
+            );
+        }
+        WizardError::Pricing(e.to_string())
+    })?;
 
     ctx.db
         .record_signed_sbp(operator_id, &res.sbp_sha256, &res.relay_pack_id, now)?;
@@ -5427,6 +5446,21 @@ mod tests {
         assert!(ctx.custody.get(&pub_alias(id)).is_err(), "custody priv");
         assert!(ctx.custody.get(&cloud_alias(id)).is_err(), "custody token");
         assert!(!ctx.keystore.has(&pub_alias(id)), "legacy priv");
+    }
+
+    #[test]
+    fn cancel_and_cleanup_erases_the_report_keys() {
+        // The network test's report key goes with its relay: an id used
+        // again must not inherit a live key.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        ctx.custody.put(&crate::report_key::key_alias(id), &[7u8; 32]).unwrap();
+        ctx.custody.put(&crate::report_key::retired_alias(id), &[8u8; 32]).unwrap();
+
+        cancel_and_cleanup(&ctx, id).unwrap();
+
+        assert!(ctx.custody.get(&crate::report_key::key_alias(id)).is_err(), "live report key");
+        assert!(ctx.custody.get(&crate::report_key::retired_alias(id)).is_err(), "retired report key");
     }
 
     // ---- Real teardown (relay_destroy) ---------------------------

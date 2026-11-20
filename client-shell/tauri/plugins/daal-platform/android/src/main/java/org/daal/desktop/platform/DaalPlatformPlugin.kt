@@ -36,6 +36,12 @@ class VpnStartArgs {
 }
 
 @InvokeArg
+class FieldProbeWatchArgs {
+  /** true when a network test is starting; false when it has ended. */
+  var on: Boolean = false
+}
+
+@InvokeArg
 class SecureScreenArgs {
   /** true while a screen showing the recovery words is mounted. */
   var on: Boolean = false
@@ -202,6 +208,46 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (t: Throwable) {
       Logger.error("DaalPlatformPlugin.secureScreen failed: ${t.message}")
       invoke.reject(t.message ?: "secureScreen failed")
+    }
+  }
+
+  /**
+   * The network test (specs/field-probe-v2.md). Reached from the app's
+   * own field_probe_* commands in src-tauri, not from the page.
+   *
+   * on = true: answer what the engine's start needs from the phone (the
+   * network's DNS servers, Private DNS mode, VPN up, global IPv6,
+   * "blocked without VPN") and start watching for the length of the
+   * run: network facts to the engine, a cancel the moment a VPN
+   * appears or Daal's activity stops, and the screen kept on
+   * (FieldProbeWatch). on = false: stop watching; answers the same
+   * facts, read again.
+   *
+   * The DNS server addresses travel to Rust and on into the engine's
+   * memory; neither side logs them.
+   */
+  @Command
+  fun fieldProbeWatch(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(FieldProbeWatchArgs::class.java)
+      val ctx = activity.applicationContext
+      if (args.on) FieldProbeWatch.start(activity) else FieldProbeWatch.stop()
+      val f = FieldProbeWatch.hostFacts(ctx)
+      val dns = app.tauri.plugin.JSArray()
+      for (d in f.dnsServers) dns.put(d)
+      invoke.resolve(
+        JSObject().apply {
+          put("watching", args.on)
+          put("dns_servers", dns)
+          put("private_dns", f.privateDns)
+          put("vpn_active", f.vpnActive)
+          put("ipv6_global", f.ipv6Global)
+          put("blocked", f.blocked)
+        },
+      )
+    } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.fieldProbeWatch failed: ${t.javaClass.simpleName}")
+      invoke.reject(t.message ?: "fieldProbeWatch failed")
     }
   }
 

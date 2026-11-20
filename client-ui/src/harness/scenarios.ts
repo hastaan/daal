@@ -13,6 +13,7 @@
 // `last` as the real engine sends it (Unix seconds of an hour) and the
 // app shows it — not a hand-written string the engine never produces.
 import { lastBucketText } from '../lib/measured';
+import type { NetTestFake } from './netTestFake';
 import type {
     ConnectionSummary,
     PointerRotationSummary,
@@ -343,6 +344,8 @@ export interface FakeShell {
     opened?: string;
     /** URL parameters other harness fakes read (`backup=stale`). */
     params?: Record<string, string>;
+    /** The network test's pretend engine (harness/netTestFake.ts). */
+    netTest?: NetTestFake;
     /** Which tab to open first. */
     open?: 'publisher' | 'network' | 'connection';
     steps?: DriveStep[];
@@ -1970,9 +1973,241 @@ export const SCENARIOS: Scenario[] = [
             id: 'rcp-address-no-file',
             title: 'My address · from Home with no file',
         }, 'connection', [{ click: 'btn:no-file-address' }, { sleep: 400 }]),
+
+    // --- Network test (Settings → Advanced → Network test, fake engine) ---
+    ...nt(
+        {
+            id: 'settings-advanced-nettest',
+            title: 'Advanced shows the row',
+        }, { state: 'idle' }, [], { stop: 'advanced' }),
+    ...nt(
+        {
+            id: 'nettest-consent',
+            title: 'what is tested, before Start',
+        }, { state: 'idle' }),
+    ...nt(
+        {
+            id: 'nettest-consent-connected',
+            title: 'Daal is connected: disconnect first',
+        }, { state: 'idle' }, [{ scroll: 'css:[data-testid="nettest-connected"]' }], {
+        connected: true,
+    }),
+    ...nt(
+        {
+            id: 'nettest-refused-rate',
+            title: 'refused: run here recently',
+        }, { state: 'idle', refuse: 'rate_limited' }, [
+        { click: 'btn:nettest-start' },
+        { waitFor: 'css:[data-testid="nettest-refused"]' },
+        { scroll: 'css:[data-testid="nettest-refused"]' },
+    ]),
+    ...nt(
+        {
+            id: 'nettest-refused-shared',
+            title: 'refused: test relay shares an address',
+        }, { state: 'idle', refuse: 'test_relay_shared' }, [
+        { click: 'btn:nettest-start' },
+        { waitFor: 'css:[data-testid="nettest-refused"]' },
+        { scroll: 'css:[data-testid="nettest-refused"]' },
+    ]),
+    ...nt(
+        {
+            id: 'nettest-running',
+            title: 'running, step n of N',
+        }, { state: 'idle' }, [
+        { click: 'btn:nettest-start' },
+        { sleep: 2600 },
+        { freeze: 'css:[data-testid="nettest-running"]' },
+    ]),
+    ...nt(
+        {
+            id: 'nettest-result',
+            title: 'result, Daal not connected',
+        }, { state: 'done' }),
+    ...nt(
+        {
+            id: 'nettest-result-connected',
+            title: 'result, Daal connected again',
+        }, { state: 'done' }, [], { connected: true }),
+    ...nt(
+        {
+            id: 'nettest-aborted-vpn',
+            title: 'stopped: another VPN came up',
+        }, { state: 'aborted', abort: 'vpn_active' }),
+    ...nt(
+        {
+            id: 'nettest-blackout',
+            title: 'international internet cut',
+        }, { state: 'blackout' }),
+    ...nt(
+        {
+            id: 'nettest-run-again',
+            title: 'stopped early: Run again shows the consent over the kept report',
+        }, { state: 'aborted', abort: 'backgrounded' }, [
+        { click: 'btn:nettest-again' },
+        { waitFor: 'css:[data-testid="nettest-replaces"]' },
+    ]),
+    ...nt(
+        {
+            id: 'nettest-run-again-start',
+            title: 'Run again: the strip right above Start',
+        }, { state: 'aborted', abort: 'backgrounded' }, [
+        { click: 'btn:nettest-again' },
+        { waitFor: 'css:[data-testid="nettest-before"]' },
+        { scroll: 'css:[data-testid="nettest-before"]' },
+    ]),
+    ...nt(
+        {
+            id: 'nettest-show-all',
+            title: 'result: show everything',
+        }, { state: 'done' }, [
+        { click: 'btn:nettest-show-all' },
+        { waitFor: 'css:[data-testid="nettest-report-json"]' },
+        { scroll: 'css:[data-testid="nettest-report-json"]' },
+    ], { connected: true }),
+    ...nt(
+        {
+            id: 'nettest-consent-start',
+            title: 'the strip right above Start',
+        }, { state: 'idle' }, [{ scroll: 'css:[data-testid="nettest-before"]' }]),
+    ...nt(
+        {
+            id: 'nettest-after-send',
+            title: 'sent: delete it from this phone?',
+        }, { state: 'done' }, [
+        { click: 'btn:nettest-send' },
+        { waitFor: 'css:[data-testid="nettest-ask-delete"]' },
+        { scroll: 'css:[data-testid="nettest-ask-delete"]' },
+    ], { connected: true }),
+    ...nt(
+        {
+            id: 'nettest-deleted',
+            title: 'report deleted',
+        }, { state: 'done' }, [
+        { click: 'btn:nettest-delete' },
+        { waitFor: 'css:[data-testid="nettest-deleted"]' },
+    ]),
+    // Publisher: the test relay and the report opener.
+    ...pub(
+        {
+            id: 'pub-relay-test-relay',
+            title: 'Relay page · ⋯ → use as test relay',
+        }, { netTest: { state: 'none' }, steps: [...OPEN_RELAY, ...relayMenu('test-relay'), { sleep: 300 }] }),
+    ...pub(
+        {
+            id: 'pub-relay-test-relay-confirm',
+            title: 'Relay page · people connect with it: asked a second time',
+        }, {
+        netTest: { state: 'none' },
+        steps: [
+            ...OPEN_RELAY,
+            ...relayMenu('test-relay'),
+            { click: 'btn:test-relay-on' },
+            { waitFor: 'css:[data-testid="test-relay-confirm"]' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-test-relay-done',
+            title: 'Relay page · test relay made on a relay in use',
+        }, {
+        netTest: { state: 'none' },
+        steps: [
+            ...OPEN_RELAY,
+            ...relayMenu('test-relay'),
+            { click: 'btn:test-relay-on' },
+            { click: 'btn:test-relay-on-anyway' },
+            { waitFor: 'css:[data-testid="test-relay-done"]' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-test-relay-separate',
+            title: 'Relay page · a separate relay nobody uses',
+        }, {
+        netTest: { state: 'none', relayPeople: 0, relayEveryone: false },
+        steps: [...OPEN_RELAY, ...relayMenu('test-relay'), { sleep: 300 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-test-relay-separate-done',
+            title: 'Relay page · test relay made on a separate relay',
+        }, {
+        netTest: { state: 'none', relayPeople: 0, relayEveryone: false },
+        steps: [
+            ...OPEN_RELAY,
+            ...relayMenu('test-relay'),
+            { click: 'btn:test-relay-on' },
+            { waitFor: 'css:[data-testid="test-relay-done"]' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-report-open',
+            title: 'Relay list · ⋯ → open a network test report',
+        }, {
+        netTest: { state: 'none', testRelayOn: true },
+        picked: 'content://downloads/net-ab12cd34.dat',
+        steps: [...relaysMenu('open-report'), { click: 'btn:report-pick' }, { waitFor: 'css:[data-testid="report-head"]' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-report-open-stage-c',
+            title: 'Report · the test relay stage',
+        }, {
+        netTest: { state: 'none', testRelayOn: true },
+        picked: 'content://downloads/net-ab12cd34.dat',
+        steps: [
+            ...relaysMenu('open-report'),
+            { click: 'btn:report-pick' },
+            { waitFor: 'css:[data-testid="report-stage-C"]' },
+            { scroll: 'css:[data-testid="report-stage-C"]' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-report-not-ours',
+            title: 'Report · no key on this phone opens it',
+        }, {
+        netTest: { state: 'none', testRelayOn: true, reportOpen: 'not_ours' },
+        picked: 'content://downloads/net-ab12cd34.dat',
+        steps: [...relaysMenu('open-report'), { click: 'btn:report-pick' }, { waitFor: 'css:[data-testid="report-failure"]' }],
+    }),
 ];
 
 // ---- builders for the fake-shell scenarios ----
+
+/** Settings → Advanced (→ Network test) on the fake engine
+ *  (harness/netTestFake.ts), with the relay file held, so the test relay
+ *  belongs to "Pars Relays". */
+function nt(
+    { id, title }: { id: string; title: string },
+    netTest: NetTestFake,
+    steps: DriveStep[] = [],
+    over: { connected?: boolean; stop?: 'advanced' } = {},
+): Scenario[] {
+    const open: DriveStep[] = [
+        { click: 'btn:tab-settings', optional: true },
+        { click: 'btn:nav-settings', optional: true },
+        { click: 'btn:advanced-row' },
+        { waitFor: 'btn:nettest-row' },
+    ];
+    if (over.stop !== 'advanced') open.push({ click: 'btn:nettest-row' }, { sleep: 300 });
+    else open.push({ scroll: 'btn:nettest-row' });
+    return [
+        {
+            id,
+            title: `Network test · ${title}`,
+            screen: 'settings',
+            state: 'fake-shell',
+            connection: over.connected
+                ? { ...CONN_BASE, state: 'connected', routeRunning: true, routeCheck: 'ok', activeRoute: RELAY_R1, auto: RELAY_AUTO_ON_R1 }
+                : { ...CONN_BASE, state: 'disconnected' },
+            availableRoutes: RELAY_FILE_ROUTES,
+            fake: { relays: 'none', open: 'connection', android: true, netTest, steps: [...open, ...steps] },
+        },
+    ];
+}
 //
 // Declared as functions (hoisted) so the catalog above can use them.
 // Each `id:` sits on its own line so tools/screenshot-harness.mjs, which

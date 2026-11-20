@@ -501,7 +501,16 @@ func FieldProbeStart(optsJSON string) (string, error) {
 			sr := storedResult{At: nowUTC().Truncate(time.Hour).Unix(), NetKind: kind, ReportTo: relay.reportTo, Report: r,
 				Summary: fieldprobe.Summary(res, r.Findings)}
 			// Filed even while Shutdown waits for this goroutine: the
-			// store is closed only after it has returned.
+			// store is closed only after it has returned. One result is
+			// kept: the page shows, sends and deletes exactly one, so an
+			// older one (another network kind) would be deleted unseen.
+			if keys, err := c.store.ListSecretKeys(fieldProbeResultPrefix); err == nil {
+				for _, k := range keys {
+					if k != fieldProbeResultPrefix+kind {
+						_ = c.store.DeleteSecret(k)
+					}
+				}
+			}
 			saveFieldProbeJSON(c.store, fieldProbeResultPrefix+kind, sr)
 			engine.LogInfo(fmt.Sprintf("fieldprobe end complete=%t abort=%s steps=%d conns=%d",
 				res.Complete, fieldProbeLogWord(res.AbortReason), res.StepsRun, res.Conns))
@@ -575,11 +584,12 @@ func (c *Core) fieldProbeOffered() (bool, string) {
 //	{"state":"running","step":7,"of":24}
 //	{"state":"done"|"aborted","net_kind":"wifi","report":{…v2…},
 //	 "summary":["netTest.summary.…",…],"complete":bool,"abort_reason":"…",
-//	 "has_test_relay":bool,"publisher_id":"…"}
+//	 "has_test_relay":bool,"publisher_id":"…","plan":{…}}
 //	{"state":"idle","plan":{…what is tested…},"has_test_relay":bool,"publisher_id":"…"}
 //
-// done/aborted is the most recent kept result (any network kind), so the
-// "a result is ready" row can be shown after the next connect.
+// done/aborted is the kept result (one at most: a new run replaces it),
+// so the "a result is ready" row can be shown after the next connect. Its
+// plan is the idle one, for a "Run again" over the kept result.
 // has_test_relay: a trusted held route carries a report address; the page
 // offers the test only then. publisher_id: that route's publisher ("" when
 // none).
@@ -598,6 +608,19 @@ func FieldProbeStatus() (string, error) {
 	fieldProbeSweep(c.store, nowUTC())
 	sweepFieldProbeOut(c, false)
 	offered, publisherID := c.fieldProbeOffered()
+	t, err := fieldprobe.DefaultTargets()
+	if err != nil {
+		return "", err
+	}
+	resolver, _, _ := strings.Cut(t.PublicResolver, ":")
+	// What is tested: shown before Start, also over a kept result ("Run
+	// again" asks for consent the same way).
+	plan := map[string]any{
+		"steps": fieldprobe.MaxSteps, "max_connections": fieldprobe.DefaultMaxConns,
+		"max_relay_connections": fieldprobe.MaxRelayFlows, "minutes": 4,
+		"consent_version": fieldProbeConsentVersion, "targets_version": t.Version,
+		"names": fieldProbeUnique(t.Names()), "public_resolver": resolver,
+	}
 	if sr, ok := latestFieldProbeResult(c.store); ok {
 		state := FieldProbeDone
 		if !sr.Report.Run.Complete {
@@ -606,20 +629,11 @@ func FieldProbeStatus() (string, error) {
 		return fieldProbeJSON(map[string]any{
 			"state": state, "net_kind": sr.NetKind, "report": sr.Report, "summary": sr.Summary,
 			"complete": sr.Report.Run.Complete, "abort_reason": sr.Report.Run.AbortReason,
-			"has_test_relay": offered, "publisher_id": publisherID,
+			"has_test_relay": offered, "publisher_id": publisherID, "plan": plan,
 		}), nil
 	}
-	t, err := fieldprobe.DefaultTargets()
-	if err != nil {
-		return "", err
-	}
-	resolver, _, _ := strings.Cut(t.PublicResolver, ":")
-	return fieldProbeJSON(map[string]any{"state": FieldProbeIdle, "plan": map[string]any{
-		"steps": fieldprobe.MaxSteps, "max_connections": fieldprobe.DefaultMaxConns,
-		"max_relay_connections": fieldprobe.MaxRelayFlows, "minutes": 4,
-		"consent_version": fieldProbeConsentVersion, "targets_version": t.Version,
-		"names": fieldProbeUnique(t.Names()), "public_resolver": resolver,
-	}, "has_test_relay": offered, "publisher_id": publisherID}), nil
+	return fieldProbeJSON(map[string]any{"state": FieldProbeIdle, "plan": plan,
+		"has_test_relay": offered, "publisher_id": publisherID}), nil
 }
 
 // FieldProbeCancel is engine_field_probe_cancel. reason: "" (the person

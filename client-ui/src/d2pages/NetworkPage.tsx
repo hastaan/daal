@@ -16,6 +16,7 @@
 // core/routestore stores it); the connect rules per route are
 // lib/networkRows.ts.
 
+import { checkForNewAddress, refreshMessage } from '../lib/relayRefresh';
 import { sep } from '../lib/format';
 import { useEffect, useRef, useState } from 'react';
 import AddSheet from '../components/AddSheet';
@@ -126,6 +127,7 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     const [openedPath, setOpenedPath] = useState<string | undefined>(undefined);
     const dev = useDeveloperMode();
     const toast = useToast();
+    const [checking, setChecking] = useState(false);
     const { density } = useDensity();
     const [addNonce, setAddNonce] = useState(0);
     const openedSheet = useOpenedFileSheet(addStep !== null, (path) => {
@@ -471,9 +473,23 @@ export default function NetworkPage({ t, onNavigate }: Props) {
         }
     };
 
+    const onCheckNewAddress = async () => {
+        if (checking) return;
+        setChecking(true);
+        toast.show('neutral', t('files.refresh.looking'), 60000);
+        const a = await checkForNewAddress();
+        setChecking(false);
+        const m = refreshMessage(a);
+        toast.show(m.tone, t(m.key));
+        if (a.outcome === 'updated') await load().catch(() => {});
+    };
+
     const moreItems: MenuItem[] = [
         { id: 'my-address', label: t('conn.more.address'), icon: 'person', onSelect: () => setAddrOpen(true) },
     ];
+    if (tree && tree.length > 0) {
+        moreItems.push({ id: 'check-address', label: t('files.refresh.action'), icon: 'refresh', onSelect: () => void onCheckNewAddress() });
+    }
     if (dev) {
         moreItems.push(
             { id: 'dev-scan', label: t('add.choose.scan'), icon: 'camera', onSelect: () => setAddStep('scan') },

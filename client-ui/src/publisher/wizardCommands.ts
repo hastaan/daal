@@ -267,6 +267,30 @@ export function classifyPublisherError(e: unknown): PublisherErrorCode {
 
 // ---- Types mirrored from Rust ----
 
+/** daal_wizard::report_key::TestRelayStatus */
+export interface TestRelayStatus {
+    operator_id: number;
+    is_test_relay: boolean;
+    has_key: boolean;
+    /** People on this relay who are not removed. */
+    people_on_relay: number;
+    /** An everyone file was made for this relay. */
+    everyone_file: boolean;
+}
+
+/** daal_wizard::report_key::TestRelaySet */
+export interface TestRelaySet {
+    operator_id: number;
+    is_test_relay: boolean;
+    key_made: boolean;
+    /** People on this relay who hold a file made before and need a new one. */
+    people_to_send: number;
+    /** An everyone file exists and was left exactly as it was (it keeps
+     *  working and does not offer the test). Never made again here. */
+    everyone_file_kept: boolean;
+    refresh_note_published: boolean;
+}
+
 /**
  * One relay, with enough identity to tell it apart from another on the
  * same provider and region — which the previous shape could not do.
@@ -1746,6 +1770,23 @@ export const Wizard = {
      *  `wizard://renew-event` (see `onRenewEvent`). */
     renewEveryone: (operator_id: number) =>
         invoke<RenewReport>('wizard_renew_everyone', { operatorId: operator_id }),
+    /** Network test: is this relay the Test relay (its pack carries the
+     *  report address)? Read-only. */
+    testRelayStatus: (operator_id: number) =>
+        invoke<TestRelayStatus>('wizard_test_relay_status', { operatorId: operator_id }),
+    /** Network test: "Use as test relay" (`on`) or stop. Makes the
+     *  report key on this phone the first time and signs the relay's
+     *  pack again with (or without) its address. Nobody on the relay is
+     *  touched and no file is made again. Turning it on for a relay
+     *  people connect with is refused (E_TEST_RELAY_IN_USE) unless
+     *  `confirmInUse`, which the sheet sends only after its second
+     *  confirmation naming the count. Reaches the relay. */
+    testRelaySet: (operator_id: number, on: boolean, confirmInUse = false) =>
+        invoke<TestRelaySet>('wizard_test_relay_set', { operatorId: operator_id, on, confirmInUse }),
+    /** Network test: open one received report (`net-xxxxxxxx.dat`, a
+     *  path `PickedFile.stage` returned) with a report key on this
+     *  phone. Answers the report JSON, validated; UNTRUSTED. */
+    reportOpen: (path: string) => invoke<string>('wizard_report_open', { path }),
     /** D3. Rust returns a cached result younger than 10 minutes unless
      *  `force` is true. Read-only. */
     relayHealth: (operator_id: number, force: boolean) =>

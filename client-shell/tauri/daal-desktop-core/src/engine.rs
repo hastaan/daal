@@ -209,6 +209,20 @@ pub struct Engine {
     network_facts: Option<
         extern "C" fn(*const c_char, *const c_char, c_int, c_int, *mut c_void, c_int) -> c_int,
     >,
+
+    /// The network test (`engine_field_probe_*`, core/abi/fieldprobe.go,
+    /// specs/field-probe-v2.md). Optional like the three above: a
+    /// library that predates them still loads, and the page then does
+    /// not offer the test.
+    field_probe_start: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
+    field_probe_status: Option<extern "C" fn(*mut c_void, c_int) -> c_int>,
+    field_probe_cancel: Option<extern "C" fn(*const c_char) -> c_int>,
+    field_probe_seal: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
+    field_probe_discard: Option<extern "C" fn() -> c_int>,
+
+    /// `engine_relaypack_refresh` (core/abi/relaypack_recover.go): look
+    /// for a newer signed file now. Optional: an older library loads.
+    relaypack_refresh: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
 }
 
 impl Engine {
@@ -505,6 +519,33 @@ impl Engine {
             >(&lib, NETWORK_FACTS_SYMBOL)
             .ok()
             .map(|sym| *sym);
+            let field_probe_start = lookup::<
+                unsafe extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int,
+            >(&lib, b"engine_field_probe_start")
+            .ok()
+            .map(|sym| *sym);
+            let field_probe_status =
+                lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(&lib, b"engine_field_probe_status")
+                    .ok()
+                    .map(|sym| *sym);
+            let field_probe_cancel =
+                lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(&lib, b"engine_field_probe_cancel")
+                    .ok()
+                    .map(|sym| *sym);
+            let field_probe_seal = lookup::<
+                unsafe extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int,
+            >(&lib, b"engine_field_probe_seal")
+            .ok()
+            .map(|sym| *sym);
+            let relaypack_refresh = lookup::<
+                unsafe extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int,
+            >(&lib, b"engine_relaypack_refresh")
+            .ok()
+            .map(|sym| *sym);
+            let field_probe_discard =
+                lookup::<unsafe extern "C" fn() -> c_int>(&lib, b"engine_field_probe_discard")
+                    .ok()
+                    .map(|sym| *sym);
 
             // Reinterpret each unsafe-extern as the safe-extern variant
             // we store in the struct. The wrapper methods enforce all
@@ -576,6 +617,12 @@ impl Engine {
                 route_precheck: route_precheck.map(|f| std::mem::transmute(f)),
                 connect_auto: connect_auto.map(|f| std::mem::transmute(f)),
                 network_facts: network_facts.map(|f| std::mem::transmute(f)),
+                field_probe_start: field_probe_start.map(|f| std::mem::transmute(f)),
+                field_probe_status: field_probe_status.map(|f| std::mem::transmute(f)),
+                field_probe_cancel: field_probe_cancel.map(|f| std::mem::transmute(f)),
+                field_probe_seal: field_probe_seal.map(|f| std::mem::transmute(f)),
+                field_probe_discard: field_probe_discard.map(|f| std::mem::transmute(f)),
+                relaypack_refresh: relaypack_refresh.map(|f| std::mem::transmute(f)),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -1406,6 +1453,87 @@ impl Engine {
     /// Makes no engine call.
     pub fn has_network_facts(&self) -> bool {
         self.network_facts.is_some()
+    }
+
+    /// `engine_field_probe_start`: start the network test in the
+    /// background. `opts_json` is the page's
+    /// `{"network_label","dns_servers":[…],"private_dns","consent_version",
+    /// "vpn_active","ipv6_global"}` — the DNS servers are used in memory
+    /// for the run only; nothing here logs them. Returns the engine's JSON
+    /// (`{"started":true}` or `{"started":false,"refused":"<code>"}`), or
+    /// `Ok(None)` when this library has no network test.
+    pub fn field_probe_start(&self, opts_json: &str) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(f) = self.field_probe_start else {
+            return Ok(None);
+        };
+        let o = CString::new(opts_json).map_err(|_| DesktopError::EngineSymbol("opts_json NUL".into()))?;
+        self.call_buf("engine_field_probe_start", |buf, len| (f)(o.as_ptr(), buf, len))
+            .map(Some)
+    }
+
+    /// `engine_field_probe_status`: progress, the kept result with its
+    /// summary keys, or what the test would do. `Ok(None)`: no network test.
+    pub fn field_probe_status(&self) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(f) = self.field_probe_status else {
+            return Ok(None);
+        };
+        self.call_buf("engine_field_probe_status", |buf, len| (f)(buf, len)).map(Some)
+    }
+
+    /// `engine_field_probe_cancel`: stop a run, keeping its partial
+    /// result. `reason`: "" | "backgrounded" | "network_changed" |
+    /// "vpn_active" | "connecting".
+    /// `Ok(Some(true))` when a run was going.
+    pub fn field_probe_cancel(&self, reason: &str) -> Result<Option<bool>> {
+        self.ensure_ready()?;
+        let Some(f) = self.field_probe_cancel else {
+            return Ok(None);
+        };
+        let r = CString::new(reason).map_err(|_| DesktopError::EngineSymbol("reason NUL".into()))?;
+        Ok(Some((f)(r.as_ptr()) == 1))
+    }
+
+    /// `engine_relaypack_refresh`: look for a newer signed file for one
+    /// held relay file (`""` = every held one, at most 3). Blocks up to
+    /// about a minute. Returns the engine's JSON
+    /// (`{"outcome":"updated|unchanged|unreachable|…",…}`), or `Ok(None)`
+    /// when this library has no such call.
+    pub fn relaypack_refresh(&self, relay_pack_id: &str) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(f) = self.relaypack_refresh else {
+            return Ok(None);
+        };
+        let id = CString::new(relay_pack_id).map_err(|_| DesktopError::EngineSymbol("relay_pack_id NUL".into()))?;
+        self.call_buf("engine_relaypack_refresh", |buf, len| (f)(id.as_ptr(), buf, len))
+            .map(Some)
+    }
+
+    /// `engine_field_probe_seal`: write the sealed report file.
+    /// `opts_json` is `{"notes","out_path","transient","net_kind"}`.
+    pub fn field_probe_seal(&self, opts_json: &str) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(f) = self.field_probe_seal else {
+            return Ok(None);
+        };
+        let o = CString::new(opts_json).map_err(|_| DesktopError::EngineSymbol("opts_json NUL".into()))?;
+        self.call_buf("engine_field_probe_seal", |buf, len| (f)(o.as_ptr(), buf, len))
+            .map(Some)
+    }
+
+    /// `engine_field_probe_discard`: delete every kept result and every
+    /// transient sealed file. Returns how many results were deleted.
+    pub fn field_probe_discard(&self) -> Result<Option<i32>> {
+        self.ensure_ready()?;
+        let Some(f) = self.field_probe_discard else {
+            return Ok(None);
+        };
+        let rc = (f)();
+        if rc < 0 {
+            return Err(self.failed("engine_field_probe_discard", rc as i32));
+        }
+        Ok(Some(rc as i32))
     }
 
     pub fn register_protect_callback(&self, fn_ptr: usize) -> Result<String> {

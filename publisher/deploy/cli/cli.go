@@ -152,6 +152,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runUsersPackSbpx(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-unpack-sbpx":
 		return runUsersUnpackSbpx(ctx, rest, os.Stdin, stdout, stderr)
+	case "report-keygen":
+		return runReportKeygen(ctx, rest, stdout, stderr)
+	case "report-open":
+		return runReportOpen(ctx, rest, os.Stdin, stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, Version)
 		return 0
@@ -303,6 +307,12 @@ Subcommands:
   cell-verify   Run M-of-N admin-quorum + cell_id-match checks on a membership
                 + delegation doc pair (operator sanity check before publishing).
   cell-status   Print summary of a cell's admin set, quorum, and membership.
+  report-keygen Make the publisher's network-test report key: private half to
+                --out (64 hex, 0600), the daal1 report address to stdout
+                (--out - prints the key in the JSON instead, for the app).
+                Sign the Test relay's pack with bind-and-sign --report-to.
+  report-open   Decrypt and validate one sealed network-test report (--in,
+                key from --key or stdin); JSON to stdout, --findings for lines.
   version       Print CLI version.
 
 Run 'daal-deploy <subcommand> --help' for subcommand flags.
@@ -2536,6 +2546,8 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	relayIdentity := fs.String("relay-identity", "",
 		"the relay's identity, as `daal-deploy relay-identity` printed it; its keys and cover host complete (and outrank the record in) the signed endpoints")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
+	reportTo := fs.String("report-to", "",
+		"network-test report address (daal1…, from report-keygen): marks this relay as the Test relay; written into every route as _report_to")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -2673,6 +2685,7 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		Freshness:            mirrorSet,
 		RevocationURL:        *revocationURL,
 		RevocationPubHex:     *revocationPubHex,
+		ReportTo:             *reportTo,
 	})
 	if err != nil {
 		emitProgress(*progressJSON, stderr, "bind_error", err.Error(), nil)

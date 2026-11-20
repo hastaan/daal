@@ -3,7 +3,10 @@
 //   main      Status · Language · Theme · Help family connect · Advanced,
 //             then Erase on its own, then the version line.
 //   advanced  Connection mode, My Daal address (CustodyPanel), Automatic
-//             updates (only when there are any), and [dev] Developer tools.
+//             updates (only when there are any), Network test (only when a
+//             held file carries a test relay, or a report is kept), and
+//             [dev] Developer tools.
+//   nettest   The network test (components/NetTestPage), back to Advanced.
 //   status    The Status page (StatusPage), with a back control.
 //
 // The sub-page can be driven by the shell (`subPage` + `onSubPageChange`,
@@ -21,6 +24,10 @@ import PanicWipeDialog, { useEraseWording } from '../components/PanicWipeDialog'
 import CustodyPanel from '../components/CustodyPanel';
 import SubscriptionsPanel from '../components/SubscriptionsPanel';
 import StatusPage from './StatusPage';
+import NetTestPage from '../components/NetTestPage';
+import { NetTest } from '../lib/netTestCommands';
+import { rowShown } from '../lib/netTest';
+import type { NetStatus } from '../lib/netTest';
 import { useContract } from '../contract/ContractProvider';
 import type { ConnMode, ConnState, VersionInfo } from '../contract/D2Contract';
 import {
@@ -37,7 +44,7 @@ import {
 } from '../design/primitives';
 import { useDensity } from '../design/DensityProvider';
 
-export type SettingsSubPage = 'main' | 'advanced' | 'status';
+export type SettingsSubPage = 'main' | 'advanced' | 'status' | 'nettest';
 
 interface Props {
     t: (k: string) => string;
@@ -82,7 +89,7 @@ export default function SettingsPage({
         if (onSubPageChange) onSubPageChange(p);
         else setOwnPage(p);
     };
-    useBack(page !== 'main', () => go('main'), 'page');
+    useBack(page !== 'main', () => go(page === 'nettest' ? 'advanced' : 'main'), 'page');
 
     const [version, setVersion] = useState<VersionInfo | null>(null);
     const [connState, setConnState] = useState<ConnState | null>(null);
@@ -150,6 +157,16 @@ export default function SettingsPage({
     if (page === 'status') {
         return wrap(<StatusPage t={t} locale={locale} onBack={() => go('main')} />);
     }
+    if (page === 'nettest') {
+        return wrap(
+            <NetTestPage
+                t={t}
+                connState={connState}
+                backLabel={t('settings.advanced.title')}
+                onBack={() => go('advanced')}
+            />,
+        );
+    }
     if (page === 'advanced') {
         return wrap(
             <AdvancedPage
@@ -158,6 +175,7 @@ export default function SettingsPage({
                 mode={mode}
                 onModeChanged={setMode}
                 version={version}
+                onOpenNetTest={() => go('nettest')}
                 onBack={() => go('main')}
                 onDevOff={() => {
                     setDeveloperMode(false);
@@ -382,6 +400,7 @@ function AdvancedPage({
     mode,
     onModeChanged,
     version,
+    onOpenNetTest,
     onBack,
     onDevOff,
 }: {
@@ -390,12 +409,25 @@ function AdvancedPage({
     mode: ConnMode;
     onModeChanged: (m: ConnMode) => void;
     version: VersionInfo | null;
+    onOpenNetTest: () => void;
     onBack: () => void;
     onDevOff: () => void;
 }) {
     const contract = useContract();
     const dev = useDeveloperMode();
     const [modeFailed, setModeFailed] = useState(false);
+    // The network test row: asked once; hidden until the engine says a
+    // held file carries a test relay (or a report is kept).
+    const [netTest, setNetTest] = useState<NetStatus | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        void NetTest.status().then((s) => {
+            if (!cancelled) setNetTest(s);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const changeMode = async (next: ConnMode) => {
         const before = mode;
@@ -441,6 +473,38 @@ function AdvancedPage({
                 <CustodyPanel t={t} locale={locale} />
 
                 <SubscriptionsPanel t={t} locale={locale} />
+
+                {netTest && rowShown(netTest) && (
+                    <Card style={{ padding: '0 16px' }}>
+                        <ListRow
+                            dataButton="nettest-row"
+                            leading={
+                                <span style={{ color: 'var(--muted)', display: 'inline-flex' }}>
+                                    <Icon name="signal" size={22} />
+                                </span>
+                            }
+                            title={t('netTest.title')}
+                            subtitle={t(
+                                netTest.kind === 'result'
+                                    ? 'netTest.row.ready'
+                                    : netTest.kind === 'running'
+                                      ? 'netTest.row.running'
+                                      : 'netTest.row.sub',
+                            )}
+                            wrapSubtitle
+                            badge={
+                                netTest.kind === 'result' ? (
+                                    <Badge tone="gold" size="sm">
+                                        {t('netTest.row.badge')}
+                                    </Badge>
+                                ) : undefined
+                            }
+                            chevron
+                            onClick={onOpenNetTest}
+                            last
+                        />
+                    </Card>
+                )}
 
                 {dev && <DevTools t={t} version={version} onDevOff={onDevOff} />}
             </div>

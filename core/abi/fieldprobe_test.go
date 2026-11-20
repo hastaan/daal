@@ -476,3 +476,36 @@ func TestFieldProbe_StatusSaysWhetherATestRelayIsHeld(t *testing.T) {
 		t.Fatalf("no publisher_id: %v", st)
 	}
 }
+
+// One result is kept: a new run replaces a result kept for another
+// network kind (the page shows, sends and deletes one, so a second would
+// be deleted unseen), and the kept result's status carries the plan, so
+// "Run again" can show what is tested.
+func TestFieldProbe_OneResultKeptAndItsStatusHasThePlan(t *testing.T) {
+	r := newFieldProbeRig(t, true)
+	other := fieldProbeResultPrefix + "zz-other-kind"
+	if err := r.c.store.PutSecret(other, []byte(`{"at":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if m := fpStart(t, fpOK); m["started"] != true {
+		t.Fatalf("start: %v", m)
+	}
+	st := fpWait(t)
+	if st["state"] != FieldProbeDone {
+		t.Fatalf("after the run: %v", st)
+	}
+	keys, err := r.c.store.ListSecretKeys(fieldProbeResultPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] == other {
+		t.Fatalf("kept results after a new run: %v", keys)
+	}
+	plan, _ := st["plan"].(map[string]any)
+	if plan == nil || plan["consent_version"] == nil {
+		t.Fatalf("a kept result's status without the plan: %v", st)
+	}
+	if names, _ := plan["names"].([]any); len(names) == 0 {
+		t.Fatalf("plan without names: %v", plan)
+	}
+}

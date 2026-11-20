@@ -925,6 +925,67 @@ pub trait CliRunner: Send + Sync {
         args: RotateTlsArgs<'_>,
         priv_key: &[u8],
     ) -> Result<RotateTlsResult>;
+
+    /// Network test: invoke `daal-deploy report-keygen --out -`. A
+    /// fresh X25519 report key: the `daal1…` address goes into the Test
+    /// relay's pack (`bind-and-sign --report-to`), the private half
+    /// comes back over the pipe and nowhere else — the caller seals it
+    /// into device custody. No network, no record, no signing key.
+    ///
+    /// The default answers "this helper has no such verb", which is
+    /// what a `daal-deploy` built before the network test says.
+    fn run_report_keygen(&self) -> Result<ReportKeygenResult> {
+        Err(BridgeError::SubprocessFailed {
+            rc: 2,
+            stderr: "unknown subcommand \"report-keygen\"\n".into(),
+        })
+    }
+
+    /// Network test: invoke `daal-deploy report-open --in <file>` with
+    /// the report private key (64 hex) on stdin. Returns the report as
+    /// the opener printed it: strictly validated v2 JSON. The report is
+    /// UNTRUSTED: anyone who holds the address can make one.
+    fn run_report_open(&self, in_path: &Path, priv_key_hex: &str) -> Result<String> {
+        let _ = (in_path, priv_key_hex);
+        Err(BridgeError::SubprocessFailed {
+            rc: 2,
+            stderr: "unknown subcommand \"report-open\"\n".into(),
+        })
+    }
+}
+
+/// What `daal-deploy report-keygen --out -` prints. The private half is
+/// held in a `Zeroizing` string and never logged; `Debug` leaves it out.
+#[derive(Clone)]
+pub struct ReportKeygenResult {
+    pub report_to: String,
+    pub private_key_hex: Zeroizing<String>,
+}
+
+/// The JSON as printed; moved into [`ReportKeygenResult`] at once.
+#[derive(Deserialize)]
+struct ReportKeygenWire {
+    report_to: String,
+    private_key_hex: String,
+}
+
+impl ReportKeygenResult {
+    /// Parse what `report-keygen --out -` printed.
+    pub fn from_json(stdout: &[u8]) -> Result<Self> {
+        let w: ReportKeygenWire = serde_json::from_slice(stdout)?;
+        Ok(Self {
+            report_to: w.report_to,
+            private_key_hex: Zeroizing::new(w.private_key_hex),
+        })
+    }
+}
+
+impl std::fmt::Debug for ReportKeygenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReportKeygenResult")
+            .field("report_to", &self.report_to)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Wave 3 Step 7: args for `daal-deploy rotate-credentials`.
@@ -1738,6 +1799,10 @@ pub struct BindAndSignArgs<'a> {
     /// never answered a recipient request; the signer then has the
     /// record alone, which on some providers is not enough to sign.
     pub relay_identity_path: Option<&'a Path>,
+    /// Network test: the publisher's report address (`daal1…`) when this
+    /// relay is the Test relay (`--report-to`). Every route of the pack
+    /// then carries it as `_report_to`. `None` = an ordinary pack.
+    pub report_to: Option<&'a str>,
 }
 
 /// Extension trait so `.apply_env()` can be chained on `Command`.
@@ -2863,6 +2928,9 @@ impl CliRunner for SubprocessRunner {
         if let Some(path) = args.relay_identity_path {
             cmd.arg("--relay-identity").arg(path);
         }
+        if let Some(addr) = args.report_to.map(str::trim).filter(|a| !a.is_empty()) {
+            cmd.arg("--report-to").arg(addr);
+        }
         let mut child = cmd
             .apply_env()
             .stdin(Stdio::piped())
@@ -3295,6 +3363,76 @@ impl CliRunner for SubprocessRunner {
         }
         Ok(serde_json::from_str(&stdout_text)?)
     }
+
+    fn run_report_keygen(&self) -> Result<ReportKeygenResult> {
+        let out = Command::new(&self.binary)
+            .arg("report-keygen")
+            .arg("--out")
+            .arg("-")
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        // The private key is in this buffer: wiped when it is dropped.
+        let stdout = Zeroizing::new(out.stdout);
+        if !out.status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        ReportKeygenResult::from_json(&stdout)
+    }
+
+    fn run_report_open(&self, in_path: &Path, priv_key_hex: &str) -> Result<String> {
+        let mut child = Command::new(&self.binary)
+            .arg("report-open")
+            .arg("--in")
+            .arg(in_path)
+            .apply_env()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        {
+            let mut stdin = child.stdin.take().expect("piped");
+            let buf = Zeroizing::new(format!("{priv_key_hex}\n"));
+            stdin.write_all(buf.as_bytes())?;
+            // dropping stdin closes the pipe.
+        }
+        // stderr on its own thread: a report fills stdout (~16 KB),
+        // and a child blocked on one pipe while the parent reads the
+        // other deadlocks.
+        let stderr = child.stderr.take().expect("piped");
+        let err_join = std::thread::spawn(move || {
+            let mut buf = String::new();
+            let mut r = BufReader::new(stderr);
+            let _ = r.read_to_string(&mut buf);
+            buf
+        });
+        let mut stdout_text = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut stdout_text);
+        }
+        let status = child.wait().map_err(BridgeError::Io)?;
+        let stderr_text = err_join.join().unwrap_or_default();
+        if !status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: status.code().unwrap_or(-1),
+                stderr: stderr_text,
+            });
+        }
+        Ok(stdout_text)
+    }
 }
 
 /// What [`run_with_piped_priv_key`] collected: the exit status plus both
@@ -3637,6 +3775,16 @@ pub struct MockRunner {
     /// thing that decides whether a rotation can heal itself, so a test
     /// has to be able to see exactly what was baked in.
     pub bind_freshness_mirrors: Mutex<Vec<Vec<String>>>,
+    /// Network test: the `--report-to` each bind-and-sign was handed,
+    /// newest last (`None` = an ordinary pack).
+    pub bind_report_to: Mutex<Vec<Option<String>>>,
+    /// Network test: how many report keys were made.
+    pub report_keygen_calls: Mutex<usize>,
+    /// Network test: what `run_report_open` prints; `None` = it fails
+    /// the way the opener does on a file that is not for this key.
+    pub report_open_result: Mutex<Option<String>>,
+    /// Network test: the key (hex) each `run_report_open` was handed.
+    pub report_open_keys: Mutex<Vec<String>>,
     /// Wave 4 Step 11: the `.sbp` path the last `run_qr_fountain` was
     /// pointed at. The QR sender can only be wrong in one way that
     /// nothing downstream notices — streaming the wrong file, flawlessly
@@ -3911,6 +4059,10 @@ impl MockRunner {
             last_subkey_cert_path: Mutex::new(None),
             bind_phases: Mutex::new(Vec::new()),
             bind_freshness_mirrors: Mutex::new(Vec::new()),
+            bind_report_to: Mutex::new(Vec::new()),
+            report_keygen_calls: Mutex::new(0),
+            report_open_result: Mutex::new(None),
+            report_open_keys: Mutex::new(Vec::new()),
             last_qr_fountain_path: Mutex::new(None),
             rotation_recommendation: Mutex::new(None),
             reprovision_calls: Mutex::new(Vec::new()),
@@ -4818,6 +4970,10 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(args.freshness_mirrors.to_vec());
+        self.bind_report_to
+            .lock()
+            .unwrap()
+            .push(args.report_to.map(str::to_string));
         // What a real signer works from: the record, completed and
         // outranked by the relay's own identity when one is passed.
         let record_json = std::fs::read_to_string(args.operator_record_path).unwrap_or_default();
@@ -5237,6 +5393,33 @@ impl CliRunner for MockRunner {
             plaintext_size: plaintext.len() as i64,
             sbpx_size: cipher.len() as i64,
         })
+    }
+
+    fn run_report_keygen(&self) -> Result<ReportKeygenResult> {
+        // A real key, so the address the app derives from the stored
+        // half is the one "printed" here — as with the Go opener.
+        *self.report_keygen_calls.lock().unwrap() += 1;
+        let secret = x25519_dalek::StaticSecret::random_from_rng(&mut rand::rngs::OsRng);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        let priv_z = Zeroizing::new(secret.to_bytes());
+        Ok(ReportKeygenResult {
+            report_to: daal_recipient_addr::encode(&public.to_bytes()),
+            private_key_hex: Zeroizing::new(hex::encode(&priv_z[..])),
+        })
+    }
+
+    fn run_report_open(&self, _in_path: &Path, priv_key_hex: &str) -> Result<String> {
+        self.report_open_keys
+            .lock()
+            .unwrap()
+            .push(priv_key_hex.to_string());
+        match self.report_open_result.lock().unwrap().clone() {
+            Some(json) => Ok(json),
+            None => Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: "open: this report was not sealed to this key\n".into(),
+            }),
+        }
     }
 }
 

@@ -24,7 +24,8 @@
 //! Also reached from the app's own commands (not invoked from the page
 //! as plugin commands): `PlatformHandle::secure_screen(on)` (PB-20,
 //! FLAG_SECURE while the recovery words are on screen; a no-op on
-//! desktop).
+//! desktop) and `PlatformHandle::field_probe_watch(on)` (the network
+//! test's start facts and its watch; `None` on desktop).
 
 use tauri::{
     plugin::{Builder, TauriPlugin},
@@ -89,6 +90,12 @@ impl<R: Runtime> PlatformHandle<R> {
     pub fn secure_screen(&self, on: bool) -> Result<()> {
         self.inner.secure_screen(on).map(|_| ())
     }
+    /// Network test: what the start needs from the phone, and the watch
+    /// for the length of the run (`on`) or its end. `None` = nothing to
+    /// tell (desktop).
+    pub fn field_probe_watch(&self, on: bool) -> Result<Option<models::FieldProbeHost>> {
+        self.inner.field_probe_watch(on).map(Some)
+    }
 }
 
 #[cfg(not(mobile))]
@@ -117,6 +124,11 @@ impl<R: Runtime> PlatformHandle<R> {
     /// PB-20: the desktop window has no capture flag; nothing to do.
     pub fn secure_screen(&self, _on: bool) -> Result<()> {
         Ok(())
+    }
+    /// Network test: the desktop shell has no network watch; the engine
+    /// is told nothing extra.
+    pub fn field_probe_watch(&self, _on: bool) -> Result<Option<models::FieldProbeHost>> {
+        Ok(None)
     }
 }
 

@@ -47,6 +47,7 @@ import type {
 import { runDrive } from './driver';
 import { activeContract } from '../backends';
 import { HarnessContract } from '../backends/harness';
+import { netTestCommands } from './netTestFake';
 
 // ---- fixtures ----------------------------------------------------------
 
@@ -442,6 +443,10 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         },
         share_text: () => null,
     };
+    // The network test (lib/netTestCommands.ts) and its publisher half,
+    // only for a scenario that asks: without it the row stays hidden, as
+    // with a shell that predates the test.
+    if (f.netTest) Object.assign(table, netTestCommands(f.netTest, 'pars-relays'));
     if (f.engineDown) {
         table.engine_status = () => ({
             engine_ready: false,

@@ -33,6 +33,7 @@ import type {
     SetupRecovery,
 } from './wizardCommands';
 import { AccountCheckSheet } from './AccountCheckSheet';
+import { ReportViewer } from './ReportViewer';
 import { checkHealth, checkSequentially, nowUnix } from './relayHealth';
 import {
     Card,
@@ -769,6 +770,8 @@ export default function RelayListPage({
     const [healthStarted, setHealthStarted] = useState(false);
     // D1: the account check sheet.
     const [accountOpen, setAccountOpen] = useState(false);
+    // Network test: open a report someone sent.
+    const [reportOpen, setReportOpen] = useState(false);
     // D1/D2: backup status (null: unknown or an older shell) and the
     // "new hosting key" sheet the restore notice opens.
     const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
@@ -978,6 +981,9 @@ export default function RelayListPage({
         ...(onRestore ? [{ id: 'restore-link', label: t('pub.restore.link'), icon: 'download' as const, onSelect: onRestore }] : []),
         ...(anyToken
             ? [{ id: 'check-account', label: t('pub.account.open'), icon: 'server' as const, onSelect: () => setAccountOpen(true) }]
+            : []),
+        ...(live.length > 0
+            ? [{ id: 'open-report', label: t('pub.report.open'), icon: 'file' as const, onSelect: () => setReportOpen(true) }]
             : []),
     ];
 
@@ -1193,6 +1199,7 @@ export default function RelayListPage({
                 />
             )}
 
+            {reportOpen && <ReportViewer t={t} onClose={() => setReportOpen(false)} />}
             {accountOpen && (
                 <AccountCheckSheet
                     t={t}

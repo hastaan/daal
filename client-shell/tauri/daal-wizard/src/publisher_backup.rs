@@ -983,6 +983,17 @@ fn referenced_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<(String, Opti
     out
 }
 
+/// The network-test report aliases every relay in `tables` may have
+/// (`crate::report_key`). Not columns: present only once made.
+fn report_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<String> {
+    let empty = TableDump::default();
+    let ops = tables.get("operators").unwrap_or(&empty);
+    ops.rows
+        .iter()
+        .flat_map(|r| crate::report_key::optional_aliases(ops.get(r, "id").as_i64()))
+        .collect()
+}
+
 fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
     let staging = ctx.staging_dir.clone();
     let (tables, path_files) = ctx
@@ -1017,6 +1028,33 @@ fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
                     snap.missing.push(alias);
                 } else {
                     return Err(coded(E_CUSTODY_BACKEND, e));
+                }
+            }
+        }
+    }
+    // Network-test report keys: in the backup when they exist, and
+    // only then, so a publisher who never made one keeps the same
+    // digest (and the same backup) as before they existed.
+    for id in snap.operator_ids() {
+        for alias in crate::report_key::optional_aliases(id) {
+            if snap.secrets.iter().any(|(a, _)| *a == alias) {
+                continue;
+            }
+            match ctx.custody.get(&alias) {
+                Ok(v) => snap.secrets.push((alias, Zeroizing::new(v))),
+                Err(CustodyError::NotFound(_)) => {}
+                Err(CustodyError::Locked) => {
+                    return Err(coded(
+                        E_CUSTODY_LOCKED,
+                        "unlock this device's key store to continue",
+                    ))
+                }
+                Err(e) => {
+                    if mode == SecretMode::Lenient {
+                        snap.missing.push(alias);
+                    } else {
+                        return Err(coded(E_CUSTODY_BACKEND, e));
+                    }
                 }
             }
         }
@@ -1355,7 +1393,11 @@ fn parse_payload(ctx: &WizardCtx, pt: &[u8]) -> Result<Parsed> {
     // Aliases: every column value and every secret must be a publisher
     // alias, and every secret must be referenced by the rows.
     let referenced = referenced_aliases(&tables);
-    let referenced_set: BTreeSet<&str> = referenced.iter().map(|(a, _)| a.as_str()).collect();
+    // A relay's network-test report keys may be there too (only when
+    // they were made; see collect_state).
+    let optional: Vec<String> = report_aliases(&tables);
+    let mut referenced_set: BTreeSet<&str> = referenced.iter().map(|(a, _)| a.as_str()).collect();
+    referenced_set.extend(optional.iter().map(String::as_str));
     for (a, _) in &referenced {
         if alias_forbidden(a, &rec_aliases) {
             return Err(damaged("the contents name a key a backup may not hold"));
@@ -2475,6 +2517,7 @@ pub fn backup_restore(
     let mut forget: BTreeSet<String> = referenced_aliases(&current.tables)
         .into_iter()
         .map(|(a, _)| a)
+        .chain(report_aliases(&current.tables))
         .filter(|a| !backup_aliases.contains(a.as_str()))
         .collect();
     for a in ctx.db.list_all_keystore_aliases().unwrap_or_default() {

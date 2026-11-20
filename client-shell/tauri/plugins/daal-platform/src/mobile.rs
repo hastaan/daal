@@ -14,8 +14,8 @@ use tauri::{
 
 use crate::error::Result;
 use crate::models::{
-    SecureScreenRequest, SecureScreenResponse, VpnStartResponse, VpnStatusResponse,
-    VpnStopResponse,
+    FieldProbeHost, FieldProbeWatchRequest, SecureScreenRequest, SecureScreenResponse,
+    VpnStartResponse, VpnStatusResponse, VpnStopResponse,
 };
 
 #[cfg(target_os = "android")]
@@ -71,6 +71,11 @@ impl<R: Runtime> Platform<R> {
     }
     pub fn vpn_status(&self) -> Result<VpnStatusResponse> {
         Ok(self.0.run_mobile_plugin::<VpnStatusResponse>("vpnStatus", ())?)
+    }
+    pub fn field_probe_watch(&self, on: bool) -> Result<FieldProbeHost> {
+        Ok(self
+            .0
+            .run_mobile_plugin::<FieldProbeHost>("fieldProbeWatch", FieldProbeWatchRequest { on })?)
     }
     pub fn secure_screen(&self, on: bool) -> Result<SecureScreenResponse> {
         Ok(self

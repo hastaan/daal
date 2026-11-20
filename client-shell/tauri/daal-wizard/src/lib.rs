@@ -62,6 +62,8 @@ pub mod recipient_sbpx;
 // matches what the pack commits to signs again.
 pub mod relay_health;
 pub mod relay_identity;
+// Network test: the Test relay's report key, and opening reports.
+pub mod report_key;
 pub mod relay_rotation;
 pub mod renew;
 pub mod restore_settle;

@@ -197,6 +197,42 @@ else
   echo "already current: $MANIFEST"
 fi
 
+# The FileProvider's paths (@xml/file_paths, which the generated manifest's
+# <provider android:authorities="${applicationId}.fileprovider"> names).
+#
+# MainActivity.shareFile hands a file to the share sheet through that
+# provider, and FileProvider refuses any file outside the roots listed
+# here ("Failed to find configured root"). The generator lists only the
+# cache and external storage. Daal's own files live in the app's files
+# directory, under the state directory <filesDir>/daal:
+#
+#   daal/staging/        relay packs, people's files and the backup handed
+#                        to the share sheet (staging moved into the state
+#                        directory on 2026-11-20; it was in the cache before)
+#   daal/fieldprobe-out/ the sealed network-test report, written there by
+#                        the engine and removed by it (specs/field-probe-v2.md)
+#
+# Nothing else under filesDir is shareable: the database, the keys and the
+# engine's store stay out of reach of every other app. Rewritten whole on
+# every run, so it is idempotent.
+FILE_PATHS="${FILE_PATHS:-$(dirname "$MANIFEST")/res/xml/file_paths.xml}"
+mkdir -p "$(dirname "$FILE_PATHS")"
+paths_want='<?xml version="1.0" encoding="utf-8"?>
+<!-- Written by tools/patch-android-manifest.sh: edit it there. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <external-path name="my_images" path="." />
+  <cache-path name="my_cache_images" path="." />
+  <files-path name="daal_staging" path="daal/staging/" />
+  <files-path name="daal_fieldprobe" path="daal/fieldprobe-out/" />
+</paths>'
+if [ ! -f "$FILE_PATHS" ] || [ "$(cat "$FILE_PATHS")" != "$paths_want" ]; then
+  printf '%s\n' "$paths_want" > "$FILE_PATHS"
+  echo "patched: $FILE_PATHS"
+else
+  echo "already current: $FILE_PATHS"
+fi
+grep -qF 'daal/fieldprobe-out/' "$FILE_PATHS" || { echo "FATAL: fieldprobe path missing after patch" >&2; exit 1; }
+
 # Prove the postcondition rather than trusting the edit.
 for needle in 'android.permission.CAMERA' 'android.hardware.camera' \
   'daal:open-with BEGIN' 'android.intent.action.SEND' 'android:mimeType="text/plain"' \

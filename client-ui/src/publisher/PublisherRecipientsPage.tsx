@@ -91,6 +91,8 @@ import type { Failure } from './failureText';
 import { PeopleSection, joinPeople, personLabel, personStateOf } from './PeopleSection';
 import type { PersonRow } from './PeopleSection';
 import { EveryoneFileSheet } from './EveryoneFileSection';
+import { TestRelaySheet } from './TestRelaySheet';
+import { ReportViewer } from './ReportViewer';
 import { Notice, PageColumn, RelayBadge, SendSheet, relayLook, useConfirm, useLocale } from './ui';
 import { useBack } from '../lib/useBack';
 import { rotateTlsVerdict } from './rotateTlsVerdict';
@@ -260,6 +262,9 @@ export default function PublisherRecipientsPage({
     const [sendFor, setSendFor] = useState<PersonRow | 'everyone' | null>(null);
     // "File for everyone" (C7.4) and "Keep files working" (C7.5).
     const [everyoneOpen, setEveryoneOpen] = useState(false);
+    // Network test: "Use as test relay" and the report opener.
+    const [testRelayOpen, setTestRelayOpen] = useState(false);
+    const [reportOpen, setReportOpen] = useState(false);
     const [keepOpen, setKeepOpen] = useState(false);
     // A refresh address is set up and its last publish failed.
     const [keepFailing, setKeepFailing] = useState(false);
@@ -1086,6 +1091,9 @@ export default function PublisherRecipientsPage({
         },
         { id: 'everyone', label: t('pub.more.everyone'), icon: 'people', onSelect: () => setEveryoneOpen(true) },
         { id: 'keep', label: t('pub.more.keep'), icon: 'refresh', onSelect: () => setKeepOpen(true) },
+        ...(provisioned
+            ? [{ id: 'test-relay', label: t('pub.more.testRelay'), icon: 'signal' as const, onSelect: () => setTestRelayOpen(true) }]
+            : []),
         ...(onBackup ? [{ id: 'backup', label: t('pub.more.backup'), icon: 'shield' as const, onSelect: onBackup }] : []),
     ];
 
@@ -1703,6 +1711,24 @@ export default function PublisherRecipientsPage({
                     )}
                 </Sheet>
             )}
+
+            {testRelayOpen && (
+                <TestRelaySheet
+                    t={t}
+                    operatorId={operatorId}
+                    onClose={() => setTestRelayOpen(false)}
+                    onOpenReport={() => {
+                        setTestRelayOpen(false);
+                        setReportOpen(true);
+                    }}
+                    onChanged={() => {
+                        void reloadArtifacts();
+                        void recheckBackup();
+                    }}
+                />
+            )}
+
+            {reportOpen && <ReportViewer t={t} onClose={() => setReportOpen(false)} />}
 
             {everyoneOpen && (
                 <EveryoneFileSheet

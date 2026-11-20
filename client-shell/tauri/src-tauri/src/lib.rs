@@ -768,6 +768,218 @@ fn export_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
     cmdlog::logged("export_diagnostics", || cmd::export_diagnostics(&state).map_err(|e| e.to_string()))
 }
 
+// ---- network test (engine_field_probe_*, specs/field-probe-v2.md) ----
+//
+// Start returns at once (the run goes on in the engine); the page polls
+// field_probe_status. On Android the start also asks the platform plugin
+// for what the engine cannot see (the network's DNS servers, Private DNS
+// mode, VPN up, global IPv6, "blocked without VPN") and starts its watch
+// for the length of the run: network facts to the engine, and a cancel
+// when a VPN appears (FieldProbeWatch.kt). The watch stops when the
+// status says the run is over, on cancel and on discard. The DNS server
+// addresses are merged into the options here and go nowhere else:
+// cmdlog writes failures only, scrubbed.
+//
+// Async with the work on the blocking pool: the plugin call waits for
+// the Kotlin side, which must not be waited for on the main thread.
+
+/// The plugin's watch is on (so a status that says "over" stops it).
+static FIELD_PROBE_WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The page's start options with what the phone knows put in. The page
+/// sends the person's choices (`network_label`, `consent_version`); the
+/// phone's facts replace whatever the page guessed for its own keys,
+/// except that a VPN either side saw counts.
+fn with_host_facts(opts_json: &str, host: Option<&tauri_plugin_daal_platform::models::FieldProbeHost>) -> String {
+    let Some(h) = host else { return opts_json.to_string() };
+    let Ok(serde_json::Value::Object(mut o)) = serde_json::from_str::<serde_json::Value>(opts_json) else {
+        // Not an object: the engine answers -1 for it, as before.
+        return opts_json.to_string();
+    };
+    o.insert("dns_servers".into(), serde_json::json!(h.dns_servers));
+    if !h.private_dns.is_empty() {
+        o.insert("private_dns".into(), serde_json::json!(h.private_dns));
+    }
+    let page_vpn = o.get("vpn_active").and_then(|v| v.as_bool()).unwrap_or(false);
+    o.insert("vpn_active".into(), serde_json::json!(page_vpn || h.vpn_active));
+    o.insert("ipv6_global".into(), serde_json::json!(h.ipv6_global));
+    let page_blocked = o.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+    o.insert("blocked".into(), serde_json::json!(page_blocked || h.blocked));
+    serde_json::Value::Object(o).to_string()
+}
+
+fn field_probe_watch(app: &tauri::AppHandle, on: bool) -> Option<tauri_plugin_daal_platform::models::FieldProbeHost> {
+    use tauri_plugin_daal_platform::PlatformExt;
+    match app.platform().field_probe_watch(on) {
+        Ok(h) => {
+            FIELD_PROBE_WATCHING.store(on && h.is_some(), std::sync::atomic::Ordering::SeqCst);
+            h
+        }
+        Err(e) => {
+            FIELD_PROBE_WATCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+            log::warn!("network test: the phone's watch is not available: {e}");
+            None
+        }
+    }
+}
+
+fn field_probe_unwatch(app: &tauri::AppHandle) {
+    if FIELD_PROBE_WATCHING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let _ = field_probe_watch(app, false);
+    }
+}
+
+#[cfg(test)]
+mod field_probe_tests {
+    use super::with_host_facts;
+    use tauri_plugin_daal_platform::models::FieldProbeHost;
+
+    #[test]
+    fn the_phones_facts_go_into_the_start_options() {
+        let page = r#"{"network_label":"mci","consent_version":1,"vpn_active":false}"#;
+        // Desktop: nothing to add, the page's options as they are.
+        assert_eq!(with_host_facts(page, None), page);
+        let host = FieldProbeHost {
+            watching: true,
+            dns_servers: vec!["192.0.2.53".into()],
+            private_dns: "strict".into(),
+            vpn_active: true,
+            ipv6_global: true,
+            blocked: false,
+        };
+        let v: serde_json::Value = serde_json::from_str(&with_host_facts(page, Some(&host))).unwrap();
+        assert_eq!(v["network_label"], "mci");
+        assert_eq!(v["consent_version"], 1);
+        assert_eq!(v["dns_servers"][0], "192.0.2.53");
+        assert_eq!(v["private_dns"], "strict");
+        assert_eq!(v["vpn_active"], true);
+        assert_eq!(v["ipv6_global"], true);
+        assert_eq!(v["blocked"], false);
+        // Not JSON: left for the engine to refuse.
+        assert_eq!(with_host_facts("nope", Some(&host)), "nope");
+    }
+}
+
+/// Run `f` on the blocking pool; the caller logs the outcome.
+async fn field_probe_blocking<T: Send + 'static>(
+    app: tauri::AppHandle,
+    f: impl FnOnce(&tauri::AppHandle) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || f(&app))
+        .await
+        .map_err(|e| format!("join: {e}"))
+        .and_then(|r| r)
+}
+
+/// "Check for a new address": one engine walk for a newer signed relay
+/// file, on the blocking pool (it can take up to about a minute).
+#[tauri::command]
+async fn relaypack_refresh(app: tauri::AppHandle, relay_pack_id: Option<String>) -> Result<String, String> {
+    cmdlog::result("relaypack_refresh", field_probe_blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        cmd::relaypack_refresh(&state, relay_pack_id.as_deref().unwrap_or("")).map_err(|e| e.to_string())
+    })
+    .await)
+}
+
+#[tauri::command]
+async fn field_probe_start(app: tauri::AppHandle, opts_json: String) -> Result<String, String> {
+    cmdlog::result("field_probe_start", field_probe_blocking(app, move |app| {
+        let host = field_probe_watch(app, true);
+        let opts = with_host_facts(&opts_json, host.as_ref());
+        let state = app.state::<AppState>();
+        let r = cmd::field_probe_start(&state, &opts).map_err(|e| e.to_string());
+        let started = r
+            .as_ref()
+            .ok()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("started").and_then(|s| s.as_bool()))
+            .unwrap_or(false);
+        if !started {
+            // Refused (or failed): there is no run to watch.
+            field_probe_unwatch(app);
+        }
+        r
+    })
+    .await)
+}
+
+#[tauri::command]
+async fn field_probe_status(app: tauri::AppHandle) -> Result<String, String> {
+    cmdlog::result("field_probe_status", field_probe_blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        let r = cmd::field_probe_status(&state).map_err(|e| e.to_string());
+        let running = r
+            .as_ref()
+            .ok()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .map(|v| v.get("state").and_then(|s| s.as_str()) == Some("running"))
+            .unwrap_or(false);
+        if !running {
+            field_probe_unwatch(app);
+        }
+        r
+    })
+    .await)
+}
+
+#[tauri::command]
+async fn field_probe_cancel(app: tauri::AppHandle, reason: String) -> Result<bool, String> {
+    cmdlog::result("field_probe_cancel", field_probe_blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        let r = cmd::field_probe_cancel(&state, &reason).map_err(|e| e.to_string());
+        field_probe_unwatch(app);
+        r
+    })
+    .await)
+}
+
+/// Seal the kept result (always a share: the engine writes it into its
+/// own `fieldprobe-out/`, see `cmd::field_probe_seal`) and hand it to
+/// the share sheet (Android) or show it in the file manager (desktop).
+/// There is no plain seal command: the page never chooses where a file
+/// goes, and a "save to file" would be the shell's own save dialog
+/// copying this file out (not built).
+/// Answers the seal's JSON; a refusal (`{"sealed":false,"refused"}`)
+/// comes back as it is, with nothing shared.
+#[tauri::command]
+async fn field_probe_share(
+    app: tauri::AppHandle,
+    opts_json: String,
+    chooser_title: Option<String>,
+) -> Result<String, String> {
+    cmdlog::result("field_probe_share", field_probe_blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        let body = cmd::field_probe_seal(&state, &opts_json).map_err(|e| e.to_string())?;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        if v.get("sealed").and_then(|s| s.as_bool()) != Some(true) {
+            return Ok(body);
+        }
+        let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("");
+        if path.is_empty() {
+            return Err("field_probe_share: the sealed file has no path".to_string());
+        }
+        let title = chooser_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or("Send");
+        share_path(path, "application/octet-stream", title)?;
+        Ok(body)
+    })
+    .await)
+}
+
+#[tauri::command]
+async fn field_probe_discard(app: tauri::AppHandle) -> Result<i32, String> {
+    cmdlog::result("field_probe_discard", field_probe_blocking(app, move |app| {
+        field_probe_unwatch(app);
+        let state = app.state::<AppState>();
+        cmd::field_probe_discard(&state).map_err(|e| e.to_string())
+    })
+    .await)
+}
+
 #[tauri::command]
 fn set_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
     cmdlog::logged("set_mode", || cmd::set_mode(&state, &mode).map_err(|e| e.to_string()))
@@ -1327,6 +1539,69 @@ async fn wizard_renew_everyone(
             };
             daal_wizard::renew::renew_everyone(ctx, operator_id, &mut on_event)
                 .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+// ---- network test, the publisher's half (daal_wizard::report_key) ----
+
+/// Is this relay the Test relay (its pack carries the report address)?
+#[tauri::command]
+async fn wizard_test_relay_status(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::report_key::TestRelayStatus, String> {
+    cmdlog::result(
+        "wizard_test_relay_status",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::report_key::status(ctx, operator_id).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// "Use as test relay" (`on`) / "Stop using as test relay": the report
+/// key made on this phone by the publisher library, the pack signed
+/// again with (or without) its address. `confirm_in_use`: the person
+/// confirmed, with the count in front of them, that people connect with
+/// this relay (refused with E_TEST_RELAY_IN_USE otherwise).
+#[tauri::command]
+async fn wizard_test_relay_set(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    on: bool,
+    confirm_in_use: Option<bool>,
+) -> Result<daal_wizard::report_key::TestRelaySet, String> {
+    let confirm_in_use = confirm_in_use.unwrap_or(false);
+    cmdlog::result(
+        "wizard_test_relay_set",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::report_key::set_test_relay(ctx, operator_id, on, confirm_in_use)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// Open one received network-test report (`net-xxxxxxxx.dat`) with a
+/// report key on this phone. The validated report JSON, untrusted.
+#[tauri::command]
+async fn wizard_report_open(
+    wstate: State<'_, WizardStateMgr>,
+    path: String,
+) -> Result<String, String> {
+    cmdlog::result(
+        "wizard_report_open",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            let p = std::path::PathBuf::from(&path);
+            let r = daal_wizard::report_key::open_report(ctx, &p).map_err(|e| e.to_string());
+            // The copy `stage_picked_file` made of the picked file; a
+            // desktop path is the person's own file and is left alone.
+            if p.starts_with(ctx.staging_dir.join("picked")) {
+                let _ = std::fs::remove_file(&p);
+            }
+            r
         })
         .await,
     )
@@ -3603,6 +3878,9 @@ pub fn run() {
             wizard_account_check,
             wizard_account_cleanup,
             wizard_renew_everyone,
+            wizard_test_relay_status,
+            wizard_test_relay_set,
+            wizard_report_open,
             wizard_relay_health,
             wizard_restore_unsettled,
             wizard_restore_answer,
@@ -3688,6 +3966,13 @@ pub fn run() {
             recipient_qr_status,
             recipient_qr_cancel,
             recipient_qr_finalize,
+            relaypack_refresh,
+            // Network test (field probe v2)
+            field_probe_start,
+            field_probe_share,
+            field_probe_status,
+            field_probe_cancel,
+            field_probe_discard,
             // D-2.1 display-summary surface
             connect_auto,
             route_summary,
@@ -3892,6 +4177,7 @@ pub fn run() {
 //   routePrecheck(routeId: String): String?
 //   connectAuto(): String?
 //   networkFacts(kind: String, id: String, validated: Int, metered: Int): Int
+//   fieldProbeCancel(reason: String): Int
 //
 // We implement each as `Java_org_daal_desktop_platform_DaalCoreBridge_<name>`
 // (Kotlin's class-mangling rule for object companions), reach the
@@ -4207,6 +4493,36 @@ mod jni_bridge {
                 };
                 log::warn!(
                     "DaalCoreBridge.networkFacts(kind={kind} validated={validated} metered={metered}) failed: {}",
+                    daal_desktop_core::cmdlog::scrub(&e.to_string())
+                );
+                -1
+            }
+        }
+    }
+
+    /// `engine_field_probe_cancel` — stop a running network test, from
+    /// the platform plugin's watch (FieldProbeWatch.kt: a VPN came up).
+    /// `reason` is the closed code the result keeps. Returns 1 = a test
+    /// was running, 0 = none was, -1 = the engine cannot be asked or has
+    /// no such call.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_fieldProbeCancel<'local>(
+        mut env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        reason: JString<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        let reason: String = match env.get_string(&reason) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+        match eng.field_probe_cancel(&reason) {
+            Ok(Some(true)) => 1,
+            Ok(Some(false)) => 0,
+            Ok(None) => -1,
+            Err(e) => {
+                log::warn!(
+                    "DaalCoreBridge.fieldProbeCancel({reason}) failed: {}",
                     daal_desktop_core::cmdlog::scrub(&e.to_string())
                 );
                 -1

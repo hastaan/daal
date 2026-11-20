@@ -13,26 +13,37 @@ compiled):
 - Recipient: Settings → Advanced → Network test
   (`client-ui/src/components/NetTestPage.tsx`, `lib/netTest.ts`), shown only
   while status says `has_test_relay` or a result is kept. Consent (the
-  plan's `names` and `public_resolver`), Start, step n of N with Cancel
-  (leaving the app cancels with `backgrounded`), the summary, one "Send
-  report" (`field_probe_share`: seal, always transient, then the share
-  sheet) and "Delete report"; after a send it asks to delete.
+  plan's `names` and `public_resolver`, and a "before you start" line
+  right above Start), Start, step n of N with Cancel (leaving the app
+  cancels with `backgrounded`; leaving the page cancels too), the
+  summary, "Show everything" (the kept report as JSON), one "Send report"
+  (`field_probe_share`: seal, always transient, then the share sheet),
+  "Run again" (the consent over the kept result, which the new run
+  replaces; first for a run that stopped early) and "Delete report";
+  after a send it asks to delete.
 - Android shell: `FieldProbeWatch.kt` in the platform plugin (Kotlin command
   `fieldProbeWatch`). `field_probe_start` asks it for the network's DNS
   servers, Private DNS mode, VPN up, global IPv6 and "blocked without VPN"
   and merges them into the start options; it then feeds
   `engine_network_facts` for the run and calls `field_probe_cancel("vpn_active")`
-  (JNI `DaalCoreBridge.fieldProbeCancel`) when any VPN network appears. The
-  watch stops when status says the run is over, on cancel and on discard,
-  and after 6 minutes regardless. The FileProvider exposes
+  (JNI `DaalCoreBridge.fieldProbeCancel`) when any VPN network appears
+  (`"connecting"` when it is Daal's own). For the run it also keeps the
+  screen on (FLAG_KEEP_SCREEN_ON) and cancels with `"backgrounded"` when
+  Daal's activity stops. The watch stops when status says the run is
+  over, on cancel and on discard, and after 6 minutes regardless. The FileProvider exposes
   `files/daal/fieldprobe-out/` (tools/patch-android-manifest.sh writes
   `res/xml/file_paths.xml`).
 - Publisher: relay page ⋯ → "Use as test relay…" makes the report key on
   the phone (`daal-deploy report-keygen --out -`), keeps it in device
   custody as `daal.report.<id>.key` (`.retired` after "Stop"; both in the
   publisher backup when present) and signs the relay's pack again with
-  `bind-and-sign --report-to` (every route gets `_report_to`); the
-  everyone file is made again. Relay list ⋯ → "Open a network test report"
+  `bind-and-sign --report-to` (every route gets `_report_to`). Nothing on
+  the relay changes and no file is made again: every file already handed
+  out (each person's and the everyone file) keeps working without the
+  test. For a relay people connect with (anyone not removed, or an
+  everyone file) the wizard refuses with `E_TEST_RELAY_IN_USE` unless the
+  sheet's second confirmation, which names the count, was given.
+  Deleting the relay deletes both report aliases. Relay list ⋯ → "Open a network test report"
   opens a `.dat` with any report key on the phone (`report-open`, key on
   stdin) and shows each stage in words, with "Copy as text".
 
@@ -314,7 +325,7 @@ privacy line always last.
 
 ## Storage
 
-The last result per network kind is kept in the route store's
+One result is kept — a new run deletes any other — in the route store's
 age-encrypted secrets table (`fieldprobe/result/<kind>`), with the report
 address it will be sealed to; the run history behind the allowance under
 `fieldprobe/history`. Both live in the state directory, so
