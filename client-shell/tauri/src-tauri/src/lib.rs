@@ -314,14 +314,47 @@ fn default_state_dir() -> PathBuf {
         // /data/local/tmp, which an app cannot write, and the engine
         // never started). There the app's own files directory is asked
         // from Android.
-        if let Some(p) = std::env::var_os("HOME").map(PathBuf::from) {
-            let d = p.join("files").join("daal");
-            if daal_wizard::dir_is_writable(&d) {
-                return d;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let chosen = home
+            .as_ref()
+            .map(|p| p.join("files").join("daal"))
+            .filter(|d| daal_wizard::dir_is_writable(d))
+            .or_else(|| android_app_dir("getFilesDir").map(|f| f.join("daal")));
+        if let Some(chosen) = chosen {
+            // Earlier builds could end up in the CACHE directory ($TMPDIR
+            // on Android) or under $HOME/.local/share: bring that state
+            // here (see daal_wizard::adopt_earlier_state).
+            let mut earlier = vec![std::env::temp_dir().join("daal")];
+            if let Some(c) = android_app_dir("getCacheDir") {
+                earlier.push(c.join("daal"));
             }
-        }
-        if let Some(files) = android_app_dir("getFilesDir") {
-            return files.join("daal");
+            if let Some(h) = &home {
+                earlier.push(h.join(".local").join("share").join("daal"));
+            }
+            if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
+                earlier.push(PathBuf::from(x).join("daal"));
+            }
+            for e in &earlier {
+                log::info!("earlier state candidate {e:?}: dir={} db={}", e.is_dir(), e.join("wizard.db").is_file());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let dir = match daal_wizard::adopt_earlier_state(&chosen, &earlier, now) {
+                daal_wizard::Adopted::Nothing => chosen,
+                daal_wizard::Adopted::Moved { from, set_aside } => {
+                    log::warn!("state moved from {from:?} to {chosen:?}; the directory that stood there is kept at {set_aside:?}");
+                    chosen
+                }
+                daal_wizard::Adopted::UseInPlace(from) => {
+                    log::warn!("state left at {from:?}: it could not be moved to {chosen:?}");
+                    from
+                }
+            };
+            log::info!("state directory {dir:?}");
+            daal_wizard::mark_state_home(&dir);
+            return dir;
         }
     }
     #[cfg(target_os = "ios")]
