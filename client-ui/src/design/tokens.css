@@ -43,12 +43,16 @@
   --cyan:          #48b7bd;  /* oklch(72% 0.10 200) */
 
   /* typography */
-  --font-display:  'Iowan Old Style', 'Charter', 'Newsreader',
+  /* 'Vazirmatn' leads every stack: its @font-face (styles.css) covers
+   * only Arabic-script characters, so Latin falls through to the rest of
+   * the stack, and Persian inside a mono or display label is still drawn
+   * with the shipped font, not whatever the phone has. */
+  --font-display:  'Vazirmatn', 'Iowan Old Style', 'Charter', 'Newsreader',
                    'Palatino Linotype', 'Book Antiqua', Palatino,
                    Georgia, serif;
-  --font-body:     -apple-system, BlinkMacSystemFont, 'Segoe UI',
+  --font-body:     'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI',
                    system-ui, sans-serif;
-  --font-mono:     ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo,
+  --font-mono:     'Vazirmatn', ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo,
                    monospace;
   --font-fa:       'Vazirmatn', 'IRANSans', 'Geeza Pro', 'SF Arabic',
                    Tahoma, sans-serif;

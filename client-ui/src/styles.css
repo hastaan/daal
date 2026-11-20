@@ -20,6 +20,20 @@ html, body, #root {
 
 * { box-sizing: border-box; }
 
+/* Vazirmatn 33.0.3 (SIL OFL 1.1, assets/fonts/vazirmatn/OFL.txt), the
+ * variable build, 111 KB, shipped inside the app. Phones inside Iran
+ * often have a poor or no Persian system font, and fetching one from
+ * the network is not possible there. Latin falls back to the system
+ * font (unicode-range keeps this face to Arabic-script text). */
+@font-face {
+    font-family: 'Vazirmatn';
+    src: url('./assets/fonts/vazirmatn/Vazirmatn-Variable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+    unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF, U+200C-200F, U+066B-066C;
+}
+
 /* Persian RTL applies via dir="rtl" on <html>; Tauri sets it from
  * navigator.language at startup if user picked fa, and the Settings
  * → Language switch can flip it live. */

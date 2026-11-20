@@ -3458,7 +3458,7 @@ translated English, and it mixed words (نشانی/آدرس, تلفن/گوشی,
   (redacted)", "rate-limited", "duress shield", "login keyring",
   "sockets"); sentences split around a number
   (`status_valid_pre`/`_post`) that Persian word order cannot follow.
-- [ ] **FA-5. No Persian font is shipped.** The page asks for Vazirmatn
+- [x] **FA-5. (Done 2026-11-20: Vazirmatn 33.0.3, the variable build, 111 KB, SIL OFL, in client-ui/src/assets/fonts/vazirmatn/ with its licence; it leads every font stack and covers only Arabic-script characters.) No Persian font was shipped.** The page asks for Vazirmatn
   and falls back to whatever the phone has. It looked fine on the
   Xperia; an old phone with a poor system font would not.
 - The style guide is `docs/style/farsi.md`: every change that writes
