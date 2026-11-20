@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"daal/core/desync"
 	"daal/core/diagnostics"
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/include"
 	boxoption "github.com/sagernet/sing-box/option"
 	tun "github.com/sagernet/sing-tun"
 	singjson "github.com/sagernet/sing/common/json"
@@ -170,7 +170,7 @@ func startSideInstance(ctx context.Context, configJSON []byte) (*box.Box, outbou
 func buildSideInstance(ictx context.Context, merged []byte, raw map[string]any) (*box.Box, error) {
 	boxBuildMu.Lock()
 	defer boxBuildMu.Unlock()
-	bctx := include.Context(ictx)
+	bctx := desync.BoxContext(ictx) // include.Context + daal-desync: see singBox.Start
 	bctx = service.ContextWith[adapter.PlatformInterface](bctx, &sidePlatform{newAndroidPlatform()})
 	options, err := singjson.UnmarshalExtendedContext[boxoption.Options](bctx, merged)
 	if err != nil {

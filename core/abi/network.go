@@ -86,6 +86,7 @@ func seedNetmemForInit() {
 	if c.pm != nil {
 		c.pm.SetActiveNetwork(netmem.SentinelUnset)
 	}
+	engine.SetDesyncNetwork(netmem.SentinelUnset)
 	if eng := budgetEngineIfPresent(); eng != nil {
 		eng.SetActiveNetwork(netmem.SentinelUnset)
 	}
@@ -225,6 +226,9 @@ func (c *Core) switchNetwork(incoming string, adoptFrom []string) (fresh bool, r
 	globalNetmem.activeNetwork = incoming
 	globalNetmem.mu.Unlock()
 	c.pm.SetActiveNetwork(incoming)
+	// Hello desync choices are remembered per network: one made on the
+	// network just left stops applying here (engine/desync.go).
+	engine.SetDesyncNetwork(incoming)
 	if eng := budgetEngineIfPresent(); eng != nil {
 		eng.SetActiveNetwork(incoming)
 	}

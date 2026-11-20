@@ -59,6 +59,11 @@ type ClientOpts struct {
 	// engine) go to the phone's stderr.log (DAAL_ENGINE_LOG, the engine's
 	// switch for exactly that off Android).
 	EngineLog bool
+	// Desync: a core/desync strategy (JSON) the phone's selection ladder
+	// has turned on for the route it connects — wb-client hands it to
+	// the engine (engine.SetRouteDesync) before SetRoute, which is all
+	// the ladder will do. Empty: off, as on every phone today.
+	Desync string
 }
 
 var clientSeq int
@@ -121,6 +126,9 @@ func StartClient(p Paths, label string, o ClientOpts) (*Client, error) {
 	}
 	if o.RecheckS > 0 {
 		args = append(args, "--recheck-s", strconv.Itoa(o.RecheckS))
+	}
+	if o.Desync != "" {
+		args = append(args, "--desync", o.Desync)
 	}
 	if o.Hosts != "" {
 		args = append([]string{"unshare", "--mount", "--propagation", "private", "sh", "-c",

@@ -156,6 +156,19 @@ func ValidateScenario(s Scenario, families []string, taxonomy map[string]bool) [
 			bad("%v", err)
 		}
 	}
+	for preset, m := range s.Desync {
+		if !contains(desyncPresets, preset) {
+			bad("desync preset %q is not one of %v", preset, desyncPresets)
+		}
+		for f, v := range m {
+			if f != "*" && !contains(families, f) {
+				bad("desync[%q] for %q, which is not a declared family", preset, f)
+			}
+			if v != Pass && v != Blocked {
+				bad("desync[%q][%q]=%q, want pass|blocked", preset, f, v)
+			}
+		}
+	}
 	for f, c := range s.Category {
 		if f != "*" && !contains(families, f) {
 			bad("category for %q, which is not a declared family", f)

@@ -48,6 +48,9 @@ type RunCtx struct {
 	// yet. Both belong to the app's order of operations at mint.
 	identity      RelayIdentityDoc
 	signedPending []string
+	// desync: the strategy (JSON) the phone of every Session started
+	// while it is set connects with (op desync). Empty: off.
+	desync string
 }
 
 func cmdRun(args []string) int {
@@ -828,7 +831,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 
 	t0 = time.Now()
 	_, _ = WireReset(rc.Ctx) // the wire tap's window for this session starts here
-	c, err := StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental})
+	c, err := StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental, Desync: rc.desync})
 	if err != nil {
 		r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
 		return Fail, false
@@ -856,7 +859,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		deadline := time.Now().Add(EstablishBudget)
 		for err != nil && ev != nil && ev["stage"] == StageProof && time.Now().Before(deadline) && rc.Ctx.Err() == nil {
 			c.Stop()
-			if c, err = StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental}); err != nil {
+			if c, err = StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental, Desync: rc.desync}); err != nil {
 				r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
 				return Fail, false
 			}

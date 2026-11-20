@@ -11,11 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"daal/core/desync"
 	"daal/core/diagnostics"
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/include"
 	boxoption "github.com/sagernet/sing-box/option"
 	singjson "github.com/sagernet/sing/common/json"
 	N "github.com/sagernet/sing/common/network"
@@ -251,7 +251,9 @@ func (s *singBox) Start(ctx context.Context, configJSON []byte) error {
 			boxBuildMu.Unlock()
 		}
 	}()
-	bctx := include.Context(ictx)
+	// sing-box's own registries plus the daal-desync outbound type
+	// (core/desync BoxContext; include.Context otherwise).
+	bctx := desync.BoxContext(ictx)
 	bctx = service.ContextWith[adapter.PlatformInterface](bctx, s.platform)
 
 	// Load libcronet.so before box.New builds any naive outbound (no-op

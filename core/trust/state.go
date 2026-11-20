@@ -231,6 +231,11 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 			ModesAllowed:    r.ModesAllowed,
 			ExpiresAt:       r.ExpiresAt,
 			ImportedAt:      r.ImportedAt,
+			// The engine's part of the signed family_specific_config
+			// (importer RouteInput.EngineConfig; "" stores "{}"). Written
+			// on every save, so a refreshed pack that drops its cover
+			// names or its desync offer drops them here too.
+			FamilySpecificConfigJSON: r.EngineConfig,
 		}
 		// FRP-2: copy parsed-and-validated RelayPack metadata onto
 		// the routestore row when present. nil RelayPack leaves all

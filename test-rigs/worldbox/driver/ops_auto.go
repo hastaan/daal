@@ -252,12 +252,15 @@ const AutoPassWait = 150 * time.Second
 
 // autoAnswer is the client's account of one press of Connect.
 type autoAnswer struct {
-	ev         map[string]any
-	res        map[string]any
-	connected  bool
-	routeID    string
-	family     string
-	verdict    string
+	ev        map[string]any
+	res       map[string]any
+	connected bool
+	routeID   string
+	family    string
+	verdict   string
+	// variant: the connected route's variant (the engine's connect
+	// ladder: "d:<preset>", "n:<signed id>", both; "" for the route as is).
+	variant    string
 	candidates int
 	tried      []map[string]any // the routes that were tried, in order
 	left       []map[string]any // the routes that were left out (result "refused")
@@ -276,7 +279,7 @@ func (x *autoAnswer) triedText() string {
 	var parts []string
 	for _, t := range x.all {
 		s := fmt.Sprintf("%v(%v)=%v", t["route_id"], t["family"], t["result"])
-		for _, k := range []string{"category", "refined", "refused", "why", "raced_with"} {
+		for _, k := range []string{"variant", "category", "refined", "refused", "why", "raced_with"} {
 			if v, _ := t[k].(string); v != "" {
 				s += " " + k + "=" + v
 			}
@@ -290,7 +293,7 @@ func (x *autoAnswer) triedText() string {
 }
 
 func (x *autoAnswer) evidence() map[string]any {
-	return map[string]any{"connected": x.connected, "route_id": x.routeID, "family": x.family, "verdict": x.verdict,
+	return map[string]any{"connected": x.connected, "route_id": x.routeID, "family": x.family, "variant": x.variant, "verdict": x.verdict,
 		"candidates": x.candidates, "tried": x.triedText(), "auto_ms": x.ev["auto_ms"], "progress": x.ev["progress"]}
 }
 
@@ -313,6 +316,7 @@ func (p *autoPhone) press(step, cmd string, t0 time.Time) *autoAnswer {
 	x.routeID, _ = x.res["route_id"].(string)
 	x.family, _ = x.res["family"].(string)
 	x.verdict, _ = x.res["verdict"].(string)
+	x.variant, _ = x.res["variant"].(string)
 	if n, ok := x.res["candidates"].(float64); ok {
 		x.candidates = int(n)
 	}
@@ -1029,6 +1033,61 @@ func (a *autoOp) fallOver() {
 
 // ---- one phone under a scenario that blocks something -------------------------
 
+// ladderRungs are the presets the engine's connect ladder tries on a
+// route whose hello is RESET, in its order, as far as its per-route
+// budget goes (core/abi connect_ladder.go: ladderPresets, ladderPerRoute =
+// 2; no pack offer and no cover names in a rig pack). A hello that is
+// dropped gets the first one only (ladderPerRouteSilent); the scenarios
+// that declare desync expectations all reset. The rig does not import the
+// product, so the list is repeated here.
+var ladderRungs = []string{"sni-cut", "tlsrec-sni"}
+
+// ladderHelloFamilies: the families whose first flight is a TLS hello the
+// split can sit under (core/engine RouteDesyncReason; desyncFamilies
+// less shadowsocks, which sends no hello).
+var ladderHelloFamilies = map[string]bool{"vless-reality": true, "websocket-tls": true, "anytls": true}
+
+// ladderCanCarry: the family is stopped as it is, and a rung of the
+// engine's ladder is one the scenario says passes.
+func ladderCanCarry(s Scenario, family string) bool {
+	if !ladderHelloFamilies[family] {
+		return false
+	}
+	if e, _ := s.ExpectFor(family); e == Pass {
+		return false
+	}
+	for _, p := range ladderRungs {
+		if _, declared := s.Desync[p]; !declared {
+			continue
+		}
+		if e, _ := s.DesyncExpect(p, family); e == Pass {
+			return true
+		}
+	}
+	return false
+}
+
+// expectOfAttempt is what the scenario says of one attempt of the pass:
+// the family's expectation, or — for a variant the engine's ladder tried
+// ("d:<preset>") — the scenario's desync expectation for that preset.
+// judged=false for a variant the scenario says nothing about (a cover
+// name; a preset it does not declare).
+func expectOfAttempt(s Scenario, family, variant string) (expect string, judged bool) {
+	if variant == "" {
+		e, _ := s.ExpectFor(family)
+		return e, true
+	}
+	if !strings.HasPrefix(variant, "d:") || strings.Contains(variant, "#") {
+		return "", false
+	}
+	p := strings.TrimPrefix(variant, "d:")
+	if _, declared := s.Desync[p]; !declared {
+		return "", false
+	}
+	e, _ := s.DesyncExpect(p, family)
+	return e, true
+}
+
 // AutoVerdictUnder is the verdict a failed pass must give under the
 // scenarios in which no route can carry: what the censor does there, and
 // nothing narrower or wider.
@@ -1076,12 +1135,17 @@ func (a *autoOp) pressUnder(label, cmd, wantVerdict string) {
 	}
 	defer p.stop()
 	cands := p.candidates()
-	canPass, degraded := 0, 0
+	canPass, degraded, ladderOnly := 0, 0, 0
 	for _, r := range cands {
 		switch e, _ := rc.Scn.ExpectFor(r.Family); {
 		case rc.Fams[r.Family].Skip != "":
 		case e == Pass:
 			canPass++
+		case ladderCanCarry(rc.Scn, r.Family):
+			// Stopped as it is, and the engine's connect ladder (core/abi
+			// connect_ladder.go) reaches a cut the scenario lets through.
+			canPass++
+			ladderOnly++
 		case rc.Scn.MustEstablish(r.Family):
 			degraded++
 		}
@@ -1096,7 +1160,12 @@ func (a *autoOp) pressUnder(label, cmd, wantVerdict string) {
 	var wrong []string
 	for _, t := range x.tried {
 		fam := str(t, "family")
-		e, _ := rc.Scn.ExpectFor(fam)
+		e, judged := expectOfAttempt(rc.Scn, fam, str(t, "variant"))
+		if !judged {
+			// A cover-name variant: the scenarios declare nothing about
+			// other names. Recorded (triedText), not judged.
+			continue
+		}
 		stopped := e != Pass && !rc.Scn.MustEstablish(fam)
 		if t["result"] == "carried" && stopped {
 			wrong = append(wrong, fmt.Sprintf("%v (%s) is reported as carrying; the scenario stops it", t["route_id"], fam))
@@ -1109,8 +1178,21 @@ func (a *autoOp) pressUnder(label, cmd, wantVerdict string) {
 	switch {
 	case canPass > 0:
 		if p.connectedOn("connect", x, t0) {
-			e, _ := rc.Scn.ExpectFor(x.family)
-			p.add("connect", x.family, "connected_on_a_route_the_censor_spares", Pass, got(e == Pass || rc.Scn.MustEstablish(x.family), Pass, Fail), "", x.evidence(), t0)
+			e, judged := expectOfAttempt(rc.Scn, x.family, x.variant)
+			if judged {
+				p.add("connect", x.family, "connected_on_a_route_the_censor_spares", Pass, got(e == Pass || rc.Scn.MustEstablish(x.family), Pass, Fail), "", x.evidence(), t0)
+			} else {
+				// A cover-name variant (or a preset the scenario does not
+				// declare): nothing to judge it against. Said, not passed.
+				p.add("connect", x.family, "connected_on_a_route_the_censor_spares", Skipped, Skipped,
+					"connected on variant="+x.variant+", which the scenario declares nothing about", x.evidence(), t0)
+			}
+			if ladderOnly == canPass {
+				// Nothing the scenario spares as it is: the engine had to
+				// find the cut by itself, inside the one pass.
+				p.add("connect", x.family, "ladder_found_the_cut", Pass,
+					got(strings.HasPrefix(x.variant, "d:") && e == Pass, Pass, Fail), "variant="+x.variant, x.evidence(), t0)
+			}
 		}
 	case degraded > 0:
 		// A path the scenario degrades without cutting may or may not

@@ -243,6 +243,16 @@ func (c *Core) prepareRouteLocked(routeID string) (routestore.RouteRow, []byte, 
 //     already running. Revocation, expiry and the endpoint guard are
 //     never skipped.
 func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (routestore.RouteRow, []byte, error) {
+	return c.prepareRouteVariant(routeID, record, ignoreCooldown, nil)
+}
+
+// prepareRouteVariant is prepareRouteOpts for one VARIANT of the route
+// (connect_ladder.go): v nil is the variant in use for the route on this
+// network, or the plain route; v non-nil is exactly that one (the zero
+// variant: the plain route). Every check above runs on the route's own
+// stored profile — the endpoint guard included — before a variant
+// changes its first flight.
+func (c *Core) prepareRouteVariant(routeID string, record, ignoreCooldown bool, v *routeVariant) (routestore.RouteRow, []byte, error) {
 	refuse := func(err error) (routestore.RouteRow, []byte, error) {
 		code := refusedCode(err)
 		if record {
@@ -285,11 +295,7 @@ func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (ro
 	if err := routeEndpointGuard(c.store, row, profile); err != nil {
 		return refuse(err)
 	}
-	cfg, err := engine.BuildSingBoxConfig(row, profile)
-	if err != nil {
-		return refuse(err)
-	}
-	body, err := engine.MarshalSingBox(cfg)
+	body, err := c.variantBodyLocked(row, profile, v)
 	if err != nil {
 		return refuse(err)
 	}
@@ -702,13 +708,13 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 			// still fine (one store write every three minutes, for
 			// nothing). No setup time: this was a round trip on a route
 			// that was already up.
-			c.rememberOutcome(routeID, netmem.RouteOutcome{Carried: true, Slow: res.Slow})
+			c.rememberOutcome(c.runningMemKeyLocked(routeID), netmem.RouteOutcome{Carried: true, Slow: res.Slow})
 		}
 		if prev == RouteCheckFailed {
 			// Back after an outage: the automatic connect is connected
 			// again.
 			c.auto.recovered(routeID, family)
-			c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
+			c.auto.resetFallLocked()
 		}
 	case prev == RouteCheckFailed && (autoFallsOverFor(prevCat) || !autoFallsOverFor(res.Category())):
 		// Still down. Keep the first classification of this outage.
@@ -718,8 +724,10 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 		// was only slow (or whose relay had no way out, or whose device
 		// had no network) and now gets no answer at all is a different
 		// outage, and the one the automatic connect moves away from.
-		c.routeDownLocked(routeID, family, res.Category(), proofFailureText(res), false)
-		c.rememberRoute(routeID, false, res.Category())
+		if !c.liveVariantDownLocked(routeID, family, res.Category(), proofFailureText(res)) {
+			c.routeDownLocked(routeID, family, res.Category(), proofFailureText(res), false)
+			c.rememberRoute(routeID, false, res.Category())
+		}
 	}
 	st, cat := c.check.get()
 	return CheckResult{RouteID: routeID, State: st, Category: string(cat), Checked: true}

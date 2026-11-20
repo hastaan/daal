@@ -43,6 +43,21 @@ type DPIRule struct {
 	// segments (a GFW-like box). false = it reads the first data packet
 	// only and misses a name that lies beyond it (a stateless box).
 	Reassemble bool `json:"reassemble,omitempty"`
+	// Packets: a tls_sni rule that is not Reassemble reads the first
+	// Packets data packets of a flow JOINED (default 1: the first packet
+	// alone) and no more — "inspects only the first two data-carrying
+	// packets and does not perform full TCP stream reassembly" (Bock et
+	// al. 2020, IRBlock 2025) is Packets 2. A ClientHello whose name is
+	// whole within the first two packets is caught; one cut so that it
+	// is not passes. At most dpiMaxPkts.
+	Packets int `json:"packets,omitempty"`
+	// Partial: a tls_sni rule reads the server_name out of a ClientHello
+	// that is not complete yet, as soon as the name itself is (the record
+	// header says how long the hello is; the box does not wait for the
+	// rest). Without it a box needs the whole record in what it reads.
+	// With Packets 2 this is the strictest stateless box: any name whole
+	// within the first two packets is caught, whatever comes after.
+	Partial bool `json:"partial,omitempty"`
 	// Allow: for first_bytes_not — "tls" (record type 0x16, version 3.x)
 	// and/or "http" (a request verb).
 	Allow []string `json:"allow,omitempty"`
@@ -63,6 +78,12 @@ func (r DPIRule) validate() error {
 		if len(r.SNI) == 0 {
 			return fmt.Errorf("dpi rule tls_sni needs a non-empty sni list")
 		}
+		if r.Packets < 0 || r.Packets > dpiMaxPkts {
+			return fmt.Errorf("dpi rule tls_sni: packets=%d, want 0..%d", r.Packets, dpiMaxPkts)
+		}
+		if r.Packets > 0 && r.Reassemble {
+			return fmt.Errorf("dpi rule tls_sni: packets is the window of a box that does NOT reassemble; drop one of packets/reassemble")
+		}
 	case "first_data":
 	case "first_bytes_not":
 		if len(r.Allow) == 0 {
@@ -75,6 +96,9 @@ func (r DPIRule) validate() error {
 		}
 	default:
 		return fmt.Errorf("dpi rule: when=%q, want tls_sni|first_data|first_bytes_not", r.When)
+	}
+	if (r.Packets != 0 || r.Partial) && r.When != "tls_sni" {
+		return fmt.Errorf("dpi rule %s: packets/partial apply to tls_sni only", r.When)
 	}
 	if r.Action != "drop" && r.Action != "rst" {
 		return fmt.Errorf("dpi rule %s: action=%q, want drop|rst", r.When, r.Action)
@@ -180,6 +204,25 @@ func parseClientHello(b []byte) (sni string, state int) {
 		return string(body[5 : 5+n]), chSNI
 	}
 	return "", chNoSNI
+}
+
+// parseClientHelloPartial is parseClientHello for a box that does not
+// wait for the whole record: an incomplete hello is read as if the bytes
+// still to come were zeros. A name that lies wholly in what has arrived
+// comes out intact; one cut short comes out with NULs in it and matches
+// no rule (no real name has one); anything else is chNeedMore.
+func parseClientHelloPartial(b []byte) (sni string, state int) {
+	name, st := parseClientHello(b)
+	if st != chNeedMore || len(b) < 5 {
+		return name, st
+	}
+	recLen := int(binary.BigEndian.Uint16(b[3:5]))
+	padded := make([]byte, 5+recLen)
+	copy(padded, b)
+	if name, st := parseClientHello(padded); st == chSNI && !strings.ContainsRune(name, 0) {
+		return name, chSNI
+	}
+	return "", chNeedMore
 }
 
 func looksLikeHTTP(b []byte) bool {
@@ -339,17 +382,30 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 			}
 		case "tls_sni":
 			data := fl.buf
+			window := r.Packets
+			if window == 0 {
+				window = 1
+			}
 			if !r.Reassemble {
-				if fl.pkts != 1 {
+				if fl.pkts > window {
 					continue
 				}
-				data = pk.payload
+				if window == 1 {
+					data = pk.payload
+				}
 			}
-			name, st := parseClientHello(data)
+			parse := parseClientHello
+			if r.Partial {
+				parse = parseClientHelloPartial
+			}
+			name, st := parse(data)
 			switch st {
 			case chNeedMore:
 				if r.Reassemble && fl.pkts < dpiMaxPkts && len(fl.buf) < dpiBufCap {
 					pending = true
+				}
+				if !r.Reassemble && fl.pkts < window && len(fl.buf) < dpiBufCap {
+					pending = true // the window is not full yet
 				}
 			case chSNI:
 				for _, want := range r.SNI {

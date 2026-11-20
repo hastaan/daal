@@ -91,7 +91,9 @@ func (s *Store) Get(networkID string) (Snapshot, error) {
 // what the record already holds about its ROUTES (RouteMemory and its
 // sequence) — those are written when a route carries or fails, by
 // RecordRouteOutcome, and a rewrite of everything else must not undo
-// one that landed a moment ago. The read and the write are one step.
+// one that landed a moment ago. The connect ladder's name count
+// (CoverNamesShown) is kept the same way. The read and the write are
+// one step.
 func (s *Store) PutKeepingRouteMemory(networkID string, snap Snapshot, now time.Time) error {
 	if networkID == "" {
 		return errors.New("netmem: empty networkID")
@@ -100,6 +102,7 @@ func (s *Store) PutKeepingRouteMemory(networkID string, snap Snapshot, now time.
 	defer s.mu.Unlock()
 	if prev, err := s.Get(networkID); err == nil {
 		snap.RouteMemory, snap.RouteMemorySeq = prev.RouteMemory, prev.RouteMemorySeq
+		snap.CoverNamesShown = prev.CoverNamesShown
 	}
 	return s.Put(networkID, snap, now)
 }
@@ -275,12 +278,57 @@ func (s *Store) ForgetRoute(routeID string) error {
 		if err != nil {
 			continue
 		}
-		if _, ok := snap.RouteMemory[routeID]; !ok {
+		found := false
+		for k := range snap.RouteMemory {
+			// The route and its variants (variant.go): a variant's
+			// record is about the route, and goes with it.
+			if k == routeID || strings.HasPrefix(k, routeID+VariantSep) {
+				delete(snap.RouteMemory, k)
+				found = true
+			}
+		}
+		if !found {
 			continue
 		}
-		delete(snap.RouteMemory, routeID)
 		// LastSeen is kept: forgetting a route is not a visit to the
 		// network and must not extend its retention.
+		body, err := snap.MarshalCanonical()
+		if err != nil {
+			return err
+		}
+		if err := s.kv.PutSecret(keyPrefix+id, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForgetVariants removes routeID's VARIANT records (variant.go) from the
+// memory of every network, and keeps the route's own. For a route whose
+// signed endpoint changed: what a cut or a name did against the old
+// relay says nothing about the new one.
+func (s *Store) ForgetVariants(routeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids, err := s.All()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		snap, err := s.Get(id)
+		if err != nil {
+			continue
+		}
+		found := false
+		for k := range snap.RouteMemory {
+			if strings.HasPrefix(k, routeID+VariantSep) {
+				delete(snap.RouteMemory, k)
+				found = true
+			}
+		}
+		if !found {
+			continue
+		}
 		body, err := snap.MarshalCanonical()
 		if err != nil {
 			return err

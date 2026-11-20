@@ -340,6 +340,69 @@ The 3B and 3C hints coexist on the same network row;
 (neither helper rewrites the full snapshot — they read,
 update one field, and write).
 
+## Route variants (2026-11-20)
+
+The connect ladder (`core/abi/connect_ladder.go`; `specs/engine-abi-v1.md`
+"The connect ladder") remembers, per network, what each VARIANT of a route
+did — the route with its TLS first flight changed by a hello desync
+preset, a signed cover name, or both. A variant's record is a
+`route_memory` entry under a derived key (`core/netmem/variant.go`):
+
+| Key | Variant |
+|---|---|
+| `<route_id>#d:<preset>` | hello cut by a desync preset (`split1`, `sni-cut`, `chain`, `tlsrec-sni`), or by the pack's own `_desync` offer when it is not one preset: `pack-<6 hex>`, the hex a digest of the normalised offer (a changed offer starts a new record) |
+| `<route_id>#n:<id>` | tls.server_name swapped for the entry of the route's signed `_cover_names` whose `id` is `<id>` (never a position: an entry dropped or moved does not shift what an id means) |
+| `<route_id>#d:<preset>#n:<id>` | both |
+
+It is an ordinary `RouteMemory` record — hour buckets, the snapshot's
+ordering counter, streaks, grade, the 30-day sweep, panic-wipe — and it
+holds no name: only a signed id. `ForgetRoute` drops a route's variants
+with it; `ForgetVariants` drops them alone, on every network, when the
+route's signed endpoint (or, for a route without one, its outbound)
+changes — the engine keeps a digest of what the variants were recorded
+against, encrypted, under `ladder_bind:<route_id>` in `secrets_kv`, and
+checks it at the start of every automatic pass.
+
+What is written: only a failure that says something about the first
+flight — a reset or close at the hello that is not measured as the
+relay's own. A silent failure, a server-side stop, a failure further on,
+or a variant that could not start writes nothing (the last is set aside
+in memory until the engine restarts).
+
+Two ageing rules apply to variant records only (a plain route's record
+ages as before, by `FailedSince` alone):
+
+- **Confidence** (`RouteMemory.Confidence`): 1 within 24 h of the hour the
+  variant last carried here, halving per further 24 h without a fresh
+  success; 0 when its last outcome here was a failure. At or above 0.5
+  (it carried here within 48 h) and more recently than the plain route,
+  the variant is the route's first attempt on this network; below it the
+  plain route goes first and the variant is the ladder's first rung.
+- **Blocked mark** (`RouteMemory.VariantBlockedAt`): a variant whose last
+  outcome here failed is not offered again for 72 h; after that it may
+  be. A variant that has carried here before needs two failures in a row
+  (`fail_streak` ≥ 2) to be marked: one stopped hello right after a flap
+  does not set a proven winner aside for three days.
+
+**The cover-name count** is the one new field, `cover_names_shown`: per
+relay address, the cover names ever presented to it from this network —
+both as `ShownKey`s (the first 8 bytes of SHA-256 over a domain separator,
+the network id and the string, hex), never a name or an address. The
+ladder shows a relay at most 3 distinct names from one network, ever, and
+no new one while two names to it carry a blocked mark here. It is not
+keyed by route, so `ForgetRoute` and a pack refresh that mints new route
+ids do not reset it; `PutKeepingRouteMemory` keeps it like the route
+records; it goes with the snapshot (the 30-day sweep, `Forget`). At most
+64 relays and 16 names per relay are kept.
+
+The route listing's `measured` reports whichever record of the route or
+of its variants was written last (a route that carries here only with its
+hello cut has carried here).
+
+An older engine reading a snapshot with variant keys sees routes it does
+not hold and ignores them (every reader looks records up by route id),
+and ignores `cover_names_shown`.
+
 ## Cross-references
 
 - `specs/rendezvous-channels-v1.md` — V3.2 channel taxonomy

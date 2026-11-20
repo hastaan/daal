@@ -7,8 +7,8 @@ middle. Every hop runs the **production binary or the production code path**
 and a rig that re-implements a seam cannot see them.
 
 ```
-../../daal e2e            # quick: 16 worlds, ~1450 checks, ~1 minute. The pre-push hook runs this.
-../../daal e2e full       # everything: 19 worlds, ~4450 checks, 4–5 minutes.
+../../daal e2e            # quick: 18 worlds, ~1450 checks, ~1 minute. The pre-push hook runs this.
+../../daal e2e full       # everything: 24 worlds, ~4450 checks, 4–5 minutes.
 ```
 
 That is the entry point (`./e2e.sh [quick|full] [-j N] [--only world,…] [--plan]`
@@ -36,8 +36,8 @@ No sudo, no network, no VPS, no phone.
 | **quick** (~1 min) | `clean` | no censor × all 7 families on the tree's mgmt daemon, plus the ops `switch` (a live route switch, TCP family ↔ QUIC family), `revoke`, `l1`, `mgmtauth`, `tamper` |
 | | `auto` | the **automatic connect** — the main screen's one button, no route named — on the four routes a default relay serves: op `auto` (see "Client-side ops") |
 | | `release` | the **pinned release artefacts** (what a relay provisioned today really downloads) × the default families, plus `revoke`, `mgmtauth` |
-| | one per censor scenario (14) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
-| **full** (4–5 min) | one per censor scenario (14) | every scenario × all 7 families |
+| | one per censor scenario (15) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
+| **full** (4–5 min) | one per censor scenario (15) | every scenario × all 7 families; under `sni-rst-stateless` and `sni-rst-first-two` also op `desync` (the engine's ClientHello split, see "Client-side op `desync`") |
 | | `clean.recipients`, `clean.rotation` | the whole lifecycle on the tree daemon × all 7 families: recipients, revoke, wrong credentials, tamper, mgmt-auth, repeated relay restarts; then L1, **L2 then L3** (the cover host moves, then the address — the order in which naive's certificate matters), freshness, capability honesty |
 | | `clean.switch` | one phone, many routes: `switch`, then `switch-all` — a live switch between **every ordered pair** of the 7 families (42) in one session |
 | | `clean.auto` | op `auto` with all 7 families' routes on the phone (three of them behind the experimental gate, which the op leaves off) |
@@ -404,7 +404,7 @@ the module cache, beside the binary.
 
   | `when` | fires on | parameters |
   |---|---|---|
-  | `tls_sni` | a TLS ClientHello whose `server_name` is in `sni` | `reassemble`: follow the hello across TCP segments (false = first data packet only) |
+  | `tls_sni` | a TLS ClientHello whose `server_name` is in `sni` | `reassemble`: follow the hello across TCP segments (false = first data packet only); `packets`: N (≤ 8) — a box that does NOT reassemble but joins the first N data packets (2 is Iran's documented window); `partial`: read the name out of a hello that is not complete yet, as soon as the name is (else the whole record must be in what the box read) |
   | `first_data` | the first packet of a flow that carries payload | — |
   | `first_bytes_not` | a first payload that does not begin like `allow` | `allow`: `tls` (record 0x16) and/or `http` (a request verb) |
 
@@ -495,6 +495,7 @@ running side by side never relink what another is executing.
 | `sni-drop` | ClientHello with the cover SNI swallowed, flow blackholed, no RST | GFW ESNI / fully-encrypted-traffic style in-path drop | dpi |
 | `sni-rst` | same trigger, forged RST to both ends, reassembling | the GFW's classic SNI reset | dpi |
 | `sni-rst-stateless` | same trigger, RST+ACK to the client only, first data packet only | Iran's SNI filter (no stream reassembly) | dpi |
+| `sni-rst-first-two` | same trigger and reset, the first TWO data packets joined, the name read as soon as it is whole in them, nothing read after | Iran's SNI filter as measured: "inspects only the first two data-carrying packets", no reassembly; the multi-record blind spot | dpi |
 | `tcp-reset-mid-handshake` | any TCP flow to the relay reset on its first data packet | RST against a suspected proxy address | dpi |
 | `quic-drop` | QUIC v1 Initial datagrams dropped on every port | QUIC/HTTP3 blocking by protocol | nft (raw payload match) |
 | `heavy-loss` | 30% random loss on TCP only | protocol-selective shaping | nft |
@@ -570,7 +571,9 @@ shown to survive Iran or China. Specifically:
 * **A simpler parser than the adversary's — and a stricter one than
   Iran's.** The ClientHello parser reads one TLS record; a hello fragmented
   across records is not seen (the real blind spot too). `sni-rst-stateless`
-  reads only the first data packet (the real box reads two). No ECH, no
+  reads only the first data packet (the real box reads two);
+  `sni-rst-first-two` reads two, and reads the name out of an incomplete
+  hello — stricter than a box that waits for the whole record. No ECH, no
   QUIC Initial decryption (so no QUIC-SNI blocking), no certificate
   inspection, no HTTP Host matching, no DNS tampering at all.
 * **One address, one flow direction.** Rules look at client→world packets.
@@ -657,6 +660,7 @@ nothing).
 | `l2` | `rotate-tls`, `bind-and-sign`, `publish-freshness`, then Rebuild | cover host moved in the record and in both places on the box; no key, no user row changed; **old pack per family = `l2OldPackExpect`** (vless-reality blocked, the rest pass); **a phone holding a pre-rotation file polls the mirrors and connects on every family with no new file** (`no-new-file.cover-host-moved.*`); rebuilt pack connects everywhere | the pre-rotation session passed |
 | `mgmtauth` | (hand-built requests, `mgmtprobe.go`) | unsigned, wrong scheme, garbage, empty signature, stranger's key, wrong op, stale, future, signed for another body, signed for another relay, replayed address token, **replayed `users-revoke` token aimed at a second recipient** are all refused | a correctly signed request is honoured; afterwards the config is byte-identical and the targeted recipient still connects |
 | `freshness` | `bind-and-sign --freshness-mirror`, `publish-freshness`, `rotate-tls`; engine: `abi.SchedulerTick` | what the app publishes — the digest of the SIGNED, credential-less pack, with that file at the pack URL — is **merged** by a polling phone: with nothing changed it still connects and keeps every route; after an L2 it connects **with no new file** (nothing is minted for it); the published file holds no credential (`published.*.holds_no_credentials`) | no poll → still blocked; a document signed by another key → refused, no pack downloaded; a pack whose digest does not match → refused; the signed pack handed as a file to a phone that holds nothing → refused; the signed pack from BEFORE the rotation handed as a file to a phone that has already moved on → not merged, routes kept, still connects (`rotated.stale-signed-pack-by-file.*`) |
+| `blocked-while-connected` | `assign-fip`, `bind-and-sign --freshness-mirror`, `publish-freshness`, `floating-ip release`; engine: `engine_connect_auto`, then nothing from the host | blackout plan C0: a phone CONNECTED on a pre-move file; the relay moves (L3) and the censor null-routes the old address under it; the engine by itself stops the dead instance, walks the mirrors once, directly from the phone's own address, applies the re-signed pack and is connected again on the new address in the same TUN (`relay_recovery.state` updated, trigger failure); one walk only (document fetches ≤ mirrors, one pack); the same again under a block that RESETS TCP instead of swallowing it | a phone that cannot see the mirrors: the walk finds nothing, `relay_recovery.state` unreachable, the dead route's instance back (failed, running), a verdict, and no traffic around the tunnel |
 | `caps` | — (reads this run's results) | every token `/health` advertises was observed to work in this run, and nothing that worked is unadvertised; a token with no evidence is `skipped` with the op that would produce it; a token the rig has no proof for fails. **It judges the binary's claim against the binary's behaviour, not the box's privilege**: `bind-address` is advertised because the daemon holds `CAP_NET_ADMIN`, which in this world every process does. It does not show that the systemd unit grants it, nor that a relay with an older unit advertises nothing | — |
 | `restarts` | `users-provision`, `users-revoke` (N cycles, `WB_RESTART_CYCLES`, default 6) | the relay comes back serving **every** family after every restart of its data plane: each cycle restarts sing-box three times and then runs a bystander's session on each family | the bystander's pack is r1's, never touched by the verbs |
 
@@ -669,6 +673,39 @@ Any op that moves an endpoint must `rc.Resign` before it mints from
 describes the relay. `caps` must run last. The rotation rungs
 need a mgmt daemon that advertises them: the pinned release does for
 L1/L2/L3 on the four default families (FINDINGS LC-O4).
+
+#### Client-side op `desync` — the engine's own ClientHello split
+
+`desync` (`driver/ops_desync.go`) runs the PRODUCTION split (`core/desync`,
+plan T2 of `docs/blackout-tier-plan.md`) against the world's censor, where
+the scenario's `split: true` proof only runs a probe-harness one. For each
+family whose outbound the split can sit under (vless-reality,
+websocket-tls, shadowsocks, anytls — not naive, whose Cronet dials the
+relay itself, nor the UDP families) and each preset the scenario lists in
+its `desync` map (preset → family → `pass`|`blocked`; `sni-cut` alone,
+expected as the scenario expects, when it lists none), one fresh phone
+connects with the preset turned on for its route — `wb-client --desync`
+→ `engine.SetRouteDesync`, which is all the selection ladder will do —
+and runs the ordinary session under `<preset>.`. `<preset>.first_segment`
+then reads the client's segment sizes off the flow tap at the censor
+(`flowtap.go`, the first 8 data packets of every flow are kept, with
+their bytes): every TCP flow to the family's endpoint must begin with a
+1-byte data packet for the presets that cut at 1, so a green tunnel is
+not a split that never happened. `<preset>.name_cut` reads where the
+cover host's name fell in those bytes: no single data packet may hold it
+whole (`sni-cut`, `chain`, `tlsrec-sni` — for the record split, the
+records' payloads joined must hold it and no packet contiguously), and
+for `sni-cut` not the first two packets joined either. `split1` does not
+claim it (recorded, not judged); a flow whose kept bytes never carry the
+name is not judged. uTLS's chrome fingerprint permutes its extensions, so
+the name moves from hello to hello (one run: byte ~140 in one flow, ~476
+in the next) — the check reads it, it does not assume it. What this rig
+cannot show: kernel autocorking on a slow link and merged
+retransmissions after loss (the veth links are lossless and the censor
+forwards out-of-order segments unread). Run by the full plan in `sni-rst-stateless` (every preset
+listed passes) and `sni-rst-first-two` (`split1` is caught — its first
+two packets hold the whole hello — and `sni-cut`, `chain`, `tlsrec-sni`
+pass).
 
 #### Client-side ops — one phone that stays up
 

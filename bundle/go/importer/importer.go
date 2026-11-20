@@ -83,6 +83,16 @@ type RouteInput struct {
 	// FORWARD. Empty exactly when Endpoint is.
 	SignedAt string
 
+	// EngineConfig is the part of the route's SIGNED
+	// family_specific_config the engine reads at connect time
+	// (bundle.EngineFamilyConfig: the pack's `_desync` offer and its
+	// `_cover_names`), or "" — always "" for a route with no signed
+	// endpoint (a pasted link, a subscription): only a route whose
+	// address its publisher signed gets a publisher's word on how its
+	// first flight may be changed. The store keeps it on the route's
+	// row (RouteRow.FamilySpecificConfigJSON); a refresh rewrites it.
+	EngineConfig string
+
 	// RelayPack carries the parsed FRP-2 metadata for this candidate.
 	// nil for non-RelayPack routes; legacy callers leave it nil. The
 	// concrete State implementation (e.g. core/trust/state.go's
@@ -473,6 +483,7 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 		}
 		if len(pr.endpoint) > 0 {
 			ri.SignedAt = parsed.Manifest.Bundle.CreatedAt
+			ri.EngineConfig = bundle.EngineFamilyConfig(r.FamilySpecificConfig)
 		}
 		if hasRP {
 			entry, err := bundle.ParseRelayPackEntry(r.FamilySpecificConfig)

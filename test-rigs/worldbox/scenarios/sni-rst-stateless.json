@@ -16,5 +16,11 @@
     {"name": "tcp-handshake-spared", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"}
   ],
   "expect": {"*": "pass", "vless-reality": "blocked"},
-  "category": {"vless-reality": "tls_sni_or_cert_block_suspected"}
+  "category": {"vless-reality": "tls_sni_or_cert_block_suspected"},
+  "desync": {
+    "split1":     {"*": "pass"},
+    "sni-cut":    {"*": "pass"},
+    "chain":      {"*": "pass"},
+    "tlsrec-sni": {"*": "pass"}
+  }
 }

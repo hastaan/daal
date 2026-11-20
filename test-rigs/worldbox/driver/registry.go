@@ -122,6 +122,32 @@ type Scenario struct {
 	// — the family's own endpoint was tried, and nothing else was — and
 	// not the byte count. See wireUnderRandomLoss.
 	RandomLoss bool `json:"random_loss,omitempty"`
+	// Desync: what op desync expects when the engine's production
+	// ClientHello split (core/desync, plan T2) is on — preset name →
+	// family (or "*") → pass|blocked. The op runs every preset listed
+	// here, on every family the split can sit under (desyncFamilies); a
+	// scenario that lists none is run with sni-cut only and the
+	// scenario's own expectation ("the split must break nothing").
+	Desync map[string]map[string]string `json:"desync,omitempty"`
+}
+
+// desyncPresets are the presets core/desync ships (Presets in
+// core/desync/strategy.go). The rig does not import the product, so the
+// list is repeated here; wb-client refuses a preset the engine does not
+// know, which turns a stale entry into a red check, not a silent pass.
+var desyncPresets = []string{"split1", "sni-cut", "chain", "tlsrec-sni"}
+
+// DesyncExpect is what a session of family with the split on should give.
+func (s Scenario) DesyncExpect(preset, family string) (string, error) {
+	if m, ok := s.Desync[preset]; ok {
+		if v, ok := m[family]; ok {
+			return v, nil
+		}
+		if v, ok := m["*"]; ok {
+			return v, nil
+		}
+	}
+	return s.ExpectFor(family)
 }
 
 // MustEstablish: the scenario claims this family still connects, and only

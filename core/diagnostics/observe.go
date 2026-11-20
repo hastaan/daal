@@ -83,8 +83,57 @@ type Observation struct {
 	// through it stayed silent. Set by the connection proof only, after
 	// at least two hosts run by different operators.
 	RelayNoEgress bool
+	// Timing (docs/adaptive-cover-names-plan.md §1.5), in memory only —
+	// durations, never a time of day; 0 = not measured.
+	//
+	// DialMs: from opening the outbound's connection to its failure —
+	// the TCP connect plus, for a family whose dial includes it, the
+	// first flight and whatever stopped it. ConnectMs: a bare TCP
+	// connect to the same relay address and port (the reach check), when
+	// one ran and was answered: about one round trip. HelloToFailMs
+	// derives the gap between the hello and its failure from the two.
+	DialMs    int
+	ConnectMs int
 	// Message is the error text, for the locked string table.
 	Message string
+}
+
+// HelloTimingFloorMs: below this round trip the two halves cannot be
+// told apart at millisecond resolution (a relay next door, a LAN, the
+// rig), and nothing is read from them.
+const HelloTimingFloorMs = 20
+
+// HelloToFailMs is the time between the first flight and the failure
+// that stopped it (DialMs less one connect). measured is false when
+// either half was not measured, when the round trip is under
+// HelloTimingFloorMs, or when the dial took LESS than the bare connect
+// (the two are not comparable then: one of them was queued); the gap is
+// 0 then and means nothing.
+func (o Observation) HelloToFailMs() (gap int, measured bool) {
+	if o.DialMs <= 0 || o.ConnectMs < HelloTimingFloorMs || o.DialMs < o.ConnectMs {
+		return 0, false
+	}
+	return o.DialMs - o.ConnectMs, true
+}
+
+// FastReset is the on-device hint of an INJECTED reset: the connection
+// was reset after the hello sooner than half a round trip to the relay
+// (ConnectMs) — an answer that cannot have come from the relay itself.
+// A heuristic, false unless both halves were measured: a CGNAT or a
+// border hop near the client blurs the two (an unprivileged socket
+// cannot read the RST's TTL, so timing is the only signal there is).
+func (o Observation) FastReset() bool {
+	gap, measured := o.HelloToFailMs()
+	return o.Reset && measured && gap*2 < o.ConnectMs
+}
+
+// ServerStop is the opposite hint: the hello was reset or closed, both
+// halves were measured, and the stop came back no sooner than the relay
+// itself could have sent it — the relay's own refusal (its inbound down,
+// its key rotated), not a box on the way. False when not measured.
+func (o Observation) ServerStop() bool {
+	gap, measured := o.HelloToFailMs()
+	return (o.Reset || o.Closed) && measured && gap*2 >= o.ConnectMs
 }
 
 // Observe builds an Observation from an error and the context the

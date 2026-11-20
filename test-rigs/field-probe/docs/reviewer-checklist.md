@@ -12,5 +12,8 @@ Before a contributed report is added as a fixture, a reviewer confirms:
 - [ ] Categories listed appear in `specs/failure-taxonomy-v1.md`.
 - [ ] No real route secrets or real CDN IPs.
 - [ ] Contributor has confirmed sharing.
+- [ ] (v2) The file opened with `daal-deploy report-open` (strict schema-v2 parse).
+- [ ] (v2) No `variant`, `notes` or other string names a host, a path or an address.
+- [ ] (v2) `flow_capped_suspected`, when present, is read as a suspicion, not a measurement.
 
 If any item fails, the report is not added as a fixture.

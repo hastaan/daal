@@ -63,6 +63,33 @@ as a no-op on the tier where it can. Source: the review section of
 The status stays PENDING. Nothing above is a pass or a rejection; it
 narrows the methodology to the one tier that can carry the modifier.
 
+## Daal's own split (core/desync, plan T2) — 2026-11-20
+
+Not sing-box's fragmenter: a `daal-desync` outbound the route's outbound
+names as `detour`, cutting the first flight below uTLS/REALITY (so it
+reaches a vless-reality hello, which `fragment`/`record_fragment` cannot).
+Presets: split1 [1]; sni-cut [1] + mid-name; chain [1] + 6-byte pieces
+across the server_name only; tlsrec-sni two records split mid-name, TCP
+cut at the boundary. Off unless the selection ladder turns it on for a
+route on the current network (the automatic pass's connect ladder,
+`core/abi/connect_ladder.go`: after the route's own hello is stopped,
+the pack offer, then sni-cut, tlsrec-sni, chain; at most two per route
+per pass; the winner remembered per network); a pack's `apply: always` is held as an
+offer until this record is PASS. Not applied together with
+`fragment`/`record_fragment` (stock_fragment) or `tcp_fast_open`.
+
+Measured in worldbox only: against the `sni-rst-first-two` model (first
+two data packets joined, partial parse, RST to client) split1 is
+caught and sni-cut, chain and tlsrec-sni pass; against
+`sni-rst-stateless` (first packet only) all four pass. That is a result
+for those censor models, not for Iran. Not measurable there: kernel
+autocorking on a slow link, and merged retransmissions after loss. Only
+the ACK-wait presets (split1, sni-cut, tlsrec-sni) survive a lost
+segment uncut; chain, or a wait that timed out, can be retransmitted
+merged (Linux tcp_retrans_collapse) with the name whole. uTLS chrome
+permutes extensions, so the name's offset varies per hello; the cuts
+follow it.
+
 ## Pass record
 
 - **status**: PENDING
@@ -89,9 +116,11 @@ modifier is not accepted at V1.5 / V1.6 (locked invariant 39).
 - **platforms**: `[]`
 
 Empty array — no platform yet enabled. Per supplement §11.6 the
-`tls_fragment` row says "post-V2"; the platform list is finalised at
-censor-lab review (the fragmentation library choice in the
-methodology determines which platforms can carry it). Empty platforms
+`tls_fragment` row says "post-V2". Candidate platforms for the
+core/desync form: Linux and Android (TCP_INFO: ACK wait, RTO floor,
+autocork guard — source-verified, on-device unproven). Windows, macOS
+and iOS have no ACK wait and no autocork guard: delays alone,
+unmeasured. The list stays `[]` until the censor-lab review. Empty platforms
 list means the engine importer rejects this modifier on every
 platform regardless of validator state, with error code
 `IMP_MODIFIER_PLATFORM` (locked invariant 40).

@@ -2,7 +2,10 @@
 
 ## Status
 
-Draft for V0 freeze.
+Draft for V0 freeze. The network test inside Daal is **v2**
+(`specs/field-probe-v2.md`, schema `probe-report-v2.json`); v1 stays the
+contract of the standalone `daal-probe` report, and every v1 privacy
+invariant holds for v2.
 
 ## Purpose
 

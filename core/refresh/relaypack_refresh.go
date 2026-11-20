@@ -131,6 +131,11 @@ const (
 	OutcomeFreshnessAmbiguous    = "relaypack_ambiguous"
 	OutcomeFreshnessRecovery     = "pointer_recovery"
 	OutcomeFreshnessImportFailed = "import_failed"
+	// OutcomeFreshnessCancelled: an unscheduled walk (relaypack_recover.go)
+	// whose caller's context was cancelled under it — a disconnect, a
+	// route picked by hand, a newer pass, Shutdown. Nothing about the
+	// mirrors was learned, and it is never recorded as "unreachable".
+	OutcomeFreshnessCancelled = "cancelled"
 )
 
 // Defaults for the walk. PerURL is short because a blocked host in
@@ -170,6 +175,27 @@ type RelayPackRefresher struct {
 	// nil means "no recovery layer wired" — the refresh simply fails,
 	// which is honest.
 	Recover func(ctx context.Context) (string, error)
+
+	// DirectDialer is the dialer the failure-triggered and on-demand
+	// kinds use when NO route is active (relaypack_recover.go). nil
+	// means bootstrap's plain direct dialer. It is consulted only after
+	// TunnelRequired() has said false, and what it returns is wrapped so
+	// that a dial attempted after a route came up is refused.
+	DirectDialer DialerFn
+
+	// FailureFloor / OnDemandFloor rate-limit the two unscheduled kinds
+	// (relaypack_recover.go); zero means the defaults there.
+	FailureFloor  time.Duration
+	OnDemandFloor time.Duration
+
+	// TunnelHealthy reports whether the route the tunnel dialer rides is
+	// carrying (the engine's connection check has not failed it). nil
+	// means "assume it is". A scheduled poll whose dialer is the tunnel's
+	// and whose tunnel is NOT healthy is treated like one the guard
+	// refused: stamped, not escalated, no pointer recovery — a walk
+	// through a dead tunnel says nothing about the mirrors (blackout plan
+	// C0, review M3).
+	TunnelHealthy func() bool
 }
 
 // RelayPackTarget is one refreshable pack.
@@ -197,6 +223,12 @@ type RelayPackResult struct {
 	Applied        bool   `json:"applied"`
 	Verdict        string `json:"verdict_kind,omitempty"`
 	Recovered      bool   `json:"pointer_recovery_attempted"`
+	// Kind: "scheduled", "user", "failure" or "on_demand" (which entry
+	// point ran this attempt; relaypack_recover.go). Additive.
+	Kind string `json:"kind,omitempty"`
+	// RetryAfterS: for a rate-limited unscheduled attempt, how many
+	// seconds until this pack may be tried that way again. 0 otherwise.
+	RetryAfterS int `json:"retry_after_s,omitempty"`
 }
 
 // freshnessRecord is the persisted per-pack state. Stored in
@@ -226,6 +258,30 @@ type freshnessRecord struct {
 	// that must produce the same instant, and because the policy is
 	// Position B (no randomness, no clocks).
 	JitterMillis int64 `json:"jitter_ms,omitempty"`
+
+	// The unscheduled kinds' own bookkeeping (relaypack_recover.go). It
+	// is deliberately separate from LastFailureAt / ConsecutiveFailures:
+	// a walk the engine makes because the route went dead, or one the
+	// person asked for, must not push the SCHEDULED poll further out —
+	// that escalation is what left a device hours from its first direct
+	// try after it had sat connected-but-dead (blackout plan, C0).
+	//
+	// OnFailureAt / OnFailureMisses: the last failure-triggered walk of
+	// this pack on ANY network, and how many walks in a row found nothing.
+	// OnFailureNets: the same per network (hashed tag, at most
+	// failureNetsMax, most recent first), so a phone flapping between two
+	// networks is held to each network's own escalating floor.
+	// OnFailureLog: when each walk that reached the network went out, for
+	// the hard ceiling (failureHourCeiling / failureDayCeiling); pruned to
+	// the last 24 h.
+	OnFailureAt     string            `json:"on_failure_at,omitempty"`
+	OnFailureMisses int               `json:"on_failure_misses,omitempty"`
+	OnFailureNets   []failureNetStamp `json:"on_failure_nets,omitempty"`
+	OnFailureLog    []string          `json:"on_failure_log,omitempty"`
+	OnDemandAt      string            `json:"on_demand_at,omitempty"`
+	// OnDemandStreak: consecutive presses of the person's button that
+	// reached the network and found nothing new (its floor escalates).
+	OnDemandStreak int `json:"on_demand_streak,omitempty"`
 }
 
 // jitterOffset renders the persisted jitter as a Duration.
@@ -503,23 +559,36 @@ type RelayPackFreshnessState struct {
 
 // Refresh is the scheduler-driven entry point.
 func (r *RelayPackRefresher) Refresh(ctx context.Context, relayPackID string) (RelayPackResult, error) {
-	return r.refresh(ctx, relayPackID, false)
+	unlock, ok := lockPack(relayPackID)
+	if !ok {
+		return packBusy(relayPackID, kindScheduled), nil
+	}
+	defer unlock()
+	return r.refresh(ctx, relayPackID, kindScheduled)
 }
 
 // RefreshUser is the user-triggered variant; bypasses the
 // lifeline-strict gate, exactly as the subscription path does.
 func (r *RelayPackRefresher) RefreshUser(ctx context.Context, relayPackID string) (RelayPackResult, error) {
-	return r.refresh(ctx, relayPackID, true)
+	unlock, ok := lockPack(relayPackID)
+	if !ok {
+		return packBusy(relayPackID, kindUser), nil
+	}
+	defer unlock()
+	return r.refresh(ctx, relayPackID, kindUser)
 }
 
-func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, userTriggered bool) (RelayPackResult, error) {
+func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, kind refreshKind) (RelayPackResult, error) {
 	now := r.now()
-	res := RelayPackResult{RelayPackID: relayPackID}
+	res := RelayPackResult{RelayPackID: relayPackID, Kind: kind.String()}
 	if r.Store == nil {
 		return res, errors.New("relaypack refresh: nil store")
 	}
 
-	if !r.shouldFire(userTriggered) {
+	// lifeline-strict means "nothing unless I ask": the person's own
+	// kinds (user, on_demand) pass; the scheduled poll and the engine's
+	// failure-triggered walk do not.
+	if !r.shouldFire(kind == kindUser || kind == kindOnDemand) {
 		res.Outcome = SkippedLifelineStrict
 		recordAudit(r.Store, auditKindFreshness, relayPackID, SkippedLifelineStrict, 0, false, now)
 		return res, nil
@@ -528,14 +597,14 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 	target, err := r.target(relayPackID)
 	if err != nil {
 		res.Outcome = OutcomeFreshnessAmbiguous
-		r.markFailure(relayPackID, now, res.Outcome)
+		r.failed(kind, relayPackID, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, 0, false, now)
 		return res, err
 	}
 	res.Providers = target.Providers
 	if len(target.Endpoints) == 0 {
 		res.Outcome = OutcomeFreshnessNoEndpoints
-		r.markFailure(relayPackID, now, res.Outcome)
+		r.failed(kind, relayPackID, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, 0, false, now)
 		return res, nil
 	}
@@ -547,7 +616,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 		ConsecutiveFailures: rec.ConsecutiveFailures,
 		JitterOffset:        rec.jitterOffset(),
 	}
-	if !userTriggered && !selection.ShouldAttemptRefresh(r.policy(), st, now) {
+	if kind == kindScheduled && !selection.ShouldAttemptRefresh(r.policy(), st, now) {
 		// No network, no audit row: a suppressed attempt is not an
 		// event, and writing one per tick would itself be a cadence
 		// record on disk.
@@ -555,14 +624,27 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 		return res, nil
 	}
 
-	dialer, viaTunnel, err := r.dial()
+	dialer, viaTunnel, err := r.dialFor(kind)
+	if err == nil && viaTunnel && r.TunnelHealthy != nil && !r.TunnelHealthy() {
+		// The tunnel this would ride has stopped carrying. A walk through
+		// it reaches nothing and would only escalate the back-off (and
+		// try the pointer layer) for a failure of the RELAY: the same
+		// bookkeeping as the guard's refusal below.
+		dialer, err = nil, ErrTunnelRequired
+	}
 	if err != nil {
 		// Wave 1's guard. This is NOT "unreachable" and must never be
-		// retried as a direct dial, so we stamp a failure (backoff
-		// applies) and stop — no pointer recovery either, since that
-		// would egress from the same address by another name.
+		// retried as a direct dial, so we stamp the attempt (the base
+		// retry gap applies) and stop — no pointer recovery either,
+		// since that would egress from the same address by another name.
+		//
+		// The stamp does NOT escalate the backoff: nothing reached the
+		// network, so nothing was learned about the mirrors, and
+		// doubling the gap on every refused tick of a connected-but-dead
+		// route is what put the first DIRECT try up to six hours after
+		// the person finally disconnected (blackout plan, C0).
 		res.Outcome = OutcomeFreshnessTunnel
-		r.markFailure(relayPackID, now, res.Outcome)
+		r.refused(kind, relayPackID, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, 0, false, now)
 		return res, err
 	}
@@ -575,10 +657,15 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 		outcome := OutcomeFreshnessUnreachable
 		if isVerificationError(err) {
 			outcome = OutcomeFreshnessRejected
+		} else if kind.unscheduled() && errors.Is(ctx.Err(), context.Canceled) {
+			outcome = OutcomeFreshnessCancelled
 		}
 		res.Outcome = outcome
-		r.markFailure(relayPackID, now, outcome)
+		r.failed(kind, relayPackID, now, outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, outcome, res.BytesIn, viaTunnel, now)
+		if outcome == OutcomeFreshnessCancelled {
+			return res, err
+		}
 
 		// Every endpoint is gone. The pack's own endpoint set cannot
 		// fix that — replacing it requires a channel that does not
@@ -586,7 +673,12 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 		// envelope: a project-root-signed set of directory pointers
 		// which can carry a directory whose routes bring a NEW
 		// freshness endpoint set with them.
-		if r.Recover != nil {
+		//
+		// Not for the failure-triggered kind: that walk is ONE bounded
+		// direct attempt made with the route stopped (relaypack_recover.go),
+		// and the pointer layer is a second, separate egress — today to
+		// placeholder hosts (W3-1). The scheduled poll still reaches it.
+		if r.Recover != nil && kind != kindFailure {
 			res.Recovered = true
 			if _, rErr := r.Recover(ctx); rErr == nil {
 				recordAudit(r.Store, auditKindFreshness, relayPackID,
@@ -620,7 +712,10 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 	res.BytesIn += int64(len(body))
 	if err != nil {
 		res.Outcome = OutcomeFreshnessBundleFetch
-		r.markFailure(relayPackID, now, res.Outcome)
+		if kind.unscheduled() && errors.Is(ctx.Err(), context.Canceled) {
+			res.Outcome = OutcomeFreshnessCancelled
+		}
+		r.failed(kind, relayPackID, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, res.BytesIn, viaTunnel, now)
 		return res, err
 	}
@@ -638,7 +733,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, us
 			outcome = OutcomeFreshnessImportFailed
 		}
 		res.Outcome = outcome
-		r.markFailure(relayPackID, now, outcome)
+		r.failed(kind, relayPackID, now, outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, outcome, res.BytesIn, viaTunnel, now)
 		return res, applyErr
 	}

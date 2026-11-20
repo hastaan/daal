@@ -68,6 +68,13 @@ func ensureRelayPackRefresh() (*refresh.RelayPackRefresher, error) {
 			}),
 			Now:     nowUTC,
 			Recover: recoverViaBootstrapPointers,
+			// A scheduled poll that would ride the tunnel of a route the
+			// connection check has failed is not made (and does not
+			// escalate): it would reach nothing (blackout plan C0).
+			TunnelHealthy: func() bool {
+				st, _, running := c.check.snapshot()
+				return !(running && st == RouteCheckFailed)
+			},
 		}
 	}
 	c.mu.Lock()

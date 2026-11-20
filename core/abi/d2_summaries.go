@@ -315,7 +315,7 @@ func RouteSummary(routeID string) (string, error) {
 		return "", err
 	}
 	disp := rowToDisplay(row, observeRoute(row, liveRouteHealth(c)))
-	disp.Measured = c.routeMemory()[row.RouteID].Measured()
+	disp.Measured = routeMeasured(c.routeMemory(), row.RouteID)
 	body, _ := json.Marshal(disp)
 	return string(body), nil
 }
@@ -356,7 +356,7 @@ func AvailableRoutes() (string, error) {
 			continue
 		}
 		d := rowToDisplay(r, observeRoute(r, live))
-		d.Measured = mem[r.RouteID].Measured()
+		d.Measured = routeMeasured(mem, r.RouteID)
 		out = append(out, d)
 	}
 	// Sort by health_pct desc, then by publisher_name asc for stability.

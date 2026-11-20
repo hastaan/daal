@@ -305,6 +305,86 @@ CDN posture" button (`publisher/deploy/cloudflare/posture.go`),
 which re-fetches Origin CA fingerprint, AOP flag, firewall rule,
 and the proxied-DNS state from Cloudflare and surfaces drift.
 
+### `_report_to` key (additive, no `spec_version` bump)
+
+A route's `family_specific_config` MAY carry `"_report_to": "daal1…"`:
+the publisher's network-test report address (`specs/sealed-report-v1.md`,
+`daal-deploy report-keygen`). It is signed with the manifest like every
+other member; builds that predate it ignore it (no decoder of the
+top-level object is strict). Routes that carry it are the **Test relay**
+(`specs/field-probe-v2.md`): the engine offers the network test only when
+a held route carries a valid address, and seals results only to it. An
+invalid address is treated as absent. The validator does not require it
+and does not reject it. The binder writes it on every route of the pack
+when signed with `bind-and-sign --report-to daal1…`
+(`relaypack.BindOpts.ReportTo`; a malformed address refuses to sign).
+
+The Test relay MUST be its own address: no route the family uses every
+day (one without `_report_to`) may point at the same server address. The
+test sends plain hellos with three different names to that address in
+about 20 s, which must never happen to a daily relay; the engine refuses
+to start (`test_relay_shared`) when it sees the two share an address.
+The report is sealed to the `_report_to` of the route the test proves
+(the REALITY/443 route), and the test's alt-port and UDP routes come only
+from that route's pack.
+
+### `_cover_names` key (additive, no `spec_version` bump)
+
+A route's `family_specific_config` MAY carry the signed list of OTHER
+names its TLS first flight may present
+(`docs/adaptive-cover-names-plan.md` §1.3, §1.7; parser
+`bundle/go/bundle/cover_names.go`). It is a sibling of `_endpoint`,
+`_relaypack` and `_desync` — never inside the endpoint commitment, whose
+decoder is strict. Covered by the manifest signature; builds that predate
+it ignore it.
+
+```jsonc
+"_cover_names": {
+  "v": 1,
+  "names": [
+    {"id": 1, "name": "www.example.com",    "class": "foreign"},
+    {"id": 2, "name": "static.example.net", "class": "cdn", "cdn": "fastly"},
+    {"id": 4, "name": "mirror.example.org", "class": "mirror", "reality": true}
+  ]
+}
+```
+
+- `id` (required): the entry's stable identity, 1..9999, unique in the
+  list. The engine refers to an entry ONLY by its id (memory and every
+  report hold the id, never the name or its position). A publisher gives
+  each new entry an id that list never used before and NEVER reuses one;
+  entries may then be dropped (a name retired fleet-wide) or reordered
+  without what a device remembers about one id describing another name.
+- `class` ∈ `foreign | cdn | mirror`. `cdn`: which CDN or prefix the name
+  lives on, `[a-z0-9-]{1,32}` — required on a `cdn` entry, absent on any
+  other. `reality` (optional, default false): the route's relay's
+  REALITY inbound answers for this name (it is in the inbound's server
+  names). A vless-reality route offers ONLY such entries; websocket-tls
+  and anytls (relay proved by its SPKI pin) offer any entry; no other
+  family uses the list. This build offers NO `cdn` entry (a CDN-hosted
+  name sent to a plain VPS address is the name/prefix mismatch a censor
+  checks; that waits for a CDN-fronted family).
+- At most 8 entries; names are full LDH DNS names in canonical form —
+  lower case, no trailing dot, no spaces (a non-canonical name is
+  refused, not normalised) — no address, no duplicates.
+- **Refused at parse, the whole list** (fail closed): any domestic name —
+  under `.ir` (or `.ایران`), or on the known-domestic list in the parser
+  — or the class `domestic`; an unknown member; an unknown class; a bad
+  or repeated id; a bad `cdn` word; a version other than 1.
+- The engine never resolves a listed name: it is only a string in the
+  hello. It offers the list only for a route with a signed `_endpoint`
+  from a trusted or TOFU-pinned publisher whose outbound is proved by its
+  key.
+- **On the device.** The importer keeps the members of
+  `family_specific_config` the engine reads at connect time —
+  `_desync` and `_cover_names`, an allowlist
+  (`bundle.EngineFamilyConfigKeys`) — on the route's row, and only for a
+  route with a signed endpoint; `_endpoint` (an address and a key) and
+  `_relaypack` are never copied there (the row is not the encrypted half
+  of the store). Every import and refresh rewrites it.
+- How it is used: `specs/engine-abi-v1.md` "The connect ladder". The
+  publisher side that writes the list is not built yet.
+
 ### Freshness JSON shape (sub-key-aware) — `daal/freshness-v2`
 
 Per FRP-8 §6: a publisher's freshness document is **either** root-

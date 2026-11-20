@@ -73,12 +73,15 @@ else
   plan+=("clean.recipients"$'\t'"--mgmt=tree --ops recipients,revoke,wrongcreds,tamper,mgmtauth,restarts clean")
   plan+=("clean.switch"$'\t'"--mgmt=tree --ops switch,switch-all clean")   # one phone, many routes: every ordered pair of families (FINDINGS SW-0, SW-1, SW-2)
   plan+=("clean.auto"$'\t'"--mgmt=tree --ops auto clean")   # the one button: pick, try, move on, remember, explain, fall over
+  plan+=("blocked-while-connected"$'\t'"--mgmt=tree --ops blocked-while-connected clean vless-reality hysteria2")   # blackout plan C0: the relay's address is null-routed UNDER a connected phone; the engine finds the publisher's new address by itself (one direct walk with the instance stopped) and reconnects; a phone that cannot see the mirrors says so
   plan+=("auto-deep"$'\t'"--mgmt=tree --ops auto-deep clean vless-reality hysteria2")   # …and what it does on its own clock or at the cost of a whole failed pass: grade a slow route, move off one for speed and hold, stay put on a metered network, keep each network's memory apart, say network_down when the host says so, leave nothing of a side instance behind
   for s in "${scenarios[@]}"; do
     if [[ "$s" == udp-blackhole ]]; then
       plan+=("$s"$'\t'"--mgmt=tree --ops recipients,l1,l3,l2,caps $s")   # rotation under a censor
     elif [[ "$s" == relay-ip-block || "$s" == total-blackout || "$s" == quic-drop ]]; then
       plan+=("$s"$'\t'"--mgmt=tree --ops auto $s")   # the one button where nothing can carry (and the verdict it must give), and where only the QUIC routes are stopped
+    elif [[ "$s" == sni-rst-stateless || "$s" == sni-rst-first-two ]]; then
+      plan+=("$s"$'\t'"--mgmt=tree --ops desync $s")   # the engine's own ClientHello split (core/desync) against a box that reads one / two packets: which presets slip through, and that the split is on the wire
     else
       plan+=("$s"$'\t'"--mgmt=tree $s")
     fi

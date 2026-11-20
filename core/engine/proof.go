@@ -98,6 +98,15 @@ type ProofConfig struct {
 	// connect sets it, because it has other routes to get to
 	// (core/abi/connect_auto.go). Not part of the configuration file.
 	StopAtUnreachedRelay bool
+	// TimeHelloStop: when a TLS first flight is reset or closed, time
+	// one bare connect to the same address and port (at most
+	// helloTimingBudget), so the observation can say whether the stop
+	// came back sooner than the relay could have sent it
+	// (diagnostics.Observation FastReset / ServerStop). Set by the
+	// automatic connect for its candidates only — the connect ladder
+	// (core/abi connect_ladder.go) is what reads it; a liveness check
+	// never pays for it. Not part of the configuration file.
+	TimeHelloStop bool
 }
 
 // ProofTarget is one default far-side host and who runs it.

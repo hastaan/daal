@@ -195,6 +195,13 @@ type AutoTried struct {
 	// SetupMs: for a route that carried, how long THIS attempt took from
 	// starting the route to its first completed round trip. 0 otherwise.
 	SetupMs int `json:"setup_ms"`
+	// Variant: the route was tried with its first flight changed by the
+	// connect ladder (connect_ladder.go) — closed words only:
+	// "d:<preset>" (a hello cut: split1, sni-cut, chain, tlsrec-sni, or
+	// "pack" for the pack's own offer), "n:<index>" (the index-th signed
+	// cover name; the name itself is never reported), or both joined by
+	// "#". "" for the route as it is.
+	Variant string `json:"variant,omitempty"`
 }
 
 // AutoResult is what engine_connect_auto returns.
@@ -209,6 +216,9 @@ type AutoResult struct {
 	// AlreadyConnected: the engine was connected when the call came and
 	// nothing was done.
 	AlreadyConnected bool `json:"already_connected"`
+	// Variant: the connected route's variant (AutoTried.Variant); "" for
+	// the route as it is.
+	Variant string `json:"variant,omitempty"`
 }
 
 // autoState is the automatic connect's state. gen is guarded by Core.mu;
@@ -228,6 +238,17 @@ type autoState struct {
 	// it, so the route's instance is still put back when nothing else
 	// carries. Guarded by Core.mu.
 	lost autoLost
+	// fallNet / fallEndedAt: the network the last engine-started pass of
+	// this outage ended on, and when. A pass on ANOTHER network is not
+	// held to nextFallAt (autoFallOver): what failed on one network says
+	// nothing about the next. Guarded by Core.mu.
+	fallNet     string
+	fallEndedAt time.Time
+	// fallNets: per network of this outage (at most autoFallNetsMax),
+	// when the engine may next start a pass there by itself — so a phone
+	// flapping between networks is held to each network's own back-off
+	// (autoNetworkMovedLocked). Guarded by Core.mu.
+	fallNets map[string]time.Time
 
 	mu      sync.Mutex
 	state   string
@@ -240,6 +261,8 @@ type autoState struct {
 	verdict string
 	routeID string
 	family  string
+	// variant: the connected route's variant word (AutoTried.Variant).
+	variant string
 }
 
 func (a *autoState) block() map[string]any {
@@ -272,6 +295,36 @@ func (a *autoState) block() map[string]any {
 		// connected on; "" unless state is "connected".
 		"route_id": a.routeID,
 		"family":   a.family,
+		// variant: the connected route's variant (closed words, see
+		// AutoTried.Variant); "" for the route as it is.
+		"variant": a.variant,
+	}
+}
+
+// autoFallNetsMax bounds autoState.fallNets.
+const autoFallNetsMax = 4
+
+// resetFallLocked ends the outage's pass back-off. Called with Core.mu
+// held.
+func (a *autoState) resetFallLocked() {
+	a.fallPasses, a.nextFallAt, a.fallNets = 0, time.Time{}, nil
+}
+
+// noteFallNetLocked records the back-off of the pass that just ended on
+// network net. Called with Core.mu held.
+func (a *autoState) noteFallNetLocked(net string, next time.Time) {
+	if a.fallNets == nil {
+		a.fallNets = map[string]time.Time{}
+	}
+	a.fallNets[net] = next
+	for len(a.fallNets) > autoFallNetsMax {
+		oldest, first := "", true
+		for k, v := range a.fallNets {
+			if k != net && (first || v.Before(a.fallNets[oldest])) {
+				oldest, first = k, false
+			}
+		}
+		delete(a.fallNets, oldest)
 	}
 }
 
@@ -295,7 +348,7 @@ func (a *autoState) reset() {
 func (a *autoState) clearLocked() {
 	a.state, a.mode = AutoStateIdle, false
 	a.trying, a.index, a.total, a.racing = "", 0, 0, nil
-	a.tried, a.verdict, a.routeID, a.family = nil, "", "", ""
+	a.tried, a.verdict, a.routeID, a.family, a.variant = nil, "", "", "", ""
 }
 
 // expireFailed drops the verdict of a failed pass whose routes may be
@@ -331,7 +384,8 @@ func (a *autoState) recovered(routeID, family string) {
 func (c *Core) autoStopLocked(keepFailedVerdict bool) (wasTrying bool) {
 	c.auto.gen++
 	c.cancelRaceLocked()
-	c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
+	c.cancelRecoverLocked()
+	c.auto.resetFallLocked()
 	c.auto.lost = autoLost{}
 	a := &c.auto
 	a.mu.Lock()
@@ -380,8 +434,19 @@ func ConnectAuto() (string, error) {
 		switch {
 		case c.shuttingDown:
 			res = AutoResult{Verdict: AutoVerdictCancelled}
+		case c.recoverPausedLocked():
+			// The engine is between "the route went dead" and "put it
+			// back": it has paused the dead route for one direct walk for
+			// a new address (relaypack_recover.go). That walk is bounded
+			// and is the best thing that can happen to this outage, so it
+			// is not cut off — and the call does not wait for it either
+			// (up to recoverAutoBudget, on the host's control thread):
+			// it says so at once. The engine is in charge from here,
+			// whoever started the walk.
+			res = c.autoLookingLocked()
 		case c.activeRoute != "" && running && (st == RouteCheckOK || st == RouteCheckDegraded):
-			res = AutoResult{Connected: true, RouteID: c.activeRoute, Family: c.activeFamily, AlreadyConnected: true}
+			res = AutoResult{Connected: true, RouteID: c.activeRoute, Family: c.activeFamily, AlreadyConnected: true,
+				Variant: c.variantInUse(c.activeRoute).suffix()}
 			c.autoTakeChargeLocked()
 		case c.auto.lost.routeID != "":
 			// A fall-over pass is in flight (the engine is between
@@ -439,8 +504,16 @@ func (c *Core) autoFallOver(ctx context.Context) {
 		// network: see autoFallsOverFor.
 		return
 	}
-	if nowUTC().Before(c.auto.nextFallAt) {
-		// A pass of this outage found nothing a little while ago.
+	if nowUTC().Before(c.auto.nextFallAt) && !c.autoNetworkMovedLocked() {
+		// A pass of this outage found nothing a little while ago, on
+		// this network. The walk for the route's new address is not a
+		// pass and has its own limits (core/refresh
+		// FailureTriggeredDue): it is not held to the pass back-off.
+		a := &c.auto
+		a.mu.Lock()
+		verdict := a.verdict
+		a.mu.Unlock()
+		c.autoRecoverBeginLocked(c.auto.gen, autoLost{routeID: c.activeRoute, family: c.activeFamily, cat: cat}, verdict)
 		return
 	}
 	if hostFacts().noNetwork() {
@@ -451,6 +524,22 @@ func (c *Core) autoFallOver(ctx context.Context) {
 		return
 	}
 	c.autoPassLocked(&autoLost{routeID: c.activeRoute, family: c.activeFamily, cat: cat}, false)
+}
+
+// autoLookingLocked is ConnectAuto's answer while a walk has paused the
+// dead route: the engine is in charge, still trying, looking for the
+// route's new address. Called with Core.mu held.
+func (c *Core) autoLookingLocked() AutoResult {
+	a := &c.auto
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.mode, a.state = true, AutoStateTrying
+	if a.verdict != AutoVerdictLookingForAddress {
+		a.verdict = AutoVerdictLookingForAddress
+	}
+	tried := make([]AutoTried, len(a.tried))
+	copy(tried, a.tried)
+	return AutoResult{Tried: tried, Verdict: AutoVerdictLookingForAddress}
 }
 
 // autoTakeChargeLocked puts the automatic connect in charge of the
@@ -466,6 +555,7 @@ func (c *Core) autoTakeChargeLocked() {
 	a.clearLocked()
 	a.mode, a.state = true, AutoStateConnected
 	a.routeID, a.family = c.activeRoute, c.activeFamily
+	a.variant = c.variantInUse(c.activeRoute).suffix()
 	engine.LogInfo(fmt.Sprintf("auto took charge route=%s family=%s", engine.LogID(c.activeRoute), engine.LogID(c.activeFamily)))
 }
 
@@ -550,6 +640,13 @@ type autoCandidate struct {
 	// proved: a side probe of THIS pass proved it (beside a winner whose
 	// hand-over then failed) and its measurement is already kept.
 	proved bool
+	// variant: what the connect ladder changes about the route's first
+	// flight for this attempt (connect_ladder.go); zero: the route as it
+	// is. ladder: an extra the ladder added after the route's own attempt
+	// failed in this pass. name above is the variant's name when it
+	// swaps one.
+	variant routeVariant
+	ladder  bool
 }
 
 // autoPassLocked is one pass over the candidates. Called with Core.mu
@@ -571,6 +668,10 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	if fallOver {
 		current, currentFamily, currentCat = lost.routeID, lost.family, lost.cat
 	}
+	// What each route's variants were recorded against is checked first:
+	// a route whose signed endpoint moved starts again from nothing
+	// (connect_ladder.go ladderRebindLocked).
+	c.ladderRebindAllLocked()
 	cands, left, routes, err := c.autoCandidatesLocked(current)
 	if err != nil {
 		// The store could not be read. That is all that is known: it is
@@ -586,7 +687,11 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		engine.LogInfo(fmt.Sprintf("auto done connected=false route=- verdict=%s", AutoVerdictStoreUnreadable))
 		return AutoResult{Verdict: AutoVerdictStoreUnreadable}
 	}
-	if fallOver && len(cands) == 0 {
+	// The connected route stopped carrying at its hello and has a variant
+	// to try (connect_ladder.go): that is something to try, also when no
+	// other route is.
+	lostLadder := fallOver && c.ladderLostWantedLocked(*lost, !explicit)
+	if fallOver && len(cands) == 0 && !lostLadder {
 		// Nothing else to try (usually: everything else is cooling down
 		// after the last pass). The instance that is running is left
 		// alone. Said once, when the outage begins — and whenever the
@@ -597,7 +702,32 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		}
 		tried := append([]AutoTried{{RouteID: current, Family: currentFamily, Result: AutoResultNotCarrying,
 			Category: string(currentCat), Why: AutoWhyWasConnected}}, left...)
-		if st, _ := c.auto.snapshot(); (explicit && st != AutoStateTrying) || st == AutoStateConnected {
+		// Nothing else to try is exactly the holder of a one-route file
+		// (or of routes that all cool down after a reset that was not
+		// silence): the walk for a new address is the ONLY thing that can
+		// help it, and it does not wait for another candidate to exist.
+		st, _ := c.auto.snapshot()
+		show := (explicit && st != AutoStateTrying) || st == AutoStateConnected
+		restore := verdict
+		if !show {
+			// A later check of the same outage: the verdict on show is
+			// the one the walk gives back.
+			a := &c.auto
+			a.mu.Lock()
+			restore = a.verdict
+			a.mu.Unlock()
+		}
+		if c.autoRecoverBeginLocked(c.auto.gen, *lost, restore) {
+			if show {
+				a := &c.auto
+				a.mu.Lock()
+				a.tried = tried
+				a.mu.Unlock()
+			}
+			engine.LogInfo(fmt.Sprintf("auto done connected=false route=- verdict=%s", AutoVerdictLookingForAddress))
+			return AutoResult{Tried: tried, Verdict: AutoVerdictLookingForAddress}
+		}
+		if show {
 			a := &c.auto
 			a.mu.Lock()
 			a.state, a.verdict, a.tried = AutoStateFailed, verdict, tried
@@ -617,9 +747,10 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	// This pass is in charge now.
 	c.auto.gen++
 	c.cancelRaceLocked()
+	c.cancelRecoverLocked()
 	gen := c.auto.gen
 	a := &c.auto
-	if len(cands) == 0 {
+	if len(cands) == 0 && !lostLadder {
 		// Nothing can be tried. Nothing is started, nothing running is
 		// touched, and the engine is not in charge of anything.
 		verdict := verdictWithoutCandidates(routes, left)
@@ -653,8 +784,14 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		p.obs = append(p.obs, autoObs{result: AutoResultNotCarrying, category: currentCat, unplaced: true})
 	}
 	queue := append([]autoCandidate(nil), cands...)
+	if fallOver {
+		// The route that stopped carrying, stopped at its hello: its
+		// next variant is tried first (connect_ladder.go).
+		queue = append(p.ladderLost(), queue...)
+	}
 	for first := true; len(queue) > 0 && p.connected == "" && !p.cancelled; first = false {
-		index := len(cands) - len(queue) + 1
+		index := len(cands) + p.ladderExtra() - len(queue) + 1
+		mark := len(p.obs)
 		// The route that carried here last is tried ALONE: when it still
 		// works — the usual press — the network sees one connection, the
 		// one it saw yesterday.
@@ -667,26 +804,32 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 			cd := queue[0]
 			queue = queue[1:]
 			p.seq(cd, index)
-			continue
+		} else {
+			a, b := queue[0], queue[partner]
+			rest := append(append([]autoCandidate{}, queue[1:partner]...), queue[partner+1:]...)
+			queue = append(p.race(a, b, index), rest...)
 		}
-		a, b := queue[0], queue[partner]
-		rest := append(append([]autoCandidate{}, queue[1:partner]...), queue[partner+1:]...)
-		queue = append(p.race(a, b, index), rest...)
+		if p.connected == "" && !p.cancelled {
+			// A route whose hello was stopped just now: its next
+			// variant, if the ladder has one within budget, goes next.
+			queue = append(p.ladderNext(mark), queue...)
+		}
 	}
 	if p.cancelled {
 		// A disconnect, a route picked by hand or a newer pass took
 		// over. The state — the engine's and the `auto` block's — is
 		// theirs.
 		engine.LogInfo(fmt.Sprintf("auto done connected=false route=- verdict=%s", AutoVerdictCancelled))
-		c.autoSettleLocked(p.pending, p.answered, lost, false)
+		c.ladderSettleLocked(p, c.autoSettleLocked(p.pending, p.answered, lost, false))
 		return AutoResult{Tried: p.tried, Verdict: AutoVerdictCancelled, Candidates: len(cands)}
 	}
 	obs, tried := p.obs, p.tried
 	connected, connectedFamily := p.connected, p.connectedFamily
 	forgiven := c.autoSettleLocked(p.pending, connected != "" || p.answered, lost, true)
+	c.ladderSettleLocked(p, forgiven)
 	c.auto.lost = autoLost{}
 	if connected != "" {
-		c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
+		c.auto.resetFallLocked()
 	} else if fallOver {
 		// Nothing else carried. The engine's own next pass of this
 		// outage waits (autoFallBackoff).
@@ -694,6 +837,8 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 			c.auto.fallPasses++
 		}
 		c.auto.nextFallAt = nowUTC().Add(autoFallBackoff(c.auto.fallPasses))
+		c.auto.fallNet, c.auto.fallEndedAt = activeNetworkID(), nowUTC()
+		c.auto.noteFallNetLocked(c.auto.fallNet, c.auto.nextFallAt)
 	}
 
 	verdict, refined := deriveAuto(obs)
@@ -714,7 +859,13 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	}
 	tried = append(tried, left...)
 
-	if connected == "" && fallOver && !c.routeRunningLocked(current) {
+	// Nothing else carried and the route that was connected is dead:
+	// before its instance is put back, look for a NEW address for it —
+	// one direct walk of the freshness mirrors with the instance
+	// stopped (relaypack_recover.go, blackout plan C0). The walk puts
+	// the instance back itself when it is done.
+	recovering := connected == "" && fallOver && c.autoRecoverBeginLocked(gen, *lost, verdict)
+	if connected == "" && fallOver && !recovering && !c.routeRunningLocked(current) {
 		// Nothing else carried, and the instance of the route that was
 		// connected was replaced on the way (a candidate tried through
 		// the tunnel's own instance). Put it back: see the comment on
@@ -725,12 +876,22 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		}
 	}
 
+	if recovering {
+		// Still looking: the engine is fetching the publisher's word on
+		// where the relay is now. A host that took "failed" here for
+		// "out of routes" would tear the TUN down under the walk. The
+		// pass's own verdict comes back if the walk finds nothing.
+		verdict = AutoVerdictLookingForAddress
+	}
 	a.mu.Lock()
 	a.trying, a.index, a.racing = "", 0, nil
 	a.tried, a.verdict = tried, verdict
-	if connected != "" {
-		a.state, a.routeID, a.family = AutoStateConnected, connected, connectedFamily
-	} else {
+	switch {
+	case connected != "":
+		a.state, a.routeID, a.family, a.variant = AutoStateConnected, connected, connectedFamily, p.connectedVariant()
+	case recovering:
+		a.state = AutoStateTrying
+	default:
 		a.state = AutoStateFailed
 	}
 	a.mu.Unlock()
@@ -738,9 +899,9 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	if connected != "" {
 		logRoute = engine.LogID(connected)
 	}
-	engine.LogInfo(fmt.Sprintf("auto done connected=%t route=%s verdict=%s", connected != "", logRoute, verdict))
+	engine.LogInfo(fmt.Sprintf("auto done connected=%t route=%s verdict=%s%s", connected != "", logRoute, verdict, p.connectedVariantField()))
 	return AutoResult{Connected: connected != "", RouteID: connected, Family: connectedFamily,
-		Tried: tried, Verdict: verdict, Candidates: len(cands)}
+		Tried: tried, Verdict: verdict, Candidates: len(cands), Variant: p.connectedVariant()}
 }
 
 // restartInstanceLocked starts the tunnel's instance on a route WITHOUT a
@@ -844,6 +1005,7 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 	}
 
 	prober := c.sideProber()
+	mem := c.routeMemory()
 	byID := map[string]autoCandidate{}
 	var usable []pathmanager.Route
 	for _, row := range rows {
@@ -862,7 +1024,26 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 			left = append(left, AutoTried{RouteID: row.RouteID, Family: row.TransportFamily, Result: AutoResultRefused, Refused: code})
 			continue
 		}
-		_, body, err := c.prepareRouteOpts(row.RouteID, false, false)
+		cd := autoCandidate{routeID: row.RouteID, family: row.TransportFamily, udp: engine.IsUDPFamily(row.TransportFamily)}
+		if profile, err := c.store.GetSecret("route:" + row.RouteID); err == nil {
+			cd.relayHost, cd.relayPort, cd.name = profileRelay(profile)
+			// A variant that carried here, recently enough to be
+			// trusted, is the route's first attempt on this network
+			// (connect_ladder.go).
+			if v, name, ok := c.ladderPreferredLocked(mem, c.ladderRouteOf(row, profile), nowUTC()); ok {
+				cd.variant, cd.name = v, name
+			}
+		}
+		// Built as the candidate it is (its variant explicit): the body
+		// the side prober is asked about is the one the pass would try,
+		// and the listing reads the variant in use without changing it.
+		v := cd.variant
+		_, body, err := c.prepareRouteVariant(row.RouteID, false, false, &v)
+		if err != nil && !v.zero() {
+			cd.variant, v = routeVariant{}, routeVariant{}
+			_, cd.name = c.routeOwnNameLocked(row.RouteID)
+			_, body, err = c.prepareRouteVariant(row.RouteID, false, false, &v)
+		}
 		if err != nil {
 			code := ConnectRefusedOther
 			var rr *routeRefusal
@@ -872,11 +1053,7 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 			left = append(left, AutoTried{RouteID: row.RouteID, Family: row.TransportFamily, Result: AutoResultRefused, Refused: code})
 			continue
 		}
-		cd := autoCandidate{routeID: row.RouteID, family: row.TransportFamily, udp: engine.IsUDPFamily(row.TransportFamily),
-			side: prober != nil && prober.CanSideProbe(body)}
-		if profile, err := c.store.GetSecret("route:" + row.RouteID); err == nil {
-			cd.relayHost, cd.relayPort, cd.name = profileRelay(profile)
-		}
+		cd.side = prober != nil && prober.CanSideProbe(body)
 		byID[row.RouteID] = cd
 		pr := pathmanager.Route{RouteID: row.RouteID, Family: row.TransportFamily, ModesAllowed: row.ModesAllowed}
 		if b, ok := budgets[row.RouteID]; ok {
@@ -912,12 +1089,12 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 	}
 	sort.SliceStable(left, func(i, j int) bool { return left[i].RouteID < left[j].RouteID })
 
-	// Step 2: this network's memory.
-	mem := c.routeMemory()
+	// Step 2: this network's memory. A route that goes in as a variant
+	// is placed by the variant's record.
 	cutoff := nowUTC().Add(-autoFailureMemory)
 	var first, middle, last []placed
 	for _, p := range order {
-		m, ok := mem[p.cd.routeID]
+		m, ok := mem[netmem.VariantKey(p.cd.routeID, p.cd.variant.suffix())]
 		p.cd.grade, p.cd.measuredMs, p.cd.samples = m.Grade(), m.SetupMs, m.Samples
 		switch {
 		case ok && m.CarriedLast():
@@ -931,7 +1108,9 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 		}
 	}
 	sort.SliceStable(first, func(i, j int) bool {
-		return mem[first[i].cd.routeID].CarriedSeq > mem[first[j].cd.routeID].CarriedSeq
+		ki := netmem.VariantKey(first[i].cd.routeID, first[i].cd.variant.suffix())
+		kj := netmem.VariantKey(first[j].cd.routeID, first[j].cd.variant.suffix())
+		return mem[ki].CarriedSeq > mem[kj].CarriedSeq
 	})
 	for _, group := range [][]placed{first, middle, last} {
 		for _, p := range group {

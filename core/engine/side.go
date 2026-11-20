@@ -85,7 +85,9 @@ func SideProbeable(configJSON []byte) bool {
 			continue
 		}
 		t, _ := ob["type"].(string)
-		if _, detoured := ob["detour"]; detoured || !sideProbeTypes[t] {
+		// The engine's own desync detour is not "a detour" here: it adds
+		// no hop and holds no state (desync.go, ownDesyncDetour).
+		if _, detoured := ob["detour"]; (detoured && !ownDesyncDetour(ob, raw.Outbounds)) || !sideProbeTypes[t] {
 			return false
 		}
 		server, _ := ob["server"].(string)
