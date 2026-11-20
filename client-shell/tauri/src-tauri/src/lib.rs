@@ -884,6 +884,22 @@ async fn relaypack_refresh(app: tauri::AppHandle, relay_pack_id: Option<String>)
     .await)
 }
 
+/// Optional add-ons, standby address: the recipient types the key they
+/// were sent. Answers "not in this engine library" until the engine
+/// lane (S7) exports `engine_standby_key`.
+#[tauri::command]
+async fn recipient_standby_key(
+    app: tauri::AppHandle,
+    relay_pack_id: Option<String>,
+    key: String,
+) -> Result<String, String> {
+    cmdlog::result("recipient_standby_key", field_probe_blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        cmd::standby_key(&state, relay_pack_id.as_deref().unwrap_or(""), &key).map_err(|e| e.to_string())
+    })
+    .await)
+}
+
 /// "Check all routes" (start: true) and its progress (start: false):
 /// the engine's survey of the file's routes beside the tunnel
 /// (core/abi/survey.go). Returns at once either way.
@@ -2004,6 +2020,226 @@ fn wizard_verify_cdn_posture(
     cmdlog::logged("wizard_verify_cdn_posture", || {
     wcmd::verify_cdn_posture(&wstate.0, front_id).map_err(|e| e.to_string())
     })
+}
+
+// ---- Optional add-ons (docs/optional-addons-plan.md, X2) ----------
+//
+// Every command the three add-ons (standby address, way in through
+// Cloudflare, Google update channel) will need, registered once. Each
+// takes one `input` object and returns one value whose types belong to
+// the add-on's own module in daal-wizard (`addon_standby`, `addon_cdn`,
+// `addon_google`): a lane changes those types and fills in that module,
+// never this file. Until a lane lands its module answers
+// `E_NOT_BUILT: …`. Steps stream on `wizard://addon-progress`.
+
+/// Run an add-on operation on the blocking pool (each may reach a
+/// provider or the relay), streaming its steps to the page.
+async fn addon_on_pool<T, F>(app: AppHandle, wstate: &WizardStateMgr, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &wcmd::WizardCtx,
+            &mut dyn FnMut(daal_wizard::addons::AddonProgress),
+        ) -> wcmd::Result<T>
+        + Send
+        + 'static,
+{
+    let ctx = wstate.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut emit = |ev: daal_wizard::addons::AddonProgress| {
+            let _ = app.emit(daal_wizard::addons::PROGRESS_EVENT, &ev);
+        };
+        f(&ctx, &mut emit).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// A relay's add-ons, for the Add-ons section. Read-only, no network.
+#[tauri::command]
+fn wizard_addons_list(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<Vec<daal_wizard::addons::AddonRow>, String> {
+    cmdlog::logged("wizard_addons_list", || {
+        daal_wizard::addons::list(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
+}
+
+/// Take one add-on down (its kind decides the order).
+#[tauri::command]
+async fn wizard_addon_remove(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    addon_id: i64,
+) -> Result<daal_wizard::addons::AddonRemoveReport, String> {
+    cmdlog::result(
+        "wizard_addon_remove",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addons::remove(ctx, addon_id, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_standby_price(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_standby::StandbyPriceInput,
+) -> Result<daal_wizard::addon_standby::StandbyPrice, String> {
+    cmdlog::result(
+        "wizard_addon_standby_price",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_standby::price(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_standby_add(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_standby::StandbyAddInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    cmdlog::result(
+        "wizard_addon_standby_add",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_standby::add(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_standby_promote(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_standby::StandbyPromoteInput,
+) -> Result<daal_wizard::addon_standby::StandbyPromoteResult, String> {
+    cmdlog::result(
+        "wizard_addon_standby_promote",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_standby::promote(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_standby_key(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_standby::StandbyKeyInput,
+) -> Result<daal_wizard::addon_standby::StandbyKey, String> {
+    cmdlog::result(
+        "wizard_addon_standby_key",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_standby::key(ctx, input, p)).await,
+    )
+}
+
+/// The pasted Cloudflare token crosses here once, as the hosting token
+/// does; it is wiped by the add-on module after it is stored.
+#[tauri::command]
+async fn wizard_addon_cdn_set_token(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_cdn::CdnTokenInput,
+) -> Result<daal_wizard::addon_cdn::CdnTokenCheck, String> {
+    cmdlog::result(
+        "wizard_addon_cdn_set_token",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_cdn::set_token(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_cdn_build(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_cdn::CdnBuildInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    cmdlog::result(
+        "wizard_addon_cdn_build",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_cdn::build(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_cdn_posture(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_cdn::CdnPostureInput,
+) -> Result<daal_wizard::addon_cdn::CdnPosture, String> {
+    cmdlog::result(
+        "wizard_addon_cdn_posture",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_cdn::posture(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_cdn_set_plain_fallback(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_cdn::CdnPlainFallbackInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    cmdlog::result(
+        "wizard_addon_cdn_set_plain_fallback",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| {
+            daal_wizard::addon_cdn::set_plain_fallback(ctx, input, p)
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_google_script(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_google::GoogleScriptInput,
+) -> Result<daal_wizard::addon_google::GoogleScript, String> {
+    cmdlog::result(
+        "wizard_addon_google_script",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::script(ctx, input, p)).await,
+    )
+}
+
+/// Path A. On Android the one-shot token comes from the platform plugin
+/// here, in Rust, so it never passes through the page; on desktop the
+/// plugin answers `None` and the add-on module signs in through the
+/// system browser itself.
+#[tauri::command]
+async fn wizard_addon_google_sign_in(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_google::GoogleSignInInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    let platform_app = app.clone();
+    cmdlog::result(
+        "wizard_addon_google_sign_in",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| {
+            use tauri_plugin_daal_platform::PlatformExt;
+            let token = platform_app
+                .platform()
+                .google_authorize(&daal_wizard::addon_google::SCOPES)
+                .map_err(|e| wcmd::WizardError::Coded(e.to_string().trim_start_matches("daal-platform: ").to_string()))?
+                .map(zeroize::Zeroizing::new);
+            daal_wizard::addon_google::sign_in(ctx, input, token, p)
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_google_attach(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_google::GoogleAttachInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    cmdlog::result(
+        "wizard_addon_google_attach",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::attach(ctx, input, p)).await,
+    )
+}
+
+#[tauri::command]
+async fn wizard_addon_google_check(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_google::GoogleCheckInput,
+) -> Result<daal_wizard::addon_google::GoogleCheck, String> {
+    cmdlog::result(
+        "wizard_addon_google_check",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::check(ctx, input, p)).await,
+    )
 }
 
 // ---- FRP-7 rotation command shims ---------------------------------
@@ -3902,6 +4138,21 @@ pub fn run() {
             wizard_provision_cdn_front,
             wizard_list_cdn_fronts,
             wizard_verify_cdn_posture,
+            // Optional add-ons (X2): the ledger, then one block per add-on
+            wizard_addons_list,
+            wizard_addon_remove,
+            wizard_addon_standby_price,
+            wizard_addon_standby_add,
+            wizard_addon_standby_promote,
+            wizard_addon_standby_key,
+            wizard_addon_cdn_set_token,
+            wizard_addon_cdn_build,
+            wizard_addon_cdn_posture,
+            wizard_addon_cdn_set_plain_fallback,
+            wizard_addon_google_script,
+            wizard_addon_google_sign_in,
+            wizard_addon_google_attach,
+            wizard_addon_google_check,
             // FRP-7 rotation surface
             wizard_rotate_recommend,
             wizard_rotate_execute,
@@ -3974,6 +4225,7 @@ pub fn run() {
             recipient_qr_cancel,
             recipient_qr_finalize,
             relaypack_refresh,
+            recipient_standby_key,
             survey_routes,
             // Network test (field probe v2)
             field_probe_start,

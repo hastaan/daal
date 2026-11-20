@@ -363,6 +363,9 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         wizard_recipient_list: (a) => (op(a) === LIVE_RELAY_ID ? people() : []),
         wizard_list_artifacts: (a) => (op(a) === LIVE_RELAY_ID ? artifacts() : []),
         wizard_relay_health: (a) => health(f, op(a)),
+        // Optional add-ons: none on any relay yet (every add-on is still
+        // in development).
+        wizard_addons_list: () => [],
         wizard_restore_unsettled: () => unsettled(f),
         wizard_setup_recovery: (a) => ({
             state: 'server_running',

@@ -952,6 +952,65 @@ pub trait CliRunner: Send + Sync {
             stderr: "unknown subcommand \"report-open\"\n".into(),
         })
     }
+
+    /// Optional add-ons (specs/optional-addons-v1.md §6): run one
+    /// add-on verb of `daal-deploy`. Generic on purpose: each add-on's
+    /// module (`addon_standby`, `addon_cdn`, `addon_google`) builds its
+    /// own argv and reads its own JSON, so no add-on lane adds a method
+    /// here or a `SubprocessRunner` arm.
+    ///
+    /// Returns the child's stdout (wiped when dropped). The default is
+    /// what a `daal-deploy` without the verb says.
+    fn run_addon(
+        &self,
+        req: AddonCliRequest<'_>,
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let _ = on_progress;
+        Err(BridgeError::SubprocessFailed {
+            rc: 2,
+            stderr: format!(
+                "unknown subcommand {:?}\n",
+                req.args.first().map(String::as_str).unwrap_or("")
+            ),
+        })
+    }
+}
+
+/// One add-on invocation of `daal-deploy` ([`CliRunner::run_addon`]).
+///
+/// No `Debug`: `stdin` and `secret_files` carry secrets.
+pub struct AddonCliRequest<'a> {
+    /// argv after the binary, verb first, e.g.
+    /// `["standby", "add", "--record-file", "<path>"]`. Never a secret:
+    /// a secret goes in `secret_files` or `stdin`.
+    pub args: Vec<String>,
+    /// Secrets handed over as 0600 temp files: each `(flag, value)`
+    /// becomes `<flag> <tempfile>`, and the file is removed when the
+    /// child exits.
+    pub secret_files: Vec<(&'a str, &'a str)>,
+    /// Written to the child's stdin, then the pipe closes. Empty: stdin
+    /// is null.
+    pub stdin: &'a [u8],
+    /// Add `--progress-json` and forward the JSON lines the child writes
+    /// on stderr; every other stderr line goes into the failure text.
+    pub progress: bool,
+}
+
+impl AddonCliRequest<'static> {
+    /// A request with only an argv.
+    pub fn args<I, S>(args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        AddonCliRequest {
+            args: args.into_iter().map(Into::into).collect(),
+            secret_files: Vec::new(),
+            stdin: &[],
+            progress: false,
+        }
+    }
 }
 
 /// What `daal-deploy report-keygen --out -` prints. The private half is
@@ -1974,6 +2033,70 @@ impl SubprocessRunner {
 }
 
 impl CliRunner for SubprocessRunner {
+    fn run_addon(
+        &self,
+        req: AddonCliRequest<'_>,
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        // Token files live until the child has exited (dropped below).
+        let mut secret_tmps = Vec::with_capacity(req.secret_files.len());
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(&req.args);
+        for (flag, value) in &req.secret_files {
+            let tmp = tempfile_with_secret(value)?;
+            cmd.arg(flag).arg(tmp.path());
+            secret_tmps.push(tmp);
+        }
+        if req.progress {
+            cmd.arg("--progress-json");
+        }
+        let mut child = cmd
+            .apply_env()
+            .stdin(if req.stdin.is_empty() { Stdio::null() } else { Stdio::piped() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        if !req.stdin.is_empty() {
+            let mut stdin = child.stdin.take().expect("piped");
+            stdin.write_all(req.stdin)?;
+            // dropping stdin closes the pipe.
+        }
+        // stdout on its own thread: a child blocked writing one pipe
+        // while the parent reads the other deadlocks.
+        let stdout_handle = child.stdout.take().expect("piped");
+        let stdout_join = std::thread::spawn(move || {
+            let mut buf = Zeroizing::new(Vec::new());
+            let mut r = BufReader::new(stdout_handle);
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let mut stderr_tail = String::new();
+        let r = BufReader::new(child.stderr.take().expect("piped"));
+        for line in r.lines().map_while(std::result::Result::ok) {
+            match serde_json::from_str::<ProgressEvent>(&line) {
+                Ok(ev) if req.progress => on_progress(ev),
+                _ => {
+                    stderr_tail.push_str(&line);
+                    stderr_tail.push('\n');
+                }
+            }
+        }
+        let status = child.wait().map_err(BridgeError::Io)?;
+        let stdout = stdout_join.join().unwrap_or_default();
+        drop(secret_tmps);
+        if !status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: status.code().unwrap_or(-1),
+                stderr: stderr_tail,
+            });
+        }
+        Ok(stdout)
+    }
+
     fn run_list_servers(&self, provider: &str, token: &str) -> Result<Vec<ExistingServer>> {
         let tmp = tempfile_with_secret(token)?;
         let token_path = tmp.path().to_path_buf();
@@ -3918,6 +4041,13 @@ pub struct MockRunner {
     /// How many `run_list_servers` calls were made (never the token).
     pub list_servers_calls: Mutex<usize>,
     pub relay_health_error: Mutex<Option<(i32, String)>>,
+    /// Optional add-ons: every `run_addon` argv, in order (secrets are
+    /// not recorded).
+    pub addon_calls: Mutex<Vec<Vec<String>>>,
+    /// Optional add-ons: answers `run_addon` with (argv, stdin). `None`:
+    /// the verb is unknown, as on a `daal-deploy` without it.
+    #[allow(clippy::type_complexity)]
+    pub addon_reply: Mutex<Option<Box<dyn FnMut(&[String], &[u8]) -> Result<Vec<u8>> + Send>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4113,6 +4243,8 @@ impl MockRunner {
             list_servers_result: Mutex::new(None),
             list_servers_calls: Mutex::new(0),
             relay_health_error: Mutex::new(None),
+            addon_calls: Mutex::new(Vec::new()),
+            addon_reply: Mutex::new(None),
         }
     }
 
@@ -4282,6 +4414,25 @@ impl MockRunner {
 }
 
 impl CliRunner for MockRunner {
+    fn run_addon(
+        &self,
+        req: AddonCliRequest<'_>,
+        _on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.addon_calls.lock().unwrap().push(req.args.clone());
+        let mut reply = self.addon_reply.lock().unwrap();
+        match reply.as_mut() {
+            Some(f) => f(&req.args, req.stdin).map(Zeroizing::new),
+            None => Err(BridgeError::SubprocessFailed {
+                rc: 2,
+                stderr: format!(
+                    "unknown subcommand {:?}\n",
+                    req.args.first().map(String::as_str).unwrap_or("")
+                ),
+            }),
+        }
+    }
+
     fn run_list_servers(&self, _provider: &str, _token: &str) -> Result<Vec<ExistingServer>> {
         *self.list_servers_calls.lock().unwrap() += 1;
         match self.list_servers_result.lock().unwrap().clone() {

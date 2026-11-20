@@ -120,6 +120,8 @@ import {
 import type { RestoreUnsettledPerson } from './wizardCommands';
 import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
+// Optional add-ons: standby address, Cloudflare, Google channel (X3).
+import { AddonsSection } from './addons/AddonsSection';
 
 interface Props {
     t: (k: string) => string;
@@ -1340,6 +1342,11 @@ export default function PublisherRecipientsPage({
                         : null
                 }
             />
+
+            {/* ---------------- Add-ons ----------------
+                Optional extras that keep people connecting when the
+                relay is blocked. Folded away, all off by default. */}
+            {provisioned && <AddonsSection t={t} operatorId={operatorId} />}
 
             {/* ---------------- Details ----------------
                 What a maintainer asks about and a family member never

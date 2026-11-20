@@ -156,6 +156,26 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runReportKeygen(ctx, rest, stdout, stderr)
 	case "report-open":
 		return runReportOpen(ctx, rest, os.Stdin, stdout, stderr)
+	// Optional add-ons (cli_addons.go): registered once here, each in
+	// its own file. Exit 8 = not built yet.
+	case "standby":
+		return runStandby(ctx, rest, os.Stdin, stdout, stderr)
+	case "cdn-token-check":
+		return runCDNTokenCheck(ctx, rest, stdout, stderr)
+	case "cdn-test":
+		return runCDNTest(ctx, rest, stdout, stderr)
+	case "cdn-posture":
+		return runCDNPosture(ctx, rest, stdout, stderr)
+	case "cdn-remove":
+		return runCDNRemove(ctx, rest, stdout, stderr)
+	case "appsscript-script":
+		return runAppsScriptScript(ctx, rest, stdout, stderr)
+	case "appsscript-deploy":
+		return runAppsScriptDeploy(ctx, rest, os.Stdin, stdout, stderr)
+	case "appsscript-check":
+		return runAppsScriptCheck(ctx, rest, stdout, stderr)
+	case "appsscript-clear":
+		return runAppsScriptClear(ctx, rest, stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, Version)
 		return 0
@@ -313,6 +333,20 @@ Subcommands:
                 Sign the Test relay's pack with bind-and-sign --report-to.
   report-open   Decrypt and validate one sealed network-test report (--in,
                 key from --key or stdin); JSON to stdout, --findings for lines.
+
+Optional add-ons (specs/optional-addons-v1.md). Exit 8: not built yet.
+  standby price|add|promote|remove
+                A second address for the relay, kept back (Hetzner Floating IP).
+  cdn-token-check  Check a Cloudflare token: the zones it sees, and that it can
+                do no more than the five zone permissions Daal needs.
+  cdn-test      A real WebSocket handshake through the Cloudflare front.
+  cdn-posture   Read-only: ECH on the zone, origin pull, firewall, last test.
+  cdn-remove    Take the Cloudflare way in down (DNS, origin rule, certificate,
+                firewall rule, inbound).
+  appsscript-script   The Google update script with its write key.
+  appsscript-deploy   Create and deploy it with a one-shot token (stdin).
+  appsscript-check    POST the current update and fetch it back.
+  appsscript-clear    POST an empty update (removal).
   version       Print CLI version.
 
 Run 'daal-deploy <subcommand> --help' for subcommand flags.

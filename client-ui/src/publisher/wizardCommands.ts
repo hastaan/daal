@@ -22,6 +22,31 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 // constants that consume it, and importing it as a type keeps this
 // module free of the QR encoder at runtime.
 import type { FountainFrame as QrFountainFrame } from '../qr/fountainStream';
+import type {
+    AddonOutcome,
+    AddonProgress,
+    AddonRemoveReport,
+    AddonRow,
+    CdnBuildInput,
+    CdnPlainFallbackInput,
+    CdnPosture,
+    CdnPostureInput,
+    CdnTokenCheck,
+    CdnTokenInput,
+    GoogleAttachInput,
+    GoogleCheck,
+    GoogleCheckInput,
+    GoogleScript,
+    GoogleScriptInput,
+    GoogleSignInInput,
+    StandbyAddInput,
+    StandbyKey,
+    StandbyKeyInput,
+    StandbyPrice,
+    StandbyPriceInput,
+    StandbyPromoteInput,
+    StandbyPromoteResult,
+} from './addons/addonTypes';
 
 export type { QrFountainFrame };
 
@@ -165,6 +190,8 @@ export type PublisherErrorCode =
     | 'E_RESTORE_ALREADY_ANSWERED'
     | 'E_RELAY_USER_INVALID'
     | 'E_RELAY_USER_IN_LIST'
+    // Optional add-ons. See `Addons` below.
+    | 'E_NOT_BUILT'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -240,6 +267,10 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     'E_RESTORE_ALREADY_ANSWERED',
     'E_RELAY_USER_INVALID',
     'E_RELAY_USER_IN_LIST',
+    // An optional add-on (standby address, Cloudflare, Google channel)
+    // whose code has not landed in this build. Nothing was changed; not
+    // retryable. The card says "in development", never a raw error.
+    'E_NOT_BUILT',
 ];
 
 /** The server id carried by an `E_SERVER_EXISTS: <id> ...` rejection,
@@ -819,6 +850,10 @@ export interface DestroyReport {
      *  absent when there is none. Details only. */
     other_server_id?: string;
     other_server_name?: string;
+    /** V019: what became of each add-on (standby address, Cloudflare,
+     *  Google channel). One with `keeps_relay` kept the relay, as an
+     *  address that still bills does. Absent from an older shell. */
+    addons?: AddonOutcome[];
 }
 
 export interface AddressOutcome {
@@ -1825,6 +1860,61 @@ export const Wizard = {
         }),
 };
 
+/**
+ * Optional add-ons (docs/optional-addons-plan.md, X2): every command the
+ * standby address, the way in through Cloudflare and the Google update
+ * channel will need, registered once in src-tauri/src/lib.rs. Each
+ * add-on command takes one `input` object and returns one value; their
+ * shapes live in ./addons/addonTypes.ts. Until an add-on's lane lands,
+ * its commands reject with `E_NOT_BUILT: …`. Steps stream on
+ * `onAddonProgress`.
+ */
+export const Addons = {
+    /** A relay's add-ons (the ledger). Read-only, no network. */
+    list: (operator_id: number) =>
+        invoke<AddonRow[]>('wizard_addons_list', { operatorId: operator_id }),
+    /** Take one add-on down; its kind decides the order. */
+    remove: (addon_id: number) =>
+        invoke<AddonRemoveReport>('wizard_addon_remove', { addonId: addon_id }),
+
+    // ---- standby address
+    standbyPrice: (input: StandbyPriceInput) =>
+        invoke<StandbyPrice>('wizard_addon_standby_price', { input }),
+    standbyAdd: (input: StandbyAddInput) =>
+        invoke<AddonRow>('wizard_addon_standby_add', { input }),
+    /** "Switch to standby": answers the key to send. */
+    standbyPromote: (input: StandbyPromoteInput) =>
+        invoke<StandbyPromoteResult>('wizard_addon_standby_promote', { input }),
+    /** The standby key again, after the sheet that showed it closed. */
+    standbyKey: (input: StandbyKeyInput) =>
+        invoke<StandbyKey>('wizard_addon_standby_key', { input }),
+
+    // ---- way in through Cloudflare
+    /** The pasted token crosses this boundary once, inbound. */
+    cdnSetToken: (input: CdnTokenInput) =>
+        invoke<CdnTokenCheck>('wizard_addon_cdn_set_token', { input }),
+    cdnBuild: (input: CdnBuildInput) =>
+        invoke<AddonRow>('wizard_addon_cdn_build', { input }),
+    cdnPosture: (input: CdnPostureInput) =>
+        invoke<CdnPosture>('wizard_addon_cdn_posture', { input }),
+    cdnSetPlainFallback: (input: CdnPlainFallbackInput) =>
+        invoke<AddonRow>('wizard_addon_cdn_set_plain_fallback', { input }),
+
+    // ---- update channel through Google
+    /** Path B: the script to paste, with its write key in it. */
+    googleScript: (input: GoogleScriptInput) =>
+        invoke<GoogleScript>('wizard_addon_google_script', { input }),
+    /** Path A: sign in once, deploy, throw the token away. The token
+     *  never reaches the page. */
+    googleSignIn: (input: GoogleSignInInput) =>
+        invoke<AddonRow>('wizard_addon_google_sign_in', { input }),
+    /** Path B: the web-app address pasted back. */
+    googleAttach: (input: GoogleAttachInput) =>
+        invoke<AddonRow>('wizard_addon_google_attach', { input }),
+    googleCheck: (input: GoogleCheckInput) =>
+        invoke<GoogleCheck>('wizard_addon_google_check', { input }),
+};
+
 /** PB-20. The platform side of screens that show secrets. */
 export const Platform = {
     /** Android: FLAG_SECURE on the activity window (no screenshots, no
@@ -1851,6 +1941,10 @@ export const onQrFrame = (
     cb: (frame: QrFountainFrame) => void,
 ): Promise<UnlistenFn> =>
     listen<QrFountainFrame>('wizard://qr-frame', (e) => cb(e.payload));
+
+/** Optional add-ons: one step of an add-on operation. */
+export const onAddonProgress = (cb: (ev: AddonProgress) => void): Promise<UnlistenFn> =>
+    listen<AddonProgress>('wizard://addon-progress', (e) => cb(e.payload));
 
 /** D2: one line per person while `renewEveryone` runs. */
 export const onRenewEvent = (cb: (ev: RenewEvent) => void): Promise<UnlistenFn> =>

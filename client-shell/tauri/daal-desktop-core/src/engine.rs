@@ -228,6 +228,12 @@ pub struct Engine {
     /// the file now, or read how far that is. Optional: an older library
     /// loads, and the page then does not offer the action.
     survey_routes: Option<extern "C" fn(c_int, *mut c_void, c_int) -> c_int>,
+
+    /// `engine_standby_key` (core/abi/standby.go, optional add-ons item
+    /// S7): a recipient types the 26-character standby key they were
+    /// sent. Optional: no library has it until that lane lands, and the
+    /// command then answers "not in this engine library".
+    standby_key: Option<extern "C" fn(*const c_char, *const c_char, *mut c_void, c_int) -> c_int>,
 }
 
 impl Engine {
@@ -555,6 +561,11 @@ impl Engine {
                 lookup::<unsafe extern "C" fn() -> c_int>(&lib, b"engine_field_probe_discard")
                     .ok()
                     .map(|sym| *sym);
+            let standby_key = lookup::<
+                unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void, c_int) -> c_int,
+            >(&lib, b"engine_standby_key")
+            .ok()
+            .map(|sym| *sym);
 
             // Reinterpret each unsafe-extern as the safe-extern variant
             // we store in the struct. The wrapper methods enforce all
@@ -633,6 +644,7 @@ impl Engine {
                 field_probe_discard: field_probe_discard.map(|f| std::mem::transmute(f)),
                 relaypack_refresh: relaypack_refresh.map(|f| std::mem::transmute(f)),
                 survey_routes: survey_routes.map(|f| std::mem::transmute(f)),
+                standby_key: standby_key.map(|f| std::mem::transmute(f)),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -1533,6 +1545,24 @@ impl Engine {
         };
         let s: c_int = if start { 1 } else { 0 };
         self.call_buf("engine_survey_routes", |buf, len| (f)(s, buf, len)).map(Some)
+    }
+
+    /// `engine_standby_key`: check a typed standby key against the signed
+    /// commitment of the routes of one held file (`relay_pack_id`, "" =
+    /// every held file) and, when it matches, keep it so the routes may
+    /// dial the standby address (specs/relaypack-v1.md `_standby`).
+    /// Returns the engine's JSON, or `Ok(None)` when this library has no
+    /// such call. The key is an address, not a secret; it is still never
+    /// logged.
+    pub fn standby_key(&self, relay_pack_id: &str, key: &str) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(f) = self.standby_key else {
+            return Ok(None);
+        };
+        let id = CString::new(relay_pack_id).map_err(|_| DesktopError::EngineSymbol("relay_pack_id NUL".into()))?;
+        let k = CString::new(key).map_err(|_| DesktopError::EngineSymbol("standby key NUL".into()))?;
+        self.call_buf("engine_standby_key", |buf, len| (f)(id.as_ptr(), k.as_ptr(), buf, len))
+            .map(Some)
     }
 
     /// `engine_field_probe_seal`: write the sealed report file.

@@ -522,6 +522,16 @@ pub fn relaypack_refresh(state: &AppState, relay_pack_id: &str) -> Result<String
         .ok_or_else(|| field_probe_missing("engine_relaypack_refresh"))
 }
 
+/// Optional add-ons, standby address: the recipient's "I was sent a
+/// code" field. Checks the typed key against the signed commitment and
+/// keeps it when it matches (`Engine::standby_key`).
+pub fn standby_key(state: &AppState, relay_pack_id: &str, key: &str) -> Result<String> {
+    state
+        .engine
+        .standby_key(relay_pack_id, key)?
+        .ok_or_else(|| field_probe_missing("engine_standby_key"))
+}
+
 /// "Check all routes": `start` true checks every route of the file now
 /// (side instances, two at a time); false reads how far that is.
 pub fn survey_routes(state: &AppState, start: bool) -> Result<String> {

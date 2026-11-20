@@ -56,6 +56,7 @@ import { explainFailure } from './failureText';
 import { RelayDestroySheet } from './RelayListPage';
 import { RELAYPACK_PHASE } from './phase';
 import { MoreWaysToConnect } from './MoreWaysToConnect';
+import { AddonsSection } from './addons/AddonsSection';
 import {
     enabledFamiliesFor,
     recallExtraFamilies,
@@ -2092,6 +2093,9 @@ export default function PublisherWizard({
                                             </Button>
                                         </div>
                                     )}
+                                    {/* Optional add-ons (X3): after the relay works,
+                                        never before it; all off. */}
+                                    {operatorId && <AddonsSection t={t} operatorId={operatorId} variant="wizard" />}
                                 </div>
                             )}
                         </div>

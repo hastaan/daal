@@ -131,6 +131,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "restore_unsettled",
         sql: include_str!("../migrations/V018__restore_unsettled.sql"),
     },
+    Migration {
+        version: 19,
+        name: "relay_addons",
+        sql: include_str!("../migrations/V019__relay_addons.sql"),
+    },
 ];
 
 /// The highest migration version this build knows. A publisher backup
@@ -2528,6 +2533,15 @@ impl OperatorDb {
             // a non-existent alias as a no-op, so emitting it
             // unconditionally is safe.
             push(format!("daal.cloudflare.{id}.token"));
+        }
+        // V019: an add-on's own secret (a Cloudflare token, a script
+        // write key). Listed so panic_wipe erases it too.
+        if let Ok(mut stmt) = conn.prepare("SELECT secret_alias FROM relay_addons") {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for a in rows.flatten() {
+                    push(a);
+                }
+            }
         }
         // cells (V008)
         if let Ok(mut stmt) = conn.prepare(

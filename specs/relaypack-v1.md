@@ -385,6 +385,87 @@ it ignore it.
 - How it is used: `specs/engine-abi-v1.md` "The connect ladder". The
   publisher side that writes the list is not built yet.
 
+### `_standby` key (additive, no `spec_version` bump) — optional add-ons
+
+Reserved 2026-11-20 for the standby-address add-on
+(`docs/optional-addons-plan.md` §1, `specs/optional-addons-v1.md` §3).
+**Not built yet**: parser `bundle/go/bundle/standby.go` (S1), importer and
+guard (S2), binder `publisher/deploy/relaypack/endpoint.go` (S5), engine
+variant (S7). Until then no pack carries it and every build ignores it.
+
+A route's `family_specific_config` MAY carry `_standby`: a second address
+of the same relay, on the same ports with the same keys, that the route
+may be dialled at. It is a sibling of `_endpoint` — never inside the
+endpoint commitment, whose decoder is strict — and is covered by the
+manifest signature. Two shapes:
+
+```jsonc
+// sealed (the default): only a commitment to the address
+"_standby": { "v": 1, "mode": "sealed", "commit": "<base64, 32 bytes>" }
+// open: the address itself
+"_standby": { "v": 1, "mode": "open", "server": "203.0.113.20" }
+```
+
+- **Shape.** `v` is `1`. `mode` is `sealed` (exactly the members `v`,
+  `mode`, `commit`) or `open` (exactly `v`, `mode`, `server`). `commit` is
+  standard base64 with padding of 32 bytes. `server` is a canonical
+  dotted-quad IPv4 address (no leading zeros) that is not unspecified,
+  loopback, private, link-local, multicast or broadcast, and is not
+  `_endpoint.server`. Anything else — an unknown member, another
+  version, a missing member, a bad length — makes `_standby` malformed,
+  and a malformed `_standby` is treated as **absent**: no standby is
+  dialled for that route. The import is not refused for it and the
+  route's `_endpoint` is unaffected. (`_standby` can only widen what a
+  route may dial, so ignoring it is the closed reading; a malformed
+  `_endpoint` still refuses the pack.)
+- **The commitment.** `commit = SHA-256("daal/standby-v1" ‖ salt ‖ ipv4)`:
+  the 15 ASCII bytes of the domain string with no terminator, a 12-byte
+  random `salt`, and the 4 address bytes in network order. One relay has
+  one standby, so every route of it carries the same `_standby`.
+- **The standby key** is `salt ‖ ipv4`, 16 bytes. It needs no signature:
+  the signed pack already committed to it, so a forged or mistyped key
+  matches no commitment and is refused, and can steer nobody anywhere. It
+  is not a secret once used; it is an address.
+  - Text form (what a person reads aloud or types): the 128 bits, most
+    significant first, followed by two zero bits, as 26 symbols of
+    Crockford's base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), shown in
+    five groups of 6-5-5-5-5 separated by one space. On input case is
+    ignored, spaces and `-` are ignored, `O` reads as `0` and `I` and
+    `L` as `1`; any other symbol, a count other than 26, or non-zero
+    trailing bits is malformed.
+  - DNS form: the 16 bytes as one AAAA record.
+  - There is no checksum: the commitment is the check.
+  - Test vectors: S1 adds them to this section with the parser.
+- **Families.** Never on `shadowsocks` (no server authentication that is
+  independent of the shared key, so a stale standby could hand a
+  stranger the traffic): the binder does not write it there, and a
+  `_standby` on a shadowsocks route is ignored. For every other family a
+  stale standby fails closed — the handshake is to the committed key.
+- **The endpoint rule, amended.** Where "Endpoint commitment" below
+  requires an outbound's `server` to equal `_endpoint.server`, it may
+  instead equal the open `_standby.server`, or the address inside a held
+  standby key that matches `_standby.commit`. Nothing else moves: port,
+  `server_name`, TLS pin, REALITY public key, shadowsocks method and
+  digest are checked exactly as before, and the stored profile itself
+  keeps the committed address (the standby is a dial-time variant,
+  `specs/optional-addons-v1.md` §3.3).
+- **On the device.** Not in `bundle.EngineFamilyConfigKeys`: open mode
+  holds an address, and the route row is not the encrypted half of the
+  store. The engine keeps it beside the route's commitment
+  (`standby:<route_id>`) with an accepted key (`standby-key:<route_id>`);
+  every import and refresh rewrites both, and a newer commitment without
+  `_standby` removes them.
+- **Where a key comes from.** A key the person types
+  (`engine_standby_key`, `specs/optional-addons-v1.md` §3.4), the
+  `standby_key` member of a `daal-refresh-v1` container (below), or a
+  file. When the publisher switches to the standby, the next signed pack
+  names it as `_endpoint.server` and needs no key at all.
+- **Publisher rules.** Sealed is the default; open is offered only while
+  no Everyone file exists for the relay (owner decision D-1). Removing a
+  standby signs and publishes a pack without `_standby` **before** the
+  address is released, so no current commitment names an address that
+  may be handed to someone else.
+
 ### Freshness JSON shape (sub-key-aware) — `daal/freshness-v2`
 
 Per FRP-8 §6: a publisher's freshness document is **either** root-
@@ -463,6 +544,84 @@ lives at `core/refresh/relaypack.go` and consults
 selection). The publisher half is
 `publisher/deploy/freshness/document.go`, whose struct this one
 mirrors field for field.
+
+### Mirror provider `appsscript` — optional add-ons
+
+Reserved 2026-11-20 for the Google update-channel add-on
+(`docs/optional-addons-plan.md` §3, `specs/optional-addons-v1.md` §5).
+**Not built yet**: publisher backend G1/G2, recipient fetcher G4/G5.
+
+- **The entry.** One member of the signed mirror set
+  (`trust/freshness-mirrors.json`, `daal/freshness-mirrors-v1`):
+  `{"provider": "appsscript", "url": "https://script.google.com/macros/s/<id>/exec?k=<token>"}`.
+  The URL is exactly that shape: host `script.google.com`, path
+  `/macros/s/<id>/exec` with `<id>` of 20–120 characters from
+  `[A-Za-z0-9_-]`, and one query parameter `k`, 22 base64url characters
+  (16 random bytes, the "path token"), nothing else. It is a mirror like
+  any other for the set's rules (https, no credentials, distinct host).
+- **What it serves** is not a freshness document but a `daal-refresh-v1`
+  container (next section) holding one.
+- **How a recipient fetches it** (G4): through the Google front — SNI
+  `www.google.com`, HTTP/2 `:authority script.google.com`, a Chrome-shaped
+  hello — following exactly one redirect, and only to
+  `script.googleusercontent.com` over the same front; a bounded read of
+  64 KiB; if the fronted attempt fails, one plain attempt with SNI
+  `script.google.com`. At most two connections to Google per walk, and
+  0–120 s of random delay before the first (the script's quota is 30
+  simultaneous executions). A recipient fetches it only after a route
+  died and with no tunnel up, like every mirror. A mirror in a
+  freshness document's `mirrors[]` (which carries URLs only) is treated
+  as `appsscript` exactly when its URL has this shape.
+- **The two-mirror rule, amended** (owner decision D-3): a mirror set
+  whose only provider is `appsscript` is accepted with that one mirror.
+  Every other set still needs at least two distinct providers. This
+  applies where the rule is enforced today: the publisher's
+  `NewMirrorSet` and the recipient's verification of the set
+  (`core/refresh`). The card says that a Google suspension then stops
+  updates.
+
+### The `daal-refresh-v1` container — optional add-ons
+
+The body the `appsscript` mirror serves (and the only thing it stores):
+the freshness document, the signed credential-less pack it names, and
+optionally a standby key, in one small text object, so a recipient
+behind the Google front needs no second fetch.
+
+```jsonc
+{
+  "kind":        "daal-refresh-v1",
+  "freshness":   "<base64 of the freshness document, its exact bytes>",
+  "pack":        "<base64 of the signed credential-less .sbp>",  // optional
+  "standby_key": "<the 26-symbol standby key>"                  // optional
+}
+```
+
+- UTF-8 JSON, at most 65 536 bytes in all; `freshness` at most 16 KiB
+  decoded, `pack` at most 48 KiB decoded. `kind` must be exactly
+  `daal-refresh-v1`. Unknown members are ignored: every part
+  authenticates itself, and nothing in the container is trusted because
+  of where it came from.
+- `freshness` is verified exactly as a document fetched from any mirror
+  (signature chain, `relay_pack_id` / `supersedes`, `sequence` high-water
+  mark, `not_after`). Nothing else in the container is used unless it
+  verifies.
+- `pack` is used only when its SHA-256 equals the document's
+  `current_bundle_sha256`, and then goes through the same merge as a
+  pack fetched from `current_signed_url` (rules 3–4 of "Recipient
+  rules"); `current_signed_url` is not fetched.
+- `standby_key` is accepted only when it matches a held route's
+  `_standby.commit` (after the pack, if any, was applied).
+- `{"kind": "daal-refresh-v1"}` with no `freshness` is the empty
+  container a removed channel serves: "nothing new", not an error.
+- **The update** (publisher → script; recipients never see it) is one
+  HTTPS POST of `{"seq": <integer>, "blob": "<the container JSON as a
+  string>", "mac": "<64 lower-case hex>"}` with
+  `mac = HMAC-SHA256(write_key, ASCII decimal seq ‖ 0x0A ‖ blob)` and
+  `write_key` 32 random bytes the publisher's app generated and embedded
+  in the script. The script stores the blob only when the MAC holds and
+  `seq` is greater than the stored one. The write key only prevents
+  vandalism of the channel; recipients trust the publisher's signature,
+  never the script.
 
 ### `Manifest.relay_pack.freshness_url` (lifted at V1.6)
 
@@ -817,6 +976,87 @@ field that does not belong to the route's family makes the commitment
 malformed (`endpoint_malformed`) — a commitment this build would not
 fully enforce is not one it may partially enforce.
 
+### The CDN-fronted endpoint — optional add-ons (additive)
+
+Reserved 2026-11-20 for the Cloudflare add-on
+(`docs/optional-addons-plan.md` §2, `specs/optional-addons-v1.md` §4).
+**Not built yet**: B-4 (`bundle/go/bundle/endpoint.go`,
+`relaypack/{client_outbound.go,candidate_render.go}`, the validator row).
+
+A `websocket-tls` route whose `_relaypack.exposure_mode` is `cdn_fronted`
+commits to a hostname and a root set instead of an address and a key
+pin. `_endpoint` `v` 1 gains five optional members, valid only on this
+shape:
+
+```jsonc
+"_endpoint": {
+  "v": 1,
+  "server": "<label>.<zone>",          // a hostname, never resolved by a recipient
+  "port": 443,
+  "server_name": "<label>.<zone>",     // equals server
+  "cdn": "cloudflare",
+  "edge_seeds": ["104.16.0.0/13", "..."],
+  "ech_config": "<base64 ECHConfigList>",               // optional
+  "tls_roots_sha256": ["<base64 SHA-256 of a root's SubjectPublicKeyInfo>", "..."],
+  "plain_fallback": false                               // optional, default false
+}
+```
+
+- **Shape.** On a `cdn_fronted` route `cdn`, `edge_seeds`,
+  `tls_roots_sha256` and `server_name` are required, `server_name`
+  equals `server`, and `tls_spki_sha256`, `reality_public_key`,
+  `ss_method` and `ss_server_key_sha256` are absent. On any other route
+  the five members are unknown members (`endpoint_malformed`).
+  - `cdn`: `cloudflare` (the only value).
+  - `server`: a canonical LDH host name of at least two labels — lower
+    case, no trailing dot, not an IP literal, not under `.ir`.
+  - `edge_seeds`: 1–8 canonical IPv4 or IPv6 CIDR prefixes, taken by the
+    publisher abroad from the CDN's published ranges at sign time.
+    Recipients dial an address inside them and never download a range
+    list or resolve the host name (domestic DNS would answer
+    `10.10.34.x`).
+  - `ech_config`: standard base64 of the ECHConfigList in the host
+    name's HTTPS record, read over DoH from abroad at sign time and at
+    every freshness publish; at most 512 bytes decoded. Absent means the
+    zone serves no ECH ("Name hidden: no"). It is the same for every
+    site on the CDN and identifies nobody; a stale one costs one round
+    trip (the edge answers with retry configs).
+  - `tls_roots_sha256`: 1–8 standard-base64 SHA-256 digests of root
+    certificates' SubjectPublicKeyInfo. The app ships the root set; the
+    route verifies only against shipped roots whose digest is listed, and
+    is not dialled when none is.
+  - `plain_fallback`: the signed per-pack flag of owner decision D-2.
+- **The outbound must** be `vless` over a `ws` transport whose `Host`
+  header is `server_name`; TLS on with `tls.server_name` = `server_name`;
+  `server` an IP address inside one of `edge_seeds` (the engine's edge
+  pick writes it; a host name there is refused) and `server_port` =
+  `port`; no `certificate_public_key_sha256`; no REALITY; no
+  `tls.insecure`; no trust anchor from a path on the device; ECH on with
+  `ech_config` when it is committed. The general rules above (member
+  names, no `detour`, …) apply unchanged. The ws path is a credential:
+  it stays in the profile, the same for every recipient of the route.
+- **Hello order** (engine, B-6b): ECH; then ECH with the outer hello
+  split (`record_fragment` + `fragment`); then stop. A plain hello
+  (which shows the zone name) only when `plain_fallback` is true. The
+  route is tried after every direct route and after the open standby.
+- **Merge** moves `server`, `server_name`, `edge_seeds`, `ech_config`,
+  `tls_roots_sha256` and `plain_fallback`; the device re-picks its edge
+  address.
+- **Stated limit.** The CDN terminates TLS, so it can read the VLESS
+  header — the recipient's UUID and each destination host and port —
+  and sees every recipient's address. Payloads that are themselves TLS
+  stay opaque. Weaker than a key pin in that one way, and the
+  publisher's card says so before anything is bought.
+- **Compatibility — open item for B-4.** A build from before this
+  amendment reads the new members as unknown, and `endpoint_malformed`
+  refuses the **whole** pack (`bundle/go/importer/endpoint_plan.go`
+  `planRoutes`), the freshness merge of the signed skeleton included —
+  not just the CDN route. So a pack with a CDN route must not reach a
+  device older than this amendment. Before the first CDN route is
+  minted, B-4 either accepts that (the pilot's phones update together)
+  or carries this commitment under a sibling key that older builds
+  ignore. See `specs/optional-addons-v1.md` §8.
+
 No manifest struct changes, so the canonical bytes of every existing
 field are unchanged and **`spec_version` does not move**:
 `family_specific_config` was already an opaque, signed object.
@@ -1133,6 +1373,7 @@ contract lives in `specs/daal-relay-mgmt-v1.md`.
 - FRP-4b (`34-phase-frp-4b-direct-deploy-integration.md`) — Helper-side `BindAndSign` that turns the OperatorRecord into a signed `.sbp`.
 - FRP-8 (`38-phase-frp-8-v1-6-cdn-fronted.md`) — lifts `cdn_fronted` and non-empty `freshness_url` to V1.6.
 - FRP-11 (`41-phase-frp-11-trusted-cells.md`) — lifts `cell_scope`. See §"V2 cell aggregation" below.
+- `specs/optional-addons-v1.md` and `docs/optional-addons-plan.md` — the `_standby` key, the CDN-fronted endpoint, the `appsscript` mirror provider and the `daal-refresh-v1` container (reserved 2026-11-20, not built yet).
 
 ## V2 cell aggregation (FRP-11 amendment)
 

@@ -176,6 +176,10 @@ pub const E_RELAY_UNREACHABLE: &str = "E_RELAY_UNREACHABLE";
 pub const E_FILE_MISSING: &str = "E_FILE_MISSING";
 /// The setup helper bundled with this app lacks the verb asked for.
 pub const E_DEPLOY_TOO_OLD: &str = "E_DEPLOY_TOO_OLD";
+/// An optional add-on operation (standby address, Cloudflare, Google
+/// update channel) whose code has not landed yet. Nothing was changed.
+/// Not retryable: only an app update brings it (`addons::not_built`).
+pub const E_NOT_BUILT: &str = "E_NOT_BUILT";
 
 // ---- Publisher backup and restore (`publisher_backup`) ------------
 //
@@ -1832,6 +1836,9 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     // the list, and an id used again must not inherit a live key (its
     // pack would silently be signed as a Test relay).
     aliases.extend(crate::report_key::optional_aliases(operator_id));
+    // V019: each add-on's own secret. Read now: the add-on rows go with
+    // the relay row (ON DELETE CASCADE).
+    aliases.extend(crate::addons::secret_aliases(ctx, operator_id));
     aliases.sort();
     aliases.dedup();
 
@@ -1904,6 +1911,11 @@ pub struct DestroyReport {
     pub other_server_id: String,
     #[serde(default)]
     pub other_server_name: String,
+    /// V019: what happened to each add-on of the relay (standby address,
+    /// Cloudflare, Google channel). One that could not be taken down
+    /// keeps the relay row, like an address that still bills.
+    #[serde(default)]
+    pub addons: Vec<crate::addons::AddonOutcome>,
 }
 
 /// PA-3: the report for "another server with this relay's name is still
@@ -1922,6 +1934,7 @@ pub(crate) fn named_server_report(cloud: DecommissionResult) -> Option<DestroyRe
         retry_needed: false,
         other_server_id: named.id,
         other_server_name: named.name,
+        addons: Vec::new(),
     })
 }
 
@@ -2038,9 +2051,13 @@ pub fn relay_destroy_with(
     delete_own_server: bool,
 ) -> Result<DestroyReport> {
     if !delete_server {
+        // Nothing is asked of any provider: every add-on keeps running
+        // (and billing), as the server does. Said in the report.
+        let addons = crate::addons::left_by_local_removal(ctx, operator_id);
         cancel_and_cleanup(ctx, operator_id)?;
         return Ok(DestroyReport {
             local_removed: true,
+            addons,
             ..Default::default()
         });
     }
@@ -2068,13 +2085,21 @@ pub fn relay_destroy_with(
         ));
     }
 
+    // V019: the add-ons first (docs/optional-addons-plan.md §1.6, §2.6:
+    // the Cloudflare side goes before the server). An add-on that could
+    // not be taken down keeps the relay row below, with the credentials
+    // that remove it; the server still goes.
+    let addons = crate::addons::before_relay_destroy(ctx, operator_id)?;
+    let addons_kept = addons.iter().any(|a| a.keeps_relay);
+
     // Cloud first. A failure here propagates and the local state — row,
     // token, staged record — survives untouched for the retry.
     let cloud = destroy_cloud_resources(ctx, operator_id, &row, true, delete_own_server)?;
 
     // PA-3: another Daal server with this relay's name is still there.
     // Nothing was deleted; keep the row and its token.
-    if let Some(rep) = named_server_report(cloud.clone()) {
+    if let Some(mut rep) = named_server_report(cloud.clone()) {
+        rep.addons = addons;
         return Ok(rep);
     }
 
@@ -2082,9 +2107,10 @@ pub fn relay_destroy_with(
     // and billing. Forgetting the relay now would forget the only
     // credential that can give it back, so the row stays — marked
     // decommissioned, naming what still bills — and the same call is the
-    // retry (a server that no longer exists counts as deleted).
+    // retry (a server that no longer exists counts as deleted). An
+    // add-on still standing is the same case.
     let still_billing = failed_addresses(&cloud);
-    if cloud.retry_needed || !still_billing.is_empty() {
+    if cloud.retry_needed || !still_billing.is_empty() || addons_kept {
         ctx.db.mark_decommissioned_with_unreleased(
             operator_id,
             (ctx.clock)(),
@@ -2100,6 +2126,7 @@ pub fn relay_destroy_with(
             warnings,
             addresses: cloud.addresses,
             retry_needed: true,
+            addons,
             ..Default::default()
         });
     }
@@ -2132,6 +2159,7 @@ pub fn relay_destroy_with(
         warnings,
         addresses: cloud.addresses,
         retry_needed: false,
+        addons,
         ..Default::default()
     })
 }

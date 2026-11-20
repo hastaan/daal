@@ -23,6 +23,13 @@
 //! The OPSEC test (`tests/key_opsec_test.rs`) greps for either
 //! symbol and fails the build if found.
 
+// Optional add-ons (docs/optional-addons-plan.md): the shared ledger
+// and plumbing, and one module per add-on. The three per-kind modules
+// are stubs that answer E_NOT_BUILT until their lanes land.
+pub mod addon_cdn;
+pub mod addon_google;
+pub mod addon_standby;
+pub mod addons;
 pub mod cli_bridge;
 pub mod commands;
 pub mod device_custody;

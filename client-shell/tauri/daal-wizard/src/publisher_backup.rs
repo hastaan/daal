@@ -143,7 +143,23 @@ pub const INCLUDED_TABLES: &[&str] = &[
     "recipient_name_counters",
     "relay_identity",
     "freshness_endpoints",
+    // V019: the add-on ledger. A new phone must know what still bills
+    // and how to take it down; each add-on's secret comes along through
+    // `ALIAS_COLUMNS`.
+    "relay_addons",
 ];
+
+/// INCLUDED tables added after backups were already being made, with
+/// the schema version that added each. A backup from before that
+/// version has no such table and restores as if it were empty; and the
+/// table counts in the staleness digest only once it has rows, so a
+/// phone that never used it keeps the digest (and the up-to-date
+/// backup) it had before the table existed.
+pub const LATER_TABLES: &[(&str, i64)] = &[("relay_addons", 19)];
+
+fn later_table_since(t: &str) -> Option<i64> {
+    LATER_TABLES.iter().find(|(n, _)| *n == t).map(|(_, v)| *v)
+}
 
 /// Tables a backup deliberately leaves out: this phone's own recipient
 /// identity, its audit and bookkeeping, and the per-device backup meta.
@@ -202,6 +218,7 @@ const ALIAS_COLUMNS: &[(&str, &str)] = &[
     ("operators", "publisher_priv_keystore_alias"),
     ("operators", "cloud_token_keystore_alias"),
     ("freshness_endpoints", "secret_alias"),
+    ("relay_addons", "secret_alias"),
     ("cells", "bundle_signer_priv_alias"),
     ("cells", "admin_priv_alias"),
 ];
@@ -1107,6 +1124,9 @@ fn sha_hex(b: &[u8]) -> String {
 fn digest_of(s: &Snapshot) -> String {
     let mut tables = BTreeMap::new();
     for (name, t) in &s.tables {
+        if t.rows.is_empty() && later_table_since(name).is_some() {
+            continue;
+        }
         let keep: Vec<usize> = (0..t.columns.len())
             .filter(|&i| {
                 !is_listed(RESET_COLUMNS, name, &t.columns[i])
@@ -1383,7 +1403,12 @@ fn parse_payload(ctx: &WizardCtx, pt: &[u8]) -> Result<Parsed> {
     }
     for &t in INCLUDED_TABLES {
         if !tables.contains_key(t) {
-            return Err(damaged("a table is missing"));
+            // A table this backup is older than is not missing: it did
+            // not exist yet, and restores as empty.
+            match later_table_since(t) {
+                Some(since) if schema < since => continue,
+                _ => return Err(damaged("a table is missing")),
+            }
         }
     }
     if schema < current {
