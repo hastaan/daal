@@ -184,6 +184,10 @@ func (c *Core) switchNetwork(incoming string, adoptFrom []string) (fresh bool, r
 
 	// 1. Persist the OUTGOING network's snapshot (best-effort).
 	outgoing := activeNetworkID()
+	if outgoing != incoming {
+		// What a survey was checking was about the network just left.
+		c.survey.stop("network")
+	}
 	if outgoing != "" && outgoing != incoming && outgoing != netmem.SentinelUnset {
 		captureAndPersist(store, outgoing, c, now)
 	}

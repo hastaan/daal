@@ -558,6 +558,10 @@ export interface WayRow {
     /** The engine's score, 0..100, last hour; `undefined` = no score yet
      *  (no bar: never a 0). */
     scorePct?: number;
+    /** No score, and none will come by itself: the engine can check
+     *  this kind of way only while it is connected on it. The card says
+     *  "Checked when used" in the score's place. */
+    whenUsed?: boolean;
 }
 
 /** "Tries again in about 9 min" for a way the engine is resting, by its
@@ -585,9 +589,12 @@ export function wayRows(input: {
     tried?: readonly AutoTried[];
     /** Scores by route id, from the engine's route health. */
     scores?: ReadonlyMap<string, number>;
+    /** Route ids the engine's check of every way is on right now
+     *  (lib/routeSurvey.ts). */
+    checking?: ReadonlySet<string>;
     nowMs: number;
 }): WayRow[] {
-    const { t, locale, routes, activeId, why, tried, scores, nowMs } = input;
+    const { t, locale, routes, activeId, why, tried, scores, checking, nowMs } = input;
     const restingFam = new Map<string, SkippedFamilyRow>();
     for (const f of why?.skippedFamilies ?? []) restingFam.set(f.family.trim().toLowerCase(), f);
     const skipped = new Map<string, string>();
@@ -607,6 +614,9 @@ export function wayRows(input: {
         } else if (r.familyMaturity === 'unsupported') {
             state = 'off';
             status = t('files.way.unsupported_short');
+        } else if (checking?.has(r.routeId)) {
+            state = 'none';
+            status = t('home.survey.checking_one');
         } else if (restingNow(r, nowMs)) {
             state = 'warn';
             status = restText(t, locale, r.cooldownUntilUnixMs ?? fam?.untilUnixMs, nowMs);
@@ -624,6 +634,7 @@ export function wayRows(input: {
             status = r.measured ? gradeText(t, r.measured) : r.familyMaturity === 'experimental' ? t('files.way.experimental') : undefined;
         }
         const pct = typeof r.healthPct === 'number' && Number.isFinite(r.healthPct) ? r.healthPct : scores?.get(r.routeId);
+        const scored = typeof pct === 'number' && Number.isFinite(pct);
         const nick = meaningfulNickname(r);
         return {
             routeId: r.routeId,
@@ -632,7 +643,8 @@ export function wayRows(input: {
             ...(status ? { status } : {}),
             state,
             active: r.routeId === activeId,
-            ...(typeof pct === 'number' && Number.isFinite(pct) ? { scorePct: Math.max(0, Math.min(100, Math.round(pct))) } : {}),
+            ...(scored ? { scorePct: Math.max(0, Math.min(100, Math.round(pct))) } : {}),
+            ...(!scored && r.checkedWhenUsed && r.routeId !== activeId && r.familyMaturity !== 'unsupported' ? { whenUsed: true } : {}),
         };
     });
 }

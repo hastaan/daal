@@ -223,6 +223,11 @@ pub struct Engine {
     /// `engine_relaypack_refresh` (core/abi/relaypack_recover.go): look
     /// for a newer signed file now. Optional: an older library loads.
     relaypack_refresh: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
+
+    /// `engine_survey_routes` (core/abi/survey.go): check every route of
+    /// the file now, or read how far that is. Optional: an older library
+    /// loads, and the page then does not offer the action.
+    survey_routes: Option<extern "C" fn(c_int, *mut c_void, c_int) -> c_int>,
 }
 
 impl Engine {
@@ -542,6 +547,10 @@ impl Engine {
             >(&lib, b"engine_relaypack_refresh")
             .ok()
             .map(|sym| *sym);
+            let survey_routes =
+                lookup::<unsafe extern "C" fn(c_int, *mut c_void, c_int) -> c_int>(&lib, b"engine_survey_routes")
+                    .ok()
+                    .map(|sym| *sym);
             let field_probe_discard =
                 lookup::<unsafe extern "C" fn() -> c_int>(&lib, b"engine_field_probe_discard")
                     .ok()
@@ -623,6 +632,7 @@ impl Engine {
                 field_probe_seal: field_probe_seal.map(|f| std::mem::transmute(f)),
                 field_probe_discard: field_probe_discard.map(|f| std::mem::transmute(f)),
                 relaypack_refresh: relaypack_refresh.map(|f| std::mem::transmute(f)),
+                survey_routes: survey_routes.map(|f| std::mem::transmute(f)),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -1508,6 +1518,21 @@ impl Engine {
         let id = CString::new(relay_pack_id).map_err(|_| DesktopError::EngineSymbol("relay_pack_id NUL".into()))?;
         self.call_buf("engine_relaypack_refresh", |buf, len| (f)(id.as_ptr(), buf, len))
             .map(Some)
+    }
+
+    /// `engine_survey_routes`: `start` true checks every route of the
+    /// file now, in side instances (returns at once); false only reads
+    /// the report. Returns the engine's JSON (the diagnostics `survey`
+    /// block plus `started` / `refused`), or `Ok(None)` when this library
+    /// has no such call. Idempotent while one is running (a second start
+    /// answers `"refused":"running"`), so the buffer retry is harmless.
+    pub fn survey_routes(&self, start: bool) -> Result<Option<String>> {
+        self.ensure_ready()?;
+        let Some(f) = self.survey_routes else {
+            return Ok(None);
+        };
+        let s: c_int = if start { 1 } else { 0 };
+        self.call_buf("engine_survey_routes", |buf, len| (f)(s, buf, len)).map(Some)
     }
 
     /// `engine_field_probe_seal`: write the sealed report file.

@@ -84,7 +84,10 @@ type routeCheck struct {
 	cancelProof context.CancelFunc
 	// cancelLive stops the liveness loop of the connected route.
 	cancelLive context.CancelFunc
-	kick       chan struct{}
+	// cancelSurvey stops a survey the person asked for (survey.go): it
+	// ends with whatever the engine was running when it began.
+	cancelSurvey context.CancelFunc
+	kick         chan struct{}
 	// checkMu serialises proofs of the connected route (timer, network
 	// change, an explicit CheckActiveRoute).
 	checkMu sync.Mutex
@@ -455,14 +458,17 @@ func (rc *routeCheck) snapshot() (state string, cat diagnostics.Category, runnin
 // loop. Safe to call with or without Core.mu held; it takes neither.
 func (rc *routeCheck) abandon() {
 	rc.mu.Lock()
-	cp, cl := rc.cancelProof, rc.cancelLive
-	rc.cancelProof, rc.cancelLive = nil, nil
+	cp, cl, cs := rc.cancelProof, rc.cancelLive, rc.cancelSurvey
+	rc.cancelProof, rc.cancelLive, rc.cancelSurvey = nil, nil, nil
 	rc.mu.Unlock()
 	if cp != nil {
 		cp()
 	}
 	if cl != nil {
 		cl()
+	}
+	if cs != nil {
+		cs()
 	}
 }
 
@@ -685,8 +691,11 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 	c.mu.Lock()
 	epoch, routeID, family, cfg := c.routeEpoch, c.activeRoute, c.activeFamily, c.proofCfg
 	state, _ := c.check.get()
+	down := c.shuttingDown
 	c.mu.Unlock()
-	if routeID == "" || state == RouteCheckVerifying || state == RouteCheckNone {
+	if routeID == "" || state == RouteCheckVerifying || state == RouteCheckNone || down || ctx.Err() != nil {
+		// (A loop whose kick and cancellation arrived together must not
+		// check a route after Shutdown has closed the store.)
 		return CheckResult{}
 	}
 
@@ -694,7 +703,7 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.routeEpoch != epoch || res.Cancelled {
+	if c.routeEpoch != epoch || res.Cancelled || c.shuttingDown || ctx.Err() != nil {
 		return CheckResult{RouteID: routeID}
 	}
 	prev, prevCat := c.check.get()
@@ -780,6 +789,10 @@ func (c *Core) startLivenessLocked() {
 	c.check.cancelLive, c.check.kick = cancel, kick
 	c.check.mu.Unlock()
 	cfg := c.proofCfg
+	// Connected: the other routes of the file are checked beside the
+	// tunnel, one at a time, on this loop's context — it ends with the
+	// tunnel (survey.go).
+	c.startSurveyLocked(ctx, false)
 	go func() {
 		// failedInARow / slowInARow: consecutive failed, and consecutive
 		// slow, checks seen by THIS loop.

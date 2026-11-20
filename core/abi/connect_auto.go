@@ -632,8 +632,11 @@ type autoCandidate struct {
 	relayPort            int
 	// side: the driver can prove this route in a side instance
 	// (engine.SideProber). grade: its grade on this network.
-	side  bool
-	grade string
+	side bool
+	// survey: the survey may prove it in a side instance — side, or a
+	// naive route (engine.SurveyProbeable; survey.go).
+	survey bool
+	grade  string
 	// measuredMs: its smoothed setup time on this network; 0 with
 	// samples == 0 when it was never timed here.
 	measuredMs, samples int
@@ -1054,6 +1057,7 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 			continue
 		}
 		cd.side = prober != nil && prober.CanSideProbe(body)
+		cd.survey = cd.side || (prober != nil && prober.CanSurveyProbe(body))
 		byID[row.RouteID] = cd
 		pr := pathmanager.Route{RouteID: row.RouteID, Family: row.TransportFamily, ModesAllowed: row.ModesAllowed}
 		if b, ok := budgets[row.RouteID]; ok {

@@ -143,6 +143,9 @@ func (c *Core) autoSpeedMove(ctx context.Context) {
 	}
 	// Whatever this probe finds short of a move, the next one waits.
 	c.speed.nextProbeAt = now.Add(speedProbeBackoff)
+	// One engine-started side probe at a time: a survey in flight ends
+	// here (survey.go).
+	c.survey.stop("speed")
 	c.sideNoteLocked(cd.routeID)
 	gen, epoch := c.auto.gen, c.routeEpoch
 	cfg := c.proofCfg

@@ -270,6 +270,10 @@ export interface DiagnosticsBlob {
     // restored}. failed_route '' = nothing to report. Read through
     // lib/activeRoute.ts parseSwitchBack.
     switch_back?: unknown;
+    // The engine's check of the other routes (core/abi/survey.go):
+    // {state, trigger, checking, total, done, seq, stop_reason,
+    // results}. Read through lib/routeSurvey.ts parseSurvey.
+    survey?: unknown;
 }
 
 // Phase 2D: PIN-vault unlock outcome.

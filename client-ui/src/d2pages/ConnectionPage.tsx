@@ -39,7 +39,9 @@ import DaalButton from '../components/DaalButton';
 import WayChooser, { routeLabel } from '../components/connection/WayChooser';
 import AutoFailure from '../components/connection/AutoFailure';
 import MeasuredDetails from '../components/connection/MeasuredDetails';
-import { anyMeasured } from '../lib/measured';
+import { anyMeasured, localDigits } from '../lib/measured';
+import { checkAllRoutes, surveyLine, surveyRefusedKey, surveyRunning } from '../lib/routeSurvey';
+import type { SurveyReport } from '../lib/routeSurvey';
 import AddSheet from '../components/AddSheet';
 import MyAddressSheet from '../components/MyAddressSheet';
 import { Badge, Button, Disclosure, Icon, OverflowMenu, Sheet, useToast } from '../design/primitives';
@@ -134,6 +136,12 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // empty.
     const [routes, setRoutes] = useState<RouteDisplayRow[] | undefined>(undefined);
     const routesReadRef = useRef<{ hint: number | undefined; atMs: number; ok: boolean } | null>(null);
+    // The engine's check of every way (lib/routeSurvey.ts): `seq` moves
+    // whenever a result changed what it remembers — the cue to read the
+    // route list (and so its scores) again. `pressedSurvey` bridges a
+    // press and the first poll that reports the check.
+    const surveySeqRef = useRef<number | undefined>(undefined);
+    const [pressedSurvey, setPressedSurvey] = useState<SurveyReport | null | 'pending'>(null);
     // The route the person chose by hand (null = Automatic, the
     // default). Remembered across launches (lib/autoConnect.ts).
     const [pinnedRaw, setPinnedRaw] = useState<string | null>(() => getPinnedRoute());
@@ -185,7 +193,11 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 setWhy(w);
                 setPointer(p);
                 setHealth(h);
-                void readRoutes(c.routeCountHint, false);
+                const seq = c.survey?.seq;
+                const surveyed = seq !== undefined && surveySeqRef.current !== undefined && seq !== surveySeqRef.current;
+                surveySeqRef.current = seq;
+                if (c.survey?.trigger === 'user') setPressedSurvey(null);
+                void readRoutes(c.routeCountHint, surveyed);
                 // Clear optimistic flag as soon as the polled state
                 // agrees with what the user asked for, so the UI
                 // converges to the truth.
@@ -509,6 +521,10 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     const passUp = conn?.auto?.mode === true && conn.auto.state === 'connected';
     const scores = new Map<string, number>();
     for (const h of health) if (typeof h.pct === 'number') scores.set(h.routeId, h.pct);
+    // The person's "Check all ways": what the engine last reported of
+    // it, or what the press itself answered until the next poll does.
+    const survey: SurveyReport | null | undefined =
+        conn?.survey?.trigger !== 'user' && pressedSurvey && pressedSurvey !== 'pending' ? pressedSurvey : conn?.survey;
     const allWays = wayRows({
         t,
         locale,
@@ -517,11 +533,33 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         why,
         tried: showFacts && passUp ? conn?.auto?.tried : undefined,
         scores,
+        checking: survey?.trigger === 'user' ? new Set(survey.checking) : undefined,
         nowMs: Date.now(),
     });
+    const onCheckAll = async () => {
+        setPressedSurvey('pending');
+        const r = await checkAllRoutes();
+        if (r.started || r.refused === 'running') {
+            setPressedSurvey(r.report ?? null);
+            return;
+        }
+        setPressedSurvey(null);
+        const key = r.refused ? surveyRefusedKey(r.refused) : 'home.survey.failed';
+        if (key) toast.show(r.refused === 'busy' ? 'neutral' : 'bad', t(key));
+    };
+    // Offered once there is something besides the way in use to check.
+    const wayCheck =
+        allWays.length >= 2 && !view.holding
+            ? {
+                  onCheck: () => void onCheckAll(),
+                  running: pressedSurvey === 'pending' || surveyRunning(survey),
+                  line: pressedSurvey === 'pending' ? t('home.survey.checking_one') : surveyLine(t, survey, (n) => localDigits(n, locale)),
+              }
+            : undefined;
     const waysTitle = t(isPhone ? 'home.details.ways' : 'home.details.ways_device');
     // No fold that opens onto nothing.
-    const details = showFacts && allWays.length > 0 ? <HomeDetails t={t} locale={locale} ways={allWays} title={waysTitle} /> : null;
+    const details =
+        showFacts && allWays.length > 0 ? <HomeDetails t={t} locale={locale} ways={allWays} title={waysTitle} check={wayCheck} /> : null;
     const failureRows = failure ? triedRows(t, failure.tried, routes) : [];
 
     // One notice at most: Daal did not start > the saved files were
@@ -763,7 +801,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 >
                     <Disclosure summary={waysTitle} dataButton="home-ready-ways">
                         <div style={{ paddingBlockEnd: 12, textAlign: 'start' }}>
-                            <WayList t={t} locale={locale} ways={allWays} />
+                            <WayList t={t} locale={locale} ways={allWays} check={wayCheck} />
                         </div>
                     </Disclosure>
                 </div>
@@ -850,7 +888,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--fs-lg)', fontWeight: 600, margin: '0 0 8px' }}>
                     {waysTitle}
                 </h2>
-                <WayList t={t} locale={locale} ways={allWays} />
+                <WayList t={t} locale={locale} ways={allWays} check={wayCheck} />
             </aside>
         ) : panel === 'empty' ? (
             <aside className="d2-home-panel" aria-hidden style={{ inlineSize: '100%', maxWidth: 340 }} />

@@ -4,6 +4,8 @@
 // (`client-ui/src/backends/harness.ts`) MUST match these field names
 // and types. The UI never reaches into raw engine JSON.
 
+import type { SurveyReport } from '../lib/routeSurvey';
+
 export type ConnState  = 'disconnected' | 'connecting' | 'connected' | 'error';
 export type ConnMode   = 'lifeline' | 'lifeline-strict' | 'normal' | 'bulk';
 export type TrustClass = 'trusted' | 'pinned' | 'lan' | 'unknown';
@@ -109,6 +111,10 @@ export interface RouteDisplayRow {
   measured?: Measured;
   /** True once the route has recorded at least one success. */
   proven?: boolean;
+  /** The engine cannot check this route beside a running connection
+   *  (`checked_when_used`: tor, wireguard, …): it is checked only when it
+   *  is used, so no score appears for it by itself. */
+  checkedWhenUsed?: boolean;
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
   sourceName?: string;
@@ -188,6 +194,9 @@ export interface ConnectionSummary {
    *  read"). Pages use a change in it as the cue to re-read the real
    *  list; "nothing imported" is never concluded from it. */
   routeCountHint?: number;
+  /** The engine's check of the other routes (diagnostics `survey`,
+   *  lib/routeSurvey.ts). `undefined` from an engine without one. */
+  survey?: SurveyReport;
 }
 
 /** One route automatic connect tried, as the engine reports it. Ids and

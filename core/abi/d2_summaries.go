@@ -32,12 +32,14 @@ package abi
 // nullability above is no longer decorative — null still means "never
 // attempted", and a value now means a connect really happened.
 //
-// The limit worth knowing before trusting these numbers: SetRoute is
-// the ONLY writer, so health accrues only to routes the user connected
-// to BY HAND. There is no prober and no race, so on a fresh install one
-// route carries history and every other route carries none — the
-// evidence is a consequence of the user's choices, not an independent
-// measurement of the route.
+// The limit worth knowing before trusting these numbers: they used to
+// accrue only to routes that carried the tunnel, so on a fresh install
+// one route carried history and every other route none. Since the
+// survey (survey.go) a route proved in a side instance beside the
+// tunnel gets the same success row a connect writes (RecordSuccess /
+// RecordDegraded), so the other routes of the file get a score too. A
+// survey FAILURE writes no row here — it is remembered for the network
+// only (netmem), never charged like a failed connect.
 
 import (
 	"encoding/json"
@@ -100,6 +102,13 @@ type RouteSummaryDisplay struct {
 	// of the latest recorded check. Read from the store; a poll writes
 	// nothing.
 	Measured netmem.Measured `json:"measured"`
+	// CheckedWhenUsed: the engine cannot prove this route beside a
+	// running tunnel (its family cannot be side-probed: tor, wireguard,
+	// amneziawg, anything detoured — engine.SurveyProbeable),
+	// so it is checked only when it is used: the survey (survey.go)
+	// never fills its score by itself. Always present; false also when
+	// the route's outbound could not be read (nothing is claimed).
+	CheckedWhenUsed bool `json:"checked_when_used"`
 }
 
 // routeObservations is everything the engine has actually MEASURED
@@ -316,6 +325,7 @@ func RouteSummary(routeID string) (string, error) {
 	}
 	disp := rowToDisplay(row, observeRoute(row, liveRouteHealth(c)))
 	disp.Measured = routeMeasured(c.routeMemory(), row.RouteID)
+	disp.CheckedWhenUsed = c.checkedWhenUsed(row.RouteID)
 	body, _ := json.Marshal(disp)
 	return string(body), nil
 }
@@ -357,6 +367,7 @@ func AvailableRoutes() (string, error) {
 		}
 		d := rowToDisplay(r, observeRoute(r, live))
 		d.Measured = routeMeasured(mem, r.RouteID)
+		d.CheckedWhenUsed = c.checkedWhenUsed(r.RouteID)
 		out = append(out, d)
 	}
 	// Sort by health_pct desc, then by publisher_name asc for stability.

@@ -13,7 +13,7 @@
 // Files tab), and the list of tries under a failed connect, by kind of
 // connection and in plain words.
 import type { CSSProperties, ReactNode } from 'react';
-import { Badge, Disclosure, Icon, StateIcon } from '../../design/primitives';
+import { Badge, Button, Disclosure, Icon, StateIcon } from '../../design/primitives';
 import type { IconName } from '../../design/primitives';
 import type { ConnectedFacts, ReadyKind, TriedRow, TryingFact, WayRow } from '../../lib/homeFacts';
 
@@ -390,9 +390,30 @@ export function ScoreBar({ pct, label, locale }: { pct: number; label: string; l
     );
 }
 
+/** "Check all ways" at the foot of the list, and how far it is. */
+export interface WayCheck {
+    onCheck: () => void;
+    /** The person's check is going: the button waits. */
+    running: boolean;
+    /** Progress, then how it ended (lib/routeSurvey.ts surveyLine). */
+    line?: string;
+}
+
 /** Every way on the device, once each: disc, kind, one status line,
  *  score. Shared by the Details fold and the computer's ready panel. */
-export function WayList({ t, locale, ways, title }: { t: T; locale: string; ways: readonly WayRow[]; title?: string }) {
+export function WayList({
+    t,
+    locale,
+    ways,
+    title,
+    check,
+}: {
+    t: T;
+    locale: string;
+    ways: readonly WayRow[];
+    title?: string;
+    check?: WayCheck;
+}) {
     const scored = ways.some((w) => w.scorePct !== undefined);
     return (
         <div data-testid="way-list">
@@ -432,9 +453,30 @@ export function WayList({ t, locale, ways, title }: { t: T; locale: string; ways
                                 />
                             </span>
                         )}
+                        {w.scorePct === undefined && w.whenUsed && (
+                            <span
+                                data-testid="way-when-used"
+                                title={t('home.details.when_used_hint')}
+                                style={{ marginBlockStart: 3, flexShrink: 0, maxInlineSize: 120, fontSize: 12, color: 'var(--dim)', textAlign: 'end', lineHeight: 1.35 }}
+                            >
+                                {t('home.details.checked_when_used')}
+                            </span>
+                        )}
                     </li>
                 ))}
             </ul>
+            {check && (
+                <div style={{ display: 'grid', justifyItems: 'start', gap: 2, marginBlockStart: 10 }}>
+                    <Button variant="link" onClick={check.onCheck} disabled={check.running} dataButton="check-all-ways">
+                        {t('home.survey.check_all')}
+                    </Button>
+                    {check.line && (
+                        <span data-testid="way-check-line" role="status" aria-live="polite" style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.45 }}>
+                            {check.line}
+                        </span>
+                    )}
+                </div>
+            )}
         </div>
     );
 }
@@ -445,17 +487,18 @@ interface DetailsProps {
     ways: readonly WayRow[];
     /** "Ways on this phone" / "Ways on this device". */
     title: string;
+    check?: WayCheck;
 }
 
 /** The fold at the bottom of the card. Not drawn when it would be
  *  empty. */
-export function HomeDetails({ t, locale, ways, title }: DetailsProps) {
+export function HomeDetails({ t, locale, ways, title, check }: DetailsProps) {
     if (ways.length === 0) return null;
     return (
         <div style={{ borderBlockStart: '1px solid var(--line-soft)' }}>
             <Disclosure summary={t('ui.details')} dataButton="home-details">
                 <div style={{ paddingBlockEnd: 12, textAlign: 'start' }}>
-                    <WayList t={t} locale={locale} ways={ways} title={title} />
+                    <WayList t={t} locale={locale} ways={ways} title={title} check={check} />
                 </div>
             </Disclosure>
         </div>

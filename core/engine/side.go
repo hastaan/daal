@@ -34,6 +34,10 @@ type SideProber interface {
 	// CanSideProbe: may the route with this engine-side config (the
 	// bytes Driver.Start takes) be proved in a side instance?
 	CanSideProbe(configJSON []byte) bool
+	// CanSurveyProbe: CanSideProbe, or a naive route this driver can
+	// prove in a side instance when the caller says so
+	// (ProofConfig.SideCronet). The survey's question, not a race's.
+	CanSurveyProbe(configJSON []byte) bool
 	// SideProbe starts a side instance for the config, makes the
 	// connection proof through it, and tears it down — on every path —
 	// before it returns. It blocks; cancelling ctx ends it promptly
@@ -57,9 +61,22 @@ type SideProber interface {
 // NOT here, and so never raced — tried alone, in order, through the
 // tunnel's own instance:
 //
-//   - naive: the outbound lives inside Cronet, whose library, network
-//     thread and session state are process-wide; a second engine beside
-//     a carrying one is not something this code can promise is inert.
+//   - naive — for a RACE. The outbound lives inside Cronet. This was
+//     first left out because the library, its network thread and its
+//     session state were thought process-wide. Looked at again
+//     (2026-11-20): the library is loaded once, but each naive outbound
+//     builds its own Cronet engine (its own network thread, socket pool
+//     and HTTP/2 sessions; cronet-go keys its dialer table by engine),
+//     and its sockets come from the outbound's Go dialer — protected
+//     exactly like the tunnel's. A side instance of a naive route beside
+//     a carrying naive tunnel proves, repeatedly and when stopped
+//     half-way, and the tunnel's open connection and its own proof are
+//     untouched (side_naive_singbox_test.go, real libcronet.so). So the
+//     SURVEY may prove naive beside the tunnel (cronetSideTypes, asked
+//     for per call: ProofConfig.SideCronet). Races and the speed move
+//     still may not: a Cronet engine costs far more to build than any
+//     outbound here, a race's point is speed, and that change has not
+//     been made on a phone.
 //   - tor: a second tor process on the same data directory, and minutes
 //     of bootstrap.
 //   - wireguard / amneziawg (endpoints, not outbounds): a second
@@ -70,10 +87,36 @@ type SideProber interface {
 var sideProbeTypes = map[string]bool{"vless": true, "vmess": true, "trojan": true, "shadowsocks": true, "anytls": true,
 	"hysteria": true, "hysteria2": true, "tuic": true, "http": true, "socks": true}
 
+// cronetSideTypes: the outbound types a side instance may ALSO be built
+// for when the caller asks (ProofConfig.SideCronet) — the survey only.
+// See naive above.
+var cronetSideTypes = map[string]bool{"naive": true}
+
 // SideProbeable reports whether the route with this engine-side config
 // may be proved in a side instance. It reads the config the same way on
 // every build, so the ABI's ordering does not depend on the driver.
 func SideProbeable(configJSON []byte) bool {
+	return sideProbeableAs(configJSON, func(t string) bool { return sideProbeTypes[t] })
+}
+
+// SurveyProbeable is SideProbeable with cronetSideTypes allowed too: may
+// the SURVEY prove this route in a side instance?
+func SurveyProbeable(configJSON []byte) bool {
+	return sideProbeableAs(configJSON, func(t string) bool { return sideProbeTypes[t] || cronetSideTypes[t] })
+}
+
+// cronetSide: the route is one only the survey may side-probe.
+func cronetSide(configJSON []byte) bool {
+	return SurveyProbeable(configJSON) && !SideProbeable(configJSON)
+}
+
+// sideAllowed: may a side probe asked for with cfg be made of this
+// route?
+func sideAllowed(configJSON []byte, cfg ProofConfig) bool {
+	return SideProbeable(configJSON) || (cfg.SideCronet && SurveyProbeable(configJSON))
+}
+
+func sideProbeableAs(configJSON []byte, allowed func(string) bool) bool {
 	var raw struct {
 		Outbounds []map[string]any `json:"outbounds"`
 	}
@@ -87,7 +130,7 @@ func SideProbeable(configJSON []byte) bool {
 		t, _ := ob["type"].(string)
 		// The engine's own desync detour is not "a detour" here: it adds
 		// no hop and holds no state (desync.go, ownDesyncDetour).
-		if _, detoured := ob["detour"]; (detoured && !ownDesyncDetour(ob, raw.Outbounds)) || !sideProbeTypes[t] {
+		if _, detoured := ob["detour"]; (detoured && !ownDesyncDetour(ob, raw.Outbounds)) || !allowed(t) {
 			return false
 		}
 		server, _ := ob["server"].(string)
@@ -196,9 +239,13 @@ func (s *Stub) CanSideProbe(configJSON []byte) bool {
 	return s.stubSideHook() != nil && SideProbeable(configJSON)
 }
 
+func (s *Stub) CanSurveyProbe(configJSON []byte) bool {
+	return s.stubSideHook() != nil && SurveyProbeable(configJSON)
+}
+
 func (s *Stub) SideProbe(ctx context.Context, configJSON []byte, cfg ProofConfig) (ProofResult, error) {
 	hook := s.stubSideHook()
-	if hook == nil || !SideProbeable(configJSON) {
+	if hook == nil || !sideAllowed(configJSON, cfg) {
 		return ProofResult{}, ErrSideProbeUnsupported
 	}
 	pctx, leave, err := s.side.enter(ctx)

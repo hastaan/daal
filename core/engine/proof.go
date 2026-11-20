@@ -107,6 +107,11 @@ type ProofConfig struct {
 	// (core/abi connect_ladder.go) is what reads it; a liveness check
 	// never pays for it. Not part of the configuration file.
 	TimeHelloStop bool
+	// SideCronet: the caller of a SIDE probe accepts a naive route —
+	// a Cronet engine in the side instance (side.go, cronetSideTypes).
+	// Only the survey sets it (core/abi/survey.go); races and the speed
+	// move never do. Not part of the configuration file.
+	SideCronet bool
 }
 
 // ProofTarget is one default far-side host and who runs it.

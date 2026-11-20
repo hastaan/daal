@@ -522,6 +522,15 @@ pub fn relaypack_refresh(state: &AppState, relay_pack_id: &str) -> Result<String
         .ok_or_else(|| field_probe_missing("engine_relaypack_refresh"))
 }
 
+/// "Check all routes": `start` true checks every route of the file now
+/// (side instances, two at a time); false reads how far that is.
+pub fn survey_routes(state: &AppState, start: bool) -> Result<String> {
+    state
+        .engine
+        .survey_routes(start)?
+        .ok_or_else(|| field_probe_missing("engine_survey_routes"))
+}
+
 pub fn field_probe_start(state: &AppState, opts_json: &str) -> Result<String> {
     state
         .engine

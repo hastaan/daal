@@ -112,6 +112,16 @@ func (c *Core) sideBudgetLocked(n int, background bool) bool {
 	if background && hostFacts().metered == 1 {
 		return false
 	}
+	return c.sideCountOKLocked(n)
+}
+
+// sideCountOKLocked: do n more side probes fit in this network's hourly
+// allowance? The count alone, without the metered rule — the survey
+// (survey.go) applies its own rule for metered networks.
+func (c *Core) sideCountOKLocked(n int) bool {
+	if c.sideProber() == nil || c.shuttingDown {
+		return false
+	}
 	net, now := activeNetworkID(), nowUTC()
 	kept := c.side.perNet[net][:0]
 	for _, t := range c.side.perNet[net] {
@@ -448,6 +458,9 @@ func (p *autoPass) race(a, b autoCandidate, index int) (requeue []autoCandidate)
 	if !lostRunning && c.activeRoute != "" {
 		c.stopForRaceLocked()
 	}
+	// The pass needs the side slots: a survey in flight ends here
+	// (survey.go).
+	c.survey.stop("pass")
 	c.sideNoteLocked(a.routeID, b.routeID)
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancelRaceLocked()

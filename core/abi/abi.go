@@ -214,6 +214,9 @@ type Core struct {
 	side  sideLimits
 	race  *raceHandle
 	speed speedState
+	// survey: checking the other routes beside the tunnel (survey.go).
+	// Its own lock.
+	survey surveyState
 
 	// activeSnap mirrors activeRoute/activeFamily for readers that must
 	// not wait for mu (SetRoute holds it across driver.Start): the
@@ -423,6 +426,7 @@ func Shutdown() error {
 	c.routeEpoch++
 	c.auto.gen++
 	c.cancelRaceLocked()
+	c.survey.stop("shutdown")
 	recoverDone := c.recover.done
 	c.cancelRecoverLocked()
 	c.check.abandon()
@@ -1074,6 +1078,13 @@ func ExportDiagnostics() (string, error) {
 		// {state, trigger, packs, outcome, bucket}. From memory only;
 		// always present. See relaypack_recover.go.
 		"relay_recovery": c.recover.block(),
+		// `survey`: the check of the other routes beside the tunnel
+		// (survey.go) — {state, trigger, checking, total, done, seq,
+		// stop_reason, results}. state is "idle", "waiting", "checking",
+		// "done" or "stopped"; trigger "auto" or "user"; seq counts the
+		// results that changed what is remembered (a page re-reads the
+		// route list when it moves). From memory only; always present.
+		"survey": c.survey.block(),
 		// `network`: what the HOST last said about the network the device
 		// is on (engine_network_facts) — {from_host, kind, validated,
 		// metered}. from_host false: no host has said anything, and the

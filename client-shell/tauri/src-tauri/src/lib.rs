@@ -23,6 +23,8 @@ mod custody;
 // "Open with Daal" / "Share to Daal" (take_opened_file, the
 // daal://opened-file event) and the text share sheet (share_text).
 mod opened;
+#[cfg(target_os = "android")]
+mod jni_class;
 
 #[cfg(any(desktop, test))]
 use std::path::Path;
@@ -878,6 +880,19 @@ async fn relaypack_refresh(app: tauri::AppHandle, relay_pack_id: Option<String>)
     cmdlog::result("relaypack_refresh", field_probe_blocking(app, move |app| {
         let state = app.state::<AppState>();
         cmd::relaypack_refresh(&state, relay_pack_id.as_deref().unwrap_or("")).map_err(|e| e.to_string())
+    })
+    .await)
+}
+
+/// "Check all routes" (start: true) and its progress (start: false):
+/// the engine's survey of the file's routes beside the tunnel
+/// (core/abi/survey.go). Returns at once either way.
+#[tauri::command]
+async fn survey_routes(app: tauri::AppHandle, start: Option<bool>) -> Result<String, String> {
+    let start = start.unwrap_or(false);
+    cmdlog::result("survey_routes", field_probe_blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        cmd::survey_routes(&state, start).map_err(|e| e.to_string())
     })
     .await)
 }
@@ -3035,9 +3050,7 @@ fn stage_picked_file(
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| format!("attach thread: {e}"))?;
-        let class = env
-            .find_class("org/daal/desktop/MainActivity")
-            .map_err(|e| format!("find_class: {e}"))?;
+        let class = crate::jni_class::app_class(&mut env, "org/daal/desktop/MainActivity")?;
         let j_uri = env.new_string(&path).map_err(|e| format!("j_uri: {e}"))?;
         let j_dest = env
             .new_string(&dest_str)
@@ -3415,9 +3428,7 @@ fn share_path(path: &str, mime: &str, chooser_title: &str) -> Result<String, Str
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| format!("attach thread: {e}"))?;
-        let class = env
-            .find_class("org/daal/desktop/MainActivity")
-            .map_err(|e| format!("find_class: {e}"))?;
+        let class = crate::jni_class::app_class(&mut env, "org/daal/desktop/MainActivity")?;
         let j_path = env.new_string(&path).map_err(|e| format!("j_path: {e}"))?;
         let j_mime = env.new_string(&mime).map_err(|e| format!("j_mime: {e}"))?;
         let j_title = env
@@ -3488,7 +3499,7 @@ fn save_path_to_downloads(src: &str, display_name: &str) -> Result<String, Strin
             .new_string(display_name)
             .map_err(|e| format!("j_name: {e}"))?;
         let saved: Result<String, String> =
-            match env.find_class("org/daal/desktop/platform/DownloadsSaver") {
+            match crate::jni_class::app_class(&mut env, "org/daal/desktop/platform/DownloadsSaver") {
                 Ok(class) => {
                     let ret = env
                         .call_static_method(
@@ -3515,9 +3526,7 @@ fn save_path_to_downloads(src: &str, display_name: &str) -> Result<String, Strin
                 Err(_) => {
                     // An app built before PB-3: the older entry point.
                     let _ = env.exception_clear();
-                    let class = env
-                        .find_class("org/daal/desktop/MainActivity")
-                        .map_err(|e| format!("find_class: {e}"))?;
+                    let class = crate::jni_class::app_class(&mut env, "org/daal/desktop/MainActivity")?;
                     let ok: bool = env
                         .call_static_method(
                             &class,
@@ -3651,9 +3660,7 @@ fn share_invite_sbpx(
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| format!("attach thread: {e}"))?;
-        let class = env
-            .find_class("org/daal/desktop/MainActivity")
-            .map_err(|e| format!("find_class: {e}"))?;
+        let class = crate::jni_class::app_class(&mut env, "org/daal/desktop/MainActivity")?;
         let j_path = env.new_string(&path).map_err(|e| format!("j_path: {e}"))?;
         let j_mime = env.new_string(&mime).map_err(|e| format!("j_mime: {e}"))?;
         let j_title = env
@@ -3967,6 +3974,7 @@ pub fn run() {
             recipient_qr_cancel,
             recipient_qr_finalize,
             relaypack_refresh,
+            survey_routes,
             // Network test (field probe v2)
             field_probe_start,
             field_probe_share,
@@ -4239,9 +4247,10 @@ mod jni_bridge {
                     let class = <&JClass>::from(g.as_obj());
                     env.call_static_method(class, "invokeProtect", "(I)Z", &[JValue::Int(fd)])
                 }
-                None => env
-                    .find_class("org/daal/desktop/platform/DaalCoreBridge")
-                    .and_then(|class| env.call_static_method(&class, "invokeProtect", "(I)Z", &[JValue::Int(fd)])),
+                None => match crate::jni_class::app_class(&mut env, "org/daal/desktop/platform/DaalCoreBridge") {
+                    Ok(class) => env.call_static_method(&class, "invokeProtect", "(I)Z", &[JValue::Int(fd)]),
+                    Err(_) => return Ok(false),
+                },
             };
             if r.is_err() {
                 let _ = env.exception_clear();

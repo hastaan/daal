@@ -267,10 +267,8 @@ impl AndroidKeystoreDwk {
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| CustodyError::Backend(format!("attach thread: {e}")))?;
-        let class = env.find_class("org/daal/desktop/DaalKeystore").map_err(|e| {
-            check_and_clear_exception(&mut env);
-            CustodyError::Backend(format!("find DaalKeystore: {e}"))
-        })?;
+        let class = crate::jni_class::app_class(&mut env, "org/daal/desktop/DaalKeystore")
+            .map_err(|e| CustodyError::Backend(format!("find DaalKeystore: {e}")))?;
         let ret = env
             .call_static_method(&class, "getOrCreateDwk", "()[B", &[])
             .map_err(|e| {
@@ -308,10 +306,8 @@ impl AndroidKeystoreDwk {
             let mut env = vm
                 .attach_current_thread()
                 .map_err(|e| CustodyError::Backend(format!("attach thread: {e}")))?;
-            let class = env.find_class("org/daal/desktop/DaalKeystore").map_err(|e| {
-                check_and_clear_exception(&mut env);
-                CustodyError::Backend(format!("find DaalKeystore: {e}"))
-            })?;
+            let class = crate::jni_class::app_class(&mut env, "org/daal/desktop/DaalKeystore")
+                .map_err(|e| CustodyError::Backend(format!("find DaalKeystore: {e}")))?;
             let ret = env
                 .call_static_method(&class, "isHardwareBacked", "()Z", &[])
                 .and_then(|v| v.z())

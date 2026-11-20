@@ -152,6 +152,10 @@ fn failed_init_leaves_a_usable_process() {
         Err(DesktopError::EngineUnavailable(_))
     ));
     assert!(matches!(
+        engine.survey_routes(true),
+        Err(DesktopError::EngineUnavailable(_))
+    ));
+    assert!(matches!(
         engine.scheduler_tick(),
         Err(DesktopError::EngineUnavailable(_))
     ));
@@ -168,6 +172,18 @@ fn failed_init_leaves_a_usable_process() {
     assert!(engine.is_ready());
     assert!(engine.unavailable_reason().is_none());
     engine.subscription_list().expect("a real call now works");
+
+    // "Check all routes": the report on a fresh engine is idle; a press
+    // with no routes starts a survey that has nothing to check. A
+    // library that predates the call answers None.
+    if let Some(body) = engine.survey_routes(false).expect("survey report") {
+        let v: serde_json::Value = serde_json::from_str(&body).expect("survey json");
+        assert_eq!(v["state"], "idle", "{body}");
+        assert_eq!(v["started"], false, "{body}");
+        let started: serde_json::Value =
+            serde_json::from_str(&engine.survey_routes(true).expect("survey start").expect("present")).unwrap();
+        assert!(started["refused"].is_string(), "{started}");
+    }
 
     // A call that fails says why — when this library records why
     // (`recent_errors`; older ones do not, and the bare code is all
