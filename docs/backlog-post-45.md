@@ -3543,8 +3543,15 @@ inside to install the app. None is started unless marked.
   renamed into place; a directory that stood there is renamed aside,
   never deleted; the chosen one is then marked. Seen on the Samsung:
   "state moved from …/cache/daal to …/files/daal", relay "Test" live,
-  hosting key and relay key readable, the imported file back. Tests:
-  `adopt_tests` (daal-wizard).
+  hosting key and relay key readable, the imported file back. The relay's
+  own files looked missing ("their file is missing on this device"): the
+  staging directory was still worked out from $TMPDIR, and the database
+  stores absolute paths into it. On Android staging now lives inside the
+  state directory, and at start stored paths that point at an old staging
+  place are rewritten when the file exists under the new one. Only a
+  directory with the operator database is ever adopted, so a cache that
+  holds nothing but staged files never replaces real state. Tests:
+  `adopt_tests` (daal-wizard), `moved_path_tests` (operator_db).
 - [ ] **SD-2. An update must be tried on a phone that holds real state
   before it reaches anyone.** The release check list should include: the
   previous release installed with a relay and a file, then the new one
