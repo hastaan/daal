@@ -436,6 +436,10 @@ loop:
 			emit("listing", ev)
 		case "res":
 			emit("res", p.held())
+		case "standby-key":
+			// The person types the 26 characters they were sent
+			// (engine_standby_key; standby_key.go). "-" = every held file.
+			emit("standby-key", standbyKeyCmd(f[1:]))
 		case "connect":
 			if len(f) < 2 {
 				emit("set", map[string]any{"stage": "pick", "error": "connect needs a family"})

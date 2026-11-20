@@ -22,6 +22,10 @@ vi.mock('@tauri-apps/api/core', () => ({
     },
 }));
 
+vi.mock('@tauri-apps/api/event', () => ({
+    listen: () => Promise.resolve(() => {}),
+}));
+
 let rig: Rig;
 beforeAll(() => {
     rig = createRig();
@@ -41,6 +45,8 @@ const fa = (k: string) => translate('fa', k);
 const tid = (root: FakeNode, id: string) => byAttr(root, 'data-testid', id);
 const EN = srcEn as Record<string, string>;
 const FA = srcFa as Record<string, string>;
+/** A build where nothing can be turned on: the "in development" shell. */
+const NONE = { standby: false, cdn: false, google: false } as const;
 
 function row(kind: AddonRow['kind'], state: AddonRow['state']): AddonRow {
     return {
@@ -107,7 +113,7 @@ describe('the strings', () => {
 
 describe('the Add-ons section', () => {
     it('is folded away by default and reads the ledger once', async () => {
-        const m = await rig.mount(<AddonsSection t={en} operatorId={1} />);
+        const m = await rig.mount(<AddonsSection t={en} operatorId={1} built={NONE} />);
         expect(tid(m.container, 'addons-summary')?.textContent).toBe(en('pub.addons.summary.soon'));
         expect(tid(m.container, 'addon-standby')).toBeNull();
         expect(calls.filter((c) => c.cmd === 'wizard_addons_list')).toEqual([
@@ -116,7 +122,7 @@ describe('the Add-ons section', () => {
     });
 
     it('opened: three blocks, each off, in development, with what it rescues, costs and ties to you', async () => {
-        const m = await rig.mount(<AddonsSection t={en} operatorId={1} defaultOpen />);
+        const m = await rig.mount(<AddonsSection t={en} operatorId={1} built={NONE} defaultOpen />);
         const s = m.container.textContent;
         expect(s).toContain(en('pub.addons.intro'));
         for (const c of ADDON_COPY) {
@@ -147,7 +153,7 @@ describe('the Add-ons section', () => {
     });
 
     it('in Persian', async () => {
-        const m = await rig.mount(<AddonsSection t={fa} operatorId={1} defaultOpen />);
+        const m = await rig.mount(<AddonsSection t={fa} operatorId={1} built={NONE} defaultOpen />);
         const s = m.container.textContent;
         expect(s).toContain(FA['pub.addons.title']);
         expect(s).toContain('۳٫۰۰ یورو');
@@ -156,28 +162,42 @@ describe('the Add-ons section', () => {
 
     it('a relay with a standby that is on says so; a promoted one does not count', async () => {
         listReply = () => Promise.resolve([row('standby', 'ready')]);
-        const m = await rig.mount(<AddonsSection t={en} operatorId={1} defaultOpen />);
+        const m = await rig.mount(<AddonsSection t={en} operatorId={1} built={NONE} defaultOpen />);
         const b = tid(m.container, 'addon-standby')!;
         expect(b.getAttribute('data-state')).toBe('ready');
         expect(b.textContent).toContain(en('pub.addons.state.ready'));
         expect(b.textContent).not.toContain(en('pub.addons.soon.line'));
         expect(byAttr(b, 'data-button', 'addon-standby-toggle')?.getAttribute('aria-checked')).toBe('true');
         expect(tid(m.container, 'addons-summary')?.textContent).toBe('1 on');
-        expect(summaryOf([row('standby', 'promoted')])).toEqual({ key: 'pub.addons.summary.soon', n: 0 });
+        expect(summaryOf([row('standby', 'promoted')], NONE)).toEqual({ key: 'pub.addons.summary.soon', n: 0 });
+        expect(summaryOf([row('standby', 'promoted')])).toEqual({ key: 'pub.addons.summary.off', n: 0 });
         expect(summaryOf([], { standby: true, cdn: false, google: false })).toEqual({ key: 'pub.addons.summary.off', n: 0 });
     });
 
     it('a shell without the ledger, or no relay yet, is simply all off', async () => {
         listReply = () => Promise.reject('unknown command wizard_addons_list');
         const m = await rig.mount(<AddonsSection t={en} operatorId={1} defaultOpen />);
-        expect(tid(m.container, 'addon-cdn')?.getAttribute('data-state')).toBe('soon');
-        const n = await rig.mount(<AddonsSection t={en} operatorId={null} defaultOpen />);
+        expect(tid(m.container, 'addon-cdn')?.getAttribute('data-state')).toBe('off');
+        const n = await rig.mount(<AddonsSection t={en} operatorId={null} built={NONE} defaultOpen />);
         expect(all(n.container, (x) => x.getAttribute?.('data-state') === 'soon')).toHaveLength(3);
         expect(calls.filter((c) => c.cmd === 'wizard_addons_list')).toHaveLength(1);
     });
 
-    it('nothing is built in this version, so nothing can be turned on', () => {
-        expect(ADDON_BUILT).toEqual({ standby: false, cdn: false, google: false });
+    it('all three are built in this version, each off until its sheet turns it on', async () => {
+        expect(ADDON_BUILT).toEqual({ standby: true, cdn: true, google: true });
+        const m = await rig.mount(<AddonsSection t={en} operatorId={1} defaultOpen />);
+        for (const c of ADDON_COPY) {
+            const b = tid(m.container, `addon-${c.kind}`)!;
+            expect(b.getAttribute('data-state')).toBe('off');
+            expect(b.textContent).not.toContain(en('pub.addons.soon.line'));
+            const sw = byAttr(b, 'data-button', `addon-${c.kind}-toggle`)!;
+            expect(sw.getAttribute('aria-checked')).toBe('false');
+            expect(byAttr(b, 'data-button', `addon-${c.kind}-open`)?.textContent).toBe(en('pub.addons.set_up'));
+        }
+        // Opening a block's sheet starts nothing by itself: only reads.
+        await rig.click(byAttr(m.container, 'data-button', 'addon-cdn-open'));
+        expect(tid(m.container, 'cdn-sheet')).toBeTruthy();
+        expect(calls.map((c) => c.cmd).filter((c) => c !== 'wizard_addons_list')).toEqual([]);
     });
 });
 

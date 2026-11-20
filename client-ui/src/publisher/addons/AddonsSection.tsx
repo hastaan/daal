@@ -8,14 +8,18 @@
 // relay works without any of them, and the page's one job per section
 // rule holds.
 //
-// This is the shell. Until an add-on's lane lands (ADDON_BUILT false)
-// its block says "In development" and its switch is off and disabled;
-// nothing here starts a setup. The lanes add their own setup sheets
-// (StandbyCard, CdnCard, GoogleCard) behind these blocks.
+// An add-on this build cannot turn on (ADDON_BUILT false) says "In
+// development" and its switch is off and disabled. One it can opens its
+// sheet (StandbyCard, CdnCard, GoogleCard) from the switch or from "Set
+// up" / "Manage"; the sheet does the setup, the status and the removal.
+// Nothing here starts an operation on its own.
 
-import { useEffect, useState } from 'react';
-import { Badge, Disclosure, Toggle } from '../../design/primitives';
+import { useCallback, useEffect, useState } from 'react';
+import { Badge, Button, Disclosure, Toggle } from '../../design/primitives';
 import { Addons } from '../wizardCommands';
+import { StandbySheet } from './StandbyCard';
+import { CdnSheet } from './CdnCard';
+import { GoogleSheet } from './GoogleCard';
 import type { AddonKind, AddonRow } from './addonTypes';
 import { ADDON_BUILT, ADDON_COPY, liveRow, stateKey, summaryOf } from './addonText';
 import type { AddonCopy } from './addonText';
@@ -41,6 +45,9 @@ export function AddonsSection({
     defaultOpen = false,
 }: AddonsSectionProps) {
     const [rows, setRows] = useState<AddonRow[]>([]);
+    const [openKind, setOpenKind] = useState<AddonKind | null>(null);
+    const [generation, setGeneration] = useState(0);
+    const reload = useCallback(() => setGeneration((g) => g + 1), []);
 
     useEffect(() => {
         let gone = false;
@@ -60,7 +67,12 @@ export function AddonsSection({
         return () => {
             gone = true;
         };
-    }, [operatorId]);
+    }, [operatorId, generation]);
+
+    const sheetProps =
+        operatorId != null && openKind != null
+            ? { t, operatorId, rows, onClose: () => setOpenKind(null), onChanged: reload }
+            : null;
 
     const summary = summaryOf(rows, built);
     return (
@@ -91,10 +103,14 @@ export function AddonsSection({
                             row={liveRow(rows, c.kind)}
                             built={built[c.kind]}
                             first={i === 0}
+                            onOpen={operatorId != null && built[c.kind] ? () => setOpenKind(c.kind) : undefined}
                         />
                     ))}
                 </div>
             </Disclosure>
+            {sheetProps && openKind === 'standby' && <StandbySheet {...sheetProps} />}
+            {sheetProps && openKind === 'cdn' && <CdnSheet {...sheetProps} />}
+            {sheetProps && openKind === 'google' && <GoogleSheet {...sheetProps} />}
         </div>
     );
 }
@@ -105,12 +121,15 @@ function AddonBlock({
     row,
     built,
     first,
+    onOpen,
 }: {
     t: (key: string) => string;
     copy: AddonCopy;
     row: AddonRow | null;
     built: boolean;
     first: boolean;
+    /** Opens the add-on's sheet; absent when it cannot be turned on. */
+    onOpen?: () => void;
 }) {
     const titleId = `addon-${copy.kind}-title`;
     const badge = row ? (
@@ -146,10 +165,10 @@ function AddonBlock({
                 </span>
                 <Toggle
                     checked={row != null}
-                    // Turning one on or off is its lane's sheet; the shell
-                    // never starts a setup or a removal.
-                    onChange={() => {}}
-                    disabled
+                    // Turning one on or off happens in its sheet: the
+                    // switch only opens it.
+                    onChange={() => onOpen?.()}
+                    disabled={!onOpen}
                     ariaLabel={`${t('pub.addons.turn_on')}: ${t(copy.titleKey)}`}
                     dataButton={`addon-${copy.kind}-toggle`}
                 />
@@ -163,6 +182,13 @@ function AddonBlock({
                 <p data-testid={`addon-${copy.kind}-soon`} style={{ ...INTRO, margin: 0 }}>
                     {t('pub.addons.soon.line')}
                 </p>
+            )}
+            {onOpen && (
+                <div>
+                    <Button size="sm" variant="secondary" onClick={onOpen} dataButton={`addon-${copy.kind}-open`}>
+                        {t(row ? 'pub.addons.manage' : 'pub.addons.set_up')}
+                    </Button>
+                </div>
             )}
         </section>
     );

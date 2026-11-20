@@ -69,6 +69,7 @@ import type { BackupApi } from './backupHarness';
 import type { Failure } from './failureText';
 import { OtherServerNote, otherServerId } from './OtherServerNote';
 import { mix } from '../design/mix';
+import { AddonOutcomeLines } from './addons/AddonOutcomeLines';
 
 interface Props {
     t: (k: string) => string;
@@ -622,6 +623,9 @@ export function RelayDestroySheet({
                         retryBusy={busy}
                         onRetry={() => void run()}
                     />
+                    {/* V019: each add-on — removed, gone with the relay,
+                        kept for a retry, or left running. */}
+                    <AddonOutcomeLines t={t} outcomes={report.addons} />
                     {failure && (
                         <div style={{ display: 'grid', gap: 6 }}>
                             <div style={{ color: 'var(--red)', fontSize: 13, lineHeight: 1.5 }}>

@@ -469,8 +469,9 @@ func (r *RelayPackRefresher) RefreshFailureTriggered(ctx context.Context, relayP
 	}
 	after := r.loadRecord(key)
 	switch {
-	case res.Applied:
-		// New information: every network's escalation starts again.
+	case res.Applied || res.StandbyKeyAccepted:
+		// New information (a pack applied, or a standby key that
+		// opens a held route): every network's escalation starts again.
 		after.OnFailureMisses = 0
 		for i := range after.OnFailureNets {
 			after.OnFailureNets[i].Misses = 0
@@ -561,7 +562,7 @@ func (r *RelayPackRefresher) RefreshOnDemand(ctx context.Context, relayPackID st
 	}
 	after := r.loadRecord(key)
 	switch {
-	case res.Applied:
+	case res.Applied || res.StandbyKeyAccepted:
 		after.OnDemandStreak = 0
 	case res.EndpointsTried == 0 || res.Outcome == OutcomeFreshnessCancelled || errors.Is(ctx.Err(), context.Canceled):
 		// Refused before it reached anything, or cut off: it does not

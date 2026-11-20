@@ -34,7 +34,10 @@ ART="${WB_ARTIFACTS:-$REPO/dist-release/relay-v1.5.1}"
 # part of the phone's engine, so it is part of the lab's.
 ENGINE_TAGS="singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego"
 export GOCACHE="${GOCACHE:-/tmp/daal-go-build}"
-export GOFLAGS="${GOFLAGS:-} -mod=mod"
+# WB_GO_MOD: the module mode of every build here. The default (-mod=mod)
+# is what the rig always used; -mod=readonly builds without touching any
+# go.mod / go.sum (what a shared working tree wants).
+export GOFLAGS="${GOFLAGS:-} ${WB_GO_MOD:--mod=mod}"
 
 mgmt=pinned
 build_only=""
@@ -97,7 +100,12 @@ build() { # dir out [go build args…]
   (cd "$dir" && go build "$@" -o "$BIN/$out" .) || die "build failed: $out"
 }
 build "$RIG/driver"            wb
-build "$RIG/labclient"         wb-client   -tags "$ENGINE_TAGS"
+# Host calls into engine code that is still landing (add-ons wave 2) are
+# behind a tag, switched on when the engine has the function: until then
+# wb-client answers "not built" and the ops that need it record SKIPPED.
+LAB_TAGS="$ENGINE_TAGS"
+grep -qs '^func StandbyKey(' "$REPO"/core/abi/*.go && LAB_TAGS="$LAB_TAGS,wb_standby_key"
+build "$RIG/labclient"         wb-client   -tags "$LAB_TAGS"
 build "$REPO/cmd/daal-deploy"  daal-deploy
 # naive rides Cronet, loaded at run time (with_purego) from beside the
 # binary — the APK ships it in lib/<abi>/. sing-box's own dependency,

@@ -108,6 +108,11 @@ var recipientInbounds = []struct{ tag, nameKey string }{
 	{tagTUIC, "name"},
 	{tagSS, "name"},
 	{tagAnyTLS, "name"},
+	// The Cloudflare door. Not a family of its own: a second VLESS
+	// inbound carrying recipients of vless-in/ws-in by the same UUID
+	// (singbox_cdn.go). Listed so a recipient is found — and revoked —
+	// wherever they hold a row.
+	{tagCDN, "name"},
 }
 
 // recipientNames returns the name of every recipient that owns a row in

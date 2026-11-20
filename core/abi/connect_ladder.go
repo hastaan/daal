@@ -44,7 +44,17 @@ import (
 //     route's own profile first; no pin and no signature check is
 //     relaxed. Names are never resolved. Class `cdn` names are not
 //     offered (no CDN-fronted family exists to send them to);
-//   - both.
+//   - both;
+//   - the ADDRESS variant (`a:standby`, connect_standby.go): the route
+//     at its signed standby address, for address-shaped stops only, and
+//     queued after the direct routes rather than at once;
+//   - for a CDN-fronted route only, its own hellos (`h:split`, then
+//     `h:plain` when signed; connect_cdn.go) and — not a variant — one
+//     fresh edge pick when its edge stops answering.
+//
+// A variant that moves the outbound (the standby, every CDN-fronted
+// attempt) is held to the signed endpoint once more, on the moved
+// outbound (variantBodyLocked).
 //
 // WHEN. A TCP route whose attempt in this pass was stopped AT ITS HELLO
 // (helloStopOf) gets its next variant, tried at once, alone, before
@@ -182,9 +192,22 @@ type routeVariant struct {
 	// name: the signed id of an entry of the route's `_cover_names`; 0
 	// = the route's own name.
 	name int
+	// hello: for a CDN-fronted route only (connect_cdn.go), how its
+	// first flight differs from the route's own ECH hello —
+	// helloSplit: the same ECH hello with the outer hello split
+	// (tls.record_fragment + tls.fragment); helloPlain: no ECH, which
+	// shows the zone name and exists only when the signed
+	// `plain_fallback` says so. Alone, never with a preset or a name.
+	hello string
+	// standby: the route dialled at its standby address instead of its
+	// committed server (standby.go; specs/relaypack-v1.md `_standby`).
+	// Alone.
+	standby bool
 }
 
-func (v routeVariant) zero() bool { return v.preset == "" && v.name == 0 }
+func (v routeVariant) zero() bool {
+	return v.preset == "" && v.name == 0 && v.hello == "" && !v.standby
+}
 
 // suffix is the variant's closed word: its netmem key suffix and what
 // `tried[].variant` reports. "" for the zero variant.
@@ -195,6 +218,12 @@ func (v routeVariant) suffix() string {
 	}
 	if v.name > 0 {
 		parts = append(parts, "n:"+strconv.Itoa(v.name))
+	}
+	if v.hello != "" {
+		parts = append(parts, "h:"+v.hello)
+	}
+	if v.standby {
+		parts = append(parts, variantStandbyWord)
 	}
 	return strings.Join(parts, netmem.VariantSep)
 }
@@ -228,6 +257,16 @@ func parseVariantSuffix(s string) (routeVariant, bool) {
 	var v routeVariant
 	if s == "" {
 		return v, false
+	}
+	switch s {
+	// The two alone-only kinds: a hello of a CDN-fronted route, the
+	// standby address.
+	case "h:" + helloSplit:
+		return routeVariant{hello: helloSplit}, true
+	case "h:" + helloPlain:
+		return routeVariant{hello: helloPlain}, true
+	case variantStandbyWord:
+		return routeVariant{standby: true}, true
 	}
 	for _, part := range strings.Split(s, netmem.VariantSep) {
 		switch {
@@ -269,12 +308,28 @@ type ladderRoute struct {
 	// namesRefused: the list is there and was refused ("domestic",
 	// "malformed"); for the log.
 	namesRefused string
+	// standby: the address the route may be dialled at instead of its
+	// committed server (routeStandbyAddress: the open standby, or the
+	// address of a held key that opens the sealed one); "" when none,
+	// or when the outbound already sits there.
+	standby string
+	// cdn: the route's stored CDN-fronted commitment (connect_cdn.go);
+	// nil for every other route. ech: its outbound has ECH on.
+	cdn *bundle.CDNEndpoint
+	ech bool
 }
 
 func (c *Core) ladderRouteOf(row routestore.RouteRow, profile []byte) ladderRoute {
 	lr := ladderRoute{row: row, profile: profile}
-	_, _, lr.own = profileRelay(profile)
+	var host string
+	host, _, lr.own = profileRelay(profile)
 	lr.names, lr.nameIDs, lr.namesRefused = c.coverNamesLocked(row, profile, lr.own)
+	if addr, ok := routeStandbyAddress(c.store, row); ok && addr != host {
+		lr.standby = addr
+	}
+	if ep, ok := c.cdnEndpointLocked(row); ok {
+		lr.cdn, lr.ech = ep, profileECH(profile)
+	}
 	return lr
 }
 
@@ -444,6 +499,20 @@ func buildVariant(lr ladderRoute, v routeVariant) ([]byte, error) {
 		}
 		return engine.MarshalSingBox(cfg)
 	}
+	if v.standby || v.hello != "" {
+		// The standby address, or a CDN-fronted route's other hello:
+		// the outbound changed and nothing else, the cut explicit
+		// (none) so what is recorded is what was sent.
+		profile, err := variantOutbound(lr, v)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err := engine.BuildSingBoxConfigWithDesync(lr.row, profile, desync.Off)
+		if err != nil {
+			return nil, err
+		}
+		return engine.MarshalSingBox(cfg)
+	}
 	profile := lr.profile
 	if v.name > 0 {
 		name, ok := lr.names[v.name]
@@ -482,19 +551,47 @@ func buildVariant(lr ladderRoute, v routeVariant) ([]byte, error) {
 // built any more (a refreshed pack dropped its name) is forgotten and
 // the plain route is built. v non-nil (every listing and every pass
 // attempt): exactly that one, and nothing is written.
+//
+// Two kinds of variant move the outbound itself — the standby address,
+// and every attempt of a CDN-fronted route (its edge address,
+// connect_cdn.go, and its other hellos). For those the set-route guard
+// (routeEndpointGuard) runs AGAIN, on the outbound the variant dials:
+// the standby must be one the signed `_standby` names, the edge an
+// address inside the signed seeds, a plain hello one the signed
+// `plain_fallback` allows. A variant the guard refuses is unusable.
 func (c *Core) variantBodyLocked(row routestore.RouteRow, profile []byte, v *routeVariant) ([]byte, error) {
 	lr := c.ladderRouteOf(row, profile)
+	if lr.cdn != nil {
+		if edged, ok := c.cdnEdgeProfileLocked(lr); ok {
+			if err := routeEndpointGuard(c.store, row, edged); err != nil {
+				return nil, fmt.Errorf("%w: %w", errVariantUnusable, err)
+			}
+			lr.profile = edged
+		}
+	}
+	build := func(v routeVariant) ([]byte, error) {
+		if v.standby || v.hello != "" {
+			moved, err := variantOutbound(lr, v)
+			if err != nil {
+				return nil, err
+			}
+			if err := routeEndpointGuard(c.store, row, moved); err != nil {
+				return nil, fmt.Errorf("%w: %w", errVariantUnusable, err)
+			}
+		}
+		return buildVariant(lr, v)
+	}
 	if v != nil {
-		return buildVariant(lr, *v)
+		return build(*v)
 	}
 	inUse := c.variantInUse(row.RouteID)
 	if !inUse.zero() {
-		if body, err := buildVariant(lr, inUse); err == nil {
+		if body, err := build(inUse); err == nil {
 			return body, nil
 		}
 		c.setVariantInUse(row.RouteID, routeVariant{})
 	}
-	return buildVariant(lr, routeVariant{})
+	return build(routeVariant{})
 }
 
 // ---- the variant in use, and what this build cannot start ---------------
@@ -593,6 +690,17 @@ func (c *Core) ladderBindOf(routeID string, profile []byte) string {
 	} else {
 		h.Write([]byte("profile|"))
 		h.Write(profile)
+	}
+	// The standby address the route may be dialled at, when it has one:
+	// a new standby (or a key that opens a sealed one) is another
+	// address, and the `a:standby` record described the old one. Only
+	// written when present, so a route without one binds exactly as
+	// before.
+	if row, err := c.store.GetRoute(routeID); err == nil {
+		if addr, ok := routeStandbyAddress(c.store, row); ok {
+			h.Write([]byte("|standby|"))
+			h.Write([]byte(addr))
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
@@ -875,6 +983,10 @@ type passLadder struct {
 	// lostCharged: the fall-over's lost route was charged as a route by
 	// the liveness check (it was running plain).
 	lostCharged bool
+	// standbyQ: standby-address attempts waiting to go into the queue
+	// after the direct routes and before the first CDN-fronted one
+	// (ladderMerge; plan §4 position 3).
+	standbyQ []autoCandidate
 }
 
 type routeLadder struct {
@@ -893,6 +1005,9 @@ type routeLadder struct {
 	// something (a variant that could not start says nothing).
 	stop helloStop
 	done bool
+	// standbyTried / repicked: the route's one standby attempt, and
+	// (CDN-fronted) its one fresh edge pick, of this pass.
+	standbyTried, repicked bool
 }
 
 type ladderFail struct {
@@ -1019,6 +1134,21 @@ func (p *autoPass) ladderNext(mark int) []autoCandidate {
 			next = append(next, plain)
 			continue
 		}
+		// The address moves (connect_standby.go, connect_cdn.go): an
+		// address-shaped stop gets the route's standby address, after
+		// every direct route of the pass; a CDN-fronted route whose edge
+		// stopped answering gets one fresh edge pick. Decided before the
+		// hello ladder's own stops below, which end that ladder only.
+		if t.Variant == variantStandbyWord {
+			// The standby itself failed: nothing more is moved for it.
+			continue
+		}
+		if cand, ok := p.ladderStandby(rl, o, addressBlocked[o.id]); ok {
+			l.standbyQ = append(l.standbyQ, cand)
+		}
+		if cand, ok := p.ladderRepick(rl, o, refined[i]); ok {
+			next = append(next, cand)
+		}
 		if addressBlocked[o.id] {
 			// Two names to this address and port were stopped alike: the
 			// name is not what the network reads. No other is shown.
@@ -1051,7 +1181,7 @@ func (p *autoPass) ladderNext(mark int) []autoCandidate {
 			next = append(next, p.ladderCandidate(rl, v))
 		}
 	}
-	p.ladderEnqueued(len(next))
+	// (Counted into the pass's total by ladderMerge.)
 	return next
 }
 
@@ -1081,7 +1211,7 @@ func (p *autoPass) ladderLost() []autoCandidate {
 	} else if v, ok := p.ladderPick(rl); ok {
 		out = append(out, p.ladderCandidate(rl, v))
 	}
-	p.ladderEnqueued(len(out))
+	// (Counted into the pass's total by ladderMerge.)
 	return out
 }
 
@@ -1107,7 +1237,13 @@ func (c *Core) ladderModeRefusedLocked(routeID string) bool {
 // have a variant of it to try first (ladderLost)? Reads only; spends no
 // budget. background: the pass is the engine's own (ladderRestricted).
 func (c *Core) ladderLostWantedLocked(lost autoLost, background bool) bool {
-	if !ladderLostShaped(lost.cat) || c.ladderModeRefusedLocked(lost.routeID) {
+	if c.ladderModeRefusedLocked(lost.routeID) {
+		return false
+	}
+	if c.ladderLostStandbyWantedLocked(lost) {
+		return true
+	}
+	if !ladderLostShaped(lost.cat) {
 		return false
 	}
 	if !c.variantInUse(lost.routeID).zero() {
@@ -1180,16 +1316,7 @@ func (p *autoPass) ladderPick(rl *routeLadder) (routeVariant, bool) {
 	}
 	mem := c.routeMemory()
 	now := nowUTC()
-	if !rl.built {
-		rl.built = true
-		if lr, ok := c.ladderRouteByID(rl.base.routeID); ok {
-			rl.lr = lr
-			rl.list = ladderOrder(ladderList(lr), mem, rl.base.routeID, now)
-			if lr.namesRefused != "" {
-				engine.LogInfo(fmt.Sprintf("auto ladder route=%s cover_names refused=%s", engine.LogID(rl.base.routeID), lr.namesRefused))
-			}
-		}
-	}
+	p.ladderBuild(rl, mem, now)
 	restricted := p.ladderRestricted()
 	namesOK := !rl.silent && rl.base.relayHost != "" && activeNetworkID() != netmem.SentinelUnset
 	for _, v := range rl.list {
@@ -1224,6 +1351,22 @@ func (p *autoPass) ladderPick(rl *routeLadder) (routeVariant, bool) {
 	}
 	rl.done = true
 	return routeVariant{}, false
+}
+
+// ladderBuild reads the route (its ladderRoute and its variant list) the
+// first time the pass needs it.
+func (p *autoPass) ladderBuild(rl *routeLadder, mem map[string]netmem.RouteMemory, now time.Time) {
+	if rl.built {
+		return
+	}
+	rl.built = true
+	if lr, ok := p.c.ladderRouteByID(rl.base.routeID); ok {
+		rl.lr = lr
+		rl.list = ladderOrder(ladderList(lr), mem, rl.base.routeID, now)
+		if lr.namesRefused != "" {
+			engine.LogInfo(fmt.Sprintf("auto ladder route=%s cover_names refused=%s", engine.LogID(rl.base.routeID), lr.namesRefused))
+		}
+	}
 }
 
 // namesShownLocked is the set of cover names (netmem.ShownKey) ever
@@ -1355,6 +1498,7 @@ func (c *Core) ladderBaseCandidateLocked(routeID string) (autoCandidate, bool) {
 	}
 	cd := autoCandidate{routeID: routeID, family: row.TransportFamily, udp: engine.IsUDPFamily(row.TransportFamily)}
 	cd.relayHost, cd.relayPort, cd.name = profileRelay(profile)
+	_, cd.cdn = c.cdnEndpointLocked(row)
 	return cd, true
 }
 
@@ -1375,6 +1519,11 @@ func (c *Core) routeRowProfile(routeID string) (routestore.RouteRow, []byte, boo
 func ladderList(lr ladderRoute) []routeVariant {
 	if engine.IsUDPFamily(lr.row.TransportFamily) {
 		return nil
+	}
+	if lr.cdn != nil {
+		// A CDN-fronted route has its own hello order and nothing
+		// else (connect_cdn.go cdnHelloList).
+		return cdnHelloList(lr)
 	}
 	var presets []string
 	if engine.RouteDesyncReason(lr.row, lr.profile) == "" {
@@ -1457,6 +1606,10 @@ func (c *Core) ladderPreferredLocked(mem map[string]netmem.RouteMemory, lr ladde
 // No config is built: buildVariant has the final word at the attempt.
 func variantUsable(lr ladderRoute, v routeVariant) (string, bool) {
 	name := lr.own
+	if v.standby || v.hello != "" {
+		_, err := variantOutbound(lr, v)
+		return name, err == nil
+	}
 	if v.name > 0 {
 		n, ok := lr.names[v.name]
 		if !ok {

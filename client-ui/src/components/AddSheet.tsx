@@ -45,6 +45,7 @@ import ImportResult, { importOutcome, trustOutcome, type ImportOutcome } from '.
 import RecipientImport from '../recipient/RecipientImport';
 import { syntheticSubscriptionFingerprint, subscriptionDisplayName } from '../lib/subscriptionIdentity';
 import { friendlyError, parseVerdict, type ImportVerdict, type TrustResolution } from '../lib/importVerdict';
+import { StandbyCodeEntry } from './StandbyCodeEntry';
 
 /** Kept for callers of the old two-tab sheet. */
 export type Tab = 'paste' | 'file';
@@ -110,6 +111,7 @@ type Stage =
     | { at: 'choose' }
     | { at: 'paste' }
     | { at: 'scan' }
+    | { at: 'code' }
     | { at: 'working' }
     | { at: 'unlock'; path: string }
     | { at: 'trust'; preview: PreviewedBundle; origin: Origin }
@@ -380,6 +382,8 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
             ? t('add.title')
             : stage.at === 'scan'
             ? t('scan.title')
+            : stage.at === 'code'
+            ? t('add.choose.code')
             : undefined;
 
     return (
@@ -390,6 +394,9 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                         <ChoiceRow icon="file" label={t('add.choose.file')} onClick={() => void chooseFile()} dataButton="add-choose-file" />
                         <ChoiceRow icon="paste" label={t('add.choose.paste')} onClick={() => void openPaste()} dataButton="add-paste" />
                         <ChoiceRow icon="camera" label={t('add.choose.scan')} onClick={() => setStage({ at: 'scan' })} dataButton="add-scan" />
+                        {/* Optional add-ons: the standby code a relay's
+                            owner sends after switching addresses. */}
+                        <ChoiceRow icon="key" label={t('add.choose.code')} onClick={() => setStage({ at: 'code' })} dataButton="add-code" />
                     </div>
                     {error && <ErrorLine text={error} />}
                     <PasteHelp t={t} />
@@ -437,6 +444,8 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                     <PasteHelp t={t} />
                 </div>
             )}
+
+            {stage.at === 'code' && <StandbyCodeEntry t={t} onAccepted={() => onImported?.()} />}
 
             {stage.at === 'scan' && (
                 <div>

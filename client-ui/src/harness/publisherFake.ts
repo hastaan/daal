@@ -351,6 +351,51 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
     // "Open with Daal": the path the shell hands over, once.
     let opened = f.opened ?? null;
     const op = (a: Args) => Number(a?.operatorId ?? LIVE_RELAY_ID);
+    // The fake add-on ledger (optional add-ons).
+    type FakeAddon = {
+        id: number;
+        operator_id: number;
+        kind: 'standby' | 'cdn' | 'google';
+        state: 'building' | 'ready' | 'promoted' | 'removing';
+        provider_ids: Record<string, string>;
+        monthly_cost_cents: number;
+        cost_currency: string;
+        has_secret: boolean;
+        detail: Record<string, unknown>;
+        created_at_unix: number;
+        updated_at_unix: number;
+    };
+    let addons: FakeAddon[] = [];
+    const STANDBY_KEY = '000G40 R40M3 0E209 185WP 03H2G';
+    const addonOp = (a: Args) => Number((a?.input as { operator_id?: number })?.operator_id ?? LIVE_RELAY_ID);
+    const addonStep = async (operator_id: number, kind: FakeAddon['kind'], step: string) => {
+        await emit('wizard://addon-progress', { operator_id, kind, step, state: 'running', detail: '' });
+        await new Promise((r) => setTimeout(r, 250));
+        await emit('wizard://addon-progress', { operator_id, kind, step, state: 'ok', detail: '' });
+    };
+    const addAddon = (
+        operator_id: number,
+        kind: FakeAddon['kind'],
+        detail: Record<string, unknown>,
+        cents: number,
+        currency: string,
+    ): FakeAddon => {
+        const r: FakeAddon = {
+            id: addons.length + 100,
+            operator_id,
+            kind,
+            state: 'ready',
+            provider_ids: {},
+            monthly_cost_cents: cents,
+            cost_currency: currency,
+            has_secret: kind === 'google',
+            detail,
+            created_at_unix: NOW(),
+            updated_at_unix: NOW(),
+        };
+        addons = [...addons.filter((x) => !(x.operator_id === operator_id && x.kind === kind && x.state !== 'promoted')), r];
+        return r;
+    };
 
     const table: Record<string, (a: Args) => unknown> = {
         // ---- publisher: relays
@@ -363,9 +408,77 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         wizard_recipient_list: (a) => (op(a) === LIVE_RELAY_ID ? people() : []),
         wizard_list_artifacts: (a) => (op(a) === LIVE_RELAY_ID ? artifacts() : []),
         wizard_relay_health: (a) => health(f, op(a)),
-        // Optional add-ons: none on any relay yet (every add-on is still
-        // in development).
-        wizard_addons_list: () => [],
+        // Optional add-ons: none on any relay until a sheet turns one on.
+        // The fake ledger keeps what the sheets make, so the cards can be
+        // walked in a browser end to end.
+        wizard_addons_list: (a) => addons.filter((r) => r.operator_id === op(a)),
+        wizard_addon_remove: (a) => {
+            const id = Number(a?.addonId);
+            const r = addons.find((x) => x.id === id);
+            addons = addons.filter((x) => x.id !== id);
+            return {
+                addon_id: id,
+                removed: true,
+                still_billing: [],
+                by_hand: r?.kind === 'cdn' ? ['delete_cloudflare_token', 'cancel_domain'] : r?.kind === 'google' ? ['delete_google_project'] : [],
+                warnings: [],
+            };
+        },
+        wizard_addon_standby_price: () => ({ monthly_cents: 300, currency: 'EUR', vat_included: false }),
+        wizard_addon_standby_add: async (a) => {
+            const o = addonOp(a);
+            for (const step of ['renting', 'attaching', 'checking', 'signing']) await addonStep(o, 'standby', step);
+            return addAddon(o, 'standby', { mode: String((a?.input as { mode?: string })?.mode ?? 'sealed') }, 300, 'EUR');
+        },
+        wizard_addon_standby_promote: async (a) => {
+            const o = addonOp(a);
+            await addonStep(o, 'standby', 'signing');
+            const r = addons.find((x) => x.operator_id === o && x.kind === 'standby' && x.state === 'ready');
+            if (r) r.state = 'promoted';
+            return { addon: r, key: STANDBY_KEY, refresh_note_published: true, warnings: [] };
+        },
+        wizard_addon_standby_key: () => ({ key: STANDBY_KEY }),
+        wizard_addon_cdn_set_token: (a) => {
+            const tok = String((a?.input as { token?: string })?.token ?? '');
+            return tok.includes('broad')
+                ? { zones: ['example.com', 'other.org'], verdict: 'too_broad', stored: false, extra: ['Account — Workers Scripts — Edit'] }
+                : { zones: ['example.com'], verdict: 'ok', stored: true };
+        },
+        wizard_addon_cdn_build: async (a) => {
+            const o = addonOp(a);
+            for (const step of ['cloudflare', 'firewall', 'door', 'testing', 'signing']) await addonStep(o, 'cdn', step);
+            return addAddon(o, 'cdn', { hostname: 'k3j9.example.com', zone: 'example.com', name_hidden: true, plain_fallback: false }, 0, '');
+        },
+        wizard_addon_cdn_posture: (a) => ({
+            name_hidden: true,
+            door_closed_to_others: true,
+            last_test_at_unix: NOW() - 60,
+            last_test_ok: true,
+            renews_at_unix: 0,
+            needs_rebuild: false,
+            hostname: 'k3j9.example.com',
+            zone: 'example.com',
+            plain_fallback: !!addons.find((x) => x.operator_id === addonOp(a) && x.kind === 'cdn')?.detail.plain_fallback,
+            notes: '',
+        }),
+        wizard_addon_cdn_set_plain_fallback: (a) => {
+            const r = addons.find((x) => x.operator_id === addonOp(a) && x.kind === 'cdn');
+            if (r) r.detail = { ...r.detail, plain_fallback: !!(a?.input as { allow?: boolean })?.allow };
+            return r;
+        },
+        wizard_addon_google_script: () => ({
+            code_gs: '// Daal update channel\nvar WRITE_KEY = "harness-not-a-real-key";\nfunction doGet(e) { /* … */ }',
+            manifest_json: '{}',
+        }),
+        wizard_addon_google_sign_in: () => {
+            throw 'E_GOOGLE_NOT_CONFIGURED: this build has no Google sign-in client';
+        },
+        wizard_addon_google_attach: async (a) => {
+            const o = addonOp(a);
+            await addonStep(o, 'google', 'checking');
+            return addAddon(o, 'google', { url: String((a?.input as { url?: string })?.url ?? ''), path: 'B' }, 0, '');
+        },
+        wizard_addon_google_check: () => ({ ok: true, via_front: true, checked_at_unix: NOW(), reason: '' }),
         wizard_restore_unsettled: () => unsettled(f),
         wizard_setup_recovery: (a) => ({
             state: 'server_running',

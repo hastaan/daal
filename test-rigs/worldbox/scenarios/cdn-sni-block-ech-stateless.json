@@ -1,0 +1,19 @@
+{
+  "name": "cdn-sni-block-ech-stateless",
+  "description": "The same blocklist entry for the CDN host, held by a box that does NOT reassemble: it joins the first two data packets of a flow and reads the name as soon as it is whole in them, single RST+ACK to the client. ECH hides the name from it as from the reassembling one; a plain hello is caught even when cut in two. Op cdn: carries with ECH, the zone's name never on the wire.",
+  "analogue": "Iran's SNI filter as measured (Bock et al. 2020, IRBlock 2025: 'inspects only the first two data-carrying packets', RST+ACK toward the client), applied to a CDN hostname. Model: two packets, partial read, exact name. The point of the pair with cdn-sni-block-ech: ECH, not a split, is what protects the CDN route, so it must hold against both boxes.",
+  "world": ["cdn"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$CDN_HOST"], "packets": 2, "partial": true, "action": "rst", "rst_to": "client"}
+    ]
+  },
+  "prove": [
+    {"name": "zone-name-plain-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "expect": "reset_after_hello"},
+    {"name": "zone-name-split-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "split": true, "expect": "reset_after_hello"},
+    {"name": "zone-name-in-ech-spared", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "other-name-spared", "probe": "tls", "to": "edge-b", "port": 443, "sni": "www.wb-control.example", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "pass"}
+}

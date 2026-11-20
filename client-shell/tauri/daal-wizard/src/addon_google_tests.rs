@@ -704,14 +704,16 @@ fn relay_delete_never_waits_on_the_channel() {
     assert!(o.error.contains("unreachable"));
 }
 
-/// The channel is one more mirror of the freshness publish: sent the
-/// document publish-freshness signed, after it, and counted.
+/// The channel is one more target of the freshness publish: the helper
+/// gets its URL and its write key (as a file) with the other mirrors'
+/// credentials, and its result is counted like theirs.
 #[test]
 fn freshness_publish_sends_to_the_channel() {
     let f = fx();
     let op = provisioned(&f);
     let seen = happy_helper(&f);
     ready_channel(&f, op);
+    let before = seen.lock().unwrap().len();
     f.ctx
         .db
         .record_signed_sbp(op, &"d".repeat(64), "rp-g", 1_800_000_000)
@@ -723,30 +725,28 @@ fn freshness_publish_sends_to_the_channel() {
     assert_eq!(r.blocked_reason, "");
     assert_eq!(r.min_mirrors, 1);
     assert_eq!(r.succeeded, 1, "{r:?}");
-    let call = seen.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(call.0[0], "appsscript-check");
-    assert_eq!(
-        arg_after(&call.0, "--freshness-file").unwrap(),
-        f.ctx
-            .staging_dir
-            .join(format!("freshness.{op}.json"))
-            .to_string_lossy()
-    );
-    let mirrors = f
+    // No separate send: the channel rides publish-freshness.
+    assert_eq!(seen.lock().unwrap().len(), before, "a separate appsscript-check ran");
+    let call = f
         .mock
         .publish_freshness_calls
         .lock()
         .unwrap()
         .last()
-        .unwrap()
-        .mirrors
-        .clone();
+        .cloned()
+        .unwrap();
     assert!(
-        mirrors[0].starts_with("appsscript=https://script.google.com/macros/s/"),
-        "{mirrors:?}"
+        call.mirrors[0].starts_with("appsscript=https://script.google.com/macros/s/"),
+        "{:?}",
+        call.mirrors
     );
+    assert!(call.appsscript_url.starts_with("https://script.google.com/macros/s/"));
+    assert!(call.appsscript_key_staged, "the write key did not reach the helper as a file");
+    assert!(call.uploaded);
+    // The signed pack goes in only when it is the file the note names.
+    assert!(call.appsscript_pack.is_none());
 
-    // Beside one other provider: refused with its own reason for now.
+    // Beside one other provider: both are targets of one publish.
     freshness::add_endpoint(
         &f.ctx,
         op,
@@ -762,7 +762,9 @@ fn freshness_publish_sends_to_the_channel() {
     )
     .unwrap();
     let r = freshness::publish(&f.ctx, op, &mut |_| {}).unwrap();
-    assert_eq!(r.blocked_reason, "google_beside_one_mirror");
+    assert_eq!(r.blocked_reason, "");
+    assert_eq!(r.succeeded, 2, "{r:?}");
+    assert_eq!(r.min_mirrors, 2);
 
     // Beside two: all three count.
     freshness::add_endpoint(
@@ -786,8 +788,7 @@ fn freshness_publish_sends_to_the_channel() {
     assert_eq!(r.min_mirrors, 2);
     let g = r.results.iter().find(|o| o.kind == "appsscript").unwrap();
     assert!(g.ok);
-    // The signed pack goes in only when it is the file the note names.
-    assert!(arg_after(&seen.lock().unwrap().last().unwrap().0, "--pack-file").is_none());
+    assert_eq!(seen.lock().unwrap().len(), before, "a separate appsscript-check ran");
     // The pack recipients hold does not carry the channel alone yet;
     // with two other providers it does.
     let args = freshness::mirror_args(&f.ctx, op).unwrap();

@@ -650,6 +650,11 @@ type autoCandidate struct {
 	// swaps one.
 	variant routeVariant
 	ladder  bool
+	// cdn: a CDN-fronted route (connect_cdn.go): tried after every
+	// other route. repick: this attempt is the ladder's fresh edge pick
+	// for it — the pick is made, with the lock released, just before
+	// the attempt (cdnRepickLocked), and the attempt is tried alone.
+	cdn, repick bool
 }
 
 // autoPassLocked is one pass over the candidates. Called with Core.mu
@@ -789,16 +794,32 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 	queue := append([]autoCandidate(nil), cands...)
 	if fallOver {
 		// The route that stopped carrying, stopped at its hello: its
-		// next variant is tried first (connect_ladder.go).
-		queue = append(p.ladderLost(), queue...)
+		// next variant is tried first (connect_ladder.go). One whose
+		// address stopped answering: its standby, after the direct
+		// routes (connect_standby.go).
+		lostNext := p.ladderLost()
+		p.ladderLostStandby()
+		queue = p.ladderMerge(lostNext, queue)
 	}
 	for first := true; len(queue) > 0 && p.connected == "" && !p.cancelled; first = false {
+		if queue[0].repick {
+			// A CDN-fronted route's fresh edge pick (connect_cdn.go):
+			// made now, with the lock released for its probes. Nothing
+			// passed: the attempt is not made, and leaves the count.
+			if !p.cdnRepickLocked(queue[0]) {
+				queue = queue[1:]
+				if !p.cancelled {
+					p.ladderEnqueued(-1)
+				}
+				continue
+			}
+		}
 		index := len(cands) + p.ladderExtra() - len(queue) + 1
 		mark := len(p.obs)
 		// The route that carried here last is tried ALONE: when it still
 		// works — the usual press — the network sees one connection, the
-		// one it saw yesterday.
-		alone := first && queue[0].why == AutoWhyCarriedHere && queue[0].grade != netmem.GradeFailing
+		// one it saw yesterday. So is a fresh edge pick.
+		alone := (first && queue[0].why == AutoWhyCarriedHere && queue[0].grade != netmem.GradeFailing) || queue[0].repick
 		partner := -1
 		if !alone && !p.noRace {
 			partner = c.racePartnerLocked(queue, p.background)
@@ -814,8 +835,10 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		}
 		if p.connected == "" && !p.cancelled {
 			// A route whose hello was stopped just now: its next
-			// variant, if the ladder has one within budget, goes next.
-			queue = append(p.ladderNext(mark), queue...)
+			// variant, if the ladder has one within budget, goes next;
+			// one whose address stopped answering: its standby, after
+			// the direct routes.
+			queue = p.ladderMerge(p.ladderNext(mark), queue)
 		}
 	}
 	if p.cancelled {
@@ -1056,6 +1079,7 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 			left = append(left, AutoTried{RouteID: row.RouteID, Family: row.TransportFamily, Result: AutoResultRefused, Refused: code})
 			continue
 		}
+		_, cd.cdn = c.cdnEndpointLocked(row)
 		cd.side = prober != nil && prober.CanSideProbe(body)
 		cd.survey = cd.side || (prober != nil && prober.CanSurveyProbe(body))
 		byID[row.RouteID] = cd
@@ -1122,7 +1146,8 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 			cands = append(cands, p.cd)
 		}
 	}
-	return cands, left, routes, nil
+	// The way in through Cloudflare goes last (connect_cdn.go).
+	return cdnLast(cands), left, routes, nil
 }
 
 // autoRankView is the ranking's view for the automatic connect: the

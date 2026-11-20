@@ -67,5 +67,17 @@
         "got": "fail"
       }
     ]
+  },
+  {
+    "id": "ADD-1",
+    "severity": "medium",
+    "title": "the Google update channel refuses the standby key in the grouped form `standby promote` prints (appsscript.Build wants the 26 symbols run together; the engine's reader ignores spaces)",
+    "match": [
+      {
+        "phase": "op:standby-google",
+        "check": "google.standby_key_as_printed_accepted",
+        "got": "fail"
+      }
+    ]
   }
 ]

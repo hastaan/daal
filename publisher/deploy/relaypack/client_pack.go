@@ -105,6 +105,20 @@ func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, [
 	var skipped []SkippedRoute
 	rendered := 0
 	for _, route := range b.Manifest.Routes {
+		if bundle.HasCDNEndpoint(route.FamilySpecificConfig) {
+			// The way in through Cloudflare: committed by
+			// `_cdn_endpoint`, never `_endpoint`, and its outbound is
+			// wrapped so builds that predate it skip this one route.
+			prof, err := cdnProfileForRecipient(route, params)
+			if err != nil {
+				skipped = append(skipped, SkippedRoute{RouteID: route.ID, Family: route.TransportFamily, Reason: err.Error()})
+				files[route.ConfigPath] = markUnavailable(b.Profiles[route.ConfigPath], route.TransportFamily, err)
+				continue
+			}
+			files[route.ConfigPath] = prof
+			rendered++
+			continue
+		}
 		port := portFromProfile(b.Profiles[route.ConfigPath])
 		if port == 0 {
 			port = defaultClientPort(route.TransportFamily)
@@ -158,6 +172,46 @@ func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, [
 		return nil, skipped, fmt.Errorf("rewrite: rebuild sbp: %w", err)
 	}
 	return out, skipped, nil
+}
+
+// cdnProfileForRecipient is the profile of a CDN-fronted route for one
+// recipient: bundle.ParseCDNEndpoint → CDNClientOutbound (which holds
+// the outbound to bundle.CheckCDNOutbound) → bundle.WrapCDNOutbound.
+//
+// Every failure SKIPS the route (and is reported), never the pack: a
+// commitment this minter cannot read is a newer publisher's shape, and
+// a relay whose door path is unknown here simply cannot be reached
+// through Cloudflare by this file — the direct routes are unaffected.
+// A route marked cdn_fronted that is not websocket-tls, or not
+// cdn_fronted while it carries `_cdn_endpoint`, is the signing check's
+// to refuse (RP026); here it fails ParseCDNEndpoint or the exposure
+// check and is skipped.
+func cdnProfileForRecipient(route bundle.RouteManifestEntry, params ClientConnParams) ([]byte, error) {
+	if mode := exposureMode(route.FamilySpecificConfig); mode != "cdn_fronted" {
+		return nil, fmt.Errorf("a route carrying _cdn_endpoint is %q, not cdn_fronted", mode)
+	}
+	ep, err := bundle.ParseCDNEndpoint(route.TransportFamily, route.FamilySpecificConfig)
+	if err != nil {
+		return nil, fmt.Errorf("the signed way in through Cloudflare is not one this minter can read: %w", err)
+	}
+	ob, err := CDNClientOutbound(ep, params)
+	if err != nil {
+		return nil, err
+	}
+	return bundle.WrapCDNOutbound(ob)
+}
+
+// exposureMode reads `_relaypack.exposure_mode` ("" when absent).
+func exposureMode(fsc json.RawMessage) string {
+	var m struct {
+		RP struct {
+			ExposureMode string `json:"exposure_mode"`
+		} `json:"_relaypack"`
+	}
+	if json.Unmarshal(fsc, &m) != nil {
+		return ""
+	}
+	return m.RP.ExposureMode
 }
 
 // markUnavailable returns the profile bytes for a route that could not

@@ -1,0 +1,20 @@
+{
+  "name": "cdn-ech-outer-block",
+  "description": "The shared ECH outer name cloudflare-ech.com is on the blocklist (reassembling box, RST both ways), and so is the zone's own name — a tripwire: a client that fell back to a plain hello would show it, and the censor's log would say so. Every ECH hello to Cloudflare dies. Op cdn: the CDN route is reported dead and is NOT retried with a plain hello (owner decision D-2: no plain fallback unless the signed flag says so); the direct families are untouched.",
+  "analogue": "Russia's block of cloudflare-ech.com (November 2024): one rule ends ECH to every Cloudflare site at once. Plan §2.1 lists it as what the CDN add-on does not rescue. Model: exact outer name, full reassembly. Not modelled: blocking by the ECH extension's presence rather than by name, or ECH GREASE handling.",
+  "world": ["cdn"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$ECH_OUTER", "$CDN_HOST"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "ech-hello-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "reset_after_hello"},
+    {"name": "ech-hello-blocked-on-every-edge", "probe": "tls", "to": "edge-d", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "reset_after_hello"},
+    {"name": "plain-zone-name-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "expect": "reset_after_hello"},
+    {"name": "other-site-on-cloudflare-spared", "probe": "tls", "to": "edge-b", "port": 443, "sni": "www.wb-control.example", "expect": "ok"},
+    {"name": "relay-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "blocked"}
+}

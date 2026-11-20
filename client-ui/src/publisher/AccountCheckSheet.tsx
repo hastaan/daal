@@ -25,6 +25,18 @@ import {
 } from './accountCheck';
 import type { AccountGroup } from './accountCheck';
 import { kindKey } from './setupRecovery';
+import { money } from './addons/addonErrors';
+import type { AccountItemAddonFields } from './addons/addonTypes';
+
+/** The add-on an account item is, in words (a standby address bills
+ *  every month until it is removed or the relay is deleted). */
+export function addonItemLine(t: (k: string) => string, item: AccountItem & AccountItemAddonFields): string | null {
+    if (item.addon !== 'standby') return null;
+    const cents = item.monthly_cost_cents ?? 0;
+    return cents > 0 && item.cost_currency
+        ? t('pub.addons.account.standby').replace('{price}', money(t, cents, item.cost_currency))
+        : t('pub.addons.account.standby_nocost');
+}
 
 const BODY: React.CSSProperties = { fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 };
 const SUB: React.CSSProperties = { fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 };
@@ -80,6 +92,11 @@ function ItemLine({
             <div style={MONO} dir="ltr">
                 {item.name || item.id}
             </div>
+            {addonItemLine(t, item) && (
+                <div data-testid="account-item-addon" style={SUB}>
+                    {addonItemLine(t, item)}
+                </div>
+            )}
             {item.finding === 'not_on_this_phone' && item.kind === 'server' && (
                 <div style={{ ...SUB, color: 'var(--amber)' }}>{t('pub.account.warn.other_phone')}</div>
             )}

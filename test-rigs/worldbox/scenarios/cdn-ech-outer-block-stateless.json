@@ -1,0 +1,18 @@
+{
+  "name": "cdn-ech-outer-block-stateless",
+  "description": "cdn-ech-outer-block held by a box that does not reassemble (first two data packets joined, name read as soon as it is whole, RST+ACK to the client). An ECH hello carries the outer name early, so it is caught here too. Op cdn: the CDN route is dead, no plain fallback (the zone name is again a tripwire).",
+  "analogue": "The cloudflare-ech.com block as Iran's two-packet SNI box would apply it. Model limits as cdn-ech-outer-block and sni-rst-first-two.",
+  "world": ["cdn"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$ECH_OUTER", "$CDN_HOST"], "packets": 2, "partial": true, "action": "rst", "rst_to": "client"}
+    ]
+  },
+  "prove": [
+    {"name": "ech-hello-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "reset_after_hello"},
+    {"name": "plain-zone-name-blocked", "probe": "tls", "to": "edge-c", "port": 443, "sni": "$CDN_HOST", "expect": "reset_after_hello"},
+    {"name": "other-site-on-cloudflare-spared", "probe": "tls", "to": "edge-b", "port": 443, "sni": "www.wb-control.example", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "blocked"}
+}

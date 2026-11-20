@@ -517,11 +517,15 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/bind-address", s.requireAuth(s.handleBindAddress))
 	mux.HandleFunc("/unbind-address", s.requireAuth(s.handleUnbindAddress))
 	mux.HandleFunc("/identity", s.requireAuth(s.handleIdentity)) // read-only; see identity.go
+	// Add-on 2: the Cloudflare door (ws-cdn-in). Mutating and carrying
+	// a private key, so it sits behind the same per-request signature
+	// and is single-use; see singbox_cdn.go.
+	mux.HandleFunc("/cdn", s.requireAuth(s.handleCDN))
 	return mux
 }
 
 // routeNames returns the exact set of HTTP paths registered. Used
-// by main_test.go to enforce TestExactlyNRoutes (n=9).
+// by main_test.go to enforce TestExactlyNRoutes (n=11).
 func (s *server) routeNames() []string {
 	return []string{
 		"/health",
@@ -534,6 +538,7 @@ func (s *server) routeNames() []string {
 		"/bind-address",
 		"/unbind-address",
 		"/identity",
+		"/cdn",
 	}
 }
 
@@ -619,6 +624,8 @@ func opFromPath(p string) string {
 		return "unbind-address"
 	case "/identity":
 		return identityOp
+	case "/cdn":
+		return cdnOp
 	default:
 		return ""
 	}
@@ -849,6 +856,13 @@ const (
 	// Mirrors mgmt.CapTUICUsers.
 	capTUICUsers = "tuic-users"
 
+	// capCDNDoor: this binary serves POST /cdn and keeps ws-cdn-in's
+	// users in step with every provision and revoke (add-on 2). It
+	// says nothing about whether THIS relay's box firewall opens the
+	// door's port to Cloudflare: that is cloud-init's, written once at
+	// first boot. Mirrors mgmt.CapCDNDoor.
+	capCDNDoor = "cdn"
+
 	// mgmtAPIVersion is the second signal, sufficient on its own so a
 	// box that reports a version but not a verb list is still usable.
 	// v2 == the Step-7 split-rotation contract.
@@ -900,7 +914,7 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.healthCnt.Add(1)
-	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped, capShadowsocks2022, capAnyTLSInbound, capTUICUsers}
+	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped, capShadowsocks2022, capAnyTLSInbound, capTUICUsers, capCDNDoor}
 	var notes []string
 	if s.addrCapability != nil {
 		ok, note := s.addrCapability()

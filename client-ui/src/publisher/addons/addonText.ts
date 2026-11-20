@@ -56,9 +56,13 @@ export const ADDON_COPY: readonly AddonCopy[] = [
  * E_NOT_BUILT.
  */
 export const ADDON_BUILT: Readonly<Record<AddonKind, boolean>> = {
-    standby: false,
-    cdn: false,
-    google: false,
+    // L-standby-pub (S3-S6) + L-ui (S8).
+    standby: true,
+    // L-cdn-server (B-1..B-5) + L-ui (B-7). The relay door verb and the
+    // binder's CDN route are other lanes' (see addon_cdn.rs).
+    cdn: true,
+    // L-google-pub (G1-G3) + L-ui (G6).
+    google: true,
 };
 
 /** The i18n key of the badge for an add-on that has a ledger row. */
@@ -98,6 +102,8 @@ export function addonKeys(): string[] {
         'pub.addons.label.cost',
         'pub.addons.label.ties',
         'pub.addons.turn_on',
+        'pub.addons.set_up',
+        'pub.addons.manage',
     ]);
     for (const c of ADDON_COPY) {
         for (const k of [c.titleKey, c.lineKey, c.rescuesKey, c.costKey, c.tiesKey]) keys.add(k);

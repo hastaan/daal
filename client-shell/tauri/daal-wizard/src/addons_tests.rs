@@ -231,39 +231,39 @@ fn panic_wipe_finds_an_addons_secret() {
 
 // ------------------------------------------------------------ the stubs
 
-fn is_not_built(e: crate::commands::WizardError) -> bool {
-    e.to_string().starts_with("E_NOT_BUILT: ")
-}
-
 #[test]
-fn every_addon_operation_answers_not_built_and_changes_nothing() {
+fn every_addon_is_built_and_a_helper_without_its_verbs_changes_nothing() {
     let f = fx();
     let op = provisioned(&f);
     let c = &f.ctx;
     // The standby add-on is built (L-standby-pub): addon_standby_tests.rs.
-    use crate::addon_cdn as cdn;
-    assert!(is_not_built(
-        cdn::set_token(c, cdn::CdnTokenInput { operator_id: op, token: "x".into() }, &mut noop())
-            .unwrap_err()
-    ));
-    assert!(is_not_built(
-        cdn::build(c, cdn::CdnBuildInput { operator_id: op, zone: "example.com".into() }, &mut noop())
-            .unwrap_err()
-    ));
-    assert!(is_not_built(cdn::posture(c, cdn::CdnPostureInput { operator_id: op }, &mut noop()).unwrap_err()));
-    assert!(is_not_built(
-        cdn::set_plain_fallback(c, cdn::CdnPlainFallbackInput { operator_id: op, allow: true }, &mut noop())
-            .unwrap_err()
-    ));
     // The Google add-on is built (L-google-pub): addon_google_tests.rs.
+    // The Cloudflare add-on is built (L-ui, B-7): addon_cdn_tests.rs. With
+    // no `cdn-*` verb in the helper it says so, and nothing is made.
+    use crate::addon_cdn as cdn;
+    let e = cdn::set_token(
+        c,
+        cdn::CdnTokenInput { operator_id: op, token: "x".into(), zone: String::new() },
+        &mut noop(),
+    )
+    .unwrap_err();
+    assert!(e.to_string().starts_with("E_DEPLOY_TOO_OLD: "), "{e}");
+    let e = cdn::build(c, cdn::CdnBuildInput { operator_id: op, zone: "example.com".into() }, &mut noop())
+        .unwrap_err();
+    assert!(e.to_string().starts_with("E_CDN_NO_TOKEN: "), "{e}");
+    assert!(cdn::posture(c, cdn::CdnPostureInput { operator_id: op, test: true }, &mut noop()).is_err());
+    assert!(cdn::set_plain_fallback(c, cdn::CdnPlainFallbackInput { operator_id: op, allow: true }, &mut noop())
+        .is_err());
     assert!(list(c, op).unwrap().is_empty());
-    assert!(f.mock.addon_calls.lock().unwrap().is_empty(), "no stub ran the helper");
+    assert_eq!(f.mock.addon_calls.lock().unwrap().len(), 1, "only the key check ran the helper");
 }
 
 #[test]
-fn removing_any_kind_answers_not_built_and_keeps_the_row_and_secret() {
+fn removing_a_kind_hands_the_row_to_its_module() {
     let f = fx();
     let op = provisioned(&f);
+    // A Cloudflare row that never got as far as Cloudflare: nothing to
+    // take down, so the row goes.
     let cdn = cdn_with_secret(&f, op);
     let sb = insert(&f.ctx, &standby(op)).unwrap();
     let g = insert(
@@ -275,9 +275,10 @@ fn removing_any_kind_answers_not_built_and_keeps_the_row_and_secret() {
     let _ = sb;
     // The Google kind is built; its removal is tested in addon_google_tests.rs.
     let _ = g;
-    assert!(is_not_built(remove(&f.ctx, cdn.id, &mut noop()).unwrap_err()));
-    assert_eq!(list(&f.ctx, op).unwrap().len(), 3);
-    assert_eq!(f.ctx.custody.get(&cdn.secret_alias).unwrap(), CF_TOKEN);
+    let rep = remove(&f.ctx, cdn.id, &mut noop()).unwrap();
+    assert!(rep.removed);
+    assert_eq!(list(&f.ctx, op).unwrap().len(), 2);
+    assert!(f.ctx.custody.get(&cdn.secret_alias).is_err(), "forgotten with its row");
     assert!(remove(&f.ctx, 4242, &mut noop()).is_err(), "no such add-on");
 }
 
@@ -299,6 +300,11 @@ fn an_addon_that_cannot_be_taken_down_yet_keeps_the_relay_but_not_the_server() {
     let f = fx();
     let op = provisioned(&f);
     let cdn = cdn_with_secret(&f, op);
+    // A front Cloudflare still holds, and a key to take it down with; the
+    // helper here has no `cdn-remove`, so the teardown fails.
+    set_detail(&f.ctx, cdn.id, &serde_json::json!({"front": {"hostname": "a.example.com", "zone_id": "z"}}))
+        .unwrap();
+    f.ctx.custody.put(&crate::commands::cloudflare_alias(op), CF_TOKEN).unwrap();
     let rep = relay_destroy(&f.ctx, op, true).unwrap();
     assert!(rep.server_deleted, "the server still goes: it is the biggest bill");
     assert!(!rep.local_removed);
@@ -306,7 +312,7 @@ fn an_addon_that_cannot_be_taken_down_yet_keeps_the_relay_but_not_the_server() {
     assert_eq!(rep.addons.len(), 1);
     let o = &rep.addons[0];
     assert_eq!((o.addon_id, o.kind, o.removed, o.keeps_relay), (cdn.id, AddonKind::Cdn, false, true));
-    assert_eq!(o.code, "not_built");
+    assert_eq!(o.code, "failed");
     // The relay, the add-on and what removes it are all still here.
     assert_eq!(f.ctx.db.get(op).unwrap().status, "decommissioned");
     assert_eq!(list(&f.ctx, op).unwrap().len(), 1);

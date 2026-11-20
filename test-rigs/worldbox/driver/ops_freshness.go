@@ -57,6 +57,9 @@ type freshChannel struct {
 	// for a re-signed pack must name the ids it replaces, because the id
 	// is a hash of exactly the fields a rotation changes.
 	announced []string
+	// extra: more publish-freshness flags for one document (label), e.g.
+	// the Google channel's backend (ops_gfe.go). Nil: none.
+	extra func(label string) []string
 }
 
 // freshSeq is the last document sequence published in this run. One
@@ -127,6 +130,9 @@ func (fc *freshChannel) publish(label, packID, sha, privFile string, supersedes 
 	}
 	for _, s := range supersedes {
 		args = append(args, "--supersedes", s)
+	}
+	if fc.extra != nil {
+		args = append(args, fc.extra(label)...)
 	}
 	v := rc.Pub.Deploy(rc.Ctx, args...)
 	var ans struct {

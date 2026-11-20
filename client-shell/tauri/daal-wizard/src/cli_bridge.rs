@@ -1456,10 +1456,20 @@ pub struct ProvisionArgs<'a> {
 /// Static shape passed to `daal-deploy cdn-provision`.
 pub struct CdnProvisionArgs<'a> {
     pub hostname: &'a str,
+    /// The zone to put a random label in when `hostname` is empty.
+    pub zone: &'a str,
     pub origin_ip: &'a str,
     pub origin_ipv6: &'a str,
     pub origin_path: &'a str,
+    /// Must be empty or equal `origin_path`: there is no Worker any
+    /// more (D-5), so the helper refuses anything else.
     pub public_path: &'a str,
+    /// The relay door's port; 0 is the helper's default (8448).
+    pub origin_port: u16,
+    /// The relay's own Hetzner firewall id (`daal-relay-<server id>`'s
+    /// numeric id). Required: the Cloudflare-ranges rule goes on it,
+    /// and the helper refuses to create a firewall attached to nothing.
+    pub firewall_id: &'a str,
     pub out_dir: &'a Path,
     pub cf_token: &'a str,
     pub cloud_token: &'a str,
@@ -1597,6 +1607,16 @@ pub struct FreshnessUploadArgs {
     pub gh_branch: String,
     pub gh_public_url: String,
     pub gh_pat_file: Option<PathBuf>,
+    /// The Google update channel (add-on 3): the web-app `/exec` URL
+    /// with its `?k=`, and the write key (64 hex) in a 0600 file. Both
+    /// or neither; the CLI refuses one without the other.
+    pub appsscript_url: String,
+    pub appsscript_write_key_file: Option<PathBuf>,
+    /// The signed credential-less pack the document names, carried
+    /// inline in the container. Optional.
+    pub appsscript_pack_file: Option<PathBuf>,
+    /// A standby key to carry in the container. Optional.
+    pub appsscript_standby_key_file: Option<PathBuf>,
 }
 
 impl FreshnessUploadArgs {
@@ -1604,7 +1624,9 @@ impl FreshnessUploadArgs {
     /// refuses a partially-specified provider, so this only gates
     /// "should we pass any upload flags at all".
     pub fn has_any(&self) -> bool {
-        self.r2_secret_file.is_some() || self.gh_pat_file.is_some()
+        self.r2_secret_file.is_some()
+            || self.gh_pat_file.is_some()
+            || self.appsscript_write_key_file.is_some()
     }
 }
 
@@ -1978,6 +2000,13 @@ impl SubprocessRunner {
         }
         if args.dry_run {
             cmd.arg("--dry-run");
+        } else {
+            // Add-on 2: the box-side firewall rule for the Cloudflare
+            // door is written once at first boot, so every real build
+            // and rebuild carries Cloudflare's ranges whether or not the
+            // add-on is ever turned on. A failed fetch is a warning in
+            // the helper, never a failed provision.
+            cmd.arg("--cdn-edge-ranges");
         }
         if let Some(j) = journal {
             cmd.arg("--journal").arg(j);
@@ -2460,8 +2489,6 @@ impl CliRunner for SubprocessRunner {
 
         let mut cmd = Command::new(&self.binary);
         cmd.arg("cdn-provision")
-            .arg("--hostname")
-            .arg(args.hostname)
             .arg("--origin-ip")
             .arg(args.origin_ip)
             .arg("--origin-path")
@@ -2475,8 +2502,21 @@ impl CliRunner for SubprocessRunner {
         if !args.origin_ipv6.is_empty() {
             cmd.arg("--origin-ipv6").arg(args.origin_ipv6);
         }
+        // Passed even when empty: the helper then refuses by name
+        // ("missing required flags: --firewall-id"), which is the
+        // message the publisher should see.
+        cmd.arg("--firewall-id").arg(args.firewall_id);
+        if !args.hostname.is_empty() {
+            cmd.arg("--hostname").arg(args.hostname);
+        }
+        if !args.zone.is_empty() {
+            cmd.arg("--zone").arg(args.zone);
+        }
         if !args.public_path.is_empty() {
             cmd.arg("--public-path").arg(args.public_path);
+        }
+        if args.origin_port != 0 {
+            cmd.arg("--origin-port").arg(args.origin_port.to_string());
         }
         let out = cmd
             .apply_env()
@@ -2701,6 +2741,19 @@ impl CliRunner for SubprocessRunner {
                 .arg(pat);
             if !up.gh_branch.is_empty() {
                 cmd.arg("--gh-branch").arg(&up.gh_branch);
+            }
+        }
+        if let Some(key) = up.appsscript_write_key_file.as_ref() {
+            cmd.arg("--appsscript-url")
+                .arg(&up.appsscript_url)
+                // The write key is a file, never an argument.
+                .arg("--appsscript-write-key-file")
+                .arg(key);
+            if let Some(p) = up.appsscript_pack_file.as_ref() {
+                cmd.arg("--appsscript-pack-file").arg(p);
+            }
+            if let Some(p) = up.appsscript_standby_key_file.as_ref() {
+                cmd.arg("--appsscript-standby-key-file").arg(p);
             }
         }
         let out = cmd
@@ -4094,6 +4147,12 @@ pub struct MockPublishFreshnessCall {
     /// accepted a higher one refuses the document as a rollback.
     pub sequence: u64,
     pub min_sequence: u64,
+    /// The Google update channel as handed to the helper: its URL
+    /// (empty when not a target), whether the write key reached it as
+    /// a file, and the inline pack's path when one was carried.
+    pub appsscript_url: String,
+    pub appsscript_key_staged: bool,
+    pub appsscript_pack: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4862,6 +4921,13 @@ impl CliRunner for MockRunner {
                 used_subkey: args.subkey_priv_path.is_some(),
                 mirrors: args.mirrors.to_vec(),
                 uploaded: args.upload.has_any(),
+                appsscript_url: args.upload.appsscript_url.clone(),
+                appsscript_key_staged: args
+                    .upload
+                    .appsscript_write_key_file
+                    .as_ref()
+                    .is_some_and(|p| p.exists()),
+                appsscript_pack: args.upload.appsscript_pack_file.clone(),
                 supersedes: args.supersedes.to_vec(),
                 sequence: args.sequence,
                 min_sequence: args.min_sequence,

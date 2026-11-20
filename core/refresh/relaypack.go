@@ -110,7 +110,8 @@ const MirrorsArchivePath = bundle.FreshnessMirrorsPath
 // unrepresentable on this side too: a mirror document that degraded
 // to one endpoint is rejected, and the recipient falls back to the
 // legacy scalar plus the bootstrap-pointer layer rather than
-// pretending one host is a set.
+// pretending one host is a set — except a lone `appsscript` mirror
+// (owner decision D-3; MeetsMirrorFloor, ValidateMirrorSet).
 //
 // MaxMirrors is pinned EQUAL to maxFreshnessEndpoints (endpoints.go).
 // It was 8 here and on the publisher while every device truncated the
@@ -564,8 +565,20 @@ var mirrorProviderRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,15}$`)
 // and accepting them here would let a publisher (or an adversary
 // who can edit an unsigned copy) turn N-provider resilience into
 // theatre.
+//
+// The one exception is owner decision D-3 (MeetsMirrorFloor): a set
+// whose only member is an `appsscript` mirror is accepted alone. Its URL
+// travels inside TLS to Google, so a censor holding the pack cannot
+// block it apart from Google itself — which is the reason the floor
+// exists. A member labelled `appsscript` must have that provider's one
+// URL shape (IsAppsScriptMirrorURL), so the label cannot buy the
+// exception for an ordinary host.
 func ValidateMirrorSet(mirrors []FreshnessMirror) ([]FreshnessMirror, error) {
-	if len(mirrors) < MinMirrors {
+	providers := make([]string, 0, len(mirrors))
+	for _, m := range mirrors {
+		providers = append(providers, m.Provider)
+	}
+	if !MeetsMirrorFloor(providers) {
 		return nil, fmt.Errorf("freshness: at least %d mirrors on distinct providers are required", MinMirrors)
 	}
 	if len(mirrors) > MaxMirrors {
@@ -581,6 +594,9 @@ func ValidateMirrorSet(mirrors []FreshnessMirror) ([]FreshnessMirror, error) {
 		host, ok := validFreshnessURL(m.URL)
 		if !ok {
 			return nil, fmt.Errorf("freshness: mirror %s: unusable url", m.Provider)
+		}
+		if m.Provider == ProviderAppsScript && !IsAppsScriptMirrorURL(m.URL) {
+			return nil, fmt.Errorf("freshness: mirror %s: not an Apps Script web-app address", m.Provider)
 		}
 		if seenProvider[m.Provider] {
 			return nil, fmt.Errorf("freshness: two mirrors share provider %q", m.Provider)

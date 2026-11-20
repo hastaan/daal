@@ -21,6 +21,7 @@ vi.mock('@tauri-apps/api/core', () => ({
         if (cmd === 'recipient_sbpx_sniff') return sealed;
         if (cmd === 'device_custody_is_unlocked') return true;
         if (cmd === 'recipient_import_sbpx') return '/staging/maman.plain.sbp';
+        if (cmd === 'recipient_standby_key') return JSON.stringify({ outcome: 'accepted', routes: 2 });
         throw new Error(`not mocked: ${cmd}`);
     },
 }));
@@ -128,6 +129,17 @@ describe('the add sheet: one sheet, three ways in', () => {
         const text = m.container.textContent ?? '';
         expect(text).not.toContain(t('common.cancel'));
         expect(text).toContain('Add my file');
+    });
+
+    it('a standby code someone sent has its own quiet way in, and goes to the engine once', async () => {
+        const m = await open();
+        await rig.click(btn(m.container, 'add-code'));
+        expect(m.container.textContent).toContain(t('add.code.help'));
+        await rig.type(btn(m.container, 'standby-code-input'), '000G40 R40M3 0E209 185WP 03H2G');
+        await rig.click(btn(m.container, 'standby-code-go'));
+        expect(calls.filter((c) => c === 'recipient_standby_key')).toHaveLength(1);
+        expect(m.container.textContent).toContain(t('add.code.accepted'));
+        expect(m.onImported).toHaveBeenCalledTimes(1);
     });
 
     it('a pasted Daal file goes on by itself: no Import tap, and it says what it is', async () => {

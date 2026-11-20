@@ -210,6 +210,14 @@ type ProvisionOpts struct {
 	// the box comes back advertising a different name than the
 	// packs already in recipients' hands expect.
 	CoverSNI string `json:"cover_sni,omitempty"`
+	// CDNEdgeRanges are Cloudflare's published ranges (v4 and v6
+	// CIDRs), fetched by the caller abroad just before provisioning.
+	// They go into cloud-init (cloudinit.RenderInputV2.CDNEdgeRanges),
+	// where the box-side ufw opens the CDN door's port to them and to
+	// nothing else. ufw is written once at first boot, so a relay
+	// provisioned without them needs a rebuild before it can take the
+	// way in through Cloudflare (add-on 2). Empty opens nothing.
+	CDNEdgeRanges []string `json:"cdn_edge_ranges,omitempty"`
 	// WaitForHealth asks a provider's live Provision path to poll
 	// the bootstrap health endpoint and capture
 	// MgmtTLSFingerprint before returning. Tests and dry-runs leave

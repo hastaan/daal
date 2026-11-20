@@ -329,6 +329,13 @@ func TestE2EPlanReachesEverything(t *testing.T) {
 			}
 		}
 		for _, s := range listNames(rig, "scenarios") {
+			if len(scn[s]) == 0 && mode == "quick" && isAddonScenario(s) {
+				// The add-on scenarios are about the CDN route and the
+				// Google channel, which only their ops reach: they are
+				// in the addons and full modes (TestAddonPlanRunsEveryAddonScenario),
+				// not in the push gate.
+				continue
+			}
 			if len(scn[s]) == 0 {
 				t.Errorf("%s mode runs no world for scenarios/%s.json", mode, s)
 			}
@@ -658,3 +665,56 @@ func TestAGivenUpSessionIsNotAnEngineDeath(t *testing.T) {
 	}
 }
 
+
+func isAddonScenario(s string) bool {
+	return strings.HasPrefix(s, "cdn-") || strings.HasPrefix(s, "refresh-google-")
+}
+
+// The addons mode runs every add-on scenario with the op that reads it,
+// and every add-on op at least once.
+func TestAddonPlanRunsEveryAddonScenario(t *testing.T) {
+	rig := rigDir(t)
+	plan := e2ePlan(t, "addons")
+	ran := map[string]string{}
+	ops := map[string]bool{}
+	for _, args := range plan {
+		f := strings.Fields(args)
+		scenario := ""
+		for i := 0; i < len(f); i++ {
+			if f[i] == "--ops" {
+				for _, o := range strings.Split(f[i+1], ",") {
+					ops[o] = true
+				}
+				i++
+				continue
+			}
+			if !strings.HasPrefix(f[i], "--") && scenario == "" {
+				scenario = f[i]
+			}
+		}
+		ran[scenario] = args
+	}
+	for _, s := range listNames(rig, "scenarios") {
+		if !isAddonScenario(s) {
+			continue
+		}
+		args, ok := ran[s]
+		switch {
+		case !ok:
+			t.Errorf("addons mode runs no world for scenarios/%s.json", s)
+		case strings.HasPrefix(s, "cdn-") && !strings.Contains(args, "--ops cdn "):
+			t.Errorf("addons mode runs %s without op cdn, the only reader of its cdn expectation", s)
+		case strings.HasPrefix(s, "refresh-google-") && !strings.Contains(args, "--ops google-refresh "):
+			t.Errorf("addons mode runs %s without op google-refresh, the only reader of its google_expect", s)
+		}
+	}
+	for _, o := range []string{"standby", "standby-promote", "standby-sealed", "standby-open", "standby-stale", "standby-google",
+		"cdn-provision", "cdn", "google-channel", "google-refresh"} {
+		if _, declared := Ops[o]; !declared {
+			t.Errorf("op %q is not declared", o)
+		}
+		if !ops[o] {
+			t.Errorf("addons mode never runs op %q", o)
+		}
+	}
+}

@@ -1,0 +1,19 @@
+{
+  "name": "refresh-google-rst",
+  "description": "refresh-google-only, and the Google front itself is reset too (any hello naming www.google.com). Op google-refresh: the walk must end cleanly — relay_recovery unreachable, the engine honest about it — after at most two connections to Google, with no retry storm.",
+  "analogue": "MasterHttpRelayVPN-RUST #313 (mid-April 2026: one of 28 Google addresses reachable, resets) and net4people #676 (Oct 2026: TCP cut after a few packets on the same routes). Plan §3.1: 'on a cut route it fails with everything else'. Model: exact names, reassembling, RST both ways.",
+  "world": ["storage", "google"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$R2_SNI", "$GH_SNI", "$PACK_SNI", "script.google.com", "www.google.com"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "r2-blocked", "probe": "tls", "to": "storage", "port": 443, "sni": "$R2_SNI", "expect": "reset_after_hello"},
+    {"name": "front-blocked", "probe": "tls", "to": "gfe", "port": 443, "sni": "www.google.com", "expect": "reset_after_hello"},
+    {"name": "script-plain-blocked", "probe": "tls", "to": "gscript", "port": 443, "sni": "script.google.com", "expect": "reset_after_hello"},
+    {"name": "relay-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "google_expect": "unreachable"
+}

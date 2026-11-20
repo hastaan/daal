@@ -92,7 +92,12 @@ func main() {
 	recheckS := flag.Int("recheck-s", 0, "connection_check.recheck_interval_s in the engine's configuration file. 0 leaves the production default (30 s)")
 	desyncJSON := flag.String("desync", "", "a core/desync strategy (JSON, e.g. {\"preset\":\"sni-cut\"}) turned on for the route before it connects — what the selection ladder does for a network (engine.SetRouteDesync). Empty: off")
 	classify := flag.Bool("classify", false, "read error texts on stdin, one per line; print the product classifier's category for each (core/diagnostics.Classify) and exit")
+	features := flag.Bool("features", false, "print the build-tag-gated host calls this binary has (standby_key.go) and exit")
 	flag.Parse()
+	if *features {
+		fmt.Println(strings.Join(clientFeatures, " "))
+		return
+	}
 	if *classify {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
@@ -340,6 +345,8 @@ func idleLoop(sc *bufio.Scanner) (family string, connect bool) {
 		case "routes":
 			routes, err := abi.AvailableRoutes()
 			emit("routes", map[string]any{"routes": rawJSON(routes), "error": errString(err)})
+		case "standby-key":
+			emit("standby-key", standbyKeyCmd(f[1:]))
 		case "import":
 			if len(f) < 2 {
 				emit("error", map[string]any{"stage": "idle", "error": "import needs a file"})

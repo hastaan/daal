@@ -57,6 +57,7 @@ import type { Locale } from '../lib/i18n';
 import { ActionButton } from './useAction';
 import type { Action } from './useAction';
 import { failureBlock } from './failureText';
+import type { FreshnessGoogleOnly } from './addons/addonTypes';
 
 interface Props {
     t: (k: string) => string;
@@ -397,6 +398,12 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     }
                     last={!enough}
                 />
+                {(status as FreshnessStatus & FreshnessGoogleOnly).google_only && (
+                    // D-3: one Google channel is accepted alone, and said.
+                    <p data-testid="fresh-google-only" style={{ fontSize: 13, color: 'var(--amber)', lineHeight: 1.55, margin: '6px 0' }}>
+                        {t('pub.addons.google.only')}
+                    </p>
+                )}
 
                 {enough && (
                     <ListRow

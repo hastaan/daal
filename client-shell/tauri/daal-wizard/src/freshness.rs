@@ -585,11 +585,12 @@ fn parse_mirrors(json: &str) -> Vec<String> {
 pub fn mirror_args(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<String>> {
     let rows = ctx.db.list_freshness_endpoints(operator_id)?;
     let kinds = distinct_kinds(&rows);
-    // D-3 admits a set of the Google channel alone, but the pack binder
-    // (`publisher/deploy/relaypack/binder.go`, `Len() < MinMirrors`)
-    // and the recipient's check (`core/refresh`, G5) do not yet: a
-    // Google-only pack would fail to sign. Until both move, such a
-    // relay signs with no mirror set, as any relay under the floor did.
+    // D-3 admits a set of the Google channel alone, and the pack binder
+    // now does too (`relaypack/binder.go`, `MeetsFloor`). The
+    // recipient's check (`core/refresh`, G5) and the builds already in
+    // families' hands are what still decide: until a Google-only mirror
+    // set is known to cost an older build nothing, such a relay signs
+    // with no mirror set, as any relay under the floor did.
     if kinds.len() < MIN_MIRRORS {
         return Ok(Vec::new());
     }
@@ -597,6 +598,33 @@ pub fn mirror_args(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<String>> {
         .iter()
         .map(|r| format!("{}={}", r.kind, r.public_base_url))
         .collect())
+}
+
+/// The Google update channel's write key as the 64 hex characters
+/// `--appsscript-write-key-file` takes, read from the add-on row's
+/// custody alias. Zeroized on drop.
+fn appsscript_write_key_hex(ctx: &WizardCtx, operator_id: i64) -> Result<zeroize::Zeroizing<String>> {
+    let row = crate::addons::list(ctx, operator_id)?
+        .into_iter()
+        .find(|r| {
+            r.kind == crate::addons::AddonKind::Google
+                && r.state != crate::addons::AddonState::Promoted
+                && !r.secret_alias.is_empty()
+        })
+        .ok_or_else(|| {
+            crate::commands::coded(
+                crate::commands::E_SECRET_MISSING,
+                "the Google update channel has no write key",
+            )
+        })?;
+    let k = crate::commands::custody_get(ctx, &row.secret_alias)?;
+    if k.len() != 32 {
+        return Err(crate::commands::coded(
+            crate::commands::E_CUSTODY_BACKEND,
+            "the stored write key has the wrong length",
+        ));
+    }
+    Ok(zeroize::Zeroizing::new(hex::encode(k.as_slice())))
 }
 
 /// Who still needs a file handed to them after a rotation, given that
@@ -766,20 +794,8 @@ pub fn publish(
         report.blocked_reason = "too_few_providers".into();
         return Ok(report);
     }
-    let has_google = kinds.contains(&KIND_APPSSCRIPT);
     if kinds == [KIND_APPSSCRIPT] {
         report.min_mirrors = 1;
-    }
-    // The Google channel is sent after `publish-freshness` (below), so
-    // that helper sees one provider fewer than the set has. Beside ONE
-    // other provider it would hold a single upload target and refuse
-    // it (its two-target floor), and nothing would be published. Until
-    // publish-freshness takes the channel as a target of its own
-    // (`cli_addon_google.go`, appsScriptFreshnessTarget), that one
-    // shape is refused here with its own reason.
-    if has_google && kinds.len() == 2 {
-        report.blocked_reason = "google_beside_one_mirror".into();
-        return Ok(report);
     }
 
     std::fs::create_dir_all(&ctx.staging_dir)
@@ -836,8 +852,30 @@ pub fn publish(
     let mut upload = FreshnessUploadArgs::default();
     for ep in &endpoints {
         if ep.kind == KIND_APPSSCRIPT {
-            // Sent after the document is signed; its key is the
-            // add-on's and never goes through this loop.
+            // The Google update channel is one more target of
+            // publish-freshness. Its write key is the add-on's, in
+            // custody under the add-on row's alias; it goes to the
+            // helper as a 0600 file like every other secret here.
+            let key = match appsscript_write_key_hex(ctx, operator_id) {
+                Ok(k) => k,
+                Err(e) => {
+                    cleanup(&scratch, &secret_dir);
+                    return Err(e);
+                }
+            };
+            let path = secret_dir.join(format!("appsscript.{}.key", ep.id));
+            if let Err(e) = write_secret_file(&path, key.as_bytes()) {
+                cleanup(&scratch, &secret_dir);
+                return Err(e);
+            }
+            scratch.push(path.clone());
+            upload.appsscript_url = ep.public_base_url.clone();
+            upload.appsscript_write_key_file = Some(path);
+            // The channel carries the signed pack inline when it is the
+            // one the document names (checked above).
+            if !report.signed_pack_path.is_empty() {
+                upload.appsscript_pack_file = Some(PathBuf::from(&report.signed_pack_path));
+            }
             continue;
         }
         let cred = match read_credential(ctx, &ep.secret_alias) {
@@ -995,43 +1033,7 @@ pub fn publish(
     // set uses — if it did not match, recipients would be polling a URL
     // nobody writes to, so a mismatch here is a bug worth surfacing
     // rather than papering over with positional matching.
-    // The signed document, where the Google channel's sender reads it.
-    if has_google && !out_file.exists() && !res.signed_doc_b64.is_empty() {
-        use base64::Engine as _;
-        if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(res.signed_doc_b64.trim()) {
-            let _ = std::fs::write(&out_file, b);
-        }
-    }
-    let signed_pack = if report.signed_pack_path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(&report.signed_pack_path))
-    };
     for ep in &endpoints {
-        if ep.kind == KIND_APPSSCRIPT {
-            let (ok, detail) =
-                crate::addon_google::push_update(ctx, operator_id, &out_file, signed_pack.as_deref());
-            let detail = redact_detail(&detail);
-            ctx.db.record_freshness_publish(
-                ep.id,
-                now,
-                ok,
-                0,
-                &detail,
-                if ok { &ep.public_base_url } else { "" },
-            )?;
-            if ok {
-                report.succeeded += 1;
-            }
-            report.results.push(PublishOutcome {
-                endpoint_id: ep.id,
-                kind: ep.kind.clone(),
-                url: ep.public_base_url.clone(),
-                ok,
-                detail,
-            });
-            continue;
-        }
         let found = res.published.iter().find(|p| p.provider == ep.kind);
         let (ok, detail, url) = match found {
             Some(p) => (

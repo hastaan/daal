@@ -51,6 +51,11 @@ type RunCtx struct {
 	// desync: the strategy (JSON) the phone of every Session started
 	// while it is set connects with (op desync). Empty: off.
 	desync string
+	// cdnWorld: the CDN add-on is under test (a cdn-* scenario or op):
+	// Cloudflare's stand-ins come up before provisioning, which then
+	// opens the CDN door's port at the box to the published ranges
+	// (provision --cdn-edge-ranges), as the app does for such a relay.
+	cdnWorld bool
 }
 
 func cmdRun(args []string) int {
@@ -176,6 +181,7 @@ func cmdRun(args []string) int {
 	}
 	rawPatience = time.Duration(scn.ProbePatienceMs) * time.Millisecond
 	rc := &RunCtx{Ctx: ctx, P: p, R: res, Scn: scn, Fams: fams, Want: want, Serve: serve, ExplicitFamilies: explicit}
+	rc.cdnWorld = contains(scn.World, "cdn") || contains(ops, "cdn") || contains(ops, "cdn-provision")
 	t0 := time.Now()
 	fmt.Fprintf(res.human, "worldbox: scenario=%s  under test: %s  relay serves: %s  ops: %s  box artefacts: %s\nworldbox: evidence in %s\n",
 		scn.Name, strings.Join(want, ","), strings.Join(serve, ","), strings.Join(ops, ","), got(*override == "", "pinned release", "TREE BUILD "+*override), p.Run)
@@ -187,6 +193,8 @@ func cmdRun(args []string) int {
 		}
 		if err := InstallWireTap(ctx, served); err != nil {
 			res.Add("", "world", "censor.wire_tap", Pass, Fail, err.Error(), nil, time.Now())
+		} else if err := rc.scenarioWorld(); err != nil {
+			res.Add("", "world", "addons.world", Pass, Fail, err.Error(), nil, time.Now())
 		} else if err := ApplyScenario(ctx, p, scn, scenarioVars(rc.Rec.CoverSNI)); err != nil {
 			res.Add("", "world", "censor.apply", Pass, Fail, err.Error(), nil, time.Now())
 		} else {
@@ -321,7 +329,16 @@ func (rc *RunCtx) provision() bool {
 	if rc.ExplicitFamilies {
 		famFlag = rc.Serve
 	}
-	v := rc.Pub.Provision(ctx, famFlag)
+	var extra []string
+	if rc.cdnWorld {
+		if err := rc.BringUpCDN(); err != nil {
+			return r.Add("", "provision", "addons.cdn_world", Pass, Fail, err.Error(), nil, t0)
+		}
+		if provisionKnowsFlag(p, "cdn-edge-ranges") {
+			extra = append(extra, "--cdn-edge-ranges")
+		}
+	}
+	v := rc.Pub.Provision(ctx, famFlag, extra...)
 	if !r.Add("", "provision", "verb.provision", Pass, got(v.OK(), Pass, Fail), v.Tail(), map[string]any{"rc": v.RC, "serve": rc.Serve, "families_flag": famFlag}, t0) {
 		return false
 	}

@@ -191,9 +191,15 @@ func pickRacePartner(queue []autoCandidate, recent func(string) bool) int {
 	best, bestScore, bestFailed := -1, -1, false
 	for j := 1; j < len(queue); j++ {
 		b := queue[j]
-		if !b.side || b.relayHost == "" || !b.variant.zero() || recent(b.routeID) {
+		if !b.side || b.relayHost == "" || !b.variant.zero() || b.repick || recent(b.routeID) {
 			// (A variant of a route — connect_ladder.go — shares its
-			// route's address and port, and is always tried alone.)
+			// route's address and port, and is always tried alone. A
+			// fresh edge pick is tried alone.)
+			continue
+		}
+		if b.cdn && !a.cdn {
+			// The way in through Cloudflare goes after the direct routes
+			// (connect_cdn.go): never beside one.
 			continue
 		}
 		if b.relayHost == a.relayHost && b.relayPort == a.relayPort {
@@ -320,6 +326,10 @@ func (p *autoPass) outcome(cd autoCandidate, out connectOutcome, racedWith strin
 	case AutoResultCarried:
 		p.connected, p.connectedFamily, p.answered = cd.routeID, cd.family, true
 		p.ladderCarried(cd)
+		if cd.cdn {
+			// The edge it went through is this network's good one.
+			p.c.cdnEdgeCarriedLocked(cd.routeID)
+		}
 	case AutoResultNotCarrying, AutoResultStartFailed:
 		if !cd.variant.zero() {
 			// A variant's failure is the variant's alone: remembered

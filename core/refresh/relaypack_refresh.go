@@ -196,6 +196,17 @@ type RelayPackRefresher struct {
 	// through a dead tunnel says nothing about the mirrors (blackout plan
 	// C0, review M3).
 	TunnelHealthy func() bool
+
+	// The Google update channel (frontmirror.go). FrontFetch replaces
+	// the front fetcher (tests); StandbyKeys receives the standby key
+	// a verified container carries (nil: such keys are dropped);
+	// GoogleJitter replaces the random wait before the first Google
+	// connection (it is given the bound and returns a wait below it);
+	// MaxGoogleJitter lowers MaxGoogleJitter.
+	FrontFetch      FrontFetchFn
+	StandbyKeys     StandbyKeySink
+	GoogleJitter    func(max time.Duration) time.Duration
+	MaxGoogleJitter time.Duration
 }
 
 // RelayPackTarget is one refreshable pack.
@@ -229,6 +240,13 @@ type RelayPackResult struct {
 	// RetryAfterS: for a rate-limited unscheduled attempt, how many
 	// seconds until this pack may be tried that way again. 0 otherwise.
 	RetryAfterS int `json:"retry_after_s,omitempty"`
+	// ViaGoogle: the document that verified came from an appsscript
+	// mirror through the Google front (frontmirror.go). Additive.
+	ViaGoogle bool `json:"via_google,omitempty"`
+	// StandbyKeyAccepted: that container carried a standby key and the
+	// engine's store accepted it for a held route. Like Applied, it is
+	// new information: the caller restarts its pass. Additive.
+	StandbyKeyAccepted bool `json:"standby_key_accepted,omitempty"`
 }
 
 // freshnessRecord is the persisted per-pack state. Stored in
@@ -650,8 +668,21 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	}
 	res.ViaTunnel = viaTunnel
 
-	doc, docBytes, tried, err := r.walkEndpoints(ctx, target, rec, dialer, now)
-	res.EndpointsTried = tried
+	allowGoogle := googleAllowed(kind, viaTunnel)
+	if order, _ := orderForWalk(target.Endpoints, allowGoogle); len(order) == 0 {
+		// Every endpoint is a Google mirror and this walk may not
+		// reach it (frontmirror.go). Nothing goes out, so nothing is
+		// learned and nothing escalates: stamped like a refusal.
+		res.Outcome = OutcomeFreshnessNoEndpoints
+		r.refused(kind, relayPackID, now, res.Outcome)
+		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, 0, viaTunnel, now)
+		return res, nil
+	}
+
+	w, err := r.walkEndpoints(ctx, target, rec, dialer, now, allowGoogle)
+	doc, docBytes := w.doc, w.raw
+	res.EndpointsTried = w.tried
+	res.ViaGoogle = w.container != nil
 	res.BytesIn += int64(len(docBytes))
 	if err != nil {
 		outcome := OutcomeFreshnessUnreachable
@@ -703,13 +734,20 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 
 	if !res.Changed {
 		res.Outcome = OutcomeFreshnessUnchanged
+		res.StandbyKeyAccepted = r.offerStandbyKey(relayPackID, w.container)
 		r.markSuccess(relayPackID, rec, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, res.BytesIn, viaTunnel, now)
 		return res, nil
 	}
 
-	body, err := r.fetchBundle(ctx, doc.CurrentSignedURL, dialer)
-	res.BytesIn += int64(len(body))
+	// A container that carried the very pack the verified document
+	// names saves the second fetch (C3 for this channel). It goes
+	// through applyBundle exactly as a downloaded one would.
+	body := inlinePackFor(w.container, doc)
+	if body == nil {
+		body, err = r.fetchBundle(ctx, doc.CurrentSignedURL, dialer)
+		res.BytesIn += int64(len(body))
+	}
 	if err != nil {
 		res.Outcome = OutcomeFreshnessBundleFetch
 		if kind.unscheduled() && errors.Is(ctx.Err(), context.Canceled) {
@@ -771,6 +809,9 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 		rec.Mirrors = mirrors
 	}
 	r.markSuccess(packID, rec, now, res.Outcome)
+	// The standby key after the pack: it is checked against the
+	// commitments of the routes as they are NOW.
+	res.StandbyKeyAccepted = r.offerStandbyKey(packID, w.container)
 	recordAudit(r.Store, auditKindFreshness, packID, res.Outcome, res.BytesIn, viaTunnel, now)
 	return res, nil
 }
@@ -797,10 +838,23 @@ func (r *RelayPackRefresher) target(relayPackID string) (RelayPackTarget, error)
 	return RelayPackTarget{}, fmt.Errorf("relaypack %s: not found or has no freshness endpoint", relayPackID)
 }
 
-// walkEndpoints tries the endpoints in randomised order under a total
-// budget, returning the first document that verifies.
+// walkResult is what walkEndpoints found.
+type walkResult struct {
+	doc   *FreshnessDocument
+	raw   []byte
+	tried int
+	// container is set when doc came out of a daal-refresh-v1
+	// container (an appsscript mirror); its other parts are usable
+	// only because doc verified.
+	container *refreshContainer
+}
+
+// walkEndpoints tries the endpoints under a total budget — the ordinary
+// mirrors in randomised order, then, when allowGoogle, the Google
+// mirror through the front (frontmirror.go) — returning the first
+// document that verifies.
 func (r *RelayPackRefresher) walkEndpoints(ctx context.Context, t RelayPackTarget,
-	rec freshnessRecord, dialer bootstrap.Dialer, now time.Time) (*FreshnessDocument, []byte, int, error) {
+	rec freshnessRecord, dialer bootstrap.Dialer, now time.Time, allowGoogle bool) (walkResult, error) {
 
 	perURL := r.PerURLTimeout
 	if perURL <= 0 {
@@ -819,52 +873,81 @@ func (r *RelayPackRefresher) walkEndpoints(ctx context.Context, t RelayPackTarge
 	defer cancel()
 
 	var lastErr error
-	var lastBody []byte
-	tried := 0
-	for _, ep := range ShuffleEndpoints(t.Endpoints) {
-		if walkCtx.Err() != nil {
-			break
+	var w walkResult
+	order, _ := orderForWalk(t.Endpoints, allowGoogle)
+	for _, ep := range order {
+		google := IsAppsScriptMirrorURL(ep)
+		if google {
+			// The Google mirror has its own time (fetchGoogleMirror);
+			// only the caller ending the walk stops it.
+			if ctx.Err() != nil {
+				break
+			}
+		} else if walkCtx.Err() != nil {
+			continue
 		}
-		tried++
-		epCtx, epCancel := context.WithTimeout(walkCtx, perURL)
-		raw, err := fetch(epCtx, ep, dialer, perURL)
-		epCancel()
+		w.tried++
+		var (
+			raw []byte
+			c   *refreshContainer
+			err error
+		)
+		if google {
+			c, err = r.fetchGoogleMirror(ctx, walkCtx, ep, dialer, perURL)
+			if c != nil {
+				raw = c.freshness
+			}
+		} else {
+			epCtx, epCancel := context.WithTimeout(walkCtx, perURL)
+			raw, err = fetch(epCtx, ep, dialer, perURL)
+			epCancel()
+			if err == nil && len(raw) > maxFreshnessDocBytes {
+				raw = raw[:maxFreshnessDocBytes]
+			}
+		}
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if len(raw) > maxFreshnessDocBytes {
-			raw = raw[:maxFreshnessDocBytes]
-		}
-		lastBody = raw
-		pub, err := PublisherKeyForFingerprint(peekPublisherPubHex(raw), t.PublisherID)
-		if err != nil {
-			// A document that is not this publisher's is either a
-			// mis-pointed URL or a substitution. Either way the next
-			// mirror is worth trying.
-			lastErr = err
-			continue
-		}
-		doc, err := VerifyFreshnessDocument(raw, FreshnessVerifyOpts{
-			PublisherRootPub:  pub,
-			Now:               now,
-			ExpectRelayPackID: t.RelayPackID,
-			MinSequence:       rec.HighWaterSequence,
-			// Feeds the equal-sequence rule: a document AT the
-			// high-water mark is only acceptable while it names the
-			// bundle we are already running.
-			CurrentBundleSHA256: rec.CurrentBundleSHA256,
-		})
+		w.raw = raw
+		doc, err := r.verifyWalkDocument(raw, t, rec, now)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		return doc, raw, tried, nil
+		w.doc, w.container = doc, c
+		return w, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("freshness: no endpoint produced a document")
 	}
-	return nil, lastBody, tried, lastErr
+	return w, lastErr
+}
+
+// verifyWalkDocument is the one verification every fetched document
+// gets, whichever mirror it came from: the publisher key bound to the
+// pinned fingerprint, then the signature chain, pack id / supersedes,
+// sequence high-water mark and expiry.
+func (r *RelayPackRefresher) verifyWalkDocument(raw []byte, t RelayPackTarget,
+	rec freshnessRecord, now time.Time) (*FreshnessDocument, error) {
+
+	pub, err := PublisherKeyForFingerprint(peekPublisherPubHex(raw), t.PublisherID)
+	if err != nil {
+		// A document that is not this publisher's is either a
+		// mis-pointed URL or a substitution. Either way the next
+		// mirror is worth trying.
+		return nil, err
+	}
+	return VerifyFreshnessDocument(raw, FreshnessVerifyOpts{
+		PublisherRootPub:  pub,
+		Now:               now,
+		ExpectRelayPackID: t.RelayPackID,
+		MinSequence:       rec.HighWaterSequence,
+		// Feeds the equal-sequence rule: a document AT the
+		// high-water mark is only acceptable while it names the
+		// bundle we are already running.
+		CurrentBundleSHA256: rec.CurrentBundleSHA256,
+	})
 }
 
 // fetchBundle pulls the signed .sbp named by a verified document.
@@ -981,9 +1064,10 @@ func (r *RelayPackRefresher) mirrorsFromBundle(body []byte, relayPackID, publish
 
 // adoptDocument folds a verified document's advertised state into the
 // persisted record: the high-water sequence (monotonic — it only ever
-// rises) and the advertised mirror set (only when it is a valid,
-// multi-provider set, so a document can never shrink a recipient down
-// to one endpoint).
+// rises) and the advertised mirror set (only when it is a valid set:
+// at least two providers, or the one exception D-3 allows — a single
+// appsscript mirror — so a document can never shrink a recipient down
+// to one ordinary endpoint).
 func (r *RelayPackRefresher) adoptDocument(relayPackID string, rec *freshnessRecord, doc *FreshnessDocument) {
 	if doc.Sequence > rec.HighWaterSequence {
 		rec.HighWaterSequence = doc.Sequence

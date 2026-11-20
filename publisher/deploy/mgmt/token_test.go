@@ -184,6 +184,7 @@ func TestToken_EveryOpHasOneRoute(t *testing.T) {
 		"identity":           {"GET", "/identity"},
 		"bind-address":       {"POST", "/bind-address"},
 		"unbind-address":     {"POST", "/unbind-address"},
+		"cdn":                {"POST", "/cdn"},
 	}
 	if len(opRoutes) != len(want) {
 		t.Errorf("opRoutes has %d ops, want %d", len(opRoutes), len(want))

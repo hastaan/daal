@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -14,6 +19,7 @@ import (
 	"daal/bundle-go/bundle"
 	"daal/bundle-go/fieldreport"
 	"daal/bundle-go/relaypackvalidate"
+	"daal/publisher/deploy/cloudflare"
 	"daal/publisher/deploy/freshness"
 	"daal/publisher/deploy/modifiers"
 	"daal/publisher/deploy/provider"
@@ -128,7 +134,46 @@ type BindOpts struct {
 	// (`test_relay_shared`). Empty = an ordinary pack, byte for byte as
 	// before.
 	ReportTo string
+
+	// CDN, when non-nil, adds the way in through Cloudflare (add-on 2)
+	// as one more route: websocket-tls, exposure cdn_fronted, committed
+	// by `_cdn_endpoint` and never by `_endpoint` (specs/relaypack-v1.md,
+	// "The CDN-fronted endpoint"). Nil signs exactly as before. Needs
+	// Phase V1.6 or later (RP004).
+	CDN *CDNFront
 }
+
+// CDNFront is what the binder signs for the way in through Cloudflare.
+// Everything in it is public metadata: the hostname, the edge prefixes
+// and the ECH configuration are the same for every recipient, and the
+// WebSocket path (a credential) is not here at all — the minter puts it
+// in each recipient's profile.
+type CDNFront struct {
+	// Front is the record cdn-provision wrote. The binder reads its
+	// hostname, its attestation fields and Front.ECH.ConfigListB64, and
+	// no file it names.
+	Front *cloudflare.FrontRecord
+	// EdgeSeeds are 1–8 prefixes from Cloudflare's published ranges,
+	// read by the publisher abroad at sign time. Canonicalised here.
+	EdgeSeeds []string
+	// TLSRootsSHA256 are the standard-base64 SHA-256 digests of the
+	// SubjectPublicKeyInfo of the roots the app ships for the edge
+	// (CDNRootDigests computes them from PEM).
+	TLSRootsSHA256 []string
+	// PlainFallback is the signed flag of owner decision D-2: a hello
+	// without ECH (which shows the zone name) only when set.
+	PlainFallback bool
+}
+
+// CDNEdgePort is the port recipients dial at the Cloudflare edge. The
+// relay door's own port (relayports.CDNOrigin) is Cloudflare's to dial
+// and appears nowhere in the pack.
+const CDNEdgePort = 443
+
+// ErrCDNCandidateInRecord refuses a record that already carries a
+// cdn_fronted candidate: the front reaches the binder through
+// BindOpts.CDN only, so there is one way such a route is signed.
+var ErrCDNCandidateInRecord = errors.New("relaypack: the record carries a cdn_fronted candidate; pass the way in through Cloudflare as BindOpts.CDN")
 
 // ReportToKey is the reserved family_specific_config key naming the
 // network-test report address.
@@ -259,7 +304,9 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	// Freshness sanity before any work: a MirrorSet can only exist
 	// in a valid state, but a caller can still hand us a non-nil
 	// zero value.
-	if opts.Freshness != nil && opts.Freshness.Len() < freshness.MinMirrors {
+	// MeetsFloor is the two-mirror rule with its one exception (D-3:
+	// a set whose only provider is appsscript).
+	if opts.Freshness != nil && !opts.Freshness.MeetsFloor() {
 		return nil, freshness.ErrTooFewMirrors
 	}
 	revocationURL, revocationPub, err := normaliseRevocation(opts.RevocationURL, opts.RevocationPubHex)
@@ -294,9 +341,33 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	if opts.Endpoint != nil {
 		material = material.Overlay(*opts.Endpoint)
 	}
-	rendered, err := renderCandidates(rec, material, createdAt, expiresAt)
+	renderRec := rec
+	cdnRouteID := ""
+	if opts.CDN != nil {
+		for _, c := range rec.Candidates {
+			if c.ExposureMode == "cdn_fronted" {
+				return nil, ErrCDNCandidateInRecord
+			}
+		}
+		meta, err := cdnCandidate(rec, opts.CDN)
+		if err != nil {
+			return nil, err
+		}
+		cp := *rec
+		cp.Candidates = append(append([]provider.CandidateMeta(nil), rec.Candidates...), meta)
+		renderRec = &cp
+		cdnRouteID = fmt.Sprintf("r%d", len(cp.Candidates))
+	}
+	rendered, err := renderCandidates(renderRec, material, createdAt, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("relaypack: render candidates: %w", err)
+	}
+	// Before _standby: the CDN route must carry no _endpoint by the
+	// time eligibility for a standby is read.
+	if cdnRouteID != "" {
+		if err := rendered.setCDNEndpoint(cdnRouteID, opts.CDN); err != nil {
+			return nil, err
+		}
 	}
 	if reportTo != "" {
 		if err := rendered.setReportTo(reportTo); err != nil {
@@ -428,6 +499,12 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 	if err != nil {
 		return nil, fmt.Errorf("relaypack validate (%s): %w", opts.Phase, err)
 	}
+	// The add-on members (RP026 `_cdn_endpoint`, RP027 `_standby`):
+	// checks a recipient's importer would refuse a route for, run here
+	// so the publisher sees them instead.
+	if err := relaypackvalidate.ValidateForSigning(preBundle); err != nil {
+		return nil, fmt.Errorf("relaypack validate for signing: %w", err)
+	}
 
 	// ---- 6. Sign deterministically -------------------------------
 	sbpBytes, err := bundle.BuildSignedBundleDeterministic(manifest, rendered.profiles, extras, rootPub, priv)
@@ -557,4 +634,171 @@ func defaultWordlists() bundle.Wordlists {
 			"نه", "ده", "یازده", "دوازده", "سیزده", "چهارده", "پانزده", "شانزده",
 		},
 	}
+}
+
+// ---- the way in through Cloudflare (add-on 2) ----------------------
+
+// cdnCandidate is the one candidate the binder adds for the front. It
+// borrows the family class and Params of the relay's direct
+// websocket-tls candidate when there is one (multiplex and the like
+// are the same on both doors), and takes its tags from the front:
+// `cdn:cloudflare` and the hostname in public_risk_tags (RP005), the
+// relay's address in origin_risk_tags (RP006), and the attestation
+// RP022/RP023 read.
+func cdnCandidate(rec *provider.OperatorRecord, cdn *CDNFront) (provider.CandidateMeta, error) {
+	f := cdn.Front
+	if f == nil {
+		return provider.CandidateMeta{}, errors.New("relaypack: CDN: no front record")
+	}
+	host, err := cloudflare.NormalizeHostname(f.Hostname)
+	if err != nil {
+		return provider.CandidateMeta{}, fmt.Errorf("relaypack: CDN: %w", err)
+	}
+	if rec.PublicIP == nil {
+		return provider.CandidateMeta{}, errors.New("relaypack: CDN: the record has no relay address for origin_risk_tags")
+	}
+	meta := provider.CandidateMeta{
+		Family:           string(bundle.TransportWebSocketTLS),
+		ExposureMode:     "cdn_fronted",
+		FamilyClass:      "vps-native",
+		ProbingRiskClass: "low",
+		Port:             CDNEdgePort,
+		PublicRiskTags:   []string{"cdn:" + bundle.CDNCloudflare, "public_domain:" + host},
+		OriginRiskTags:   []string{"origin_ip:" + rec.PublicIP.String()},
+		CDNAttestation: &provider.CDNAttestation{
+			OriginCAFingerprint: f.OriginCAFingerprint,
+			AOPEnabled:          f.AOPEnabled,
+			FirewallID:          f.FirewallID,
+			// cdn-provision creates proxied records only.
+			DNSOnlyPresent: false,
+		},
+	}
+	for _, c := range rec.Candidates {
+		if normaliseFamily(c.Family) == string(bundle.TransportWebSocketTLS) && c.ExposureMode != "cdn_fronted" {
+			if c.FamilyClass != "" {
+				meta.FamilyClass = c.FamilyClass
+			}
+			if c.ProbingRiskClass != "" {
+				meta.ProbingRiskClass = c.ProbingRiskClass
+			}
+			meta.Params = append([]byte(nil), c.Params...)
+			break
+		}
+	}
+	return meta, nil
+}
+
+// setCDNEndpoint turns the rendered CDN route into a CDN-fronted one:
+// whatever `_endpoint` the direct renderer gave it goes (a CDN route
+// never carries one — RP026, and every earlier build would refuse the
+// pack for the unknown members if it went there), `_cdn_endpoint` is
+// written from the front, and the route leaves the uncommitted list.
+func (r *renderedCandidates) setCDNEndpoint(routeID string, cdn *CDNFront) error {
+	ep, err := cdnEndpointFor(cdn)
+	if err != nil {
+		return err
+	}
+	for i := range r.routes {
+		if r.routes[i].ID != routeID {
+			continue
+		}
+		fc := map[string]any{}
+		if err := json.Unmarshal(r.routes[i].FamilySpecificConfig, &fc); err != nil {
+			return fmt.Errorf("route %s: family_specific_config: %w", routeID, err)
+		}
+		delete(fc, bundle.EndpointKey)
+		fc[bundle.CDNEndpointKey] = ep
+		b, err := json.Marshal(fc)
+		if err != nil {
+			return fmt.Errorf("route %s: marshal family_specific_config: %w", routeID, err)
+		}
+		r.routes[i].FamilySpecificConfig = b
+		r.profiles[r.routes[i].ConfigPath] = b
+		kept := r.uncommitted[:0]
+		for _, u := range r.uncommitted {
+			if u.RouteID != routeID {
+				kept = append(kept, u)
+			}
+		}
+		r.uncommitted = kept
+		return nil
+	}
+	return fmt.Errorf("relaypack: CDN route %s was not rendered", routeID)
+}
+
+// cdnEndpointFor builds and validates the signed commitment. The ECH
+// configuration is the one cdn-provision (or the last freshness
+// publish) read over DoH from abroad; empty means the zone serves none,
+// and then only a signed plain_fallback makes the route dialable —
+// ValidateForSigning refuses the other case (RP026).
+func cdnEndpointFor(cdn *CDNFront) (*bundle.CDNEndpoint, error) {
+	host, err := cloudflare.NormalizeHostname(cdn.Front.Hostname)
+	if err != nil {
+		return nil, fmt.Errorf("relaypack: CDN: %w", err)
+	}
+	seeds := make([]string, 0, len(cdn.EdgeSeeds))
+	seen := map[string]bool{}
+	for _, s := range cdn.EdgeSeeds {
+		p, err := netip.ParsePrefix(strings.TrimSpace(s))
+		if err != nil {
+			return nil, fmt.Errorf("relaypack: CDN: edge seed %q: %w", s, err)
+		}
+		c := p.Masked().String()
+		if !seen[c] {
+			seen[c] = true
+			seeds = append(seeds, c)
+		}
+	}
+	ep := &bundle.CDNEndpoint{
+		V:              bundle.CDNEndpointVersion,
+		Server:         host,
+		Port:           CDNEdgePort,
+		ServerName:     host,
+		CDN:            bundle.CDNCloudflare,
+		EdgeSeeds:      seeds,
+		ECHConfig:      strings.TrimSpace(cdn.Front.ECH.ConfigListB64),
+		TLSRootsSHA256: append([]string(nil), cdn.TLSRootsSHA256...),
+		PlainFallback:  cdn.PlainFallback,
+	}
+	if err := ep.Validate(string(bundle.TransportWebSocketTLS)); err != nil {
+		return nil, fmt.Errorf("relaypack: CDN: %w", err)
+	}
+	return ep, nil
+}
+
+// CDNRootDigests returns the `tls_roots_sha256` entries for a PEM
+// bundle of root certificates: standard base64 of the SHA-256 of each
+// certificate's SubjectPublicKeyInfo, in file order, without repeats.
+// Anything in the bundle that is not a CA certificate is refused.
+func CDNRootDigests(pemBundle []byte) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	rest := pemBundle
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if blk.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("relaypack: CDN roots: a %q block is not a certificate", blk.Type)
+		}
+		c, err := x509.ParseCertificate(blk.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("relaypack: CDN roots: %w", err)
+		}
+		if !c.IsCA {
+			return nil, errors.New("relaypack: CDN roots: a certificate in the bundle is not a CA")
+		}
+		sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+		d := base64.StdEncoding.EncodeToString(sum[:])
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("relaypack: CDN roots: no certificate in the bundle")
+	}
+	return out, nil
 }

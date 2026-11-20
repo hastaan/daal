@@ -296,13 +296,16 @@ Subcommands:
                 pull, strict SSL, WebSockets, proxied record, origin rule) and
                 the relay firewall rule; emit FrontRecord JSON.
   cdn-rotate-path
-                Rotate the visible /r/<hex> path on a CDN-fronted candidate
-                (re-uploads worker, rebinds route). Emits CdnRotateResult JSON.
-                Caller MUST re-sign RelayPack + re-publish freshness afterwards (FRP-9).
+                Retired with the Cloudflare Worker: always fails and says so.
+                The WebSocket path is the relay door's own; a new one comes
+                from removing and rebuilding the way in through Cloudflare.
   cdn-rotate-hostname
-                Migrate proxied DNS to a new hostname, rebind worker on the new
-                zone. Emits CdnRotateResult JSON. Caller MUST re-sign RelayPack +
-                re-publish freshness afterwards (FRP-9).
+                Move the way in through Cloudflare to another name in the same
+                zone: a proxied record for the new name, the origin rule moved
+                with it, the old name's record and rule removed (the origin
+                certificate covers *.<zone>, so it stays). Emits CdnRotateResult
+                JSON. Caller MUST re-sign RelayPack + re-publish freshness
+                afterwards (FRP-9).
   cdn-rotate-origin
                 Re-point proxied A / AAAA at a new origin IP. Hostname + public
                 path unchanged. Emits CdnRotateResult JSON. Caller MUST NOT
@@ -316,9 +319,10 @@ Subcommands:
                 publish timestamp) and a --ttl-hours expiry: together they are
                 what stops a censor replaying an older signed document to
                 freeze a recipient or walk it back onto revoked credentials.
-                Supply --r2-* and/or --gh-* credentials to upload; the upload
-                is an error unless at least 2 mirrors accept it. With no
-                credentials the verb signs only and says so on stderr.
+                Supply --r2-*, --gh-* and/or --appsscript-* credentials to
+                upload; the upload is an error unless at least 2 mirrors
+                accept it, or the Google update channel alone does (D-3).
+                With no credentials the verb signs only and says so on stderr.
   cell-create   Generate a fresh per-admin Ed25519 keypair (FRP-11). Emits
                 JSON with both halves; operator persists to encrypted keystore.
   cell-invite   Wrap an admin-quorum-signed membership doc into a .cell-join
@@ -404,6 +408,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	outFile := fs.String("o", "", "write OperatorRecord JSON here (default: stdout)")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per provisioning step on stderr (FRP-4b)")
 	journalPath := fs.String("journal", "", "append a JSON-lines record of everything this run creates, as it creates it, to this file (locked for the run's life); see provjournal")
+	cdnEdgeRanges := fs.Bool("cdn-edge-ranges", false, "fetch Cloudflare's published ranges and open the CDN door's port to them at the box firewall (add-on 2; written once at first boot, so a relay built without it needs a rebuild for the way in through Cloudflare). Skipped with --dry-run; a failed fetch is a warning, not an error")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -535,6 +540,10 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	}
 
 	emitProgress(*progressJSON, stderr, "provision_start", "starting provisioning", nil)
+	var edgeRanges []string
+	if *cdnEdgeRanges && !*dryRun {
+		edgeRanges = provisionEdgeRanges(ctx, *progressJSON, stderr)
+	}
 	emitProgress(*progressJSON, stderr, "provision_cloud_call", "calling cloud provider", map[string]any{"provider": *providerName, "region": *region})
 
 	var pj provider.ProvisionJournal
@@ -550,6 +559,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		HelperIP:          hip,
 		MgmtPort:          *mgmtPort,
 		CoverSNI:          *coverSNI,
+		CDNEdgeRanges:     edgeRanges,
 		WaitForHealth:     !*dryRun,
 		EphemeralSSHKey:   ephem,
 		DryRun:            *dryRun,
@@ -579,6 +589,56 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		"cover_sni": rec.CoverSNI,
 	})
 	return emitRecord(rec, *outFile, stdout, stderr)
+}
+
+// provisionEdgeRanges fetches Cloudflare's published ranges for the
+// box-side firewall of a relay about to be built. The add-on is
+// optional, so a failed fetch builds the relay without the rule and
+// says so: that relay needs a rebuild before it can take the way in
+// through Cloudflare, and nothing else about it changes.
+func provisionEdgeRanges(ctx context.Context, progress bool, stderr io.Writer) []string {
+	fctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	r, err := cloudflare.FetchEdgeRanges(fctx, newEdgeFetcher(), time.Now)
+	var out []string
+	if err == nil {
+		out = append(append(out, r.V4...), r.V6...)
+		err = checkEdgeRanges(out)
+	}
+	if err != nil || len(out) == 0 {
+		msg := "could not read Cloudflare's address list; this relay is built without the Cloudflare door's firewall rule and needs a rebuild before it can use the way in through Cloudflare"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		emitProgress(progress, stderr, "cdn_ranges_warning", msg, nil)
+		if !progress {
+			fmt.Fprintln(stderr, "provision: "+msg)
+		}
+		return nil
+	}
+	emitProgress(progress, stderr, "cdn_ranges", "Cloudflare's address list read for the box firewall", map[string]any{"count": len(out)})
+	return out
+}
+
+// checkEdgeRanges refuses a list cloud-init would refuse (it renders
+// each entry into a root shell line and re-checks it there): a list
+// that fails here would otherwise fail the whole provision for an
+// add-on the publisher may never use. 64 mirrors
+// cloudinit.maxCDNEdgeRanges; Cloudflare publishes about two dozen.
+func checkEdgeRanges(rs []string) error {
+	if len(rs) > 64 {
+		return fmt.Errorf("%d ranges, more than Cloudflare publishes", len(rs))
+	}
+	for _, r := range rs {
+		_, n, err := net.ParseCIDR(strings.TrimSpace(r))
+		if err != nil {
+			return fmt.Errorf("%q is not a CIDR", r)
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return fmt.Errorf("%q is everyone, not a Cloudflare range", r)
+		}
+	}
+	return nil
 }
 
 // emitProgress writes one JSON-line step event to stderr when
@@ -1928,8 +1988,8 @@ func runCDNRotatePath(ctx context.Context, args []string, stdout, stderr io.Writ
 	fs.SetOutput(stderr)
 	hostname := fs.String("hostname", "", "current public CDN hostname")
 	zoneID := fs.String("zone-id", "", "Cloudflare zone ID for hostname")
-	accountID := fs.String("account-id", "", "Cloudflare account ID hosting the worker script")
-	oldRouteID := fs.String("old-route-id", "", "current worker route ID; will be replaced")
+	accountID := fs.String("account-id", "", "unused (the Worker is gone); kept so old callers get the reason, not a flag error")
+	oldRouteID := fs.String("old-route-id", "", "unused (the Worker is gone)")
 	originPath := fs.String("origin-path", "", "stable origin path (unchanged)")
 	newPublicPath := fs.String("new-public-path", "", "new public random path; empty generates one")
 	tokenFile := fs.String("cf-token-file", "", "Cloudflare API token file")
@@ -2187,6 +2247,12 @@ func runPublishFreshness(ctx context.Context, args []string, stdout, stderr io.W
 	ghBranch := fs.String("gh-branch", "", "branch (default main)")
 	ghPublicURL := fs.String("gh-public-url", "", "recipient-facing https://owner.github.io/repo/path URL")
 	ghPATFile := fs.String("gh-pat-file", "", "file holding the fine-grained PAT (Contents: RW)")
+	// Add-on 3, the update channel through Google: one more backend.
+	// The write key comes from a file, never argv.
+	asURL := fs.String("appsscript-url", "", "Google update channel: the web-app /exec URL, ?k= included")
+	asKeyFile := fs.String("appsscript-write-key-file", "", "Google update channel: file holding the write key (64 hex)")
+	asPackFile := fs.String("appsscript-pack-file", "", "Google update channel: the signed credential-less pack the document names, carried inline (optional)")
+	asStandbyFile := fs.String("appsscript-standby-key-file", "", "Google update channel: file holding a standby key to carry (optional)")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -2342,6 +2408,20 @@ func runPublishFreshness(ctx context.Context, args []string, stdout, stderr io.W
 	if err != nil {
 		fmt.Fprintf(stderr, "publish-freshness: %v\n", err)
 		return 2
+	}
+	asSet := *asURL != "" || *asKeyFile != "" || *asPackFile != "" || *asStandbyFile != ""
+	if asSet {
+		if *asURL == "" || *asKeyFile == "" {
+			fmt.Fprintln(stderr, "publish-freshness: google update channel: --appsscript-url and --appsscript-write-key-file are both required")
+			return 2
+		}
+		t, wipe, err := appsScriptFreshnessTarget(*asURL, *asKeyFile, *asPackFile, *asStandbyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "publish-freshness: google update channel: %v\n", err)
+			return 2
+		}
+		defer wipe()
+		targets = append(targets, t)
 	}
 	publishFailed := false
 	if len(targets) > 0 {
@@ -2576,6 +2656,12 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 	reportTo := fs.String("report-to", "",
 		"network-test report address (daal1…, from report-keygen): marks this relay as the Test relay; written into every route as _report_to")
+	// Add-on 2, the way in through Cloudflare: one more route, committed
+	// by _cdn_endpoint. Needs --phase V1.6 or later.
+	cdnFront := fs.String("cdn-front", "", "the FrontRecord JSON cdn-provision printed; adds the way in through Cloudflare as one more route (needs --phase V1.6+)")
+	cdnSeeds := fs.String("cdn-edge-seeds", "", "comma-separated 1–8 prefixes from Cloudflare's published ranges, read abroad at sign time (with --cdn-front)")
+	cdnRoots := fs.String("cdn-roots-file", "", "PEM bundle of the roots the app ships for the edge; their SPKI digests are signed (with --cdn-front)")
+	cdnPlain := fs.Bool("cdn-plain-fallback", false, "allow a hello without ECH (shows the zone name) on the Cloudflare route (D-2; off by default)")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -2702,7 +2788,35 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		}
 	}
 
+	var cdn *relaypack.CDNFront
+	if *cdnFront != "" {
+		front, err := cdnReadRecord(*cdnFront)
+		if err != nil {
+			fmt.Fprintf(stderr, "bind-and-sign: --cdn-front: %v\n", err)
+			return 2
+		}
+		if *cdnSeeds == "" || *cdnRoots == "" {
+			fmt.Fprintln(stderr, "bind-and-sign: --cdn-front needs --cdn-edge-seeds and --cdn-roots-file")
+			return 2
+		}
+		pemBundle, err := os.ReadFile(*cdnRoots)
+		if err != nil {
+			fmt.Fprintf(stderr, "bind-and-sign: --cdn-roots-file: %v\n", err)
+			return 2
+		}
+		roots, err := relaypack.CDNRootDigests(pemBundle)
+		if err != nil {
+			fmt.Fprintf(stderr, "bind-and-sign: %v\n", err)
+			return 2
+		}
+		cdn = &relaypack.CDNFront{Front: front, EdgeSeeds: splitCSV(*cdnSeeds), TLSRootsSHA256: roots, PlainFallback: *cdnPlain}
+	} else if *cdnSeeds != "" || *cdnRoots != "" || *cdnPlain {
+		fmt.Fprintln(stderr, "bind-and-sign: the --cdn-* flags need --cdn-front")
+		return 2
+	}
+
 	res, err := relaypack.BindAndSign(rec, priv, relaypack.BindOpts{
+		CDN:                  cdn,
 		Endpoint:             endpoint,
 		RelayIdentity:        relayID,
 		Now:                  now,

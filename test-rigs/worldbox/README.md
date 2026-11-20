@@ -260,6 +260,10 @@ driver/                the `wb` binary (stdlib + hcloud schema types)
   fakecloud_fip.go     floating IPs (the cloud half of L3)
   mgmtprobe.go         hand-built mgmt requests (`wb mgmtprobe`)
   storage.go           static hosting the insider reaches without a tunnel (`wb storage`)
+  addons_net.go        the add-ons' outside world (cdn / google / stranger namespaces) and Prereq (what waits on other lanes)
+  fakecf_api.go fakecdn.go ech_lab.go      Cloudflare's API, published ranges, DoH, and edge; the lab ECH key
+  fakegfe.go fakegas_api.go                Google's front, the deployed web apps, Apps Script API and OAuth
+  ops_standby.go ops_cdn.go ops_gfe.go     the add-on ops (see "The publisher add-ons")
   *_test.go            hermetic: isolation + declaration validation
 labclient/             `wb-client`: real engine + the lab's VpnService (switch.go: route switch, fd sentinels, store checks; auto.go: the one button — engine_connect_auto, cancel, disconnect and connect again in one process)
 box/init.py            cloud-init first boot
@@ -857,6 +861,98 @@ for commands with the VPN off — `tick` calls the product's own
 `abi.SchedulerTick` once, `import <file>` hands the phone another file
 (the app's own `abi.ImportSBP`), `connect <family>` brings the VPN up.
 Nothing was added to the engine for it.
+
+#### The publisher add-ons — standby address, CDN front, Google channel
+
+`docs/optional-addons-plan.md` items B-8 and G7, the standby ops, and
+every add-on scenario. `./e2e.sh addons` runs them all (and `full`
+includes them); one world at a time:
+
+```
+./run.sh --mgmt=tree --ops standby,standby-promote,standby-sealed,standby-open,standby-stale clean vless-reality hysteria2
+./run.sh --mgmt=tree --ops standby-google clean vless-reality
+./run.sh --mgmt=tree --ops cdn-provision clean vless-reality
+./run.sh --mgmt=tree --ops google-channel clean vless-reality
+./run.sh --mgmt=tree --ops cdn cdn-grey-budget vless-reality hysteria2        # any cdn-*.json
+./run.sh --mgmt=tree --ops google-refresh refresh-google-only vless-reality   # any refresh-google-*.json
+```
+
+The outside world they need is brought up only when a scenario's
+`world` (or a probe's target) or an op asks for it (`driver/addons_net.go`):
+
+| part | where | stands in for | what it enforces |
+|---|---|---|---|
+| `wb fakecf` (`fakecf_api.go`) | 192.0.2.25 in the internet ns: `api.cloudflare.com`, `www.cloudflare.com/ips-v4`, `cloudflare-dns.com` + `dns.google` (DoH) | Cloudflare API v4, the published ranges, the publisher's ECH read | tokens with permissions and a zone scope (`cf-tokens.json`): a call the token may not make is 403, which is what the token check's verdicts rest on; a lab Origin CA signs the CSR; faults (`cf-faults.json`) for rollback; state in `cf-state.json` that the edge obeys |
+| `wb fakecdn` (`fakecdn.go`) | ns `cdn`, every address of 198.19.8.0/24 (four published /26s), behind the censor; pulls from 198.19.8.250 | Cloudflare's edge | SNI == Host (else 421, no fronting; with ECH the inner name); only proxied hosts (else 403); the origin rule's port; Full (strict) against the lab Origin CA; origin pull with the zone's uploaded client certificate; ECH with the world's lab key (outer name `cloudflare-ech.com`); idle WebSockets closed |
+| `wb fakegoogle` (`fakegfe.go`, `fakegas_api.go`) | ns `google`, 198.19.9.0/24 behind the censor and reachable from the publisher | Google's front, the deployed web apps, Apps Script API, OAuth | routes by AUTHORITY, not SNI; `/exec` answers with Apps Script's 302 to `script.googleusercontent.com`; the web app runs Code.gs's rules (MAC, seq, k) with the write key and token read out of the source actually deployed (API) or pasted (`google-paste/<id>.gs`, Path B); the API accepts exactly the sign-in's token and not after revocation; knobs `google-knobs.json` (API off, a failing stage, the previous container, a sign-in wall) |
+| the stranger (`wb elsewhere --listen`) | ns `stranger`, a released Floating IP routed there by the censor | whoever the provider gives a released address to | its own TLS certificate: a stale standby must fail closed against it |
+| the lab ECH key (`ech_lab.go`) | `lab-ech-*.bin` in the run directory | Cloudflare's shared ECH configuration | real ECH with Go's stack (`TestLabECHIsRealECH`) |
+
+New censor mechanisms (`censor_dpi.go`, unit-tested in `addons_test.go`):
+`budget` (a flow may send `packets` client packets, SYN and ACKs
+included, then it is cut — the "grey" addresses of net4people #676),
+`tls_sni_not` (an SNI allowlist), and `dst` as a CIDR prefix. New raw
+probes: `"ech": true` on `tls` (the inner name is `sni`; the wire shows
+the outer name) and `exchange` (twelve request/answer round trips over
+TLS: `ok` or `cut`). New targets: `edge-a`…`edge-d`, `gfe`, `gfe2`,
+`gscript`, `guser`, `storage`; variables `$EDGE_A…D`, `$EDGE_NET_A…D`,
+`$EDGE_NET`, `$CDN_HOST`, `$ECH_OUTER`, `$R2_SNI`, `$GH_SNI`, `$PACK_SNI`,
+`$GFE_IP`… A scenario may say what op `cdn` expects of the CDN route
+(`"cdn": {"expect": …, "via": [edge prefixes]}`) and how op
+`google-refresh`'s walk must end (`google_expect`, `google_knobs`).
+
+| scenario | censor | the CDN route / the walk must |
+|---|---|---|
+| `cdn-relay-ip-block` | relay address null-routed, edges open | carry (every direct family blocked) |
+| `cdn-sni-block-ech`, `cdn-sni-block-ech-stateless` | the zone's name reset by SNI — reassembling box / two-packet box | carry with ECH; the name never in a plain hello |
+| `cdn-ech-outer-block`, `cdn-ech-outer-block-stateless` | `cloudflare-ech.com` reset (zone name as a tripwire) — both boxes | be reported dead; no plain fallback (D-2) |
+| `cdn-grey-budget` | two of four /26s cut flows after 6 packets | carry, on an edge in a clean prefix |
+| `cdn-edge-allowlist` | three of four /26s dropped | carry, through the one open prefix |
+| `cdn-sni-allowlist` | on edge addresses only one name may open | be dead (not rescued, plan §2.1); no plain fallback |
+| `refresh-google-only` | R2, Pages, pack URL and `script.google.com` reset by SNI; `www.google.com` open | recover through the front |
+| `refresh-google-rst` | …and `www.google.com` reset too | end cleanly, ≤ 2 connections to Google |
+| `refresh-google-rollback` | as `-only`; the script serves the previous update | refuse it |
+
+Ops: `standby` (rent → bind without adopting → sign: every route but
+shadowsocks carries a sealed commitment that matches the printed key,
+the address in no byte of the pack, the box answers on both; a phone
+connects; remove leaves nothing billing), `standby-promote` (a CONNECTED
+phone; "Switch to standby" re-signs and publishes; the primary is
+null-routed under it: one walk, reconnected on the standby, no new
+file), `standby-sealed` (the primary dies and no key comes: the phone
+never dials the standby and names it nowhere; then a wrong key and a
+malformed one are refused and the typed key reconnects it on the
+standby), `standby-open` (the engine's address variant `a:standby`, zero
+fetches), `standby-stale` (the released address at a stranger's: the
+variant is tried and fails closed), `standby-google` (the switch and the
+key through the Google channel with the ordinary mirrors cut),
+`cdn-provision` (token verdicts ok / too_broad ×2 / missing_permission /
+invalid; a provision that fails at the origin rule leaves the zone as it
+was; the zone state, the relay firewall's door rule from the published
+ranges only, the ECH config read over DoH; posture; a WebSocket through
+the edge with ECH and origin pull; the door refuses a client without the
+origin-pull certificate; removal; the token in no log), `cdn` (a phone
+with the CDN route, per scenario), `google-channel` (Path A: API off →
+`E_GOOGLE_API_NOT_ENABLED`, a failing stage → `E_GOOGLE_PARTIAL` and a
+resume into the same project, the token revoked every time and in no
+output; the update POSTed and fetched back through the front; a
+stranger's write key and an older update refused; Path B ends in the
+same state; a sign-in wall named), `google-refresh` (a phone connected
+when the relay moves and its address is null-routed: per scenario).
+
+**Waiting on other lanes.** Parts that need code still landing in this
+wave record ONE `skipped` check whose detail starts `WAITS ON <lane>
+<item>` (`Prereq` in `addons_net.go`, detected from the tree's non-test
+source). They run for real, with no rig change, once that code is in.
+wb-client's `standby-key` command is behind the build tag
+`wb_standby_key`, which run.sh sets when `core/abi` exports `StandbyKey`
+(`wb-client --features` says which it has).
+
+What none of this can show (plan §7): which Cloudflare prefixes and
+Google addresses pass per ISP today, real ECH on a free zone (C-2), the
+token keys (C-1), PropertiesService without authorisation (G-1), the
+front with the engine's hello against the real Google (G-2), the
+Floating IP limit (S-1).
 
 ### (d) Results
 

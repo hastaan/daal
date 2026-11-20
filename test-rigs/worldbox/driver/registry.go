@@ -83,6 +83,24 @@ type Scenario struct {
 		// forged RSTs). See censor_dpi.go.
 		DPI []DPIRule `json:"dpi,omitempty"`
 	} `json:"censor"`
+	// World: the parts of the add-ons' outside world (addons_net.go)
+	// the scenario's rules and probes are about — "storage" (the
+	// freshness mirrors' static host), "cdn" (Cloudflare's API and edge),
+	// "google" (Google's front and Apps Script). Brought up before the
+	// scenario is applied; a probe aimed at one brings it up too.
+	World []string `json:"world,omitempty"`
+	// CDN: what op cdn expects of the CDN route under this censor —
+	// expect pass|blocked, and the edge targets ($EDGE_*, $EDGE_NET_*) a
+	// session that carried must have reached (empty: any).
+	CDN *struct {
+		Expect string   `json:"expect"`
+		Via    []string `json:"via,omitempty"`
+	} `json:"cdn,omitempty"`
+	// GoogleKnobs are set on the lab's Google before op google-refresh
+	// waits for the walk (fakegfe.go), and GoogleExpect is how that walk
+	// must end: recovered (default) | unreachable | refused.
+	GoogleKnobs  *GoogleKnobs `json:"google_knobs,omitempty"`
+	GoogleExpect string       `json:"google_expect,omitempty"`
 	// Analogue: the documented real-world behaviour this models, and
 	// where the model stops. Required.
 	Analogue string `json:"analogue"`

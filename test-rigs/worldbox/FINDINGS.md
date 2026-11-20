@@ -101,7 +101,7 @@ here fails without its fix. None has a `known-findings.json` entry.
 | REV-8 | low (fingerprint) | The bare TCP reach check ran on every timed-out attempt, not only when the timeout hides its phase: one payload-less connect-and-close to the relay's port per failed proof, every 30 s on a failed route | **fixed** in `core/engine/proof_singbox.go` (`timeoutPhaseIsUnknown` gates it) | counting hop in front of an in-process relay: "2 of 4 connections to the relay's port carried nothing" | unit `TestProveSubject_CarryTimeoutMakesNoBareConnectToTheRelay` (`-tags singbox`) |
 | REV-9 | low (security, defence in depth; on the relay) | Request binding ignored the query string (`/users/list?name=…` rode a token for `/users/list`; `POST /users/revoke?name=r2` changed the config), and three token field checks were held by no test | **fixed** in `cmd/daal-relay-mgmt/main.go` (`requireAuth`): any query string, even a bare `?`, is 400 before the token is read. Released as relay-v1.5.1 (2026-11-19) | the requests above: 200 | unit `TestQueryStringIsRefused`, `TestTokenFieldChecksHold` (each check proven by mutation in a scratch copy) |
 
-### Open — need a decision, a release or a dependency fix (6 rows; open: CEN-4, AUTO-1, AUTO-2, SW-3)
+### Open — need a decision, a release or a dependency fix (7 rows; open: CEN-4, AUTO-1, AUTO-2, SW-3, ADD-1)
 
 | id | severity | one line | status | reproduce | pinned by |
 |---|---|---|---|---|---|
@@ -110,6 +110,7 @@ here fails without its fix. None has a `known-findings.json` entry.
 | SW-1 | low-to-medium | A switch to a route that turns out to carry nothing ended with NOTHING connected: `engine_set_route(B)` stops the connected route A before it has learned whether B works | **fixed 2026-11-19** (engine) — when B carries nothing the engine reconnects A, re-proves it, returns the error for B and records `switch_back` in the diagnostics. There is still a gap of B's check plus A's reconnect; nothing is left disconnected | `./run.sh --mgmt=tree --ops switch clean vless-reality hysteria2` → `check-rotate.unreachable.vless-reality>hysteria2.old_route_still_connected`, `.switch_back_recorded`, `.tunnel`, `.wire` green with the host doing nothing after the failed call | those four checks (quick and full); unit `TestSetRoute_FailedSwitchGoesBackToTheRouteThatWasCarrying` (core/abi). known-findings.json entry deleted |
 | AUTO-1 | low | A border that forwards nothing at all read as ONE relay not answering: the automatic connect sees only its own routes, all to one address, so under `total-blackout` its verdict was `relay_unreachable` and never `network_down` | **narrowed 2026-11-19, open** — fixed for a host that reports NO network (`engine_network_facts` kind `none` turns a pass in which nothing answered into `network_down`; no traffic is added). A link that is up and merely not validated (what Android says under `total-blackout`), and a host that says nothing, still get `relay_unreachable`: validated 0 is also what a network that filters the platform's own check gives, and is not taken for "no internet" — section AUTO-1 | before: `./run.sh --mgmt=tree --ops auto total-blackout vless-reality hysteria2` → `scenario.connect.verdict expect=network_down got=relay_unreachable` | known-findings.json `AUTO-1` (1 check, full): `op:auto scenario.connect.verdict` under `total-blackout` (red, known: `relay_unreachable`) beside `scenario-untold.connect.verdict`; `op:auto-deep networks.down.verdict` (kind `none`: `network_down`) beside `networks.unvalidated.verdict` and `networks.dead-relay.verdict` (`relay_unreachable`); engine `TestNetworkFacts_NothingAnswered…` |
 | AUTO-2 | low | A route whose address answers nothing costs a pass TWO attempt budgets (8 s), not the one (4 s) the automatic connect is meant to stop at (`StopAtUnreachedRelay`, backlog AC-30): a timed-out connect does not say which phase it died in, the reach check that settles it runs beside the second attempt, and the stop is only looked at between attempts. Two silent routes checked together are done in 8.3 s — half of the 16 s they cost one after the other, and twice the 4.5 s the stated budget gives | open — the engine's (core/engine/proof.go, proof_singbox.go); needs the first attempt's phase settled before the second is started | `./run.sh --mgmt=tree --ops auto clean vless-reality hysteria2` → `race.connect.a_silent_address_costs_one_attempt expect=pass got=fail` (`auto_ms` ≈ 8300; the censor's log shows two connections to each dropped endpoint, 4 s apart) | known-findings.json `AUTO-2` (1 check, quick and full); `race.connect.faster_than_one_after_another` (green) holds the half that works |
+| ADD-1 | medium (add-ons: standby key through the Google channel) | The Google update channel refuses the standby key in the form the publisher holds it: `standby promote` prints it grouped with spaces (`bundle.StandbyKeyBytes.Text()`, the form shown to people), and `appsscript.Build` (`appsscript-check --standby-key-file`, `publish-freshness --appsscript-standby-key-file`) accepts only the 26 symbols run together: "standby key must be 26 Crockford base32 symbols" | open — `publisher/deploy/freshness/backends/appsscript/container.go` should read the key with `bundle.ParseStandbyKeyText` (spaces and '-' ignored, as the engine's own `StandbyKey` does) and carry the canonical form; no wave-2 lane owns that file | `./run.sh --mgmt=tree --ops standby-google clean vless-reality` → `google.standby_key_as_printed_accepted expect=pass got=fail`; with the key's spaces removed the same channel carries it and the phone reconnects on the standby (`found_the_new_address_through_google` green) | known-findings.json `ADD-1` (1 check, addons and full) |
 | SW-3 | low | Every connect that had the TUN leaves one open file behind for the life of the process: the stop eventfd of gVisor's fd endpoint (`pkg/tcpip/link/stopfd`), which nothing closes when the instance is closed. One per connect, per switch, per move the engine makes by itself | open — a dependency's (gVisor as sing-tun uses it); the engine could close it where it closes the instance. Not a side instance's: those hold no TUN and leave nothing | `./e2e.sh full --only auto-deep` → `leak-stopped.cycle.a_connect_and_a_disconnect_leave_nothing expect=pass got=fail` (`[eventfd]` 5 → 6 across one connect by hand and disconnect) | known-findings.json `SW-3` (1 check, full) |
 
 ### Observations (no verdict; recorded so the day they change is visible)
@@ -3245,3 +3246,31 @@ flows).
 ./e2e.sh full --only auto-deep,clean.auto,total-blackout,relay-ip-block,quic-drop
 WB_AUTO_ONLY=speed,metered ./e2e.sh full --only auto-deep        # single phones of an op
 ```
+
+## ADD-1 — the Google channel refuses the standby key as the publisher holds it
+
+**What.** Add-on 1 meets add-on 3: after "Switch to standby" the
+publisher's app has the 26-character key to hand out, and the Google
+channel is meant to carry it (`daal-refresh-v1`, member `standby_key`).
+`daal-deploy standby promote` prints the key in its display form, five
+groups separated by spaces (`bundle.StandbyKeyBytes.Text()`). The
+container builder (`appsscript.Build`, behind `appsscript-check
+--standby-key-file` and `publish-freshness --appsscript-standby-key-file`)
+accepts only the 26 symbols run together and refuses the display form:
+`appsscript: standby key must be 26 Crockford base32 symbols`. The
+engine's own reader (`bundle.ParseStandbyKeyText`, used by
+`engine_standby_key`) ignores spaces and dashes, so the two ends of one
+key disagree on its spelling.
+
+**Reproduce.** `./run.sh --mgmt=tree --ops standby-google clean
+vless-reality` → `op:standby-google google.standby_key_as_printed_accepted
+expect=pass got=fail`. The op then sends the same key with the spaces
+removed, and everything after it is green: the phone, connected when the
+primary is null-routed and the ordinary mirrors cut, finds the standby
+through the Google front and reconnects on it.
+
+**Fix.** Read the key in `container.go` with `bundle.ParseStandbyKeyText`
+and write the canonical form; the wizard then needs to do nothing
+special. The check turns green and this entry must go (the rig reports a
+known finding that did not reproduce).
+

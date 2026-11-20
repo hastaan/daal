@@ -354,7 +354,9 @@ func TestFamilyNamesMatchThePublishers(t *testing.T) {
 	}
 	// Every managed inbound belongs to exactly one family and is in the
 	// registry walk, or its users would be invisible to /users/list.
-	if len(recipientInbounds) != len(mine) {
-		t.Errorf("recipientInbounds has %d entries for %d families", len(recipientInbounds), len(mine))
+	// The one extra entry is ws-cdn-in, the Cloudflare door: a second
+	// inbound of the VLESS families, not a family of its own.
+	if len(recipientInbounds) != len(mine)+1 {
+		t.Errorf("recipientInbounds has %d entries for %d families plus the CDN door", len(recipientInbounds), len(mine))
 	}
 }

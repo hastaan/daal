@@ -122,11 +122,12 @@ func signReq(req *http.Request, priv ed25519.PrivateKey, op string, ts int64) {
 // --- tests ---
 
 // TestExactlyNRoutes enforces FRP-14 invariant 1: the mgmt API
-// surface is exactly nine routes — the original three, the
-// per-recipient trio, /whoami, and the Wave-3c address pair that the
-// pinned L3 contract requires. Adding a TENTH requires a supplement
-// amendment, and specs/daal-relay-mgmt-v1.md §4 needs the amendment
-// for the two added here.
+// surface is exactly eleven routes — the original three, the
+// per-recipient trio, /whoami, the Wave-3c address pair that the
+// pinned L3 contract requires, /identity, and /cdn (add-on 2, the
+// Cloudflare door). Adding another requires a supplement amendment,
+// and specs/daal-relay-mgmt-v1.md §4 needs the amendment for the
+// ones added here.
 func TestExactlyNRoutes(t *testing.T) {
 	srv, _, _, _ := newTestServer(t)
 	got := append([]string{}, srv.routeNames()...)
@@ -142,6 +143,7 @@ func TestExactlyNRoutes(t *testing.T) {
 		"/bind-address",
 		"/unbind-address",
 		"/identity",
+		"/cdn",
 	}
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {

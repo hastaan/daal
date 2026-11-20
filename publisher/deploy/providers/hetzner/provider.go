@@ -302,6 +302,11 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		// The box's own copy of the family set its inbounds and both
 		// firewalls were derived from; daal-relay-mgmt obeys it.
 		Families: served,
+		// Add-on 2: the box-side half of "only Cloudflare reaches the
+		// CDN door". Written once at first boot, so it goes on every
+		// fresh provision and rebuild, built add-on or not; nothing
+		// listens on the port until the publisher opens the door.
+		CDNEdgeRanges: opts.CDNEdgeRanges,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: render cloud-init: %w", err)

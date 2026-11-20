@@ -1362,8 +1362,7 @@ pub struct ProvisionCdnFrontInput {
     #[serde(default)]
     pub origin_ipv6: String,
     pub origin_path: String,
-    /// Optional. When empty the provider generates a random
-    /// `/r/<hex>` path.
+    /// Optional. Must be empty or equal `origin_path` (no Worker).
     #[serde(default)]
     pub public_path: String,
 }
@@ -1381,6 +1380,7 @@ pub fn provision_cdn_front(ctx: &WizardCtx, input: &ProvisionCdnFrontInput) -> R
             "hostname, origin_ip, origin_path required".into(),
         ));
     }
+
     let op = ctx.db.get(input.operator_id)?;
     // Read the Cloudflare token (alias =
     // daal.cloudflare.<operator_id>.token) and the cloud-provider
@@ -1402,10 +1402,18 @@ pub fn provision_cdn_front(ctx: &WizardCtx, input: &ProvisionCdnFrontInput) -> R
         .cli
         .run_cdn_provision(CdnProvisionArgs {
             hostname: &input.hostname,
+            zone: "",
             origin_ip: &input.origin_ip,
             origin_ipv6: &input.origin_ipv6,
             origin_path: &input.origin_path,
             public_path: &input.public_path,
+            origin_port: 0,
+            // This FRP-8 path has no source for the relay firewall's
+            // id (the record does not carry it), so the helper refuses
+            // it ("--firewall-id required") rather than create a
+            // firewall attached to nothing. B-7 (`addon_cdn`) replaces
+            // this path and supplies it.
+            firewall_id: "",
             out_dir: &out_dir,
             cf_token: token_str,
             cloud_token: cloud_token_str,
@@ -3081,6 +3089,72 @@ fn carry_floating_ip_forward(
     }
 }
 
+/// Carry the `standby` object (add-on 1) from the pre-rotation record
+/// onto a freshly provisioned one, as [`carry_floating_ip_forward`] does
+/// for the primary Floating IP.
+///
+/// Every destroy-and-rebuild rung builds a brand-new record without it,
+/// while the Floating IP stays on the account and keeps billing. A record
+/// that has lost it is a standby nothing can release (removal and relay
+/// delete read it from the record), and packs signed from it lose
+/// `_standby`: a key sent later then matches nothing, and the salt —
+/// chosen once for the standby's life — is gone with it.
+///
+/// It is NOT attached to the new server (the delete unassigned it) and
+/// the new box has not bound it, so the warning always says so: in open
+/// mode recipients would reach nothing there until it is attached again.
+/// Across providers it cannot follow (a Hetzner id means nothing to
+/// another cloud) and is reported, not carried.
+fn carry_standby_forward(
+    provisioned: &str,
+    prior_record_json: &str,
+    same_provider: bool,
+    same_region: bool,
+) -> (String, Option<String>) {
+    let prior = serde_json::from_str::<serde_json::Value>(prior_record_json)
+        .ok()
+        .and_then(|v| v.get("standby").cloned())
+        .filter(|s| s.is_object());
+    let Some(prior) = prior else {
+        return (provisioned.to_string(), None);
+    };
+    let fip = prior
+        .get("floating_ip_id")
+        .and_then(|f| f.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !same_provider {
+        return (
+            provisioned.to_string(),
+            Some(format!(
+                "the standby address (floating IP {fip}) is on the PREVIOUS provider and cannot follow the relay across clouds — it is still reserved and still billing there, and Daal can no longer see it. Release it in that provider's console"
+            )),
+        );
+    }
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(provisioned) else {
+        return (provisioned.to_string(), None);
+    };
+    if v.get("standby") == Some(&prior) {
+        return (provisioned.to_string(), None);
+    }
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("standby".into(), prior);
+    }
+    let warning = if same_region {
+        format!(
+            "the standby address (floating IP {fip}) is not attached to the rebuilt relay: it is still reserved and still billing, and nobody can switch to it until it is attached again. Remove the standby and rent a new one"
+        )
+    } else {
+        format!(
+            "the standby address (floating IP {fip}) is still reserved and still billing, and it CANNOT be moved to the rebuilt relay: it is tied to the location it was rented in. Remove the standby, and rent a new one in the new location"
+        )
+    };
+    match serde_json::to_string(&v) {
+        Ok(body) => (body, Some(warning)),
+        Err(_) => (provisioned.to_string(), None),
+    }
+}
+
 fn trimmed_opt(value: Option<&String>) -> Option<&str> {
     value.map(|s| s.trim()).filter(|s| !s.is_empty())
 }
@@ -4008,6 +4082,20 @@ fn rotate_execute_inner(
                 region == rec.region,
             );
             if let Some(w) = fip_warning {
+                warnings.push(w);
+            }
+            // The standby address (add-on 1) is a second Floating IP the
+            // rebuild leaves on the account, billing, and drops from the
+            // record. Carried the same way, so removal and relay delete
+            // can still release it and every later pack keeps the same
+            // commitment. See carry_standby_forward.
+            let (provisioned, standby_warning) = carry_standby_forward(
+                &provisioned,
+                &prior_record_json,
+                provider == rec.provider,
+                region == rec.region,
+            );
+            if let Some(w) = standby_warning {
                 warnings.push(w);
             }
             ctx.db.update_record_json(operator_id, &provisioned)?;
@@ -8684,6 +8772,33 @@ mod tests {
     /// so "re-attach it with an address swap" was advice that fails for
     /// the rung's most common use — after which the address keeps
     /// billing and the operator concludes the app is broken.
+    /// The standby (add-on 1) survives a rebuild in the record, salt and
+    /// all, and is always reported; across providers it is reported and
+    /// not carried.
+    #[test]
+    fn a_rebuild_carries_the_standby_forward() {
+        let prior = r#"{"provider":"hetzner","region":"fsn1","server_id":"1","standby":{"floating_ip_id":"77","ip":"203.0.113.20","mode":"sealed","salt":"AAAAAAAAAAAAAAAA"}}"#;
+        let rebuilt = r#"{"provider":"hetzner","region":"fsn1","server_id":"9"}"#;
+        let (body, w) = carry_standby_forward(rebuilt, prior, true, true);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["standby"]["floating_ip_id"], "77");
+        assert_eq!(v["standby"]["salt"], "AAAAAAAAAAAAAAAA");
+        assert_eq!(v["server_id"], "9");
+        assert!(w.expect("always reported").contains("not attached"));
+
+        let (_, w) = carry_standby_forward(rebuilt, prior, true, false);
+        assert!(w.unwrap().contains("CANNOT be moved"));
+
+        let (body, w) = carry_standby_forward(rebuilt, prior, false, false);
+        assert!(!body.contains("standby"));
+        assert!(w.unwrap().contains("PREVIOUS provider"));
+
+        // No standby before: nothing changes, nothing said.
+        let (body, w) = carry_standby_forward(rebuilt, rebuilt, true, true);
+        assert_eq!(body, rebuilt);
+        assert!(w.is_none());
+    }
+
     #[test]
     fn a_carried_address_says_release_not_reattach_when_the_region_moved() {
         let rebuilt = r#"{"provider":"hetzner","region":"ash","server_id":"9"}"#;

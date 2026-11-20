@@ -26,7 +26,15 @@
 #         does on its own clock (grade a slow route, move for speed and
 #         hold, per-network memory, network_down on the host's word); and the
 #         pinned artefacts × all 7 families (FINDINGS F-002, kept visible);
-#         and a relay provisioned with two opt-in families only (FAM-4).
+#         and a relay provisioned with two opt-in families only (FAM-4);
+#         and the add-on worlds below.
+# addons  the publisher add-ons (docs/optional-addons-plan.md): standby
+#         address (rent, sign sealed, switch under a connected phone, no
+#         key → no dial, typed key, open variant, stale address), the CDN
+#         front (provisioning against the lab's Cloudflare, every cdn-*
+#         censor) and the Google channel (Path A/B, every refresh-google-*
+#         censor). Parts that wait on engine code still landing report
+#         SKIPPED "WAITS ON <lane> <item>" (driver/addons_net.go).
 #
 # Each world is one ./run.sh (own namespaces, own evidence directory under
 # out/). A world is rootless and hermetic; several run side by side.
@@ -45,7 +53,7 @@ RIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode=quick; jobs=""; only=""; plan_only=""
 while (($#)); do
   case "$1" in
-    quick|full) mode="$1" ;;
+    quick|full|addons) mode="$1" ;;
     -j) jobs="$2"; shift ;;
     --only) only="$2"; shift ;;
     --plan) plan_only=1 ;;
@@ -60,9 +68,31 @@ fi
 
 # ---- the plan: label <TAB> run.sh arguments ------------------------------
 # The longest worlds first, so the short ones fill in around them.
-scenarios=(); for f in "$RIG"/scenarios/*.json; do s="$(basename "$f" .json)"; [[ "$s" == clean ]] || scenarios+=("$s"); done
+# The add-on scenarios (cdn-*, refresh-google-*) are about the CDN route
+# and the Google channel, which only their ops exercise: they are not in
+# the generic loop below but in the add-on worlds (addons, and full).
+scenarios=(); addon_scenarios=()
+for f in "$RIG"/scenarios/*.json; do
+  s="$(basename "$f" .json)"
+  case "$s" in clean) ;; cdn-*|refresh-google-*) addon_scenarios+=("$s") ;; *) scenarios+=("$s") ;; esac
+done
+addon_worlds() { # [family…] for the scenario worlds; none = every family (full)
+  local fams="$*"
+  plan+=("standby"$'\t'"--mgmt=tree --ops standby,standby-promote,standby-sealed,standby-open,standby-stale clean vless-reality hysteria2")   # add-on 1: rent, sign sealed, switch under a connected phone (freshness), no key → no dial, typed key, open-mode variant, stale address to a stranger
+  plan+=("standby-google"$'\t'"--mgmt=tree --ops standby-google clean vless-reality")   # add-on 1 + 3: the switch and the key through the Google channel with the ordinary mirrors cut
+  plan+=("cdn-provision"$'\t'"--mgmt=tree --ops cdn-provision clean vless-reality")   # add-on 2, publisher side: token verdicts, rollback, zone state, firewall, ECH config, posture, front test, removal
+  plan+=("google-channel"$'\t'"--mgmt=tree --ops google-channel clean vless-reality")   # add-on 3, publisher side: Path A (API off, half-way failure, resume), update through the front, refusals, Path B
+  for s in "${addon_scenarios[@]}"; do
+    case "$s" in
+      cdn-*) plan+=("$s"$'\t'"--mgmt=tree --ops cdn $s${fams:+ $fams}") ;;   # the CDN route under this censor (scenario's cdn.expect)
+      refresh-google-*) plan+=("$s"$'\t'"--mgmt=tree --ops google-refresh $s${fams:+ $fams}") ;;   # the walk through the Google front under this censor (google_expect)
+    esac
+  done
+}
 plan=()
-if [[ "$mode" == quick ]]; then
+if [[ "$mode" == addons ]]; then
+  addon_worlds vless-reality hysteria2
+elif [[ "$mode" == quick ]]; then
   plan+=("auto"$'\t'"--mgmt=tree --ops auto clean vless-reality hysteria2")   # the one button, on the four routes a default relay serves: ~70 s, the longest world of this mode, so it is its own and first
   plan+=("clean"$'\t'"--mgmt=tree --ops switch,revoke,l1,mgmtauth,tamper clean")   # switch first: it uses r1's pack as minted
   plan+=("release"$'\t'"--ops revoke,mgmtauth clean @default")
@@ -86,6 +116,7 @@ else
       plan+=("$s"$'\t'"--mgmt=tree $s")
     fi
   done
+  addon_worlds
   plan+=("release.all-families"$'\t'"clean")
   plan+=("narrow-relay"$'\t'"--mgmt=tree --relay-families=shadowsocks,anytls clean shadowsocks anytls")   # FINDINGS FAM-4
 fi
@@ -127,6 +158,8 @@ prune_reports quick 8
 prune_reports full 4
 prune_reports quick-only 4
 prune_reports full-only 4
+prune_reports addons 4
+prune_reports addons-only 4
 printf '%s\n' "${plan[@]}" >"$out/plan.tsv"
 
 # A world that hangs must not hang a push: the driver gives itself 15

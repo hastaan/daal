@@ -59,7 +59,9 @@ export interface AddonOutcome {
     removed: boolean;
     /** Something of it is left and only this relay holds what removes it. */
     keeps_relay: boolean;
-    code: 'removed' | 'not_built' | 'failed' | 'left';
+    /** `with_relay`: nothing to do first; it goes with the relay (the
+     *  standby address is released with the relay's addresses). */
+    code: 'removed' | 'not_built' | 'failed' | 'left' | 'with_relay';
     error: string;
 }
 
@@ -101,11 +103,25 @@ export interface CdnTokenInput {
     operator_id: number;
     /** Crosses this boundary once, inbound. */
     token: string;
+    /** The zone meant, when known. */
+    zone?: string;
 }
+export type CdnTokenVerdict =
+    | 'ok'
+    | 'invalid'
+    | 'no_zone'
+    | 'zone_not_visible'
+    | 'too_broad'
+    | 'missing_permission'
+    | 'refused';
 export interface CdnTokenCheck {
     zones: string[];
-    verdict: 'ok' | 'too_broad' | 'too_narrow' | 'no_zone';
+    verdict: CdnTokenVerdict;
+    /** Kept on this phone (only when ok). */
     stored: boolean;
+    /** Cloudflare's names of the permissions missing / extra. */
+    missing?: string[];
+    extra?: string[];
 }
 export interface CdnBuildInput {
     operator_id: number;
@@ -113,14 +129,24 @@ export interface CdnBuildInput {
 }
 export interface CdnPostureInput {
     operator_id: number;
+    /** Also a real handshake through the front now (default true). */
+    test?: boolean;
 }
 export interface CdnPosture {
+    /** ECH on the zone and accepted in the last test: the zone name is
+     *  not on the wire. null: could not be read. */
     name_hidden: boolean | null;
+    /** Origin pull on and the firewall open to Cloudflare only. */
     door_closed_to_others: boolean | null;
     last_test_at_unix: number;
     last_test_ok: boolean | null;
     renews_at_unix: number;
     needs_rebuild: boolean;
+    hostname?: string;
+    zone?: string;
+    plain_fallback?: boolean;
+    /** Provider words; Details only. */
+    notes?: string;
 }
 export interface CdnPlainFallbackInput {
     operator_id: number;
@@ -151,5 +177,24 @@ export interface GoogleCheck {
     ok: boolean;
     via_front: boolean;
     checked_at_unix: number;
-    reason: '' | 'api_not_enabled' | 'not_deployed' | 'wrong_content' | 'unreachable';
+    /** '' when ok. `api_not_enabled` is a sign-in error
+     *  (E_GOOGLE_API_NOT_ENABLED), not a check reason. */
+    reason: '' | 'not_deployed' | 'refused' | 'stale' | 'wrong_content' | 'unreachable' | 'no_address';
+}
+
+// ---- mirrors of fields wizardCommands.ts does not carry yet ----
+
+/** setup_recovery::AccountItem's add-on fields (V019). An older shell
+ *  sends none of them. */
+export interface AccountItemAddonFields {
+    /** 'standby' for a relay's standby address, '' otherwise. */
+    addon?: string;
+    monthly_cost_cents?: number;
+    cost_currency?: string;
+}
+
+/** freshness::FreshnessStatus.google_only (D-3): the only refresh
+ *  address is the Google update channel. */
+export interface FreshnessGoogleOnly {
+    google_only?: boolean;
 }
