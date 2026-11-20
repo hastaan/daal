@@ -23,6 +23,7 @@ func TestImport_EngineConfigTravelsWithASignedRouteOnly(t *testing.T) {
 			var fc map[string]json.RawMessage
 			_ = json.Unmarshal(m.Routes[i].FamilySpecificConfig, &fc)
 			fc[bundle.CoverNamesKey], fc["_desync"] = cover, desync
+			fc[bundle.ReportToKey] = json.RawMessage(`"daal1example"`)
 			m.Routes[i].FamilySpecificConfig, _ = json.Marshal(fc)
 		}
 	})
@@ -35,7 +36,7 @@ func TestImport_EngineConfigTravelsWithASignedRouteOnly(t *testing.T) {
 		t.Fatalf("%v %+v", err, v)
 	}
 	for _, ri := range st.saved[0] {
-		if !strings.Contains(ri.EngineConfig, bundle.CoverNamesKey) || !strings.Contains(ri.EngineConfig, "_desync") {
+		if !strings.Contains(ri.EngineConfig, bundle.CoverNamesKey) || !strings.Contains(ri.EngineConfig, "_desync") || !strings.Contains(ri.EngineConfig, bundle.ReportToKey) {
 			t.Fatalf("route %s: engine config %q", ri.RouteID, ri.EngineConfig)
 		}
 		for _, leak := range []string{bundle.EndpointKey, "5.75.0.1", "fixture-reality-public-key", "_relaypack"} {
@@ -66,7 +67,9 @@ func TestImport_EngineConfigTravelsWithASignedRouteOnly(t *testing.T) {
 
 func TestEngineFamilyConfig_Allowlist(t *testing.T) {
 	got := bundle.EngineFamilyConfig(json.RawMessage(`{"_endpoint":{"v":1,"server":"198.51.100.1"},"_desync":{"v":1},"_report_to":"x","other":1}`))
-	if got != `{"_desync":{"v":1}}` {
+	// _report_to (a public daal1 address) is the engine's too: the
+	// network test reads it from the row (core/abi/fieldprobe.go).
+	if got != `{"_desync":{"v":1},"_report_to":"x"}` {
 		t.Fatalf("got %s", got)
 	}
 	for _, in := range []string{"", "  ", "[]", "not json", `{"_endpoint":{}}`} {

@@ -60,8 +60,8 @@ export default function TrustPrompt({ t, preview, onResolve, locale }: Props) {
         onResolve({ decision, verdict, error });
     };
 
-    const enWords = preview.fingerprintEN.split(/\s+/).filter(Boolean);
-    const faWords = preview.fingerprintFA.split(/\s+/).filter(Boolean);
+    const enWords = preview.fingerprintEN.split(/[\s-]+/).filter(Boolean);
+    const faWords = preview.fingerprintFA.split(/[\s-]+/).filter(Boolean);
     const sets = [
         { lang: 'fa' as const, words: faWords, label: t('trust.words.fa') },
         { lang: 'en' as const, words: enWords, label: t('trust.words.en') },

@@ -2271,7 +2271,7 @@ function StepStrip({
 
 /** Four check words as chips: the UI's own language first and large. */
 function WordChips({ words, lang, label }: { words: string; lang: 'en' | 'fa'; label: string }) {
-    const list = words.split(/\s+/).filter(Boolean);
+    const list = words.split(/[\s-]+/).filter(Boolean);
     const { density } = useDensity();
     // Even rows (4 across, 2 on a phone): no word alone on a line.
     const cols = density === 'phone' ? 2 : 4;

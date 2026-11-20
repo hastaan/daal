@@ -16,7 +16,13 @@ import (
 // family_specific_config also carries `_endpoint` — the relay's address
 // and keys — which must never be copied there. A member is added here
 // only when the engine reads it and it holds no address, key or secret.
-var EngineFamilyConfigKeys = []string{"_desync", CoverNamesKey}
+// ReportToKey is the network-test report address (a daal1… public
+// address, specs/field-probe-v2.md) a test relay writes into each
+// route; core/abi/fieldprobe.go reads it from the row. Public, so it
+// may sit on the unencrypted row.
+const ReportToKey = "_report_to"
+
+var EngineFamilyConfigKeys = []string{"_desync", CoverNamesKey, ReportToKey}
 
 // EngineFamilyConfig returns the part of a route's signed
 // family_specific_config the engine reads (EngineFamilyConfigKeys), as a
