@@ -17,7 +17,7 @@ or it does not run at all.**
 ./daal test            # run all Go + Rust test suites
 ./daal build           # build engine + CLIs + Tauri desktop (slow)
 ./daal package         # collect artifacts under build/release/
-./daal release-check   # verify ABI=63, engine version, no bad imports
+./daal release-check   # verify ABI=70, engine version, no bad imports
 ./daal manifest        # print build/release/manifest.json
 ```
 
@@ -128,7 +128,7 @@ Three things this does NOT do, and you must do by hand:
 - **Locked invariant 52.** No `daal/publisher/directory` references anywhere (FRP-13 closure).
 - **Locked invariant 47.** No `CellAdminScreen` / `ModifierAdminScreen` / `publisherAdmin` references anywhere in the tree. This was Android-specific when written; since the Compose tree was removed (`daal:405-407`) it greps every `.kt` / `.java` / `.ts` / `.tsx` / `.rs` source file.
 - **`spec_version=4`** pinned in specs / bundle.
-- **ABI symbol count.** If the engine `.so` has been built, `nm -D --defined-only` must show 63 `engine_*` exported symbols — the authoritative ledger is at the end of `specs/engine-abi-v1.md`. The check reads `build/libdaalcore.so`, not the tracked copy under `client-shell/tauri/src-tauri/resources/`, so without a prior `./daal build` in the same tree it warns rather than fails.
+- **ABI symbol count.** If the engine `.so` has been built, `nm -D --defined-only` must show 70 `engine_*` exported symbols — the authoritative ledger is at the end of `specs/engine-abi-v1.md`. The check reads `build/libdaalcore.so`, not the tracked copy under `client-shell/tauri/src-tauri/resources/`, so without a prior `./daal build` in the same tree it warns rather than fails.
 - **Working tree clean.** A dirty tree is a warn, not a fail — but a dirty tree on a release tag is a problem you should fix.
 
 Set `DAAL_RELEASE_STRICT=1` for release cuts. Strict mode turns a dirty tree or missing built engine binary into a hard failure.

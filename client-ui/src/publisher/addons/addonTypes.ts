@@ -181,20 +181,3 @@ export interface GoogleCheck {
      *  (E_GOOGLE_API_NOT_ENABLED), not a check reason. */
     reason: '' | 'not_deployed' | 'refused' | 'stale' | 'wrong_content' | 'unreachable' | 'no_address';
 }
-
-// ---- mirrors of fields wizardCommands.ts does not carry yet ----
-
-/** setup_recovery::AccountItem's add-on fields (V019). An older shell
- *  sends none of them. */
-export interface AccountItemAddonFields {
-    /** 'standby' for a relay's standby address, '' otherwise. */
-    addon?: string;
-    monthly_cost_cents?: number;
-    cost_currency?: string;
-}
-
-/** freshness::FreshnessStatus.google_only (D-3): the only refresh
- *  address is the Google update channel. */
-export interface FreshnessGoogleOnly {
-    google_only?: boolean;
-}

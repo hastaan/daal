@@ -52,6 +52,7 @@ func cdnTestFront(t *testing.T) *cloudflare.FrontRecord {
 		return p
 	}
 	return &cloudflare.FrontRecord{
+		EdgeRanges:       []string{"173.245.48.0/20", "2400:cb00::/32"},
 		Hostname:         "door.example.org",
 		OriginPath:       "/0123456789abcdef0123456789abcdef",
 		OriginCACertPath: write("c.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
@@ -102,7 +103,10 @@ func TestCDNDoorEnable_SignedAndChecked(t *testing.T) {
 	front := cdnTestFront(t)
 	box := &fakeDoorBox{pub: pub, caps: `{"ok":true,"capabilities":["cdn"]}`,
 		answer: func(req cloudflare.DoorRequest) (int, string) {
-			return 200, `{"action":"enable","enabled":true,"changed":true,"port":8448,"ws_path":"` + req.WSPath + `","users":2}`
+			if len(req.EdgeRanges) != 2 {
+				return 400, "no edge ranges"
+			}
+			return 200, `{"action":"enable","enabled":true,"changed":true,"port":8448,"ws_path":"` + req.WSPath + `","users":2,"box_firewall_rules":2}`
 		}}
 	ts, fp := startTLSServer(t, box.mux(t))
 	rec := recForServer(t, ts, fp)
@@ -119,6 +123,15 @@ func TestCDNDoorEnable_SignedAndChecked(t *testing.T) {
 	}
 	if !strings.Contains(string(box.lastBody), `"origin_key_pem"`) || !strings.Contains(string(box.lastBody), `"action":"enable"`) {
 		t.Fatalf("body sent = %s", box.lastBody)
+	}
+
+	// A relay that opened its door behind no box-firewall rule is a
+	// failure: Cloudflare could never reach it.
+	box.answer = func(req cloudflare.DoorRequest) (int, string) {
+		return 200, `{"action":"enable","enabled":true,"port":8448,"ws_path":"` + req.WSPath + `","users":2}`
+	}
+	if _, err := cli.CDNDoorEnable(context.Background(), rec, priv, front); err == nil {
+		t.Fatal("an enable that opened no box-firewall rule was accepted")
 	}
 
 	// An answer about another door is a failure.

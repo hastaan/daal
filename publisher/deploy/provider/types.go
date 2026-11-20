@@ -211,12 +211,13 @@ type ProvisionOpts struct {
 	// packs already in recipients' hands expect.
 	CoverSNI string `json:"cover_sni,omitempty"`
 	// CDNEdgeRanges are Cloudflare's published ranges (v4 and v6
-	// CIDRs), fetched by the caller abroad just before provisioning.
-	// They go into cloud-init (cloudinit.RenderInputV2.CDNEdgeRanges),
-	// where the box-side ufw opens the CDN door's port to them and to
-	// nothing else. ufw is written once at first boot, so a relay
-	// provisioned without them needs a rebuild before it can take the
-	// way in through Cloudflare (add-on 2). Empty opens nothing.
+	// CIDRs), fetched by the caller abroad just before provisioning
+	// (provision --cdn-edge-ranges, a CLI opt-in). They go into
+	// cloud-init (cloudinit.RenderInputV2.CDNEdgeRanges), where the
+	// box-side ufw opens the CDN door's port to them from first boot.
+	// The app leaves this empty: daal-relay-mgmt /cdn opens the same
+	// rule when the door is turned on (add-on 2), so building a relay
+	// never contacts Cloudflare. Empty opens nothing.
 	CDNEdgeRanges []string `json:"cdn_edge_ranges,omitempty"`
 	// WaitForHealth asks a provider's live Provision path to poll
 	// the bootstrap health endpoint and capture

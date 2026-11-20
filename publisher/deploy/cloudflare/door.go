@@ -32,12 +32,16 @@ type DoorRequest struct {
 	OriginCertPEM string `json:"origin_cert_pem,omitempty"`
 	OriginKeyPEM  string `json:"origin_key_pem,omitempty"`
 	AOPCACertPEM  string `json:"aop_ca_pem,omitempty"`
+	// EdgeRanges are the Cloudflare ranges the relay opens its box
+	// firewall to for the door's port (FrontRecord.EdgeRanges).
+	EdgeRanges []string `json:"edge_ranges,omitempty"`
 }
 
 // BuildDoorEnable assembles the enable request from a FrontRecord and
 // the files ProvisionFront wrote, and checks them first: the key must
-// match the certificate, the certificate must cover the hostname, and
-// the origin-pull CA must be a CA. A relay handed a broken pair would
+// match the certificate, the certificate must cover the hostname, the
+// origin-pull CA must be a CA, and there must be Cloudflare ranges for
+// the box firewall (a door behind a closed box firewall carries nothing). A relay handed a broken pair would
 // fail its next reload, which takes every route down, not only this one.
 func BuildDoorEnable(rec *FrontRecord) (DoorRequest, error) {
 	if rec == nil {
@@ -73,6 +77,9 @@ func BuildDoorEnable(rec *FrontRecord) (DoorRequest, error) {
 	if err := leaf.VerifyHostname(rec.Hostname); err != nil {
 		return DoorRequest{}, fmt.Errorf("door: origin certificate does not cover %s: %w", rec.Hostname, err)
 	}
+	if len(rec.EdgeRanges) == 0 {
+		return DoorRequest{}, errors.New("door: the record has no Cloudflare ranges for the relay's box firewall (run cdn-provision again)")
+	}
 	blk, _ := pem.Decode(caPEM)
 	if blk == nil {
 		return DoorRequest{}, errors.New("door: origin pull CA is not PEM")
@@ -88,6 +95,7 @@ func BuildDoorEnable(rec *FrontRecord) (DoorRequest, error) {
 		OriginCertPEM: string(certPEM),
 		OriginKeyPEM:  string(keyPEM),
 		AOPCACertPEM:  string(caPEM),
+		EdgeRanges:    append([]string(nil), rec.EdgeRanges...),
 	}, nil
 }
 

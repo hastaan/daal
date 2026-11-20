@@ -359,16 +359,21 @@ func TestBuildDoorEnable(t *testing.T) {
 		OriginCAPrivPath: write("c.key", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})),
 		AOPCACertPath:    write("ca.pem", mat.CACertPEM),
 	}
+	// No ranges for the relay's box firewall: refused.
+	if _, err := BuildDoorEnable(rec); err == nil {
+		t.Fatal("a door with no Cloudflare ranges for the box firewall accepted")
+	}
+	rec.EdgeRanges = []string{"173.245.48.0/20", "2400:cb00::/32"}
 	req, err := BuildDoorEnable(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Action != "enable" || req.Port != 8448 || req.WSPath != rec.OriginPath {
+	if req.Action != "enable" || req.Port != 8448 || req.WSPath != rec.OriginPath || len(req.EdgeRanges) != 2 {
 		t.Fatalf("req = %+v", req)
 	}
 	// JSON names pinned against the box (cmd/daal-relay-mgmt cdnReq).
 	b, _ := json.Marshal(req)
-	for _, k := range []string{`"action"`, `"port"`, `"ws_path"`, `"origin_cert_pem"`, `"origin_key_pem"`, `"aop_ca_pem"`} {
+	for _, k := range []string{`"action"`, `"port"`, `"ws_path"`, `"origin_cert_pem"`, `"origin_key_pem"`, `"aop_ca_pem"`, `"edge_ranges"`} {
 		if !strings.Contains(string(b), k) {
 			t.Errorf("missing %s in %s", k, b)
 		}

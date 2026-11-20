@@ -393,10 +393,13 @@ Reserved 2026-11-20 for the standby-address add-on
 `bundle/go/bundle/standby.go` (S1); importer
 (`bundle/go/importer/endpoint_plan.go`) and set-route guard
 (`core/abi/endpoint_guard.go`) (S2); the signing check RP027
-(`relaypackvalidate.ValidateForSigning`). **Not built:** binder
-`publisher/deploy/relaypack/endpoint.go` (S5), the store keeping it
-(`core/trust` SaveImport), the engine variant and `engine_standby_key`
-(S7). Until S5 no pack carries it.
+(`relaypackvalidate.ValidateForSigning`); the binder
+`publisher/deploy/relaypack/endpoint.go` (S5); the store keeping it
+(`core/trust` SaveImport; both secrets go with the route,
+`routestore.perRouteSecretKeys`); the engine's address variant and
+`engine_standby_key` (S7); a key carried by a `daal-refresh-v1`
+container is offered to the same store by the refresh walk
+(`abi.StandbyKeySink`). All built 2026-11-20.
 
 **Compatibility.** Every build ignores a member of
 `family_specific_config` it does not know: no decoder of that object is
@@ -588,7 +591,26 @@ mirrors field for field.
 
 Reserved 2026-11-20 for the Google update-channel add-on
 (`docs/optional-addons-plan.md` §3, `specs/optional-addons-v1.md` §5).
-**Not built yet**: publisher backend G1/G2, recipient fetcher G4/G5.
+**Built 2026-11-20:** publisher backend G1/G2
+(`publisher/deploy/freshness/backends/appsscript/`, one more backend of
+`publish-freshness`), the recipient's front fetcher G4
+(`core/bootstrap/{front.go,h2mini.go,hpack_tables.go}`: Chrome-shaped
+uTLS hello, HTTP/2 framed by hand with no `net/http`, the one allowed
+redirect, the bounded read) and its walk G5 (`core/refresh/frontmirror.go`:
+which endpoints are Google mirrors, the container, the D-3 rule in
+`refresh.ValidateMirrorSet`). Details the built walk fixes:
+
+- An `appsscript` mirror is walked only by the two unscheduled walks
+  (the engine's failure walk and the person's button), only when the
+  walk dials direct (the C0 walk with the tunnel down), and **last**,
+  after the ordinary mirrors in their random order. The scheduled poll
+  and anything riding the tunnel skip it.
+- The random delay before the first connection is bounded by what is
+  left of the walk's own budget, not by the full 120 s (accepted by the
+  lead, 2026-11-20).
+- A standby key in the container is offered to the engine's store after
+  the document (and the pack, if any) was applied; a walk whose key was
+  kept counts as one that found a new address.
 
 - **The entry.** One member of the signed mirror set
   (`trust/freshness-mirrors.json`, `daal/freshness-mirrors-v1`):
@@ -649,7 +671,11 @@ behind the Google front needs no second fetch.
   pack fetched from `current_signed_url` (rules 3–4 of "Recipient
   rules"); `current_signed_url` is not fetched.
 - `standby_key` is accepted only when it matches a held route's
-  `_standby.commit` (after the pack, if any, was applied).
+  `_standby.commit` (after the pack, if any, was applied). It is the 26
+  symbols run together, upper case, the last symbol's two padding bits
+  zero; the publisher's builder takes the key in any form
+  `bundle.ParseStandbyKeyText` reads (the grouped form people are shown)
+  and writes this one.
 - `{"kind": "daal-refresh-v1"}` with no `freshness` is the empty
   container a removed channel serves: "nothing new", not an error.
 - **The update** (publisher → script; recipients never see it) is one
@@ -1036,10 +1062,16 @@ Reserved 2026-11-20 for the Cloudflare add-on
 `bundle/go/bundle/cdn_endpoint.go`; import
 (`bundle/go/importer/endpoint_plan.go` `planCDNRoute`); set-route guard
 (`core/abi/endpoint_guard.go`); the signing check RP026
-(`relaypackvalidate.ValidateForSigning`). **Not built:** the minter
-(`relaypack/{client_outbound.go,candidate_render.go,client_pack.go}`),
-the binder writing it, the engine's edge pick and hello order (B-4
-outbound part, B-6, B-6b).
+(`relaypackvalidate.ValidateForSigning`). **Built 2026-11-20 (B-4
+outbound part, B-6, B-6b, integration):** the binder writing it
+(`relaypack.BindOpts.CDN`; `bind-and-sign` fills it from the operator
+record's `cdn_front` member, seeds from the Cloudflare ranges the front
+record holds, roots = the shipped set `relaypack.CDNShippedRootDigests`,
+or `--cdn-*` flags), the minter (`relaypack/client_outbound.go`
+`CDNClientOutbound`, wrapped by `client_pack.go`; the door's path from
+the creds file's `cdn_ws_path` or `users-pack-sbp[x] --cdn-front`, the
+roots shipped or `--cdn-roots-file`), the engine's edge pick
+(`core/edgepick`) and hello order (`core/abi/connect_cdn.go`).
 
 A `websocket-tls` route whose `_relaypack.exposure_mode` is `cdn_fronted`
 commits to a host name and a root set instead of an address and a key
@@ -1499,7 +1531,7 @@ contract lives in `specs/daal-relay-mgmt-v1.md`.
 - FRP-4b (`34-phase-frp-4b-direct-deploy-integration.md`) — Helper-side `BindAndSign` that turns the OperatorRecord into a signed `.sbp`.
 - FRP-8 (`38-phase-frp-8-v1-6-cdn-fronted.md`) — lifts `cdn_fronted` and non-empty `freshness_url` to V1.6.
 - FRP-11 (`41-phase-frp-11-trusted-cells.md`) — lifts `cell_scope`. See §"V2 cell aggregation" below.
-- `specs/optional-addons-v1.md` and `docs/optional-addons-plan.md` — the `_standby` key, the CDN-fronted endpoint, the `appsscript` mirror provider and the `daal-refresh-v1` container (reserved 2026-11-20, not built yet).
+- `specs/optional-addons-v1.md` and `docs/optional-addons-plan.md` — the `_standby` key, the CDN-fronted endpoint, the `appsscript` mirror provider and the `daal-refresh-v1` container (reserved and built 2026-11-20).
 
 ## V2 cell aggregation (FRP-11 amendment)
 

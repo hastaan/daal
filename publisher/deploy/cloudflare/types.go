@@ -95,6 +95,13 @@ type FrontRecord struct {
 	// LastEdgeRefreshUnix is when the Cloudflare ranges were last
 	// fetched and applied to the relay firewall.
 	LastEdgeRefreshUnix int64 `json:"last_edge_refresh_unix,omitempty"`
+
+	// EdgeRanges are the Cloudflare ranges (v4 then v6, as published)
+	// that fetch opened the provider firewall to. They are public. The
+	// door request carries them so the relay opens its box firewall to
+	// the same set (daal-relay-mgmt /cdn), and the binder takes the
+	// signed edge seeds from the v4 ones (EdgeSeedsFromRanges).
+	EdgeRanges []string `json:"edge_ranges,omitempty"`
 }
 
 // CDNAttestation is the additive sub-object that lands inside the

@@ -26,11 +26,10 @@ import {
 import type { AccountGroup } from './accountCheck';
 import { kindKey } from './setupRecovery';
 import { money } from './addons/addonErrors';
-import type { AccountItemAddonFields } from './addons/addonTypes';
 
 /** The add-on an account item is, in words (a standby address bills
  *  every month until it is removed or the relay is deleted). */
-export function addonItemLine(t: (k: string) => string, item: AccountItem & AccountItemAddonFields): string | null {
+export function addonItemLine(t: (k: string) => string, item: AccountItem): string | null {
     if (item.addon !== 'standby') return null;
     const cents = item.monthly_cost_cents ?? 0;
     return cents > 0 && item.cost_currency

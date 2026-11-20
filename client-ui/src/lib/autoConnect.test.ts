@@ -411,7 +411,7 @@ describe('verdicts: one plain sentence each, in both languages', () => {
         expect(autoConnectedNoteKey(up('udp_blocked_here'))).toBe('auto.note.udp_blocked_here');
         expect(autoConnectedNoteKey(up('something_new'))).toBeUndefined();
         // What the engine really sends when a QUIC way was silent and
-        // another way to the same server carried (worldbox op `auto`,
+        // another way to the same server carried (the lab rig's op `auto`,
         // memory.udp): verdict 'moved_on', and the reason on the entry.
         const moved = parseAuto({
             state: 'connected',

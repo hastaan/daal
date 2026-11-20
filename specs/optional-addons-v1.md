@@ -5,17 +5,31 @@
 Reserved 2026-11-20. Design: `docs/optional-addons-plan.md` (approved by
 the owner; its section 0 decisions D-1 to D-5 are taken as recommended).
 
-**Built (Wave 0):** the add-on ledger (§2), the whole command surface as
-stubs (§6), the Add-ons section of the publisher UI with every add-on
-shown as "in development" (§6.4), and the wire formats reserved in
-`specs/relaypack-v1.md`. **Built (Wave 1, L-bundle):** the recipient
-side of both pack members — `_standby` (parser, commitment, key text and
-DNS forms, import, set-route guard; S1, S2) and the CDN-fronted
-commitment `_cdn_endpoint` (format, check, merge, import, guard; B-4
-endpoint part) — and the publisher's signing check for both
-(`relaypackvalidate.ValidateForSigning`, RP026/RP027). **Not built:**
-everything else an add-on does. Every add-on operation answers
-`E_NOT_BUILT` until its lane lands (§6.1).
+**Built (2026-11-20, waves 0–2 and the integration pass): all three
+add-ons, end to end against the lab's stand-ins.**
+
+- Shared: the add-on ledger (§2), the command surface (§6), the Add-ons
+  section of the publisher UI with the three setup cards (§6.4), the
+  wire formats in `specs/relaypack-v1.md`, and the publisher's signing
+  check (`relaypackvalidate.ValidateForSigning`, RP026/RP027).
+- Standby address: provider, box, binder, verbs, wizard, card (S1–S6,
+  S8); the recipient's store write (`core/trust` SaveImport), address
+  variant and `engine_standby_key` (S7); a standby key carried by the
+  Google channel is kept by the refresh walk (`abi.StandbyKeySink`) and
+  counts as a new address for the route.
+- Way in through Cloudflare: the relay's door (`ws-cdn-in`, mgmt
+  `POST /cdn`, which also opens the box firewall), Cloudflare and the
+  provider firewall (`cdn-provision`), the door verb (`cdn-door`),
+  posture, test and removal, the signed route (the binder reads the
+  record's `cdn_front` member), the minted outbound, the edge picker and
+  the ladder (B-1 to B-8).
+- Google update channel: script, container, Path A and B, the
+  `appsscript` mirror in `publish-freshness`, the recipient's front
+  fetcher and container walk (G1–G7).
+
+**Not built:** nothing an add-on needs answers `E_NOT_BUILT` any more
+(the mechanism stays, §6.1). What is still open is in §8: the
+real-account gates, which no lab can answer, and a few edges.
 
 **Compatibility rule for every add-on member (owner's requirement:
 families may stay on an older build for a long time).** A pack that
@@ -136,9 +150,9 @@ as `importer.RouteInput.Standby` (nil when the route may use none). The
 store keeps it at `bundle.StandbyStoreKey(route)` = `standby:<route>`
 and removes it — and any key at `bundle.StandbyKeyStoreKey(route)` =
 `standby-key:<route>`, 16 raw bytes — when a newer commitment carries
-none. **That store write is `core/trust` SaveImport and is not built
-yet** (no lane owned it in wave 1); until it is, no standby reaches the
-guard and nothing is dialled at one. The set-route guard accepts an
+none. That store write is `core/trust` SaveImport (built). Both
+secrets are the route's and go with it on a hard delete
+(`routestore.perRouteSecretKeys`). The set-route guard accepts an
 outbound at the committed server, the open standby, or the address of a
 held key that matches the commitment; `routeStandbyAddress` in
 `core/abi/endpoint_guard.go` is the address S7's variant uses.
@@ -171,14 +185,44 @@ Never echoes the key or the address. Returns the number of bytes, or
 -1 when the engine is not initialised. Optional symbol: the desktop core
 binds it if present (`Engine::standby_key`), and the shell command
 `recipient_standby_key` answers "not in this engine library" until it
-exists. S7 adds it to `specs/engine-abi-v1.md` with its export.
+exists. It is in the ledger of `specs/engine-abi-v1.md` (release
+surface 70).
+
+A key also arrives without a person: a `daal-refresh-v1` container from
+the Google channel may carry one (`standby_key`), and the engine's
+refresher hands it to the same store write (`abi.StandbyKeySink`,
+`refresh.RelayPackRefresher.StandbyKeys`; never called with `Core.mu`
+held). A walk whose key was kept reports `updated`, like a walk that
+applied a new pack, and the route is checked again. The publisher's
+container builder reads the key the way the engine does
+(`bundle.ParseStandbyKeyText`: the grouped form `standby promote`
+prints, any case, `-` or spaces) and carries the one canonical form.
 
 ## 4. Way in through Cloudflare
 
 - Relay: a dedicated inbound `ws-cdn-in` (VLESS over WebSocket) on its
   own port, serving the Cloudflare Origin CA certificate and requiring
-  Authenticated Origin Pull; the relay's firewall opens that port to
-  Cloudflare's ranges only. A relay built before this needs a rebuild.
+  Authenticated Origin Pull. Both firewalls open that port to
+  Cloudflare's ranges only: the provider firewall by `cdn-provision`
+  (the relay's own firewall, by id or by its name
+  `daal-relay-<server id>`), the box firewall (ufw) by the door itself
+  when it is opened (`daal-relay-mgmt` `POST /cdn` with `edge_ranges`,
+  `specs/daal-relay-mgmt-v1.md`), and both close again on removal.
+  **Building a relay contacts nobody but the hosting company**: the app
+  passes no `--cdn-edge-ranges` to `provision`, so no relay needs
+  Cloudflare's list at first boot and none needs a rebuild to take the
+  add-on later. A relay whose management binary predates the door (no
+  `cdn` capability; relay releases before relay-v1.6.0) needs a rebuild
+  (`cdn-door` exit 3, `E_CDN_NEEDS_REBUILD`). The door opens only once
+  the relay has at least one person on it (sing-box refuses an inbound
+  with no users).
+- The order the app runs: `cdn-token-check` (the token is kept only
+  when it is exactly right), `cdn-provision` (Cloudflare, then the
+  provider firewall; a firewall failure takes the Cloudflare side down
+  again), `cdn-door --action enable`, `cdn-test` (a real handshake
+  through the edge, with ECH), then the signature with the route in it.
+  Any failure after `cdn-provision` closes the door and runs
+  `cdn-remove`.
 - Cloudflare: proxied record `<label>.<zone>`, SSL Full (strict), an
   Origin Rule overriding the destination port for the host name,
   WebSockets on, AOP on, ECH left on. No Worker.
@@ -193,11 +237,27 @@ exists. S7 adds it to `specs/engine-abi-v1.md` with its export.
   (`bundle.WrapCDNOutbound`) and installs the listed roots as
   `tls.certificate` (`specs/relaypack-v1.md`, "The CDN-fronted
   endpoint"). The binder runs `ValidateForSigning` (RP026).
-- Removal: sign without the route and publish; delete the record and
-  the origin rule; revoke the origin certificate; close the firewall
-  rule; disable the inbound; forget the token; tell the publisher to
-  delete the token in Cloudflare and that the domain bills until
-  cancelled. Relay delete does this before the server goes.
+- Where the signature gets it: while the way in is live the operator
+  record carries `cdn_front` (the front record `cdn-provision` printed,
+  plus the signed `plain_fallback` flag). `bind-and-sign` reads that
+  member when no `--cdn-front` is given; the edge seeds are the widest
+  of the Cloudflare ranges `cdn-provision` read (`FrontRecord.edge_ranges`,
+  v4 first, at most 8; `cloudflare.EdgeSeedsFromRanges`), the roots are
+  the ones the app ships (`relaypack.CDNShippedRootDigests`).
+  `--cdn-edge-seeds`, `--cdn-roots-file` and `--cdn-plain-fallback`
+  override. The minter takes the door's WebSocket path from the creds
+  file's `cdn_ws_path` (the app copies `cdn_front.origin_path` into it)
+  or `users-pack-sbp[x] --cdn-front`, and installs the shipped roots, or
+  the bundle `--cdn-roots-file` names (the lab's edge CA).
+- Removal: sign without the route and publish; close the door
+  (`cdn-door --action disable`: the inbound, its files and the box
+  firewall rules); delete the record and the origin rule; revoke the
+  origin certificate; close the provider firewall rule (`cdn-remove`);
+  forget the token; tell the publisher to delete the token in Cloudflare
+  and that the domain bills until cancelled. Relay delete does the
+  Cloudflare part before the server goes (the door goes with the
+  server). `cdn-remove` closes the door itself when given the relay's
+  record, key and helper address (the CLI's one-verb removal).
 
 ## 5. Google update channel
 
@@ -256,27 +316,32 @@ module and never `src-tauri/src/lib.rs`. All run on the blocking pool.
 |---|---|---|---|
 | `wizard_addons_list(operatorId)` | `addons::list` | `Addons.list` | built |
 | `wizard_addon_remove(addonId)` | `addons::remove` → the kind's `remove` | `Addons.remove` | built (dispatch) |
-| `wizard_addon_standby_price(input)` | `addon_standby::price` | `Addons.standbyPrice` | L-standby-pub (S6) |
-| `wizard_addon_standby_add(input)` | `addon_standby::add` | `Addons.standbyAdd` | L-standby-pub (S6) |
-| `wizard_addon_standby_promote(input)` | `addon_standby::promote` | `Addons.standbyPromote` | L-standby-pub (S6) |
-| `wizard_addon_standby_key(input)` | `addon_standby::key` | `Addons.standbyKey` | L-standby-pub (S6) |
-| `wizard_addon_cdn_set_token(input)` | `addon_cdn::set_token` | `Addons.cdnSetToken` | L-ui (B-7) |
-| `wizard_addon_cdn_build(input)` | `addon_cdn::build` | `Addons.cdnBuild` | L-ui (B-7) |
-| `wizard_addon_cdn_posture(input)` | `addon_cdn::posture` | `Addons.cdnPosture` | L-ui (B-7) |
-| `wizard_addon_cdn_set_plain_fallback(input)` | `addon_cdn::set_plain_fallback` | `Addons.cdnSetPlainFallback` | L-ui (B-7) |
-| `wizard_addon_google_script(input)` | `addon_google::script` | `Addons.googleScript` | L-google-pub (G3) |
-| `wizard_addon_google_sign_in(input)` | `addon_google::sign_in` (+ `PlatformHandle::google_authorize`) | `Addons.googleSignIn` | L-google-pub (G3) |
-| `wizard_addon_google_attach(input)` | `addon_google::attach` | `Addons.googleAttach` | L-google-pub (G3) |
-| `wizard_addon_google_check(input)` | `addon_google::check` | `Addons.googleCheck` | L-google-pub (G3) |
-| `recipient_standby_key(relayPackId, key)` | daal-desktop-core `commands::standby_key` → `Engine::standby_key` → `engine_standby_key` | `enterStandbyKey` (`client-ui/src/lib/standbyKey.ts`) | L-ladder (S7) for the export; L-ui (S8) for the field |
+| `wizard_addon_standby_price(input)` | `addon_standby::price` | `Addons.standbyPrice` | built (S6) |
+| `wizard_addon_standby_add(input)` | `addon_standby::add` | `Addons.standbyAdd` | built (S6) |
+| `wizard_addon_standby_promote(input)` | `addon_standby::promote` | `Addons.standbyPromote` | built (S6) |
+| `wizard_addon_standby_key(input)` | `addon_standby::key` | `Addons.standbyKey` | built (S6) |
+| `wizard_addon_cdn_set_token(input)` | `addon_cdn::set_token` | `Addons.cdnSetToken` | built (B-7) |
+| `wizard_addon_cdn_build(input)` | `addon_cdn::build` | `Addons.cdnBuild` | built (B-7) |
+| `wizard_addon_cdn_posture(input)` | `addon_cdn::posture` | `Addons.cdnPosture` | built (B-7) |
+| `wizard_addon_cdn_set_plain_fallback(input)` | `addon_cdn::set_plain_fallback` | `Addons.cdnSetPlainFallback` | built (B-7) |
+| `wizard_addon_google_script(input)` | `addon_google::script` | `Addons.googleScript` | built (G3) |
+| `wizard_addon_google_sign_in(input)` | `addon_google::sign_in` (+ `PlatformHandle::google_authorize`) | `Addons.googleSignIn` | built (G3) |
+| `wizard_addon_google_attach(input)` | `addon_google::attach` | `Addons.googleAttach` | built (G3) |
+| `wizard_addon_google_check(input)` | `addon_google::check` | `Addons.googleCheck` | built (G3) |
+| `recipient_standby_key(relayPackId, key)` | daal-desktop-core `commands::standby_key` → `Engine::standby_key` → `engine_standby_key` | `enterStandbyKey` (`client-ui/src/lib/standbyKey.ts`) | built (S7, S8) |
 
 Relay delete calls each kind's `on_relay_delete(ctx, row) -> AddonOutcome`
-(`addon_standby`, `addon_cdn`, `addon_google`); the stubs answer
-`not_built` with `keeps_relay`.
+(`addon_standby`, `addon_cdn`, `addon_google`). `AddonOutcome::not_built`
+remains for a kind a build does not know.
+
+The account check's items carry the add-on they are
+(`AccountItem.addon`, `monthly_cost_cents`, `cost_currency`; mirrored in
+`wizardCommands.ts`), and `FreshnessStatus.google_only` says the only
+refresh address is the Google channel (D-3).
 
 The older FRP-8 commands (`wizard_store_cloudflare_token`,
 `wizard_provision_cdn_front`, `wizard_list_cdn_fronts`,
-`wizard_verify_cdn_posture`) stay until B-7 retires them.
+`wizard_verify_cdn_posture`) are still registered; retiring them waits.
 
 ### 6.3 `daal-deploy` verbs
 
@@ -284,14 +349,19 @@ Driven from the wizard through the generic `CliRunner::run_addon`
 (`cli_bridge.rs`): argv verb first, secrets as 0600 temp files named by
 a flag (`AddonCliRequest.secret_files`) or on stdin, `--progress-json`
 lines on stderr forwarded as progress, stdout returned and wiped when
-dropped. `MockRunner.addon_reply` answers it in tests. No add-on lane
-adds a `CliRunner` method.
+dropped. A verb that refuses or whose check fails exits **4** with the
+JSON that says why on stdout; `run_addon` keeps that stdout at the head
+of the failure text (`cli_bridge::ADDON_REFUSED_RC`).
+`MockRunner.addon_reply` answers it in tests. No add-on lane adds a
+`CliRunner` method.
 
 | Verb | File | Lane |
 |---|---|---|
 | `standby price \| add \| promote \| remove` | `publisher/deploy/cli/cli_addon_standby.go` | L-standby-pub (S5) |
 | `cdn-token-check`, `cdn-test`, `cdn-posture`, `cdn-remove` | `publisher/deploy/cli/cli_addon_cdn.go` | L-cdn-server (B-3) |
-| `cdn-provision` (existing, rewritten in place) | `publisher/deploy/cli/cli.go` → `cloudflare.ProvisionFront` | L-cdn-server (B-3) |
+| `cdn-door --record-file F --operator-record R --token-file H --action enable\|disable --priv-key - --helper-ip IP` | `publisher/deploy/cli/cli_addon_cdn.go` → `mgmt.CDNDoorEnableWithFW` / `CDNDoorDisableWithFW`; exit 3 = the relay's management has no door | integration |
+| `cdn-provision` (existing, rewritten in place) | `publisher/deploy/cli/cli.go` → `cloudflare.ProvisionFront`; `--firewall-id` takes the id or the name | L-cdn-server (B-3) |
+| `users-pack-sbp[x] --cdn-front F --cdn-roots-file P` | `publisher/deploy/cli/cli_users_pack.go`: the CDN route's door path and roots for the minter | integration |
 | `appsscript-script`, `appsscript-deploy`, `appsscript-check`, `appsscript-clear` | `publisher/deploy/cli/cli_addon_google.go` | L-google-pub (G1/G2) |
 
 Publishing to the Google channel is not a verb: it is one more backend
@@ -304,10 +374,10 @@ of `publish-freshness`.
 at the end of the build wizard; one block per add-on with what it helps
 with, its cost and what it ties to the publisher; off by default.
 `addonText.ts` — the copy keys (`pub.addons.*`, English and Persian in
-`client-shared/i18n/d2-extra.*.json`) and `ADDON_BUILT`, which keeps a
-block "in development" (switch off and disabled) until its lane sets it
-true. The setup sheets (`StandbyCard.tsx`, `CdnCard.tsx`,
-`GoogleCard.tsx`) are the lanes' to add.
+`client-ui/src/i18n/d2/d2-extra.*.json`) and `ADDON_BUILT`, which keeps a
+block "in development" (switch off and disabled) while false; all three
+are true. The setup sheets are `StandbyCard.tsx`, `CdnCard.tsx` and
+`GoogleCard.tsx`.
 
 ## 7. One order on the recipient
 
@@ -322,33 +392,36 @@ Cloudflare way in, and Home says when the app is at 5.
 
 ## 8. Open items
 
-- **CDN compatibility — settled (wave 1).** The CDN commitment is the
-  sibling `_cdn_endpoint` and the outbound is wrapped, so builds before
-  it skip that one route ("not offered") and keep the rest of the pack
-  and the freshness merge. A `_cdn_endpoint` this build cannot read
-  costs that route (`needs_newer_app`), not the pack. The import screen
-  has no Persian/English line for `needs_newer_app` yet (it falls back
-  to the generic sentence): L-ui.
-- **Standby store write.** `core/trust` SaveImport must write
-  `RouteInput.Standby` to `standby:<route>` (and delete it and
-  `standby-key:<route>` when nil), atomically with the commitment. No
-  lane owns `core/trust` in wave 1.
-- **Signing check wiring.** The binder (`relaypack/binder.go`) must call
-  `relaypackvalidate.ValidateForSigning` after `Validate`; the minter
-  (`relaypack/client_pack.go` RewriteProfilesForRecipient) must render a
-  `cdn_fronted` route through `bundle.ParseCDNEndpoint` →
-  `bundle.CheckCDNOutbound` → `bundle.WrapCDNOutbound` instead of the
-  `_endpoint` path (today it marks such a route unavailable).
-- **The freshness endpoint table** (`daal-wizard/src/freshness.rs`,
-  V013) accepts only `r2` and `ghpages`. The Google channel needs an
-  `appsscript` kind there and its write key passed to
-  `publish-freshness`. No lane owns that file in the plan; L-google-pub
-  should, in wave 1.
-- **The account check** lists the standby Floating IP as a billed item
-  (plan §1.6); `setup_recovery.rs` is not in any lane's list. L-standby-pub.
-- **The relay delete sheet** does not yet show `DestroyReport.addons`.
-  L-ui.
+Settled since wave 1: the CDN compatibility rule (the sibling
+`_cdn_endpoint` and the wrapped outbound; an import costs the route,
+`needs_newer_app`, never the pack, and the import screen says so in both
+languages); the standby store write; the signing check in the binder and
+the CDN route in the minter; the `appsscript` kind of the freshness
+table; the standby item in the account check; `DestroyReport.addons` on
+the relay delete sheet; the door verb and the CDN route in the signature
+(integration pass).
+
+Still open:
+
 - **Real-account gates**, in order: S-1 (Floating IP limit on the
-  account), C-1 (token permission keys), C-2 (ECH on a free zone), G-1
-  (PropertiesService without an authorization step), G-2 (fronted fetch
-  with the engine's hello).
+  account), C-1 (token permission keys), C-2 (ECH on a free zone, and
+  the edge probe's neutral name), G-1 (PropertiesService without an
+  authorization step), G-2 (fronted fetch with the engine's hello; Google
+  may answer 421 to `script.googleusercontent.com` on a connection opened
+  with the `www.google.com` name).
+- **The relay release.** The door's box-firewall half and `POST /cdn`
+  ride relay-v1.6.0, which the owner cuts; every relay needs a fresh
+  provision to gain it.
+- **A door before the first person.** `POST /cdn` refuses while the relay
+  has no recipient (409), so the way in through Cloudflare cannot be set
+  up on a relay nobody is on yet; the build rolls back and says why. (A
+  door the last person left is parked and opens again for the next one.)
+- **What a block of `cloudflare-ech.com` does.** Plan §2.1 says the add-on
+  does not rescue it. In the lab the route still carries, on the second
+  rung (the ECH hello split across TLS records), because the lab's boxes,
+  like the measured real ones, do not join TLS records
+  (`cdn-ech-outer-block*`). Against a box that does, the route is dead and
+  no plain hello is sent. Which one Iran's boxes are is unknown.
+- **Google-only signing for older builds** (`mirror_args`): a one-mirror
+  set waits until the builds in people's hands accept it.
+- **The FRP-8 CDN commands** are still registered beside the add-on's.

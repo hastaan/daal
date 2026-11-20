@@ -31,9 +31,12 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     #[cfg(target_os = "android")]
     let handle = api.register_android_plugin(PLUGIN_IDENTIFIER, "DaalPlatformPlugin")?;
     // Optional add-ons, Google update channel, Path A: Play services'
-    // authorization client, in its own Kotlin class (GoogleAuth.kt).
+    // authorization client (GoogleAuth.kt), reached through the SAME
+    // plugin. A second register_android_plugin under this identifier
+    // replaces the first on the Kotlin side: every DaalPlatformPlugin
+    // command (VPN, secure screen, insets) then failed on the phone.
     #[cfg(target_os = "android")]
-    let google = Some(api.register_android_plugin(PLUGIN_IDENTIFIER, "GoogleAuthPlugin")?);
+    let google = None;
     #[cfg(target_os = "ios")]
     let handle = api.register_ios_plugin(init_plugin_daal_platform)?;
     #[cfg(target_os = "ios")]
@@ -113,9 +116,11 @@ impl<R: Runtime> Platform<R> {
         if ANDROID_CLIENT_ID.map_or(true, |s| s.trim().is_empty()) {
             return Err(Error::Other(NOT_CONFIGURED.into()));
         }
-        let Some(google) = &self.1 else {
+        #[cfg(not(target_os = "android"))]
+        if self.1.is_none() {
             return Err(Error::Other(NOT_CONFIGURED.into()));
-        };
+        }
+        let google = &self.0;
         match google.run_mobile_plugin::<GoogleAuthorizeResponse>(
             "googleAuthorize",
             GoogleAuthorizeArgs { scopes },

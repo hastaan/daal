@@ -4,13 +4,9 @@ import android.app.Activity
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.IntentSenderRequest
 import app.tauri.Logger
-import app.tauri.annotation.ActivityCallback
-import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
-import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
-import app.tauri.plugin.Plugin
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
@@ -47,17 +43,24 @@ class GoogleAuthorizeArgs {
  * Every rejection message starts with a stable code the wizard passes
  * through: E_GOOGLE_NOT_CONFIGURED, E_GOOGLE_NO_PLAY_SERVICES,
  * E_GOOGLE_SIGN_IN_CANCELLED, E_GOOGLE_UNAUTHORIZED.
+ *
+ * Not a plugin of its own: DaalPlatformPlugin's `googleAuthorize`
+ * command and `googleAuthorizeResult` callback delegate here. Tauri
+ * keeps one Kotlin plugin per identifier, so a second @TauriPlugin
+ * registered under org.daal.desktop.platform replaced the main one.
  */
-@TauriPlugin
-class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
+class GoogleAuth(
+  private val activity: Activity,
+  /** Shows Google's consent sheet; its result comes back to [onResult]. */
+  private val showConsent: (Invoke, IntentSenderRequest) -> Unit,
+) {
 
   private val allowedScopes = setOf(
     "https://www.googleapis.com/auth/script.projects",
     "https://www.googleapis.com/auth/script.deployments",
   )
 
-  @Command
-  fun googleAuthorize(invoke: Invoke) {
+  fun authorize(invoke: Invoke) {
     val scopes: List<String>
     try {
       scopes = invoke.parseArgs(GoogleAuthorizeArgs::class.java).scopes
@@ -86,11 +89,7 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
             // Google's own consent sheet (account choice, the
             // "unverified app" warning, the two permissions).
             try {
-              startIntentSenderForResult(
-                invoke,
-                IntentSenderRequest.Builder(pending.intentSender).build(),
-                "googleAuthorizeResult",
-              )
+              showConsent(invoke, IntentSenderRequest.Builder(pending.intentSender).build())
             } catch (t: Throwable) {
               invoke.reject("E_GOOGLE_UNAUTHORIZED: could not show Google's sign-in")
             }
@@ -104,8 +103,7 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
-  @ActivityCallback
-  fun googleAuthorizeResult(invoke: Invoke, result: ActivityResult) {
+  fun onResult(invoke: Invoke, result: ActivityResult) {
     if (result.resultCode != Activity.RESULT_OK || result.data == null) {
       invoke.reject("E_GOOGLE_SIGN_IN_CANCELLED: the Google sign-in was closed")
       return
@@ -130,7 +128,7 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
   /** A stable code for a failure; never the token, never account details. */
   private fun messageFor(t: Throwable): String {
     val code = (t as? ApiException)?.statusCode
-    Logger.error("GoogleAuthPlugin: authorization failed, status ${code ?: "-"}")
+    Logger.error("GoogleAuth: authorization failed, status ${code ?: "-"}")
     return when (code) {
       CommonStatusCodes.DEVELOPER_ERROR ->
         "E_GOOGLE_NOT_CONFIGURED: this build is not registered with Google; add the script by hand"

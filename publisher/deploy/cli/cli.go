@@ -167,7 +167,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "cdn-posture":
 		return runCDNPosture(ctx, rest, stdout, stderr)
 	case "cdn-remove":
-		return runCDNRemove(ctx, rest, stdout, stderr)
+		return runCDNRemove(ctx, rest, os.Stdin, stdout, stderr)
+	case "cdn-door":
+		return runCDNDoor(ctx, rest, os.Stdin, stdout, stderr)
 	case "appsscript-script":
 		return runAppsScriptScript(ctx, rest, stdout, stderr)
 	case "appsscript-deploy":
@@ -295,6 +297,10 @@ Subcommands:
   cdn-provision Build the way in through Cloudflare (origin certificate, origin
                 pull, strict SSL, WebSockets, proxied record, origin rule) and
                 the relay firewall rule; emit FrontRecord JSON.
+  cdn-door      Open (--action enable) or close (--action disable) the relay's
+                Cloudflare door through its management: the ws-cdn-in inbound
+                and the box-firewall rules for Cloudflare's ranges. Exit 3: the
+                relay's management predates the door (rebuild it).
   cdn-rotate-path
                 Retired with the Cloudflare Worker: always fails and says so.
                 The WebSocket path is the relay door's own; a new one comes
@@ -408,7 +414,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	outFile := fs.String("o", "", "write OperatorRecord JSON here (default: stdout)")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per provisioning step on stderr (FRP-4b)")
 	journalPath := fs.String("journal", "", "append a JSON-lines record of everything this run creates, as it creates it, to this file (locked for the run's life); see provjournal")
-	cdnEdgeRanges := fs.Bool("cdn-edge-ranges", false, "fetch Cloudflare's published ranges and open the CDN door's port to them at the box firewall (add-on 2; written once at first boot, so a relay built without it needs a rebuild for the way in through Cloudflare). Skipped with --dry-run; a failed fetch is a warning, not an error")
+	cdnEdgeRanges := fs.Bool("cdn-edge-ranges", false, "contact Cloudflare now for its published ranges and open the CDN door's port to them at the box firewall from first boot (add-on 2). Not needed: the door opens its own box-firewall rule when it is turned on (cdn-door), and the app never passes this, so building a relay contacts no one but the hosting company. Skipped with --dry-run; a failed fetch is a warning, not an error")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -1911,7 +1917,7 @@ func runCDNProvision(ctx context.Context, args []string, stdout, stderr io.Write
 	outDir := fs.String("out-dir", "", "directory for origin CA / origin pull CA files")
 	tokenFile := fs.String("cf-token-file", "", "Cloudflare API token file")
 	cloudTokenFile := fs.String("token-file", "", "Hetzner API token file for the relay firewall rule")
-	firewallID := fs.String("firewall-id", "", "the relay's own Hetzner firewall id (daal-relay-<server id>)")
+	firewallID := fs.String("firewall-id", "", "the relay's own Hetzner firewall: its numeric id, or its name (daal-relay-<server id>), which is looked up")
 	noECH := fs.Bool("no-ech-read", false, "skip the DoH read of the published ECH config")
 	progress := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 
@@ -2660,7 +2666,7 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	// by _cdn_endpoint. Needs --phase V1.6 or later.
 	cdnFront := fs.String("cdn-front", "", "the FrontRecord JSON cdn-provision printed; adds the way in through Cloudflare as one more route (needs --phase V1.6+)")
 	cdnSeeds := fs.String("cdn-edge-seeds", "", "comma-separated 1–8 prefixes from Cloudflare's published ranges, read abroad at sign time (with --cdn-front)")
-	cdnRoots := fs.String("cdn-roots-file", "", "PEM bundle of the roots the app ships for the edge; their SPKI digests are signed (with --cdn-front)")
+	cdnRoots := fs.String("cdn-roots-file", "", "PEM bundle of the roots the edge chains to; their SPKI digests are signed (default: the roots the app ships, relaypack.CDNShippedRootDigests)")
 	cdnPlain := fs.Bool("cdn-plain-fallback", false, "allow a hello without ECH (shows the zone name) on the Cloudflare route (D-2; off by default)")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
@@ -2788,6 +2794,10 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		}
 	}
 
+	// The way in through Cloudflare: --cdn-front, or else the record's
+	// own `cdn_front` member (what the app writes while the way in is
+	// live). From the member the seeds come from the ranges cdn-provision
+	// read and the roots are the ones the app ships; the flags override.
 	var cdn *relaypack.CDNFront
 	if *cdnFront != "" {
 		front, err := cdnReadRecord(*cdnFront)
@@ -2799,20 +2809,42 @@ func runBindAndSign(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 			fmt.Fprintln(stderr, "bind-and-sign: --cdn-front needs --cdn-edge-seeds and --cdn-roots-file")
 			return 2
 		}
-		pemBundle, err := os.ReadFile(*cdnRoots)
+		cdn = &relaypack.CDNFront{Front: front, EdgeSeeds: splitCSV(*cdnSeeds), PlainFallback: *cdnPlain}
+	} else {
+		member, err := cdnFrontFromRecordFile(*recordFile)
 		if err != nil {
-			fmt.Fprintf(stderr, "bind-and-sign: --cdn-roots-file: %v\n", err)
+			fmt.Fprintf(stderr, "bind-and-sign: --operator-record: %v\n", err)
 			return 2
 		}
-		roots, err := relaypack.CDNRootDigests(pemBundle)
-		if err != nil {
-			fmt.Fprintf(stderr, "bind-and-sign: %v\n", err)
+		if member == nil && (*cdnSeeds != "" || *cdnRoots != "" || *cdnPlain) {
+			fmt.Fprintln(stderr, "bind-and-sign: the --cdn-* flags need --cdn-front (or a record with a cdn_front member)")
 			return 2
 		}
-		cdn = &relaypack.CDNFront{Front: front, EdgeSeeds: splitCSV(*cdnSeeds), TLSRootsSHA256: roots, PlainFallback: *cdnPlain}
-	} else if *cdnSeeds != "" || *cdnRoots != "" || *cdnPlain {
-		fmt.Fprintln(stderr, "bind-and-sign: the --cdn-* flags need --cdn-front")
-		return 2
+		if member != nil {
+			cdn = member
+			if *cdnSeeds != "" {
+				cdn.EdgeSeeds = splitCSV(*cdnSeeds)
+			}
+			cdn.PlainFallback = cdn.PlainFallback || *cdnPlain
+		}
+	}
+	if cdn != nil {
+		cdn.TLSRootsSHA256 = relaypack.CDNShippedRootDigests()
+		if *cdnRoots != "" {
+			pemBundle, err := os.ReadFile(*cdnRoots)
+			if err != nil {
+				fmt.Fprintf(stderr, "bind-and-sign: --cdn-roots-file: %v\n", err)
+				return 2
+			}
+			if cdn.TLSRootsSHA256, err = relaypack.CDNRootDigests(pemBundle); err != nil {
+				fmt.Fprintf(stderr, "bind-and-sign: %v\n", err)
+				return 2
+			}
+		}
+		if len(cdn.EdgeSeeds) == 0 {
+			fmt.Fprintln(stderr, "bind-and-sign: the way in through Cloudflare has no edge seeds: its front record holds no Cloudflare ranges (run cdn-provision again) and no --cdn-edge-seeds was given")
+			return 2
+		}
 	}
 
 	res, err := relaypack.BindAndSign(rec, priv, relaypack.BindOpts{

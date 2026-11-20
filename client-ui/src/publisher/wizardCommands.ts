@@ -440,6 +440,10 @@ export interface FreshnessStatus {
      *  existed. Never inferred from `endpoints`. */
     mirrors_in_pack: string[];
     pack_signed_at_unix: number;
+    /** The only refresh address is the Google update channel (owner
+     *  decision D-3): accepted alone (min_mirrors is then 1), and the
+     *  card says a Google suspension stops updates. */
+    google_only?: boolean;
 }
 
 /** What the operator types to add one mirror. Credentials travel this
@@ -1050,6 +1054,13 @@ export interface AccountItem extends ResourceRef {
         | 'cannot_tell';
     belongs_to_relay_id: number | null;
     can_delete: boolean;
+    /** The add-on this item is (setup_recovery::AccountItem.addon):
+     *  'standby' for a relay's standby address, '' otherwise. */
+    addon?: string;
+    /** What the add-on bills each month, as read when it was rented;
+     *  0 with an empty currency when unknown. */
+    monthly_cost_cents?: number;
+    cost_currency?: string;
 }
 
 export interface AccountCheckAccount {

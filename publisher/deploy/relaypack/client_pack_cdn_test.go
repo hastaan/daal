@@ -204,3 +204,31 @@ func TestCDNClientOutbound_PlainOnlyWhenSigned(t *testing.T) {
 		t.Fatal("minted without the recipient's uuid")
 	}
 }
+
+// A pack signed for other roots (bind-and-sign --cdn-roots-file, the lab
+// edge's CA) mints with those roots installed when the minter is handed
+// the same bundle, and still refuses roots the commitment does not list.
+func TestCDNClientOutbound_PublisherRoots(t *testing.T) {
+	shipped := CDNShippedRoots()
+	other := shipped[len(shipped)-1]
+	roots, err := cdnRootsFromPEMs([]string{other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := fullParams()
+	p.CDNWSPath = "/p"
+	p.CDNRootPEMs = []string{other}
+	ob, err := CDNClientOutbound(cdnMintEndpoint([]string{roots[0].digest}, cdnMintECH, false), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ob), strings.Split(other, "\n")[1]) {
+		t.Fatalf("the publisher's root is not installed: %s", ob)
+	}
+	if _, err := CDNClientOutbound(cdnMintEndpoint(CDNShippedRootDigests()[:1], cdnMintECH, false), p); err == nil {
+		t.Fatal("minted with a root the commitment does not list")
+	}
+	if _, err := cdnRootsFromPEMs([]string{"not pem"}); err == nil {
+		t.Fatal("an empty bundle accepted")
+	}
+}

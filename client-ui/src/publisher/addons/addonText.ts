@@ -58,8 +58,9 @@ export const ADDON_COPY: readonly AddonCopy[] = [
 export const ADDON_BUILT: Readonly<Record<AddonKind, boolean>> = {
     // L-standby-pub (S3-S6) + L-ui (S8).
     standby: true,
-    // L-cdn-server (B-1..B-5) + L-ui (B-7). The relay door verb and the
-    // binder's CDN route are other lanes' (see addon_cdn.rs).
+    // L-cdn-server (B-1..B-5) + L-ui (B-7); the relay door verb
+    // (cdn-door) and the binder's CDN route landed in the integration
+    // pass.
     cdn: true,
     // L-google-pub (G1-G3) + L-ui (G6).
     google: true,

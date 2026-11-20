@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"daal/publisher/deploy/cloudflare"
 	"daal/publisher/deploy/relayports"
@@ -63,14 +64,39 @@ func (a *CloudflareFirewallApplier) port() int {
 	return a.Port
 }
 
+// resolve turns a relay firewall's name into its id. The wizard knows a
+// relay by its server id, and so its firewall by the name provisioning
+// gave it (firewallNameForServer: daal-relay-<server id>); the record
+// does not carry the firewall's id. Anything else is taken as an id.
+func (a *CloudflareFirewallApplier) resolve(ctx context.Context, idOrName string) (string, error) {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" {
+		return "", errNoRelayFirewall
+	}
+	if !strings.HasPrefix(idOrName, firewallNameForServer("")) {
+		return idOrName, nil
+	}
+	fws, err := a.c.FirewallList(ctx)
+	if err != nil {
+		return "", fmt.Errorf("hetzner: find firewall %q: %w", idOrName, err)
+	}
+	for _, f := range fws {
+		if f.Name == idOrName {
+			return f.ID, nil
+		}
+	}
+	return "", fmt.Errorf("hetzner: no firewall named %q on this account", idOrName)
+}
+
 // ApplyCloudflareRule satisfies cloudflare.FirewallApplier. firewallID
-// must be the relay's own firewall. Returns that id.
+// must be the relay's own firewall, by id or by name. Returns its id.
 func (a *CloudflareFirewallApplier) ApplyCloudflareRule(ctx context.Context, firewallID string, ranges *cloudflare.EdgeRanges) (string, error) {
 	if ranges == nil {
 		return "", errEmptyRanges
 	}
-	if firewallID == "" {
-		return "", errNoRelayFirewall
+	firewallID, err := a.resolve(ctx, firewallID)
+	if err != nil {
+		return "", err
 	}
 	if pr, ok := a.c.(cloudflarePortRuler); ok {
 		return pr.FirewallApplyCloudflareRuleOnPort(ctx, firewallID, a.port(), ranges.V4, ranges.V6)
@@ -89,6 +115,10 @@ func (a *CloudflareFirewallApplier) RemoveCloudflareRule(ctx context.Context, fi
 	if !ok {
 		return errors.New("hetzner: this client cannot remove the Cloudflare rule")
 	}
+	firewallID, err := a.resolve(ctx, firewallID)
+	if err != nil {
+		return err
+	}
 	return pr.FirewallRemoveCloudflareRule(ctx, firewallID)
 }
 
@@ -99,6 +129,10 @@ func (a *CloudflareFirewallApplier) CloudflareRule(ctx context.Context, firewall
 	pr, ok := a.c.(cloudflarePortRuler)
 	if !ok {
 		return CloudflareRuleState{}, errors.New("hetzner: this client cannot read the Cloudflare rule")
+	}
+	firewallID, err := a.resolve(ctx, firewallID)
+	if err != nil {
+		return CloudflareRuleState{}, err
 	}
 	return pr.FirewallCloudflareRule(ctx, firewallID)
 }

@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"daal/bundle-go/bundle"
 )
 
 // ContainerKind is the container's kind discriminator.
@@ -108,11 +110,18 @@ func Build(freshnessDoc, pack []byte, standbyKey string) ([]byte, error) {
 		}
 		w.Pack = base64.StdEncoding.EncodeToString(pack)
 	}
-	if standbyKey != "" {
-		if !standbyKeyRe.MatchString(standbyKey) {
-			return nil, errors.New("appsscript: standby key must be 26 Crockford base32 symbols")
+	if strings.TrimSpace(standbyKey) != "" {
+		// The key as the publisher holds it: `standby promote` prints it
+		// in groups (bundle.StandbyKeyBytes.Text). Read it the way the
+		// engine reads a typed key (spaces and '-' ignored, case folded,
+		// O/I/L read as digits, trailing bits zero) and carry the one
+		// canonical form, 26 symbols run together, which is all a
+		// recipient's container reader accepts.
+		k, err := bundle.ParseStandbyKeyText(standbyKey)
+		if err != nil {
+			return nil, fmt.Errorf("appsscript: standby key: %w", err)
 		}
-		w.StandbyKey = standbyKey
+		w.StandbyKey = strings.ReplaceAll(k.Text(), " ", "")
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

@@ -929,9 +929,12 @@ key through the Google channel with the ordinary mirrors cut),
 `cdn-provision` (token verdicts ok / too_broad ×2 / missing_permission /
 invalid; a provision that fails at the origin rule leaves the zone as it
 was; the zone state, the relay firewall's door rule from the published
-ranges only, the ECH config read over DoH; posture; a WebSocket through
-the edge with ECH and origin pull; the door refuses a client without the
-origin-pull certificate; removal; the token in no log), `cdn` (a phone
+ranges only, the ECH config read over DoH; the door opened by `cdn-door`,
+which opens the box firewall to the same ranges itself (provisioning
+fetches none); posture; a WebSocket through the edge with ECH and origin
+pull; the door refuses a client without the origin-pull certificate;
+removal, door first, leaves it closed at both firewalls; the token in no
+log), `cdn` (a phone
 with the CDN route, per scenario), `google-channel` (Path A: API off →
 `E_GOOGLE_API_NOT_ENABLED`, a failing stage → `E_GOOGLE_PARTIAL` and a
 resume into the same project, the token revoked every time and in no

@@ -461,6 +461,12 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 				fire, sni = listed == (r.When == "tls_sni"), name
 			case chNoSNI:
 				fire = r.When == "tls_sni_not"
+			case chOpaque:
+				// An allowlist lets through only a name it has read: a
+				// hello it cannot read (split across records) is not on
+				// it. A blocklist cannot match one, which is the blind
+				// spot the split hello exists for (Niere et al. 2023).
+				fire = r.When == "tls_sni_not"
 			}
 		}
 		if !fire {

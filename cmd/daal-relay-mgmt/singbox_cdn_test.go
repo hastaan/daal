@@ -282,12 +282,27 @@ func TestCDNUserHooks(t *testing.T) {
 		t.Fatal("remove r3")
 	}
 	if findInboundByTag(doc, tagCDN) != nil {
-		t.Fatal("the last recipient leaving must close the door (no empty inbound)")
+		t.Fatal("the last recipient leaving must park the door (no empty inbound)")
 	}
-	// Closed door: appending is a no-op, not a new inbound.
+	// A parked door (files and path kept) opens again for the next
+	// recipient, on the path the signed packs name: removing the last
+	// person and adding a new one must not silently end the way in.
 	appendCDNUser(doc, userCreds{Name: "r4", VLESSUUID: "uuid-4"})
+	in := findInboundByTag(doc, tagCDN)
+	if in == nil || len(asSlice(in["users"])) != 1 {
+		t.Fatalf("a parked door did not open for the next recipient: %v", in)
+	}
+	if tr, _ := in["transport"].(map[string]any); tr["path"] != enableReq(m).WSPath {
+		t.Fatalf("reopened on another path: %v", tr)
+	}
+	// A disabled door (files gone) stays closed.
+	removeCDNUser(doc, "r4")
+	if rr := cdnCall(t, srv, cdnReq{Action: "disable"}); rr.Code != http.StatusOK {
+		t.Fatal(rr.Body.String())
+	}
+	appendCDNUser(doc, userCreds{Name: "r5", VLESSUUID: "uuid-5"})
 	if findInboundByTag(doc, tagCDN) != nil {
-		t.Fatal("appendCDNUser opened a closed door")
+		t.Fatal("appendCDNUser opened a disabled door")
 	}
 }
 
@@ -319,7 +334,7 @@ func TestCDNDoorIsCoveredByCredentialRotation(t *testing.T) {
 
 // The wire shape must match publisher/deploy/cloudflare.DoorRequest.
 func TestCDNRequestFieldNames(t *testing.T) {
-	want := []string{"action", "aop_ca_pem", "origin_cert_pem", "origin_key_pem", "port", "ws_path"}
+	want := []string{"action", "aop_ca_pem", "edge_ranges", "origin_cert_pem", "origin_key_pem", "port", "ws_path"}
 	var got []string
 	rt := reflect.TypeOf(cdnReq{})
 	for i := 0; i < rt.NumField(); i++ {
@@ -328,5 +343,115 @@ func TestCDNRequestFieldNames(t *testing.T) {
 	sort.Strings(got)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cdnReq json names = %v, want %v", got, want)
+	}
+}
+
+// ufwRecorder stands in for ufw: it keeps the rule set the calls leave
+// and can be told to refuse one rule.
+type ufwRecorder struct {
+	calls  []string
+	rules  map[string]bool
+	refuse string
+}
+
+func stubUFW(t *testing.T) *ufwRecorder {
+	t.Helper()
+	r := &ufwRecorder{rules: map[string]bool{}}
+	old := cdnUFW
+	cdnUFW = func(args ...string) error {
+		line := strings.Join(args, " ")
+		r.calls = append(r.calls, line)
+		if r.refuse != "" && strings.Contains(line, r.refuse) {
+			return errors.New("refused")
+		}
+		rule := strings.TrimPrefix(strings.TrimPrefix(line, "--force delete allow "), "allow ")
+		if strings.HasPrefix(line, "--force delete allow ") {
+			delete(r.rules, rule)
+		} else if strings.HasPrefix(line, "allow ") {
+			r.rules[rule] = true
+		} else {
+			t.Fatalf("unexpected ufw call %q", line)
+		}
+		return nil
+	}
+	t.Cleanup(func() { cdnUFW = old })
+	return r
+}
+
+// The door opens its own port at the box firewall to the ranges it is
+// sent, replaces the set on a second enable, and closes every rule it
+// opened on disable. Provisioning needs no Cloudflare ranges for it.
+func TestCDNEnable_OpensTheBoxFirewallToTheSentRanges(t *testing.T) {
+	srv, _, m := newCDNTestServer(t)
+	ufw := stubUFW(t)
+	req := enableReq(m)
+	req.EdgeRanges = []string{"173.245.48.0/20", "2400:cb00::/32", "173.245.48.1/20"}
+	rr := cdnCall(t, srv, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("enable: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp cdnResp
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	want := map[string]bool{
+		"from 173.245.48.0/20 to any port 8448 proto tcp": true,
+		"from 2400:cb00::/32 to any port 8448 proto tcp":  true,
+	}
+	if !reflect.DeepEqual(ufw.rules, want) || resp.BoxFirewallRules != 2 {
+		t.Fatalf("rules = %v (resp %d), want %v", ufw.rules, resp.BoxFirewallRules, want)
+	}
+	// A second enable with a changed list: the new one added, the gone
+	// one removed, the kept one untouched.
+	ufw.calls = nil
+	req.EdgeRanges = []string{"173.245.48.0/20", "103.21.244.0/22"}
+	if rr := cdnCall(t, srv, req); rr.Code != http.StatusOK {
+		t.Fatalf("re-enable: %d %s", rr.Code, rr.Body.String())
+	}
+	want = map[string]bool{
+		"from 173.245.48.0/20 to any port 8448 proto tcp": true,
+		"from 103.21.244.0/22 to any port 8448 proto tcp": true,
+	}
+	if !reflect.DeepEqual(ufw.rules, want) || len(ufw.calls) != 2 {
+		t.Fatalf("after re-enable rules = %v calls = %v", ufw.rules, ufw.calls)
+	}
+	rr = cdnCall(t, srv, cdnReq{Action: "disable"})
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if rr.Code != http.StatusOK || len(ufw.rules) != 0 || resp.BoxFirewallRules != 0 {
+		t.Fatalf("disable: %d rules left %v (resp %d)", rr.Code, ufw.rules, resp.BoxFirewallRules)
+	}
+	if _, err := os.Stat(cdnRangesPath()); err == nil {
+		t.Fatal("the range record outlived disable")
+	}
+}
+
+func TestCDNEnable_BadRangesRefusedBeforeAnything(t *testing.T) {
+	for _, bad := range []string{"0.0.0.0/0", "::/0", "1.2.3.4", "10.0.0.0/8; rm -rf /"} {
+		srv, cfg, m := newCDNTestServer(t)
+		ufw := stubUFW(t)
+		req := enableReq(m)
+		req.EdgeRanges = []string{"173.245.48.0/20", bad}
+		if rr := cdnCall(t, srv, req); rr.Code != http.StatusBadRequest {
+			t.Fatalf("%q: %d %s", bad, rr.Code, rr.Body.String())
+		}
+		doc, _ := loadSingboxDoc(cfg)
+		if len(ufw.calls) != 0 || findInboundByTag(doc, tagCDN) != nil {
+			t.Fatalf("%q: something was written (ufw %v)", bad, ufw.calls)
+		}
+	}
+}
+
+// A rule ufw refuses fails the enable and takes back the rules it had
+// added; the door is not opened.
+func TestCDNEnable_FirewallFailureOpensNothing(t *testing.T) {
+	srv, cfg, m := newCDNTestServer(t)
+	ufw := stubUFW(t)
+	ufw.refuse = "2400:cb00::/32"
+	req := enableReq(m)
+	req.EdgeRanges = []string{"173.245.48.0/20", "2400:cb00::/32"}
+	if rr := cdnCall(t, srv, req); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("enable: %d %s", rr.Code, rr.Body.String())
+	}
+	doc, _ := loadSingboxDoc(cfg)
+	if len(ufw.rules) != 0 || findInboundByTag(doc, tagCDN) != nil {
+		t.Fatalf("left behind: rules %v, door %v", ufw.rules, findInboundByTag(doc, tagCDN) != nil)
 	}
 }

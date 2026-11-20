@@ -130,6 +130,13 @@ type ClientConnParams struct {
 	// minter knows of, and a cdn_fronted route is skipped and reported.
 	CDNWSPath string `json:",omitempty"`
 
+	// CDNRootPEMs replaces the app's shipped CDN roots (CDNShippedRoots)
+	// as the set the CDN outbound may trust, when the publisher signed
+	// other roots (bind-and-sign --cdn-roots-file; users-pack-sbp[x]
+	// --cdn-roots-file installs the same bundle). Only roots the signed
+	// commitment lists are installed either way. Empty: the shipped set.
+	CDNRootPEMs []string `json:",omitempty"`
+
 	// Multiplex is the per-family (in a Daal pack, per-route: one route
 	// per family) stream-multiplexing knob, sourced from the toolbox
 	// profile — see MultiplexFromProfile. A nil map or a missing entry
@@ -627,6 +634,44 @@ var cdnRoots = sync.OnceValues(func() ([]cdnRoot, error) {
 	return out, nil
 })
 
+// cdnRootsFromPEMs is cdnRoots for a bundle the publisher passed
+// (CDNRootPEMs): each entry one or more PEM CA certificates.
+func cdnRootsFromPEMs(pems []string) ([]cdnRoot, error) {
+	var out []cdnRoot
+	seen := map[string]bool{}
+	for _, p := range pems {
+		rest := []byte(p)
+		for {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type != "CERTIFICATE" {
+				return nil, fmt.Errorf("a %q block is not a certificate", block.Type)
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			if !cert.IsCA {
+				return nil, errors.New("a certificate in the bundle is not a CA")
+			}
+			sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+			d := base64.StdEncoding.EncodeToString(sum[:])
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			out = append(out, cdnRoot{pem: strings.TrimSpace(string(pem.EncodeToMemory(block))), digest: d})
+		}
+	}
+	if len(out) == 0 || len(out) > bundle.MaxTLSRoots {
+		return nil, fmt.Errorf("%d roots (want 1..%d)", len(out), bundle.MaxTLSRoots)
+	}
+	return out, nil
+}
+
 // CDNShippedRoots returns the shipped CDN roots as PEM, in a fixed order.
 func CDNShippedRoots() []string {
 	roots, _ := cdnRoots()
@@ -686,6 +731,11 @@ func CDNClientOutbound(ep *bundle.CDNEndpoint, p ClientConnParams) ([]byte, erro
 	roots, err := cdnRoots()
 	if err != nil {
 		return nil, fmt.Errorf("client outbound: shipped CDN roots: %w", err)
+	}
+	if len(p.CDNRootPEMs) > 0 {
+		if roots, err = cdnRootsFromPEMs(p.CDNRootPEMs); err != nil {
+			return nil, fmt.Errorf("client outbound: CDN roots: %w", err)
+		}
 	}
 	listed := map[string]bool{}
 	for _, d := range ep.TLSRootsSHA256 {

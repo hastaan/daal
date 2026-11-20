@@ -52,9 +52,9 @@ type RunCtx struct {
 	// while it is set connects with (op desync). Empty: off.
 	desync string
 	// cdnWorld: the CDN add-on is under test (a cdn-* scenario or op):
-	// Cloudflare's stand-ins come up before provisioning, which then
-	// opens the CDN door's port at the box to the published ranges
-	// (provision --cdn-edge-ranges), as the app does for such a relay.
+	// Cloudflare's stand-ins come up before provisioning. Provisioning
+	// itself contacts no Cloudflare stand-in, as the app's does not: the
+	// door opens its own box-firewall rule (cdn-door).
 	cdnWorld bool
 }
 
@@ -329,16 +329,12 @@ func (rc *RunCtx) provision() bool {
 	if rc.ExplicitFamilies {
 		famFlag = rc.Serve
 	}
-	var extra []string
 	if rc.cdnWorld {
 		if err := rc.BringUpCDN(); err != nil {
 			return r.Add("", "provision", "addons.cdn_world", Pass, Fail, err.Error(), nil, t0)
 		}
-		if provisionKnowsFlag(p, "cdn-edge-ranges") {
-			extra = append(extra, "--cdn-edge-ranges")
-		}
 	}
-	v := rc.Pub.Provision(ctx, famFlag, extra...)
+	v := rc.Pub.Provision(ctx, famFlag)
 	if !r.Add("", "provision", "verb.provision", Pass, got(v.OK(), Pass, Fail), v.Tail(), map[string]any{"rc": v.RC, "serve": rc.Serve, "families_flag": famFlag}, t0) {
 		return false
 	}

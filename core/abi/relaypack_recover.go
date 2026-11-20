@@ -446,7 +446,9 @@ func recoverSummary(results []refresh.RelayPackResult) (state, outcome string, r
 	}
 	pick := func(st string, r refresh.RelayPackResult) (string, string, int) { return st, r.Outcome, r.RetryAfterS }
 	for _, r := range results {
-		if r.Applied {
+		// A standby key the walk brought (and the store kept) is a new
+		// address for the route as much as a new pack is.
+		if r.Applied || r.StandbyKeyAccepted {
 			return pick(RecoverUpdated, r)
 		}
 	}
@@ -527,7 +529,7 @@ func (c *Core) recoverFinishLocked(t recoverTicket, results []refresh.RelayPackR
 	state, outcome, _ := recoverSummary(results)
 	applied := map[string]bool{}
 	for _, r := range results {
-		if r.Applied {
+		if r.Applied || r.StandbyKeyAccepted {
 			applied[r.RelayPackID] = true
 		}
 	}

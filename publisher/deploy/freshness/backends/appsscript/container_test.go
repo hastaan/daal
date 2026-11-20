@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"daal/bundle-go/bundle"
 )
 
 func testKey() []byte {
@@ -43,7 +45,7 @@ func TestMACVector(t *testing.T) {
 func TestBuildParseRoundTrip(t *testing.T) {
 	pack := []byte("signed credential-less pack bytes")
 	doc := fakeDoc(42, pack)
-	key := "0123456789ABCDEFGHJKMNPQRS"
+	key := "0123456789ABCDEFGHJKMNPQRR" // the last symbol's two padding bits are zero
 	blob, err := Build(doc, pack, key)
 	if err != nil {
 		t.Fatal(err)
@@ -135,5 +137,33 @@ func TestUpdateBody(t *testing.T) {
 	}
 	if _, err := UpdateBody([]byte("short"), 1, nil); err == nil {
 		t.Error("short key")
+	}
+}
+
+// ADD-1: the key as `standby promote` prints it (grouped, any case) is
+// carried, in the one canonical form a recipient's reader accepts; a
+// key whose trailing bits are not zero is refused.
+func TestBuildTakesTheStandbyKeyAsThePublisherHoldsIt(t *testing.T) {
+	var k bundle.StandbyKeyBytes
+	for i := range k {
+		k[i] = byte(i*37 + 11)
+	}
+	shown := k.Text() // "XXXXXX XXXXX XXXXX XXXXX XXXXX"
+	canon := strings.ReplaceAll(shown, " ", "")
+	doc := fakeDoc(7, nil)
+	for _, in := range []string{shown, canon, strings.ToLower(shown), strings.ReplaceAll(shown, " ", "-")} {
+		blob, err := Build(doc, nil, in)
+		if err != nil {
+			t.Fatalf("%q refused: %v", in, err)
+		}
+		p, err := Parse(blob)
+		if err != nil || p.StandbyKey != canon {
+			t.Fatalf("%q carried as %q (%v), want %q", in, p.StandbyKey, err, canon)
+		}
+	}
+	bad := []byte(canon)
+	bad[25] = 'Z' // the last symbol's two low bits are padding
+	if _, err := Build(doc, nil, string(bad)); err == nil {
+		t.Fatal("a key with non-zero trailing bits was carried")
 	}
 }

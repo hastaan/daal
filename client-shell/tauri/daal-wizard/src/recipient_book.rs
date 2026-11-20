@@ -828,6 +828,18 @@ fn fill_box_material_from_record(creds: &mut serde_json::Value, record: &serde_j
             }
         }
     }
+    // The way in through Cloudflare: the door's WebSocket path is the
+    // front record's (`cdn_front.origin_path`, live while the route is
+    // signed), not the box's, and the minter needs it for the CDN route
+    // (`users-pack-sbp[x]` reads `cdn_ws_path`).
+    if let Some(p) = record
+        .get(crate::addon_cdn::RECORD_MEMBER)
+        .and_then(|f| f.get("origin_path"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        obj.insert("cdn_ws_path".into(), p.into());
+    }
 }
 
 pub(crate) fn write_record_staging(

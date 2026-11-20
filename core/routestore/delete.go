@@ -4,12 +4,18 @@ import "fmt"
 
 // perRouteSecretKeys returns the secrets_kv keys owned by a single route,
 // so a hard delete leaves no orphaned per-route secrets behind. Keep in
-// sync with the writers: delegate.counterSecretKey (core/abi) and the
-// budget engine (core/budget/persist.go, `budget:bucket:<route_id>`).
+// sync with the writers: delegate.counterSecretKey (core/abi), the
+// budget engine (core/budget/persist.go, `budget:bucket:<route_id>`),
+// and the standby address (add-on 1): the route's `_standby` as signed
+// (bundle.StandbyStoreKey, written by core/trust SaveImport; in open
+// mode it holds the address) and a standby key the device accepted
+// (bundle.StandbyKeyStoreKey, written by core/abi acceptStandbyKey).
 func perRouteSecretKeys(routeID string) []string {
 	return []string{
 		"delegate_share_counter:" + routeID,
 		"budget:bucket:" + routeID,
+		"standby:" + routeID,
+		"standby-key:" + routeID,
 	}
 }
 

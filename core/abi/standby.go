@@ -32,6 +32,7 @@ import (
 
 	"daal/bundle-go/bundle"
 	"daal/core/engine"
+	"daal/core/refresh"
 )
 
 // Outcomes of StandbyKey (the `outcome` member).
@@ -101,6 +102,8 @@ func AcceptStandbyKeyBytes(relayPackID string, raw []byte) (StandbyKeyResult, er
 // this method set and calls it when a container carries a key.
 // accepted = the number of routes the key opened (0: refused).
 type StandbyKeySink struct{}
+
+var _ refresh.StandbyKeySink = StandbyKeySink{}
 
 // AcceptStandbyKey implements the refresh walk's standby-key hook.
 func (StandbyKeySink) AcceptStandbyKey(relayPackID string, key []byte) (accepted int, err error) {

@@ -268,10 +268,11 @@ runcmd:
 {{- end }}
 {{- if .CDNUFWRules }}
     # Add-on 2 (way in through Cloudflare): the CDN door, ws-cdn-in, is
-    # reachable from Cloudflare's published ranges only, fetched by the
-    # publisher at provision time. Nothing listens here until the
-    # publisher turns the door on through daal-relay-mgmt /cdn, and the
-    # relay firewall at the provider opens the port only then.
+    # reachable from Cloudflare's published ranges only. Present only
+    # when the provisioner fetched them (a CLI opt-in); otherwise
+    # daal-relay-mgmt /cdn writes the same rules when the door is
+    # turned on. Nothing listens here until then, and the relay
+    # firewall at the provider opens the port only then.
 {{- range .CDNUFWRules }}
     run ufw allow {{ . }}
 {{- end }}

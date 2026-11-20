@@ -32,7 +32,7 @@ import (
 // Can a naive route be proved in a side instance BESIDE a running naive
 // tunnel? Real Cronet (libcronet.so, loaded at run time: run with
 // LD_LIBRARY_PATH pointing at a directory holding it, e.g.
-// test-rigs/worldbox/bin), real sing-box naive inbounds on loopback.
+// the directory the lab rig builds it into), real sing-box naive inbounds on loopback.
 //
 // This is the evidence behind the decision written in side.go
 // (sideProbeTypes / cronetSideTypes): the survey may prove naive beside

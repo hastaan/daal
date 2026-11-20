@@ -33,11 +33,11 @@ package cli
 // printed, and the token is revoked and zeroed after the deploy.
 //
 // Publishing an update rides on publish-freshness as one more backend
-// (appsscript.Backend, built by appsScriptFreshnessTarget below). The
-// flags that select it live in cli.go, which this lane does not edit;
-// until they are wired, the app publishes to the channel with
-// appsscript-check right after publish-freshness, which sends the same
-// bytes.
+// (appsscript.Backend, built by appsScriptFreshnessTarget below), chosen
+// by its --appsscript-url, --appsscript-write-key-file,
+// --appsscript-pack-file and --appsscript-standby-key-file flags
+// (cli.go). The app publishes to the channel that way; appsscript-check
+// is the setup's fetch-back test and the card's "check now".
 
 import (
 	"bytes"

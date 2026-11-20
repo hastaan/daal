@@ -305,7 +305,7 @@ func TestStandby_GuardRunsOnTheMovedOutbound(t *testing.T) {
 	}
 }
 
-// The worldbox's `standby-open` in small: connected on a one-route file,
+// The end-to-end lab's `standby-open` op in small: connected on a one-route file,
 // the relay's address stops answering — the engine's own fall-over pass
 // moves to the standby, with nothing fetched and nobody asked.
 func TestStandby_FallOverMovesToTheStandbyWhileConnected(t *testing.T) {

@@ -118,3 +118,21 @@ func TestPortCovers(t *testing.T) {
 		}
 	}
 }
+
+// The wizard names the relay's firewall the way provisioning did
+// (daal-relay-<server id>); the applier finds its id on the account.
+func TestCloudflareFirewallApplier_ResolvesTheRelayFirewallByName(t *testing.T) {
+	fc := newFake()
+	fc.ensuredFirewalls = map[string]string{"4242": "fw-4242"}
+	a := NewCloudflareFirewallApplier(fc)
+	id, err := a.ApplyCloudflareRule(context.Background(), "daal-relay-4242", &cloudflare.EdgeRanges{V4: []string{"173.245.48.0/20"}})
+	if err != nil || id != "fw-4242" {
+		t.Fatalf("id = %q, err = %v; want fw-4242", id, err)
+	}
+	if _, ok := fc.firewalls["fw-4242"]; !ok {
+		t.Fatal("rule not written to the resolved firewall")
+	}
+	if _, err := a.ApplyCloudflareRule(context.Background(), "daal-relay-9999", &cloudflare.EdgeRanges{V4: []string{"173.245.48.0/20"}}); err == nil {
+		t.Fatal("a relay firewall name nobody has was accepted")
+	}
+}

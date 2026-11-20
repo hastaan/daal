@@ -376,6 +376,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       activity.startService(intent)
     }
   }
+
+  // ---- Optional add-ons, Google update channel, Path A (GoogleAuth.kt)
+
+  private val googleAuth = GoogleAuth(activity) { invoke, request ->
+    startIntentSenderForResult(invoke, request, "googleAuthorizeResult")
+  }
+
+  @Command
+  fun googleAuthorize(invoke: Invoke) = googleAuth.authorize(invoke)
+
+  @ActivityCallback
+  fun googleAuthorizeResult(invoke: Invoke, result: ActivityResult) =
+    googleAuth.onResult(invoke, result)
+
 }
 
 /** The page's own background (client-ui tokens.css --bg-deep), shown behind the system bars. */

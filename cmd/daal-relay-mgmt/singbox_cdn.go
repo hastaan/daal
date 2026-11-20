@@ -2,19 +2,23 @@
 // (docs/optional-addons-plan.md §2.2, item B-1).
 //
 //	POST /cdn  {"action":"enable", "port":8448, "ws_path":"/…",
-//	            "origin_cert_pem":…, "origin_key_pem":…, "aop_ca_pem":…}
+//	            "origin_cert_pem":…, "origin_key_pem":…, "aop_ca_pem":…,
+//	            "edge_ranges":["173.245.48.0/20", …]}
 //	POST /cdn  {"action":"disable"}
 //	POST /cdn  {"action":"status"}
 //
 // enable installs the Cloudflare Origin CA certificate and key and the
-// origin-pull CA under /etc/daal/cdn, and writes ONE inbound, ws-cdn-in:
-// VLESS over WebSocket on its own port, serving the Origin CA
-// certificate and REQUIRING a client certificate signed by the
+// origin-pull CA under /etc/daal/cdn, opens the door's port at the box
+// firewall to edge_ranges (Cloudflare's published ranges, read by the
+// publisher abroad; singbox_cdn_ufw.go), and writes ONE inbound,
+// ws-cdn-in: VLESS over WebSocket on its own port, serving the Origin
+// CA certificate and REQUIRING a client certificate signed by the
 // origin-pull CA (`client_authentication: require-and-verify`). Only
 // Cloudflare, presenting this zone's origin-pull certificate, completes
-// a TLS handshake on it; anyone else who reaches the port — and the
-// firewalls already allow only Cloudflare's ranges — is cut off before
-// a byte of VLESS is read.
+// a TLS handshake on it; anyone else who reaches the port — and both
+// firewalls allow only Cloudflare's ranges — is cut off before a byte
+// of VLESS is read. disable removes the inbound, the files and the
+// box-firewall rules enable opened.
 //
 // Why a dedicated inbound and not ws-in. ws-in (8445) serves the
 // relay's self-signed certificate to direct clients that pin it and
@@ -26,12 +30,10 @@
 // VLESS inbounds, keyed by the same UUIDs: enable copies uuid and name
 // from vless-in and ws-in (never REALITY's `flow`, which is meaningless
 // over WebSocket). Credential rotation already covers it, because
-// rotateRecipientCreds rewrites every inbound of type vless. Adding and
-// revoking a recipient need the two hooks below (appendCDNUser,
-// removeCDNUser) called from singbox_users.go; until they are, a
-// recipient revoked after the door opened keeps the door. That wiring
-// is outside this file and is reported as required before the door is
-// enabled on any relay.
+// rotateRecipientCreds rewrites every inbound of type vless, and
+// singbox_users.go calls appendCDNUser and removeCDNUser on every
+// provision and revoke, so a recipient revoked after the door opened
+// loses the door with the rest.
 //
 // The door's material comes through the management session only,
 // never through cloud-init user-data (cloudinit.RenderV2 refuses it):
@@ -77,6 +79,31 @@ func cdnCertPath() string { return filepath.Join(cdnDir, "origin.pem") }
 func cdnKeyPath() string  { return filepath.Join(cdnDir, "origin.key") }
 func cdnCAPath() string   { return filepath.Join(cdnDir, "aop_ca.pem") }
 
+// cdnPathFile keeps the door's WebSocket path while the door is open,
+// so a door the last recipient left (parked: no inbound, files kept)
+// opens again for the next recipient on the path the signed packs name.
+func cdnPathFile() string { return filepath.Join(cdnDir, "ws_path") }
+
+// parkedCDNPath is the path of a parked door: its files are all there
+// and a path was recorded. "" when the door was never opened or was
+// disabled.
+func parkedCDNPath() string {
+	for _, p := range []string{cdnCertPath(), cdnKeyPath(), cdnCAPath()} {
+		if _, err := os.Stat(p); err != nil {
+			return ""
+		}
+	}
+	b, err := os.ReadFile(cdnPathFile())
+	if err != nil {
+		return ""
+	}
+	path := strings.TrimSpace(string(b))
+	if !cdnPathRE.MatchString(path) || strings.Contains(path, "..") {
+		return ""
+	}
+	return path
+}
+
 // cdnReq is the /cdn body. It must agree field for field with
 // publisher/deploy/cloudflare.DoorRequest.
 type cdnReq struct {
@@ -86,6 +113,10 @@ type cdnReq struct {
 	OriginCertPEM string `json:"origin_cert_pem,omitempty"`
 	OriginKeyPEM  string `json:"origin_key_pem,omitempty"`
 	AOPCACertPEM  string `json:"aop_ca_pem,omitempty"`
+	// EdgeRanges are Cloudflare's published ranges (v4 and v6 CIDRs)
+	// the box firewall opens the door's port to. Empty leaves the box
+	// firewall as it is (a relay whose first boot already opened it).
+	EdgeRanges []string `json:"edge_ranges,omitempty"`
 }
 
 // cdnResp never echoes key material.
@@ -98,6 +129,9 @@ type cdnResp struct {
 	Users                  int    `json:"users"`
 	OriginCertSHA256       string `json:"origin_cert_sha256,omitempty"`
 	OriginCertNotAfterUnix int64  `json:"origin_cert_not_after_unix,omitempty"`
+	// BoxFirewallRules is how many Cloudflare ranges the box firewall
+	// opens the door's port to, by rules this service wrote.
+	BoxFirewallRules int `json:"box_firewall_rules"`
 }
 
 var cdnPathRE = regexp.MustCompile(`^/[A-Za-z0-9._~/-]{1,127}$`)
@@ -213,11 +247,19 @@ func setCDNInbound(doc map[string]any, inbound map[string]any) {
 }
 
 // appendCDNUser adds a newly provisioned recipient to ws-cdn-in when
-// the door is open. No-op when it is closed. Call it from
+// the door is open, and opens a parked door (the last recipient left
+// it; its files and path are kept) with this recipient on it. No-op
+// when the door was never opened or was disabled. Called from
 // addUserToSingboxFor after the vless rows are written.
 func appendCDNUser(doc map[string]any, c userCreds) {
+	if c.VLESSUUID == "" || c.Name == "" {
+		return
+	}
 	in := findInboundByTag(doc, tagCDN)
-	if in == nil || c.VLESSUUID == "" || c.Name == "" {
+	if in == nil {
+		if path := parkedCDNPath(); path != "" {
+			setCDNInbound(doc, cdnInbound(path, []any{map[string]any{"uuid": c.VLESSUUID, "name": c.Name}}))
+		}
 		return
 	}
 	users := asSlice(in["users"])
@@ -231,9 +273,10 @@ func appendCDNUser(doc map[string]any, c userCreds) {
 }
 
 // removeCDNUser takes a revoked recipient off ws-cdn-in and reports
-// whether a row went. The last recipient leaving closes the door
-// (sing-box refuses an inbound with no users); /cdn enable opens it
-// again. Call it from removeUserFromSingbox.
+// whether a row went. The last recipient leaving parks the door
+// (sing-box refuses an inbound with no users): the inbound goes, its
+// files and path stay, and the next recipient provisioned opens it
+// again (appendCDNUser). Called from removeUserFromSingbox.
 func removeCDNUser(doc map[string]any, name string) bool {
 	in := findInboundByTag(doc, tagCDN)
 	if in == nil {
@@ -358,6 +401,10 @@ func (s *server) cdnEnable(req cdnReq) (cdnResp, int, error) {
 	if err != nil {
 		return cdnResp{}, http.StatusBadRequest, err
 	}
+	ranges, err := canonicalCDNRanges(req.EdgeRanges)
+	if err != nil {
+		return cdnResp{}, http.StatusBadRequest, err
+	}
 	doc, err := loadSingboxDoc(s.singboxConfig)
 	if err != nil {
 		return cdnResp{}, http.StatusInternalServerError, fmt.Errorf("singbox config: %v", err)
@@ -366,25 +413,45 @@ func (s *server) cdnEnable(req cdnReq) (cdnResp, int, error) {
 	if len(users) == 0 {
 		return cdnResp{}, http.StatusConflict, errors.New("no recipient on this relay yet: the door opens once there is someone to let in (sing-box refuses an inbound with no users)")
 	}
+	// The box firewall first: a rule with nothing listening behind it
+	// admits nothing, and a door that listens behind no rule would
+	// report "enabled" and carry nothing.
+	var opened []string
+	if len(ranges) > 0 {
+		if opened, err = openCDNRanges(ranges); err != nil {
+			return cdnResp{}, http.StatusInternalServerError, fmt.Errorf("box firewall: %v", err)
+		}
+	}
 	restoreFiles, err := writeCDNFiles([]*cdnFile{
 		{path: cdnCertPath(), mode: 0o644, body: []byte(req.OriginCertPEM)},
 		{path: cdnKeyPath(), mode: 0o600, body: []byte(req.OriginKeyPEM)},
 		{path: cdnCAPath(), mode: 0o644, body: []byte(req.AOPCACertPEM)},
+		{path: cdnPathFile(), mode: 0o600, body: []byte(req.WSPath + "\n")},
 	})
 	if err != nil {
+		undoCDNRanges(opened)
 		return cdnResp{}, http.StatusInternalServerError, fmt.Errorf("write door files: %v", err)
 	}
 	setCDNInbound(doc, cdnInbound(req.WSPath, users))
 	rollbackCfg, err := s.commitSingboxDoc(s.singboxConfig, doc)
 	if err != nil {
 		restoreFiles()
+		undoCDNRanges(opened)
 		return cdnResp{}, http.StatusInternalServerError, fmt.Errorf("singbox config: %v", err)
 	}
 	if err := s.applyReload(func() {
 		rollbackCfg()
 		restoreFiles()
+		undoCDNRanges(opened)
 	}); err != nil {
 		return cdnResp{}, http.StatusInternalServerError, fmt.Errorf("singbox reload: %v", err)
+	}
+	if len(ranges) > 0 {
+		if err := settleCDNRanges(ranges); err != nil {
+			// The door is open on the new set; an old rule that would
+			// not go is still recorded and is retried by the next call.
+			fmt.Fprintf(os.Stderr, "cdn: box firewall: %v\n", err)
+		}
 	}
 	sum := sha256.Sum256(leaf.Raw)
 	return cdnResp{
@@ -395,6 +462,7 @@ func (s *server) cdnEnable(req cdnReq) (cdnResp, int, error) {
 		Users:                  len(users),
 		OriginCertSHA256:       hex.EncodeToString(sum[:]),
 		OriginCertNotAfterUnix: leaf.NotAfter.Unix(),
+		BoxFirewallRules:       len(loadCDNRanges()),
 	}, http.StatusOK, nil
 }
 
@@ -416,12 +484,20 @@ func (s *server) cdnDisable() (cdnResp, int, error) {
 	}
 	// The inbound that read them is gone; the files go after it, never
 	// before (a reload with the inbound and without the files fails).
-	for _, p := range []string{cdnCertPath(), cdnKeyPath(), cdnCAPath()} {
+	for _, p := range []string{cdnCertPath(), cdnKeyPath(), cdnCAPath(), cdnPathFile()} {
 		if err := os.Remove(p); err == nil {
 			changed = true
 		}
 	}
-	return cdnResp{Enabled: false, Changed: changed}, http.StatusOK, nil
+	// And the box-firewall rules enable opened. A rule ufw would not
+	// remove stays recorded (box_firewall_rules > 0) and the next
+	// disable tries it again; nothing listens behind it any more.
+	had := len(loadCDNRanges())
+	left := closeCDNRanges()
+	if left < had {
+		changed = true
+	}
+	return cdnResp{Enabled: false, Changed: changed, BoxFirewallRules: left}, http.StatusOK, nil
 }
 
 func (s *server) cdnStatus() (cdnResp, int, error) {
@@ -431,9 +507,9 @@ func (s *server) cdnStatus() (cdnResp, int, error) {
 	}
 	in := findInboundByTag(doc, tagCDN)
 	if in == nil {
-		return cdnResp{}, http.StatusOK, nil
+		return cdnResp{BoxFirewallRules: len(loadCDNRanges())}, http.StatusOK, nil
 	}
-	resp := cdnResp{Enabled: true, Users: len(asSlice(in["users"]))}
+	resp := cdnResp{Enabled: true, Users: len(asSlice(in["users"])), BoxFirewallRules: len(loadCDNRanges())}
 	if p, ok := numericPort(in["listen_port"]); ok {
 		resp.Port = p
 	}

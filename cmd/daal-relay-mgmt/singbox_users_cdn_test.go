@@ -34,7 +34,8 @@ func cdnDoorUUIDs(t *testing.T, cfg string) map[string]string {
 // signed tokens: open the door with two recipients, revoke one, and the
 // revoked recipient's UUID is gone from ws-cdn-in while the other's
 // stays. A recipient added afterwards gets a row on the open door, and
-// the last one leaving closes it. Before the hooks were wired, a
+// the last one leaving parks it, and the next one provisioned opens it
+// again. Before the hooks were wired, a
 // recipient revoked after the door opened kept a way in through
 // Cloudflare.
 func TestRevokedRecipientLosesTheCDNDoor(t *testing.T) {
@@ -105,6 +106,15 @@ func TestRevokedRecipientLosesTheCDNDoor(t *testing.T) {
 	}
 	if door = cdnDoorUUIDs(t, cfg); door != nil {
 		t.Fatalf("the last recipient left and the door is still open: %v", door)
+	}
+	// The next person provisioned opens the parked door again: the
+	// signed packs still name the way in through Cloudflare.
+	resp = postJSON(t, ts.URL+"/users/provision", priv, "users-provision", provisionReq{Name: "r4"})
+	var c4 userCreds
+	_ = json.NewDecoder(resp.Body).Decode(&c4)
+	resp.Body.Close()
+	if door = cdnDoorUUIDs(t, cfg); door["r4"] != c4.VLESSUUID || c4.VLESSUUID == "" {
+		t.Fatalf("the parked door did not open for the next recipient: %v", door)
 	}
 }
 

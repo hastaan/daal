@@ -38,7 +38,7 @@ import { profileBySlug } from './rebuildPlan';
  * MIRROR of `PinnedMgmtServesOptInFamilies` in
  * publisher/deploy/cloudinit/artifacts.go — the constant that sits next
  * to the pinned daal-relay-mgmt hash. It is false while that pinned
- * release predates shadowsocks, anytls and tuic (worldbox F-002): a
+ * release predates shadowsocks, anytls and tuic (lab finding F-002): a
  * server built today opens the extra door, nothing answers behind it, the
  * connection file carries no such route, and with anytls named the file
  * is still made in the newer format older apps refuse. All of the cost

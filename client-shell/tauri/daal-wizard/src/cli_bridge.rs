@@ -977,6 +977,11 @@ pub trait CliRunner: Send + Sync {
     }
 }
 
+/// The exit code of an add-on verb that refused or whose check failed,
+/// with the JSON that says why on stdout. [`CliRunner::run_addon`]
+/// keeps that stdout, at the head of `SubprocessFailed::stderr`.
+pub const ADDON_REFUSED_RC: i32 = 4;
+
 /// One add-on invocation of `daal-deploy` ([`CliRunner::run_addon`]).
 ///
 /// No `Debug`: `stdin` and `secret_files` carry secrets.
@@ -2000,14 +2005,12 @@ impl SubprocessRunner {
         }
         if args.dry_run {
             cmd.arg("--dry-run");
-        } else {
-            // Add-on 2: the box-side firewall rule for the Cloudflare
-            // door is written once at first boot, so every real build
-            // and rebuild carries Cloudflare's ranges whether or not the
-            // add-on is ever turned on. A failed fetch is a warning in
-            // the helper, never a failed provision.
-            cmd.arg("--cdn-edge-ranges");
         }
+        // No `--cdn-edge-ranges`: building a relay contacts the hosting
+        // company and nobody else. The way in through Cloudflare opens
+        // its own box-firewall rule when it is turned on (`cdn-door`
+        // sends Cloudflare's ranges to daal-relay-mgmt /cdn), so a relay
+        // needs no Cloudflare list at first boot and no rebuild later.
         if let Some(j) = journal {
             cmd.arg("--journal").arg(j);
         }
@@ -2118,10 +2121,17 @@ impl CliRunner for SubprocessRunner {
         let stdout = stdout_join.join().unwrap_or_default();
         drop(secret_tmps);
         if !status.success() {
-            return Err(BridgeError::SubprocessFailed {
-                rc: status.code().unwrap_or(-1),
-                stderr: stderr_tail,
-            });
+            let rc = status.code().unwrap_or(-1);
+            // Exit 4 is an add-on refusal or a failed check, and its
+            // reason is the JSON on stdout (the add-on verbs never print
+            // a secret there). It goes first, so the caller's
+            // `addon_cdn::json_in` reads the answer before any prose.
+            let stderr = if rc == ADDON_REFUSED_RC && !stdout.is_empty() {
+                format!("{}\n{stderr_tail}", String::from_utf8_lossy(&stdout).trim())
+            } else {
+                stderr_tail
+            };
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
         }
         Ok(stdout)
     }
@@ -6164,6 +6174,36 @@ mod tests {
             }
         }
         p
+    }
+
+    /// An add-on refusal (exit 4) keeps its stdout: the JSON that says
+    /// why comes first in the failure text, the helper's stderr after.
+    #[cfg(unix)]
+    #[test]
+    fn run_addon_keeps_stdout_on_exit_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            r#"echo '{"verdict":"too_broad","extra":["workers_scripts"]}'
+echo 'cdn-token-check: {not json}' >&2
+exit 4"#,
+        );
+        let err = SubprocessRunner::new(Some(bin.clone()))
+            .run_addon(AddonCliRequest::args(["cdn-token-check"]), &mut |_| {})
+            .unwrap_err();
+        match err {
+            BridgeError::SubprocessFailed { rc: 4, stderr } => {
+                assert!(stderr.starts_with(r#"{"verdict":"too_broad""#), "{stderr}");
+                assert!(stderr.contains("cdn-token-check: {not json}"), "{stderr}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Any other failure keeps stderr only.
+        let bin = fake_deploy(dir.path(), "echo '{\"x\":1}'\necho boom >&2\nexit 1");
+        match SubprocessRunner::new(Some(bin)).run_addon(AddonCliRequest::args(["cdn-test"]), &mut |_| {}) {
+            Err(BridgeError::SubprocessFailed { rc: 1, stderr }) => assert_eq!(stderr.trim(), "boom"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[cfg(unix)]

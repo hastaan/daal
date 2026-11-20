@@ -124,6 +124,9 @@ fn fx() -> Fx {
             }
             "cdn-door" => {
                 has_record(HOST);
+                let at = args.iter().position(|a| a == "--operator-record").expect("--operator-record");
+                let op: Value = serde_json::from_str(&std::fs::read_to_string(&args[at + 1]).unwrap()).unwrap();
+                assert_eq!(op["server_id"], "123", "the relay's own record reaches the management call");
                 assert!(args.windows(2).any(|w| w[0] == "--priv-key" && w[1] == "-"));
                 assert!(!stdin.is_empty(), "the signing key travels on stdin");
                 fail(&h.door_fail)?;
@@ -138,8 +141,8 @@ fn fx() -> Fx {
                     h.tests[(n - 1).min(h.tests.len() - 1)].clone()
                 };
                 if v["ok"] != true {
-                    // Exit 4 with the answer on stdout; the bridge of
-                    // the future appends it to the failure text.
+                    // Exit 4 with the answer on stdout; the bridge puts
+                    // it at the head of the failure text.
                     return Err(BridgeError::SubprocessFailed { rc: 4, stderr: v.to_string() });
                 }
                 v

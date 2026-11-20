@@ -314,9 +314,9 @@ var (
 	PreCDNLabRoots = Prereq{Lane: "L-ladder", Item: "B-4 outbound roots",
 		What: "users-pack-sbp installs the roots the commitment signs (from --cdn-roots-file), not only the app's shipped set: the lab's edge chains to the lab CA",
 		Dir:  "publisher/deploy/cli", Files: "*.go", Pattern: regexp.MustCompile(`fs\.String\("cdn-roots-file"`), MinHits: 2}
-	PreCDNDoorCall = Prereq{Lane: "L-glue (unowned: publisher/deploy/cli/cli_addon_cdn.go)", Item: "mgmt /cdn from a verb",
-		What: "cdn-provision opens the relay's CDN door (mgmt.Client.CDNDoorEnable exists; no daal-deploy verb calls it yet)",
-		Dir:  "publisher/deploy/cli", Files: "*.go", Pattern: regexp.MustCompile(`CDNDoorEnable\(`)}
+	PreCDNDoorCall = Prereq{Lane: "integration", Item: "mgmt /cdn from a verb",
+		What: "daal-deploy cdn-door opens and closes the relay's CDN door (mgmt.CDNDoorEnableWithFW / CDNDoorDisableWithFW)",
+		Dir:  "publisher/deploy/cli", Files: "*.go", Pattern: regexp.MustCompile(`mgmt\.CDNDoorEnable`)}
 	PreEdgePick = Prereq{Lane: "L-ladder", Item: "B-6",
 		What: "core/edgepick picks an edge address from the signed seeds",
 		Dir:  "core/edgepick", Files: "*.go", Pattern: regexp.MustCompile(`(?m)^package edgepick`)}
@@ -413,10 +413,4 @@ func (rc *RunCtx) scenarioWorld() error {
 		}
 	}
 	return nil
-}
-
-// provisionKnowsFlag: the tree's daal-deploy provision takes --name (the
-// CDN door's ranges at first boot landed in add-ons wave 2, L-glue).
-func provisionKnowsFlag(p Paths, name string) bool {
-	return (Prereq{Dir: "publisher/deploy/cli", Files: "cli.go", Pattern: regexp.MustCompile(`fs\.Bool\("` + regexp.QuoteMeta(name) + `"`)}).Present(p.Repo)
 }

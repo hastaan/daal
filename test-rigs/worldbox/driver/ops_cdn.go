@@ -82,6 +82,22 @@ func (rc *RunCtx) relayFirewallID() string {
 	return ""
 }
 
+// cdnDoor opens or closes the relay's door the way the app does:
+// cdn-door through the relay's management, with the publisher's key.
+func (rc *RunCtx) cdnDoor(recFile, action string) Verb {
+	return rc.Pub.Deploy(rc.Ctx, "cdn-door", "--record-file", recFile, "--operator-record", rc.Pub.Path("record.json"),
+		"--token-file", rc.Pub.Path("cloud.token"), "--action", action,
+		"--priv-key", rc.Pub.Path("publisher.priv"), "--helper-ip", PublisherIP)
+}
+
+// cdnRemove is cdn-remove as the CLI takes it with the relay's door:
+// the door is closed first, then Cloudflare and the firewall rule.
+func (rc *RunCtx) cdnRemove(recFile, tokFile string) Verb {
+	return rc.Pub.Deploy(rc.Ctx, "cdn-remove", "--record-file", recFile, "--token-file", tokFile,
+		"--hetzner-token-file", rc.Pub.Path("cloud.token"), "--operator-record", rc.Pub.Path("record.json"),
+		"--priv-key", rc.Pub.Path("publisher.priv"), "--helper-ip", PublisherIP)
+}
+
 // cdnZoneClean: nothing the add-on makes is left in the zone.
 func cdnZoneClean(st *CFState) []string {
 	var left []string
@@ -198,6 +214,23 @@ func (rc *RunCtx) cdnProvision(phase string, tok map[string]string) (string, boo
 	}
 	rc.R.Add("", phase, "firewall.door_open_to_published_ranges_only", Pass, got(same, Pass, Fail),
 		fmt.Sprintf("8448/tcp sources: %v", srcs), nil, t0)
+
+	// The relay's door, as the app opens it (cdn-door), once the verb
+	// is in the tree.
+	if PreCDNDoorCall.Present(rc.P.Repo) {
+		t0 = time.Now()
+		v := rc.cdnDoor(recFile, "enable")
+		rc.R.Add("", phase, "verb.cdn-door.enable", Pass, got(v.OK(), Pass, Fail), v.Tail()+" "+oneLine(v.Stdout, 200), nil, t0)
+		// The relay opened its own box firewall to the same ranges:
+		// provisioning fetched none.
+		ufw, _ := sh(rc.Ctx, inNS(NSRelay1, "nft", "list", "table", "inet", "wb_ufw")...)
+		boxOK := true
+		for _, s := range CDNPublishedV4 {
+			boxOK = boxOK && strings.Contains(ufw, s)
+		}
+		rc.R.Add("", phase, "door.box_firewall_open_to_published_ranges", Pass, got(boxOK && nftAllows(ufw, "tcp", 8448), Pass, Fail),
+			oneLine(ufw, 400), nil, t0)
+	}
 	return recFile, true
 }
 
@@ -261,10 +294,15 @@ func opCDNProvision(rc *RunCtx) {
 
 	// 6. Removal.
 	t0 = time.Now()
-	v = rc.Pub.Deploy(rc.Ctx, "cdn-remove", "--record-file", recFile, "--token-file", tok["tokgood"], "--hetzner-token-file", rc.Pub.Path("cloud.token"))
+	v = rc.cdnRemove(recFile, tok["tokgood"])
 	st, _ = LoadCFState(rc.P.Run)
 	left = cdnZoneClean(st)
 	rc.R.Add("", phase, "removed.zone_as_it_was", Pass, got(v.OK() && len(left) == 0, Pass, Fail), strings.Join(left, "; ")+" "+v.Tail(), nil, t0)
+	if PreCDNDoorCall.Present(rc.P.Repo) {
+		ufw, _ := sh(rc.Ctx, inNS(NSRelay1, "nft", "list", "table", "inet", "wb_ufw")...)
+		rc.R.Add("", phase, "removed.door_closed", Pass, got(!rc.cdnDoorOpen() && !nftAllows(ufw, "tcp", 8448), Pass, Fail),
+			fmt.Sprintf("ws-cdn-in served=%v, box firewall admits 8448=%v", rc.cdnDoorOpen(), nftAllows(ufw, "tcp", 8448)), nil, t0)
+	}
 	closed := true
 	for _, f := range CloudFirewalls(rc.P) {
 		for _, r := range f.Rules {
@@ -303,7 +341,7 @@ func (rc *RunCtx) cdnTest(phase, recFile string) {
 		if rc.waitsOn(phase, "front-test", PreCDNDoorCall) {
 			return
 		}
-		rc.R.Add("", phase, "front-test.door_open", Pass, Fail, "cdn-provision ran and the relay serves no ws-cdn-in inbound", nil, t0)
+		rc.R.Add("", phase, "front-test.door_open", Pass, Fail, "cdn-door ran and the relay serves no ws-cdn-in inbound", nil, t0)
 		return
 	}
 	before := len(CDNRequests(rc.P.Run))
@@ -341,9 +379,9 @@ func opCDN(rc *RunCtx) {
 	if !ok {
 		return
 	}
-	defer rc.Pub.Deploy(rc.Ctx, "cdn-remove", "--record-file", recFile, "--token-file", tok["tokgood"], "--hetzner-token-file", rc.Pub.Path("cloud.token"))
+	defer rc.cdnRemove(recFile, tok["tokgood"])
 	if !rc.cdnDoorOpen() {
-		rc.R.Add("", phase, "door_open", Pass, Fail, "the relay serves no ws-cdn-in inbound after cdn-provision", nil, t0)
+		rc.R.Add("", phase, "door_open", Pass, Fail, "the relay serves no ws-cdn-in inbound after cdn-door", nil, t0)
 		return
 	}
 	t0 = time.Now()
@@ -359,7 +397,7 @@ func opCDN(rc *RunCtx) {
 	if vp := rc.Pub.UsersProvision(rc.Ctx, "r1"); !rc.R.Add("", phase, "verb.users-provision.r1", Pass, got(vp.OK(), Pass, Fail), vp.Tail(), nil, t0) {
 		return
 	}
-	vp := rc.Pub.PackSBP(rc.Ctx, "base-cdn.sbp", "creds-r1.json", "pack-r1-cdn.sbp", "--cdn-roots-file", rc.P.CA())
+	vp := rc.Pub.PackSBP(rc.Ctx, "base-cdn.sbp", "creds-r1.json", "pack-r1-cdn.sbp", "--cdn-roots-file", rc.P.CA(), "--cdn-front", recFile)
 	if !rc.R.Add("", phase, "verb.users-pack-sbp.cdn", Pass, got(vp.OK(), Pass, Fail), vp.Tail(), nil, t0) {
 		return
 	}
@@ -381,6 +419,21 @@ func opCDN(rc *RunCtx) {
 		}
 		via = rc.Scn.CDN.Via
 	}
+	// The CDN route is tried last (plan §4), so it can only be the one
+	// that carries when the direct routes cannot. A scenario that models
+	// only Cloudflare's side (edges, the zone's name) leaves the relay's
+	// own address open: take it out of the way for this phone, the way
+	// the burned address the add-on exists for would.
+	if rc.tcpFromClient(rc.Rec.PublicIP, 443) {
+		t0 = time.Now()
+		err := c0BlockWith(rc, rc.Rec.PublicIP, false)
+		ok := err == nil && !rc.tcpFromClient(rc.Rec.PublicIP, 443)
+		if !rc.R.Add("", phase, "direct_routes_out_of_the_way", Pass, got(ok, Pass, Fail),
+			fmt.Sprintf("the relay's own address null-routed for this phone (err %v)", err), nil, t0) {
+			return
+		}
+		defer func() { _ = c0Unblock(rc) }()
+	}
 	a := &autoOp{rc: rc, phase: phase}
 	saved := rc.Pack
 	rc.Pack = pack
@@ -400,6 +453,7 @@ func opCDN(rc *RunCtx) {
 	onCDN := x.connected && x.family == "websocket-tls" && len(CDNRequests(rc.P.Run)) > before
 	p.add("connect", x.family, "cdn_route", want, got(onCDN, Pass, Blocked), "tried: "+x.triedText(), x.evidence(), t0)
 	if onCDN {
+		p.sw.viaEdge = true
 		p.connectedOn("connect", x, t0)
 		var edges []string
 		okEdge := len(via) == 0

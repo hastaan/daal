@@ -41,13 +41,16 @@
 //! works.
 //!
 //! Publishing an update is not a verb of its own: it runs inside the
-//! freshness publish as one more mirror (`freshness::publish` calls
-//! [`push_update`] for the `appsscript` endpoint after
-//! `publish-freshness` has signed the document).
+//! freshness publish as one more mirror. `freshness::publish` hands
+//! `publish-freshness` the channel's address and write key
+//! (`--appsscript-url`, `--appsscript-write-key-file`, and the signed
+//! pack as `--appsscript-pack-file`), and the helper's `appsscript`
+//! backend POSTs the container and fetches it back like any other
+//! mirror.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -858,34 +861,6 @@ pub fn check(
         checked_at_unix: now,
         reason: r.reason,
     })
-}
-
-/// The freshness publish's step for this mirror: send the document
-/// `publish-freshness` just signed (and the pack it names) and fetch it
-/// back. Returns whether it landed and, when not, the reason.
-pub(crate) fn push_update(
-    ctx: &WizardCtx,
-    op: i64,
-    doc: &Path,
-    pack: Option<&Path>,
-) -> (bool, String) {
-    let row = match row_for(ctx, op) {
-        Ok(Some(r)) if r.has_secret => r,
-        _ => return (false, "the Google update channel has no write key".into()),
-    };
-    let d = detail_of(&row);
-    if d.url.is_empty() {
-        return (false, "the Google update channel has no address".into());
-    }
-    let payload = Payload::Document {
-        doc: doc.to_path_buf(),
-        pack: pack.map(Path::to_path_buf),
-    };
-    match send(ctx, &row, &d.url, payload, &mut |_| {}) {
-        Ok(c) if c.ok => (true, String::new()),
-        Ok(c) => (false, c.reason),
-        Err(e) => (false, crate::freshness::redact_detail(&e.to_string())),
-    }
 }
 
 /// Called by `addons::remove`. Order (plan §3.6): take the mirror out of

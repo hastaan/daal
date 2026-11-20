@@ -18,7 +18,7 @@ import { Button, Input, Sheet, Textarea } from '../../design/primitives';
 import { WhatIsThis } from '../Disclosure';
 import { useSecureScreen } from '../useSecureScreen';
 import { Addons, Wizard } from '../wizardCommands';
-import type { AddonRemoveReport, FreshnessGoogleOnly, GoogleCheck } from './addonTypes';
+import type { AddonRemoveReport, GoogleCheck } from './addonTypes';
 import type { AddonSheetProps } from './StandbyCard';
 import {
     BODY,
@@ -61,7 +61,7 @@ export function GoogleSheet({ t, operatorId, rows, onClose, onChanged }: AddonSh
         let gone = false;
         Wizard.freshnessStatus(operatorId)
             .then((s) => {
-                if (!gone) setGoogleOnly(!!(s as FreshnessGoogleOnly | null)?.google_only);
+                if (!gone) setGoogleOnly(!!s?.google_only);
             })
             .catch(() => {});
         return () => {

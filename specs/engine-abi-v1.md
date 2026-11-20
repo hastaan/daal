@@ -1557,7 +1557,10 @@ grows again, update the live ones together (the count was 60 in each as
 of 2026-11-19; `engine_connect_auto` made it 61 and
 `engine_network_facts` 62 the same day, and only
 `daal` `EXPECTED_ABI` and this document were updated with them; the last three are dated history and keep the number
-they were written with):
+they were written with). On 2026-11-20 (70, after `engine_standby_key`) the live
+ones were brought up together: `daal` `EXPECTED_ABI`, `specs/frp-track-v1.md`,
+`development-phases/README.md`, `docs/build-and-release.md` and the unreleased
+section of `CHANGELOG.md`:
 
 - `daal` `EXPECTED_ABI`
 - `specs/frp-track-v1.md`

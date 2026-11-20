@@ -200,16 +200,16 @@ fn translate(op: i64, ev: &ProgressEvent, out: &mut dyn FnMut(AddonProgress)) {
 }
 
 /// The first JSON object inside a text, for a helper refusal (exit 4)
-/// whose answer is on stdout. Today's bridge keeps only stderr for a
-/// failed run; a bridge that appends stdout to it (requested of the
-/// cli_bridge lane) is read with no change here.
+/// whose answer is on stdout: the bridge puts that stdout at the head of
+/// the failure text (`cli_bridge::ADDON_REFUSED_RC`), and whatever the
+/// helper wrote on stderr follows it.
 fn json_in(text: &str) -> Option<Value> {
     let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    serde_json::from_str(&text[start..=end]).ok()
+    serde_json::Deserializer::from_str(&text[start..])
+        .into_iter::<Value>()
+        .next()?
+        .ok()
+        .filter(Value::is_object)
 }
 
 fn str_list(v: &Value, key: &str) -> Vec<String> {
@@ -243,11 +243,14 @@ struct Staged(PathBuf);
 
 impl Staged {
     fn write(ctx: &WizardCtx, op: i64, front: &Value) -> Result<Self> {
+        Self::write_named(ctx, op, "cdn.front", front)
+    }
+    fn write_named(ctx: &WizardCtx, op: i64, what: &str, v: &Value) -> Result<Self> {
         std::fs::create_dir_all(&ctx.staging_dir)
             .map_err(|e| WizardError::Cdn(format!("mkdir staging: {e}")))?;
-        let p = ctx.staging_dir.join(format!("{op}.cdn.front.json"));
-        std::fs::write(&p, front.to_string().as_bytes())
-            .map_err(|e| WizardError::Cdn(format!("write front record: {e}")))?;
+        let p = ctx.staging_dir.join(format!("{op}.{what}.json"));
+        std::fs::write(&p, v.to_string().as_bytes())
+            .map_err(|e| WizardError::Cdn(format!("write {what} record: {e}")))?;
         Ok(Self(p))
     }
     fn arg(&self) -> String {
@@ -339,9 +342,10 @@ fn provider_ids(front: &Value) -> BTreeMap<String, String> {
     ids
 }
 
-/// The relay's Hetzner firewall. The record names it once a lane writes
-/// `firewall_id` there; until then the relay's conventional firewall
-/// name, which `cdn-provision` is asked to resolve (cross-lane request).
+/// The relay's Hetzner firewall: `firewall_id` when the record has one,
+/// else the name provisioning gave it (`daal-relay-<server id>`), which
+/// `cdn-provision` looks up on the account. The front record it prints
+/// carries the numeric id from then on.
 fn firewall_of(rec: &Value) -> String {
     if let Some(s) = rec.get("firewall_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         return s.to_string();
@@ -403,18 +407,26 @@ fn test_front(ctx: &WizardCtx, op: i64, front: &Value, on_progress: &mut dyn FnM
     Ok(t)
 }
 
-/// `cdn-door --action enable|disable`: the relay's `ws-cdn-in` inbound,
-/// through the relay's management (signing key on stdin).
+/// `cdn-door --action enable|disable`: the relay's `ws-cdn-in` inbound
+/// and its box-firewall rules for Cloudflare's ranges, through the
+/// relay's management (signing key on stdin; the hosting token opens
+/// the management window).
 fn run_door(ctx: &WizardCtx, op: i64, front: &Value, action: &str) -> Result<()> {
     let row = ctx.db.get(op)?;
     let helper_ip = require_helper_ip(ctx, op)?;
+    let hz = hz_token(ctx, op).ok_or(WizardError::EmptyToken)?;
     let key = custody_get(ctx, &row.publisher_priv_keystore_alias)?;
     let staged = Staged::write(ctx, op, front)?;
+    let rec: Value = serde_json::from_str(&row.operator_record_json)
+        .map_err(|e| WizardError::Validation(format!("this relay's record is unreadable: {e}")))?;
+    let staged_rec = Staged::write_named(ctx, op, "cdn.operator", &rec)?;
     let req = AddonCliRequest {
         args: vec![
             "cdn-door".into(),
             "--record-file".into(),
             staged.arg(),
+            "--operator-record".into(),
+            staged_rec.arg(),
             "--action".into(),
             action.into(),
             "--priv-key".into(),
@@ -422,7 +434,7 @@ fn run_door(ctx: &WizardCtx, op: i64, front: &Value, action: &str) -> Result<()>
             "--helper-ip".into(),
             helper_ip,
         ],
-        secret_files: vec![],
+        secret_files: vec![("--token-file", hz.as_str())],
         stdin: key.as_slice(),
         progress: false,
     };

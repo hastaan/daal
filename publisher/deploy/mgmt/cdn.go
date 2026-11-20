@@ -18,11 +18,11 @@ import (
 // POST /cdn (add-on 2, the way in through Cloudflare) and keeps the
 // door's users in step with every provision and revoke.
 //
-// It names the BINARY, not the relay: whether the box-side firewall
-// opens the door's port to Cloudflare is cloud-init's, written once at
-// first boot, and a relay provisioned before the add-on has no such
-// rule. The end-to-end test through the front (cdn-test) is what proves
-// the whole path.
+// It names the BINARY: such a box also opens the door's port at its own
+// firewall (ufw) to the Cloudflare ranges the enable request carries,
+// and closes those rules on disable, so a relay needs no Cloudflare
+// ranges at provision time. The end-to-end test through the front
+// (cdn-test) is what proves the whole path.
 //
 // WIRE CONTRACT with cmd/daal-relay-mgmt (capCDNDoor). No version
 // fallback in Has(): the verb rides the pinned artifact.
@@ -44,6 +44,9 @@ type CDNDoorResp struct {
 	Users                  int    `json:"users"`
 	OriginCertSHA256       string `json:"origin_cert_sha256,omitempty"`
 	OriginCertNotAfterUnix int64  `json:"origin_cert_not_after_unix,omitempty"`
+	// BoxFirewallRules is how many Cloudflare ranges the relay's box
+	// firewall opens the door's port to (rules the door wrote).
+	BoxFirewallRules int `json:"box_firewall_rules"`
 }
 
 // CDNDoorEnable opens ws-cdn-in on the relay with the Origin CA
@@ -79,7 +82,26 @@ func (c *Client) CDNDoorEnable(ctx context.Context, rec *provider.OperatorRecord
 		return got, fmt.Errorf("mgmt: cdn enable: relay answered enabled=%v port=%d path=%q, asked port=%d path=%q",
 			got.Enabled, got.Port, got.WSPath, req.Port, req.WSPath)
 	}
+	if len(req.EdgeRanges) > 0 && got.BoxFirewallRules == 0 {
+		return got, errors.New("mgmt: cdn enable: the relay opened its door behind no box-firewall rule for Cloudflare's ranges")
+	}
 	return got, nil
+}
+
+// CDNDoorEnableWithFW is CDNDoorEnable inside an ephemeral provider
+// firewall window for callerIP, like every other management call.
+func CDNDoorEnableWithFW(ctx context.Context, prov provider.Provider, rec *provider.OperatorRecord, privKey ed25519.PrivateKey, callerIP string, front *cloudflare.FrontRecord) (*CDNDoorResp, error) {
+	return withFirewallWindow(ctx, prov, rec, callerIP, func(cli *Client) (*CDNDoorResp, error) {
+		return cli.CDNDoorEnable(ctx, rec, privKey, front)
+	})
+}
+
+// CDNDoorDisableWithFW is CDNDoorDisable inside an ephemeral provider
+// firewall window for callerIP.
+func CDNDoorDisableWithFW(ctx context.Context, prov provider.Provider, rec *provider.OperatorRecord, privKey ed25519.PrivateKey, callerIP string) (*CDNDoorResp, error) {
+	return withFirewallWindow(ctx, prov, rec, callerIP, func(cli *Client) (*CDNDoorResp, error) {
+		return cli.CDNDoorDisable(ctx, rec, privKey)
+	})
 }
 
 // CDNDoorDisable closes ws-cdn-in and removes the door's files on the

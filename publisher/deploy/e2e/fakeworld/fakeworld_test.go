@@ -2,12 +2,14 @@ package fakeworld
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"daal/publisher/deploy/cli"
+	"daal/publisher/deploy/cloudflare"
 )
 
 // The listing verbs against an account that has nothing in it, through
@@ -46,7 +48,22 @@ func TestEmptyAccountListsAsAnEmptyArrayNotNull(t *testing.T) {
 			t.Errorf("%s on an empty account printed %q, want []", verb[0], got)
 		}
 	}
-	if st := w.State(); len(st.Unmodelled) != 0 || len(st.Requests) == 0 {
+	if st := w.State(); len(st.Unmodelled) != 0 || len(st.Requests) == 0 || st.CloudflareFetches != 0 {
 		t.Fatalf("the calls must reach the fake and only modelled endpoints: %+v", st)
+	}
+
+	// Cloudflare's published ranges are modelled and counted (in this
+	// test: the proxy settings are read once per process), so a test
+	// can prove a verb did or did not contact Cloudflare. The fetch is
+	// the product's own, through the same proxy as the rest.
+	r, err := cloudflare.FetchEdgeRanges(context.Background(), cloudflare.NewHTTPSEdgeRangeFetcher(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(r.V4, ",") != strings.Join(CloudflareRangesV4, ",") || strings.Join(r.V6, ",") != strings.Join(CloudflareRangesV6, ",") {
+		t.Fatalf("ranges = %+v", r)
+	}
+	if st := w.State(); st.CloudflareFetches != 2 || len(st.Unmodelled) != 0 {
+		t.Fatalf("state = %+v", st)
 	}
 }

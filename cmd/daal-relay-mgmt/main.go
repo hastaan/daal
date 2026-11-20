@@ -856,11 +856,11 @@ const (
 	// Mirrors mgmt.CapTUICUsers.
 	capTUICUsers = "tuic-users"
 
-	// capCDNDoor: this binary serves POST /cdn and keeps ws-cdn-in's
-	// users in step with every provision and revoke (add-on 2). It
-	// says nothing about whether THIS relay's box firewall opens the
-	// door's port to Cloudflare: that is cloud-init's, written once at
-	// first boot. Mirrors mgmt.CapCDNDoor.
+	// capCDNDoor: this binary serves POST /cdn, keeps ws-cdn-in's
+	// users in step with every provision and revoke, and opens the
+	// door's port at the box firewall to the Cloudflare ranges an
+	// enable carries (add-on 2; singbox_cdn_ufw.go). Mirrors
+	// mgmt.CapCDNDoor.
 	capCDNDoor = "cdn"
 
 	// mgmtAPIVersion is the second signal, sufficient on its own so a
