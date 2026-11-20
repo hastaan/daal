@@ -80,6 +80,11 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     keepClearOfSystemBars(webView)
+    // The page scrolls inside its own areas; the WebView's own bar only
+    // showed as a stray line at the screen's edge.
+    webView.isVerticalScrollBarEnabled = false
+    webView.isHorizontalScrollBarEnabled = false
+    webView.overScrollMode = View.OVER_SCROLL_NEVER
     DownloadsSaver.context = activity.applicationContext
     ShareText.context = activity.applicationContext
     ShareText.setActivity(activity)

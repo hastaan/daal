@@ -363,8 +363,10 @@ function MainList({
 /** "Daal 0.9.0", with the version kept left-to-right inside Persian. */
 export function VersionText({ t, version }: { t: (k: string) => string; version: string }) {
     const [before, after] = t('settings.version').split('{version}');
+    // dir=auto: the first word ("Daal" / «دال») sets the order, even
+    // inside a button that an old WebView lays out left to right.
     return (
-        <span>
+        <span dir="auto">
             {before}
             <bdi dir="ltr">{version}</bdi>
             {after ?? ''}
