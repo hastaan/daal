@@ -316,7 +316,9 @@ func TestConnIncompleteRecordIsFlushed(t *testing.T) {
 		t.Fatal("an incomplete record was sent at once")
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for len(rc.got()) == 0 && time.Now().Before(deadline) {
+	// The strategy cuts at 2, so the bytes arrive in two pieces with a
+	// gap: wait for all of them, not just the first.
+	for len(bytes.Join(rc.got(), nil)) < len(head) && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if got := bytes.Join(rc.got(), nil); !bytes.Equal(got, head) {

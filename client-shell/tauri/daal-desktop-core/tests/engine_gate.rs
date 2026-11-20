@@ -68,6 +68,10 @@ fn every_core_call_is_gated() {
             .or_else(|| text.find("self.route_precheck"))
             .or_else(|| text.find("self.connect_auto"))
             .or_else(|| text.find("self.network_facts"))
+            // Optional symbols: `let Some(f) = self.<sym> else …` then a
+            // call through `f`, direct or via call_buf.
+            .or_else(|| text.find("self.call_buf("))
+            .or_else(|| text.find("(f)("))
             .unwrap_or_else(|| panic!("{name}: expected an engine call"));
         let gate = text
             .find("self.ensure_ready()?;")
