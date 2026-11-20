@@ -4209,6 +4209,9 @@ mod jni_bridge {
         super::ENGINE_FOR_JNI.get().cloned()
     }
 
+    /// DaalCoreBridge, resolved on a Java thread (see protect_trampoline).
+    static BRIDGE_CLASS: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
+
     /// Engine driver's protect trampoline. The signature matches the
     /// `int (*)(int fd)` contract documented on
     /// engine_register_protect_callback: returns non-zero on success,
@@ -4225,14 +4228,25 @@ mod jni_bridge {
         };
         let result = (|| -> Result<bool, jni::errors::Error> {
             let mut env = vm.attach_current_thread()?;
-            let class = env.find_class("org/daal/desktop/platform/DaalCoreBridge")?;
-            let v = env.call_static_method(
-                &class,
-                "invokeProtect",
-                "(I)Z",
-                &[JValue::Int(fd)],
-            )?;
-            v.z()
+            // This runs on threads the Go engine made (sing-box dials, the
+            // network test's probes). FindClass there searches only the
+            // system class loader and misses app classes, and a pending
+            // ClassNotFoundException at detach kills the app. So use the
+            // class cached when Java registered the callback, and never
+            // leave an exception pending.
+            let r = match BRIDGE_CLASS.get() {
+                Some(g) => {
+                    let class = <&JClass>::from(g.as_obj());
+                    env.call_static_method(class, "invokeProtect", "(I)Z", &[JValue::Int(fd)])
+                }
+                None => env
+                    .find_class("org/daal/desktop/platform/DaalCoreBridge")
+                    .and_then(|class| env.call_static_method(&class, "invokeProtect", "(I)Z", &[JValue::Int(fd)])),
+            };
+            if r.is_err() {
+                let _ = env.exception_clear();
+            }
+            r?.z()
         })();
         // The JavaVM came from a raw pointer we do not own (ndk_context
         // holds the lifetime); avoid running the destructor.
@@ -4277,9 +4291,16 @@ mod jni_bridge {
 
     #[no_mangle]
     pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_registerProtectCallback<'local>(
-        _env: JNIEnv<'local>,
-        _class: JClass<'local>,
+        env: JNIEnv<'local>,
+        class: JClass<'local>,
     ) -> jint {
+        // Called from a Java thread, where the class is resolvable: keep a
+        // global reference for protect_trampoline's engine-made threads.
+        if BRIDGE_CLASS.get().is_none() {
+            if let Ok(g) = env.new_global_ref(&class) {
+                let _ = BRIDGE_CLASS.set(g);
+            }
+        }
         let Some(eng) = engine() else { return -1 };
         let ptr = protect_trampoline as *const () as usize;
         match eng.register_protect_callback(ptr) {
