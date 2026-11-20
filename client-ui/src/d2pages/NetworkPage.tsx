@@ -679,12 +679,16 @@ export default function NetworkPage({ t, onNavigate }: Props) {
                         openedSheet.closed();
                     }}
                     onImported={() => void load()}
-                    onConnect={() => {
-                        void startConnect(contract, { kind: 'auto' }).catch(() => {
-                            /* Home says how the connect went */
-                        });
-                        onNavigate?.('connection');
-                    }}
+                    onConnect={
+                        summaryNow?.state === 'connected' || summaryNow?.state === 'connecting'
+                            ? undefined
+                            : () => {
+                                  void startConnect(contract, { kind: 'auto' }).catch(() => {
+                                      /* Home says how the connect went */
+                                  });
+                                  onNavigate?.('connection');
+                              }
+                    }
                 />
             )}
             {addrOpen && <MyAddressSheet t={t} onClose={() => setAddrOpen(false)} />}

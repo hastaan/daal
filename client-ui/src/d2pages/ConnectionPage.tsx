@@ -932,7 +932,13 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                         openedSheet.closed();
                     }}
                     onImported={() => void readRoutes(conn?.routeCountHint, true)}
-                    onConnect={() => void connectNow({ kind: 'auto' })}
+                    // Already connected (or on the way): no "Connect" on the
+                    // result, just Close — the new file joins automatically.
+                    onConnect={
+                        conn?.state === 'connected' || conn?.state === 'connecting'
+                            ? undefined
+                            : () => void connectNow({ kind: 'auto' })
+                    }
                 />
             )}
 

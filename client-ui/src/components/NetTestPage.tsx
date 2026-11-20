@@ -482,20 +482,23 @@ export default function NetTestPage({ t, connState, onBack, backLabel, api = Net
                                 <div style={{ display: 'grid', gap: 10 }} data-testid="nettest-ask-delete">
                                     <p style={BODY}>{t('netTest.afterSend.question')}</p>
                                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        {/* Android cannot tell us whether the share went
+                                            through, so keeping is the safe default: a
+                                            person who backed out must not lose the report. */}
                                         <Button
-                                            dataButton="nettest-delete-after"
-                                            disabled={busy !== null}
-                                            onClick={() => void remove()}
-                                        >
-                                            {t('netTest.delete')}
-                                        </Button>
-                                        <Button
-                                            variant="ghost"
                                             dataButton="nettest-keep"
                                             disabled={busy !== null}
                                             onClick={() => setAskDelete(false)}
                                         >
                                             {t('netTest.keep')}
+                                        </Button>
+                                        <Button
+                                            variant="ghost"
+                                            dataButton="nettest-delete-after"
+                                            disabled={busy !== null}
+                                            onClick={() => void remove()}
+                                        >
+                                            {t('netTest.delete')}
                                         </Button>
                                     </div>
                                 </div>
