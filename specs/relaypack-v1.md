@@ -389,9 +389,23 @@ it ignore it.
 
 Reserved 2026-11-20 for the standby-address add-on
 (`docs/optional-addons-plan.md` §1, `specs/optional-addons-v1.md` §3).
-**Not built yet**: parser `bundle/go/bundle/standby.go` (S1), importer and
-guard (S2), binder `publisher/deploy/relaypack/endpoint.go` (S5), engine
-variant (S7). Until then no pack carries it and every build ignores it.
+**Built:** parser, commitment and key functions
+`bundle/go/bundle/standby.go` (S1); importer
+(`bundle/go/importer/endpoint_plan.go`) and set-route guard
+(`core/abi/endpoint_guard.go`) (S2); the signing check RP027
+(`relaypackvalidate.ValidateForSigning`). **Not built:** binder
+`publisher/deploy/relaypack/endpoint.go` (S5), the store keeping it
+(`core/trust` SaveImport), the engine variant and `engine_standby_key`
+(S7). Until S5 no pack carries it.
+
+**Compatibility.** Every build ignores a member of
+`family_specific_config` it does not know: no decoder of that object is
+strict, `_endpoint` is read by its own key, and the engine's row keeps
+only `bundle.EngineFamilyConfigKeys`. So a phone on a build from before
+this member imports a pack that carries it exactly as if it were
+absent, the freshness merge included. Tested against a frozen copy of
+the rules as they shipped (`bundle/go/importer/compat_old_test.go`,
+`internal/oldrules`, frozen from 079ef96).
 
 A route's `family_specific_config` MAY carry `_standby`: a second address
 of the same relay, on the same ports with the same keys, that the route
@@ -435,7 +449,16 @@ manifest signature. Two shapes:
     trailing bits is malformed.
   - DNS form: the 16 bytes as one AAAA record.
   - There is no checksum: the commitment is the check.
-  - Test vectors: S1 adds them to this section with the parser.
+  - Test vector (`bundle/go/bundle/standby_test.go`, cross-checked with
+    an independent implementation): salt `00 01 02 … 0b`, address
+    `203.0.113.20` →
+    key text `000G40 R40M3 0E209 185WP 03H2G`;
+    commit `oLKATgHpOx6iddfCqnGCuDAi1XSE7ysXDZ1tUmE5HHY=`;
+    DNS form `1:203:405:607:809:a0b:cb00:7114`.
+    Sixteen `ff` bytes read `ZZZZZZ ZZZZZ ZZZZZ ZZZZZ ZZZZW` (the two
+    trailing bits are zero).
+  - A key whose address is not a public IPv4 address (the rules for
+    `server` above) is never acted on, even when it matches.
 - **Families.** Never on `shadowsocks` (no server authentication that is
   independent of the shared key, so a stale standby could hand a
   stranger the traffic): the binder does not write it there, and a
@@ -449,12 +472,28 @@ manifest signature. Two shapes:
   digest are checked exactly as before, and the stored profile itself
   keeps the committed address (the standby is a dial-time variant,
   `specs/optional-addons-v1.md` §3.3).
+- **Import.** The importer hands the store the `_standby` of every
+  route that may use one, exactly as signed (`importer.RouteInput.Standby`;
+  nil when absent, malformed, on shadowsocks, or on a route without a
+  direct `_endpoint`). An outbound in a file may sit at the open standby
+  address; a sealed standby needs a key, and none is held at import, so
+  there the outbound must be at `_endpoint.server`. Publishers mint at
+  `_endpoint.server` (older builds require it).
 - **On the device.** Not in `bundle.EngineFamilyConfigKeys`: open mode
   holds an address, and the route row is not the encrypted half of the
-  store. The engine keeps it beside the route's commitment
-  (`standby:<route_id>`) with an accepted key (`standby-key:<route_id>`);
-  every import and refresh rewrites both, and a newer commitment without
-  `_standby` removes them.
+  store. The engine keeps it beside the route's commitment, as signed,
+  under `standby:<route_id>` (`bundle.StandbyStoreKey`), with an accepted
+  key as its 16 raw bytes under `standby-key:<route_id>`
+  (`bundle.StandbyKeyStoreKey`); every import and refresh rewrites the
+  first, a newer commitment without `_standby` removes both, and a key
+  that no longer matches the held commitment is never used (the guard
+  checks the match at every connect). The set-route guard
+  (`routeEndpointGuard`) accepts an outbound at the committed server,
+  the open standby, or the address of a held key that matches.
+- **Signing.** RP027 (signing only): a malformed `_standby`, one on
+  shadowsocks or on a route without a direct `_endpoint`, an open one
+  equal to the endpoint's server, or routes of one relay address that
+  do not all carry the same one (shadowsocks excepted).
 - **Where a key comes from.** A key the person types
   (`engine_standby_key`, `specs/optional-addons-v1.md` §3.4), the
   `standby_key` member of a `daal-refresh-v1` container (below), or a
@@ -693,6 +732,8 @@ validator code.
 | RP021 | error | `relay_pack.freshness_url` is populated at V1.5. The slot is reserved at FRP-1; FRP-8 lifts acceptance at V1.6 — where the blanket rejection is **replaced by a shape check**, not removed: absolute `https://`, a fully-qualified host that is not an IP literal / loopback, no embedded credentials, ≤2048 bytes. |
 | RP022 | error | At `Phase: V16`, every `cdn_fronted` candidate's `_cdn_attestation` blob (additive sub-field inside the FRP-1 `_relaypack` opaque container — no `spec_version` bump) must carry `origin_ca_fingerprint`, `aop_enabled: true`, `firewall_id`. Validator does NOT call Cloudflare; live-posture re-verification is the wizard's "Verify CDN posture" job. |
 | RP023 | error | `_cdn_attestation.dns_only_present` is `true` (the wizard's deploy-time check found a DNS-only A/AAAA record on the chosen subdomain — §11.7 hard rule). Distinguishes "attestation missing" (RP022) from "attestation present but reports posture failure" (RP023). |
+| RP026 | error (signing only) | `relaypackvalidate.ValidateForSigning`: a `cdn_fronted` candidate's `_cdn_endpoint` is missing or unusable, sits beside an `_endpoint`, is on a family other than `websocket-tls`, or could never be dialled (no `ech_config`, `plain_fallback` off); or a candidate that is not `cdn_fronted` carries `_cdn_endpoint`. **Never run on a recipient** (`Validate` does not include it): a newer publisher's shape must cost a recipient one route, not the pack. |
+| RP027 | error (signing only) | `ValidateForSigning`: a `_standby` is malformed, sits on shadowsocks or on a route without a direct `_endpoint`, is an open standby equal to `_endpoint.server`, or the routes of one relay address do not all carry the same one (shadowsocks excepted). Recipients treat every such `_standby` as absent. |
 | RP019 | warn  | All RelayPack candidates share every `public_risk_tag` (no diversity at all). UI nudge: add a CDN front, a second VPS, or a different provider. |
 | RP020 | warn  | The bundle has no `udp_gated:true` AND no UDP-shaped families. Recipients on UDP-only paths will have no candidate. |
 | RP024 | warn  | A `cdn_fronted` candidate without a `direct_vps` sibling in the same RelayPack — UI nudge: "consider adding a direct route as fallback". |
@@ -791,6 +832,16 @@ The schema is **additive only**:
 - `freshness_url` is already part of the struct at FRP-1 but must be
   empty at V1.5 (`RP021` rejects non-empty values); FRP-8 lifts the
   validator to accept non-empty values; no `spec_version` bump.
+- New data for a route goes in a **sibling** member of
+  `family_specific_config` that older builds ignore (`_report_to`,
+  `_cover_names`, `_standby`, `_cdn_endpoint`), never inside
+  `_endpoint`, whose decoder is strict and whose refusal costs the whole
+  pack. A route whose outbound older builds must not see (they would
+  refuse the pack for an outbound with no `_endpoint`) wraps it in its
+  profile under a key of its own with no top-level `type`
+  (`_daal_cdn_outbound`). Each such member is refused only at signing
+  (`ValidateForSigning`); a recipient that cannot read one drops that
+  member or that route, never the pack.
 
 The next `spec_version` bump after FRP-1 is **FRP-7.5** (sub-key
 cert chain), which lifts `spec_version` from 3 to 4. FRP-7.5 is
@@ -896,7 +947,8 @@ the on-device cadence policy. Verified by
 ## Endpoint commitment — "signed endpoint, local credential"
 
 **Normative.** Implemented by `bundle/go/bundle/endpoint.go` (format,
-check, merge), `bundle/go/importer/endpoint_plan.go` (import policy),
+check, merge; the CDN-fronted shape in `cdn_endpoint.go`, the standby
+in `standby.go`), `bundle/go/importer/endpoint_plan.go` (import policy),
 `publisher/deploy/relaypack/endpoint.go` (signing) and
 `core/abi/endpoint_guard.go` (set-route).
 
@@ -980,82 +1032,151 @@ fully enforce is not one it may partially enforce.
 
 Reserved 2026-11-20 for the Cloudflare add-on
 (`docs/optional-addons-plan.md` §2, `specs/optional-addons-v1.md` §4).
-**Not built yet**: B-4 (`bundle/go/bundle/endpoint.go`,
-`relaypack/{client_outbound.go,candidate_render.go}`, the validator row).
+**Built (B-4, endpoint part):** format, check and merge
+`bundle/go/bundle/cdn_endpoint.go`; import
+(`bundle/go/importer/endpoint_plan.go` `planCDNRoute`); set-route guard
+(`core/abi/endpoint_guard.go`); the signing check RP026
+(`relaypackvalidate.ValidateForSigning`). **Not built:** the minter
+(`relaypack/{client_outbound.go,candidate_render.go,client_pack.go}`),
+the binder writing it, the engine's edge pick and hello order (B-4
+outbound part, B-6, B-6b).
 
 A `websocket-tls` route whose `_relaypack.exposure_mode` is `cdn_fronted`
-commits to a hostname and a root set instead of an address and a key
-pin. `_endpoint` `v` 1 gains five optional members, valid only on this
-shape:
+commits to a host name and a root set instead of an address and a key
+pin.
+
+**Where it travels — and why not in `_endpoint`.** `_endpoint` is
+decoded strictly (below), and every build since endpoint commitments
+refuses the **whole** pack — every other route and the freshness merge
+of the signed skeleton with it — for one unknown member there. Families
+may stay on an older build for a long time, so the CDN commitment is a
+sibling member of its own, and the route carries **no** `_endpoint`:
 
 ```jsonc
-"_endpoint": {
-  "v": 1,
-  "server": "<label>.<zone>",          // a hostname, never resolved by a recipient
-  "port": 443,
-  "server_name": "<label>.<zone>",     // equals server
-  "cdn": "cloudflare",
-  "edge_seeds": ["104.16.0.0/13", "..."],
-  "ech_config": "<base64 ECHConfigList>",               // optional
-  "tls_roots_sha256": ["<base64 SHA-256 of a root's SubjectPublicKeyInfo>", "..."],
-  "plain_fallback": false                               // optional, default false
+"family_specific_config": {
+  "_relaypack": { "exposure_mode": "cdn_fronted", /* … RP005–RP007 */ },
+  "_cdn_attestation": { /* RP022 / RP023, unchanged */ },
+  "_cdn_endpoint": {
+    "v": 1,
+    "server": "<label>.<zone>",          // a host name, never resolved by a recipient
+    "port": 443,
+    "server_name": "<label>.<zone>",     // equals server
+    "cdn": "cloudflare",
+    "edge_seeds": ["104.16.0.0/13", "..."],
+    "ech_config": "<base64 ECHConfigList>",               // optional
+    "tls_roots_sha256": ["<base64 SHA-256 of a root's SubjectPublicKeyInfo>", "..."],
+    "plain_fallback": false                               // optional, default false
+  }
 }
 ```
 
-- **Shape.** On a `cdn_fronted` route `cdn`, `edge_seeds`,
-  `tls_roots_sha256` and `server_name` are required, `server_name`
-  equals `server`, and `tls_spki_sha256`, `reality_public_key`,
-  `ss_method` and `ss_server_key_sha256` are absent. On any other route
-  the five members are unknown members (`endpoint_malformed`).
-  - `cdn`: `cloudflare` (the only value).
+and the recipient's outbound for the route is **wrapped** in its
+profile, beside the minter's `_daal_unavailable` marker, with no
+top-level `type`:
+
+```jsonc
+// profiles/<id>.json of a CDN-fronted route in a recipient's file
+{
+  "_daal_unavailable": { "family": "websocket-tls", "reason": "…" },
+  "_daal_cdn_outbound": { "type": "vless", "server": "104.16.1.2", /* … */ }
+}
+```
+
+(`bundle.WrapCDNOutbound`; `bundle.CDNProfileOutbound` unwraps, and also
+accepts an outbound at the top of the profile.) A build from before this
+amendment therefore sees, for that one route, no commitment and no
+outbound: it reports the route `not_offered` ("not included in this
+file … nothing is wrong with your phone"), imports every other route,
+and on the freshness path merges every other route and reports this one
+`no_credentials`. Tested against a frozen copy of those rules, and
+against the real code of 079ef96 on packs this build produced
+(`bundle/go/importer/compat_old_test.go`; the same file shows the
+earlier proposal — these members inside `_endpoint` — refused whole by
+the old rules). A recipient's old build also runs the RelayPack
+validator, which already accepts a `cdn_fronted` `websocket-tls`
+candidate at V1.6 when RP005–RP007 and RP022/RP023 hold, so the minter
+MUST write `_cdn_attestation` and the tags.
+
+The member is covered by the manifest signature like every other
+member of `family_specific_config` (canonicalisation re-parses the
+object and sorts its keys); the wrapped outbound, like every outbound,
+is not signed and is held to the commitment.
+
+- **Shape.** Decoded strictly: an unknown member, a version other than
+  `1`, or any rule below broken makes it unusable for this build. On a
+  recipient that costs **that route only** — it is reported
+  `needs_newer_app` and the rest of the pack is used: the member is
+  signed, so a shape this build does not know is a newer publisher, not
+  an altered file. A route carrying both `_endpoint` and `_cdn_endpoint`
+  refuses the pack (`endpoint_malformed`). RP026 refuses all of these
+  at signing.
+  - `cdn`: `cloudflare` (the only value). Family: `websocket-tls` only.
   - `server`: a canonical LDH host name of at least two labels — lower
-    case, no trailing dot, not an IP literal, not under `.ir`.
-  - `edge_seeds`: 1–8 canonical IPv4 or IPv6 CIDR prefixes, taken by the
-    publisher abroad from the CDN's published ranges at sign time.
-    Recipients dial an address inside them and never download a range
-    list or resolve the host name (domestic DNS would answer
-    `10.10.34.x`).
-  - `ech_config`: standard base64 of the ECHConfigList in the host
-    name's HTTPS record, read over DoH from abroad at sign time and at
-    every freshness publish; at most 512 bytes decoded. Absent means the
-    zone serves no ECH ("Name hidden: no"). It is the same for every
-    site on the CDN and identifies nobody; a stale one costs one round
-    trip (the edge answers with retry configs).
+    case, no trailing dot, not an IP literal, not domestic (`.ir`, its
+    IDN, or the known-domestic list of `_cover_names`).
+  - `edge_seeds`: 1–8 canonical (host bits zero, as `netip` prints it)
+    IPv4 or IPv6 CIDR prefixes of public unicast space, no repeats,
+    taken by the publisher abroad from the CDN's published ranges at
+    sign time. Recipients dial an address inside them and never
+    download a range list or resolve the host name (domestic DNS would
+    answer `10.10.34.x`).
+  - `ech_config`: standard base64 (padded) of the ECHConfigList in the
+    host name's HTTPS record (a 2-byte length then that many bytes),
+    read over DoH from abroad at sign time and at every freshness
+    publish; at most 512 bytes decoded. Absent means the zone serves no
+    ECH ("Name hidden: no"). It is the same for every site on the CDN and
+    identifies nobody; a stale one costs one round trip (the edge
+    answers with retry configs).
   - `tls_roots_sha256`: 1–8 standard-base64 SHA-256 digests of root
-    certificates' SubjectPublicKeyInfo. The app ships the root set; the
-    route verifies only against shipped roots whose digest is listed, and
-    is not dialled when none is.
+    certificates' SubjectPublicKeyInfo, no repeats. The app ships the
+    root set; the minter installs the listed roots in the outbound.
   - `plain_fallback`: the signed per-pack flag of owner decision D-2.
-- **The outbound must** be `vless` over a `ws` transport whose `Host`
-  header is `server_name`; TLS on with `tls.server_name` = `server_name`;
-  `server` an IP address inside one of `edge_seeds` (the engine's edge
-  pick writes it; a host name there is refused) and `server_port` =
-  `port`; no `certificate_public_key_sha256`; no REALITY; no
-  `tls.insecure`; no trust anchor from a path on the device; ECH on with
-  `ech_config` when it is committed. The general rules above (member
-  names, no `detour`, …) apply unchanged. The ws path is a credential:
-  it stays in the profile, the same for every recipient of the route.
+    A commitment with no `ech_config` and `plain_fallback` off could
+    never be dialled; RP026 refuses to sign it.
+- **The outbound must** (`bundle.CheckCDNOutbound`) be `vless` over a
+  `ws` transport whose `Host` header is set exactly once (any spelling
+  of the name), to one value, `server_name`; TLS on with
+  `tls.server_name` = `server_name`; `server` an IP address inside one
+  of `edge_seeds` (the engine's edge pick writes it; a host name there
+  is refused) and `server_port` = `port`; no
+  `certificate_public_key_sha256`; REALITY absent or off; no
+  `tls.insecure`, no `disable_sni`; no `certificate_path` or
+  `certificate_directory_path`; at least one root installed as
+  `tls.certificate`, **every** one of which has a listed SPKI digest —
+  sing-box then trusts those roots and nothing else, whatever the
+  platform holds. ECH: `tls.ech.enabled` with `tls.ech.config` exactly
+  the committed ECHConfigList (PEM `ECH CONFIGS`) and no `config_path`
+  or `query_server_name` — never a configuration fetched by a DNS
+  lookup (which would put the zone name in a query) or read from the
+  device; ECH off is accepted **only** when `plain_fallback` is true.
+  The general rules above (plain lower-case member names, no `detour`,
+  bind knobs or `server_ports`) apply unchanged and extend to the
+  `transport` and `tls.ech` objects. The ws path is a credential: it
+  stays in the profile, the same for every recipient of the route.
+- **Import.** As rules 1–4 of "Recipient rules" with this checker: an
+  outbound in the file that does not match refuses the whole pack
+  (`endpoint_mismatch`); the unwrapped outbound is what is stored, and
+  the `_cdn_endpoint` object (as signed) is the route's stored
+  commitment (`endpoint:<route_id>`; a reader tells the two shapes apart
+  by the `cdn` member, `bundle.IsCDNCommitment`). The set-route guard
+  holds the stored outbound to it.
 - **Hello order** (engine, B-6b): ECH; then ECH with the outer hello
   split (`record_fragment` + `fragment`); then stop. A plain hello
   (which shows the zone name) only when `plain_fallback` is true. The
   route is tried after every direct route and after the open standby.
-- **Merge** moves `server`, `server_name`, `edge_seeds`, `ech_config`,
-  `tls_roots_sha256` and `plain_fallback`; the device re-picks its edge
-  address.
+- **Merge** (`bundle.MergeCDNEndpoint`, freshness or a later file, into
+  a device route whose stored commitment is a CDN one) moves the port,
+  `tls.server_name`, the ws `Host`, the ECH configuration (removed when
+  none is committed), and the edge address when it is no longer inside
+  the seeds (to the first address of the first seed; the device
+  re-picks). Installed roots that are no longer listed are dropped; if
+  none is left the route is `needs_new_file` and left as it was.
+  Credentials (uuid, ws path) stay.
 - **Stated limit.** The CDN terminates TLS, so it can read the VLESS
   header — the recipient's UUID and each destination host and port —
   and sees every recipient's address. Payloads that are themselves TLS
   stay opaque. Weaker than a key pin in that one way, and the
   publisher's card says so before anything is bought.
-- **Compatibility — open item for B-4.** A build from before this
-  amendment reads the new members as unknown, and `endpoint_malformed`
-  refuses the **whole** pack (`bundle/go/importer/endpoint_plan.go`
-  `planRoutes`), the freshness merge of the signed skeleton included —
-  not just the CDN route. So a pack with a CDN route must not reach a
-  device older than this amendment. Before the first CDN route is
-  minted, B-4 either accepts that (the pilot's phones update together)
-  or carries this commitment under a sibling key that older builds
-  ignore. See `specs/optional-addons-v1.md` §8.
 
 No manifest struct changes, so the canonical bytes of every existing
 field are unchanged and **`spec_version` does not move**:
@@ -1148,7 +1269,10 @@ rig `op:tamper uncommitted_replacement.*`.
 ### Recipient rules (import)
 
 For a bundle with `Manifest.relay_pack != nil`, per usable route, before
-any trust prompt and again before persistence:
+any trust prompt and again before persistence (a route carrying
+`_cdn_endpoint` follows the same rules with that commitment in place of
+`_endpoint`, its outbound unwrapped from the profile; "The CDN-fronted
+endpoint"):
 
 1. **Outbound present** (the profile is a JSON object with a non-empty
    `type`): the route MUST carry a valid `_endpoint` and the outbound
@@ -1160,7 +1284,9 @@ any trust prompt and again before persistence:
    minter's `_daal_unavailable` marker): the route is **not stored**. It
    is not listed, not selectable, not activatable. It is reported in
    `Verdict.Unavailable` with a reason — `not_offered` (marker),
-   `no_credentials`, `needs_new_file`, or `older_than_device`.
+   `no_credentials`, `needs_new_file`, `older_than_device`, or
+   `needs_newer_app` (a signed add-on member this build cannot read;
+   "The CDN-fronted endpoint").
 3. **Merge.** If the route has a commitment and the device already holds
    an outbound for the same route id, from the **same publisher**, of the
    **same family**, the new signed endpoint is applied to that outbound

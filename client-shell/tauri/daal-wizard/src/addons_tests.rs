@@ -240,13 +240,8 @@ fn every_addon_operation_answers_not_built_and_changes_nothing() {
     let f = fx();
     let op = provisioned(&f);
     let c = &f.ctx;
-    use crate::{addon_cdn as cdn, addon_google as g, addon_standby as s};
-    assert!(is_not_built(s::price(c, s::StandbyPriceInput { operator_id: op }, &mut noop()).unwrap_err()));
-    assert!(is_not_built(
-        s::add(c, s::StandbyAddInput { operator_id: op, mode: String::new() }, &mut noop()).unwrap_err()
-    ));
-    assert!(is_not_built(s::promote(c, s::StandbyPromoteInput { operator_id: op }, &mut noop()).unwrap_err()));
-    assert!(is_not_built(s::key(c, s::StandbyKeyInput { operator_id: op }, &mut noop()).unwrap_err()));
+    // The standby add-on is built (L-standby-pub): addon_standby_tests.rs.
+    use crate::addon_cdn as cdn;
     assert!(is_not_built(
         cdn::set_token(c, cdn::CdnTokenInput { operator_id: op, token: "x".into() }, &mut noop())
             .unwrap_err()
@@ -260,15 +255,7 @@ fn every_addon_operation_answers_not_built_and_changes_nothing() {
         cdn::set_plain_fallback(c, cdn::CdnPlainFallbackInput { operator_id: op, allow: true }, &mut noop())
             .unwrap_err()
     ));
-    assert!(is_not_built(g::script(c, g::GoogleScriptInput { operator_id: op }, &mut noop()).unwrap_err()));
-    assert!(is_not_built(
-        g::sign_in(c, g::GoogleSignInInput { operator_id: op }, None, &mut noop()).unwrap_err()
-    ));
-    assert!(is_not_built(
-        g::attach(c, g::GoogleAttachInput { operator_id: op, url: "https://script.google.com/x".into() }, &mut noop())
-            .unwrap_err()
-    ));
-    assert!(is_not_built(g::check(c, g::GoogleCheckInput { operator_id: op }, &mut noop()).unwrap_err()));
+    // The Google add-on is built (L-google-pub): addon_google_tests.rs.
     assert!(list(c, op).unwrap().is_empty());
     assert!(f.mock.addon_calls.lock().unwrap().is_empty(), "no stub ran the helper");
 }
@@ -284,9 +271,11 @@ fn removing_any_kind_answers_not_built_and_keeps_the_row_and_secret() {
         &NewAddon { operator_id: op, kind: Some(AddonKind::Google), ..Default::default() },
     )
     .unwrap();
-    for id in [cdn.id, sb, g] {
-        assert!(is_not_built(remove(&f.ctx, id, &mut noop()).unwrap_err()));
-    }
+    // The standby kind is built; its removal is tested in addon_standby_tests.rs.
+    let _ = sb;
+    // The Google kind is built; its removal is tested in addon_google_tests.rs.
+    let _ = g;
+    assert!(is_not_built(remove(&f.ctx, cdn.id, &mut noop()).unwrap_err()));
     assert_eq!(list(&f.ctx, op).unwrap().len(), 3);
     assert_eq!(f.ctx.custody.get(&cdn.secret_alias).unwrap(), CF_TOKEN);
     assert!(remove(&f.ctx, 4242, &mut noop()).is_err(), "no such add-on");

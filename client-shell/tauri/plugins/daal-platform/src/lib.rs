@@ -99,14 +99,13 @@ impl<R: Runtime> PlatformHandle<R> {
     /// Optional add-ons, Google update channel, Path A
     /// (docs/optional-addons-plan.md §3.3, item G3): a one-shot OAuth
     /// access token for `scopes` from Play services' authorization
-    /// client. The caller uses it for the Apps Script API calls and
-    /// drops it; nothing is stored. NOT BUILT YET: lane L-google-pub
-    /// fills this in (mobile.rs + the Kotlin `GoogleAuth`).
+    /// client (`GoogleAuth.kt`). The caller uses it for the Apps Script
+    /// API calls and drops it; nothing is stored. Errors start with an
+    /// `E_GOOGLE_*` code (`E_GOOGLE_NOT_CONFIGURED` in a build without
+    /// the Android OAuth client, `E_GOOGLE_SIGN_IN_CANCELLED`,
+    /// `E_GOOGLE_NO_PLAY_SERVICES`, `E_GOOGLE_UNAUTHORIZED`).
     pub fn google_authorize(&self, scopes: &[&str]) -> Result<Option<String>> {
-        let _ = scopes;
-        Err(crate::Error::Other(
-            "E_NOT_BUILT: signing in with Google is not built yet".into(),
-        ))
+        self.inner.google_authorize(scopes)
     }
 }
 

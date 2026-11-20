@@ -177,6 +177,25 @@ pub const MAX_SUPERSEDES: i64 = 16;
 /// nobody writes to.
 pub const KIND_R2: &str = "r2";
 pub const KIND_GHPAGES: &str = "ghpages";
+/// The Google update channel (optional add-on 3, `addon_google`). Its
+/// row is made and removed only by the add-on: the URL comes from the
+/// setup, and its one secret (the write key) belongs to the add-on row,
+/// so this table holds no alias for it.
+pub const KIND_APPSSCRIPT: &str = "appsscript";
+
+/// The two-mirror rule with its one exception (owner decision D-3,
+/// `freshness.MeetsMirrorFloor` in Go): a set whose only provider is
+/// `appsscript` is accepted alone. `kinds` are distinct.
+pub fn meets_mirror_floor(kinds: &[&str]) -> bool {
+    kinds.len() >= MIN_MIRRORS || (kinds.len() == 1 && kinds[0] == KIND_APPSSCRIPT)
+}
+
+fn distinct_kinds(rows: &[FreshnessEndpointRow]) -> Vec<&str> {
+    let mut kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
+}
 
 /// What the operator fills in to add one endpoint. Credentials are in
 /// this struct only on the way *in*; they are moved into custody and
@@ -261,6 +280,9 @@ pub struct FreshnessStatus {
     /// `mirrors_in_pack`. Lets the UI say "anything you handed out
     /// before <date> will not repair itself".
     pub pack_signed_at_unix: i64,
+    /// The only provider is the Google update channel (D-3): accepted
+    /// alone, and the card says a Google suspension then stops updates.
+    pub google_only: bool,
 }
 
 /// Custody alias for one endpoint's credential blob.
@@ -319,6 +341,11 @@ pub fn add_endpoint(
     let _ = ctx.db.get(operator_id)?;
 
     let kind = trimmed(&input.kind).to_ascii_lowercase();
+    if kind == KIND_APPSSCRIPT {
+        return Err(WizardError::Validation(
+            "freshness: the Google update channel is set up from the relay's Add-ons".into(),
+        ));
+    }
     if kind != KIND_R2 && kind != KIND_GHPAGES {
         return Err(WizardError::Pricing(format!(
             "freshness: unknown provider {kind:?}"
@@ -435,6 +462,24 @@ pub fn add_endpoint(
 /// write-key is still in the keystore is a live credential nobody is
 /// watching, on an account the operator has stopped thinking about.
 pub fn delete_endpoint(ctx: &WizardCtx, endpoint_id: i64) -> Result<()> {
+    // The Google channel is removed from Add-ons: that path also clears
+    // what the script serves, and its write key belongs to the add-on.
+    let kind: Option<String> = ctx.db.with_conn(|c| {
+        use rusqlite::OptionalExtension;
+        c.query_row(
+            "SELECT kind FROM freshness_endpoints WHERE id = ?1",
+            rusqlite::params![endpoint_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    });
+    if kind.as_deref() == Some(KIND_APPSSCRIPT) {
+        return Err(WizardError::Validation(
+            "freshness: remove the Google update channel from the relay's Add-ons".into(),
+        ));
+    }
     let alias = ctx.db.delete_freshness_endpoint(endpoint_id)?;
     if !alias.is_empty() {
         ctx.custody.forget(&alias).ok();
@@ -465,9 +510,8 @@ pub fn set_pack_url(ctx: &WizardCtx, operator_id: i64, url: &str) -> Result<()> 
 pub fn status(ctx: &WizardCtx, operator_id: i64) -> Result<FreshnessStatus> {
     let row = ctx.db.get(operator_id)?;
     let rows = ctx.db.list_freshness_endpoints(operator_id)?;
-    let mut kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
-    kinds.sort_unstable();
-    kinds.dedup();
+    let kinds = distinct_kinds(&rows);
+    let google_only = kinds == [KIND_APPSSCRIPT];
     let endpoints = rows
         .iter()
         .map(|r| FreshnessEndpointSummary {
@@ -476,8 +520,16 @@ pub fn status(ctx: &WizardCtx, operator_id: i64) -> Result<FreshnessStatus> {
             public_url: r.public_base_url.clone(),
             target: describe_target(r),
             // A probe, not an assumption: an endpoint whose credential
-            // was wiped by a custody reset must not look ready.
-            has_credential: ctx.custody.get(&r.secret_alias).is_ok(),
+            // was wiped by a custody reset must not look ready. The
+            // Google channel's key is the add-on's.
+            has_credential: if r.kind == KIND_APPSSCRIPT {
+                crate::addon_google::has_write_key(ctx, operator_id)
+            } else {
+                ctx.custody
+                    .get(&r.secret_alias)
+                    .map(zeroize::Zeroizing::new)
+                    .is_ok()
+            },
             last_publish_at_unix: r.last_publish_at_unix,
             last_publish_ok: r.last_publish_ok,
             last_publish_detail: r.last_publish_detail.clone(),
@@ -487,7 +539,8 @@ pub fn status(ctx: &WizardCtx, operator_id: i64) -> Result<FreshnessStatus> {
     Ok(FreshnessStatus {
         endpoints,
         distinct_providers: kinds.len() as i64,
-        min_mirrors: MIN_MIRRORS as i64,
+        min_mirrors: if google_only { 1 } else { MIN_MIRRORS as i64 },
+        google_only,
         pack_url: row.freshness_pack_url.clone(),
         mirrors_in_pack: parse_mirrors(&row.freshness_mirrors_in_pack),
         pack_signed_at_unix: row.signed_sbp_at_unix.unwrap_or(0),
@@ -495,6 +548,9 @@ pub fn status(ctx: &WizardCtx, operator_id: i64) -> Result<FreshnessStatus> {
 }
 
 fn describe_target(r: &FreshnessEndpointRow) -> String {
+    if r.kind == KIND_APPSSCRIPT {
+        return "Google Apps Script".into();
+    }
     if r.kind == KIND_R2 {
         format!("{}/{}", r.bucket, r.key_prefix)
     } else {
@@ -528,9 +584,12 @@ fn parse_mirrors(json: &str) -> Vec<String> {
 /// fail-early copy of a rule that is enforced twice on purpose.
 pub fn mirror_args(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<String>> {
     let rows = ctx.db.list_freshness_endpoints(operator_id)?;
-    let mut kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
-    kinds.sort_unstable();
-    kinds.dedup();
+    let kinds = distinct_kinds(&rows);
+    // D-3 admits a set of the Google channel alone, but the pack binder
+    // (`publisher/deploy/relaypack/binder.go`, `Len() < MinMirrors`)
+    // and the recipient's check (`core/refresh`, G5) do not yet: a
+    // Google-only pack would fail to sign. Until both move, such a
+    // relay signs with no mirror set, as any relay under the floor did.
     if kinds.len() < MIN_MIRRORS {
         return Ok(Vec::new());
     }
@@ -702,11 +761,24 @@ pub fn publish(
         SignedPackCheck::NotFound => {}
     }
     let endpoints = ctx.db.list_freshness_endpoints(operator_id)?;
-    let mut kinds: Vec<&str> = endpoints.iter().map(|e| e.kind.as_str()).collect();
-    kinds.sort_unstable();
-    kinds.dedup();
-    if kinds.len() < MIN_MIRRORS {
+    let kinds = distinct_kinds(&endpoints);
+    if !meets_mirror_floor(&kinds) {
         report.blocked_reason = "too_few_providers".into();
+        return Ok(report);
+    }
+    let has_google = kinds.contains(&KIND_APPSSCRIPT);
+    if kinds == [KIND_APPSSCRIPT] {
+        report.min_mirrors = 1;
+    }
+    // The Google channel is sent after `publish-freshness` (below), so
+    // that helper sees one provider fewer than the set has. Beside ONE
+    // other provider it would hold a single upload target and refuse
+    // it (its two-target floor), and nothing would be published. Until
+    // publish-freshness takes the channel as a target of its own
+    // (`cli_addon_google.go`, appsScriptFreshnessTarget), that one
+    // shape is refused here with its own reason.
+    if has_google && kinds.len() == 2 {
+        report.blocked_reason = "google_beside_one_mirror".into();
         return Ok(report);
     }
 
@@ -763,6 +835,11 @@ pub fn publish(
     // 2. Per-provider routing + credential files.
     let mut upload = FreshnessUploadArgs::default();
     for ep in &endpoints {
+        if ep.kind == KIND_APPSSCRIPT {
+            // Sent after the document is signed; its key is the
+            // add-on's and never goes through this loop.
+            continue;
+        }
         let cred = match read_credential(ctx, &ep.secret_alias) {
             Ok(c) => c,
             Err(e) => {
@@ -918,7 +995,43 @@ pub fn publish(
     // set uses — if it did not match, recipients would be polling a URL
     // nobody writes to, so a mismatch here is a bug worth surfacing
     // rather than papering over with positional matching.
+    // The signed document, where the Google channel's sender reads it.
+    if has_google && !out_file.exists() && !res.signed_doc_b64.is_empty() {
+        use base64::Engine as _;
+        if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(res.signed_doc_b64.trim()) {
+            let _ = std::fs::write(&out_file, b);
+        }
+    }
+    let signed_pack = if report.signed_pack_path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(&report.signed_pack_path))
+    };
     for ep in &endpoints {
+        if ep.kind == KIND_APPSSCRIPT {
+            let (ok, detail) =
+                crate::addon_google::push_update(ctx, operator_id, &out_file, signed_pack.as_deref());
+            let detail = redact_detail(&detail);
+            ctx.db.record_freshness_publish(
+                ep.id,
+                now,
+                ok,
+                0,
+                &detail,
+                if ok { &ep.public_base_url } else { "" },
+            )?;
+            if ok {
+                report.succeeded += 1;
+            }
+            report.results.push(PublishOutcome {
+                endpoint_id: ep.id,
+                kind: ep.kind.clone(),
+                url: ep.public_base_url.clone(),
+                ok,
+                detail,
+            });
+            continue;
+        }
         let found = res.published.iter().find(|p| p.provider == ep.kind);
         let (ok, detail, url) = match found {
             Some(p) => (
@@ -1032,6 +1145,111 @@ pub fn redact_detail(s: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------
+// The Google update channel's row (made and removed by `addon_google`)
+// ---------------------------------------------------------------------
+
+/// The mirror URL for what a publisher pasted (or the Apps Script API
+/// answered): `https://script.google.com/macros/s/<id>/exec?k=<token>`,
+/// the one shape `freshness.ValidateAppsScriptURL` accepts. A `k`
+/// already in it must be this relay's.
+pub(crate) fn normalize_appsscript_url(
+    pasted: &str,
+    path_token: &str,
+) -> std::result::Result<String, String> {
+    let tok_ok = |t: &str| {
+        t.len() == 22
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    if !tok_ok(path_token) {
+        return Err("bad path token".into());
+    }
+    let s = pasted.trim();
+    const HOST: &str = "https://script.google.com/";
+    // `get`, not indexing: pasted text may start with anything,
+    // including a character that does not end on byte 26.
+    if !s.get(..HOST.len()).is_some_and(|p| p.eq_ignore_ascii_case(HOST)) {
+        return Err("that is not a script.google.com web-app address".into());
+    }
+    let rest = &s[HOST.len() - 1..];
+    let rest = rest.split('#').next().unwrap_or("");
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    for kv in query.split('&') {
+        if let Some(k) = kv.strip_prefix("k=") {
+            if k != path_token {
+                return Err("that address belongs to another relay's script".into());
+            }
+        }
+    }
+    let path = path.trim_end_matches('/');
+    if path.ends_with("/dev") {
+        return Err(
+            "that is the test address (/dev); copy the web app address that ends in /exec".into(),
+        );
+    }
+    let id = path
+        .strip_prefix("/macros/s/")
+        .and_then(|p| p.strip_suffix("/exec"))
+        .ok_or_else(|| "the address must look like script.google.com/macros/s/…/exec".to_string())?;
+    if !(20..=120).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("the address must look like script.google.com/macros/s/…/exec".into());
+    }
+    Ok(format!("https://script.google.com/macros/s/{id}/exec?k={path_token}"))
+}
+
+/// Put the channel's URL in the mirror table (replacing an older one).
+pub(crate) fn set_appsscript_endpoint(ctx: &WizardCtx, operator_id: i64, url: &str) -> Result<i64> {
+    let rows = ctx.db.list_freshness_endpoints(operator_id)?;
+    if let Some(r) = rows.iter().find(|r| r.kind == KIND_APPSSCRIPT) {
+        if r.public_base_url == url {
+            return Ok(r.id);
+        }
+        ctx.db.delete_freshness_endpoint(r.id)?;
+    }
+    Ok(ctx.db.insert_freshness_endpoint(
+        operator_id,
+        KIND_APPSSCRIPT,
+        url,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        (ctx.clock)(),
+    )?)
+}
+
+/// Take the channel out of the mirror table. Whether it was there.
+pub(crate) fn remove_appsscript_endpoint(ctx: &WizardCtx, operator_id: i64) -> Result<bool> {
+    let rows = ctx.db.list_freshness_endpoints(operator_id)?;
+    let mut found = false;
+    for r in rows.iter().filter(|r| r.kind == KIND_APPSSCRIPT) {
+        ctx.db.delete_freshness_endpoint(r.id)?;
+        found = true;
+    }
+    Ok(found)
+}
+
+/// Whether the pack recipients hold names the Google channel.
+pub(crate) fn pack_names_appsscript(ctx: &WizardCtx, operator_id: i64) -> bool {
+    ctx.db
+        .get(operator_id)
+        .map(|r| {
+            parse_mirrors(&r.freshness_mirrors_in_pack)
+                .iter()
+                .any(|m| m.starts_with("appsscript="))
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,6 +1337,44 @@ mod tests {
             require_https("https://x.example.com/f.json/", "public URL").unwrap(),
             "https://x.example.com/f.json"
         );
+    }
+
+    #[test]
+    fn the_floor_admits_the_google_channel_alone_and_nothing_else_alone() {
+        assert!(meets_mirror_floor(&["appsscript"]));
+        assert!(meets_mirror_floor(&["ghpages", "r2"]));
+        assert!(meets_mirror_floor(&["appsscript", "r2"]));
+        assert!(!meets_mirror_floor(&["r2"]));
+        assert!(!meets_mirror_floor(&["ghpages"]));
+        assert!(!meets_mirror_floor(&[]));
+    }
+
+    #[test]
+    fn appsscript_urls_have_one_shape() {
+        let tok = "AAAAAAAAAAAAAAAAAAAAAA";
+        let id = "AKfycbx0123456789abcdefghij";
+        let want = format!("https://script.google.com/macros/s/{id}/exec?k={tok}");
+        for pasted in [
+            format!("https://script.google.com/macros/s/{id}/exec"),
+            format!("  https://script.google.com/macros/s/{id}/exec/ "),
+            format!("https://script.google.com/macros/s/{id}/exec?k={tok}"),
+            format!("https://script.google.com/macros/s/{id}/exec?usp=sharing#x"),
+        ] {
+            assert_eq!(normalize_appsscript_url(&pasted, tok).unwrap(), want, "{pasted}");
+        }
+        for bad in [
+            format!("http://script.google.com/macros/s/{id}/exec"),
+            format!("https://script.google.com/macros/s/{id}/dev"),
+            format!("https://script.google.com/a/macros/example.org/s/{id}/exec"),
+            format!("https://script.google.com.evil.example/macros/s/{id}/exec"),
+            format!("https://script.google.com/macros/s/{id}/exec?k=BBBBBBBBBBBBBBBBBBBBBB"),
+            "https://script.google.com/macros/s/short/exec".to_string(),
+            "https://script.google.com/macros/s/has%2Fslash000000000000/exec".to_string(),
+            "آدرس https://script.google.com/macros/s/AKfycbx0123456789abcdefghij/exec".to_string(),
+        ] {
+            assert!(normalize_appsscript_url(&bad, tok).is_err(), "{bad}");
+        }
+        assert!(normalize_appsscript_url(&want, "bad").is_err());
     }
 
     #[test]

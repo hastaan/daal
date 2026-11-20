@@ -50,6 +50,17 @@ type endpointSecrets interface {
 //     state to connect from.
 //   - Any other route (pasted URI, subscription, directory) has no
 //     commitment and is not this function's business.
+//
+// Two commitment shapes are stored under the same key, told apart by
+// bundle.IsCDNCommitment:
+//
+//   - a direct endpoint (bundle.Endpoint). The outbound's server may be
+//     the committed one, or — the standby add-on — the route's open
+//     standby, or the address inside a held standby key that matches
+//     the sealed commitment (bundle.CheckOutboundStandby). Nothing else
+//     is relaxed, and never for shadowsocks;
+//   - a CDN-fronted endpoint (bundle.CDNEndpoint), checked by
+//     bundle.CheckCDNOutbound.
 func routeEndpointGuard(st endpointSecrets, row routestore.RouteRow, profile []byte) error {
 	raw, err := st.GetSecret(trust.RouteEndpointKey(row.RouteID))
 	if err != nil || len(raw) == 0 {
@@ -58,12 +69,70 @@ func routeEndpointGuard(st endpointSecrets, row routestore.RouteRow, profile []b
 		}
 		return nil
 	}
+	if bundle.IsCDNCommitment(raw) {
+		cep, err := bundle.ParseCDNEndpointJSON(row.TransportFamily, raw)
+		if err != nil {
+			return fmt.Errorf("%w: route %s: stored CDN endpoint is unusable", ErrRouteEndpoint, row.RouteID)
+		}
+		if err := bundle.CheckCDNOutbound(cep, profile); err != nil {
+			return fmt.Errorf("%w: route %s: %v", ErrRouteEndpoint, row.RouteID, err)
+		}
+		return nil
+	}
 	var ep bundle.Endpoint
 	if err := json.Unmarshal(raw, &ep); err != nil {
 		return fmt.Errorf("%w: route %s: stored endpoint is unreadable", ErrRouteEndpoint, row.RouteID)
 	}
-	if err := bundle.CheckOutbound(row.TransportFamily, &ep, profile); err != nil {
+	sb, key := routeStandby(st, row, &ep)
+	if err := bundle.CheckOutboundStandby(row.TransportFamily, &ep, sb, key, profile); err != nil {
 		return fmt.Errorf("%w: route %s: %v", ErrRouteEndpoint, row.RouteID, err)
 	}
 	return nil
+}
+
+// routeStandby reads the standby a route may be dialled at: its signed
+// `_standby` (bundle.StandbyStoreKey) and any accepted key
+// (bundle.StandbyKeyStoreKey, the 16 raw bytes). nil when there is
+// none, when either is unreadable, or for shadowsocks — every failure
+// is "no standby", which only narrows what may be dialled.
+func routeStandby(st endpointSecrets, row routestore.RouteRow, ep *bundle.Endpoint) (*bundle.Standby, *bundle.StandbyKeyBytes) {
+	if row.TransportFamily == string(bundle.TransportShadowsocks) {
+		return nil, nil
+	}
+	raw, err := st.GetSecret(bundle.StandbyStoreKey(row.RouteID))
+	if err != nil || len(raw) == 0 {
+		return nil, nil
+	}
+	sb, err := bundle.ParseStandbyJSON(raw)
+	if err != nil {
+		return nil, nil
+	}
+	if sb.Mode == bundle.StandbyModeOpen && sb.Server == ep.Server {
+		return nil, nil
+	}
+	if kb, err := st.GetSecret(bundle.StandbyKeyStoreKey(row.RouteID)); err == nil && len(kb) > 0 {
+		if k, err := bundle.StandbyKeyFromBytes(kb); err == nil && sb.Matches(k) {
+			return sb, &k
+		}
+	}
+	return sb, nil
+}
+
+// routeStandbyAddress is the address a route may be dialled at instead
+// of its committed server, for the ladder's address variant (S7): the
+// open standby, or the address of a held key that matches the sealed
+// commitment. false when the route has none (or is shadowsocks, or has
+// no direct commitment). A variant built from it still goes through
+// routeEndpointGuard.
+func routeStandbyAddress(st endpointSecrets, row routestore.RouteRow) (string, bool) {
+	raw, err := st.GetSecret(trust.RouteEndpointKey(row.RouteID))
+	if err != nil || len(raw) == 0 || bundle.IsCDNCommitment(raw) {
+		return "", false
+	}
+	var ep bundle.Endpoint
+	if json.Unmarshal(raw, &ep) != nil {
+		return "", false
+	}
+	sb, key := routeStandby(st, row, &ep)
+	return sb.DialAddress(key)
 }

@@ -1,41 +1,57 @@
 package cloudflare
 
+// The Helper-side network calls of the CDN add-on, all in this one file
+// so the opsec allowlist (publisher/deploy/opsec_test.go) stays one
+// name long for them:
+//
+//   - the Cloudflare API v4 client (liveCFClient), bearer token, to
+//     api.cloudflare.com only;
+//   - the DoH read of a hostname's HTTPS record for its ECH config
+//     (DoHECHFetcher, B-5), to the resolvers it is given;
+//   - the front test (FrontTest): one TLS + WebSocket handshake to a
+//     Cloudflare edge for the publisher's own hostname.
+//
+// All three run on the publisher's machine or phone, never on the relay
+// and never on a recipient. The token goes into the Authorization
+// header and nowhere else: not into a URL, an error or a log line.
+
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
 
-// liveCFClient is the production CFClient implementation. It uses
-// Cloudflare's v4 REST API directly behind the narrow CFClient
-// interface. The publisher module also carries cloudflare-go/v4 in
-// go.mod so API compatibility is pinned for operators who prefer the
-// SDK, but this file keeps the runtime surface small and testable.
+// liveCFClient is the production CFClient.
 type liveCFClient struct {
 	baseURL    string
 	httpClient *http.Client
 }
 
-// NewLiveCFClient returns the production Cloudflare client used by
-// the FRP wizard and daal-deploy CLI. It never stores the API token;
-// callers pass token bytes per request and zeroize after return.
+// NewLiveCFClient returns the production Cloudflare client. It never
+// stores the token; callers pass it per call and zeroize it after.
 func NewLiveCFClient() CFClient {
 	return newLiveCFClient(cloudflareAPIBase, &http.Client{Timeout: 30 * time.Second})
 }
@@ -44,263 +60,48 @@ func newLiveCFClient(baseURL string, client *http.Client) *liveCFClient {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &liveCFClient{baseURL: strings.TrimRight(baseURL, "/"), httpClient: client}
+	// Never follow a redirect with the bearer header on it.
+	c := *client
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &liveCFClient{baseURL: strings.TrimRight(baseURL, "/"), httpClient: &c}
 }
 
-func (c *liveCFClient) IssueOriginCert(ctx context.Context, cfToken []byte, hostnames []string, validityDays int) ([]byte, []byte, string, error) {
-	if len(hostnames) == 0 {
-		return nil, nil, "", errors.New("cloudflare: hostnames required")
-	}
-	if validityDays <= 0 {
-		validityDays = 5475
-	}
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("cloudflare: generate origin key: %w", err)
-	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: hostnames[0]},
-		DNSNames: hostnames,
-	}, priv)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("cloudflare: create csr: %w", err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("cloudflare: marshal origin key: %w", err)
-	}
-	reqBody := map[string]any{
-		"csr":                string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})),
-		"hostnames":          hostnames,
-		"request_type":       "origin-ecc",
-		"requested_validity": validityDays,
-	}
-	var res struct {
-		Certificate string `json:"certificate"`
-		ID          string `json:"id"`
-	}
-	if err := c.do(ctx, cfToken, http.MethodPost, "/certificates", nil, reqBody, &res); err != nil {
-		return nil, nil, "", err
-	}
-	certPEM := []byte(res.Certificate)
-	if len(certPEM) == 0 {
-		return nil, nil, "", errors.New("cloudflare: origin CA response missing certificate")
-	}
-	privPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	sum := sha256.Sum256(certPEM)
-	return certPEM, privPEM, hex.EncodeToString(sum[:]), nil
+// statusError is a non-2xx answer. Body is Cloudflare's error JSON,
+// bounded; it never carries the token.
+type statusError struct {
+	Method, Path string
+	Status       int
+	Body         string
 }
 
-func (c *liveCFClient) EnableAOP(ctx context.Context, cfToken []byte, zoneID string) error {
-	if zoneID == "" {
-		return errors.New("cloudflare: zoneID required")
-	}
-	var out any
-	return c.do(ctx, cfToken, http.MethodPut, "/zones/"+url.PathEscape(zoneID)+"/origin_tls_client_auth/settings", nil, map[string]bool{"enabled": true}, &out)
+func (e *statusError) Error() string {
+	return fmt.Sprintf("cloudflare: %s %s: status %d: %s", e.Method, e.Path, e.Status, e.Body)
 }
 
-func (c *liveCFClient) FetchAOPClientCert(ctx context.Context, cfToken []byte, zoneID string) ([]byte, error) {
-	if zoneID == "" {
-		return nil, errors.New("cloudflare: zoneID required")
-	}
-	var certs []struct {
-		Certificate string `json:"certificate"`
-		Status      string `json:"status"`
-	}
-	if err := c.do(ctx, cfToken, http.MethodGet, "/zones/"+url.PathEscape(zoneID)+"/origin_tls_client_auth", nil, nil, &certs); err != nil {
-		return nil, err
-	}
-	for _, cert := range certs {
-		if cert.Certificate != "" && (cert.Status == "" || cert.Status == "active") {
-			return []byte(cert.Certificate), nil
-		}
-	}
-	return nil, errors.New("cloudflare: no active AOP client certificate found")
-}
-
-func (c *liveCFClient) EnsureProxiedRecords(ctx context.Context, cfToken []byte, zoneID, hostname, originIPv4, originIPv6 string) error {
-	if zoneID == "" || hostname == "" || originIPv4 == "" {
-		return errors.New("cloudflare: zoneID, hostname, originIPv4 required")
-	}
-	if err := c.ensureProxiedRecord(ctx, cfToken, zoneID, hostname, "A", originIPv4); err != nil {
-		return err
-	}
-	if originIPv6 != "" {
-		if err := c.ensureProxiedRecord(ctx, cfToken, zoneID, hostname, "AAAA", originIPv6); err != nil {
-			return err
-		}
+func (e *statusError) Unwrap() error {
+	if e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden {
+		return &authError{msg: "cloudflare: not authorised"}
 	}
 	return nil
 }
 
-func (c *liveCFClient) UploadWorkerScript(ctx context.Context, cfToken []byte, accountID, scriptName string, scriptBody []byte) (string, error) {
-	if accountID == "" || scriptName == "" || len(scriptBody) == 0 {
-		return "", errors.New("cloudflare: accountID, scriptName, scriptBody required")
-	}
-	path := "/accounts/" + url.PathEscape(accountID) + "/workers/scripts/" + url.PathEscape(scriptName)
-	var out struct {
-		ID string `json:"id"`
-	}
-	if err := c.doRaw(ctx, cfToken, http.MethodPut, path, nil, "application/javascript", scriptBody, &out); err != nil {
-		return "", err
-	}
-	if out.ID != "" {
-		return out.ID, nil
-	}
-	return scriptName, nil
-}
-
-func (c *liveCFClient) BindWorkerRoute(ctx context.Context, cfToken []byte, zoneID, scriptName, pattern string) (string, error) {
-	if zoneID == "" || scriptName == "" || pattern == "" {
-		return "", errors.New("cloudflare: zoneID, scriptName, pattern required")
-	}
-	body := map[string]string{"pattern": pattern, "script": scriptName}
-	var out struct {
-		ID string `json:"id"`
-	}
-	if err := c.do(ctx, cfToken, http.MethodPost, "/zones/"+url.PathEscape(zoneID)+"/workers/routes", nil, body, &out); err != nil {
-		return "", err
-	}
-	if out.ID == "" {
-		return "", errors.New("cloudflare: worker route response missing id")
-	}
-	return out.ID, nil
-}
-
-func (c *liveCFClient) LookupZoneID(ctx context.Context, cfToken []byte, apexDomain string) (string, string, error) {
-	if apexDomain == "" {
-		return "", "", errors.New("cloudflare: apex domain required")
-	}
-	q := url.Values{}
-	q.Set("name", apexDomain)
-	q.Set("status", "active")
-	var zones []struct {
-		ID      string `json:"id"`
-		Account struct {
-			ID string `json:"id"`
-		} `json:"account"`
-	}
-	if err := c.do(ctx, cfToken, http.MethodGet, "/zones", q, nil, &zones); err != nil {
-		return "", "", err
-	}
-	if len(zones) == 0 || zones[0].ID == "" {
-		return "", "", fmt.Errorf("cloudflare: no active zone found for %q", apexDomain)
-	}
-	return zones[0].ID, zones[0].Account.ID, nil
-}
-
-func (c *liveCFClient) VerifyPosture(ctx context.Context, cfToken []byte, rec *FrontRecord) (PostureReport, error) {
-	if rec == nil {
-		return PostureReport{}, errors.New("cloudflare: front record required")
-	}
-	report := PostureReport{
-		OriginCAFingerprintMatch: rec.OriginCAFingerprint != "",
-		FirewallEdgeRangesFresh:  rec.FirewallID != "",
-	}
-	aop, err := c.aopEnabled(ctx, cfToken, rec.ZoneID)
-	if err != nil {
-		return PostureReport{}, err
-	}
-	report.AOPEnabled = aop
-	recs, err := c.listDNSRecords(ctx, cfToken, rec.ZoneID, rec.Hostname, "")
-	if err != nil {
-		return PostureReport{}, err
-	}
-	report.DNSProxiedOnly = true
-	for _, r := range recs {
-		if (r.Type == "A" || r.Type == "AAAA") && !r.proxied() {
-			report.DNSProxiedOnly = false
-		}
-	}
-	if report.OriginCAFingerprintMatch && report.AOPEnabled && report.FirewallEdgeRangesFresh && report.DNSProxiedOnly {
-		report.Notes = "cloudflare posture ok"
-	} else {
-		report.Notes = "cloudflare posture drift detected"
-	}
-	return report, nil
-}
-
-func (c *liveCFClient) ensureProxiedRecord(ctx context.Context, token []byte, zoneID, hostname, typ, content string) error {
-	records, err := c.listDNSRecords(ctx, token, zoneID, hostname, typ)
-	if err != nil {
-		return err
-	}
-	for _, rec := range records {
-		if !rec.proxied() {
-			return ErrDNSOnlyRecordPresent
-		}
-	}
-	for _, rec := range records {
-		if rec.proxied() {
-			body := dnsRecordPayload{Type: typ, Name: hostname, Content: content, Proxied: true}
-			if rec.Content == content {
-				return nil
-			}
-			var out dnsRecord
-			err := c.do(ctx, token, http.MethodPut, "/zones/"+url.PathEscape(zoneID)+"/dns_records/"+url.PathEscape(rec.ID), nil, body, &out)
-			return err
-		}
-	}
-	var out dnsRecord
-	return c.do(ctx, token, http.MethodPost, "/zones/"+url.PathEscape(zoneID)+"/dns_records", nil, dnsRecordPayload{
-		Type: typ, Name: hostname, Content: content, Proxied: true,
-	}, &out)
-}
-
-func (c *liveCFClient) listDNSRecords(ctx context.Context, token []byte, zoneID, hostname, typ string) ([]dnsRecord, error) {
-	q := url.Values{}
-	q.Set("name", hostname)
-	if typ != "" {
-		q.Set("type", typ)
-	}
-	var records []dnsRecord
-	if err := c.do(ctx, token, http.MethodGet, "/zones/"+url.PathEscape(zoneID)+"/dns_records", q, nil, &records); err != nil {
-		return nil, err
-	}
-	return records, nil
-}
-
-func (c *liveCFClient) aopEnabled(ctx context.Context, token []byte, zoneID string) (bool, error) {
-	var out struct {
-		Enabled bool   `json:"enabled"`
-		Value   string `json:"value"`
-	}
-	if err := c.do(ctx, token, http.MethodGet, "/zones/"+url.PathEscape(zoneID)+"/origin_tls_client_auth/settings", nil, nil, &out); err != nil {
-		return false, err
-	}
-	return out.Enabled || out.Value == "on", nil
-}
-
-type dnsRecord struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	Proxied *bool  `json:"proxied"`
-}
-
-func (r dnsRecord) proxied() bool { return r.Proxied != nil && *r.Proxied }
-
-type dnsRecordPayload struct {
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	Proxied bool   `json:"proxied"`
+func isStatus(err error, code int) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.Status == code
 }
 
 func (c *liveCFClient) do(ctx context.Context, token []byte, method, path string, query url.Values, body any, out any) error {
 	var raw []byte
 	if body != nil {
 		var err error
-		raw, err = json.Marshal(body)
-		if err != nil {
+		if raw, err = json.Marshal(body); err != nil {
 			return err
 		}
 	}
-	return c.doRaw(ctx, token, method, path, query, "application/json", raw, out)
+	return c.doRaw(ctx, token, method, path, query, raw, out)
 }
 
-func (c *liveCFClient) doRaw(ctx context.Context, token []byte, method, path string, query url.Values, contentType string, body []byte, out any) error {
+func (c *liveCFClient) doRaw(ctx context.Context, token []byte, method, path string, query url.Values, body []byte, out any) error {
 	if len(token) == 0 {
 		return errors.New("cloudflare: token required")
 	}
@@ -309,7 +110,13 @@ func (c *liveCFClient) doRaw(ctx context.Context, token []byte, method, path str
 		return err
 	}
 	if query != nil {
-		u.RawQuery = query.Encode()
+		q := u.Query()
+		for k, vs := range query {
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
+		u.RawQuery = q.Encode()
 	}
 	var rdr io.Reader
 	if body != nil {
@@ -320,12 +127,13 @@ func (c *liveCFClient) doRaw(ctx context.Context, token []byte, method, path str
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+string(token))
-	if body != nil && contentType != "" {
-		req.Header.Set("Content-Type", contentType)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		// net/http errors name the URL, which carries no secret.
+		return scrub(err, token)
 	}
 	defer resp.Body.Close()
 	limited, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -333,7 +141,11 @@ func (c *liveCFClient) doRaw(ctx context.Context, token []byte, method, path str
 		return err
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("cloudflare: %s %s: status %d: %s", method, path, resp.StatusCode, string(limited))
+		b := string(limited)
+		if len(b) > 512 {
+			b = b[:512]
+		}
+		return scrub(&statusError{Method: method, Path: path, Status: resp.StatusCode, Body: b}, token)
 	}
 	if out == nil {
 		return nil
@@ -361,89 +173,591 @@ func (c *liveCFClient) doRaw(ctx context.Context, token []byte, method, path str
 	return json.Unmarshal(env.Result, out)
 }
 
-// RotatePublicPath rebinds the worker route to the new public path.
-// We delete the old route and create a fresh one because the
-// Cloudflare workers/routes endpoint does not expose an in-place
-// pattern-update path that's atomic across all account types; the
-// idempotent recreate is the simpler, well-supported path.
-//
-// Re-uploads the worker script with the new public path baked in so
-// the script's path-prefix check matches the new pattern. The origin
-// path is unchanged.
-func (c *liveCFClient) RotatePublicPath(ctx context.Context, cfToken []byte, zoneID, oldRouteID, scriptName, hostname, newPublicPath, originPath string) (string, error) {
-	if zoneID == "" || scriptName == "" || hostname == "" || newPublicPath == "" || originPath == "" {
-		return "", errors.New("cloudflare: zoneID, scriptName, hostname, newPublicPath, originPath required")
-	}
-	// 1. Re-upload the script with the new public path.
-	scriptBody := RewriteWorkerScript(newPublicPath, originPath)
-	if _, err := c.UploadWorkerScript(ctx, cfToken, accountIDFromCtx(ctx), scriptName, scriptBody); err != nil {
-		// accountID unknown via ctx — fall through; the old script
-		// stays valid until BindWorkerRoute returns success below.
-		// (In practice the wizard supplies the accountID through
-		// Provider.RotatePublicPath which calls UploadWorkerScript
-		// directly; this path is the bare-CFClient fallback used
-		// by tests.)
-		_ = err
-	}
-	// 2. Best-effort delete of the old route. Failure is logged
-	// implicitly (we just proceed) so an already-deleted route
-	// from a partial prior rotation does not block recovery.
-	if oldRouteID != "" {
-		_ = c.do(ctx, cfToken, http.MethodDelete, "/zones/"+url.PathEscape(zoneID)+"/workers/routes/"+url.PathEscape(oldRouteID), nil, nil, nil)
-	}
-	// 3. Bind the fresh route at the new pattern.
-	pattern := hostname + newPublicPath + "*"
-	return c.BindWorkerRoute(ctx, cfToken, zoneID, scriptName, pattern)
+func zp(zoneID string) string { return "/zones/" + url.PathEscape(zoneID) }
+
+func (c *liveCFClient) VerifyToken(ctx context.Context, tok []byte) (TokenStatus, error) {
+	var st TokenStatus
+	err := c.do(ctx, tok, http.MethodGet, "/user/tokens/verify", nil, nil, &st)
+	return st, err
 }
 
-// RotateHostname resolves the apex of newHostname into a (possibly
-// different) zone, then ensures proxied A + AAAA records on that
-// zone for the new hostname. The caller is responsible for the
-// worker-script rebinding on the new hostname (Provider.RotateHostname
-// handles that step). Returns the new (zoneID, accountID) pair.
-func (c *liveCFClient) RotateHostname(ctx context.Context, cfToken []byte, oldRec *FrontRecord, newHostname, originIPv4, originIPv6 string) (string, string, error) {
-	if oldRec == nil {
-		return "", "", errors.New("cloudflare: oldRec required")
-	}
-	if newHostname == "" || originIPv4 == "" {
-		return "", "", errors.New("cloudflare: newHostname and originIPv4 required")
-	}
-	apex := apexOf(newHostname)
-	zoneID, accountID, err := c.LookupZoneID(ctx, cfToken, apex)
-	if err != nil {
-		return "", "", fmt.Errorf("cloudflare: lookup zone for %q: %w", apex, err)
-	}
-	if err := c.EnsureProxiedRecords(ctx, cfToken, zoneID, newHostname, originIPv4, originIPv6); err != nil {
-		return "", "", fmt.Errorf("cloudflare: proxied DNS for %q: %w", newHostname, err)
-	}
-	return zoneID, accountID, nil
+type apiZone struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Account struct {
+		ID string `json:"id"`
+	} `json:"account"`
 }
 
-// RotateOrigin re-points the existing proxied A + AAAA records at
-// the new origin IPs. Hostname and public path are unchanged — the
-// censor sees nothing.
-//
-// Per supplement §14.4 origin-only path: the caller MUST NOT re-sign
-// the RelayPack. The public-risk-tag set is byte-identical before
-// and after.
-func (c *liveCFClient) RotateOrigin(ctx context.Context, cfToken []byte, zoneID, hostname, newOriginIPv4, newOriginIPv6 string) error {
-	if zoneID == "" || hostname == "" || newOriginIPv4 == "" {
-		return errors.New("cloudflare: zoneID, hostname, newOriginIPv4 required")
-	}
-	if err := c.ensureProxiedRecord(ctx, cfToken, zoneID, hostname, "A", newOriginIPv4); err != nil {
-		return err
-	}
-	if newOriginIPv6 != "" {
-		if err := c.ensureProxiedRecord(ctx, cfToken, zoneID, hostname, "AAAA", newOriginIPv6); err != nil {
-			return err
+func (z apiZone) zone() Zone {
+	return Zone{ID: z.ID, Name: z.Name, Status: z.Status, AccountID: z.Account.ID}
+}
+
+func (c *liveCFClient) ListZones(ctx context.Context, tok []byte) ([]Zone, error) {
+	var out []Zone
+	// A five-permission token sees one zone; the pages exist for the
+	// too-broad case, which only needs the count to exceed one.
+	for page := 1; page <= 4; page++ {
+		q := url.Values{"per_page": {"50"}, "page": {strconv.Itoa(page)}}
+		var zs []apiZone
+		if err := c.do(ctx, tok, http.MethodGet, "/zones", q, nil, &zs); err != nil {
+			return nil, err
+		}
+		for _, z := range zs {
+			out = append(out, z.zone())
+		}
+		if len(zs) < 50 {
+			break
 		}
 	}
-	return nil
+	return out, nil
 }
 
-// accountIDFromCtx is a no-op stub; the live path supplies accountID
-// through Provider.RotatePublicPath, which calls
-// CFClient.UploadWorkerScript directly. This stub exists so the
-// fallback code path inside RotatePublicPath compiles without a
-// context-bound value when callers test the CFClient interface alone.
-func accountIDFromCtx(_ context.Context) string { return "" }
+func (c *liveCFClient) LookupZone(ctx context.Context, tok []byte, name string) (Zone, bool, error) {
+	var zs []apiZone
+	if err := c.do(ctx, tok, http.MethodGet, "/zones", url.Values{"name": {name}}, nil, &zs); err != nil {
+		return Zone{}, false, err
+	}
+	for _, z := range zs {
+		if strings.EqualFold(z.Name, name) {
+			return z.zone(), true, nil
+		}
+	}
+	return Zone{}, false, nil
+}
+
+func (c *liveCFClient) ProbeRead(ctx context.Context, tok []byte, path string) (ProbeResult, error) {
+	p, rawQuery, _ := strings.Cut(path, "?")
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return ProbeDenied, err
+	}
+	err = c.doRaw(ctx, tok, http.MethodGet, p, q, nil, nil)
+	switch {
+	case err == nil:
+		return ProbeAllowed, nil
+	case isStatus(err, http.StatusUnauthorized), isStatus(err, http.StatusForbidden):
+		return ProbeDenied, nil
+	case isStatus(err, http.StatusNotFound):
+		return ProbeNotFound, nil
+	default:
+		return ProbeDenied, err
+	}
+}
+
+func (c *liveCFClient) IssueOriginCert(ctx context.Context, tok []byte, hostnames []string, validityDays int) (OriginCert, error) {
+	if len(hostnames) == 0 {
+		return OriginCert{}, errors.New("cloudflare: hostnames required")
+	}
+	if validityDays <= 0 {
+		validityDays = 5475
+	}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return OriginCert{}, fmt.Errorf("cloudflare: generate origin key: %w", err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: hostnames[0]},
+		DNSNames: hostnames,
+	}, priv)
+	if err != nil {
+		return OriginCert{}, fmt.Errorf("cloudflare: create csr: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return OriginCert{}, fmt.Errorf("cloudflare: marshal origin key: %w", err)
+	}
+	reqBody := map[string]any{
+		"csr":                string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})),
+		"hostnames":          hostnames,
+		"request_type":       "origin-ecc",
+		"requested_validity": validityDays,
+	}
+	var res struct {
+		Certificate string `json:"certificate"`
+		ID          string `json:"id"`
+	}
+	if err := c.do(ctx, tok, http.MethodPost, "/certificates", nil, reqBody, &res); err != nil {
+		return OriginCert{}, err
+	}
+	if res.Certificate == "" || res.ID == "" {
+		return OriginCert{}, errors.New("cloudflare: origin CA response missing certificate or id")
+	}
+	certPEM := []byte(res.Certificate)
+	sum := sha256.Sum256(certPEM)
+	return OriginCert{
+		ID:             res.ID,
+		CertPEM:        certPEM,
+		KeyPEM:         pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		FingerprintHex: hex.EncodeToString(sum[:]),
+	}, nil
+}
+
+func (c *liveCFClient) RevokeOriginCert(ctx context.Context, tok []byte, certID string) error {
+	err := c.do(ctx, tok, http.MethodDelete, "/certificates/"+url.PathEscape(certID), nil, nil, nil)
+	if isStatus(err, http.StatusNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *liveCFClient) UploadAOPCert(ctx context.Context, tok []byte, zoneID string, certPEM, keyPEM []byte) (string, error) {
+	body := map[string]string{"certificate": string(certPEM), "private_key": string(keyPEM)}
+	var res struct {
+		ID string `json:"id"`
+	}
+	if err := c.do(ctx, tok, http.MethodPost, zp(zoneID)+"/origin_tls_client_auth", nil, body, &res); err != nil {
+		return "", err
+	}
+	if res.ID == "" {
+		return "", errors.New("cloudflare: origin pull upload returned no id")
+	}
+	return res.ID, nil
+}
+
+func (c *liveCFClient) DeleteAOPCert(ctx context.Context, tok []byte, zoneID, certID string) error {
+	err := c.do(ctx, tok, http.MethodDelete, zp(zoneID)+"/origin_tls_client_auth/"+url.PathEscape(certID), nil, nil, nil)
+	if isStatus(err, http.StatusNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *liveCFClient) SetAOPEnabled(ctx context.Context, tok []byte, zoneID string, enabled bool) error {
+	var out any
+	return c.do(ctx, tok, http.MethodPut, zp(zoneID)+"/origin_tls_client_auth/settings", nil, map[string]bool{"enabled": enabled}, &out)
+}
+
+func (c *liveCFClient) AOPEnabled(ctx context.Context, tok []byte, zoneID string) (bool, error) {
+	var out struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.do(ctx, tok, http.MethodGet, zp(zoneID)+"/origin_tls_client_auth/settings", nil, nil, &out); err != nil {
+		return false, err
+	}
+	return out.Enabled, nil
+}
+
+func (c *liveCFClient) GetZoneSetting(ctx context.Context, tok []byte, zoneID, name string) (string, error) {
+	var out struct {
+		Value json.RawMessage `json:"value"`
+	}
+	if err := c.do(ctx, tok, http.MethodGet, zp(zoneID)+"/settings/"+url.PathEscape(name), nil, nil, &out); err != nil {
+		return "", err
+	}
+	var s string
+	if err := json.Unmarshal(out.Value, &s); err != nil {
+		return "", fmt.Errorf("cloudflare: setting %s is not a string value", name)
+	}
+	return s, nil
+}
+
+func (c *liveCFClient) SetZoneSetting(ctx context.Context, tok []byte, zoneID, name, value string) error {
+	var out any
+	return c.do(ctx, tok, http.MethodPatch, zp(zoneID)+"/settings/"+url.PathEscape(name), nil, map[string]string{"value": value}, &out)
+}
+
+func (c *liveCFClient) ListDNSRecords(ctx context.Context, tok []byte, zoneID, hostname string) ([]DNSRecord, error) {
+	var recs []DNSRecord
+	err := c.do(ctx, tok, http.MethodGet, zp(zoneID)+"/dns_records", url.Values{"name": {hostname}, "per_page": {"100"}}, nil, &recs)
+	return recs, err
+}
+
+type dnsRecordPayload struct {
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Proxied bool   `json:"proxied"`
+	TTL     int    `json:"ttl"`
+}
+
+func (c *liveCFClient) EnsureProxiedRecords(ctx context.Context, tok []byte, zoneID, hostname, v4, v6 string) ([]string, error) {
+	if zoneID == "" || hostname == "" || v4 == "" {
+		return nil, errors.New("cloudflare: zoneID, hostname, originIPv4 required")
+	}
+	recs, err := c.ListDNSRecords(ctx, tok, zoneID, hostname)
+	if err != nil {
+		return nil, err
+	}
+	want := map[string]string{"A": v4}
+	if v6 != "" {
+		want["AAAA"] = v6
+	}
+	have := map[string]bool{}
+	for _, r := range recs {
+		if r.Type != "A" && r.Type != "AAAA" {
+			continue
+		}
+		if !r.proxied() {
+			return nil, ErrDNSOnlyRecordPresent
+		}
+		if w, ok := want[r.Type]; ok && w != r.Content {
+			return nil, ErrHostnameInUse
+		}
+		have[r.Type] = true
+	}
+	var created []string
+	for _, typ := range []string{"A", "AAAA"} {
+		content, ok := want[typ]
+		if !ok || have[typ] {
+			continue
+		}
+		var out DNSRecord
+		if err := c.do(ctx, tok, http.MethodPost, zp(zoneID)+"/dns_records", nil,
+			dnsRecordPayload{Type: typ, Name: hostname, Content: content, Proxied: true, TTL: 1}, &out); err != nil {
+			return created, err
+		}
+		if out.ID == "" {
+			return created, errors.New("cloudflare: dns record create returned no id")
+		}
+		created = append(created, out.ID)
+	}
+	return created, nil
+}
+
+func (c *liveCFClient) SetDNSRecordContent(ctx context.Context, tok []byte, zoneID, recordID, content string) error {
+	var out DNSRecord
+	return c.do(ctx, tok, http.MethodPatch, zp(zoneID)+"/dns_records/"+url.PathEscape(recordID), nil, map[string]string{"content": content}, &out)
+}
+
+func (c *liveCFClient) DeleteDNSRecord(ctx context.Context, tok []byte, zoneID, recordID string) error {
+	err := c.do(ctx, tok, http.MethodDelete, zp(zoneID)+"/dns_records/"+url.PathEscape(recordID), nil, nil, nil)
+	if isStatus(err, http.StatusNotFound) {
+		return nil
+	}
+	return err
+}
+
+// ---- origin rules (phase http_request_origin) ----
+
+// rulesetRule keeps only the writable fields of a rule, so a PUT of the
+// entrypoint carries every other rule back exactly as the publisher
+// made it.
+type rulesetRule struct {
+	ID               string          `json:"id,omitempty"`
+	Ref              string          `json:"ref,omitempty"`
+	Expression       string          `json:"expression"`
+	Action           string          `json:"action"`
+	ActionParameters json.RawMessage `json:"action_parameters,omitempty"`
+	Description      string          `json:"description,omitempty"`
+	Enabled          *bool           `json:"enabled,omitempty"`
+	Logging          json.RawMessage `json:"logging,omitempty"`
+}
+
+func (c *liveCFClient) entrypoint(ctx context.Context, tok []byte, zoneID string) ([]rulesetRule, bool, error) {
+	var rs struct {
+		Rules []rulesetRule `json:"rules"`
+	}
+	err := c.do(ctx, tok, http.MethodGet, originEntrypointPath(zoneID), nil, nil, &rs)
+	if isStatus(err, http.StatusNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return rs.Rules, true, nil
+}
+
+func (c *liveCFClient) putEntrypoint(ctx context.Context, tok []byte, zoneID string, rules []rulesetRule) error {
+	if rules == nil {
+		rules = []rulesetRule{}
+	}
+	var out any
+	return c.do(ctx, tok, http.MethodPut, originEntrypointPath(zoneID), nil, map[string]any{"rules": rules}, &out)
+}
+
+// hostExpression is the rule's match. The hostname was checked by
+// NormalizeHostname, so it holds no quote or backslash.
+func hostExpression(hostname string) string {
+	return `(http.host eq "` + hostname + `")`
+}
+
+func (c *liveCFClient) EnsureOriginRule(ctx context.Context, tok []byte, zoneID, ref, hostname string, port int) error {
+	if _, err := NormalizeHostname(hostname); err != nil {
+		return err
+	}
+	rules, _, err := c.entrypoint(ctx, tok, zoneID)
+	if err != nil {
+		return err
+	}
+	params, _ := json.Marshal(map[string]any{"origin": map[string]int{"port": port}})
+	t := true
+	ours := rulesetRule{
+		Ref:              ref,
+		Expression:       hostExpression(hostname),
+		Action:           "route",
+		ActionParameters: params,
+		Description:      "origin port",
+		Enabled:          &t,
+	}
+	next := make([]rulesetRule, 0, len(rules)+1)
+	for _, r := range rules {
+		if r.Ref == ref {
+			continue
+		}
+		next = append(next, r)
+	}
+	return c.putEntrypoint(ctx, tok, zoneID, append(next, ours))
+}
+
+func (c *liveCFClient) RemoveOriginRule(ctx context.Context, tok []byte, zoneID, ref string) error {
+	rules, exists, err := c.entrypoint(ctx, tok, zoneID)
+	if err != nil || !exists {
+		return err
+	}
+	next := make([]rulesetRule, 0, len(rules))
+	for _, r := range rules {
+		if r.Ref != ref {
+			next = append(next, r)
+		}
+	}
+	if len(next) == len(rules) {
+		return nil
+	}
+	return c.putEntrypoint(ctx, tok, zoneID, next)
+}
+
+func (c *liveCFClient) OriginRule(ctx context.Context, tok []byte, zoneID, ref string) (string, int, bool, error) {
+	rules, _, err := c.entrypoint(ctx, tok, zoneID)
+	if err != nil {
+		return "", 0, false, err
+	}
+	for _, r := range rules {
+		if r.Ref != ref {
+			continue
+		}
+		var ap struct {
+			Origin struct {
+				Port int `json:"port"`
+			} `json:"origin"`
+		}
+		_ = json.Unmarshal(r.ActionParameters, &ap)
+		host := strings.TrimSuffix(strings.TrimPrefix(r.Expression, `(http.host eq "`), `")`)
+		return host, ap.Origin.Port, true, nil
+	}
+	return "", 0, false, nil
+}
+
+// ---- B-5: ECH over DoH ----
+
+// DefaultDoHResolvers are tried in order. Both are reached from the
+// publisher abroad; neither sees anything but the hostname.
+var DefaultDoHResolvers = []string{
+	"https://cloudflare-dns.com/dns-query",
+	"https://dns.google/dns-query",
+}
+
+// DoHECHFetcher reads a hostname's HTTPS record over DNS-over-HTTPS
+// (RFC 8484, GET with application/dns-message) and returns its ech
+// SvcParam.
+type DoHECHFetcher struct {
+	Resolvers []string
+	Client    *http.Client
+}
+
+// NewDoHECHFetcher returns a fetcher over the given resolvers, or the
+// defaults.
+func NewDoHECHFetcher(resolvers ...string) *DoHECHFetcher {
+	if len(resolvers) == 0 {
+		resolvers = DefaultDoHResolvers
+	}
+	return &DoHECHFetcher{Resolvers: resolvers, Client: &http.Client{Timeout: 10 * time.Second}}
+}
+
+func (f *DoHECHFetcher) FetchECH(ctx context.Context, hostname string) ([]byte, string, error) {
+	h, err := NormalizeHostname(hostname)
+	if err != nil {
+		return nil, "", err
+	}
+	var errs []string
+	for _, r := range f.Resolvers {
+		list, err := f.fetchOne(ctx, r, h)
+		if err == nil {
+			return list, r, nil
+		}
+		errs = append(errs, err.Error())
+	}
+	return nil, "", fmt.Errorf("ech: no resolver answered: %s", strings.Join(errs, "; "))
+}
+
+func (f *DoHECHFetcher) fetchOne(ctx context.Context, resolver, host string) ([]byte, error) {
+	if !strings.HasPrefix(resolver, "https://") {
+		return nil, fmt.Errorf("doh: resolver must be https: %q", resolver)
+	}
+	q, id, err := buildHTTPSQuery(host)
+	if err != nil {
+		return nil, err
+	}
+	u := resolver + "?dns=" + base64.RawURLEncoding.EncodeToString(q)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/dns-message")
+	client := f.Client
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("doh %s: status %d", resolver, resp.StatusCode)
+	}
+	msg, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, err
+	}
+	return echFromDNSAnswer(msg, id)
+}
+
+// ---- cdn-test: one real handshake through the front ----
+
+// FrontTestOpts is one front test.
+type FrontTestOpts struct {
+	Hostname string
+	Path     string
+	// Edge is "ip:port" of a Cloudflare edge. Empty: the hostname on
+	// port 443, resolved by the system resolver (the publisher is
+	// abroad; this is never run where local DNS lies).
+	Edge string
+	// ECHConfigList, when set, is offered; RequireECH fails the test
+	// unless the edge accepted it.
+	ECHConfigList []byte
+	RequireECH    bool
+	Timeout       time.Duration
+	// RootCAs nil means the system roots. Tests pass a pool.
+	RootCAs *x509.CertPool
+	// Dial is injectable for tests.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// FrontTestResult is what cdn-test prints.
+type FrontTestResult struct {
+	OK          bool   `json:"ok"`
+	Edge        string `json:"edge"`
+	ECHOffered  bool   `json:"ech_offered"`
+	ECHAccepted bool   `json:"ech_accepted"`
+	TLSVersion  string `json:"tls_version,omitempty"`
+	HTTPStatus  int    `json:"http_status,omitempty"`
+	ElapsedMS   int64  `json:"elapsed_ms"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+// FrontTest opens a TLS connection to the edge for the hostname (with
+// ECH when a config is given) and sends one WebSocket upgrade for the
+// path. Success is a 101 with the right Sec-WebSocket-Accept: that
+// proves the edge took the name, the origin rule sent the request to
+// the relay's CDN port, the relay accepted Cloudflare's origin-pull
+// certificate, and ws-cdn-in serves the path. It sends no VLESS bytes.
+//
+// It is Go's TLS stack, not the recipients' uTLS hello: it tests the
+// path, not the fingerprint.
+func FrontTest(ctx context.Context, o FrontTestOpts) FrontTestResult {
+	start := time.Now()
+	res := FrontTestResult{Edge: o.Edge, ECHOffered: len(o.ECHConfigList) > 0}
+	done := func(detail string) FrontTestResult {
+		res.ElapsedMS = time.Since(start).Milliseconds()
+		res.Detail = detail
+		return res
+	}
+	host, err := NormalizeHostname(o.Hostname)
+	if err != nil {
+		return done(err.Error())
+	}
+	if !ValidWSPath(o.Path) {
+		return done("bad path")
+	}
+	if res.Edge == "" {
+		res.Edge = net.JoinHostPort(host, "443")
+	}
+	timeout := o.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	dial := o.Dial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	raw, err := dial(ctx, "tcp", res.Edge)
+	if err != nil {
+		return done("connect: " + err.Error())
+	}
+	defer raw.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = raw.SetDeadline(dl)
+	}
+	cfg := &tls.Config{
+		ServerName: host,
+		RootCAs:    o.RootCAs,
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
+	}
+	if res.ECHOffered {
+		cfg.MinVersion = tls.VersionTLS13
+		cfg.EncryptedClientHelloConfigList = o.ECHConfigList
+	}
+	conn := tls.Client(raw, cfg)
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return done("tls: " + err.Error())
+	}
+	st := conn.ConnectionState()
+	res.ECHAccepted = st.ECHAccepted
+	res.TLSVersion = tls.VersionName(st.Version)
+	if o.RequireECH && !st.ECHAccepted {
+		return done("the edge did not accept ECH")
+	}
+	var keyb [16]byte
+	if _, err := rand.Read(keyb[:]); err != nil {
+		return done(err.Error())
+	}
+	key := base64.StdEncoding.EncodeToString(keyb[:])
+	req := "GET " + o.Path + " HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: " + key + "\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"User-Agent: Mozilla/5.0\r\n\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		return done("write: " + err.Error())
+	}
+	br := bufio.NewReaderSize(io.LimitReader(conn, 16<<10), 4096)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		return done("read: " + err.Error())
+	}
+	parts := strings.SplitN(strings.TrimSpace(status), " ", 3)
+	if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/1.") {
+		return done("not an HTTP answer")
+	}
+	res.HTTPStatus, _ = strconv.Atoi(parts[1])
+	accept := ""
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return done("read headers: " + err.Error())
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "Sec-WebSocket-Accept") {
+			accept = strings.TrimSpace(v)
+		}
+	}
+	if res.HTTPStatus != http.StatusSwitchingProtocols {
+		return done(fmt.Sprintf("the front answered %d, not 101", res.HTTPStatus))
+	}
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	if accept != base64.StdEncoding.EncodeToString(sum[:]) {
+		return done("wrong Sec-WebSocket-Accept")
+	}
+	res.OK = true
+	return done("")
+}

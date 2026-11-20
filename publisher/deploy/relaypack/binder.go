@@ -303,6 +303,11 @@ func BindAndSign(rec *provider.OperatorRecord, priv ed25519.PrivateKey, opts Bin
 			return nil, fmt.Errorf("relaypack: %w", err)
 		}
 	}
+	// The standby address add-on: `_standby` beside each `_endpoint`
+	// (endpoint.go). A record without one renders exactly as before.
+	if err := rendered.setStandby(rec.Standby); err != nil {
+		return nil, err
+	}
 	// A pack in which not one servable route has a signed endpoint is a
 	// pack every recipient's client will refuse. Do not sign it.
 	if committable, committed := countCommitments(rendered); committable > 0 && committed == 0 {

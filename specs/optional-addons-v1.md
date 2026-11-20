@@ -8,8 +8,27 @@ the owner; its section 0 decisions D-1 to D-5 are taken as recommended).
 **Built (Wave 0):** the add-on ledger (§2), the whole command surface as
 stubs (§6), the Add-ons section of the publisher UI with every add-on
 shown as "in development" (§6.4), and the wire formats reserved in
-`specs/relaypack-v1.md`. **Not built:** everything an add-on does. Every
-add-on operation answers `E_NOT_BUILT` until its lane lands (§6.1).
+`specs/relaypack-v1.md`. **Built (Wave 1, L-bundle):** the recipient
+side of both pack members — `_standby` (parser, commitment, key text and
+DNS forms, import, set-route guard; S1, S2) and the CDN-fronted
+commitment `_cdn_endpoint` (format, check, merge, import, guard; B-4
+endpoint part) — and the publisher's signing check for both
+(`relaypackvalidate.ValidateForSigning`, RP026/RP027). **Not built:**
+everything else an add-on does. Every add-on operation answers
+`E_NOT_BUILT` until its lane lands (§6.1).
+
+**Compatibility rule for every add-on member (owner's requirement:
+families may stay on an older build for a long time).** A pack that
+carries add-on data must cost a phone on an older build nothing it had:
+its other routes import and the freshness merge still moves them. So
+add-on data is carried where older builds ignore it — sibling members
+of `family_specific_config` (never inside `_endpoint`, whose strict
+decoder refuses the whole pack), and for a route whose outbound older
+builds must not see, the outbound wrapped in the profile under
+`_daal_cdn_outbound` with no top-level `type`. Signatures cover it all
+(`family_specific_config` is inside the signed manifest). Proved by
+`bundle/go/importer/compat_old_test.go` against a frozen copy of the
+rules of 079ef96 (`bundle/go/importer/internal/oldrules`).
 
 The wire formats are normative in `specs/relaypack-v1.md`:
 
@@ -109,7 +128,20 @@ once the record names it (S3).
 ### 3.2 What is signed
 
 `_standby` on every route of the relay except shadowsocks
-(`specs/relaypack-v1.md`).
+(`specs/relaypack-v1.md`), the same object on each; the binder (S5) runs
+`relaypackvalidate.ValidateForSigning` (RP027) before signing.
+
+What the recipient keeps (built): the importer passes the signed object
+as `importer.RouteInput.Standby` (nil when the route may use none). The
+store keeps it at `bundle.StandbyStoreKey(route)` = `standby:<route>`
+and removes it — and any key at `bundle.StandbyKeyStoreKey(route)` =
+`standby-key:<route>`, 16 raw bytes — when a newer commitment carries
+none. **That store write is `core/trust` SaveImport and is not built
+yet** (no lane owned it in wave 1); until it is, no standby reaches the
+guard and nothing is dialled at one. The set-route guard accepts an
+outbound at the committed server, the open standby, or the address of a
+held key that matches the commitment; `routeStandbyAddress` in
+`core/abi/endpoint_guard.go` is the address S7's variant uses.
 
 ### 3.3 Recipient: the address variant
 
@@ -131,8 +163,9 @@ int engine_standby_key(const char* relay_pack_id, const char* key, void* out, in
 ```
 
 `relay_pack_id` `""` means every held file. Checks `key` (the text
-form) against the `_standby.commit` of the held routes and keeps it on
-every route it matches. Writes JSON to `out` via `copyOut`:
+form, `bundle.ParseStandbyKeyText`) against the `_standby.commit` of the
+held routes (`Standby.Matches`) and keeps it on every route it matches,
+as 16 raw bytes at `bundle.StandbyKeyStoreKey(route)`. Writes JSON to `out` via `copyOut`:
 `{"outcome":"accepted|no_match|malformed|no_standby","routes":<n>}`.
 Never echoes the key or the address. Returns the number of bytes, or
 -1 when the engine is not initialised. Optional symbol: the desktop core
@@ -153,8 +186,13 @@ exists. S7 adds it to `specs/engine-abi-v1.md` with its export.
   at account level: Zone Read, DNS Edit, SSL and Certificates Edit, Zone
   Settings Edit, Origin Rules Edit. A token that can do more is refused
   and not stored (`CdnTokenCheck.verdict = too_broad`).
-- What is signed: one more `websocket-tls` route, exposure `cdn_fronted`
-  (`specs/relaypack-v1.md`, "The CDN-fronted endpoint").
+- What is signed: one more `websocket-tls` route, exposure `cdn_fronted`,
+  whose commitment is the sibling member `_cdn_endpoint` (no
+  `_endpoint`), with `_cdn_attestation` and the RP005/RP006 tags as
+  before; a recipient's outbound for it is wrapped in the profile
+  (`bundle.WrapCDNOutbound`) and installs the listed roots as
+  `tls.certificate` (`specs/relaypack-v1.md`, "The CDN-fronted
+  endpoint"). The binder runs `ValidateForSigning` (RP026).
 - Removal: sign without the route and publish; delete the record and
   the origin rule; revoke the origin certificate; close the firewall
   rule; disable the inbound; forget the token; tell the publisher to
@@ -284,10 +322,23 @@ Cloudflare way in, and Home says when the app is at 5.
 
 ## 8. Open items
 
-- **CDN compatibility.** Builds before the CDN-fronted endpoint refuse a
-  whole pack that carries one (`specs/relaypack-v1.md`, the
-  compatibility paragraph). B-4 decides before the first CDN route is
-  minted.
+- **CDN compatibility — settled (wave 1).** The CDN commitment is the
+  sibling `_cdn_endpoint` and the outbound is wrapped, so builds before
+  it skip that one route ("not offered") and keep the rest of the pack
+  and the freshness merge. A `_cdn_endpoint` this build cannot read
+  costs that route (`needs_newer_app`), not the pack. The import screen
+  has no Persian/English line for `needs_newer_app` yet (it falls back
+  to the generic sentence): L-ui.
+- **Standby store write.** `core/trust` SaveImport must write
+  `RouteInput.Standby` to `standby:<route>` (and delete it and
+  `standby-key:<route>` when nil), atomically with the commitment. No
+  lane owns `core/trust` in wave 1.
+- **Signing check wiring.** The binder (`relaypack/binder.go`) must call
+  `relaypackvalidate.ValidateForSigning` after `Validate`; the minter
+  (`relaypack/client_pack.go` RewriteProfilesForRecipient) must render a
+  `cdn_fronted` route through `bundle.ParseCDNEndpoint` →
+  `bundle.CheckCDNOutbound` → `bundle.WrapCDNOutbound` instead of the
+  `_endpoint` path (today it marks such a route unavailable).
 - **The freshness endpoint table** (`daal-wizard/src/freshness.rs`,
   V013) accepts only `r2` and `ghpages`. The Google channel needs an
   `appsscript` kind there and its write key passed to

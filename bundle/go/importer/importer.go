@@ -67,13 +67,26 @@ type RouteInput struct {
 	Profile         []byte // sing-box outbound JSON; passed through to PutSecret
 
 	// Endpoint is the route's SIGNED endpoint commitment
-	// (bundle.Endpoint, as JSON), or nil for a route that is not part
+	// (bundle.Endpoint, as JSON — or, for a CDN-fronted route, its
+	// bundle.CDNEndpoint as signed under `_cdn_endpoint`; readers tell
+	// them apart with bundle.IsCDNCommitment), or nil for a route that is not part
 	// of a RelayPack. The store keeps it beside the profile so the
 	// engine can re-check, at set-route, that the outbound it is about
 	// to dial still points where the publisher signed — a second gate
 	// behind planRoutes, for any path that writes a profile without
 	// coming through here.
 	Endpoint []byte
+
+	// Standby is the route's signed `_standby` (bundle.Standby, as
+	// JSON, exactly as signed), or nil when the route may use none:
+	// absent, malformed, a shadowsocks route, a CDN-fronted route. The
+	// store keeps it beside the commitment
+	// (bundle.StandbyStoreKey(route id)) and REMOVES what it held there
+	// when this is nil, together with any accepted standby key
+	// (bundle.StandbyKeyStoreKey): a newer commitment without `_standby`
+	// must leave no address behind that the publisher may have released.
+	// Never on the route row (it can hold an address).
+	Standby []byte
 
 	// SignedAt is the signed manifest's bundle.created_at for the
 	// manifest Endpoint came from: when the publisher signed the
@@ -480,6 +493,9 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 			TrustState:      trustStateFromLevel(trustLevel),
 			Profile:         append([]byte(nil), profile...),
 			Endpoint:        append([]byte(nil), pr.endpoint...),
+		}
+		if len(pr.standby) > 0 {
+			ri.Standby = append([]byte(nil), pr.standby...)
 		}
 		if len(pr.endpoint) > 0 {
 			ri.SignedAt = parsed.Manifest.Bundle.CreatedAt

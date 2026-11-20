@@ -1,46 +1,110 @@
-// firewall_cf.go is the FRP-8 Hetzner-side adapter that satisfies
-// the cloudflare.FirewallApplier interface. It binds the supplied
-// EdgeRanges to a Hetzner Cloud Firewall rule allowing inbound
-// 443/tcp ONLY from Cloudflare-published edge IP ranges.
+// firewall_cf.go is the Hetzner side of the CDN way in (add-on 2, item
+// B-2): it satisfies cloudflare.FirewallApplier by putting ONE rule on
+// the relay's own firewall that opens the CDN door's port
+// (relayports.CDNOrigin, ws-cdn-in) to Cloudflare's published ranges and
+// to nothing else.
 //
-// Per supplement §11.7 + phase doc §13 rule 5: this code runs on
-// the FRP Helper machine (the wizard process), NEVER on the
-// origin box. The origin box holds no Hetzner API token.
+// What changed from FRP-8, and why (blackout plan, Group B, defect 3):
+//   - the port is a parameter, and defaults to the CDN door, not 443
+//     (443/tcp is REALITY's and already world-open, so a rule for it
+//     narrowed nothing);
+//   - the rule goes on the relay's firewall (daal-relay-<server id>);
+//     an empty firewall id is refused instead of creating a firewall
+//     attached to nothing;
+//   - a port the firewall already opens to everyone is refused.
+//
+// Runs on the publisher's device, never on the relay: the relay holds
+// no Hetzner token.
 
 package hetzner
 
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"daal/publisher/deploy/cloudflare"
+	"daal/publisher/deploy/relayports"
 )
 
-// errEmptyRanges is returned when the FirewallApplier is invoked
-// with a nil EdgeRanges pointer. The caller (wizard) treats this
-// as a programming error and surfaces it to the FRP unchanged.
+// errEmptyRanges is returned when the applier is invoked with no
+// ranges. A failed range fetch must never become an empty rule.
 var errEmptyRanges = errors.New("hetzner: edge ranges required")
 
-// CloudflareFirewallApplier adapts an hcloudClient into the
-// cloudflare.FirewallApplier interface. Constructed by the
-// wizard's Tauri shim alongside the existing Hetzner Provider.
-type CloudflareFirewallApplier struct {
-	c hcloudClient
+// cloudflarePortRuler is the port-aware half of the live client. It is
+// an optional interface rather than an hcloudClient method so the
+// shared client interface (client.go) and its fakes need no change; the
+// live client implements it.
+type cloudflarePortRuler interface {
+	FirewallApplyCloudflareRuleOnPort(ctx context.Context, firewallID string, port int, ipv4Ranges, ipv6Ranges []string) (string, error)
+	FirewallRemoveCloudflareRule(ctx context.Context, firewallID string) error
+	FirewallCloudflareRule(ctx context.Context, firewallID string) (CloudflareRuleState, error)
 }
 
-// NewCloudflareFirewallApplier wraps the supplied hcloudClient.
-// The same client object the existing Hetzner Provider uses can
-// be reused; the firewall API is independent of the server API.
+// CloudflareFirewallApplier adapts an hcloudClient into the
+// cloudflare.FirewallApplier interface.
+type CloudflareFirewallApplier struct {
+	c hcloudClient
+	// Port is the relay port the rule opens. Zero means the CDN door
+	// (relayports.CDNOrigin).
+	Port int
+}
+
+// NewCloudflareFirewallApplier wraps the supplied hcloudClient; the
+// rule opens the CDN door's port.
 func NewCloudflareFirewallApplier(c hcloudClient) *CloudflareFirewallApplier {
 	return &CloudflareFirewallApplier{c: c}
 }
 
-// ApplyCloudflareRule satisfies cloudflare.FirewallApplier.
-// firewallID == "" creates a fresh rule; non-empty updates the
-// existing rule in place. Returns the rule's Hetzner-side ID.
+func (a *CloudflareFirewallApplier) port() int {
+	if a.Port == 0 {
+		return relayports.CDNOrigin.Port
+	}
+	return a.Port
+}
+
+// ApplyCloudflareRule satisfies cloudflare.FirewallApplier. firewallID
+// must be the relay's own firewall. Returns that id.
 func (a *CloudflareFirewallApplier) ApplyCloudflareRule(ctx context.Context, firewallID string, ranges *cloudflare.EdgeRanges) (string, error) {
 	if ranges == nil {
 		return "", errEmptyRanges
 	}
+	if firewallID == "" {
+		return "", errNoRelayFirewall
+	}
+	if pr, ok := a.c.(cloudflarePortRuler); ok {
+		return pr.FirewallApplyCloudflareRuleOnPort(ctx, firewallID, a.port(), ranges.V4, ranges.V6)
+	}
+	// A client without the port-aware call (test fakes, the dry-run
+	// client) can only open the default port.
+	if a.port() != relayports.CDNOrigin.Port {
+		return "", fmt.Errorf("hetzner: this client cannot open port %d", a.port())
+	}
 	return a.c.FirewallApplyCloudflareRule(ctx, firewallID, ranges.V4, ranges.V6)
+}
+
+// RemoveCloudflareRule takes the rule off the relay firewall (cdn-remove).
+func (a *CloudflareFirewallApplier) RemoveCloudflareRule(ctx context.Context, firewallID string) error {
+	pr, ok := a.c.(cloudflarePortRuler)
+	if !ok {
+		return errors.New("hetzner: this client cannot remove the Cloudflare rule")
+	}
+	return pr.FirewallRemoveCloudflareRule(ctx, firewallID)
+}
+
+// CloudflareRule reads the rule back (cdn-posture). Present with the
+// door's port and at least one source is what "only Cloudflare can
+// reach the door" needs from Hetzner.
+func (a *CloudflareFirewallApplier) CloudflareRule(ctx context.Context, firewallID string) (CloudflareRuleState, error) {
+	pr, ok := a.c.(cloudflarePortRuler)
+	if !ok {
+		return CloudflareRuleState{}, errors.New("hetzner: this client cannot read the Cloudflare rule")
+	}
+	return pr.FirewallCloudflareRule(ctx, firewallID)
+}
+
+// DoorPortOpenToCloudflareOnly reports whether st is the rule this
+// applier would have written.
+func (a *CloudflareFirewallApplier) DoorPortOpenToCloudflareOnly(st CloudflareRuleState) bool {
+	return st.Present && st.Sources > 0 && st.Port == fmt.Sprint(a.port())
 }

@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"daal/publisher/deploy/relayports"
+
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud/schema"
 )
@@ -164,7 +166,7 @@ func TestLiveFirewallApplyCloudflareRule_KeepsEveryOtherRule(t *testing.T) {
 	}
 	got := f.descriptions()
 	want := []string{"tcp/80/", "tcp/443/", "udp/443/", "tcp/8444/", "tcp/8445/",
-		"tcp/31337/daal-eph-4242-192.0.2.10-31337-1", "tcp/443/" + cdnRuleDescription}
+		"tcp/31337/daal-eph-4242-192.0.2.10-31337-1", "tcp/" + cdnOriginPort + "/" + cdnRuleDescription}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("rules after apply:\n got  %v\n want %v", got, want)
 	}
@@ -232,7 +234,7 @@ func TestLiveFirewallApplyCloudflareRule_RetriesWhenOverwrittenAfterWrite(t *tes
 		t.Errorf("set_rules calls = %d, want 2 (one retry)", f.setCalls)
 	}
 	got := strings.Join(f.descriptions(), " ")
-	if !strings.Contains(got, "tcp/9999/") || !strings.Contains(got, "tcp/443/"+cdnRuleDescription) {
+	if !strings.Contains(got, "tcp/9999/") || !strings.Contains(got, "tcp/"+cdnOriginPort+"/"+cdnRuleDescription) {
 		t.Errorf("retry must keep the other writer's rule and land ours: %v", got)
 	}
 }
@@ -269,18 +271,47 @@ func TestLiveFirewallApplyCloudflareRule_RejectsBadOrEmptyRanges(t *testing.T) {
 	}
 }
 
-func TestLiveFirewallApplyCloudflareRule_CreateTagsTheRule(t *testing.T) {
+// Defect 3: an empty firewall id used to create a fresh firewall holding
+// only this rule and attached to nothing. It is refused now, before any
+// API call.
+func TestLiveFirewallApplyCloudflareRule_RefusesNoFirewall(t *testing.T) {
 	f := &fakeHcloudAPI{}
 	l := newFakeLive(t, f)
-	id, err := l.FirewallApplyCloudflareRule(context.Background(), "", []string{"1.0.0.0/24"}, nil)
-	if err != nil {
-		t.Fatal(err)
+	_, err := l.FirewallApplyCloudflareRule(context.Background(), "", []string{"1.0.0.0/24"}, nil)
+	if !errors.Is(err, errNoRelayFirewall) {
+		t.Fatalf("want errNoRelayFirewall, got %v", err)
 	}
-	if id != "9001" || len(f.created) != 1 || len(f.created[0].Rules) != 1 {
-		t.Fatalf("create: id=%q created=%+v", id, f.created)
+	if len(f.created) != 0 || f.setCalls != 0 {
+		t.Errorf("refused call reached the API: created=%d set=%d", len(f.created), f.setCalls)
 	}
-	if d := f.created[0].Rules[0].Description; d == nil || *d != cdnRuleDescription {
-		t.Errorf("created rule not tagged: %v", d)
+}
+
+// The default port is the CDN door's, never 443 (REALITY, world-open).
+func TestLiveFirewallApplyCloudflareRule_DefaultsToTheCDNDoor(t *testing.T) {
+	if cdnOriginPort != strconv.Itoa(relayports.CDNOrigin.Port) || cdnOriginPort == "443" {
+		t.Fatalf("cdnOriginPort = %s", cdnOriginPort)
+	}
+}
+
+// A port the firewall already opens to everyone is refused: the rule
+// would narrow nothing while the posture said "only Cloudflare".
+func TestLiveFirewallApplyCloudflareRuleOnPort_RefusesWorldOpenPort(t *testing.T) {
+	f := &fakeHcloudAPI{rules: relayBaseline()}
+	l := newFakeLive(t, f)
+	_, err := l.FirewallApplyCloudflareRuleOnPort(context.Background(), strconv.Itoa(fakeFirewallID), 443, []string{"1.0.0.0/24"}, nil)
+	if !errors.Is(err, errCDNPortWorldOpen) {
+		t.Fatalf("want errCDNPortWorldOpen, got %v", err)
+	}
+	if f.setCalls != 0 {
+		t.Errorf("refused call wrote set_rules %d times", f.setCalls)
+	}
+}
+
+func TestLiveFirewallApplyCloudflareRule_RefusesEveryoneAsARange(t *testing.T) {
+	f := &fakeHcloudAPI{rules: relayBaseline()}
+	l := newFakeLive(t, f)
+	if _, err := l.FirewallApplyCloudflareRule(context.Background(), strconv.Itoa(fakeFirewallID), []string{"0.0.0.0/0"}, nil); err == nil {
+		t.Fatal("0.0.0.0/0 is not a Cloudflare range")
 	}
 }
 

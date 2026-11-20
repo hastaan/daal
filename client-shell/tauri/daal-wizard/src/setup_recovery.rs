@@ -488,6 +488,18 @@ pub struct AccountItem {
     pub finding: String,
     pub belongs_to_relay_id: Option<i64>,
     pub can_delete: bool,
+    /// The add-on this item is, when it is one: `standby` for a relay's
+    /// standby address (a Floating IP billed every month until it is
+    /// removed or the relay is deleted). `""` otherwise.
+    #[serde(default)]
+    pub addon: String,
+    /// What the add-on bills each month, as read when it was rented
+    /// (`relay_addons.monthly_cost_cents`); 0 with an empty currency
+    /// when unknown.
+    #[serde(default)]
+    pub monthly_cost_cents: i64,
+    #[serde(default)]
+    pub cost_currency: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -677,9 +689,36 @@ pub(crate) fn account_items(
                 finding: finding.into(),
                 belongs_to_relay_id: belongs,
                 can_delete,
+                ..Default::default()
             }
         })
         .collect()
+}
+
+/// Name the standby addresses among an account's items, so the check
+/// lists each as the billed add-on it is (docs/optional-addons-plan.md
+/// §1.6). Display only: nothing here makes an item deletable — a
+/// standby is removed from its relay's add-ons, or with the relay.
+///
+/// A Floating IP is the standby when its relay's ledger row names its
+/// id, or — for a row whose run stopped before the id was saved — when
+/// its relay has a standby row and the address carries the name the
+/// helper gives a standby (`<relay>-standby-<hex>`).
+pub(crate) fn mark_addon_items(ctx: &WizardCtx, items: &mut [AccountItem]) {
+    for it in items.iter_mut().filter(|i| i.kind == "floating-ip") {
+        let Some(op) = it.belongs_to_relay_id else { continue };
+        let Ok(rows) = crate::addons::list(ctx, op) else { continue };
+        let row = rows.iter().filter(|r| r.kind == crate::addons::AddonKind::Standby).find(|r| {
+            r.provider_ids.get("floating_ip_id").map(String::as_str) == Some(it.id.as_str())
+                || (r.provider_ids.is_empty() && it.name.contains("-standby-"))
+        });
+        if let Some(r) = row {
+            it.addon = "standby".into();
+            it.billing = true;
+            it.monthly_cost_cents = r.monthly_cost_cents;
+            it.cost_currency = r.cost_currency.clone();
+        }
+    }
 }
 
 /// `wizard_account_check`: read-only, every hosting account this phone
@@ -704,6 +743,7 @@ pub fn account_check(ctx: &WizardCtx) -> Result<AccountCheck> {
             Ok(report) => {
                 entry.complete = report.server_list_complete;
                 entry.items = account_items(&report, &index_to_op, &status_of);
+                mark_addon_items(ctx, &mut entry.items);
                 entry.details = report.warnings.clone();
             }
             Err(e) => {

@@ -136,6 +136,38 @@ var declaredFor = map[string]Endpoint{
 	"wireguard": {Port: 51820, UDP: true},
 }
 
+// CDNOrigin is the relay port of the ws-cdn-in inbound: VLESS over
+// WebSocket behind the publisher's Cloudflare zone (add-on 2,
+// docs/optional-addons-plan.md §2, item B-1). Cloudflare's edge dials it
+// because an Origin Rule on the zone overrides the destination port for
+// the front's hostname; recipients never dial it, they dial a Cloudflare
+// edge on 443.
+//
+// It is NOT a row in declaredFor, on purpose:
+//   - it is not a family. The route it carries is family websocket-tls
+//     with exposure cdn_fronted, and websocket-tls already owns 8445 for
+//     the direct route. Declared() lists listeners keyed by family, and
+//     the binder's family matrix iterates it;
+//   - it is never world-open. FirewallPortsFor (both firewalls'
+//     world-open list) must never contain it. The relay firewall opens
+//     it to Cloudflare's published ranges only (hetzner
+//     FirewallApplyCloudflareRule), and box-side ufw the same
+//     (cloudinit RenderInputV2.CDNEdgeRanges).
+//
+// Why a port of its own instead of 443: Cloudflare dialling 443 lands
+// on REALITY, which hands an unknown client the cover site's
+// certificate — error 526 under Full (strict). That was defect 1 of the
+// blackout plan's Group B. 8448 is a constant across relays, which is
+// the same port-axis cost recorded for 8444–8447 above, but it is not
+// reachable from anywhere but Cloudflare's ranges, so a censor scanning
+// a relay address sees nothing on it.
+//
+// The collision test checks it against every declared endpoint.
+var CDNOrigin = Endpoint{Port: 8448, UDP: false}
+
+// CDNInboundTag is the sing-box tag of the inbound on CDNOrigin.
+const CDNInboundTag = "ws-cdn-in"
+
 // familyAliases maps alternate spellings onto the canonical family whose
 // LISTENER they name. These are aliases for port purposes only and say
 // nothing about wire compatibility: bundle.TransportAmneziaWG is

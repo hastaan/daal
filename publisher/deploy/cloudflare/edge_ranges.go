@@ -1,6 +1,7 @@
 // edge_ranges.go fetches Cloudflare's published edge IP ranges so
 // the Helper can apply them to the cloud-provider firewall rule
-// that locks origin 443/tcp to Cloudflare-only sources.
+// that locks the relay's CDN origin port (relayports.CDNOrigin) to
+// Cloudflare-only sources.
 //
 // Per supplement §11.7, this fetch runs from the FRP Helper
 // machine (not from the origin box). The Helper holds the
@@ -135,7 +136,7 @@ func FetchEdgeRanges(ctx context.Context, f EdgeRangeFetcher, now func() time.Ti
 // implements this. Vultr / Stark (FRP-10) plug in later.
 type FirewallApplier interface {
 	// ApplyCloudflareRule creates or updates a firewall rule
-	// allowing inbound 443/tcp ONLY from the supplied edge
+	// allowing inbound tcp on the CDN origin port ONLY from the supplied edge
 	// ranges. Returns the rule's provider-side ID.
 	ApplyCloudflareRule(ctx context.Context, firewallID string, ranges *EdgeRanges) (string, error)
 }

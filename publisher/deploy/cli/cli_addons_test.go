@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// Every add-on verb is registered and, until its lane lands, refuses
-// with E_NOT_BUILT and exit 8 — never "unknown subcommand" (exit 2),
+// Every add-on verb is registered: called with no flags it answers with
+// its own usage or a missing-flag error, never "unknown subcommand",
 // which the app reads as an old helper.
-func TestAddonVerbsAreRegisteredAndRefuseAsNotBuilt(t *testing.T) {
+func TestAddonVerbsAreRegistered(t *testing.T) {
 	for _, argv := range [][]string{
 		{"standby", "price"},
 		{"standby", "add"},
@@ -25,19 +25,13 @@ func TestAddonVerbsAreRegisteredAndRefuseAsNotBuilt(t *testing.T) {
 		{"appsscript-clear"},
 	} {
 		var out, errb bytes.Buffer
-		rc := Run(argv, &out, &errb)
+		Run(argv, &out, &errb)
 		name := strings.Join(argv, " ")
-		if rc != exitNotBuilt {
-			t.Errorf("%s: rc=%d, want %d (stderr %q)", name, rc, exitNotBuilt, errb.String())
-		}
-		if !strings.HasPrefix(errb.String(), "E_NOT_BUILT: ") {
-			t.Errorf("%s: stderr %q", name, errb.String())
-		}
 		if strings.Contains(strings.ToLower(errb.String()), "unknown subcommand") {
 			t.Errorf("%s: reads as an unknown verb", name)
 		}
-		if out.Len() != 0 {
-			t.Errorf("%s: wrote stdout %q", name, out.String())
+		if strings.HasPrefix(errb.String(), "E_NOT_BUILT: ") {
+			t.Errorf("%s: still a stub", name)
 		}
 	}
 }

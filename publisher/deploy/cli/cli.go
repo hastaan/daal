@@ -292,7 +292,9 @@ Subcommands:
                 that route heals by itself on phones that check for updates.
                 Exit 3 from either verb means the relay's daal-relay-mgmt is too
                 old for in-place rotation — reprovision or re-release.
-  cdn-provision Provision Cloudflare fronting + firewall and emit FrontRecord JSON (FRP-8).
+  cdn-provision Build the way in through Cloudflare (origin certificate, origin
+                pull, strict SSL, WebSockets, proxied record, origin rule) and
+                the relay firewall rule; emit FrontRecord JSON.
   cdn-rotate-path
                 Rotate the visible /r/<hex> path on a CDN-fronted candidate
                 (re-uploads worker, rebinds route). Emits CdnRotateResult JSON.
@@ -1828,85 +1830,77 @@ func buildProvider(providerName, tokenFile string, dryRun bool) (providerFace, e
 	}
 }
 
-// runCDNProvision provisions the Cloudflare side of a cdn_fronted
-// candidate and emits publisher/deploy/cloudflare.FrontRecord JSON.
+// runCDNProvision builds the way in through Cloudflare (add-on 2,
+// item B-3) and emits publisher/deploy/cloudflare.FrontRecord JSON. The
+// work is in cli_addon_cdn.go (provisionCDN); this keeps the flags.
+//
+// --firewall-id is required now: the Cloudflare-ranges rule goes on the
+// relay's own firewall, and an empty id used to create a firewall
+// attached to nothing (blackout plan, Group B, defect 3). There is no
+// Worker any more, so --public-path is the relay's path or nothing.
 func runCDNProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cdn-provision", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	hostname := fs.String("hostname", "", "public CDN hostname, e.g. relay.example.com")
-	originIP := fs.String("origin-ip", "", "origin VPS IPv4")
-	originIPv6 := fs.String("origin-ipv6", "", "origin VPS IPv6 (optional)")
-	originPath := fs.String("origin-path", "", "stable origin path, e.g. /ws")
-	publicPath := fs.String("public-path", "", "public random path; empty generates one")
-	outDir := fs.String("out-dir", "", "directory for origin CA / AOP cert files")
+	hostname := fs.String("hostname", "", "public CDN hostname, e.g. abc.example.com (or --zone)")
+	zone := fs.String("zone", "", "zone to put a random hostname in (when --hostname is empty)")
+	originIP := fs.String("origin-ip", "", "relay IPv4")
+	originIPv6 := fs.String("origin-ipv6", "", "relay IPv6 (optional)")
+	originPath := fs.String("origin-path", "", "relay WebSocket path; empty generates one")
+	publicPath := fs.String("public-path", "", "deprecated (no Worker): must be empty or equal --origin-path")
+	originPort := fs.Int("origin-port", 0, "relay CDN door port (default relayports.CDNOrigin)")
+	outDir := fs.String("out-dir", "", "directory for origin CA / origin pull CA files")
 	tokenFile := fs.String("cf-token-file", "", "Cloudflare API token file")
-	cloudTokenFile := fs.String("token-file", "", "Hetzner API token file for Cloudflare-edge firewall")
-	firewallID := fs.String("firewall-id", "", "existing Hetzner firewall ID to update (optional)")
+	cloudTokenFile := fs.String("token-file", "", "Hetzner API token file for the relay firewall rule")
+	firewallID := fs.String("firewall-id", "", "the relay's own Hetzner firewall id (daal-relay-<server id>)")
+	noECH := fs.Bool("no-ech-read", false, "skip the DoH read of the published ECH config")
+	progress := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
 	if err := requireAll(stderr, map[string]string{
-		"--hostname":      *hostname,
 		"--origin-ip":     *originIP,
-		"--origin-path":   *originPath,
 		"--out-dir":       *outDir,
 		"--cf-token-file": *tokenFile,
 		"--token-file":    *cloudTokenFile,
+		"--firewall-id":   *firewallID,
 	}); err != nil {
 		return 2
 	}
-	tokenBytes, err := os.ReadFile(*tokenFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "read cf-token-file: %v\n", err)
-		return 1
+	if *hostname == "" && *zone == "" {
+		fmt.Fprintln(stderr, "missing required flags: --hostname or --zone")
+		return 2
 	}
-	token := []byte(strings.TrimSpace(string(tokenBytes)))
-	if len(token) == 0 {
-		fmt.Fprintln(stderr, "cf-token-file is empty")
-		return 1
+	if *publicPath != "" && *publicPath != *originPath {
+		fmt.Fprintln(stderr, "cdn-provision: there is no path-rewrite Worker any more; --public-path must be empty or equal --origin-path")
+		return 2
 	}
-	defer zeroBytes(token)
-
-	p := cloudflare.NewProvider(cloudflare.NewLiveCFClient())
-	rec, err := p.ProvisionFront(ctx, cloudflare.CloudflareOpts{
-		Hostname:      *hostname,
-		OriginIP:      *originIP,
-		OriginIPv6:    *originIPv6,
-		PublicPath:    *publicPath,
-		OriginPath:    *originPath,
-		CFTokenSecret: token,
-		OutDir:        *outDir,
-	})
+	token, err := cdnReadSecret(*tokenFile, "--cf-token-file")
 	if err != nil {
 		fmt.Fprintf(stderr, "cdn-provision: %v\n", err)
 		return 1
 	}
-	cloudTokenBytes, err := os.ReadFile(*cloudTokenFile)
+	defer zeroBytes(token)
+	cloudToken, err := cdnReadSecret(*cloudTokenFile, "--token-file")
 	if err != nil {
-		fmt.Fprintf(stderr, "read token-file: %v\n", err)
-		return 1
-	}
-	cloudToken := []byte(strings.TrimSpace(string(cloudTokenBytes)))
-	if len(cloudToken) == 0 {
-		fmt.Fprintln(stderr, "token-file is empty")
+		fmt.Fprintf(stderr, "cdn-provision: %v\n", err)
 		return 1
 	}
 	defer zeroBytes(cloudToken)
-	applier := hetzner.NewCloudflareFirewallApplier(hetzner.NewLiveClient(string(cloudToken)))
-	fwID, _, err := cloudflare.RefreshFirewall(ctx, cloudflare.NewHTTPSEdgeRangeFetcher(), applier, *firewallID, time.Now)
-	if err != nil {
-		fmt.Fprintf(stderr, "cdn-provision firewall: %v\n", err)
-		return 1
+	opts := cloudflare.CloudflareOpts{
+		Hostname:      *hostname,
+		Zone:          *zone,
+		OriginIP:      *originIP,
+		OriginIPv6:    *originIPv6,
+		OriginPath:    *originPath,
+		OriginPort:    *originPort,
+		CFTokenSecret: token,
+		OutDir:        *outDir,
 	}
-	p.SetFirewallID(rec, fwID)
-	body, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "marshal front record: %v\n", err)
-		return 1
+	if !*noECH {
+		opts.ECH = newECHFetcher()
 	}
-	fmt.Fprintln(stdout, string(body))
-	return 0
+	return provisionCDN(ctx, opts, cloudToken, *firewallID, *progress, stdout, stderr)
 }
 
 // cdnRotateResult mirrors the wizard cli_bridge.CdnRotateResult

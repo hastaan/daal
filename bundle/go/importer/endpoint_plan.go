@@ -58,6 +58,19 @@ package importer
 //     refused (ReasonEndpointDowngrade) and the routes are left as
 //     they were. The store enforces the same rule on its own
 //     (core/trust SaveImport), for any State and any caller.
+//
+// Two members added for the optional add-ons ride beside `_endpoint`,
+// never inside it, so that builds from before them skip them and keep
+// the rest of the pack (proved by compat_old_test.go against a frozen
+// copy of the earlier rules):
+//
+//   - `_standby` (bundle/standby.go): a second address of the relay.
+//     Kept on the route when it may use one; a file's outbound may sit
+//     at the open standby address. Malformed is absent, never a refusal.
+//   - `_cdn_endpoint` (bundle/cdn_endpoint.go): a CDN-fronted route's
+//     commitment, with its outbound wrapped in the profile. Same rules
+//     1–4 with the CDN checker and merge (planCDNRoute); a version this
+//     build cannot read costs that route, not the pack.
 
 import (
 	"bytes"
@@ -115,6 +128,12 @@ const (
 	// the route, and what it signs for the route is older than what the
 	// device already holds. The existing route is untouched (rule 4).
 	UnavailableOlderThanDevice = "older_than_device"
+	// UnavailableNeedsNewerApp: the publisher signed something about
+	// this route that this build cannot read — a `_cdn_endpoint` of a
+	// later version, or with a member this build does not know. The
+	// member is signed, so this is a newer publisher, not tampering:
+	// that one route is left out and the rest of the pack is used.
+	UnavailableNeedsNewerApp = "needs_newer_app"
 )
 
 // UnavailableRoute is one manifest route that was not stored, and why.
@@ -160,7 +179,11 @@ type plannedRoute struct {
 	route    bundle.RouteManifestEntry
 	profile  []byte
 	endpoint []byte // the signed commitment, as JSON; nil for a non-RelayPack route
-	merged   bool
+	// standby is the route's signed `_standby`, as JSON, when this
+	// route may use one (bundle.StandbyForRoute); nil otherwise —
+	// absent, malformed, shadowsocks, or a CDN-fronted route.
+	standby []byte
+	merged  bool
 }
 
 type routePlan struct {
@@ -208,12 +231,34 @@ func planRoutes(parsed *bundle.Bundle, st State, fingerprintHex string, continui
 		if epErr != nil && !errors.Is(epErr, bundle.ErrNoEndpoint) {
 			return plan, ReasonEndpointMalformed, epErr
 		}
-		var epJSON []byte
+		if bundle.HasCDNEndpoint(r.FamilySpecificConfig) {
+			// A CDN-fronted route (bundle/cdn_endpoint.go). It carries
+			// its commitment under its own member and NO `_endpoint`;
+			// a route with both is a publisher error this build will
+			// not guess about.
+			if ep != nil {
+				return plan, ReasonEndpointMalformed,
+					errRoute(r.ID, errors.New("importer: a route carries both _endpoint and _cdn_endpoint"))
+			}
+			reason, err := planCDNRoute(&plan, r, profile, device, fingerprintHex, packID, continuity, parsed.Manifest.Bundle.CreatedAt)
+			if err != nil {
+				return plan, reason, err
+			}
+			continue
+		}
+		var epJSON, sbJSON []byte
 		if ep != nil {
 			if err := ep.Validate(r.TransportFamily); err != nil {
 				return plan, ReasonEndpointMalformed, err
 			}
 			epJSON = endpointJSON(r)
+		}
+		// `_standby` (bundle/standby.go): kept only when this route may
+		// use it. Anything wrong with it is "no standby", never a
+		// refusal — it can only widen what the route may dial.
+		sb, sbErr := bundle.StandbyForRoute(r.TransportFamily, r.FamilySpecificConfig, ep)
+		if sbErr == nil {
+			sbJSON, _ = rawMember(r.FamilySpecificConfig, bundle.StandbyKey)
 		}
 
 		if bundle.ProfileOutboundType(profile) != "" {
@@ -221,10 +266,13 @@ func planRoutes(parsed *bundle.Bundle, st State, fingerprintHex string, continui
 				return plan, ReasonEndpointUnauthenticated,
 					errRoute(r.ID, bundle.ErrEndpointUnauthenticated)
 			}
-			if err := bundle.CheckOutbound(r.TransportFamily, ep, profile); err != nil {
+			// The amended endpoint rule: the committed server, or the
+			// open standby. (A sealed standby needs a key, and no key
+			// is held for a route being imported.)
+			if err := bundle.CheckOutboundStandby(r.TransportFamily, ep, sb, nil, profile); err != nil {
 				return plan, ReasonEndpointMismatch, errRoute(r.ID, err)
 			}
-			plan.routes = append(plan.routes, plannedRoute{route: r, profile: profile, endpoint: epJSON})
+			plan.routes = append(plan.routes, plannedRoute{route: r, profile: profile, endpoint: epJSON, standby: sbJSON})
 			continue
 		}
 
@@ -249,7 +297,7 @@ func planRoutes(parsed *bundle.Bundle, st State, fingerprintHex string, continui
 					merged, mErr = bundle.MergeEndpoint(r.TransportFamily, ep, cur.Profile)
 				}
 				if mErr == nil {
-					plan.routes = append(plan.routes, plannedRoute{route: r, profile: merged, endpoint: epJSON, merged: true})
+					plan.routes = append(plan.routes, plannedRoute{route: r, profile: merged, endpoint: epJSON, standby: sbJSON, merged: true})
 					plan.merged++
 					continue
 				}
@@ -272,6 +320,73 @@ func planRoutes(parsed *bundle.Bundle, st State, fingerprintHex string, continui
 		return plan, ReasonNoCredentials, errors.New("importer: this pack holds no route this device can connect with")
 	}
 	return plan, "", nil
+}
+
+// planCDNRoute is planRoutes for one route that carries a
+// `_cdn_endpoint`. The same rules as a direct route, with the CDN
+// commitment and its checker:
+//
+//   - a `_cdn_endpoint` this build cannot read: the route is
+//     unavailable (needs_newer_app) and the pack goes on — it is signed,
+//     so it is a newer publisher, not an altered file;
+//   - an outbound in the file (wrapped under bundle.CDNOutboundKey, or
+//     at the top of the profile) must match the commitment, or the
+//     WHOLE pack is refused (endpoint_mismatch), exactly as for a direct
+//     route; the unwrapped outbound is what is stored;
+//   - no outbound: merged into the device's own CDN outbound for the
+//     route under the same conditions as a direct merge, or reported.
+func planCDNRoute(plan *routePlan, r bundle.RouteManifestEntry, profile []byte, device DeviceRoutes,
+	fingerprintHex, packID string, continuity bool, createdAt string) (string, error) {
+	cep, err := bundle.ParseCDNEndpoint(r.TransportFamily, r.FamilySpecificConfig)
+	if err != nil {
+		plan.unavailable = append(plan.unavailable, UnavailableRoute{
+			RouteID: r.ID, Family: r.TransportFamily, Reason: UnavailableNeedsNewerApp,
+		})
+		return "", nil
+	}
+	epJSON, _ := rawMember(r.FamilySpecificConfig, bundle.CDNEndpointKey)
+	if ob, ok := bundle.CDNProfileOutbound(profile); ok {
+		if err := bundle.CheckCDNOutbound(cep, ob); err != nil {
+			return ReasonEndpointMismatch, errRoute(r.ID, err)
+		}
+		plan.routes = append(plan.routes, plannedRoute{route: r, profile: ob, endpoint: epJSON})
+		return "", nil
+	}
+	reason := UnavailableNoCredentials
+	if bundle.ProfileUnavailable(profile) {
+		reason = UnavailableNotOffered
+	}
+	if device != nil {
+		cur, ok, err := device.DeviceRoute(r.ID)
+		if err != nil {
+			return "lookup_failed", err
+		}
+		if ok && sameFingerprint(cur.PublisherFingerprint, fingerprintHex) &&
+			cur.TransportFamily == r.TransportFamily &&
+			(continuity || (packID != "" && cur.RelayPackID == packID)) &&
+			bundle.IsCDNCommitment(cur.Endpoint) &&
+			bundle.ProfileOutboundType(cur.Profile) != "" {
+			forward := succession(continuity, createdAt, epJSON, cur)
+			var merged []byte
+			mErr := errors.New("importer: not a later signing than the route holds")
+			if forward == successionOK {
+				merged, mErr = bundle.MergeCDNEndpoint(cep, cur.Profile)
+			}
+			if mErr == nil {
+				plan.routes = append(plan.routes, plannedRoute{route: r, profile: merged, endpoint: epJSON, merged: true})
+				plan.merged++
+				return "", nil
+			}
+			reason = UnavailableNeedsNewFile
+			if forward == successionOlder {
+				reason = UnavailableOlderThanDevice
+			}
+		}
+	}
+	plan.unavailable = append(plan.unavailable, UnavailableRoute{
+		RouteID: r.ID, Family: r.TransportFamily, Reason: reason,
+	})
+	return "", nil
 }
 
 const (

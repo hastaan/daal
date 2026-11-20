@@ -59,7 +59,17 @@ func PublishAll(ctx context.Context, body []byte, targets []Target) ([]PublishRe
 	if len(body) == 0 {
 		return nil, errors.New("freshness: empty document body")
 	}
-	if len(targets) < MinMirrors {
+	providers := make([]Provider, 0, len(targets))
+	for _, t := range targets {
+		providers = append(providers, t.Provider)
+	}
+	// The floor: MinMirrors, or one appsscript target alone (D-3,
+	// MeetsMirrorFloor). The same floor applies to the successes.
+	floor := MinMirrors
+	if len(targets) == 1 && MeetsMirrorFloor(providers) {
+		floor = 1
+	}
+	if len(targets) < floor {
 		return nil, fmt.Errorf("%w: %d target(s) configured, need %d",
 			ErrTooFewMirrors, len(targets), MinMirrors)
 	}
@@ -86,7 +96,7 @@ func PublishAll(ctx context.Context, body []byte, targets []Target) ([]PublishRe
 		}
 		results = append(results, res)
 	}
-	if ok < MinMirrors {
+	if ok < floor {
 		return results, fmt.Errorf("%w: %d of %d succeeded", ErrPublishDegraded, ok, len(targets))
 	}
 	return results, nil

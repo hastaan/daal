@@ -5,111 +5,101 @@ import (
 	"time"
 )
 
-// FrontRecord is the durable state for one Cloudflare-fronted
-// candidate. It is what the wizard persists to the V005 SQLite
-// table and what the binder consumes when emitting the
-// `_cdn_attestation` blob inside the bundle's `_relaypack`
-// per-candidate sub-object.
+// FrontRecord is the durable state for one Cloudflare-fronted way in
+// (docs/optional-addons-plan.md §2). It is what `daal-deploy
+// cdn-provision` prints, what the wizard keeps, and what every later
+// verb (cdn-posture, cdn-test, cdn-remove, the rotations) reads back.
 //
-// Rule 5 of phase doc §13: this struct holds **public CDN
-// metadata only**. Cloudflare API tokens live in the OS
-// keystore; Origin CA private bytes live on disk under
-// staging_dir/cdn/{operator_id}/ at mode 0600 and are
-// referenced by path in the V005 row, never embedded inline.
+// It holds public metadata and provider ids only. The Cloudflare token
+// lives in device custody; the Origin CA private key lives on disk under
+// the out dir at mode 0600 and is named here by path, never inline; the
+// Authenticated Origin Pull client key is generated, uploaded to
+// Cloudflare and dropped — it is never written anywhere by Daal.
 type FrontRecord struct {
-	// Hostname is the public domain the recipient connects to,
-	// e.g. "momsroute.example.com". MUST be proxied through
-	// Cloudflare (orange cloud); the validator and the deploy
-	// path both refuse DNS-only records.
+	// Hostname is the proxied name recipients reach, `<label>.<zone>`.
 	Hostname string `json:"hostname"`
 
-	// ZoneID is Cloudflare's zone identifier (32-hex). Used
-	// for every zone-scoped API call; surfaced to the wizard
-	// so subsequent rotations can target the same zone
-	// without re-resolving.
-	ZoneID string `json:"zone_id"`
+	// Zone is the Cloudflare zone the hostname sits in, found by
+	// walking the hostname's labels (FindZone). ZoneID and AccountID
+	// are Cloudflare's ids for it.
+	Zone      string `json:"zone"`
+	ZoneID    string `json:"zone_id"`
+	AccountID string `json:"account_id,omitempty"`
 
-	// PublicPath is the visible random path the family's
-	// client targets, e.g. "/r/8c1f4a23". A Worker on the
-	// FRP's zone rewrites it to OriginPath before forwarding
-	// to the origin. Rotating PublicPath is a
-	// Cloudflare-API-only operation (no box redeploy).
+	// OriginPath is the WebSocket path the relay's ws-cdn-in inbound
+	// serves: a random 16-byte value, the same for every recipient of
+	// the route, rotated by re-signing. There is no Worker any more
+	// (decision D-5), so the path recipients send is the path the relay
+	// serves, and PublicPath always equals OriginPath. PublicPath is
+	// kept because older callers read it.
 	PublicPath string `json:"public_path"`
-
-	// OriginPath is the stable path the sing-box config on
-	// the origin expects, e.g. "/ws". Never visible to the
-	// censor. Set once at provision time; rotated only on
-	// box redeploy (rare).
 	OriginPath string `json:"origin_path"`
 
-	// WorkerRouteID is the Cloudflare route binding that
-	// targets the rewrite Worker. Surfaced so RotatePath can
-	// update the binding in place rather than recreating it.
+	// OriginPort is the relay port of ws-cdn-in
+	// (relayports.CDNOrigin). The Origin Rule tells Cloudflare to dial
+	// it; the relay firewall opens it to Cloudflare's ranges only.
+	OriginPort int `json:"origin_port"`
+
+	// WorkerRouteID is always empty. The path-rewrite Worker is gone
+	// (decision D-5); the field stays so the wizard's existing JSON
+	// shape still parses.
 	WorkerRouteID string `json:"worker_route_id"`
 
-	// FirewallID is the cloud-provider firewall rule (e.g.
-	// Hetzner Cloud Firewall ID) that locks origin 443/tcp
-	// to Cloudflare edge ranges. Refreshed by the Helper at
-	// every deploy + rotate + explicit "verify posture" + the
-	// optional OS scheduled task.
+	// FirewallID is the relay's own Hetzner firewall
+	// (daal-relay-<server id>) that carries the Cloudflare-ranges rule
+	// for OriginPort.
 	FirewallID string `json:"firewall_id"`
 
-	// OriginCAFingerprint is the SHA-256 fingerprint of the
-	// Cloudflare-issued Origin CA cert deployed on the
-	// origin. PUBLIC fingerprint, hex-encoded; the actual
-	// private key + cert PEM live on disk at OriginCAPrivPath
-	// + OriginCACertPath, never inline here.
+	// OriginCAFingerprint is the hex SHA-256 of the Origin CA
+	// certificate PEM; OriginCertID is Cloudflare's id for it (used to
+	// revoke it on removal). The certificate covers the zone and
+	// `*.<zone>`, so hostname rotation inside the zone needs no new one.
 	OriginCAFingerprint string `json:"origin_ca_fingerprint"`
+	OriginCertID        string `json:"origin_cert_id"`
+	OriginCACertPath    string `json:"origin_ca_cert_path"`
+	OriginCAPrivPath    string `json:"origin_ca_priv_path"`
 
-	// OriginCACertPath is the on-disk path to the Origin CA
-	// certificate (PEM). The cloud-init template reads this
-	// at provision time. Mode 0600.
-	OriginCACertPath string `json:"origin_ca_cert_path"`
-
-	// OriginCAPrivPath is the on-disk path to the Origin CA
-	// private key (PEM). Mode 0600. NEVER stored in the
-	// OperatorRecord JSON blob; only the path is durable.
-	OriginCAPrivPath string `json:"origin_ca_priv_path"`
-
-	// AOPClientCertPath is the on-disk path to the
-	// Cloudflare-signed Authenticated Origin Pulls client
-	// cert (PEM). Deployed to the origin via cloud-init.
+	// AOPCACertPath is the CA certificate the relay verifies
+	// Cloudflare's client certificate against (`client_authentication:
+	// require-and-verify`). AOPCertID is Cloudflare's id for the zone's
+	// uploaded client certificate. AOPClientCertPath is kept for the
+	// old JSON shape and is always empty.
+	AOPCACertPath     string `json:"aop_ca_cert_path"`
+	AOPCertID         string `json:"aop_cert_id"`
 	AOPClientCertPath string `json:"aop_client_cert_path"`
+	AOPEnabled        bool   `json:"aop_enabled"`
 
-	// AOPEnabled is the toggle the wizard sets on the zone.
-	// Always true under §11.7. The validator checks this
-	// flag inside the signed attestation (RP022).
-	AOPEnabled bool `json:"aop_enabled"`
+	// DNSRecordIDs are the proxied A/AAAA records Daal created for
+	// Hostname. Removal deletes exactly these.
+	DNSRecordIDs []string `json:"dns_record_ids,omitempty"`
 
-	// FreshnessURL is the FRP-controlled static-host URL the
-	// wizard uploads the freshness JSON document to. Empty
-	// if the FRP skipped the freshness mechanism.
-	// Mirrors Manifest.RelayPack.FreshnessURL one-to-one.
-	FreshnessURL string `json:"freshness_url,omitempty"`
+	// OriginRuleRef is the `ref` of the one rule Daal owns in the
+	// zone's http_request_origin entrypoint. Rules without it are the
+	// publisher's own and are never touched.
+	OriginRuleRef string `json:"origin_rule_ref"`
 
-	// FreshnessHost is which static-host backend the wizard
-	// uses: "r2" | "github_pages" | "ipfs" (ipfs reserved /
-	// disabled at FRP-8). Drives which credential set the
-	// wizard reads from the keystore at upload time.
+	// PriorSettings are the zone settings as they were before Daal
+	// changed them ("ssl", "websockets", "aop"). Removal restores a
+	// setting only when it still holds the value Daal set.
+	PriorSettings map[string]string `json:"prior_settings,omitempty"`
+
+	// ECH is the posture read at provision time (zone setting and the
+	// published HTTPS record). The binder copies ConfigListB64 into the
+	// signed endpoint (B-4) and every freshness publish re-reads it.
+	ECH ECHPosture `json:"ech"`
+
+	// Freshness fields from FRP-8, unchanged.
+	FreshnessURL  string `json:"freshness_url,omitempty"`
 	FreshnessHost string `json:"freshness_host,omitempty"`
 
-	// LastEdgeRefreshUnix is the wall-clock at which the
-	// Helper last fetched the Cloudflare edge IP ranges and
-	// applied them to the firewall. Surfaced in the wizard
-	// "Verify CDN posture" panel.
+	// LastEdgeRefreshUnix is when the Cloudflare ranges were last
+	// fetched and applied to the relay firewall.
 	LastEdgeRefreshUnix int64 `json:"last_edge_refresh_unix,omitempty"`
 }
 
-// CDNAttestation is the additive sub-object that lands inside
-// the per-candidate `_relaypack` opaque blob (FRP-1's
-// json.RawMessage slot). At V1.6 every cdn_fronted candidate's
-// `_relaypack._cdn_attestation` MUST carry these four fields;
-// the validator (RP022) rejects malformed or missing
-// attestations, and (RP023) rejects attestations that report
-// `dns_only_present: true`.
-//
-// The struct is canonicalisable in the same json.Marshal-key-
-// sort sense as the rest of the relaypack profile.
+// CDNAttestation is the additive sub-object that lands inside the
+// per-candidate `_relaypack` opaque blob. The validator (RP022/RP023)
+// reads it; this package only fills it.
 type CDNAttestation struct {
 	OriginCAFingerprint string `json:"origin_ca_fingerprint"`
 	AOPEnabled          bool   `json:"aop_enabled"`
@@ -117,68 +107,102 @@ type CDNAttestation struct {
 	DNSOnlyPresent      bool   `json:"dns_only_present"`
 }
 
-// CloudflareOpts is the input to ProvisionFront. The Cloudflare
-// API token is supplied via the secret-bytes channel; ProvisionFront
-// never logs it.
+// CloudflareOpts is the input to ProvisionFront. The token is passed in
+// CFTokenSecret and never logged; the caller zeroizes it afterwards.
 type CloudflareOpts struct {
-	// Hostname is the public domain to provision.
+	// Hostname is the proxied name to create. Empty with Zone set:
+	// ProvisionFront picks a random label inside Zone.
 	Hostname string
 
-	// OriginIP is the public IP the proxied A record points at.
-	OriginIP string
+	// Zone is the zone to place a generated label in. Ignored when
+	// Hostname is set (the zone is then found by walking its labels).
+	Zone string
 
-	// OriginIPv6 is the public IPv6 the proxied AAAA record
-	// points at. Empty skips AAAA.
+	// OriginIP / OriginIPv6 are the relay addresses the proxied
+	// records point at. OriginIPv6 empty skips AAAA.
+	OriginIP   string
 	OriginIPv6 string
 
-	// PublicPath is the visible random path. If empty,
-	// ProvisionFront generates a 16-hex-char random path.
-	PublicPath string
-
-	// OriginPath is the stable origin path the sing-box
-	// expects. Required.
+	// OriginPath is the relay's ws-cdn-in path. Empty: a fresh random
+	// 16-byte path.
 	OriginPath string
 
+	// OriginPort is the relay port Cloudflare dials. Zero:
+	// relayports.CDNOrigin.Port.
+	OriginPort int
+
 	// CFTokenSecret is the Cloudflare API token bytes.
-	// Zeroized after the Provision call returns.
 	CFTokenSecret []byte
 
-	// OutDir is the directory the live impl writes
-	// origin_ca.pem, origin_ca.key, aop_client.pem to.
-	// Mode 0700 expected.
+	// OutDir receives origin_ca.pem, origin_ca.key and aop_ca.pem.
 	OutDir string
 
-	// Now is the wall-clock; tests inject a fixed time.
+	// ECH, when set, reads the hostname's published ECH config over
+	// DoH after the records exist. Nil skips that read; the zone
+	// setting is read either way.
+	ECH ECHFetcher
+
+	// Now is the wall clock; tests inject a fixed time.
 	Now func() time.Time
 }
 
-// PostureReport is the result of a "Verify CDN posture" check
-// (the wizard's settings button per §11.7). The wizard surfaces
-// any non-PASS field to the operator.
+// PostureReport is what "cdn-posture" prints: the live state of the
+// Cloudflare side, read-only. Every field is a read, never a guess;
+// a field that could not be read is false and named in Notes.
 type PostureReport struct {
-	OriginCAFingerprintMatch bool   `json:"origin_ca_fingerprint_match"`
-	AOPEnabled               bool   `json:"aop_enabled"`
-	FirewallEdgeRangesFresh  bool   `json:"firewall_edge_ranges_fresh"`
-	DNSProxiedOnly           bool   `json:"dns_proxied_only"`
-	Notes                    string `json:"notes,omitempty"`
+	OriginCAFingerprintMatch bool `json:"origin_ca_fingerprint_match"`
+	AOPEnabled               bool `json:"aop_enabled"`
+	FirewallEdgeRangesFresh  bool `json:"firewall_edge_ranges_fresh"`
+	DNSProxiedOnly           bool `json:"dns_proxied_only"`
+
+	SSLStrict  bool `json:"ssl_strict"`
+	WebSockets bool `json:"websockets"`
+	OriginRule bool `json:"origin_rule"`
+
+	// ECH is the zone setting plus what the hostname's HTTPS record
+	// publishes. NameHidden is the card's "Name hidden: yes/no".
+	ECH        ECHPosture `json:"ech"`
+	NameHidden bool       `json:"name_hidden"`
+
+	// OnlyCloudflare is the card's "Only Cloudflare can reach the
+	// door": origin pull on with Daal's certificate, and the relay
+	// firewall rule present. FirewallChecked is false when no
+	// Hetzner token was given, in which case OnlyCloudflare is false.
+	FirewallChecked bool `json:"firewall_checked"`
+	OnlyCloudflare  bool `json:"only_cloudflare"`
+
+	Notes string `json:"notes,omitempty"`
 }
 
 // Errors used across the package.
 var (
-	// ErrCFNotImplemented remains reserved for optional providers
-	// that deliberately do not implement a Cloudflare API method.
-	// NewLiveCFClient no longer returns it for the FRP-8 critical
-	// path.
+	// ErrCFNotImplemented is reserved for optional providers.
 	ErrCFNotImplemented = errors.New("cloudflare: API method not implemented")
 
-	// ErrDNSOnlyRecordPresent is returned by EnsureProxiedRecords
-	// when the chosen subdomain has any non-proxied A or AAAA
-	// record. The wizard refuses to proceed; this maps to RP023.
+	// ErrDNSOnlyRecordPresent: the hostname already has an A/AAAA
+	// record that is not proxied. Refused (RP023).
 	ErrDNSOnlyRecordPresent = errors.New("cloudflare: existing DNS-only A/AAAA record on subdomain (refusing per §11.7)")
 
-	// ErrOriginCAIssueFailed is returned by IssueOriginCert.
-	ErrOriginCAIssueFailed = errors.New("cloudflare: origin CA cert issuance failed")
+	// ErrHostnameInUse: the hostname already has a proxied record
+	// pointing somewhere else. Daal never re-points a record it did
+	// not create.
+	ErrHostnameInUse = errors.New("cloudflare: hostname already has a proxied record pointing elsewhere")
 
-	// ErrAOPEnableFailed is returned by EnableAOP.
-	ErrAOPEnableFailed = errors.New("cloudflare: enable Authenticated Origin Pulls failed")
+	// ErrZoneNotFound: no active zone the token can see contains the
+	// hostname.
+	ErrZoneNotFound = errors.New("cloudflare: no active zone the token can see contains this hostname")
+
+	// ErrOriginCAIssueFailed / ErrAOPEnableFailed wrap the provider's
+	// answer for the two certificate steps.
+	ErrOriginCAIssueFailed = errors.New("cloudflare: origin CA cert issuance failed")
+	ErrAOPEnableFailed     = errors.New("cloudflare: enable Authenticated Origin Pulls failed")
+
+	// ErrWorkerRemoved answers the old public-path rotation. There is
+	// no Worker (decision D-5): the path is the relay's own, so moving
+	// it is a relay change plus a re-sign, not a Cloudflare call.
+	ErrWorkerRemoved = errors.New("cloudflare: there is no path-rewrite Worker any more; the WebSocket path is the relay's own and moves by changing the relay and re-signing")
+
+	// ErrCrossZoneRotation: a hostname in another zone needs its own
+	// certificate, origin pull and token, i.e. the add-on built again.
+	ErrCrossZoneRotation = errors.New("cloudflare: the new hostname is in a different zone; build the way in again for that zone")
 )

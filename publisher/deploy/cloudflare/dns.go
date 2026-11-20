@@ -21,6 +21,10 @@ type DNSPostureCheck struct {
 	// successfully created/updated proxied A + AAAA records.
 	ProxiedRecordsEnsured bool
 
+	// CreatedIDs are the records this call created (an identical
+	// proxied record already there is reused and not listed).
+	CreatedIDs []string
+
 	// Notes carries human-readable detail for the wizard's
 	// posture panel.
 	Notes string
@@ -50,12 +54,13 @@ func CheckAndEnsureDNS(
 	if zoneID == "" || hostname == "" || originIPv4 == "" {
 		return DNSPostureCheck{}, errors.New("dns: zoneID, hostname, originIPv4 required")
 	}
-	err := cf.EnsureProxiedRecords(ctx, cfToken, zoneID, hostname, originIPv4, originIPv6)
+	ids, err := cf.EnsureProxiedRecords(ctx, cfToken, zoneID, hostname, originIPv4, originIPv6)
 	switch {
 	case err == nil:
 		return DNSPostureCheck{
 			DNSOnlyPresent:        false,
 			ProxiedRecordsEnsured: true,
+			CreatedIDs:            ids,
 			Notes:                 "proxied A" + ifv6(originIPv6, " + AAAA") + " ensured",
 		}, nil
 	case errors.Is(err, ErrDNSOnlyRecordPresent):
@@ -64,7 +69,7 @@ func CheckAndEnsureDNS(
 			Notes:          "existing DNS-only A/AAAA record on " + hostname + " — refused per §11.7",
 		}, err
 	default:
-		return DNSPostureCheck{}, err
+		return DNSPostureCheck{}, scrub(err, cfToken)
 	}
 }
 

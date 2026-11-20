@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -337,15 +338,14 @@ func (l *liveClient) FloatingIPUnassign(ctx context.Context, fipID string) error
 	return nil
 }
 
-// cdnOriginPort is the port the Cloudflare-edge rule opens. It is
-// 443 today because that is the only origin port the cdn_fronted
-// lane has; the plan's Origin Rule port override (a dedicated CDN
-// inbound, e.g. 2053/tcp) changes this one constant. On a relay
-// firewall that already opens 443/tcp to everyone for REALITY the
-// rule adds nothing — it narrows nothing either, because Hetzner
-// unions allow rules. That is the point: adding it must never close
-// what the relay already serves.
-const cdnOriginPort = "443"
+// cdnOriginPort is the port the Cloudflare-edge rule opens by default:
+// the relay's dedicated CDN door (relayports.CDNOrigin, ws-cdn-in). It
+// used to be 443, which opened nothing (443/tcp is already open to the
+// world for REALITY, and Hetzner unions allow rules) and pointed the
+// edge at REALITY, which answers with the cover site's certificate.
+// The CDN port is in no world-open list (relayports.FirewallPortsFor),
+// so this rule is the only way in to it.
+var cdnOriginPort = strconv.Itoa(relayports.CDNOrigin.Port)
 
 // cdnRuleDescription tags the one rule FirewallApplyCloudflareRule
 // owns, so a refresh replaces that rule (Cloudflare's ranges change)
@@ -487,26 +487,49 @@ func withCloudflareRule(cur []hcloud.FirewallRule, rule hcloud.FirewallRule) []h
 }
 
 // FirewallApplyCloudflareRule adds (or refreshes) ONE inbound rule
-// allowing cdnOriginPort/tcp from the supplied Cloudflare edge
-// ranges. Idempotent.
-//
-//   - firewallID == "": creates a new firewall holding only that rule
-//     and returns its id. Note that this firewall is attached to
-//     nothing; pass the relay's own firewall (daal-relay-<serverID>,
-//     from FirewallEnsureForServer) to put the rule where it works.
-//   - firewallID != "": adds the rule to that firewall, replacing a
-//     previous rule this function wrote (tagged cdnRuleDescription)
-//     and KEEPING EVERY OTHER RULE. An earlier version called
-//     set_rules with this one rule alone, which on a relay firewall
-//     deleted 80/tcp, every data-plane port and any open mgmt hole.
-//
-// FRP-8 §11.7. Called from the Helper, never from the origin box.
+// allowing the CDN door's port (cdnOriginPort) from the supplied
+// Cloudflare edge ranges. See FirewallApplyCloudflareRuleOnPort.
 func (l *liveClient) FirewallApplyCloudflareRule(ctx context.Context, firewallID string, ipv4Ranges, ipv6Ranges []string) (string, error) {
+	return l.FirewallApplyCloudflareRuleOnPort(ctx, firewallID, relayports.CDNOrigin.Port, ipv4Ranges, ipv6Ranges)
+}
+
+// errNoRelayFirewall refuses a Cloudflare rule with no firewall to put
+// it on. The old behaviour (create a fresh firewall holding only that
+// rule) produced a firewall attached to nothing: a lock that locked
+// nothing, which the phone path then reported as done (defect 3 of the
+// blackout plan, Group B).
+var errNoRelayFirewall = errors.New("hetzner firewall: the Cloudflare rule goes on the relay's own firewall (daal-relay-<server id>); pass its id")
+
+// errCDNPortWorldOpen refuses a Cloudflare-only rule for a port the
+// firewall already opens to everyone: Hetzner unions allow rules, so it
+// would narrow nothing while the posture line said "only Cloudflare".
+var errCDNPortWorldOpen = errors.New("hetzner firewall: that port is already open to everyone on this firewall; a Cloudflare-only rule for it would restrict nothing")
+
+// FirewallApplyCloudflareRuleOnPort adds (or refreshes) ONE inbound rule
+// allowing port/tcp from the supplied Cloudflare edge ranges, on the
+// relay's own firewall. Idempotent.
+//
+//   - firewallID must be the relay's firewall (daal-relay-<serverID>,
+//     from FirewallEnsureForServer). Empty is refused.
+//   - The rule replaces a previous rule this function wrote (tagged
+//     cdnRuleDescription) and KEEPS EVERY OTHER RULE. An earlier
+//     version called set_rules with this one rule alone, which on a
+//     relay firewall deleted 80/tcp, every data-plane port and any open
+//     mgmt hole.
+//   - A port another rule already opens to 0.0.0.0/0 or ::/0 is refused
+//     (errCDNPortWorldOpen).
+//
+// Called from the publisher, never from the relay.
+func (l *liveClient) FirewallApplyCloudflareRuleOnPort(ctx context.Context, firewallID string, port int, ipv4Ranges, ipv6Ranges []string) (string, error) {
+	if port <= 0 || port > 65535 {
+		return "", fmt.Errorf("hetzner firewall: port %d out of range", port)
+	}
+	portStr := strconv.Itoa(port)
 	desc := cdnRuleDescription
 	rule := hcloud.FirewallRule{
 		Direction:   hcloud.FirewallRuleDirectionIn,
 		Protocol:    hcloud.FirewallRuleProtocolTCP,
-		Port:        stringPtr(cdnOriginPort),
+		Port:        stringPtr(portStr),
 		Description: &desc,
 	}
 	for _, r := range ipv4Ranges {
@@ -528,27 +551,28 @@ func (l *liveClient) FirewallApplyCloudflareRule(ctx context.Context, firewallID
 	if len(rule.SourceIPs) == 0 {
 		return "", errEmptyRanges
 	}
-
-	if firewallID == "" {
-		res, _, err := l.c.Firewall.Create(ctx, hcloud.FirewallCreateOpts{
-			Name:  "daal-cloudflare-edge-only",
-			Rules: []hcloud.FirewallRule{rule},
-		})
-		if err != nil {
-			return "", err
+	for _, n := range rule.SourceIPs {
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return "", fmt.Errorf("hetzner firewall: %s is everyone, not a Cloudflare range", n.String())
 		}
-		return strconv.FormatInt(res.Firewall.ID, 10), nil
 	}
-
+	if firewallID == "" {
+		return "", errNoRelayFirewall
+	}
 	idInt, err := strconv.ParseInt(firewallID, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
 	}
+	var refused error
 	err = l.modifyFirewallRules(ctx, idInt,
 		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			if worldOpensTCPPort(cur, portStr) {
+				refused = errCDNPortWorldOpen
+				return nil, false
+			}
 			if have, ok := findRuleByDescription(cur, cdnRuleDescription); ok &&
 				sameSources(have.SourceIPs, rule.SourceIPs) &&
-				have.Port != nil && *have.Port == cdnOriginPort &&
+				have.Port != nil && *have.Port == portStr &&
 				countByDescription(cur, cdnRuleDescription) == 1 {
 				return nil, false // already exactly this rule
 			}
@@ -556,13 +580,115 @@ func (l *liveClient) FirewallApplyCloudflareRule(ctx context.Context, firewallID
 		},
 		func(after []hcloud.FirewallRule) bool {
 			have, ok := findRuleByDescription(after, cdnRuleDescription)
-			return ok && sameSources(have.SourceIPs, rule.SourceIPs)
+			return ok && sameSources(have.SourceIPs, rule.SourceIPs) && have.Port != nil && *have.Port == portStr
 		},
 	)
 	if err != nil {
 		return "", err
 	}
+	if refused != nil {
+		return "", refused
+	}
 	return firewallID, nil
+}
+
+// worldOpensTCPPort reports whether a rule other than Daal's Cloudflare
+// rule opens port/tcp to 0.0.0.0/0 or ::/0.
+func worldOpensTCPPort(rules []hcloud.FirewallRule, port string) bool {
+	for _, r := range rules {
+		if ruleHasDescription(r, cdnRuleDescription) || r.Direction != hcloud.FirewallRuleDirectionIn ||
+			r.Protocol != hcloud.FirewallRuleProtocolTCP || r.Port == nil || !portCovers(*r.Port, port) {
+			continue
+		}
+		for _, n := range r.SourceIPs {
+			if ones, _ := n.Mask.Size(); ones == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// portCovers reports whether a Hetzner port spec ("443" or
+// "8000-9000") includes port.
+func portCovers(spec, port string) bool {
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	lo, hi, isRange := strings.Cut(spec, "-")
+	a, err := strconv.Atoi(strings.TrimSpace(lo))
+	if err != nil {
+		return false
+	}
+	if !isRange {
+		return a == p
+	}
+	b, err := strconv.Atoi(strings.TrimSpace(hi))
+	return err == nil && a <= p && p <= b
+}
+
+// CloudflareRuleState is what the posture check reads back.
+type CloudflareRuleState struct {
+	Present bool
+	Port    string
+	Sources int
+}
+
+// FirewallCloudflareRule reads Daal's Cloudflare rule on a firewall.
+// Read-only.
+func (l *liveClient) FirewallCloudflareRule(ctx context.Context, firewallID string) (CloudflareRuleState, error) {
+	idInt, err := strconv.ParseInt(firewallID, 10, 64)
+	if err != nil {
+		return CloudflareRuleState{}, fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
+	}
+	fw, _, err := l.c.Firewall.GetByID(ctx, idInt)
+	if err != nil {
+		return CloudflareRuleState{}, fmt.Errorf("%w: %w", errFirewallRead, err)
+	}
+	if fw == nil {
+		return CloudflareRuleState{}, errFirewallNotFound
+	}
+	have, ok := findRuleByDescription(fw.Rules, cdnRuleDescription)
+	if !ok {
+		return CloudflareRuleState{}, nil
+	}
+	st := CloudflareRuleState{Present: true, Sources: len(have.SourceIPs)}
+	if have.Port != nil {
+		st.Port = *have.Port
+	}
+	return st, nil
+}
+
+// FirewallRemoveCloudflareRule takes Daal's Cloudflare rule off a
+// firewall and keeps every other rule. Idempotent: no rule, or no
+// firewall, is success.
+func (l *liveClient) FirewallRemoveCloudflareRule(ctx context.Context, firewallID string) error {
+	idInt, err := strconv.ParseInt(firewallID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
+	}
+	err = l.modifyFirewallRules(ctx, idInt,
+		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			if countByDescription(cur, cdnRuleDescription) == 0 {
+				return nil, false
+			}
+			next := make([]hcloud.FirewallRule, 0, len(cur))
+			for _, r := range cur {
+				if !ruleHasDescription(r, cdnRuleDescription) {
+					next = append(next, r)
+				}
+			}
+			return next, true
+		},
+		func(after []hcloud.FirewallRule) bool {
+			return countByDescription(after, cdnRuleDescription) == 0
+		},
+	)
+	if errors.Is(err, errFirewallNotFound) {
+		return nil
+	}
+	return err
 }
 
 func countByDescription(rules []hcloud.FirewallRule, desc string) int {
