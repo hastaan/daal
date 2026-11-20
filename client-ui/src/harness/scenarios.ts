@@ -196,6 +196,46 @@ export interface Scenario {
     wasmModules?: string[];
     wasmKillSwitchPubkey?: string;
     skippedFamilies?: SkippedFamilyRow[];
+    /** The pretend Tauri shell (publisherFake.ts) and the taps that open
+     *  the screen. Absent: the page behaves exactly as before. */
+    fake?: FakeShell;
+}
+
+/** One tap or wait on the way to a screen (driver.ts names the
+ *  targets: `btn:`, `key:`, `css:`, `text:`). */
+export type DriveStep =
+    | { click: string; nth?: number; optional?: boolean }
+    | { type: string; text: string; nth?: number }
+    | { waitFor: string; nth?: number }
+    | { scroll: string; nth?: number }
+    | { sleep: number }
+    /** Stop the page's timers (after the target shows, or at once). */
+    | { freeze: true | string }
+    /** Stop only its long timers (3 s and up, or this many ms and up):
+     *  a notice stays up after the next tap, a hand-off waits. */
+    | { keep: true | number };
+
+/** What the fake shell holds, and how to reach the screen. */
+export interface FakeShell {
+    /** `two`: one working relay with three people (one removed), and
+     *  one setup that never finished. `none`: a first run. */
+    relays: 'two' | 'none';
+    health?: 'good' | 'way_failing' | 'unreachable';
+    /** PB-1: Baba was restored from a backup and waits for an answer. */
+    waiting?: boolean;
+    /** PB-2: the relay lets in someone this phone has no row for. */
+    relayOnly?: boolean;
+    /** The recipient's own Daal address exists already. */
+    identity?: 'none' | 'made';
+    /** What importing pasted text or a finished QR scan answers
+     *  (`partial`: imported, but one way in the file is not usable
+     *  on this phone). */
+    importVerdict?: 'imported' | 'partial' | 'trust' | 'refused';
+    /** URL parameters other harness fakes read (`backup=stale`). */
+    params?: Record<string, string>;
+    /** Which tab to open first. */
+    open?: 'publisher' | 'network' | 'connection';
+    steps?: DriveStep[];
 }
 
 // ---- shared fragments ----
@@ -270,6 +310,32 @@ const CONN_BASE: ConnectionSummary = {
     networkLabel: 'Wi-Fi',
     pointerValidDays: 14,
 };
+
+// ---- taps shared by the fake-shell scenarios (driver.ts) ----
+
+/** From the relay list into the working relay's page. */
+const OPEN_RELAY: DriveStep[] = [
+    // The working relay's card opens on a tap; its title is the name.
+    { click: 'text:Family relay' },
+    { waitFor: 'css:[data-testid="health-panel"]' },
+    { sleep: 300 },
+];
+
+/** Hosting key pasted, then on to "name and size". */
+const WIZARD_TO_2: DriveStep[] = [
+    { type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' },
+    { click: 'key:wiz.nav.next' },
+];
+
+/** Something that reads as a pasted connection file (`UEsDB…`). */
+const PASTED_FILE =
+    'UEsDBBQAAAAIAA' + 'Kx3mQ9vT2bN8pLr4Wc7Zy1Hd6Fg0Js5Ae9Ui2Ok8Tn3Bv7Mq4Xw1Cs6Dp0Ga5Hf9Ej2Il8Ro'.repeat(9);
+
+const PASTE: DriveStep[] = [
+    { click: 'key:auto.add_file' },
+    { click: 'key:add.tab.paste' },
+    { type: 'css:textarea', text: PASTED_FILE },
+];
 
 // ---- catalog ----
 
@@ -866,7 +932,433 @@ export const SCENARIOS: Scenario[] = [
         screen: 'modal',
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
     },
+
+    // --- Publisher, on the fake shell (publisherFake.ts) ---
+    ...pub(
+        {
+            id: 'pub-relay-list',
+            title: 'Relay list',
+        }, {}),
+    ...pub(
+        {
+            id: 'pub-relay-list-backup-stale',
+            title: 'Relay list · backup out of date',
+        }, { params: { backup: 'stale' } }),
+    ...pub(
+        {
+            id: 'pub-relay-list-restored',
+            title: 'Relay list · just restored from a backup',
+        }, { params: { backup: 'notice' } }),
+    ...pub(
+        {
+            id: 'pub-relay-remove',
+            title: 'Relay list · remove the working relay',
+        }, {
+        steps: [{ click: 'key:pub.relays.decommission', nth: 0 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-remove-unfinished',
+            title: 'Relay list · remove the unfinished setup',
+        }, {
+        steps: [{ click: 'key:pub.relays.decommission', nth: 1 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-account-check',
+            title: 'Relay list · check my hosting account',
+        }, {
+        steps: [{ click: 'key:pub.account.open' }, { sleep: 600 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-healthy',
+            title: 'Relay page · working',
+        }, { steps: OPEN_RELAY }),
+    ...pub(
+        {
+            id: 'pub-relay-people',
+            title: 'Relay page · People',
+        }, {
+        steps: [...OPEN_RELAY, { scroll: 'key:pub.people.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-everyone',
+            title: 'Relay page · one file for everyone',
+        }, {
+        steps: [...OPEN_RELAY, { scroll: 'key:pub.everyone.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-way-failing',
+            title: 'Relay page · one way not answering',
+        }, {
+        health: 'way_failing',
+        steps: OPEN_RELAY,
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-unreachable',
+            title: 'Relay page · relay does not answer',
+        }, {
+        health: 'unreachable',
+        steps: OPEN_RELAY,
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-waiting',
+            title: 'Relay page · a person waits for an answer',
+        }, {
+        waiting: true,
+        steps: OPEN_RELAY,
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-relay-only',
+            title: 'Relay page · someone only the relay knows',
+        }, {
+        relayOnly: true,
+        steps: [...OPEN_RELAY, { scroll: 'key:pub.people.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-more',
+            title: 'Person · "File lost, or shared by mistake?" open',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'key:pub.people.more', nth: 0 }, { scroll: 'key:pub.people.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-sent',
+            title: 'Person · after "Send file"',
+        }, {
+        steps: [...OPEN_RELAY, { keep: true }, { click: 'key:pub.people.send', nth: 0 }, { scroll: 'key:pub.people.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-saved',
+            title: 'Person · after "Save file"',
+        }, {
+        steps: [...OPEN_RELAY, { keep: true }, { click: 'key:pub.people.save', nth: 0 }, { scroll: 'key:pub.people.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-copied',
+            title: 'Person · after "Copy as text"',
+        }, {
+        steps: [...OPEN_RELAY, { keep: true }, { click: 'key:pub.person.copy', nth: 0 }, { scroll: 'key:pub.people.title' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-add',
+            title: 'Person · add a person',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'key:pub.people.add' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-remove',
+            title: 'Person · remove access, confirm',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'key:pub.people.remove_access', nth: 0 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-qr-person',
+            title: 'QR · one person\'s file',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'key:pub.person.qr', nth: 0 }, { sleep: 800 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-qr-everyone',
+            title: 'QR · the file for everyone',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'key:pub.everyone.qr' }, { sleep: 800 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-everyone-copied',
+            title: 'Everyone file · after "Copy as text"',
+        }, {
+        steps: [
+            ...OPEN_RELAY,
+            { keep: true },
+            // Same words as each person's button: the third one
+            // (Maman, Baba, then everyone; Ali's access is gone).
+            { click: 'key:pub.everyone.copy', nth: 2 },
+            { scroll: 'key:pub.everyone.title' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-backup-first',
+            title: 'Backup · first time',
+        }, {
+        params: { backup: 'never' },
+        steps: [{ click: 'btn:backup' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-backup-words',
+            title: 'Backup · the twelve words shown',
+        }, {
+        params: { backup: 'never' },
+        steps: [{ click: 'btn:backup' }, { click: 'btn:create-words' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-backup-confirm',
+            title: 'Backup · check three of the words',
+        }, {
+        params: { backup: 'never' },
+        steps: [{ click: 'btn:backup' }, { click: 'btn:create-words' }, { click: 'btn:wrote' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-backup-stale',
+            title: 'Backup · out of date',
+        }, {
+        params: { backup: 'stale' },
+        steps: [{ click: 'btn:backup' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-backup-saved',
+            title: 'Backup · saved to Downloads',
+        }, {
+        params: { backup: 'last' },
+        steps: [{ click: 'btn:backup' }, { click: 'btn:save-downloads' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-restore',
+            title: 'Restore · choose the file',
+        }, {
+        steps: [{ click: 'btn:restore-link' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-restore-words',
+            title: 'Restore · type the twelve words',
+        }, {
+        steps: [{ click: 'btn:restore-link' }, { click: 'btn:choose' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-restore-preview',
+            title: 'Restore · what the backup holds',
+        }, {
+        steps: [
+            { click: 'btn:restore-link' },
+            { click: 'btn:choose' },
+            { type: 'css:textarea', text: 'legal winner thank year wave sausage worth useful legal winner thank yellow' },
+            { click: 'btn:open' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-wizard-1',
+            title: 'Wizard · 1 hosting account',
+        }, { relays: 'none' }),
+    ...pub(
+        {
+            id: 'pub-wizard-1-filled',
+            title: 'Wizard · 1 key pasted',
+        }, {
+        relays: 'none',
+        steps: [{ type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-wizard-2',
+            title: 'Wizard · 2 name and size',
+        }, {
+        relays: 'none',
+        steps: [...WIZARD_TO_2, { sleep: 600 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-wizard-3-building',
+            title: 'Wizard · 3 building',
+        }, {
+        relays: 'none',
+        steps: [...WIZARD_TO_2, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.hint' }, { sleep: 700 }, { freeze: true }],
+    }),
+    ...pub(
+        {
+            id: 'pub-wizard-3-done',
+            title: 'Wizard · 3 relay ready',
+        }, {
+        relays: 'none',
+        // The 1.2 s pause before the hand-off to the relay page is held.
+        steps: [...WIZARD_TO_2, { keep: 1000 }, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }],
+    }),
+
+    // --- Recipient: import, scan, address (fake shell + taps) ---
+    ...rcp(
+        {
+            id: 'rcp-add-sheet',
+            title: 'Add a file · the sheet',
+        }, 'connection', [{ click: 'key:auto.add_file' }]),
+    ...rcp(
+        {
+            id: 'rcp-add-paste-tab',
+            title: 'Add a file · "Paste" tab',
+        }, 'connection', [
+        { click: 'key:auto.add_file' },
+        { click: 'key:add.tab.paste' },
+    ]),
+    ...rcp(
+        {
+            id: 'rcp-paste-ready',
+            title: 'Add a file · text pasted',
+        }, 'connection', PASTE),
+    ...rcp(
+        {
+            id: 'rcp-import-trust',
+            title: 'Add a file · new publisher, check the words',
+        }, 'connection',
+        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'trust' }),
+    ...rcp(
+        {
+            id: 'rcp-import-refused',
+            title: 'Add a file · refused',
+        }, 'connection',
+        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'refused' }),
+    ...rcp(
+        {
+            id: 'rcp-import-done',
+            title: 'Add a file · imported',
+        }, 'connection',
+        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'imported' }),
+    ...rcp(
+        {
+            id: 'rcp-import-partial',
+            title: 'Add a file · imported, one way not usable here',
+        }, 'connection',
+        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'partial' }),
+    ...rcp(
+        {
+            id: 'rcp-network-add',
+            title: 'Network · add from the Network tab',
+        }, 'network', [{ click: 'key:network.add' }]),
+    ...rcp(
+        {
+            id: 'rcp-scan',
+            title: 'Scan · camera',
+        }, 'network', [{ click: 'key:scan.open' }, { sleep: 600 }]),
+    ...rcp(
+        {
+            id: 'rcp-scan-paste',
+            title: 'Scan · paste frames tab',
+        }, 'network', [
+        { click: 'key:scan.open' },
+        { click: 'key:scan.mode.paste' },
+    ]),
+    ...rcp(
+        {
+            id: 'rcp-scan-progress',
+            title: 'Scan · part of the file read',
+        }, 'network', scanFeed(5)),
+    ...rcp(
+        {
+            id: 'rcp-scan-trust',
+            title: 'Scan · done, new publisher',
+        }, 'network', scanFeed(14), { importVerdict: 'trust' }),
+    ...rcp(
+        {
+            id: 'rcp-scan-done',
+            title: 'Scan · done, imported (the sheet closes by itself)',
+        }, 'network', scanFeed(14), { importVerdict: 'imported' }),
+    ...rcp(
+        {
+            id: 'rcp-scan-partial',
+            title: 'Scan · done, one way not usable here',
+        }, 'network', scanFeed(14), { importVerdict: 'partial' }),
+    ...rcp(
+        {
+            id: 'rcp-scan-refused',
+            title: 'Scan · done, refused',
+        }, 'network', scanFeed(14), { importVerdict: 'refused' }),
+    ...rcp(
+        {
+            id: 'rcp-address-before',
+            title: 'My address · not made yet',
+        }, 'network', [{ click: 'key:network.my_address' }, { sleep: 300 }]),
+    ...rcp(
+        {
+            id: 'rcp-address-copied',
+            title: 'My address · copied',
+        }, 'network', [
+        { click: 'key:network.my_address' },
+        // "Copied" turns back after 1.5 s.
+        { keep: 1000 },
+        { click: 'key:recipient.address.copy' },
+    ], { identity: 'made' }),
+    ...rcp(
+        {
+            id: 'rcp-address-after',
+            title: 'My address · made',
+        }, 'network', [{ click: 'key:network.my_address' }, { sleep: 300 }], {
+        identity: 'made',
+    }),
 ];
+
+// ---- builders for the fake-shell scenarios ----
+//
+// Declared as functions (hoisted) so the catalog above can use them.
+// Each `id:` sits on its own line so tools/screenshot-harness.mjs, which
+// reads ids from this file's text, finds them too.
+
+function pub({ id, title }: { id: string; title: string }, fake: Partial<FakeShell>): Scenario[] {
+    return [
+        {
+            id,
+            title: `Publisher · ${title}`,
+            screen: 'publisher',
+            state: 'fake-shell',
+            connection: { ...CONN_BASE, state: 'disconnected' },
+            fake: { relays: 'two', health: 'good', open: 'publisher', ...fake },
+        },
+    ];
+}
+
+function rcp(
+    { id, title }: { id: string; title: string },
+    open: 'connection' | 'network',
+    steps: DriveStep[],
+    extra: Partial<FakeShell> = {},
+): Scenario[] {
+    return [
+        {
+            id,
+            title: `Recipient · ${title}`,
+            screen: 'modal',
+            state: 'fake-shell',
+            connection: { ...CONN_BASE, state: 'disconnected' },
+            availableRoutes: open === 'connection' ? [] : DEFAULT_AVAILABLE_ROUTES,
+            fake: { relays: 'none', open, steps, ...extra },
+        },
+    ];
+}
+
+/** Open the scanner, switch to pasted frames, feed `n` of them. */
+function scanFeed(n: number): DriveStep[] {
+    const lines: string[] = [];
+    for (let i = 0; i < n; i++) {
+        // 144 base64url characters: one 108-byte frame.
+        lines.push(`AQ${String.fromCharCode(65 + i)}` + 'Lm4Rt8Vx2Bz6Nc0Qe3Gs7Jw1Hy5Ku9Pa'.repeat(4) + 'ABCDE');
+    }
+    return [
+        { click: 'key:scan.open' },
+        { click: 'key:scan.mode.paste' },
+        { type: 'css:textarea', text: lines.join('\n') },
+        { click: 'key:scan.paste.feed' },
+        { sleep: 600 },
+    ];
+}
 
 // ---- helpers ----
 

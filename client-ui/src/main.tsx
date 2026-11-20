@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { ContractProvider } from './contract/ContractProvider';
 import { DevPicker } from './harness/DevPicker';
+import { isHarnessActive } from './harness/scenarios';
 import { DensityProvider } from './design/DensityProvider';
 import { secureScreenClearAtStart } from './publisher/useSecureScreen';
 import './design/tokens.css';
@@ -32,15 +33,31 @@ bootstrapTheme();
 // screenshot block off; screens showing the recovery words turn it on.
 secureScreenClearAtStart();
 
-const rootEl = document.getElementById('root');
-if (!rootEl) throw new Error('root element missing');
-createRoot(rootEl).render(
-    <React.StrictMode>
-        <ContractProvider>
-            <DensityProvider>
-                <App />
-                <DevPicker />
-            </DensityProvider>
-        </ContractProvider>
-    </React.StrictMode>,
-);
+function render() {
+    const rootEl = document.getElementById('root');
+    if (!rootEl) throw new Error('root element missing');
+    createRoot(rootEl).render(
+        <React.StrictMode>
+            <ContractProvider>
+                <DensityProvider>
+                    <App />
+                    <DevPicker />
+                </DensityProvider>
+            </ContractProvider>
+        </React.StrictMode>,
+    );
+}
+
+// Browser harness only: on ?harness=<id> for a scenario with a `fake`
+// block, a pretend Tauri shell answers the publisher/recipient commands
+// (harness/publisherFake.ts) before the first render. Without ?harness=
+// the fake is never loaded (its own chunk) and the app renders exactly
+// as before; inside the real app it also refuses to shadow the shell.
+if (isHarnessActive()) {
+    import('./harness/publisherFake')
+        .then((m) => m.installPublisherFake())
+        .catch(() => false)
+        .finally(render);
+} else {
+    render();
+}

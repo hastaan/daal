@@ -10,6 +10,8 @@ import { SCENARIOS, isHarnessActive, activeScenario, type Scenario } from './sce
 
 export function DevPicker() {
     if (!isHarnessActive()) return null;
+    // `&nopicker` keeps screenshots clean.
+    if (new URLSearchParams(window.location.search).has('nopicker')) return null;
     const [open, setOpen] = useState(false);
     const current = activeScenario();
 
