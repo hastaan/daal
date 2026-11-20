@@ -92,3 +92,60 @@ html, body, #root {
 .daal-publisher [data-actions] {
     flex-wrap: wrap;
 }
+/* WhatIsThis (publisher/Disclosure.tsx) draws its own chevron; the
+ * native <details> triangle points sideways and is hidden. */
+summary.daal-fold { list-style: none; }
+summary.daal-fold::-webkit-details-marker { display: none; }
+summary.daal-fold::marker { content: ''; }
+
+/* ---- primitives (spec B.13) ------------------------------------------ */
+
+/* Icons that point along the reading direction (chevron, back, external)
+ * are wrapped in this class by `Icon`; under RTL they mirror. */
+[dir="rtl"] .daal-flip-rtl {
+    display: inline-flex;
+    transform: scaleX(-1);
+}
+
+/* One visible focus ring for every control reached by keyboard. */
+:focus-visible {
+    outline: 2px solid var(--gold-warm);
+    outline-offset: 2px;
+}
+
+button {
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Inside a menu or a list the ring sits inside the item, so it is not
+ * cut by the menu's rounded edge. */
+.daal-inset-focus:focus-visible {
+    outline-offset: -2px;
+}
+
+/* SidebarFull: the keyboard shortcut shows only while its row is hovered
+ * or focused, so the resting sidebar is just the names. */
+.daal-nav-item .daal-nav-shortcut {
+    opacity: 0;
+    transition: opacity var(--t-fast);
+}
+.daal-nav-item:hover .daal-nav-shortcut,
+.daal-nav-item:focus-visible .daal-nav-shortcut {
+    opacity: 1;
+}
+
+/* Hover tints for rows and menu items (touch has no hover; nothing
+ * depends on it). */
+.daal-hover:hover {
+    background: rgba(246, 241, 233, 0.04);
+}
+
+/* The breathing dot of a pulsing Badge. */
+@keyframes daal-badge-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .daal-spin, .daal-badge-dot { animation: none !important; }
+}

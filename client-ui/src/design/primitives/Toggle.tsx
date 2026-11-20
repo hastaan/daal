@@ -1,4 +1,6 @@
-// Toggle — switch with label + optional subtitle row.
+// Toggle — switch with label + optional subtitle row. The switch itself
+// has a 44 px tap area (the track stays 36 × 20); the knob moves toward
+// the inline end when on, so it reads right in Persian too.
 
 import type { ReactNode } from 'react';
 
@@ -8,6 +10,9 @@ interface Props {
     label?: ReactNode;
     subtitle?: ReactNode;
     disabled?: boolean;
+    /** Accessible name when there is no visible label (a row's title names it). */
+    ariaLabel?: string;
+    dataButton?: string;
 }
 
 export function Toggle({
@@ -16,6 +21,8 @@ export function Toggle({
     label,
     subtitle,
     disabled,
+    ariaLabel,
+    dataButton,
 }: Props) {
     return (
         <label
@@ -30,43 +37,59 @@ export function Toggle({
             <button
                 role="switch"
                 aria-checked={checked}
+                aria-label={ariaLabel}
+                data-button={dataButton}
                 disabled={disabled}
                 type="button"
                 onClick={() => !disabled && onChange(!checked)}
                 style={{
                     flexShrink: 0,
-                    width: 36,
-                    height: 20,
-                    borderRadius: 10,
-                    background: checked
-                        ? 'var(--gold)'
-                        : 'var(--surface-3)',
+                    // 44 × 44 target around a 36 × 20 track.
+                    width: 44,
+                    height: 44,
+                    marginBlock: -12,
+                    marginInline: -4,
+                    padding: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'transparent',
                     border: 0,
-                    position: 'relative',
                     cursor: disabled ? 'not-allowed' : 'pointer',
-                    transition: 'background var(--t-fast)',
                 }}
             >
                 <span
                     aria-hidden
                     style={{
-                        position: 'absolute',
-                        top: 2,
-                        left: checked ? 18 : 2,
-                        width: 16,
-                        height: 16,
-                        background: 'var(--fg)',
-                        borderRadius: '50%',
-                        transition: 'left var(--t-fast)',
+                        width: 36,
+                        height: 20,
+                        borderRadius: 10,
+                        background: checked ? 'var(--gold)' : 'var(--surface-3)',
+                        position: 'relative',
+                        display: 'block',
+                        transition: 'background var(--t-fast)',
                     }}
-                />
+                >
+                    <span
+                        style={{
+                            position: 'absolute',
+                            top: 2,
+                            insetInlineStart: checked ? 18 : 2,
+                            width: 16,
+                            height: 16,
+                            background: 'var(--fg)',
+                            borderRadius: '50%',
+                            transition: 'inset-inline-start var(--t-fast)',
+                        }}
+                    />
+                </span>
             </button>
             {(label || subtitle) && (
                 <div style={{ flex: 1, minWidth: 0 }}>
                     {label && (
                         <div
                             style={{
-                                fontSize: 13,
+                                fontSize: 14,
                                 color: 'var(--fg)',
                                 fontWeight: 600,
                             }}
@@ -77,7 +100,7 @@ export function Toggle({
                     {subtitle && (
                         <div
                             style={{
-                                fontSize: 12,
+                                fontSize: 13,
                                 color: 'var(--muted)',
                             }}
                         >

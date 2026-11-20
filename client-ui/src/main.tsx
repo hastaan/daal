@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { ContractProvider } from './contract/ContractProvider';
 import { DevPicker } from './harness/DevPicker';
-import { isHarnessActive } from './harness/scenarios';
+import { isHarnessActive, scenarioFromUrl } from './harness/scenarios';
 import { DensityProvider } from './design/DensityProvider';
 import { secureScreenClearAtStart } from './publisher/useSecureScreen';
 import './design/tokens.css';
@@ -53,11 +53,21 @@ function render() {
 // (harness/publisherFake.ts) before the first render. Without ?harness=
 // the fake is never loaded (its own chunk) and the app renders exactly
 // as before; inside the real app it also refuses to shadow the shell.
+// A plain scenario that needs taps (a sheet, a fold) is walked by the
+// same driver once the page has drawn.
 if (isHarnessActive()) {
-    import('./harness/publisherFake')
+    import('./harness/driver')
+        .then((d) => d.prepareScenario(scenarioFromUrl()))
+        .catch(() => undefined)
+        .then(() => import('./harness/publisherFake'))
         .then((m) => m.installPublisherFake())
         .catch(() => false)
-        .finally(render);
+        .finally(() => {
+            render();
+            void import('./harness/driver')
+                .then((d) => d.runPlainDrive(scenarioFromUrl()))
+                .catch(() => undefined);
+        });
 } else {
     render();
 }

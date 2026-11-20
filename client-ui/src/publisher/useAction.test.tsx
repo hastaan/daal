@@ -163,7 +163,7 @@ describe('ActionToast', () => {
     it('is pinned with logical insets, so it lays out the same right-to-left', () => {
         const html = renderToStaticMarkup(<ActionToast t={t} outcome={ok} onDismiss={() => {}} />);
         expect(html).toContain('position:fixed');
-        expect(html).toContain('inset-inline:12px');
+        expect(html).toContain('inset-inline-end:16px');
         expect(html).not.toMatch(/(?<![-a-z])(left|right):/);
     });
 });

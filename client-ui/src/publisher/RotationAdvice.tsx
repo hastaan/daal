@@ -80,6 +80,7 @@ import { failureBlock } from './failureText';
 import type { RotationRecommendation } from './wizardCommands';
 import { diagnosticsExplain } from '../lib/bridge';
 import { ListRow, Button, Card } from '../design/primitives';
+import { useDeviceT } from './ui';
 // The text layer lives next door so it can be tested without a
 // renderer. Every lookup in it keys a Go-emitted code and falls back to
 // the Go prose; see adviceText.ts for why that shape is load-bearing.
@@ -107,6 +108,7 @@ const BODY: React.CSSProperties = {
 const MUTED: React.CSSProperties = { ...BODY, color: 'var(--muted)', fontSize: 12 };
 
 export function RotationAdvice({ t, operatorId, reloadToken }: Props) {
+    const dt = useDeviceT(t);
     const [rec, setRec] = useState<RotationRecommendation | null>(null);
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState<string | null>(null);
@@ -158,10 +160,13 @@ export function RotationAdvice({ t, operatorId, reloadToken }: Props) {
         <>
             <ListRow
                 title={t('pub.danger.advice.title')}
-                subtitle={t('pub.danger.advice.body')}
+                subtitle={dt('pub.danger.advice.body')}
+                stack
+                wrapSubtitle
                 trailing={
                     <Button
                         variant="secondary"
+                        dataButton="rotation-advice"
                         onClick={(e) => {
                             e.stopPropagation();
                             void load();

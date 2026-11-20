@@ -22,7 +22,8 @@
 
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
-import { Button } from '../design/primitives';
+import { Button, Icon, IconButton, StateIcon } from '../design/primitives';
+import { WhatIsThis } from './Disclosure';
 import type { Failure } from './failureText';
 
 export interface ActionOutcome {
@@ -205,83 +206,72 @@ export function ActionToast({
     onDismiss: () => void;
 }) {
     if (!outcome) return null;
+    // Phone or not, without needing the density provider (a toast may be
+    // drawn by a test or a sheet on its own).
+    let phone = true;
+    try {
+        phone = typeof window === 'undefined' || typeof window.matchMedia !== 'function' || window.matchMedia('(max-width: 640px)').matches;
+    } catch {
+        phone = true;
+    }
     const failed = outcome.kind === 'fail';
-    const accent = failed ? 'var(--red)' : 'var(--green)';
     return (
         <div
             // `alert` interrupts a screen reader, `status` waits its
             // turn — a failure is worth interrupting for.
             role={failed ? 'alert' : 'status'}
             data-kind={outcome.kind}
+            data-toast={failed ? 'bad' : 'good'}
             key={outcome.seq}
             style={{
                 position: 'fixed',
-                insetInline: 12,
-                bottom: 'calc(env(safe-area-inset-bottom, 0px) + 84px)',
                 zIndex: 400,
+                bottom: phone ? 'calc(72px + env(safe-area-inset-bottom, 0px))' : 24,
+                insetInlineStart: phone ? 16 : undefined,
+                insetInlineEnd: phone ? 16 : 24,
+                maxWidth: phone ? undefined : 420,
                 display: 'flex',
-                justifyContent: 'center',
-                pointerEvents: 'none',
+                alignItems: 'flex-start',
+                gap: 10,
+                paddingBlock: 6,
+                paddingInlineStart: 14,
+                paddingInlineEnd: 4,
+                background: 'var(--surface-2)',
+                border: `1px solid ${failed ? 'var(--red)' : 'var(--line)'}`,
+                borderRadius: 'var(--r-tile)',
+                boxShadow: '0 16px 40px rgba(0,0,0,0.4)',
+                color: 'var(--fg)',
+                textAlign: 'start',
             }}
         >
-            <div
-                style={{
-                    pointerEvents: 'auto',
-                    maxWidth: 520,
-                    width: '100%',
-                    background: 'var(--surface-2)',
-                    border: `1px solid ${accent}`,
-                    borderInlineStart: `4px solid ${accent}`,
-                    borderRadius: 'var(--radius-md)',
-                    boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
-                    padding: '10px 12px',
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: 10,
-                    textAlign: 'start',
-                }}
-            >
-                <span aria-hidden style={{ color: accent, fontWeight: 700, lineHeight: 1.5 }}>
-                    {failed ? '!' : '✓'}
-                </span>
-                <div style={{ flex: 1, minWidth: 0, display: 'grid', gap: 6 }}>
-                    <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.5 }}>
-                        {outcome.message}
-                    </div>
-                    {outcome.detail && (
-                        <details>
-                            <summary
-                                style={{
-                                    fontSize: 12,
-                                    color: 'var(--muted)',
-                                    cursor: 'pointer',
-                                }}
-                            >
-                                {t('pub.fb.details')}
-                            </summary>
-                            <div
-                                dir="ltr"
-                                style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 11,
-                                    color: 'var(--muted)',
-                                    wordBreak: 'break-word',
-                                    whiteSpace: 'pre-wrap',
-                                    marginTop: 4,
-                                    maxHeight: 120,
-                                    overflowY: 'auto',
-                                    textAlign: 'left',
-                                }}
-                            >
-                                {outcome.detail}
-                            </div>
-                        </details>
-                    )}
-                </div>
-                <Button variant="ghost" size="sm" onClick={onDismiss}>
-                    {t('common.close')}
-                </Button>
+            <span style={{ display: 'inline-flex', paddingBlockStart: 12 }}>
+                <StateIcon state={failed ? 'bad' : 'ok'} size={20} />
+            </span>
+            <div style={{ flex: 1, minWidth: 0, display: 'grid', gap: 2, paddingBlock: 10 }}>
+                <div style={{ fontSize: 14, color: 'var(--fg)', lineHeight: 1.45 }}>{outcome.message}</div>
+                {outcome.detail && (
+                    <WhatIsThis label={t('pub.fb.details')}>
+                        <div
+                            dir="ltr"
+                            style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: 11,
+                                color: 'var(--muted)',
+                                wordBreak: 'break-word',
+                                whiteSpace: 'pre-wrap',
+                                maxHeight: 120,
+                                overflowY: 'auto',
+                                textAlign: 'left',
+                            }}
+                        >
+                            {outcome.detail}
+                        </div>
+                    </WhatIsThis>
+                )}
             </div>
+            <IconButton label={t('common.close')} dataButton="toast-close" onClick={onDismiss}>
+                <Icon name="close" size={18} />
+            </IconButton>
         </div>
     );
 }

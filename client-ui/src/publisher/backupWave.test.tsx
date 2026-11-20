@@ -34,10 +34,10 @@ import {
 } from './backup';
 import { Backup, Wizard, classifyPublisherError } from './wizardCommands';
 import type { DestroyReport, ReleaseAddressResult, SetupRecovery } from './wizardCommands';
-import { BackupConfirm, BackupDone, BackupReady, BackupWords, FailureLine, backupBackRefused } from './BackupPage';
+import { BackupConfirm, BackupDone, BackupReady, BackupWords, FailureLine, backupBackRefused, backupMenu } from './BackupPage';
 import { RestorePreview, restoreBackRefused, stepAfterFailure } from './RestorePage';
 import { RestoreNoticeCard, keyLineText, saveNewKeys } from './RestoreNotice';
-import { BackupCard } from './BackupCard';
+import { BackupBadge } from './BackupCard';
 import { harnessBackupApi, HARNESS_WORDS } from './backupHarness';
 import {
     releaseLiveAddresses,
@@ -124,24 +124,18 @@ describe('D1 the relay list card', () => {
         expect(EN[backupCardKey('stale')]).toBe('Your backup is out of date. It does not have your latest changes.');
     });
 
-    it('renders the sentence and the right button, in both languages', () => {
+    it('one badge on the list header, a tap opens Backup; nothing when it is current (C7.1)', () => {
         for (const t of [tEn, tFa]) {
-            const never = renderToStaticMarkup(<BackupCard t={t} status={backupStatusFixture()} onBackup={() => {}} />);
-            expect(never).toContain(t('pub.backup.card.never'));
-            expect(never).toContain(t('pub.backup.card.make'));
+            const never = renderToStaticMarkup(<BackupBadge t={t} status={backupStatusFixture()} onBackup={() => {}} />);
+            expect(never).toContain(`>${t('pub.backup.badge.never')}<`);
+            expect(never).toContain('data-button="backup"');
             const stale = renderToStaticMarkup(
-                <BackupCard t={t} status={backupStatusFixture({ last_backup_at_unix: 5, stale: true })} onBackup={() => {}} />,
+                <BackupBadge t={t} status={backupStatusFixture({ last_backup_at_unix: 5, stale: true })} onBackup={() => {}} />,
             );
-            expect(stale).toContain(t('pub.backup.card.stale'));
-            expect(stale).toContain(t('pub.backup.card.make_new'));
+            expect(stale).toContain(`>${t('pub.backup.badge.stale')}<`);
         }
-        // The relay page shows it only when the backup is out of date.
-        expect(
-            renderToStaticMarkup(
-                <BackupCard t={tEn} status={backupStatusFixture({ last_backup_at_unix: 5 })} onlyWhenStale />,
-            ),
-        ).toBe('');
-        expect(listSource).toContain('<BackupCard t={t} status={backupStatus} onBackup={onBackup} />');
+        expect(renderToStaticMarkup(<BackupBadge t={tEn} status={backupStatusFixture({ last_backup_at_unix: 5 })} />)).toBe('');
+        expect(listSource).toContain('<BackupBadge t={t} status={backupStatus} onBackup={onBackup} />');
         expect(listSource).toContain("t('pub.restore.link')");
     });
 });
@@ -151,16 +145,22 @@ describe('D1 the backup page', () => {
         const s = backupStatusFixture({ words_set: true, last_backup_at_unix: 1_763_460_000 });
         for (const t of [tEn, tFa]) {
             const html = renderToStaticMarkup(
-                <BackupReady t={t} status={s} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} onCheckWords={() => {}} onNewWords={() => {}} />,
+                <DensityProvider>
+                    <BackupReady t={t} status={s} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} />
+                </DensityProvider>,
             );
-            expect(html).toContain(backupHasText(t, s.contents));
-            expect(html).toContain(t('pub.backup.hasnot'));
+            // What it holds is one tap away ("What's in it", C7.6)…
+            expect(html).toContain(t('pub.backup.whats_in'));
+            expect(html).not.toContain(backupHasText(t, s.contents));
+            // …the warning is not (MUST KEEP 5).
             expect(html).toContain(t('pub.backup.warning'));
+            expect(html).toContain(t('pub.backup.badge.done').split('{date}')[0]);
             expect(html).toContain('data-button="save-downloads"');
             expect(html).toContain('data-button="save-share"');
-            expect(html).toContain('data-button="check-words"');
-            expect(html).toContain('data-button="new-words"');
+            // Check / new words live in the page's ⋯.
+            expect(backupMenu(t, s, false, () => {}, () => {}).map((i) => i.id)).toEqual(['check-words', 'new-words']);
         }
+        expect(backupMenu(tEn, backupStatusFixture(), false, () => {}, () => {})).toEqual([]);
         expect(backupHasText(tEn, s.contents)).toBe(
             'The backup will have: 1 relay (Bahar), 3 people and their files, and the key to your hosting account.',
         );
@@ -168,17 +168,23 @@ describe('D1 the backup page', () => {
 
     it('without words, the only button makes the words', () => {
         const html = renderToStaticMarkup(
-            <BackupReady t={tEn} status={backupStatusFixture()} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} onCheckWords={() => {}} onNewWords={() => {}} />,
+            <DensityProvider>
+                <BackupReady t={tEn} status={backupStatusFixture()} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} />
+            </DensityProvider>,
         );
         expect(html).toContain('data-button="create-words"');
         expect(html).not.toContain('data-button="save-downloads"');
-        expect(html).toContain(EN['pub.backup.last.never']);
+        expect(html.match(/data-button="(create-words|save-downloads|save-share)"/g)).toHaveLength(1);
+        expect(html).toContain(EN['pub.backup.lead']);
+        expect(html).toContain(EN['pub.backup.warning']);
     });
 
     it('each blocked reason is its own sentence, the detail under Details', () => {
         for (const b of ['setup_running', 'secret_unreadable', 'custody_locked', 'custody_backend', 'legacy_pending'] as const) {
             const html = renderToStaticMarkup(
-                <BackupReady t={tEn} status={backupStatusFixture({ blocked: b, blocked_detail: 'relay 1' })} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} onCheckWords={() => {}} onNewWords={() => {}} />,
+                <DensityProvider>
+                    <BackupReady t={tEn} status={backupStatusFixture({ blocked: b, blocked_detail: 'relay 1' })} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} />
+                </DensityProvider>,
             );
             expect(html).toContain(EN[blockedKey(b)!]);
             expect(html).not.toContain('data-button');
@@ -206,9 +212,9 @@ describe('D1 the backup page', () => {
 
     it('done says where the file went', () => {
         const made = { file_name: 'daal-backup-2026-11-19.daalbackup', made_at_unix: 1, contents: backupStatusFixture().contents };
-        expect(renderToStaticMarkup(<BackupDone t={tEn} made={{ ...made, destination: 'downloads' }} onDone={() => {}} />)).toContain(
-            'Saved to Downloads as daal-backup-2026-11-19.daalbackup.',
-        );
+        const saved = renderToStaticMarkup(<BackupDone t={tEn} made={{ ...made, destination: 'downloads' }} onDone={() => {}} />);
+        expect(saved).toContain('Saved as daal-backup-2026-11-19.daalbackup');
+        expect(saved).toContain(EN['pub.backup.saved_line']);
         expect(renderToStaticMarkup(<BackupDone t={tEn} made={{ ...made, destination: 'share' }} onDone={() => {}} />)).toContain(
             // Only reached once the person said the file arrived.
             EN['pub.backup.done.share.ok'],
@@ -302,9 +308,14 @@ describe('D2 restore preview and replace', () => {
     const contents = backupStatusFixture().contents;
     it('an empty phone: Restore, no replace box', () => {
         const html = renderToStaticMarkup(
-            <RestorePreview t={tEn} preview={{ made_at_unix: 1_763_460_000, app_version: 'x', contents, replace: null }} busy={false} onRestore={() => {}} onCancel={() => {}} />,
+            <DensityProvider>
+                <RestorePreview t={tEn} preview={{ made_at_unix: 1_763_460_000, app_version: 'x', contents, replace: null }} busy={false} onRestore={() => {}} onCancel={() => {}} />
+            </DensityProvider>,
         );
         expect(html).toContain(previewText(tEn, 1_763_460_000, contents));
+        // The app's date format ("18 Nov 2025"), not the US one.
+        expect(html).toContain('18 Nov 2025');
+        expect(html).not.toContain('Nov 18, 2025');
         expect(html).toContain('It has 1 relay (Bahar) and 3 people.');
         expect(html).toContain('data-button="restore"');
         expect(html).not.toContain('restore-replace');
@@ -314,13 +325,15 @@ describe('D2 restore preview and replace', () => {
         const sahand = { ...contents.relays[0], id: 7, nickname: 'Sahand' };
         for (const t of [tEn, tFa]) {
             const html = renderToStaticMarkup(
-                <RestorePreview
-                    t={t}
-                    preview={{ made_at_unix: 1, app_version: 'x', contents, replace: { this_phone: [sahand], only_on_this_phone: [sahand], digest: 'd' } }}
-                    busy={false}
-                    onRestore={() => {}}
-                    onCancel={() => {}}
-                />,
+                <DensityProvider>
+                    <RestorePreview
+                        t={t}
+                        preview={{ made_at_unix: 1, app_version: 'x', contents, replace: { this_phone: [sahand], only_on_this_phone: [sahand], digest: 'd' } }}
+                        busy={false}
+                        onRestore={() => {}}
+                        onCancel={() => {}}
+                    />
+                </DensityProvider>,
             );
             expect(html).toContain(t('pub.restore.replace').replace('{names}', 'Sahand'));
             expect(html).toContain(t('pub.restore.replace.orphans').replace('{names}', 'Sahand'));
@@ -330,12 +343,29 @@ describe('D2 restore preview and replace', () => {
     });
 
     it('the old-phone notice says what is true, and the refresh line only when there are refresh keys', () => {
-        const html = renderToStaticMarkup(<RestoreNoticeCard t={tEn} notice={restoreNoticeFixture()} onEnterKey={() => {}} onDismiss={() => {}} />);
+        // Closed: the title, one line (MUST KEEP 6), the action, "I understand".
+        const closed = renderToStaticMarkup(
+            <DensityProvider>
+                <RestoreNoticeCard t={tEn} notice={restoreNoticeFixture()} onEnterKey={() => {}} onDismiss={() => {}} />
+            </DensityProvider>,
+        );
+        for (const k of ['title', 'newkey', 'ok']) expect(closed).toContain(EN[`pub.restore.oldphone.${k}`]);
+        expect(closed).toContain(EN['pub.restore.warn.line'].replace(/'/g, '&#x27;'));
+        expect(EN['pub.restore.warn.line']).toMatch(/manage your relays and make files your family trusts/);
+        expect(closed).not.toContain(EN['pub.restore.oldphone.body1']);
+        // "What to do" holds the rest.
+        const html = renderToStaticMarkup(
+            <DensityProvider>
+                <RestoreNoticeCard t={tEn} notice={restoreNoticeFixture()} onEnterKey={() => {}} onDismiss={() => {}} whatOpen />
+            </DensityProvider>,
+        );
         for (const k of ['title', 'body1', 'body2', 'body3', 'newkey', 'ok']) expect(html).toContain(EN[`pub.restore.oldphone.${k}`]);
         expect(html).not.toContain(EN['pub.restore.oldphone.body4']);
         expect(EN['pub.restore.oldphone.body3']).toContain('Daal cannot change that key yet.');
         const refresh = renderToStaticMarkup(
-            <RestoreNoticeCard t={tFa} notice={restoreNoticeFixture({ has_refresh_keys: true })} onEnterKey={() => {}} onDismiss={() => {}} />,
+            <DensityProvider>
+                <RestoreNoticeCard t={tFa} notice={restoreNoticeFixture({ has_refresh_keys: true })} onEnterKey={() => {}} onDismiss={() => {}} whatOpen />
+            </DensityProvider>,
         );
         expect(refresh).toContain(FA['pub.restore.oldphone.body4']);
     });
@@ -386,7 +416,9 @@ describe('D2 restore preview and replace', () => {
 
     it('the notice says changes after the backup day are not in it', () => {
         const html = renderToStaticMarkup(
-            <RestoreNoticeCard t={tEn} notice={restoreNoticeFixture()} onEnterKey={() => {}} onDismiss={() => {}} />,
+            <DensityProvider>
+                <RestoreNoticeCard t={tEn} notice={restoreNoticeFixture()} onEnterKey={() => {}} onDismiss={() => {}} whatOpen />
+            </DensityProvider>,
         );
         expect(html).toContain('Changes made on the old phone after that day are not in it.');
     });
@@ -605,7 +637,8 @@ describe('PA-7 the list delete of an unfinished setup asks first', () => {
         // sheet, which offers deleting the server.
         expect((await listDeleteFor(op(), fail)).kind).toBe('destroy');
         expect((await listDeleteFor(op({ has_cloud_token: false }), fail)).kind).toBe('destroy');
-        expect(listSource).toContain('void startDelete(op);');
+        // Behind the unfinished row's own ⋯ (C7.1: no Remove button on rows).
+        expect(listSource).toContain('onSelect: () => void startDelete(op)');
         expect(listSource).toContain('deleteMine(cur.op.id');
         expect(listSource).toContain('keepMine(cur.op.id');
     });

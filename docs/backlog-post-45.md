@@ -3560,3 +3560,193 @@ inside to install the app. None is started unless marked.
   one place, a cache directory. Prompt for the first backup as soon as a
   relay is live, not only on the relay list.
 
+
+## 24. The redesign: what was built, and what is left (2026-11-20)
+
+The UI wave rebuilt every screen to `build/ux/spec/spec.md` (audit:
+`build/ux/spec/audit.md`) in seven lanes (primitives, recipient,
+publisher, settings + status + shells, Android, integration, repair) on
+branch `ux-refine`. Captures: `build/ux/after/` (134 harness scenarios ×
+phone / phone-Farsi / desktop, montages in `build/ux/after/montage/`),
+acceptance against spec F: `build/ux/after/acceptance.md`, one-page
+before/after for the owner: `build/ux/after/SUMMARY.md`.
+
+**Gate, 2026-11-20 (nothing committed yet).** `npm run typecheck` clean;
+`npx vitest run` 56 files / 938 tests green; `tools/test-android-jvm.sh`
+113 green; the pre-push static and node gates green
+(check-hardcoded-strings, -diagnostics-redaction, -tokens, -phase,
+-deploy-so-manifest, -engine-so-manifest, check-plumbing,
+-family-maturity, -creds-mirror, -toolbox-profiles, -rotation-ladder,
+-qr-send 45/45); `npm run build` green; `./daal test` "all suites
+green". `./daal e2e` was not run (the push hook runs it). The Tauri crate
+passes `cargo check --target aarch64-linux-android --lib`; its desktop
+build cannot run on this laptop (no GTK/pango dev packages), so
+`opened.rs` was compiled and its 5 tests run as a stubbed copy outside
+the crate. The gate also moved `log` from the Android-only dependencies
+of `src-tauri/Cargo.toml` to every platform: `build_wizard_ctx` calls
+`log::warn!` on desktop since `3f1b72d`, which a desktop build would
+have refused.
+
+### Built: in the tree, not seen on a phone
+
+Every item below passes its tests and was looked at in the browser
+harness at 390 px (English and Farsi) and 1280 px. None has been on a
+real phone yet; that is UX-19.
+
+- [x] **UX-1. Primitives.** New `Icon` set (directional icons mirror in
+  RTL), `Badge`, `OverflowMenu` (popover on desktop, sheet on phone),
+  `MenuSheet`, `Disclosure`, `EmptyState`, `StateIcon`, `PageHeader`,
+  `Toast` (one at a time), `ProgressRing`, `Avatar`; 44 px targets
+  everywhere (Segmented, Toggle, Input, rows); no uppercase or
+  letter-spacing; logical properties only; `lib/format.ts` for dates and
+  "2 hours ago" in both languages; `lib/devMode.ts` (developer mode, seven
+  taps on the version line). Test: `primitives.test.tsx`, `format.test`,
+  `devMode.test`.
+- [x] **UX-2. First run.** A language tap goes straight on; then two
+  cards, "For me" / "For my family". Test: `onboarding.test`.
+- [x] **UX-3. Home.** The bird, one headline, at most one line, at most
+  one button, badges (Manual, Lifeline, Slow); every engine word (why this
+  route, pointer rotation, health bars, throughput) is behind developer
+  mode; failure is "Couldn't connect" + "Try again" + a Details fold;
+  "No internet" has no fold; the desktop side panel only when connected
+  or failed; notices are one row each. Way chooser and recovery are
+  sheets. Test: `mainScreen.test` (every failure line ≤ 60 characters),
+  `AutoUi.test`, `MeasuredUi.test`, `PageNotices.test`.
+- [x] **UX-4. Adding a file.** One sheet, three rows (Choose a file,
+  Paste text, Scan a code), no tabs, no Preview or Import button: a Daal
+  file goes on by itself; a web address or proxy link waits for "Add".
+  The trust question replaces the sheet: two answers, words in the UI
+  language first, "Use this file only" under a fold. Results: File added
+  (Connect / Not now), partial, refused (one Close), key changed. Test:
+  `AddSheet.test` (22).
+- [x] **UX-5. "Open with Daal" / "Share to Daal" (spec G.1).**
+  `take_opened_file` and the `daal://opened-file` event (Rust
+  `opened.rs`, Kotlin `OpenedFiles.kt` / `OpenedIntent.kt`); only
+  `content://` from another app, never `file://` or Daal's own provider,
+  4 MiB cap; shared text that holds a Daal file becomes that file, other
+  text is emptied at once and refused by name. On launch the file opens
+  on Home straight at the trust step; while Daal runs in Publisher or
+  Settings a toast offers it; a second file waits for the first sheet.
+  Test: `OpenedIntentTest` (JVM), `opened.rs` tests,
+  `openedFile.test.tsx`, `settingsLane.test`.
+- [x] **UX-6. "Send address" (spec G.2).** `share_text` opens the Android
+  share sheet; on desktop it copies. My Daal address is made on open,
+  grouped `daal1 xxxx …`, with Send (Android) and Copy. Test:
+  `myAddress.test.tsx`.
+- [x] **UX-7. Files tab** (was Network). One row per file: state icon,
+  name, "Updated 3 minutes ago", "In use"; a sheet per file with Connect,
+  Check for updates, Stop checking, Remove (with the true consequence:
+  its ways go too). Per-route controls are developer mode. Test:
+  `networkRows.test`.
+- [x] **UX-8. Settings.** Six rows on a phone with no scroll: Status,
+  Language, Theme, Help family connect, Advanced, Erase. Advanced holds
+  connection mode, the address card and subscriptions; developer tools
+  appear only in developer mode. Erase is a sheet with the typed word
+  («پاک» in Farsi, "erase" also accepted) and a 5 s hold that fires once.
+  Test: `settingsLane.test` (32).
+- [x] **UX-9. Status** (was Diagnostics). At most four summary rows, one
+  "Copy a report for my helper" button with a toast either way, a helper
+  fold with names not ids; JSON and probes only in developer mode.
+- [x] **UX-10. Shells.** Phone: Connection, Files, (Publisher), Settings.
+  Desktop: a 220 px sidebar with three or four items, Ctrl/⌘+1..n, a quiet
+  "Erase Daal…" row instead of the red Panic wipe button, a status strip
+  with one badge, "Daal stopped working" only when it did. Tablet: rail.
+- [x] **UX-11. Publisher list and relay page.** One relay opens directly;
+  none shows an empty state ("About €5–8 a month", Start, Restore). The
+  relay page is one health card (only failing checks, the hedge always
+  shown), People as rows with a send icon and ⋯, Everyone as a row,
+  Details and Danger zone folded. Sending is one sheet: Send with an app,
+  Save, Show QR code, Copy as text. `window.confirm` is gone from the
+  publisher. Test: `redesign.test.tsx`, `relayPage.test`,
+  `backRendered.test`.
+- [x] **UX-12. Wizard, backup, restore.** Three steps; Hetzner only (no
+  "Coming soon"); cost line first; the build log behind Details; the
+  done screen waits for "Add the first person". Backup and restore keep
+  every MUST KEEP line; restore dates are local dates. Test:
+  `backupWave.test`, `backupFlows.test`, `restoreSettle.test`.
+- [x] **UX-13. Farsi throughout.** Every new or changed string follows
+  `docs/style/farsi.md`; Persian digits and dates in prose; mixed-direction
+  lines isolated (the "No internet" line, server addresses); words in a
+  grid so none is left alone on a line.
+- [x] **UX-14. Harness.** Every old scenario opens its own screen again,
+  29 new scenarios, `harness/scenarios.test.ts` checks every target id
+  and key exists; `build/ux/capture-all.mjs` captures and logs visible
+  text, buttons, scroll and console errors per shot.
+
+### Open
+
+- [ ] **UX-15. "Share to Daal" puts Daal in every text share sheet.**
+  `tools/patch-android-manifest.sh` registers SEND text/plain and
+  VIEW/SEND application/octet-stream. So the Daal name and icon show up
+  whenever the person shares any text, and as an "Open with" choice for
+  any untyped file. For someone whose phone may be looked at, that makes
+  the app much easier to notice. It needs a product decision. Options:
+  keep VIEW `.sbp`/`.sbpx` (pathPattern) and SEND octet-stream, and drop
+  SEND text/plain or gate it behind an activity-alias that a Settings
+  switch turns on; or accept it and say so on the Settings page.
+- [ ] **UX-16. Opened files stay staged after use.** A `.sbp`/`.sbpx`
+  handed to Daal (and the file decoded from shared text) stays in
+  `<staging>/opened/` until the next launch or a panic wipe. Shared text
+  that is not a Daal file is now emptied at once (`opened.rs`
+  `finish_staged`), but the Daal files themselves are not removed after
+  import. This needs a small command (`release_opened_file(path)`) that
+  the page calls when the add sheet closes.
+- [ ] **UX-17. "This phone" on a computer: the rest of the publisher
+  strings.** The health hedge, "Working, as far as…", the access-key line
+  and the restore link now say "this computer" on a computer
+  (`useDeviceT`, `<key>_desktop`). About 40 other `pub.*` strings still
+  say "this phone" (backup, restore, account check, people). Go through
+  them with the same `_desktop` variants.
+- [ ] **UX-18. The rotate-address and rotate-way sheets.** They have no
+  harness scenario and were not looked at in Farsi at 390 px
+  (`pub.danger.address.*`, `pub.danger.rebuild.*`); their confirm bodies
+  (AddressSwap, RelayRebuild, rotate disguise) are not yet "one
+  consequence line + Details" (audit H-30).
+- [ ] **UX-19. Nothing of this wave has been on a phone.** Build the APK
+  (signed with `release-keys/android-device-signing.jks`), install on the
+  spare Sony first, then: Home in every state, add a file three ways,
+  Telegram and WhatsApp "Open with" and "Share" (VIEW and SEND), a second
+  file while Daal runs, reopening from recents (no double offer), "Send
+  address" share sheet, the 5 s erase hold, the publisher send sheet, and
+  the whole set in Farsi on the old phone.
+- [ ] **UX-20. The desktop shell was not built.** This laptop has no
+  GTK/pango dev packages, so `src-tauri` was only checked for Android.
+  Build the desktop app once (Linux or Windows) before a release; check
+  that a `.sbp` given on the command line opens on Home and that "Copy"
+  of the address works through `wl-copy` / `xclip` / PowerShell.
+- [ ] **UX-21. Desktop "Open with".** Desktop has no file association
+  (`tauri.conf.json` `fileAssociations`) and no single-instance
+  hand-over, so the event never fires there; only the first launch's
+  command line is read.
+- [ ] **UX-22. A publisher sharing a `daal1…` address to Daal** arrives
+  as a refused `.txt`. It could open "Add a person" with the address
+  filled in; the page has no command to read a staged text today.
+- [ ] **UX-23. Harness fixture: 8 + 8 check words.** The real fingerprint
+  has 4 English and 4 Persian words (spec 0.2). The fixture
+  (`publisherFake.ts` `WORDS_EN`/`WORDS_FA`) still has 8 + 8, so the
+  trust captures show two rows of chips where a phone shows one. Also:
+  the trust prompt's thumbnail is drawn from the hex fingerprint in the
+  harness; `pub-wizard-3-add-first` opens a relay titled "#1" (the fake
+  has no relay after a build).
+- [ ] **UX-24. Farsi quotes of UI labels.** The fa strings that quote a
+  label (`«…»`) were checked against the current labels for Add my file,
+  My Daal address, Files, People, Send with an app, Replace the file,
+  Give a new file and Publish now. `pub.setup.cancel.body.*` quotes
+  «لغو و حذف», while the button reads «لغو و حذف این رله»; decide whether
+  to quote the full label.
+- [ ] **UX-25. Desktop Farsi.** A `deskfa` capture pass exists
+  (`node build/ux/capture-all.mjs --only deskfa …`) but only a few screens
+  were captured. Run the whole set and look at the sidebar, the title bar
+  and the publisher column in RTL.
+- [ ] **UX-26. A failed erase says nothing.** If `panicWipe()` rejects,
+  the sheet closes with no message (kept as before: a rejection usually
+  means the engine is already gone). Principle A.8 asks for a line.
+- [ ] **UX-27. Light theme.** `styles.tokens.css` overrides only the
+  legacy colour names; `--surface`, `--fg` and the rest do not change in
+  light mode, so "Light" is partly dark. Unchanged by this wave.
+- [ ] **UX-28. Smaller leftovers.** The relay page has no "check these
+  words" line in the send sheet (`pub.send.words`): no command returns the
+  fingerprint words there. A partial import that leaves no usable way
+  relies on the engine refusing it (`pack_has_no_credentials`).
+  `shell/TitleBar.tsx` is dead code. With an unfinished second relay, S-1
+  is 8 taps, not 7 (the list stays so "may cost money" is seen).

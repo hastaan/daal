@@ -81,6 +81,14 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     super.load(webView)
     keepClearOfSystemBars(webView)
     DownloadsSaver.context = activity.applicationContext
+    ShareText.context = activity.applicationContext
+    ShareText.setActivity(activity)
+    // "Open with Daal" / "Share to Daal": the file or text Daal was
+    // started with is held for the page, which takes it with
+    // `take_opened_file` once it is up. No event here: the page is not
+    // listening yet.
+    OpenedFiles.context = activity.applicationContext
+    OpenedFiles.offer(activity, activity.intent)
     // A page that loads has asked for nothing yet (PB-20).
     applySecureFlag(synchronized(secure) { secure.atLoad() })
     val host = activity as? ComponentActivity ?: return
@@ -110,6 +118,18 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
     }
     host.onBackPressedDispatcher.addCallback(host, callback)
+  }
+
+  /**
+   * A file opened with Daal, or a file or text shared to it, while Daal
+   * runs (the activity is singleTask, so it comes here rather than
+   * starting a second Daal). Held, and Rust is told: it stages the file
+   * and fires `daal://opened-file` once the page has asked for files
+   * (src-tauri/src/opened.rs). Nothing is imported.
+   */
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    if (OpenedFiles.offer(activity, intent)) OpenedFiles.notifyArrived()
   }
 
   /**

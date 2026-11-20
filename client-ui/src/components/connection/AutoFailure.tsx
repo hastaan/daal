@@ -1,52 +1,32 @@
-// AutoFailure — what the main screen says when automatic connect found
-// no way that works.
+// AutoFailure — the "Details" fold under a failed connect on Home.
 //
-// The headline above this box already carries the ONE sentence for the
-// engine's verdict. This adds what the person can do, a "Try again"
-// button, "Add your file" when there is nothing to connect with, and a
-// Details fold holding the per-route list — the only place a route id,
-// a family name or a category code is printed, left-to-right and in a
-// fixed-width face, for the person helping from the other end.
-//
-// Every button here does something: "Try again" is off (and the wait is
-// said) while the ways are resting, is absent where trying again cannot
-// change the answer, and "Choose one yourself" / "Disconnect" appear
-// where those are the way forward. The same box serves the Android
-// "holding" state — the VPN kept closed while Daal retries — where the
-// headline is about that and the verdict moves in here (`lead`).
+// The headline ("Couldn't connect"), the one line of what to do, "Try
+// again" and the one link are drawn by the page from lib/mainScreen.ts.
+// This fold adds only how much Daal tried: "Tried 3 ways". In developer
+// mode it also lists each try the way the engine names it (route id,
+// kind, result, category, time) — the only place those words are
+// printed, left-to-right and in a fixed-width face, for the person
+// helping from the other end.
 import type { AutoTried } from '../../contract/D2Contract';
-import { Button } from '../../design/primitives';
+import { Disclosure } from '../../design/primitives';
 import { autoResultKey } from '../../lib/autoConnect';
+import { toFaDigits } from '../../lib/i18n';
 
 interface Props {
     t: (k: string) => string;
-    /** The whole "what to do" line, already translated. */
-    actionText: string;
+    locale?: string;
     tried: readonly AutoTried[];
-    /** The engine's verdict code, printed under Details only. */
+    /** The engine's verdict code, printed in developer mode only. */
     verdict: string;
-    /** Absent when trying again cannot change the answer. */
-    onRetry?: () => void;
-    /** Present when adding a file is the way forward. */
-    onAddFile?: () => void;
-    /** A sentence above the action line (the verdict, when the headline
-     *  is used for something else). */
-    lead?: string;
-    /** "You can try again in…": the ways are resting. */
-    restText?: string;
-    /** "Try again" is shown but off: it would do nothing right now. */
-    retryOff?: boolean;
-    /** Words on the retry button other than "Try again". */
-    retryLabel?: string;
-    /** Present when choosing a way by hand is the way forward. */
-    onChoose?: () => void;
-    /** Present when the VPN is being held closed: let go of it. */
-    onDisconnect?: () => void;
+    /** Developer mode: the per-try lines and the verdict code. */
+    dev?: boolean;
+    /** Open at first (tests, and the desktop failed panel). */
+    defaultOpen?: boolean;
 }
 
 /** One tried route as the engine names it: id, kind, result, category,
  *  then — when the engine said — how long this attempt took and which
- *  route it was tried at the same time as. Details only. */
+ *  route it was tried at the same time as. Developer mode only. */
 export function triedCode(x: AutoTried): string {
     return [
         x.routeId,
@@ -60,65 +40,20 @@ export function triedCode(x: AutoTried): string {
         .join(' · ');
 }
 
-export default function AutoFailure({
-    t,
-    actionText,
-    tried,
-    verdict,
-    onRetry,
-    onAddFile,
-    lead,
-    restText,
-    retryOff,
-    retryLabel,
-    onChoose,
-    onDisconnect,
-}: Props) {
-    const other = !!onAddFile || !!onChoose;
+/** "Tried 3 ways" in the page's language, or the line for none. */
+export function triedSummary(t: (k: string) => string, locale: string | undefined, n: number): string {
+    if (n === 0) return t('auto.details.none');
+    const num = locale === 'fa' ? toFaDigits(String(n)) : String(n);
+    return t(n === 1 ? 'auto.details.tried_one' : 'auto.details.tried_n').replace('{n}', num);
+}
+
+export default function AutoFailure({ t, locale, tried, verdict, dev, defaultOpen }: Props) {
     return (
-        <div
-            role="alert"
-            style={{
-                maxWidth: 520,
-                inlineSize: '100%',
-                marginBlockEnd: 16,
-                padding: '12px 16px',
-                borderRadius: 12,
-                border: '1px solid var(--teal-hairline)',
-                background: 'var(--surface-2, transparent)',
-                color: 'var(--fg)',
-                textAlign: 'center',
-                fontSize: 14,
-            }}
-        >
-            {lead && <div style={{ marginBlockEnd: 8 }}>{lead}</div>}
-            <div style={{ marginBlockEnd: 12 }}>{actionText}</div>
-            {restText && (
-                <div data-rest style={{ marginBlockEnd: 12, color: 'var(--ink-soft)' }}>
-                    {restText}
-                </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-                {onAddFile && <Button onClick={onAddFile}>{t('auto.add_file')}</Button>}
-                {onChoose && <Button onClick={onChoose}>{t('auto.choose_yourself')}</Button>}
-                {onRetry && (
-                    <Button variant={other ? 'secondary' : 'primary'} onClick={onRetry} disabled={retryOff}>
-                        {retryLabel ?? t('auto.try_again')}
-                    </Button>
-                )}
-                {onDisconnect && (
-                    <Button variant="secondary" onClick={onDisconnect}>
-                        {t('auto.holding.disconnect')}
-                    </Button>
-                )}
-            </div>
-            <details style={{ marginBlockStart: 12, color: 'var(--muted)', fontSize: 12, textAlign: 'start' }}>
-                <summary style={{ cursor: 'pointer' }}>{t('network.error_details')}</summary>
-                <div style={{ marginBlockStart: 6 }}>
-                    {tried.length > 0 ? t('auto.details.intro') : t('auto.details.none')}
-                </div>
-                {tried.length > 0 && (
-                    <ol style={{ margin: '6px 0 0', paddingInlineStart: 20 }}>
+        <Disclosure summary={t('ui.details')} dataButton="failure-details" defaultOpen={defaultOpen}>
+            <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'start' }}>
+                <div>{triedSummary(t, locale, tried.length)}</div>
+                {dev && tried.length > 0 && (
+                    <ol data-dev style={{ margin: '6px 0 0', paddingInlineStart: 20 }}>
                         {tried.map((x, i) => (
                             <li key={`${x.routeId}-${i}`} style={{ marginBlockEnd: 4 }}>
                                 <span>{t(autoResultKey(x.result))}</span>{' '}
@@ -137,8 +72,9 @@ export default function AutoFailure({
                         ))}
                     </ol>
                 )}
-                {verdict && (
+                {dev && verdict && (
                     <code
+                        data-dev
                         dir="ltr"
                         style={{
                             display: 'block',
@@ -151,7 +87,7 @@ export default function AutoFailure({
                         {verdict}
                     </code>
                 )}
-            </details>
-        </div>
+            </div>
+        </Disclosure>
     );
 }

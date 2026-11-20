@@ -30,11 +30,10 @@ export function TopBar({ title, actions, eyebrow }: Props) {
                 {eyebrow && (
                     <div
                         style={{
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 10,
-                            letterSpacing: '0.18em',
-                            textTransform: 'uppercase',
-                            color: 'var(--gold-warm)',
+                            fontFamily: 'var(--font-body)',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            color: 'var(--muted)',
                         }}
                     >
                         {eyebrow}

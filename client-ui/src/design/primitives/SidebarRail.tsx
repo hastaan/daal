@@ -1,4 +1,5 @@
-// SidebarRail — narrow icon-only nav for TabletShell.
+// SidebarRail — narrow icon-only nav for TabletShell. The names are the
+// buttons' accessible names and tooltips. A disabled item is not drawn.
 
 import type { SectionId } from './icons';
 import { SECTION_ICONS } from './icons';
@@ -33,13 +34,16 @@ export function SidebarRail({ active, items, onChange, footer }: Props) {
             {/* Rail header intentionally empty — no logo at the top
                 of the collapsed-icon rail (matches the full sidebar
                 in tablet/desktop). */}
-            {items.map((it) => {
+            {items.filter((it) => !it.disabled).map((it) => {
                 const on = active === it.id;
                 return (
                     <button
                         key={it.id}
+                        type="button"
                         title={it.label}
-                        disabled={it.disabled}
+                        aria-label={it.label}
+                        aria-current={on ? 'page' : undefined}
+                        data-button={`nav-${it.id}`}
                         onClick={() => onChange(it.id)}
                         style={{
                             width: 48,
@@ -48,13 +52,9 @@ export function SidebarRail({ active, items, onChange, footer }: Props) {
                             background: on
                                 ? 'rgba(201,162,58,0.12)'
                                 : 'transparent',
-                            color: on
-                                ? 'var(--gold-warm)'
-                                : it.disabled
-                                    ? 'var(--dim)'
-                                    : 'var(--muted)',
+                            color: on ? 'var(--gold-warm)' : 'var(--muted)',
                             borderRadius: 12,
-                            cursor: it.disabled ? 'not-allowed' : 'pointer',
+                            cursor: 'pointer',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',

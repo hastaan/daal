@@ -50,7 +50,10 @@ import type {
     PublishReport,
 } from './wizardCommands';
 import { Card, ListRow, Button, Sheet, Input, StatusPill } from '../design/primitives';
-import { Collapsible, WhatIsThis } from './Disclosure';
+import { WhatIsThis } from './Disclosure';
+import { useConfirm, useLocale } from './ui';
+import { formatDate } from '../lib/format';
+import type { Locale } from '../lib/i18n';
 import { ActionButton } from './useAction';
 import type { Action } from './useAction';
 import { failureBlock } from './failureText';
@@ -80,13 +83,10 @@ const BODY: React.CSSProperties = {
     lineHeight: 1.55,
 };
 
-function dayLabel(unix: number): string {
+function dayLabel(unix: number, locale: Locale): string {
     if (!unix) return '';
-    try {
-        return new Date(unix * 1000).toISOString().slice(0, 10);
-    } catch {
-        return '';
-    }
+    // Never an ISO date in prose (spec F.2): the app's own format.
+    return formatDate(locale, unix);
 }
 
 /** Provider label. Kept as an i18n key rather than the raw token so
@@ -96,16 +96,14 @@ function providerKey(kind: string): string {
 }
 
 export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
+    const locale = useLocale();
     const [status, setStatus] = useState<FreshnessStatus | null>(null);
     const [err, setErr] = useState<string | null>(null);
     const [report, setReport] = useState<PublishReport | null>(null);
     const [showAdd, setShowAdd] = useState(false);
     const [packUrlDraft, setPackUrlDraft] = useState('');
-    // Closed until asked for. The owner's first reading of this page
-    // was that nothing on it said what "refresh" meant or how it
-    // differed from adding a person; what they need by default is the
-    // one-line answer, and everything else is one tap away.
-    const [open, setOpen] = useState(false);
+    // The app's own confirm, not window.confirm (H-29).
+    const confirm = useConfirm();
 
     const reload = useCallback(async () => {
         try {
@@ -160,7 +158,14 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
 
     const onDelete = async (id: number) => {
         if (action.busy !== null) return;
-        if (!window.confirm(t('pub.fresh.remove.confirm'))) return;
+        const yes = await confirm.ask({
+            title: t('pub.keep.remove_address'),
+            body: t('pub.fresh.remove.confirm'),
+            confirmLabel: t('pub.keep.remove_address'),
+            cancelLabel: t('common.cancel'),
+            danger: true,
+        });
+        if (!yes) return;
         const r = await action.run(
             `fresh:del:${id}`,
             () => Wizard.deleteFreshnessEndpoint(id),
@@ -184,30 +189,31 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
           : t('common.loading');
 
     return (
-        <Collapsible
-            title={t('pub.keep.title')}
-            summary={summary}
-            open={open}
-            onToggle={() => setOpen((v) => !v)}
-            trailing={
-                status ? (
-                    <StatusPill tone={packCanHeal ? 'good' : 'warn'}>
-                        {packCanHeal
-                            ? t('pub.fresh.pill.healing')
-                            : t('pub.fresh.pill.manual')}
-                    </StatusPill>
-                ) : undefined
-            }
-        >
+        <div style={{ display: 'grid', gap: 12 }} data-testid="keep-page">
+            <div style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg)' }}>{summary}</div>
+            {/* MUST KEEP 14, visible above the forms: switching this on
+                makes the readership countable at a hosting company. */}
+            <div
+                data-testid="keep-privacy"
+                style={{
+                    fontSize: 13,
+                    lineHeight: 1.55,
+                    color: 'var(--fg)',
+                    borderInlineStart: '3px solid var(--amber)',
+                    paddingInlineStart: 10,
+                }}
+            >
+                <div style={{ fontWeight: 600 }}>{t('pub.fresh.privacy.title')}</div>
+                {/* The two facts, in view; the reasoning behind Details. */}
+                <div>{t('pub.fresh.privacy.line')}</div>
+                <div>{t('pub.fresh.privacy.key_line')}</div>
+                <WhatIsThis label={t('ui.details')} dataButton="keep-privacy-details">
+                    <div>{t('pub.fresh.privacy.body')}</div>
+                </WhatIsThis>
+            </div>
             <WhatIsThis label={t('pub.what')}>
                 <div>{t('pub.keep.what')}</div>
                 <div>{t('pub.fresh.none.body')}</div>
-                {/* The cost. Behind the same tap as the explanation,
-                    not behind a second one: a publisher deciding
-                    whether to switch this on is deciding whether their
-                    readership becomes countable at a hosting company. */}
-                <div style={{ fontWeight: 600 }}>{t('pub.fresh.privacy.title')}</div>
-                <div>{t('pub.fresh.privacy.body')}</div>
             </WhatIsThis>
 
             {!status && err && (
@@ -240,6 +246,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     computed from the signed pack, never from the list
                     below it. ---- */}
                 <ListRow
+                    wrapSubtitle
                     title={
                         packCanHeal
                             ? t('pub.fresh.pack.healing')
@@ -254,7 +261,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                             : status.pack_signed_at_unix
                               ? t('pub.fresh.pack.not_healing.body_dated').replace(
                                     '{date}',
-                                    dayLabel(status.pack_signed_at_unix),
+                                    dayLabel(status.pack_signed_at_unix, locale),
                                 )
                               : t('pub.fresh.pack.not_healing.body')
                     }
@@ -266,6 +273,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     that feels done and is not. ---- */}
                 {!enough && (
                     <ListRow
+                        wrapSubtitle
                         title={
                             status.distinct_providers === 0
                                 ? t('pub.fresh.none.title')
@@ -286,6 +294,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     The note says "the file changed, get it here"; with
                     no "here" there is nothing to publish at all. ---- */}
                 <ListRow
+                    wrapSubtitle
                     title={t('pub.fresh.pack_url.title')}
                     subtitle={t('pub.fresh.pack_url.body')}
                     stack
@@ -325,6 +334,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     const tone = never ? 'neutral' : ep.last_publish_ok ? 'good' : 'bad';
                     return (
                         <ListRow
+                            wrapSubtitle
                             key={ep.id}
                             title={t(providerKey(ep.kind))}
                             subtitle={
@@ -352,8 +362,8 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                                     {never
                                         ? t('pub.fresh.state.never')
                                         : ep.last_publish_ok
-                                          ? `${t('pub.fresh.state.published')} ${dayLabel(ep.last_publish_at_unix)}`
-                                          : `${t('pub.fresh.state.refused')} ${dayLabel(ep.last_publish_at_unix)}`}
+                                          ? `${t('pub.fresh.state.published')} ${dayLabel(ep.last_publish_at_unix, locale)}`
+                                          : `${t('pub.fresh.state.refused')} ${dayLabel(ep.last_publish_at_unix, locale)}`}
                                 </StatusPill>
                             }
                             trailing={
@@ -376,6 +386,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     a PERSON, and two buttons that differ by a noun
                     nobody explained was the owner's exact complaint. ---- */}
                 <ListRow
+                    wrapSubtitle
                     title={t('pub.keep.addresses.count')
                         .replace('{have}', String(status.distinct_providers))
                         .replace('{need}', String(status.min_mirrors))}
@@ -389,6 +400,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
 
                 {enough && (
                     <ListRow
+                        wrapSubtitle
                         title={t('pub.fresh.publish.title')}
                         subtitle={t('pub.fresh.publish.body')}
                         trailing={
@@ -415,6 +427,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                 <Card>
                     {report.blocked_reason ? (
                         <ListRow
+                            wrapSubtitle
                             title={t('pub.fresh.blocked.title')}
                             subtitle={t(`pub.fresh.blocked.${report.blocked_reason}`)}
                             last
@@ -422,6 +435,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     ) : (
                         <>
                             <ListRow
+                                wrapSubtitle
                                 title={
                                     report.succeeded >= report.min_mirrors
                                         ? t('pub.fresh.result.ok')
@@ -445,6 +459,7 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                             />
                             {report.results.map((r, i) => (
                                 <ListRow
+                                    wrapSubtitle
                                     key={r.endpoint_id}
                                     title={t(providerKey(r.kind))}
                                     subtitle={
@@ -493,7 +508,8 @@ export function FreshnessPanel({ t, operatorId, reloadToken, action }: Props) {
                     }}
                 />
             )}
-        </Collapsible>
+            {confirm.node}
+        </div>
     );
 }
 

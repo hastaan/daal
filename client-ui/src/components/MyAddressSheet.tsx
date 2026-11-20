@@ -1,9 +1,10 @@
-// MyAddressSheet.tsx — wraps the existing MyAddress flow in a Sheet
-// so it can be reached from a dedicated header action on the Network
-// page (separate from "Add", per D-2 redesign).
+// MyAddressSheet.tsx — "My Daal address" in a sheet (spec C4.4). The
+// title is said once, by the sheet; there is no Continue: the address is
+// made as it opens, and the drag handle, the backdrop, Escape and Back
+// close it.
 
 import MyAddress from '../recipient/MyAddress';
-import { Sheet, Button } from '../design/primitives';
+import { Sheet } from '../design/primitives';
 
 interface Props {
     t: (k: string) => string;
@@ -12,12 +13,7 @@ interface Props {
 
 export default function MyAddressSheet({ t, onClose }: Props) {
     return (
-        <Sheet
-            title={t('recipient.address.title')}
-            onClose={onClose}
-            width={520}
-            footer={<Button onClick={onClose}>{t('common.continue')}</Button>}
-        >
+        <Sheet title={t('recipient.address.title')} onClose={onClose} width={480}>
             <MyAddress t={t} />
         </Sheet>
     );

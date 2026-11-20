@@ -270,7 +270,8 @@ describe('mainScreenView: one line under the headline', () => {
         const v = mainScreenView(
             input(conn({ state: 'connected', routeCheck: 'ok', activeRoute: good, auto: auto({ state: 'connected', mode: true, routeId: 'r1' }) }), [good, slow]),
         );
-        expect(v.headline).toBe("You're connected.");
+        expect(v.headline).toBe('Connected');
+        // How the way does here is for the person helping (developer fold).
         expect(t(v.connectedNoteKey!)).toBe('Works well here.');
     });
     it('news about a move comes first: there is still only ONE line', () => {
@@ -296,7 +297,9 @@ describe('mainScreenView: one line under the headline', () => {
         });
         expect(autoConnectedNoteKey(movedThenSlow.auto)).toBe('auto.note.moved_faster');
         const v = mainScreenView(input(movedThenSlow, [good, slow]));
-        expect(v.headline).toBe('Connected, but slow.');
+        expect(v.detail).toBe('Connected, but slow.');
+        expect(v.headline).toBe('Connected');
+        expect(v.slow).toBe(true);
         expect(v.connectedNoteKey).toBe('measure.connected.slow_auto');
         // With one way only there is no promise either.
         expect(mainScreenView(input(movedThenSlow, [good])).connectedNoteKey).toBe('measure.connected.slow');
@@ -308,7 +311,8 @@ describe('mainScreenView: one line under the headline', () => {
                 [good, slow],
             ),
         );
-        expect(v.headline).toBe('Connected, but slow.');
+        expect(v.detail).toBe('Connected, but slow.');
+        expect(v.slow).toBe(true);
         expect(t(v.connectedNoteKey!)).toBe('Slow here. Daal will switch if it finds a faster way.');
     });
     it('while two ways are tried at once the headline is that one sentence, and the tap is Cancel', () => {
@@ -324,7 +328,8 @@ describe('mainScreenView: one line under the headline', () => {
                 [good, slow],
             ),
         );
-        expect(v.headline).toBe('Trying two ways at once…');
+        expect(v.detail).toBe('Trying two ways at once…');
+        expect(v.headline).toBe('Connecting…');
         expect(v.plan.kind).toBe('disconnect');
         expect(v.connectedNoteKey).toBeUndefined();
     });
@@ -332,7 +337,9 @@ describe('mainScreenView: one line under the headline', () => {
         const v = mainScreenView(
             input(conn({ state: 'error', routeRunning: false, auto: auto({ state: 'failed', verdict: 'network_down', total: 2 }) }), [good, slow]),
         );
-        expect(v.headline).toBe('This phone has no internet right now.');
+        expect(v.detail).toBe('This phone has no internet right now.');
+        expect(v.headline).toBe('No internet');
+        expect(v.line).toBe('Check Wi-Fi or mobile data.');
         expect(v.failure?.actionText).toBe('Check your Wi-Fi or mobile data, then try again.');
         expect(v.failure?.noRetry).toBe(false);
         expect(v.failure?.retryOff).toBe(false);
@@ -490,10 +497,10 @@ describe('the pages use these decisions', () => {
             .join('\n');
     const network = code(networkPageSource);
     const connection = code(connectionPageSource);
-    it('Connections page: rows say the grade, chips the count; no percentage and no "not measured yet"', () => {
-        // The row's line is ONE call, for the row being drawn; what it
-        // says is tested on its output below.
-        expect(network).toMatch(/\{rowMetaText\(t, r, \{\s*stateLabelKey: stateLabel,\s*isAuto: r\.routeId === autoRouteId,\s*isPinned: r\.routeId === pinnedId,\s*\}\)\}/);
+    it('Files page: the developer line of a way says the grade, chips the count; no percentage and no "not measured yet"', () => {
+        // The way's engine line (developer mode) is ONE call, for the way
+        // being drawn; what it says is tested on its output below.
+        expect(network).toMatch(/\{rowMetaText\(t, r, \{\s*stateLabelKey: rowStateLabelKey\(st\),\s*isAuto: r\.routeId === autoRouteId,\s*isPinned: r\.routeId === pinnedId,\s*\}\)\}/);
         expect(network).not.toContain('gradeKey(');
         expect(network).toContain('chipHereText(t, locale, chip.here)');
         expect(network).not.toContain("t('network.unmeasured')");

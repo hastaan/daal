@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import MeasuredDetails from './MeasuredDetails';
 import AutoFailure, { triedCode } from './AutoFailure';
+import { DensityProvider } from '../../design/DensityProvider';
 import RouteHealthBars from './RouteHealthBars';
 import type { RouteDisplayRow } from '../../contract/D2Contract';
 import legacyEn from '../../i18n/en.json';
@@ -72,17 +73,21 @@ describe('AutoFailure: the tried list', () => {
         expect(triedCode({ routeId: 'r1', family: 'tuic', result: 'not_carrying', category: 'udp_no_reply' })).toBe(
             'r1 · tuic · not_carrying · udp_no_reply',
         );
-        const html = renderToStaticMarkup(
-            <AutoFailure
-                t={tr(EN)}
-                actionText="Try again later."
-                verdict="all_failed"
-                tried={[{ routeId: 'r1', family: 'tuic', result: 'not_carrying', category: 'udp_no_reply', racedWith: 'r2' }]}
-            />,
-        );
-        const [outside, inside] = html.split('<details');
-        expect(outside).not.toContain('r2');
-        expect(inside).toContain('with r2');
+        // Developer mode: the per-try line carries it; otherwise no route id at all.
+        const html = (dev: boolean) =>
+            renderToStaticMarkup(
+                <DensityProvider>
+                    <AutoFailure
+                        t={tr(EN)}
+                        verdict="all_failed"
+                        defaultOpen
+                        dev={dev}
+                        tried={[{ routeId: 'r1', family: 'tuic', result: 'not_carrying', category: 'udp_no_reply', racedWith: 'r2' }]}
+                    />
+                </DensityProvider>,
+            );
+        expect(html(false)).not.toContain('r2');
+        expect(html(true)).toContain('with r2');
     });
 });
 

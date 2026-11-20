@@ -43,8 +43,11 @@ interface Props {
     onToggle: () => void;
     onPick: (routeId: string) => void;
     onBackToAuto: () => void;
-    /** "See all connections" — the Connections page. */
+    /** "Open my files" — the Files page. */
     onManage: () => void;
+    /** Only the list of choices, for the "Choose the way myself" sheet
+     *  (the chip and its hint are the page's business there). */
+    bare?: boolean;
 }
 
 export function routeLabel(r: RouteDisplayRow): string {
@@ -65,6 +68,7 @@ export default function WayChooser({
     onPick,
     onBackToAuto,
     onManage,
+    bare,
 }: Props) {
     // What is in force right now. With nothing connected that is simply
     // the saved choice. With something connected it is what the engine
@@ -82,6 +86,43 @@ export default function WayChooser({
         : !pinned && !engineAuto
         ? t('auto.chooser.next_auto')
         : undefined;
+    if (bare) {
+        // The sheet ("Choose the way myself"): the selected radio is what
+        // Home's "Manual" badge says, i.e. the saved pick, or else the way
+        // the engine is holding because the person picked it. One line
+        // under the list at most: a saved pick that is not in force yet
+        // says "from the next time", otherwise the one hint.
+        const selectedId = pinned?.routeId ?? nowOwn?.routeId ?? null;
+        const pendingPick =
+            running && pinned && (engineAuto || pinned.routeId !== running.routeId)
+                ? t('auto.chooser.next_pinned').replace('{name}', routeLabel(pinned))
+                : undefined;
+        const hasList = routes !== undefined && routes.length > 0;
+        return (
+            <ChoiceList
+                t={t}
+                selectedId={selectedId}
+                routes={routes}
+                note={pendingPick ?? (hasList ? t('auto.chooser.advanced_hint') : undefined)}
+                onPick={onPick}
+                onBackToAuto={onBackToAuto}
+                onManage={onManage}
+                framed={false}
+            />
+        );
+    }
+    const list = (
+        <ChoiceList
+            t={t}
+            selectedId={pinned?.routeId ?? null}
+            routes={routes}
+            note={busy ? t('auto.chooser.next_time') : routes?.length ? t('auto.chooser.advanced_hint') : undefined}
+            onPick={onPick}
+            onBackToAuto={onBackToAuto}
+            onManage={onManage}
+            framed
+        />
+    );
     return (
         <div
             style={{
@@ -119,13 +160,34 @@ export default function WayChooser({
                     {t('auto.chooser.back')}
                 </Button>
             )}
-            {open && (
+            {open && list}
+        </div>
+    );
+}
+
+function ChoiceList({
+    t,
+    selectedId,
+    routes,
+    note,
+    onPick,
+    onBackToAuto,
+    onManage,
+    framed,
+}: Pick<Props, 't' | 'routes' | 'onPick' | 'onBackToAuto' | 'onManage'> & {
+    /** The selected way, or null for Automatic. */
+    selectedId: string | null;
+    /** The one line under the list, if any. */
+    note?: string;
+    framed: boolean;
+}) {
+    return (
                 <div
                     style={{
                         inlineSize: '100%',
-                        border: '1px solid var(--teal-hairline)',
+                        border: framed ? '1px solid var(--teal-hairline)' : 0,
                         borderRadius: 12,
-                        padding: 12,
+                        padding: framed ? 12 : 0,
                         textAlign: 'start',
                         display: 'flex',
                         flexDirection: 'column',
@@ -135,40 +197,35 @@ export default function WayChooser({
                     <ChoiceRow
                         label={t('auto.chooser.automatic')}
                         sub={t('auto.chooser.automatic_hint')}
-                        selected={!pinned}
+                        selected={selectedId === null}
                         onClick={onBackToAuto}
                     />
                     {routes !== undefined && routes.length > 0 && (
                         <>
-                            <div style={{ fontSize: 12, color: 'var(--ink-soft)', marginBlockStart: 6 }}>
-                                <strong style={{ display: 'block', color: 'var(--paper-dim)' }}>
-                                    {t('auto.chooser.advanced')}
-                                </strong>
-                                {t('auto.chooser.advanced_hint')}
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--muted)', marginBlockStart: 6 }}>
+                                {t('auto.chooser.advanced')}
                             </div>
                             {routes.map((r) => (
                                 <ChoiceRow
                                     key={r.routeId}
                                     label={routeLabel(r)}
-                                    selected={pinned?.routeId === r.routeId}
+                                    selected={selectedId === r.routeId}
                                     onClick={() => onPick(r.routeId)}
                                 />
                             ))}
                         </>
                     )}
-                    {busy && (
-                        <div style={{ fontSize: 12, color: 'var(--ink-soft)' }}>
-                            {t('auto.chooser.next_time')}
+                    {note && (
+                        <div data-note style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.45 }}>
+                            <span>{note}</span>
                         </div>
                     )}
                     <div>
-                        <Button size="sm" variant="ghost" onClick={onManage}>
+                        <Button variant="link" onClick={onManage} dataButton="chooser-files">
                             {t('auto.chooser.manage')}
                         </Button>
                     </div>
                 </div>
-            )}
-        </div>
     );
 }
 

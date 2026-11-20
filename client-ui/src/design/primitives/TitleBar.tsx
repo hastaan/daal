@@ -1,5 +1,6 @@
-// TitleBar — the always-visible top strip on Desktop. Mirrors macOS-
-// style window chrome with a small status pill on the right.
+// TitleBar — the always-visible top strip on Desktop: one status badge
+// on the inline-start side, and (only when something is wrong) one on
+// the inline-end side. Tall enough for a clickable Badge.
 
 import type { ReactNode } from 'react';
 
@@ -17,18 +18,17 @@ export function TitleBar({ left, right }: Props) {
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 gap: 12,
-                padding: '6px 14px',
-                height: 32,
+                padding: '2px 14px',
+                minHeight: 36,
                 background: 'var(--bg-deep)',
                 borderBottom: '1px solid var(--line-soft)',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 11,
+                fontFamily: 'var(--font-body)',
+                fontSize: 12,
                 color: 'var(--muted)',
-                letterSpacing: '0.04em',
             }}
         >
-            <div>{left}</div>
-            <div>{right}</div>
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>{left}</div>
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>{right}</div>
         </div>
     );
 }

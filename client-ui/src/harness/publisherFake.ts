@@ -58,6 +58,11 @@ export const UNFINISHED_RELAY_ID = 2;
 
 function operators(f: FakeShell): OperatorSummary[] {
     if (f.relays === 'none') return [];
+    const both = twoRelays(f);
+    return f.relays === 'one' ? [both[0]] : both;
+}
+
+function twoRelays(f: FakeShell): OperatorSummary[] {
     const now = NOW();
     const live: OperatorSummary = {
         id: LIVE_RELAY_ID,
@@ -306,6 +311,8 @@ export function verdictJson(kind: FakeShell['importVerdict']): string {
             });
         case 'refused':
             return JSON.stringify({ Kind: 3, Reason: 'bundle_signature_invalid' });
+        case 'changed':
+            return JSON.stringify({ Kind: 3, Reason: 'publisher_key_changed' });
         case 'partial':
             return JSON.stringify({
                 Kind: 0,
@@ -340,6 +347,8 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         created_at_unix: NOW() - 3 * DAY,
     };
     let identityMade = f.identity === 'made';
+    // "Open with Daal": the path the shell hands over, once.
+    let opened = f.opened ?? null;
     const op = (a: Args) => Number(a?.operatorId ?? LIVE_RELAY_ID);
 
     const table: Record<string, (a: Args) => unknown> = {
@@ -417,9 +426,28 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         },
         device_custody_level: () => 'hardware',
         device_custody_is_unlocked: () => true,
-        // The file chooser: nothing chosen.
-        'plugin:dialog|open': () => null,
+        // The file chooser: nothing chosen, or the scenario's file.
+        'plugin:dialog|open': () => f.picked ?? null,
+        stage_picked_file: (a) => {
+            const uri = String(a?.uri ?? a?.path ?? f.picked ?? 'picked.sbp');
+            return `/staging/${uri.split('/').pop() || 'picked.sbp'}`;
+        },
+        // A sealed file would need this phone's key; the fixtures are not.
+        recipient_sbpx_sniff: () => false,
+        // ---- Android hand-over (spec G.1, G.2)
+        take_opened_file: () => {
+            const p = opened;
+            opened = null;
+            return p;
+        },
+        share_text: () => null,
     };
+    if (f.engineDown) {
+        table.engine_status = () => ({
+            engine_ready: false,
+            engine_error: 'the engine library did not load',
+        });
+    }
     return (cmd, args) => {
         const h = table[cmd];
         return h ? h(args) : undefined;
@@ -492,6 +520,7 @@ export function installPublisherFake(): boolean {
     );
     guardFetch();
     fakeClipboard();
+    if (fake.android) pretendAndroid();
     patchImports(fake);
     installed = true;
     void runDrive(scenario, fake);
@@ -508,6 +537,20 @@ function patchImports(fake: FakeShell) {
     const answer = async () => verdictJson(fake.importVerdict);
     c.importSbpBytes = answer;
     c.importSbp = answer;
+}
+
+/** Report an Android user agent, so the page offers what a phone has
+ *  (the share sheet). */
+function pretendAndroid() {
+    try {
+        const ua = navigator.userAgent;
+        Object.defineProperty(navigator, 'userAgent', {
+            configurable: true,
+            get: () => (/Android/i.test(ua) ? ua : `${ua} (Linux; Android 10)`),
+        });
+    } catch {
+        /* ignore */
+    }
 }
 
 /** A headless page may not write the clipboard; a phone can. Copying

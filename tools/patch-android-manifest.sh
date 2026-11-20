@@ -88,6 +88,109 @@ add_line_after_internet \
   '    <uses-feature android:name="android.hardware.camera" android:required="false" />' \
   'android.hardware.camera'
 
+# "Open with Daal" and "Share to Daal" (UI spec G.1, X-13).
+#
+# A person inside Iran gets their file in Telegram or WhatsApp. Without
+# these filters Daal is not offered when they tap it, and the only way in
+# is Save -> open Daal -> Add my file -> Choose a file -> Downloads -> the
+# file (I-1, 9 taps). With them it is: tap the file, Daal (4).
+#
+# The filters only bring the file to the page. NOTHING IS IMPORTED: the
+# daal-platform plugin holds it (platform/OpenedFiles.kt; which intents
+# are taken is decided in vpn/OpenedIntent.kt), the page takes it with
+# `take_opened_file` and shows it, and the person decides. The activity is
+# singleTask (the generator's default, enforced below), so a second file
+# while Daal runs reaches onNewIntent and arrives as the
+# `daal://opened-file` event instead of starting a second Daal.
+#
+#   1. VIEW of a content:// URI whose name ends in .sbpx / .sbp, any type.
+#      pathPattern is not a real regex (".*" does not backtrack over a
+#      dot), so the usual one-to-four-dots ladder is listed.
+#   2. VIEW of a content:// URI typed application/octet-stream, any name:
+#      messengers hand over a URI with no file name in it, typed as the
+#      sender typed it (Daal's own share sheet sends octet-stream).
+#   3. SEND of one file typed application/octet-stream (messenger "Share").
+#   4. SEND of text/plain: a Daal file that was pasted into a chat as text.
+#
+# file:// is not listed: no app may send one since Android 7, and the
+# plugin refuses it (it would be read with Daal's own rights).
+#
+# The block sits between BEGIN/END markers and is rewritten on every run,
+# so a change here reaches a manifest an earlier run patched.
+open_with_out="$(python3 - "$MANIFEST" <<'PY'
+import re, sys
+path = sys.argv[1]
+src = open(path, encoding='utf-8').read()
+orig = src
+
+BEGIN = '<!-- daal:open-with BEGIN (tools/patch-android-manifest.sh) -->'
+END = '<!-- daal:open-with END -->'
+I = ' ' * 12   # inside <activity>
+J = ' ' * 16   # inside <intent-filter>
+
+def data(attr, value):
+    return '%s<data android:%s="%s" />' % (J, attr, value)
+
+def intent_filter(action, datas):
+    return '\n'.join(
+        ['%s<intent-filter>' % I,
+         '%s<action android:name="android.intent.action.%s" />' % (J, action),
+         '%s<category android:name="android.intent.category.DEFAULT" />' % J]
+        + datas
+        + ['%s</intent-filter>' % I])
+
+# In the manifest a literal dot in a pathPattern is written "\\." .
+patterns = []
+for ext in ('sbpx', 'sbp'):
+    for dots in range(4):
+        patterns.append('.*' + '\\\\..*' * dots + '\\\\.' + ext)
+
+block = '\n'.join([
+    BEGIN,
+    intent_filter('VIEW', [data('scheme', 'content'), data('host', '*'), data('mimeType', '*/*')]
+                  + [data('pathPattern', p) for p in patterns]),
+    intent_filter('VIEW', [data('scheme', 'content'), data('mimeType', 'application/octet-stream')]),
+    intent_filter('SEND', [data('mimeType', 'application/octet-stream')]),
+    intent_filter('SEND', [data('mimeType', 'text/plain')]),
+    I + END,
+])
+
+# The main activity's opening tag; make it singleTask.
+m = re.search(r'<activity\b[^>]*android:name="\.MainActivity"[^>]*>', src, re.S)
+if not m:
+    sys.stderr.write('FATAL: no .MainActivity <activity> in %s\n' % path)
+    sys.exit(1)
+tag = m.group(0)
+if 'android:launchMode=' in tag:
+    new_tag = re.sub(r'android:launchMode="[^"]*"', 'android:launchMode="singleTask"', tag)
+else:
+    new_tag = tag.replace('<activity', '<activity\n            android:launchMode="singleTask"', 1)
+src = src[:m.start()] + new_tag + src[m.start() + len(tag):]
+act_start = m.start()
+act_end = src.index('</activity>', act_start)
+
+if BEGIN in src:
+    b = src.index(BEGIN)
+    e = src.index(END, b) + len(END)
+    if not (act_start < b < act_end):
+        sys.stderr.write('FATAL: the open-with block is outside .MainActivity\n')
+        sys.exit(1)
+    src = src[:b] + block.lstrip() + src[e:]
+else:
+    launcher = src.find('android.intent.category.LAUNCHER', act_start, act_end)
+    if launcher < 0:
+        sys.stderr.write('FATAL: no LAUNCHER intent-filter in .MainActivity to anchor on\n')
+        sys.exit(1)
+    close = src.index('</intent-filter>', launcher) + len('</intent-filter>')
+    src = src[:close] + '\n' + I + block + src[close:]
+
+if src != orig:
+    open(path, 'w', encoding='utf-8').write(src)
+    print('changed')
+PY
+)" || exit 1
+[ "$open_with_out" = "changed" ] && changed=1
+
 if [ "$changed" -eq 1 ]; then
   echo "patched: $MANIFEST"
 else
@@ -95,6 +198,8 @@ else
 fi
 
 # Prove the postcondition rather than trusting the edit.
-for needle in 'android.permission.CAMERA' 'android.hardware.camera'; do
+for needle in 'android.permission.CAMERA' 'android.hardware.camera' \
+  'daal:open-with BEGIN' 'android.intent.action.SEND' 'android:mimeType="text/plain"' \
+  'android:launchMode="singleTask"'; do
   grep -qF "$needle" "$MANIFEST" || { echo "FATAL: $needle missing after patch" >&2; exit 1; }
 done

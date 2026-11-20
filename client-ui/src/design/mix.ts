@@ -30,13 +30,18 @@ export const PALETTE: Record<string, string> = {
     cyan: '#48b7bd',
 };
 
+/** Tokens defined as another token in tokens.css (`--info: var(--cyan)`). */
+export const ALIASES: Record<string, string> = {
+    info: 'cyan',
+};
+
 type Rgba = [number, number, number, number];
 
 function parse(c: string): Rgba | null {
     const s = c.trim();
     if (s === 'transparent') return [0, 0, 0, 0];
     const v = /^var\(--([a-z0-9-]+)\)$/.exec(s);
-    const hex = v ? PALETTE[v[1]] : s;
+    const hex = v ? PALETTE[ALIASES[v[1]] ?? v[1]] : s;
     const m = hex ? /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex) : null;
     if (!m) return null;
     return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16), 1];

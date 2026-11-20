@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HarnessContract } from '../backends/harness';
 import type { AutoStatus, ConnState, ConnectionSummary, RouteDisplayRow } from '../contract/D2Contract';
 import { startConnect } from './autoConnect';
-import { mainScreenView, retryTarget, runMainTap, type MainScreenInput } from './mainScreen';
+import { failureDetailsShown, homeBadges, mainScreenView, retryTarget, runMainTap, usingName, type MainScreenInput } from './mainScreen';
 import type { Scenario } from '../harness/scenarios';
 import legacyEn from '../i18n/en.json';
 import en from '../i18n/d2/d2-extra.en.json';
@@ -112,14 +112,18 @@ describe('the main screen: a tap connects by itself', () => {
         const p = new Page(new HarnessContract({ stepMs: 0, scenario: scenario([dead('r1'), way('r2'), way('r3')]) }));
         await p.poll();
         const before = p.view();
-        expect(before.headline).toBe('Press to connect.');
+        expect(before.headline).toBe('Tap to connect');
+        expect(before.tone).toBe('ready');
+        expect(before.primary).toBeUndefined();
         expect(before.plan).toEqual({ kind: 'auto' });
         await p.tap();
         expect(p.calls).toEqual(['connectAuto']);
         await p.poll();
         const after = p.view();
         expect(after.state).toBe('connected');
-        expect(after.headline).toBe("You're connected.");
+        expect(after.headline).toBe('Connected');
+        expect(after.line).toBe('Using Pars');
+        expect(after.tone).toBe('good');
         // It moved past a way that did not work, and says so.
         expect(after.connectedNoteKey).toBe('auto.note.moved_on');
         expect(after.engineAuto).toBe(true);
@@ -140,8 +144,13 @@ describe('the main screen: a tap connects by itself', () => {
         await p.poll();
         const v = p.view();
         expect(v.needFile).toBe(true);
-        expect(v.headline).toBe('Add your file to get started.');
-        expect(v.tapLabel).toBe('Add your file');
+        expect(v.headline).toBe('Add your file');
+        expect(v.tone).toBe('none');
+        // One gold button and one link: "Add my file", "No file yet? Send my address".
+        expect(v.primary).toBe('add_file');
+        expect(v.link).toBe('no_file_address');
+        expect(v.line).toBeUndefined();
+        expect(v.tapLabel).toBe('Add my file');
         await p.tap();
         expect(p.calls).toEqual(['openAddSheet']);
     });
@@ -154,8 +163,13 @@ describe('the main screen: a tap connects by itself', () => {
         const v = p.view();
         expect(v.failure).toBeDefined();
         expect(v.failure!.tried.map((x) => x.routeId)).toEqual(['r1', 'r2']);
-        expect(v.headline).toBe(t(`auto.verdict.${v.failure!.verdict}`));
-        expect(v.headline).not.toBe('Press to connect.');
+        // The headline is one short line; the verdict's sentence is the
+        // developer detail, and what to do is the line under it.
+        expect(v.headline).toBe("Couldn't connect");
+        expect(v.detail).toBe(t(`auto.verdict.${v.failure!.verdict}`));
+        expect(v.line).toBe(v.failure!.actionText);
+        expect(v.primary).toBe('try_again');
+        expect(v.tone).toBe('bad');
         expect(v.stateLabel).toBe('Not connected');
         expect(v.failure!.noRetry).toBe(false);
         expect(v.failure!.retryOff).toBe(false);
@@ -180,14 +194,18 @@ describe('the main screen: a tap connects by itself', () => {
         const v = p.view();
         expect(v.state).toBe('connecting');
         expect(v.showProgress).toBe(true);
-        expect(v.headline).toBe('Trying way 1 of 2…');
+        // "Connecting…" and nothing else: no "way 1 of 2" on Home.
+        expect(v.headline).toBe('Connecting…');
+        expect(v.line).toBeUndefined();
+        expect(v.detail).toBe('Trying way 1 of 2…');
+        expect(v.tone).toBe('busy');
         expect(v.tapLabel).toBe('Cancel');
         expect(v.plan).toEqual({ kind: 'disconnect' });
         await p.tap();
         expect(p.calls).toEqual(['connectAuto', 'disconnect']);
         await pending;
         await p.poll();
-        expect(p.view().headline).toBe('Press to connect.');
+        expect(p.view().headline).toBe('Tap to connect');
     });
 });
 
@@ -220,7 +238,11 @@ describe('the main screen: no dead ends', () => {
 
     it('"Daal will not choose any of these": says so, offers choosing by hand, and no futile Try again', () => {
         const v = view({ conn: failed('none_usable') });
-        expect(v.headline).toBe('Daal does not pick any of the ways on this phone by itself.');
+        expect(v.detail).toBe('Daal does not pick any of the ways on this phone by itself.');
+        expect(v.headline).toBe("Couldn't connect");
+        // No futile Try again; the link is choosing by hand.
+        expect(v.primary).toBeUndefined();
+        expect(v.link).toBe('choose');
         expect(v.failure).toMatchObject({ wantsChooser: true, noRetry: true, actionText: 'You can choose one yourself.' });
         // ...and once they have chosen, the tap connects THAT — the
         // automatic failure still on screen is not the pin's.
@@ -242,11 +264,14 @@ describe('the main screen: no dead ends', () => {
         const resting = routes.map((r, i) => ({ ...r, inCooldown: true, cooldownUntilUnixMs: 1_000_000 + (i + 3) * 60_000 }));
         const remembered = { verdict: 'all_failed', tried: [] };
         const v = view({ conn: failed('all_cooling_down'), routes: resting, remembered });
-        expect(v.headline).toBe('None of the ways in your file worked on this network.');
+        expect(v.detail).toBe('None of the ways in your file worked on this network.');
         expect(v.failure).toMatchObject({ retryOff: true, restText: 'You can try again in about 3 min.' });
+        // The wait is the one line under the headline.
+        expect(v.line).toBe('You can try again in about 3 min.');
         // With nothing remembered the engine's own sentence stands, once.
         const bare = view({ conn: failed('all_cooling_down'), routes: resting });
-        expect(bare.headline).toBe('Every way failed a little while ago, so Daal is giving them a rest.');
+        expect(bare.detail).toBe('Every way failed a little while ago, so Daal is giving them a rest.');
+        expect(bare.line).toBe('Try again in about 3 min.');
         expect(bare.failure!.actionText).toBe('Try again in about 3 min.');
         expect(bare.failure!.restText).toBeUndefined();
     });
@@ -255,7 +280,8 @@ describe('the main screen: no dead ends', () => {
         const own: ConnectionSummary = { state: 'error', mode: 'normal', routeCheck: 'failed', routeRunning: false, auto: auto({}) };
         const v = view({ conn: own, pinnedRaw: 'r2' });
         expect(v.pinnedFailed).toBe(true);
-        expect(v.headline).toBe('The one you chose did not work.');
+        expect(v.headline).toBe("That way didn't work");
+        expect(v.primary).toBe('let_daal_choose');
         // Not for the two failures that rest nothing (try the same again).
         expect(view({ conn: { ...own, routeCheckCategory: 'path_too_slow' }, pinnedRaw: 'r2' }).pinnedFailed).toBe(false);
         // Not without a pin.
@@ -266,7 +292,11 @@ describe('the main screen: no dead ends', () => {
         const held = failed('relay_unreachable', { holding: true, auto: auto({ state: 'failed', mode: true, verdict: 'relay_unreachable' }) });
         const v = view({ conn: held });
         expect(v.holding).toBe(true);
-        expect(v.headline).toBe('Connection lost. Daal keeps trying.');
+        expect(v.headline).toBe('Reconnecting…');
+        expect(v.line).toBe('Other apps have no internet until Daal reconnects or you stop.');
+        expect(v.primary).toBe('try_now');
+        expect(v.link).toBe('disconnect');
+        expect(v.tone).toBe('holding');
         expect(v.stateLabel).toBe('Connection lost');
         expect(v.plan).toEqual({ kind: 'disconnect' });
         expect(v.tapLabel).toBe('Disconnect');
@@ -285,7 +315,121 @@ describe('the main screen: no dead ends', () => {
 
     it('the engine refused the store read (an unknown code): the generic sentence, never the code', () => {
         const v = view({ conn: failed('store_unreadable') });
-        expect(v.headline).toBe('Daal could not connect.');
-        expect(v.headline).not.toContain('store');
+        expect(v.detail).toBe('Daal could not connect.');
+        expect(v.headline).toBe("Couldn't connect");
+        expect(v.line).not.toContain('store');
+        expect(v.detail).not.toContain('store');
+    });
+});
+
+describe('Home: one headline, one line, at most one button and one link (spec C2)', () => {
+    const base = (over: Partial<MainScreenInput>) =>
+        mainScreenView({
+            t,
+            locale: 'en',
+            nowMs: 1_000_000,
+            conn: null,
+            optimistic: null,
+            connectInFlight: false,
+            intent: null,
+            hostFailed: false,
+            pinnedRaw: null,
+            routes: [way('r1'), way('r2')],
+            wasConnected: false,
+            remembered: undefined,
+            ...over,
+        });
+    const failedWith = (verdict: string): ConnectionSummary => ({
+        state: 'error',
+        mode: 'normal',
+        routeCheck: 'failed',
+        routeRunning: false,
+        auto: auto({ state: 'failed', verdict }),
+    });
+
+    it('connected shows a visible Disconnect link; connecting shows Cancel', () => {
+        const up = base({ conn: { state: 'connected', mode: 'normal', routeCheck: 'ok', routeRunning: false } as ConnectionSummary });
+        expect(up.headline).toBe(t('conn.headline_connected'));
+        expect(up.primary).toBeUndefined();
+        expect(up.link).toBe('disconnect');
+        const going = base({ conn: { state: 'connecting', mode: 'normal', routeRunning: false } as ConnectionSummary });
+        expect(going.link).toBe('cancel');
+    });
+    it('no internet: its own headline and line, Try again, and no link', () => {
+        const v = base({ conn: failedWith('network_down') });
+        expect(v.headline).toBe('No internet');
+        expect(v.line).toBe('Check Wi-Fi or mobile data.');
+        expect(v.lineNoInternet).toBe(true);
+        expect(v.primary).toBe('try_again');
+        expect(v.link).toBeUndefined();
+    });
+    it('a failure that wants a file links "Add a new file" — never also the chooser', () => {
+        const v = base({ conn: failedWith('no_routes') });
+        expect(v.link).toBe('add_new_file');
+        expect(v.line).toBe('Add the file you were sent.');
+        expect(base({ conn: failedWith('all_need_new_file') }).link).toBeUndefined();
+    });
+    it('every action line under a failure is one short line (≤ 60 characters)', () => {
+        for (const verdict of ['no_routes', 'all_need_new_file', 'all_expired_or_revoked', 'network_down', 'udp_blocked_here',
+            'relay_unreachable', 'name_blocked', 'address_blocked', 'all_failed', 'none_usable', 'store_unreadable']) {
+            const line = base({ conn: failedWith(verdict) }).line ?? '';
+            expect(line.length, verdict).toBeLessThanOrEqual(60);
+        }
+    });
+    it('a connect the relay could not carry: "Couldn\'t connect" and the line that says whom to tell', () => {
+        const own: ConnectionSummary = {
+            state: 'error',
+            mode: 'normal',
+            routeCheck: 'failed',
+            routeRunning: false,
+            routeCheckCategory: 'relay_no_egress',
+        };
+        const v = base({ conn: own });
+        expect(v.headline).toBe("Couldn't connect");
+        expect(v.line).toBe("The server can't reach the internet. Tell the person who gave you the file.");
+        expect(v.primary).toBe('try_again');
+        expect(base({ conn: { ...own, routeCheckCategory: 'path_too_slow' } }).line).toBe('The network is too slow right now.');
+    });
+    it('connected and slow: "Connected", the way in use, and the Slow badge', () => {
+        const c: ConnectionSummary = {
+            state: 'connected',
+            mode: 'lifeline',
+            routeCheck: 'degraded',
+            activeRoute: way('r1', { publisherName: 'Maman' }),
+        };
+        const v = base({ conn: c });
+        expect(v.headline).toBe('Connected');
+        expect(v.line).toBe('Using Maman');
+        expect(v.slow).toBe(true);
+        expect(v.tone).toBe('slow');
+        expect(v.primary).toBeUndefined();
+        // Slow first, then Lifeline; at most two.
+        // The engine is not choosing here (no auto block): Manual.
+        expect(homeBadges(v, c.mode)).toEqual(['slow', 'manual']);
+        expect(homeBadges({ ...v, engineAuto: true }, c.mode)).toEqual(['slow', 'lifeline']);
+        expect(homeBadges({ ...v, pinnedId: 'r1' }, c.mode)).toEqual(['slow', 'manual']);
+        expect(homeBadges({ ...v, slow: false, pinnedId: 'r1' }, 'normal')).toEqual(['manual']);
+        expect(homeBadges({ ...v, slow: false, engineAuto: true }, 'normal')).toEqual([]);
+    });
+    it('a lost connection being retried: "Reconnecting…", amber', () => {
+        // The backend reads a connected route that stopped carrying as
+        // "connecting" (lib/routeCheck.ts connStateWithCheck).
+        const v = base({ conn: { state: 'connecting', mode: 'normal', routeCheck: 'failed', routeRunning: true } });
+        expect(v.state).toBe('connecting');
+        expect(v.headline).toBe('Reconnecting…');
+        expect(v.tone).toBe('holding');
+    });
+    it('"Using {name}" falls back to our own words for a route whose details could not be read', () => {
+        expect(usingName({ state: 'connected', mode: 'normal', activeRoute: way('r9', { publisherName: '', routeNickname: '' }) }, t)).toBeTruthy();
+        expect(usingName({ state: 'disconnected', mode: 'normal' }, t)).toBeUndefined();
+    });
+});
+
+describe('the failure Details fold', () => {
+    it('is drawn when ways were tried, not when the phone has no internet (nothing tried)', () => {
+        expect(failureDetailsShown([{}], false)).toBe(true);
+        expect(failureDetailsShown([], false)).toBe(false);
+        // Developer mode keeps it, for the verdict code.
+        expect(failureDetailsShown([], true)).toBe(true);
     });
 });

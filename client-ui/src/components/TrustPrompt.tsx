@@ -1,12 +1,21 @@
-// TrustPrompt.tsx — modal trust prompt with EN+FA word grid.
-// Used by AddSheet and ScanSheet — those two files are its ONLY importers.
-// (The onboarding R4 step renders its own copy via t('trust.body'); it does
-// not mount this component.)
+// TrustPrompt.tsx — "Is this file from {name}?" (spec C3.3a).
+//
+// A file from a publisher this phone has never met is not added until
+// the person answers. The check words come from the engine's verdict:
+// four English words and four Persian words, from DIFFERENT bytes of the
+// key (one set is not a translation of the other), so both stay on
+// screen — the set in the page's language first and large.
+//
+// Two answers: "Yes, I know them" (trust) and "No". "Use this file only"
+// (trust this bundle, not the publisher) is behind "Other choices".
+// Used by the add sheet for pasted, chosen, opened and scanned files.
 
+import { useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type { PreviewedBundle, TrustDecision } from '../contract/D2Contract';
 import { useDensity } from '../design/DensityProvider';
-import { Button } from '../design/primitives';
+import { Button, Disclosure, FingerprintThumb, Icon } from '../design/primitives';
+import { effectiveLocale } from '../lib/i18n';
 import { parseVerdict, type TrustResolution } from '../lib/importVerdict';
 
 interface Props {
@@ -16,19 +25,28 @@ interface Props {
      *  Callers must not report success without checking it — see
      *  `trustFailure` in lib/importVerdict. */
     onResolve: (r: TrustResolution) => void;
+    /** The page language; read from the app when absent. */
+    locale?: 'en' | 'fa';
 }
 
-export default function TrustPrompt({ t, preview, onResolve }: Props) {
+export function trustTitle(t: (k: string) => string, name: string): string {
+    return name.trim() ? t('trust.title').replace('{name}', name.trim()) : t('trust.title_anon');
+}
+
+export default function TrustPrompt({ t, preview, onResolve, locale }: Props) {
     const contract = useContract();
     const { density } = useDensity();
     const isPhone = density === 'phone';
+    const [busy, setBusy] = useState(false);
+    const lang = locale ?? effectiveLocale();
     const choose = async (decision: TrustDecision) => {
+        if (busy) return;
+        setBusy(true);
         // resolveTrustPrompt is the call that COMMITS the routes, and it
         // re-verifies the pending bundle first, so it can legitimately
-        // refuse here — a revocation that landed while the word grid was
-        // on screen, an expiry, or a failed save. Both its return value
-        // and its exception are load-bearing; this used to discard both
-        // and report success either way.
+        // refuse here — a revocation that landed while the words were on
+        // screen, an expiry, or a failed save. Both its return value and
+        // its exception are load-bearing.
         let verdict = null;
         let error: string | null = null;
         try {
@@ -36,130 +54,123 @@ export default function TrustPrompt({ t, preview, onResolve }: Props) {
             verdict = parseVerdict(raw ?? '');
         } catch (e) {
             error = e instanceof Error ? e.message : String(e);
+        } finally {
+            setBusy(false);
         }
         onResolve({ decision, verdict, error });
     };
 
-    const enWords = preview.fingerprintEN.split(/\s+/);
-    const faWords = preview.fingerprintFA.split(/\s+/);
+    const enWords = preview.fingerprintEN.split(/\s+/).filter(Boolean);
+    const faWords = preview.fingerprintFA.split(/\s+/).filter(Boolean);
+    const sets = [
+        { lang: 'fa' as const, words: faWords, label: t('trust.words.fa') },
+        { lang: 'en' as const, words: enWords, label: t('trust.words.en') },
+    ];
+    if (lang === 'en') sets.reverse();
+    const title = trustTitle(t, preview.publisherName);
 
     return (
-        <div
-            style={{
-                background: 'var(--teal-deep)',
-                border: '1px solid var(--teal-border)',
-                borderRadius: 'var(--radius-md)',
-                padding: 16,
-                marginTop: 18,
-            }}
-            role="region"
-            aria-label={t('trust.title')}
-        >
-            <h3
-                style={{
-                    fontFamily: 'var(--font-display)',
-                    fontSize: 16,
-                    color: 'var(--paper)',
-                    margin: 0,
-                    marginBottom: 4,
-                }}
-            >
-                {t('trust.title')}
-            </h3>
-            <p
-                style={{
-                    color: 'var(--paper-dim)',
-                    fontSize: 13,
-                    margin: 0,
-                    marginBottom: 12,
-                }}
-            >
-                {t('trust.body')}
-            </p>
-            <div
-                style={{
-                    display: 'grid',
-                    gridTemplateColumns: isPhone ? '1fr' : '1fr 1fr',
-                    gap: 12,
-                    marginBottom: 14,
-                }}
-            >
-                <WordGrid title={t('trust.fingerprint.en')} words={enWords} />
-                <WordGrid
-                    title={t('trust.fingerprint.fa')}
-                    words={faWords}
-                    rtl
-                />
+        <div role="region" aria-label={title} data-testid="trust-prompt" style={{ display: 'grid', gap: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <h2
+                    style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontFamily: 'var(--font-display)',
+                        fontSize: 'var(--fs-xl)',
+                        lineHeight: 1.25,
+                        fontWeight: 600,
+                        color: 'var(--fg)',
+                        margin: 0,
+                    }}
+                >
+                    <bdi>{title}</bdi>
+                </h2>
+                {preview.fingerprintHex && <FingerprintThumb fingerprint={preview.fingerprintHex} size={48} />}
+            </div>
+            <p style={{ color: 'var(--muted)', fontSize: 14, margin: 0 }}>{t('trust.body')}</p>
+            <div style={{ display: 'grid', gap: 12 }}>
+                {sets.map((s, i) => (
+                    <WordSet key={s.lang} words={s.words} rtl={s.lang === 'fa'} large={i === 0} label={s.label} cols={isPhone ? 2 : 4} />
+                ))}
             </div>
             <div
                 style={{
                     display: 'flex',
                     gap: 8,
-                    justifyContent: isPhone ? 'stretch' : 'flex-end',
-                    flexDirection: isPhone ? 'column-reverse' : 'row',
+                    flexDirection: isPhone ? 'column' : 'row-reverse',
+                    justifyContent: isPhone ? undefined : 'flex-start',
                 }}
             >
-                <Button variant="ghost" onClick={() => choose(2)} block={isPhone}>
-                    {t('trust.cancel')}
+                <Button onClick={() => void choose(0)} block={isPhone} disabled={busy} dataButton="trust-yes">
+                    {t('trust.trust')}
                 </Button>
                 <Button
                     variant="secondary"
-                    onClick={() => choose(1)}
+                    onClick={() => void choose(2)}
                     block={isPhone}
+                    disabled={busy}
+                    dataButton="trust-no"
                 >
+                    {t('trust.cancel')}
+                </Button>
+            </div>
+            <Disclosure summary={t('trust.more')} dataButton="trust-more">
+                <Button variant="secondary" block onClick={() => void choose(1)} disabled={busy} dataButton="trust-once">
                     {t('trust.once')}
                 </Button>
-                <Button onClick={() => choose(0)} block={isPhone}>
-                    {t('trust.trust')}
-                </Button>
-            </div>
+            </Disclosure>
         </div>
     );
 }
 
-function WordGrid({
-    title,
+/** A set of check words in even rows (4 across, 2 on a phone), so no
+ *  word is ever left alone on a line of its own. */
+function WordSet({
     words,
     rtl,
+    large,
+    label,
+    cols,
 }: {
-    title: string;
     words: string[];
-    rtl?: boolean;
+    rtl: boolean;
+    large: boolean;
+    label: string;
+    cols: number;
 }) {
     return (
-        <div style={{ direction: rtl ? 'rtl' : 'ltr' }}>
-            <div
-                style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    letterSpacing: '0.16em',
-                    textTransform: 'uppercase',
-                    color: 'var(--ink-mute)',
-                    marginBottom: 6,
-                }}
-            >
-                {title}
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {words.map((w, i) => (
-                    <span
-                        key={i}
-                        style={{
-                            background: 'var(--teal-raised)',
-                            border: '1px solid var(--teal-border)',
-                            borderRadius: 'var(--radius-sm)',
-                            padding: '4px 10px',
-                            fontFamily: rtl ? 'var(--font-fa)' : 'var(--font-mono)',
-                            fontSize: 13,
-                            color: 'var(--paper)',
-                        }}
-                    >
-                        {w}
-                    </span>
-                ))}
-            </div>
+        <div
+            role="group"
+            aria-label={label}
+            dir={rtl ? 'rtl' : 'ltr'}
+            style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}
+        >
+            <span aria-hidden style={{ color: 'var(--muted)', display: 'inline-flex', marginInlineEnd: 2, paddingBlockStart: large ? 8 : 4 }}>
+                <Icon name="globe" size={large ? 18 : 14} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(max-content, 1fr))`, gap: 6 }}>
+            {words.map((w, i) => (
+                <span
+                    key={i}
+                    style={{
+                        textAlign: 'center',
+                        // A check word is never broken inside: the column
+                        // grows to the word instead.
+                        whiteSpace: 'nowrap',
+                        background: 'var(--surface-2)',
+                        border: '1px solid var(--line-soft)',
+                        borderRadius: 'var(--radius-sm)',
+                        padding: large ? '6px 4px' : '3px 4px',
+                        fontFamily: rtl ? 'var(--font-fa)' : 'var(--font-mono)',
+                        fontSize: large ? 18 : 13,
+                        color: large ? 'var(--fg)' : 'var(--muted)',
+                    }}
+                >
+                    {w}
+                </span>
+            ))}
+            </span>
         </div>
     );
 }
-
-

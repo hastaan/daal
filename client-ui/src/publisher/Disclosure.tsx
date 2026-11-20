@@ -12,9 +12,11 @@
 // they lay out the same in a right-to-left language.
 
 import type { ReactNode } from 'react';
+import { useState } from 'react';
+import { Icon } from '../design/primitives';
 
 const BODY: React.CSSProperties = {
-    fontSize: 12,
+    fontSize: 13,
     color: 'var(--muted)',
     lineHeight: 1.55,
 };
@@ -23,23 +25,54 @@ export function WhatIsThis({
     label,
     children,
     defaultOpen,
+    dataButton,
 }: {
     /** "What is this?" — or a more specific question. */
     label: string;
     children: ReactNode;
     defaultOpen?: boolean;
+    dataButton?: string;
 }) {
+    // Still a <details> (the content is in the page, folded, so the raw
+    // text a helper needs is there and tests can see it is inside the
+    // fold), but drawn like the app's Disclosure (spec B.5): no sideways
+    // triangle, which points the wrong way in Persian, and a chevron that
+    // turns when it opens.
+    const [open, setOpen] = useState(!!defaultOpen);
     return (
-        <details open={defaultOpen}>
+        <details
+            open={defaultOpen}
+            onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+        >
             <summary
+                className="daal-fold"
+                data-button={dataButton}
                 style={{
-                    fontSize: 12,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    listStyle: 'none',
+                    fontSize: 13,
+                    fontWeight: 600,
                     color: 'var(--gold-warm)',
                     cursor: 'pointer',
-                    padding: '6px 0',
+                    // A 44 px tap target (E.1.5).
+                    minHeight: 44,
+                    lineHeight: 1.5,
                 }}
             >
-                {label}
+                <span>{label}</span>
+                <span
+                    aria-hidden
+                    style={{
+                        display: 'inline-flex',
+                        flexShrink: 0,
+                        transition: 'transform var(--t-fast)',
+                        transform: open ? 'rotate(180deg)' : 'none',
+                    }}
+                >
+                    <Icon name="chevronDown" size={16} />
+                </span>
             </summary>
             <div style={{ ...BODY, display: 'grid', gap: 8, paddingBottom: 6 }}>
                 {children}
@@ -100,8 +133,16 @@ export function Collapsible({
                     {summary && <span style={BODY}>{summary}</span>}
                 </span>
                 {trailing}
-                <span aria-hidden style={{ color: 'var(--dim)', fontSize: 14 }}>
-                    {open ? '▴' : '▾'}
+                <span
+                    aria-hidden
+                    style={{
+                        color: 'var(--muted)',
+                        display: 'inline-flex',
+                        transition: 'transform var(--t-fast)',
+                        transform: open ? 'rotate(180deg)' : 'none',
+                    }}
+                >
+                    <Icon name="chevronDown" size={18} />
                 </span>
             </button>
             {open && <div style={{ display: 'grid', gap: 8 }}>{children}</div>}

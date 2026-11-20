@@ -1,24 +1,25 @@
-// DesktopShell.tsx — large-viewport host (≥1024px) built from
-// primitives in client-ui/src/design/primitives. Replaces the
-// pre-v0.3 D2Shell (deleted once this shell superseded it).
+// DesktopShell.tsx — the computer host (≥1024 px), spec C9.
+//
+// A calm desktop window, not a stretched phone or a cockpit:
+//   - a thin status strip on top: one connection badge, and a warning
+//     only when the engine stops answering (StatusStrip);
+//   - a 220 px sidebar with the same places as the phone tabs and no
+//     section labels; shortcut hints show on hover/focus only; at the
+//     bottom a quiet "Erase Daal…" row and the version;
+//   - the page. Status is an inner page of Settings, as on the phone.
 
-import { useEffect, useMemo, useState } from 'react';
-import { applyDir, type Locale } from '../lib/i18n';
+import { useEffect, useState } from 'react';
+import type { Locale } from '../lib/i18n';
 import { Prefs } from '../lib/prefs';
-import { useContract } from '../contract/ContractProvider';
-import {
-    SidebarFull,
-    TitleBar,
-    Button,
-    StatusPill,
-    type SectionId,
-} from '../design/primitives';
+import { SidebarFull, Icon, shortcutLabel } from '../design/primitives';
 import ConnectionPage from '../d2pages/ConnectionPage';
 import NetworkPage from '../d2pages/NetworkPage';
-import StatusPage from '../d2pages/StatusPage';
-import SettingsPage from '../d2pages/SettingsPage';
+import SettingsPage, { VersionText } from '../d2pages/SettingsPage';
 import PublisherPage from '../d2pages/PublisherPage';
 import PanicWipeDialog from '../components/PanicWipeDialog';
+import OpenedFileToast from './OpenedFileToast';
+import StatusStrip from './StatusStrip';
+import { useShellNav, visibleSections, type ShellSection } from './useShellNav';
 
 interface Props {
     locale: Locale;
@@ -28,80 +29,36 @@ interface Props {
     t: (k: string) => string;
 }
 
-export default function DesktopShell({
-    locale,
-    onLocaleChange,
-    engineHealthy,
-    appVersion,
-    t,
-}: Props) {
-    const contract = useContract();
-    const [section, setSection] = useState<SectionId>('connection');
-    const [publisherEnabled, setPublisherEnabled] = useState(
-        Prefs.publisherEnabled(),
-    );
-    const [showPanic, setShowPanic] = useState(false);
+export const NAV_LABEL_KEY: Record<ShellSection, string> = {
+    connection: 'nav.connection',
+    network: 'nav.network',
+    publisher: 'nav.publisher',
+    settings: 'nav.settings',
+};
 
-    const [isConnected, setIsConnected] = useState(false);
-    const [connectedSinceUnixMs, setConnectedSinceUnixMs] = useState<
-        number | null
-    >(null);
-
+/** Ctrl/⌘ + 1..n picks the n-th visible place. */
+export function useNavShortcuts(order: ShellSection[], pick: (s: ShellSection) => void) {
+    const key = order.join(',');
     useEffect(() => {
-        let cancelled = false;
-        const tick = async () => {
-            try {
-                const c = await contract.connectionSummary();
-                if (cancelled) return;
-                const nowConnected = c.state === 'connected';
-                setIsConnected(nowConnected);
-                if (nowConnected && connectedSinceUnixMs == null) {
-                    setConnectedSinceUnixMs(
-                        c.connectedSinceUnixMs ?? Date.now(),
-                    );
-                } else if (!nowConnected && connectedSinceUnixMs != null) {
-                    setConnectedSinceUnixMs(null);
-                }
-            } catch {
-                /* ignored */
-            }
-        };
-        tick();
-        const id = setInterval(tick, 2000);
-        return () => {
-            cancelled = true;
-            clearInterval(id);
-        };
-    }, [contract, connectedSinceUnixMs]);
-
-    useEffect(() => {
+        const order = key.split(',') as ShellSection[];
         const onKey = (e: KeyboardEvent) => {
-            if (!(e.ctrlKey || e.metaKey)) return;
-            const map: Record<string, SectionId> = {
-                '1': 'connection',
-                '2': 'network',
-                '3': 'status',
-                '4': 'settings',
-                '5': 'publisher',
-            };
-            const next = map[e.key];
-            if (next) {
-                if (next === 'publisher' && !publisherEnabled) return;
-                e.preventDefault();
-                setSection(next);
-            }
+            if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+            const n = Number(e.key);
+            if (!Number.isInteger(n) || n < 1 || n > order.length) return;
+            e.preventDefault();
+            pick(order[n - 1]);
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [publisherEnabled]);
+    }, [key, pick]);
+}
 
-    const navigate = useMemo(
-        () => (target: SectionId) => {
-            if (target === 'publisher' && !publisherEnabled) return;
-            setSection(target);
-        },
-        [publisherEnabled],
-    );
+export default function DesktopShell({ locale, onLocaleChange, engineHealthy, appVersion, t }: Props) {
+    const [publisherEnabled, setPublisherEnabled] = useState(Prefs.publisherEnabled());
+    const nav = useShellNav(publisherEnabled);
+    const order = visibleSections(publisherEnabled);
+    useNavShortcuts(order, nav.pick);
+
 
     return (
         <div
@@ -114,152 +71,116 @@ export default function DesktopShell({
                 minHeight: 0,
             }}
         >
-            <TitleBar
-                left={
-                    isConnected ? (
-                        <StatusPill tone="good" glow>
-                            {t('connection.connected')} ·{' '}
-                            {formatElapsed(connectedSinceUnixMs)}
-                        </StatusPill>
-                    ) : (
-                        <StatusPill tone="neutral" dotless>
-                            {t('connection.disconnected')}
-                        </StatusPill>
-                    )
-                }
-                right={
-                    <span>
-                        {engineHealthy
-                            ? t('engine.healthy')
-                            : t('engine.degraded')}
-                    </span>
-                }
+            <StatusStrip
+                t={t}
+                locale={locale}
+                engineHealthy={engineHealthy}
+                onOpenConnection={() => nav.pick('connection')}
+                onOpenStatus={() => nav.navigate('status')}
             />
             <div
                 style={{
                     flex: 1,
                     minHeight: 0,
                     display: 'grid',
-                    gridTemplateColumns: '240px 1fr',
+                    gridTemplateColumns: '220px minmax(0, 1fr)',
                 }}
             >
                 <SidebarFull
-                    active={section}
-                    onChange={navigate}
+                    width={220}
+                    active={nav.section}
+                    onChange={(id) => nav.pick(id as ShellSection)}
                     sections={[
                         {
-                            label: t('nav.section.main'),
-                            items: [
-                                {
-                                    id: 'connection',
-                                    label: t('nav.connection'),
-                                    shortcut: '⌘1',
-                                },
-                                {
-                                    id: 'network',
-                                    label: t('nav.network'),
-                                    shortcut: '⌘2',
-                                },
-                                {
-                                    id: 'status',
-                                    label: t('nav.status'),
-                                    shortcut: '⌘3',
-                                },
-                                {
-                                    id: 'settings',
-                                    label: t('nav.settings'),
-                                    shortcut: '⌘4',
-                                },
-                            ],
-                        },
-                        {
-                            label: t('nav.section.advanced'),
-                            items: [
-                                {
-                                    id: 'publisher',
-                                    label: t('nav.publisher'),
-                                    shortcut: '⌘5',
-                                    badge: publisherEnabled
-                                        ? undefined
-                                        : t('badge_off'),
-                                    disabled: !publisherEnabled,
-                                },
-                            ],
+                            label: '',
+                            items: order.map((id, i) => ({
+                                id,
+                                label: t(NAV_LABEL_KEY[id]),
+                                shortcut: shortcutLabel(i + 1),
+                            })),
                         },
                     ]}
-                    footer={
-                        <Button
-                            variant="danger"
-                            block
-                            onClick={() => setShowPanic(true)}
-                        >
-                            {t('settings.panic_wipe')}
-                        </Button>
-                    }
+                    footer={<SidebarFooter t={t} appVersion={appVersion} onErase={() => nav.setEraseOpen(true)} />}
                 />
-                <div
+                <main
                     style={{
-                        display: 'flex',
-                        flexDirection: 'column',
                         minWidth: 0,
                         minHeight: 0,
+                        overflow: 'auto',
+                        background: 'var(--bg)',
+                        display: 'flex',
                     }}
                 >
-                    <main
-                        style={{
-                            flex: 1,
-                            minHeight: 0,
-                            overflow: 'auto',
-                            background: 'var(--bg)',
-                            display: 'flex',
-                        }}
-                    >
-                        {section === 'connection' && (
-                            <ConnectionPage t={t} onNavigate={navigate} />
-                        )}
-                        {section === 'network' && <NetworkPage t={t} />}
-                        {section === 'status' && <StatusPage t={t} />}
-                        {section === 'settings' && (
-                            <SettingsPage
-                                t={t}
-                                locale={locale}
-                                appVersion={appVersion}
-                                onLocaleChange={(l) => {
-                                    onLocaleChange(l);
-                                    applyDir(l);
-                                }}
-                                publisherEnabled={publisherEnabled}
-                                onPublisherEnabledChange={(v) => {
-                                    Prefs.setPublisherEnabled(v);
-                                    setPublisherEnabled(v);
-                                    if (
-                                        !v &&
-                                        (section as SectionId) === 'publisher'
-                                    ) {
-                                        setSection('connection');
-                                    }
-                                }}
-                            />
-                        )}
-                        {section === 'publisher' && publisherEnabled && (
-                            <PublisherPage t={t} />
-                        )}
-                    </main>
-                </div>
+                    {nav.section === 'connection' && <ConnectionPage t={t} onNavigate={nav.navigate} />}
+                    {nav.section === 'network' && <NetworkPage t={t} onNavigate={nav.navigate} />}
+                    {nav.section === 'settings' && (
+                        <SettingsPage
+                            t={t}
+                            locale={locale}
+                            appVersion={appVersion}
+                            onLocaleChange={onLocaleChange}
+                            publisherEnabled={publisherEnabled}
+                            onPublisherEnabledChange={(v) => {
+                                Prefs.setPublisherEnabled(v);
+                                setPublisherEnabled(v);
+                            }}
+                            subPage={nav.settingsPage}
+                            onSubPageChange={nav.setSettingsPage}
+                        />
+                    )}
+                    {nav.section === 'publisher' && publisherEnabled && <PublisherPage t={t} locale={locale} />}
+                </main>
             </div>
 
-            {showPanic && (
-                <PanicWipeDialog t={t} onClose={() => setShowPanic(false)} />
+            {nav.eraseOpen && <PanicWipeDialog t={t} onClose={() => nav.setEraseOpen(false)} />}
+            {nav.fileWaiting && (
+                <OpenedFileToast t={t} onOpen={nav.openWaitingFile} onDismiss={nav.dismissFileWaiting} />
             )}
         </div>
     );
 }
 
-function formatElapsed(sinceUnixMs: number | null): string {
-    if (sinceUnixMs == null) return '00:00:00';
-    const sec = Math.max(0, Math.floor((Date.now() - sinceUnixMs) / 1000));
-    const h = String(Math.floor(sec / 3600)).padStart(2, '0');
-    const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
-    const s = String(sec % 60).padStart(2, '0');
-    return `${h}:${m}:${s}`;
+/** The sidebar's foot: a quiet erase row (red only on hover or focus,
+ *  never a filled red button) and the version. */
+export function SidebarFooter({ t, appVersion, onErase }: { t: (k: string) => string; appVersion: string; onErase: () => void }) {
+    const [hot, setHot] = useState(false);
+    return (
+        <div style={{ display: 'grid', gap: 2, marginInline: -10 }}>
+            <button
+                type="button"
+                data-button="erase"
+                onClick={onErase}
+                onMouseEnter={() => setHot(true)}
+                onMouseLeave={() => setHot(false)}
+                onFocus={() => setHot(true)}
+                onBlur={() => setHot(false)}
+                style={{
+                    appearance: 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    minHeight: 44,
+                    width: '100%',
+                    paddingInline: 10,
+                    background: 'transparent',
+                    border: 0,
+                    borderRadius: 8,
+                    color: hot ? 'var(--red)' : 'var(--muted)',
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 13,
+                    textAlign: 'start',
+                    cursor: 'pointer',
+                    transition: 'color var(--t-fast)',
+                }}
+            >
+                <Icon name="erase" size={18} />
+                <span>{t('nav.erase')}</span>
+            </button>
+            {appVersion && (
+                <div style={{ fontSize: 11, color: 'var(--muted)', paddingInline: 10 }}>
+                    <VersionText t={t} version={appVersion} />
+                </div>
+            )}
+        </div>
+    );
 }

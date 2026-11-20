@@ -13,17 +13,25 @@
 //                        shortest element that contains it)
 //   css:<selector>       a CSS selector
 //   text:<literal>       literal text, as with key:
+//   a || b               the first of several that is on screen (a tab
+//                        bar on a phone, a sidebar on a computer)
 //
 // `{ keep: true }` stops the page's long timers so a notice shown after
 // the next tap does not hide itself; `{ freeze }` stops all of them.
+// `{ dev: true }` holds developer mode on for this page (never stored),
+// `{ dev: false }` off again: a scan fed through the developer frame
+// lane is then pictured as a recipient sees it.
 //
 // When the walk ends the root element carries `data-harness-drive`
 // ("done", or "failed:<step>") so a capture script can tell. Harness
-// only: it runs from installPublisherFake, which never runs outside it.
+// only: it runs from installPublisherFake (fake-shell scenarios) and
+// from main.tsx for the plain ones (`runPlainDrive`), both behind
+// isHarnessActive().
 
 import type { DriveStep, FakeShell, Scenario } from './scenarios';
 import { detectLocale, translate } from '../lib/i18n';
 import { Prefs } from '../lib/prefs';
+import { setDeveloperModeOverride } from '../lib/devMode';
 
 const STEP_TIMEOUT_MS = 6000;
 const POLL_MS = 60;
@@ -48,6 +56,13 @@ function textFor(matcher: string): string | null {
 
 /** Every visible element the matcher names, in document order. */
 export function findAll(matcher: string, root: ParentNode = document): HTMLElement[] {
+    if (matcher.includes(' || ')) {
+        for (const one of matcher.split(' || ')) {
+            const hit = findAll(one.trim(), root);
+            if (hit.length) return hit;
+        }
+        return [];
+    }
     if (matcher.startsWith('btn:')) {
         return [...root.querySelectorAll<HTMLElement>(`[data-button="${matcher.slice(4)}"]`)].filter(visible);
     }
@@ -121,9 +136,9 @@ function keepNotices(from: number) {
 function openSteps(fake: FakeShell): DriveStep[] {
     switch (fake.open) {
         case 'publisher':
-            return [{ click: 'key:nav.publisher' }];
+            return [{ click: 'btn:tab-publisher || btn:nav-publisher || key:nav.publisher' }];
         case 'network':
-            return [{ click: 'key:nav.network' }];
+            return [{ click: 'btn:tab-network || btn:nav-network || key:nav.network' }];
         default:
             return [];
     }
@@ -140,6 +155,10 @@ function mark(v: string) {
 async function runStep(step: DriveStep): Promise<boolean> {
     if ('sleep' in step) {
         await sleep(step.sleep);
+        return true;
+    }
+    if ('dev' in step) {
+        setDeveloperModeOverride(step.dev);
         return true;
     }
     if ('keep' in step) {
@@ -184,10 +203,30 @@ export function preparePrefs(fake: FakeShell) {
 
 export async function runDrive(scenario: Scenario, fake: FakeShell): Promise<void> {
     preparePrefs(fake);
+    await walk(scenario, [...openSteps(fake), ...(fake.steps ?? [])]);
+}
+
+/** Before the first render: a scenario that is about developer tools
+ *  holds developer mode on for this page. */
+export function prepareScenario(scenario: Scenario | null) {
+    if (scenario?.dev) setDeveloperModeOverride(true);
+}
+
+/** A plain scenario (no fake shell) that still needs taps: a sheet or a
+ *  fold opened on the screen harnessStart.ts opened. */
+export async function runPlainDrive(scenario: Scenario | null): Promise<void> {
+    if (!scenario || scenario.fake) return;
+    if (!scenario.steps?.length) {
+        mark('done');
+        return;
+    }
+    await walk(scenario, scenario.steps);
+}
+
+async function walk(scenario: Scenario, steps: DriveStep[]): Promise<void> {
     mark('running');
     // Let the first render and its loads land.
     await sleep(400);
-    const steps = [...openSteps(fake), ...(fake.steps ?? [])];
     for (let i = 0; i < steps.length; i++) {
         const ok = await runStep(steps[i]);
         if (!ok) {

@@ -20,6 +20,9 @@
 
 pub mod recipient;
 mod custody;
+// "Open with Daal" / "Share to Daal" (take_opened_file, the
+// daal://opened-file event) and the text share sheet (share_text).
+mod opened;
 
 #[cfg(any(desktop, test))]
 use std::path::Path;
@@ -3720,8 +3723,16 @@ pub fn run() {
             save_shared_sbp_to_downloads,
             save_sbpx_to_downloads,
             wizard_get_sbp_path,
+            // UI spec G.1 / G.2: files handed to the app, text share sheet.
+            opened::take_opened_file,
+            opened::share_text,
         ])
         .setup(|app| {
+            // "Open with Daal": remember the handle for the
+            // daal://opened-file event and clear files an earlier run
+            // staged for a page that is gone.
+            opened::install(app.handle());
+
             // Best-effort: spawn sing-box on launch so the SOCKS5 inlet
             // is up by the time the user clicks Connect. Errors are
             // swallowed; the user can retry from Subscriptions.

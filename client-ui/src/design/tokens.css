@@ -74,6 +74,28 @@
   --t-fast:     120ms;
   --t-base:     180ms;
   --t-slow:     280ms;
+
+  /* type scale (spec B.13) */
+  --fs-xs:      12px;
+  --fs-sm:      13px;
+  --fs-md:      15px;
+  --fs-lg:      18px;
+  --fs-xl:      24px;
+  --fs-hero:    30px;
+
+  /* sizes: the smallest tap target, a list row, reading columns */
+  --tap:          44px;
+  --row:          56px;
+  --content-max:  640px;
+  --hero-max:     560px;
+
+  /* information tone (badges, notices) */
+  --info:       var(--cyan);
+}
+
+/* busy rings, indeterminate progress */
+@keyframes daal-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* global resets */

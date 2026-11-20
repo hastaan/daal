@@ -199,6 +199,11 @@ export interface Scenario {
     /** The pretend Tauri shell (publisherFake.ts) and the taps that open
      *  the screen. Absent: the page behaves exactly as before. */
     fake?: FakeShell;
+    /** Developer mode held on for this page (never stored). */
+    dev?: boolean;
+    /** Taps on a plain scenario (no fake shell), after the screen that
+     *  shell/harnessStart.ts opens has drawn (driver.ts runPlainDrive). */
+    steps?: DriveStep[];
 }
 
 /** One tap or wait on the way to a screen (driver.ts names the
@@ -213,13 +218,16 @@ export type DriveStep =
     | { freeze: true | string }
     /** Stop only its long timers (3 s and up, or this many ms and up):
      *  a notice stays up after the next tap, a hand-off waits. */
-    | { keep: true | number };
+    | { keep: true | number }
+    /** Developer mode on or off for this page from here (driver.ts). */
+    | { dev: boolean };
 
 /** What the fake shell holds, and how to reach the screen. */
 export interface FakeShell {
     /** `two`: one working relay with three people (one removed), and
-     *  one setup that never finished. `none`: a first run. */
-    relays: 'two' | 'none';
+     *  one setup that never finished. `one`: only the working relay (the
+     *  Publisher tab opens it directly). `none`: a first run. */
+    relays: 'two' | 'one' | 'none';
     health?: 'good' | 'way_failing' | 'unreachable';
     /** PB-1: Baba was restored from a backup and waits for an answer. */
     waiting?: boolean;
@@ -230,7 +238,17 @@ export interface FakeShell {
     /** What importing pasted text or a finished QR scan answers
      *  (`partial`: imported, but one way in the file is not usable
      *  on this phone). */
-    importVerdict?: 'imported' | 'partial' | 'trust' | 'refused';
+    importVerdict?: 'imported' | 'partial' | 'trust' | 'refused' | 'changed';
+    /** The engine did not start (`engine_status` says so): Home's first
+     *  notice (MUST KEEP 16). */
+    engineDown?: boolean;
+    /** Pretend to be an Android phone (the share sheet exists, so My
+     *  address offers "Send address" first). */
+    android?: boolean;
+    /** The file the system picker returns ("Choose a file"). */
+    picked?: string;
+    /** The file Android handed over ("Open with Daal"), taken once. */
+    opened?: string;
     /** URL parameters other harness fakes read (`backup=stale`). */
     params?: Record<string, string>;
     /** Which tab to open first. */
@@ -247,7 +265,7 @@ const DEFAULT_THROUGHPUT: ThroughputSnapshot = {
 };
 
 const DEFAULT_ROUTE_HEALTH: RouteHealthDisplayRow[] = [
-    { routeId: ROUTE_PARS_RESCUE_03.routeId, label: 'Pars · Rescue 03', pct: 96, severity: 'ok' },
+    { routeId: ROUTE_PARS_RESCUE_03.routeId, label: 'Pars Relays · Rescue 03', pct: 96, severity: 'ok' },
     { routeId: ROUTE_PARS_RESCUE_01.routeId, label: 'Pars · Rescue 01', pct: 64, severity: 'warn' },
     { routeId: ROUTE_FRIEND_MAY6.routeId,   label: 'Friend · May 6',  pct: 28, severity: 'bad' },
 ];
@@ -321,8 +339,20 @@ const OPEN_RELAY: DriveStep[] = [
     { sleep: 300 },
 ];
 
+/** Publisher: the relay page's ⋯, then one of its items. */
+const relayMenu = (item: string): DriveStep[] => [{ click: 'btn:relay-more' }, { click: `btn:${item}` }];
+/** Publisher: the relay list's ⋯, then one of its items. */
+const relaysMenu = (item: string): DriveStep[] => [{ click: 'btn:relays-more' }, { click: `btn:${item}` }];
+/** Publisher: the first person's send button, then a way out. */
+const sendPerson = (item: string): DriveStep[] => [{ click: 'btn:person-send', nth: 0 }, { click: `btn:${item}` }];
+/** Publisher: the everyone row's send button, then a way out. */
+const sendEveryone = (item: string): DriveStep[] => [{ click: 'btn:everyone-send' }, { click: `btn:${item}` }];
+/** Publisher with no relay: the empty state's "Start" opens the wizard. */
+const START_WIZARD: DriveStep[] = [{ click: 'btn:new-relay' }];
+
 /** Hosting key pasted, then on to "name and size". */
 const WIZARD_TO_2: DriveStep[] = [
+    ...START_WIZARD,
     { type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' },
     { click: 'key:wiz.nav.next' },
 ];
@@ -331,10 +361,13 @@ const WIZARD_TO_2: DriveStep[] = [
 const PASTED_FILE =
     'UEsDBBQAAAAIAA' + 'Kx3mQ9vT2bN8pLr4Wc7Zy1Hd6Fg0Js5Ae9Ui2Ok8Tn3Bv7Mq4Xw1Cs6Dp0Ga5Hf9Ej2Il8Ro'.repeat(9);
 
+/** Home with no file: "Add my file" → "Paste text" → the text, which
+ *  goes on by itself (detection settles in 400 ms). */
 const PASTE: DriveStep[] = [
-    { click: 'key:auto.add_file' },
-    { click: 'key:add.tab.paste' },
+    { click: 'btn:add-my-file' },
+    { click: 'btn:add-paste' },
     { type: 'css:textarea', text: PASTED_FILE },
+    { sleep: 900 },
 ];
 
 // ---- catalog ----
@@ -381,6 +414,33 @@ export const SCENARIOS: Scenario[] = [
         state: 'error',
         connection: { ...CONN_BASE, state: 'error' },
         pointer: POINTER_EMBEDDED,
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+    {
+        // Android keeps the VPN closed while it retries (MUST KEEP 18).
+        id: 'connection-holding',
+        title: 'Connection · holding: other apps have no internet',
+        screen: 'connection',
+        state: 'connecting',
+        connection: { ...CONN_BASE, state: 'connecting', holding: true, routeRunning: false },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+    {
+        // The saved files were reset (MUST KEEP 16, the store notice).
+        id: 'home-notice-store',
+        title: 'Connection · notice: saved files were reset',
+        screen: 'connection',
+        state: 'disconnected',
+        connection: { ...CONN_BASE, state: 'disconnected', storeRecovered: true } as ConnectionSummary,
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+    {
+        // A build with no data plane (MUST KEEP 16).
+        id: 'home-notice-no-traffic',
+        title: 'Connection · notice: this build cannot carry traffic',
+        screen: 'connection',
+        state: 'disconnected',
+        connection: { ...CONN_BASE, state: 'disconnected', dataPlane: 'none' },
         availableRoutes: DEFAULT_AVAILABLE_ROUTES,
     },
     {
@@ -652,7 +712,7 @@ export const SCENARIOS: Scenario[] = [
         availableRoutes: MEASURED_ROUTES,
         routeHealth: MEASURED_ROUTES.map((r) => ({
             routeId: r.routeId,
-            label: `Pars · ${r.routeNickname}`,
+            label: `${r.publisherName} · ${r.routeNickname}`,
             measured: r.measured,
         })),
     },
@@ -694,7 +754,7 @@ export const SCENARIOS: Scenario[] = [
         connection: { ...CONN_BASE, state: 'disconnected', pointerValidDays: undefined },
         availableRoutes: [ROUTE_FRESH_UNMEASURED, ROUTE_UNSUPPORTED_WG],
         routeHealth: [
-            { routeId: ROUTE_FRESH_UNMEASURED.routeId, label: 'Pars · Just imported' },
+            { routeId: ROUTE_FRESH_UNMEASURED.routeId, label: 'Pars Relays · Just imported' },
             { routeId: ROUTE_UNSUPPORTED_WG.routeId, label: 'Pars · Old WG' },
         ],
         pointer: POINTER_EMBEDDED,
@@ -763,19 +823,19 @@ export const SCENARIOS: Scenario[] = [
 
     // --- Publisher ---
     {
+        // The Publisher tab is hidden; Settings holds the switch.
         id: 'publisher-off',
-        title: 'Publisher · off',
+        title: 'Publisher · off (the switch in Settings)',
         screen: 'publisher',
         initialRoute: '/publisher',
         connection: { ...CONN_BASE, state: 'disconnected' },
     },
-    {
-        id: 'publisher-on',
-        title: 'Publisher · on',
-        screen: 'publisher',
-        initialRoute: '/publisher',
-        connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
-    },
+    // On, with one finished relay: the tab opens that relay (C7.0).
+    ...pub(
+        {
+            id: 'publisher-on',
+            title: 'on, one relay (opens it directly)',
+        }, { relays: 'one', steps: [{ waitFor: 'css:[data-testid="health-panel"]' }, { sleep: 300 }] }),
 
     // --- Onboarding (step-targeted scenarios resolve in routes/Onboarding) ---
     {
@@ -803,62 +863,82 @@ export const SCENARIOS: Scenario[] = [
     // --- Status accordions (v0.2.x extras) ---
     {
         id: 'status-scheduler',
-        title: 'Status · scheduler accordion',
+        title: 'Status · scheduler (developer tools)',
         screen: 'status',
         initialRoute: '/status',
+        dev: true,
+        steps: [{ click: 'btn:dev-scheduler' }, { scroll: 'btn:dev-scheduler' }],
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
         schedulerStatusJson:
             '{"tick":4218,"queue":[{"id":"pars-rescue-03","delay_ms":120},{"id":"friend-may-6","delay_ms":820}],"in_flight":1,"last_pick":"pars-rescue-03"}',
     },
     {
         id: 'status-stats-redacted',
-        title: 'Status · stats (redacted)',
+        title: 'Status · stats, redacted (developer tools)',
         screen: 'status',
         initialRoute: '/status',
+        dev: true,
+        steps: [{ click: 'btn:dev-stats' }, { scroll: 'btn:dev-stats' }],
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
         statsRedactedJson:
             '{"sessions":4,"bytes_up_bucket":"k","bytes_down_bucket":"M","redacted":true}',
     },
     {
         id: 'status-bootstrap-empty',
-        title: 'Status · bootstrap (empty)',
+        title: 'Status · bootstrap, empty (developer tools)',
         screen: 'status',
         initialRoute: '/status',
+        dev: true,
+        steps: [{ click: 'btn:dev-bootstrap' }, { scroll: 'btn:dev-bootstrap' }],
         connection: { ...CONN_BASE, state: 'disconnected' },
         bootstrapStatusJson: '{"seeds":0,"last_refresh":null}',
     },
     {
         id: 'status-bootstrap-seeded',
-        title: 'Status · bootstrap (seeded)',
+        title: 'Status · bootstrap, seeded (developer tools)',
         screen: 'status',
         initialRoute: '/status',
+        dev: true,
+        steps: [{ click: 'btn:dev-bootstrap' }, { scroll: 'btn:dev-bootstrap' }],
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
         bootstrapStatusJson:
             '{"seeds":3,"last_refresh":"2026-05-22T11:48:02Z","ok":true}',
     },
     {
         id: 'status-network-test',
-        title: 'Status · network test',
+        title: 'Status · network test (developer tools)',
         screen: 'status',
         initialRoute: '/status',
+        dev: true,
+        steps: [{ click: 'btn:dev-network' }, { scroll: 'btn:dev-network' }],
         connection: { ...CONN_BASE, state: 'disconnected' },
     },
 
     // --- Settings (wasm / advanced) ---
     {
         id: 'settings-wasm-loaded',
-        title: 'Settings · wasm loaded',
+        title: 'Settings · Advanced, developer tools with WASM loaded',
         screen: 'settings',
         initialRoute: '/settings',
+        dev: true,
+        steps: [{ scroll: 'btn:dev-off' }],
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
         wasmModules: ['hello-https', 'censorship-canary'],
         wasmKillSwitchPubkey: 'a1b2c3d4e5f6'.repeat(4),
     },
     {
         id: 'settings-advanced',
-        title: 'Settings · advanced toggles',
+        title: 'Settings · Advanced',
         screen: 'settings',
         initialRoute: '/settings',
+        connection: { ...CONN_BASE, state: 'disconnected' },
+    },
+    {
+        id: 'settings-advanced-dev',
+        title: 'Settings · Advanced, developer tools on',
+        screen: 'settings',
+        initialRoute: '/settings',
+        dev: true,
         connection: { ...CONN_BASE, state: 'disconnected' },
     },
 
@@ -871,55 +951,48 @@ export const SCENARIOS: Scenario[] = [
     },
 
     // --- Publisher wizard (Phase C) ---
-    {
-        id: 'publisher-wizard-step-1',
-        title: 'Publisher · welcome',
-        screen: 'publisher',
-        initialRoute: '/publisher?wizard=1',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
-    {
-        id: 'publisher-wizard-step-4',
-        title: 'Publisher · keys',
-        screen: 'publisher',
-        initialRoute: '/publisher?wizard=4',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
-    {
-        id: 'publisher-wizard-step-7',
-        title: 'Publisher · distribute',
-        screen: 'publisher',
-        initialRoute: '/publisher?wizard=7',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
+    // The old seven-step wizard is three steps now (C7.8); these ids
+    // open the nearest step.
+    ...pub(
+        {
+            id: 'publisher-wizard-step-1',
+            title: 'first run: no relay yet',
+        }, { relays: 'none' }),
+    ...pub(
+        {
+            id: 'publisher-wizard-step-4',
+            title: 'wizard 2 (name and size)',
+        }, { relays: 'none', steps: [...WIZARD_TO_2, { sleep: 600 }] }),
+    ...pub(
+        {
+            id: 'publisher-wizard-step-7',
+            title: 'wizard 3 done (check words, add the first person)',
+        }, { relays: 'none', steps: [...WIZARD_TO_2, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }] }),
 
     // --- Recipient QR (Phase D) ---
-    {
-        id: 'recipient-qr-empty',
-        title: 'Recipient · QR (idle)',
-        screen: 'modal',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
-    {
-        id: 'recipient-qr-scanning',
-        title: 'Recipient · QR (scanning)',
-        screen: 'modal',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
-    {
-        id: 'recipient-qr-done',
-        title: 'Recipient · QR (done)',
-        screen: 'modal',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
+    // Scanning is a step of "Add my file" now (C3.4).
+    ...rcp(
+        {
+            id: 'recipient-qr-empty',
+            title: 'QR · the scanner, from Home',
+        }, 'connection', [{ click: 'btn:add-my-file' }, { click: 'btn:add-scan' }, { sleep: 600 }]),
+    ...rcp(
+        {
+            id: 'recipient-qr-scanning',
+            title: 'QR · part of the file read',
+        }, 'connection', scanFeed(5, 'btn:add-my-file')),
+    ...rcp(
+        {
+            id: 'recipient-qr-done',
+            title: 'QR · done, new publisher',
+        }, 'connection', scanFeed(14, 'btn:add-my-file'), { importVerdict: 'trust' }),
 
     // --- Modals & overlays ---
-    {
-        id: 'trust-prompt-new-publisher',
-        title: 'Trust prompt · new publisher',
-        screen: 'modal',
-        connection: { ...CONN_BASE, state: 'disconnected' },
-    },
+    ...rcp(
+        {
+            id: 'trust-prompt-new-publisher',
+            title: 'Trust prompt · new publisher (a pasted file)',
+        }, 'connection', PASTE, { importVerdict: 'trust' }),
     {
         id: 'panic-wipe-confirm',
         title: 'Panic-wipe · confirm',
@@ -927,10 +1000,155 @@ export const SCENARIOS: Scenario[] = [
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
     },
     {
+        // Lifeline on: its badge on Home opens the picker.
         id: 'mode-picker-open',
-        title: 'Mode-picker · open',
+        title: 'Mode-picker · open (from the Lifeline badge)',
         screen: 'modal',
+        connection: { ...CONN_BASE, state: 'connected', mode: 'lifeline', activeRoute: ROUTE_PARS_RESCUE_03 },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        steps: [{ click: 'btn:badge-lifeline' }],
+    },
+
+    // --- Home: sheets, menus and developer mode (plain + taps) ---
+    {
+        id: 'connection-more',
+        title: 'Connection · the ⋯ menu',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: WAY_GOOD,
+        },
+        availableRoutes: MEASURED_ROUTES,
+        steps: [{ click: 'btn:home-more' }],
+    },
+    {
+        id: 'connection-chooser',
+        title: 'Connection · choose the way myself',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: WAY_GOOD,
+        },
+        availableRoutes: MEASURED_ROUTES,
+        steps: [{ click: 'btn:home-more' }, { click: 'btn:choose-way' }],
+    },
+    {
+        id: 'connection-lifeline',
+        title: 'Connection · ready, Lifeline on',
+        screen: 'connection',
+        state: 'disconnected',
+        connection: { ...CONN_BASE, state: 'disconnected', mode: 'lifeline' },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+    },
+    {
+        id: 'connection-failed-details',
+        title: 'Connection · nothing worked, Details open',
+        screen: 'connection',
+        state: 'error',
+        connection: {
+            ...CONN_BASE,
+            state: 'error',
+            routeRunning: false,
+            auto: {
+                state: 'failed',
+                mode: false,
+                trying: '',
+                index: 0,
+                total: 2,
+                tried: [
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'vless-reality', result: 'start_failed', category: 'tcp_connect_timeout' },
+                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: 'websocket-tls', result: 'start_failed', category: 'tcp_connect_timeout' },
+                ],
+                verdict: 'relay_unreachable',
+                routeId: '',
+            },
+        },
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        // On a computer the tries are in the side panel; no fold to open.
+        steps: [{ click: 'btn:failure-details', optional: true }],
+    },
+    {
+        id: 'connection-connected-dev',
+        title: 'Connection · connected, developer tools on',
+        screen: 'connection',
+        state: 'connected',
+        dev: true,
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: WAY_GOOD,
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 1,
+                total: 3,
+                tried: [{ routeId: WAY_GOOD.routeId, family: WAY_GOOD.family, result: 'carried', category: '', setupMs: 310 }],
+                verdict: '',
+                routeId: WAY_GOOD.routeId,
+            },
+        },
+        why: WHY_CONNECTED,
+        pointer: POINTER_OK,
+        routeHealth: DEFAULT_ROUTE_HEALTH,
+        availableRoutes: MEASURED_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
+        steps: [{ click: 'btn:helper-fold' }, { scroll: 'btn:helper-fold' }],
+    },
+
+    // --- Status: the summary, and how it is reached ---
+    {
+        id: 'status-from-home',
+        title: 'Status · the summary, opened from Home\'s ⋯',
+        screen: 'connection',
+        state: 'connected',
         connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
+        pointer: POINTER_OK,
+        routeHealth: DEFAULT_ROUTE_HEALTH,
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        steps: [{ click: 'btn:home-more' }, { click: 'btn:status' }, { waitFor: 'btn:export' }],
+    },
+    {
+        id: 'status-helper-open',
+        title: 'Status · "For someone helping you" open',
+        screen: 'status',
+        initialRoute: '/status',
+        connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
+        pointer: POINTER_OK,
+        routeHealth: DEFAULT_ROUTE_HEALTH,
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        steps: [{ click: 'btn:helper-fold' }],
+    },
+    {
+        id: 'status-dev',
+        title: 'Status · developer tools on',
+        screen: 'status',
+        initialRoute: '/status',
+        dev: true,
+        connection: { ...CONN_BASE, state: 'connected', activeRoute: ROUTE_PARS_RESCUE_03 },
+        pointer: POINTER_OK,
+        routeHealth: DEFAULT_ROUTE_HEALTH,
+        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
+        steps: [{ scroll: 'btn:dev-raw' }],
+    },
+    {
+        id: 'settings-erase-from-row',
+        title: 'Settings · the erase row opens the confirm',
+        screen: 'settings',
+        initialRoute: '/settings',
+        connection: { ...CONN_BASE, state: 'disconnected' },
+        steps: [{ click: 'btn:erase' }],
     },
 
     // --- Publisher, on the fake shell (publisherFake.ts) ---
@@ -951,24 +1169,34 @@ export const SCENARIOS: Scenario[] = [
         }, { params: { backup: 'notice' } }),
     ...pub(
         {
+            id: 'pub-relay-list-empty',
+            title: 'Relay list · none yet (first run)',
+        }, { relays: 'none' }),
+    ...pub(
+        {
+            id: 'pub-relays-more',
+            title: 'Relay list · the ⋯ menu',
+        }, { steps: [{ click: 'btn:relays-more' }] }),
+    ...pub(
+        {
             id: 'pub-relay-remove',
-            title: 'Relay list · remove the working relay',
+            title: 'Relay page · Danger zone → remove this relay',
         }, {
-        steps: [{ click: 'key:pub.relays.decommission', nth: 0 }],
+        steps: [...OPEN_RELAY, { click: 'btn:danger-zone' }, { click: 'btn:relay-remove' }],
     }),
     ...pub(
         {
             id: 'pub-relay-remove-unfinished',
             title: 'Relay list · remove the unfinished setup',
         }, {
-        steps: [{ click: 'key:pub.relays.decommission', nth: 1 }],
+        steps: [{ click: 'btn:relay-row-more' }, { click: 'btn:remove' }],
     }),
     ...pub(
         {
             id: 'pub-account-check',
             title: 'Relay list · check my hosting account',
         }, {
-        steps: [{ click: 'key:pub.account.open' }, { sleep: 600 }],
+        steps: [...relaysMenu('check-account'), { sleep: 600 }],
     }),
     ...pub(
         {
@@ -984,10 +1212,36 @@ export const SCENARIOS: Scenario[] = [
     }),
     ...pub(
         {
+            id: 'pub-relay-more',
+            title: 'Relay page · the ⋯ menu',
+        }, { steps: [...OPEN_RELAY, { click: 'btn:relay-more' }] }),
+    ...pub(
+        {
             id: 'pub-relay-everyone',
-            title: 'Relay page · one file for everyone',
+            title: 'Relay page · ⋯ → file for everyone',
         }, {
-        steps: [...OPEN_RELAY, { scroll: 'key:pub.everyone.title' }],
+        steps: [...OPEN_RELAY, ...relayMenu('everyone')],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-keep',
+            title: 'Relay page · ⋯ → keep files working (advanced)',
+        }, {
+        steps: [...OPEN_RELAY, ...relayMenu('keep')],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-details',
+            title: 'Relay page · Details open',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'btn:relay-details' }, { scroll: 'btn:relay-details' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-danger',
+            title: 'Relay page · Danger zone open',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'btn:danger-zone' }, { scroll: 'btn:danger-zone' }],
     }),
     ...pub(
         {
@@ -1024,72 +1278,92 @@ export const SCENARIOS: Scenario[] = [
     ...pub(
         {
             id: 'pub-person-more',
-            title: 'Person · "File lost, or shared by mistake?" open',
+            title: 'Person · the ⋯ menu (new file, remove access)',
         }, {
-        steps: [...OPEN_RELAY, { click: 'key:pub.people.more', nth: 0 }, { scroll: 'key:pub.people.title' }],
+        steps: [...OPEN_RELAY, { click: 'btn:person-more', nth: 0 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-send',
+            title: 'Person · the send sheet',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'btn:person-send', nth: 0 }],
     }),
     ...pub(
         {
             id: 'pub-person-sent',
-            title: 'Person · after "Send file"',
+            title: 'Person · after "Send with an app" (no toast)',
         }, {
-        steps: [...OPEN_RELAY, { keep: true }, { click: 'key:pub.people.send', nth: 0 }, { scroll: 'key:pub.people.title' }],
+        steps: [...OPEN_RELAY, { keep: true }, ...sendPerson('share'), { sleep: 400 }],
     }),
     ...pub(
         {
             id: 'pub-person-saved',
-            title: 'Person · after "Save file"',
+            title: 'Person · after "Save to phone"',
         }, {
-        steps: [...OPEN_RELAY, { keep: true }, { click: 'key:pub.people.save', nth: 0 }, { scroll: 'key:pub.people.title' }],
+        steps: [...OPEN_RELAY, { keep: true }, ...sendPerson('save'), { sleep: 400 }],
     }),
     ...pub(
         {
             id: 'pub-person-copied',
             title: 'Person · after "Copy as text"',
         }, {
-        steps: [...OPEN_RELAY, { keep: true }, { click: 'key:pub.person.copy', nth: 0 }, { scroll: 'key:pub.people.title' }],
+        steps: [...OPEN_RELAY, { keep: true }, ...sendPerson('copy'), { sleep: 400 }],
     }),
     ...pub(
         {
             id: 'pub-person-add',
             title: 'Person · add a person',
         }, {
-        steps: [...OPEN_RELAY, { click: 'key:pub.people.add' }],
+        steps: [...OPEN_RELAY, { click: 'btn:add-person' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-person-add-filled',
+            title: 'Person · add a person, name and pasted address',
+        }, {
+        steps: [
+            ...OPEN_RELAY,
+            { click: 'btn:add-person' },
+            { type: 'css:input', text: 'Khaleh', nth: 0 },
+            // Pasted from a chat, with its line breaks and spaces.
+            { type: 'css:input, textarea', text: 'daal1 qm3n 8v2c\n5m3n 8v2c 5m3n 8v2c 5m3n 8v2c 5m3n 8v2c5', nth: 1 },
+        ],
     }),
     ...pub(
         {
             id: 'pub-person-remove',
             title: 'Person · remove access, confirm',
         }, {
-        steps: [...OPEN_RELAY, { click: 'key:pub.people.remove_access', nth: 0 }],
+        steps: [...OPEN_RELAY, { click: 'btn:person-more', nth: 0 }, { click: 'btn:remove' }],
     }),
     ...pub(
         {
             id: 'pub-qr-person',
             title: 'QR · one person\'s file',
         }, {
-        steps: [...OPEN_RELAY, { click: 'key:pub.person.qr', nth: 0 }, { sleep: 800 }],
+        steps: [...OPEN_RELAY, ...sendPerson('qr'), { sleep: 800 }],
     }),
     ...pub(
         {
             id: 'pub-qr-everyone',
             title: 'QR · the file for everyone',
         }, {
-        steps: [...OPEN_RELAY, { click: 'key:pub.everyone.qr' }, { sleep: 800 }],
+        steps: [...OPEN_RELAY, ...sendEveryone('qr'), { sleep: 800 }],
+    }),
+    ...pub(
+        {
+            id: 'pub-everyone-send',
+            title: 'Everyone file · the send sheet',
+        }, {
+        steps: [...OPEN_RELAY, { click: 'btn:everyone-send' }],
     }),
     ...pub(
         {
             id: 'pub-everyone-copied',
             title: 'Everyone file · after "Copy as text"',
         }, {
-        steps: [
-            ...OPEN_RELAY,
-            { keep: true },
-            // Same words as each person's button: the third one
-            // (Maman, Baba, then everyone; Ali's access is gone).
-            { click: 'key:pub.everyone.copy', nth: 2 },
-            { scroll: 'key:pub.everyone.title' },
-        ],
+        steps: [...OPEN_RELAY, { keep: true }, ...sendEveryone('copy'), { sleep: 400 }],
     }),
     ...pub(
         {
@@ -1129,13 +1403,22 @@ export const SCENARIOS: Scenario[] = [
             title: 'Backup · saved to Downloads',
         }, {
         params: { backup: 'last' },
-        steps: [{ click: 'btn:backup' }, { click: 'btn:save-downloads' }],
+        // A current backup has no badge: the list's ⋯ holds "Back up".
+        steps: [...relaysMenu('backup'), { click: 'btn:save-downloads' }],
     }),
     ...pub(
         {
             id: 'pub-restore',
             title: 'Restore · choose the file',
         }, {
+        steps: relaysMenu('restore-link'),
+    }),
+    ...pub(
+        {
+            id: 'pub-restore-fresh',
+            title: 'Restore · from the first-run empty state',
+        }, {
+        relays: 'none',
         steps: [{ click: 'btn:restore-link' }],
     }),
     ...pub(
@@ -1143,7 +1426,7 @@ export const SCENARIOS: Scenario[] = [
             id: 'pub-restore-words',
             title: 'Restore · type the twelve words',
         }, {
-        steps: [{ click: 'btn:restore-link' }, { click: 'btn:choose' }],
+        steps: [...relaysMenu('restore-link'), { click: 'btn:choose' }],
     }),
     ...pub(
         {
@@ -1151,7 +1434,7 @@ export const SCENARIOS: Scenario[] = [
             title: 'Restore · what the backup holds',
         }, {
         steps: [
-            { click: 'btn:restore-link' },
+            ...relaysMenu('restore-link'),
             { click: 'btn:choose' },
             { type: 'css:textarea', text: 'legal winner thank year wave sausage worth useful legal winner thank yellow' },
             { click: 'btn:open' },
@@ -1161,14 +1444,14 @@ export const SCENARIOS: Scenario[] = [
         {
             id: 'pub-wizard-1',
             title: 'Wizard · 1 hosting account',
-        }, { relays: 'none' }),
+        }, { relays: 'none', steps: START_WIZARD }),
     ...pub(
         {
             id: 'pub-wizard-1-filled',
             title: 'Wizard · 1 key pasted',
         }, {
         relays: 'none',
-        steps: [{ type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' }],
+        steps: [...START_WIZARD, { type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' }],
     }),
     ...pub(
         {
@@ -1192,8 +1475,22 @@ export const SCENARIOS: Scenario[] = [
             title: 'Wizard · 3 relay ready',
         }, {
         relays: 'none',
-        // The 1.2 s pause before the hand-off to the relay page is held.
-        steps: [...WIZARD_TO_2, { keep: 1000 }, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }],
+        // The done screen waits for "Add the first person" (no hand-off).
+        steps: [...WIZARD_TO_2, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-wizard-3-add-first',
+            title: 'Wizard · 3 done → "Add the first person"',
+        }, {
+        relays: 'none',
+        steps: [
+            ...WIZARD_TO_2,
+            { click: 'key:wiz.plan.next' },
+            { waitFor: 'key:wiz.build.done.eyebrow' },
+            { click: 'btn:add-first-person' },
+            { sleep: 600 },
+        ],
     }),
 
     // --- Recipient: import, scan, address (fake shell + taps) ---
@@ -1201,60 +1498,161 @@ export const SCENARIOS: Scenario[] = [
         {
             id: 'rcp-add-sheet',
             title: 'Add a file · the sheet',
-        }, 'connection', [{ click: 'key:auto.add_file' }]),
+        }, 'connection', [{ click: 'btn:add-my-file' }]),
     ...rcp(
         {
             id: 'rcp-add-paste-tab',
-            title: 'Add a file · "Paste" tab',
+            title: 'Add a file · "Paste text", nothing on the clipboard',
         }, 'connection', [
-        { click: 'key:auto.add_file' },
-        { click: 'key:add.tab.paste' },
+        { click: 'btn:add-my-file' },
+        { click: 'btn:add-paste' },
     ]),
     ...rcp(
         {
+            // The moment the text is recognised, before it goes on by
+            // itself (the 400 ms settle is held).
             id: 'rcp-paste-ready',
-            title: 'Add a file · text pasted',
-        }, 'connection', PASTE),
+            title: 'Add a file · text pasted, recognised',
+        }, 'connection', [
+        { click: 'btn:add-my-file' },
+        { click: 'btn:add-paste' },
+        { waitFor: 'css:textarea' },
+        // Timers stop before the text lands, so the 400 ms settle that
+        // would carry it on never fires.
+        { freeze: true },
+        { type: 'css:textarea', text: PASTED_FILE },
+        { sleep: 300 },
+    ]),
+    ...rcp(
+        {
+            id: 'rcp-paste-unknown',
+            title: 'Add a file · pasted text that is not a Daal file',
+        }, 'connection', [
+        { click: 'btn:add-my-file' },
+        { click: 'btn:add-paste' },
+        { type: 'css:textarea', text: 'Salam! See you on Friday.' },
+        { sleep: 900 },
+    ]),
     ...rcp(
         {
             id: 'rcp-import-trust',
             title: 'Add a file · new publisher, check the words',
-        }, 'connection',
-        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'trust' }),
+        }, 'connection', PASTE, { importVerdict: 'trust' }),
+    ...rcp(
+        {
+            id: 'rcp-import-trust-more',
+            title: 'Add a file · new publisher, "Other choices" open',
+        }, 'connection', [...PASTE, { click: 'btn:trust-more' }], { importVerdict: 'trust' }),
     ...rcp(
         {
             id: 'rcp-import-refused',
             title: 'Add a file · refused',
-        }, 'connection',
-        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'refused' }),
+        }, 'connection', PASTE, { importVerdict: 'refused' }),
+    ...rcp(
+        {
+            // MUST KEEP 10: a publisher whose key changed blocks the import.
+            id: 'rcp-import-key-changed',
+            title: 'Add a file · the publisher\'s key changed',
+        }, 'connection', PASTE, { importVerdict: 'changed' }),
+    ...rcp(
+        {
+            // MUST KEEP 16: Daal did not start.
+            id: 'home-notice-engine',
+            title: 'Home · notice: Daal did not start',
+        }, 'connection', [{ sleep: 400 }], { engineDown: true }),
     ...rcp(
         {
             id: 'rcp-import-done',
             title: 'Add a file · imported',
-        }, 'connection',
-        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'imported' }),
+        }, 'connection', PASTE, { importVerdict: 'imported' }),
     ...rcp(
         {
             id: 'rcp-import-partial',
             title: 'Add a file · imported, one way not usable here',
-        }, 'connection',
-        [...PASTE, { click: 'key:add.import' }], { importVerdict: 'partial' }),
+        }, 'connection', PASTE, { importVerdict: 'partial' }),
+    ...rcp(
+        {
+            id: 'rcp-import-partial-open',
+            title: 'Add a file · imported, "Some ways aren\'t in this file" open',
+        }, 'connection', [...PASTE, { click: 'btn:import-partial' }], { importVerdict: 'partial' }),
+    ...rcp(
+        {
+            // "Choose a file": the picker returns a file, and the sheet
+            // goes on by itself to the result.
+            id: 'rcp-file-done',
+            title: 'Add a file · a chosen file, imported',
+        }, 'connection', [
+        { click: 'btn:add-my-file' },
+        { click: 'btn:add-choose-file' },
+        { sleep: 900 },
+    ], { importVerdict: 'imported', picked: 'content://downloads/Maman.sbp' }),
+    ...rcp(
+        {
+            id: 'rcp-file-trust',
+            title: 'Add a file · a chosen file, new publisher',
+        }, 'connection', [
+        { click: 'btn:add-my-file' },
+        { click: 'btn:add-choose-file' },
+        { sleep: 900 },
+    ], { importVerdict: 'trust', picked: 'content://downloads/Maman.sbp' }),
+    ...rcp(
+        {
+            // Android "Open with Daal" / "Share to Daal" from a
+            // messenger: Home opens the check by itself.
+            id: 'rcp-opened-file',
+            title: 'Opened from a messenger · new publisher',
+        }, 'connection', [{ waitFor: 'btn:trust-yes' }], {
+        importVerdict: 'trust',
+        opened: '/staging/opened/opened-7f3a.sbp',
+    }),
+    ...rcp(
+        {
+            id: 'rcp-opened-file-known',
+            title: 'Opened from a messenger · publisher already trusted',
+        }, 'connection', [{ waitFor: 'btn:import-connect' }], {
+        importVerdict: 'imported',
+        opened: '/staging/opened/opened-7f3a.sbp',
+    }),
+    ...rcp(
+        {
+            id: 'rcp-opened-text',
+            title: 'Shared to Daal · text that is not a Daal file',
+        }, 'connection', [{ sleep: 900 }], {
+        opened: '/staging/opened/opened-7f3a.txt',
+    }),
     ...rcp(
         {
             id: 'rcp-network-add',
-            title: 'Network · add from the Network tab',
-        }, 'network', [{ click: 'key:network.add' }]),
+            title: 'Files · add from the Files tab',
+        }, 'network', [{ click: 'btn:add' }]),
+    ...rcp(
+        {
+            id: 'rcp-files-more',
+            title: 'Files · the ⋯ menu',
+        }, 'network', [{ click: 'btn:files-more' }]),
+    ...rcp(
+        {
+            id: 'rcp-file-sheet',
+            title: 'Files · one file opened',
+        }, 'network', [{ click: 'btn:file-row', nth: 0 }]),
+    ...rcp(
+        {
+            id: 'rcp-file-sheet-more',
+            title: 'Files · one file, its ⋯ menu',
+        }, 'network', [{ click: 'btn:file-row', nth: 0 }, { click: 'btn:file-more' }]),
     ...rcp(
         {
             id: 'rcp-scan',
             title: 'Scan · camera',
-        }, 'network', [{ click: 'key:scan.open' }, { sleep: 600 }]),
+        }, 'network', [{ click: 'btn:add' }, { click: 'btn:add-scan' }, { sleep: 600 }]),
     ...rcp(
         {
             id: 'rcp-scan-paste',
-            title: 'Scan · paste frames tab',
+            title: 'Scan · paste frames tab (developer tools)',
         }, 'network', [
-        { click: 'key:scan.open' },
+        { dev: true },
+        { click: 'btn:add' },
+        { click: 'btn:add-scan' },
         { click: 'key:scan.mode.paste' },
     ]),
     ...rcp(
@@ -1270,7 +1668,7 @@ export const SCENARIOS: Scenario[] = [
     ...rcp(
         {
             id: 'rcp-scan-done',
-            title: 'Scan · done, imported (the sheet closes by itself)',
+            title: 'Scan · done, imported',
         }, 'network', scanFeed(14), { importVerdict: 'imported' }),
     ...rcp(
         {
@@ -1284,26 +1682,55 @@ export const SCENARIOS: Scenario[] = [
         }, 'network', scanFeed(14), { importVerdict: 'refused' }),
     ...rcp(
         {
+            // The address is made when the sheet opens.
             id: 'rcp-address-before',
-            title: 'My address · not made yet',
-        }, 'network', [{ click: 'key:network.my_address' }, { sleep: 300 }]),
+            title: 'My address · first open (made on open)',
+        }, 'network', [{ click: 'btn:files-more' }, { click: 'btn:my-address' }, { sleep: 400 }]),
     ...rcp(
         {
             id: 'rcp-address-copied',
             title: 'My address · copied',
         }, 'network', [
-        { click: 'key:network.my_address' },
-        // "Copied" turns back after 1.5 s.
+        { click: 'btn:files-more' },
+        { click: 'btn:my-address' },
+        // The "Copied" toast hides itself after 3.5 s.
         { keep: 1000 },
-        { click: 'key:recipient.address.copy' },
+        { click: 'btn:copy-address' },
     ], { identity: 'made' }),
     ...rcp(
         {
             id: 'rcp-address-after',
             title: 'My address · made',
-        }, 'network', [{ click: 'key:network.my_address' }, { sleep: 300 }], {
+        }, 'network', [{ click: 'btn:files-more' }, { click: 'btn:my-address' }, { sleep: 300 }], {
         identity: 'made',
     }),
+    ...rcp(
+        {
+            // Android: the share sheet exists, "Send address" comes first.
+            id: 'rcp-address-android',
+            title: 'My address · on Android',
+        }, 'network', [{ click: 'btn:files-more' }, { click: 'btn:my-address' }, { sleep: 300 }], {
+        identity: 'made',
+        android: true,
+    }),
+    ...rcp(
+        {
+            // Settings → Advanced with an address made: "Get a new
+            // address" and its checkbox (MUST KEEP 15).
+            id: 'settings-advanced-address',
+            title: 'Settings · Advanced, this phone\'s address',
+        }, 'connection', [
+            { click: 'btn:tab-settings', optional: true },
+            { click: 'btn:nav-settings', optional: true },
+            { click: 'btn:advanced-row' },
+            { sleep: 400 },
+        ], { identity: 'made' }),
+    ...rcp(
+        {
+            // No file yet: Home's link goes straight to the address.
+            id: 'rcp-address-no-file',
+            title: 'My address · from Home with no file',
+        }, 'connection', [{ click: 'btn:no-file-address' }, { sleep: 400 }]),
 ];
 
 // ---- builders for the fake-shell scenarios ----
@@ -1344,19 +1771,28 @@ function rcp(
     ];
 }
 
-/** Open the scanner, switch to pasted frames, feed `n` of them. */
-function scanFeed(n: number): DriveStep[] {
+/** Open the scanner, feed `n` frames through the developer frame lane,
+ *  then picture it as a recipient sees it: back on the camera with its
+ *  ring, developer tools off. `from` opens the add sheet. */
+function scanFeed(n: number, from = 'btn:add'): DriveStep[] {
     const lines: string[] = [];
     for (let i = 0; i < n; i++) {
         // 144 base64url characters: one 108-byte frame.
         lines.push(`AQ${String.fromCharCode(65 + i)}` + 'Lm4Rt8Vx2Bz6Nc0Qe3Gs7Jw1Hy5Ku9Pa'.repeat(4) + 'ABCDE');
     }
     return [
-        { click: 'key:scan.open' },
+        { dev: true },
+        { click: from },
+        { click: 'btn:add-scan' },
         { click: 'key:scan.mode.paste' },
         { type: 'css:textarea', text: lines.join('\n') },
         { click: 'key:scan.paste.feed' },
         { sleep: 600 },
+        // Still scanning: back to the camera lane (its tab is there while
+        // developer tools are on). A finished scan has moved on already.
+        { click: 'key:scan.mode.camera', optional: true },
+        { dev: false },
+        { sleep: 400 },
     ];
 }
 

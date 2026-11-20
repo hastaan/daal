@@ -1,7 +1,6 @@
 {
   "active": "فعال",
   "appname": "دال",
-  "badge_off": "خاموش",
   "banner_label": "تعویض نشانگرها",
   "banner_text": "نشانگرها عوض شدند. تا ۱۴ روز دیگر معتبرند.",
   "brand_sub": "v0.4.2",
@@ -38,7 +37,6 @@
   "skipped": "رد شد",
   "state_connected": "وصل است · در حال مسیریابی",
   "state_connected_short": "● وصل · ۰۲:۱۴",
-  "status_line": "روی Wi-Fi · با نشانگرهای تازه · ۱۴ روز اعتبار",
   "tray_change_route": "تغییر مسیر…",
   "tray_disconnect": "قطع اتصال",
   "tray_label": "پنجرهٔ نوار وضعیت",

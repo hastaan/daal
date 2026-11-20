@@ -61,10 +61,8 @@ export function RenewBanner({
 }
 
 export interface RenewSendActions {
-    onSend: (path: string, label: string) => void;
-    onSave: (path: string, label: string) => void;
-    onQr: (recipientId: number, label: string) => void;
-    onCopy: (recipientId: number, label: string) => void;
+    /** Open the send sheet for this person's new file. */
+    onOpen: (recipientId: number, path: string, label: string) => void;
 }
 
 function itemLabel(t: (k: string) => string, i: RenewItem): string {
@@ -100,18 +98,16 @@ export function RenewResultRow({
                 </div>
             )}
             {ok && send && item.recipient_id != null && item.sbpx_path && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    <Button size="sm" onClick={() => send.onSend(item.sbpx_path, label)}>
-                        {t('pub.people.send')}
-                    </Button>
-                    <Button size="sm" variant="secondary" onClick={() => send.onSave(item.sbpx_path, label)}>
-                        {t('pub.people.save')}
-                    </Button>
-                    <Button size="sm" variant="secondary" onClick={() => send.onQr(item.recipient_id!, label)}>
-                        {t('pub.person.qr')}
-                    </Button>
-                    <Button size="sm" variant="secondary" onClick={() => send.onCopy(item.recipient_id!, label)}>
-                        {t('pub.person.copy')}
+                <div>
+                    {/* One button: the four ways out are in the send sheet. */}
+                    <Button
+                        size="sm"
+                        variant="secondary"
+                        leading="share"
+                        onClick={() => send.onOpen(item.recipient_id!, item.sbpx_path, label)}
+                        dataButton="renew-send"
+                    >
+                        {t('pub.send.open')}
                     </Button>
                 </div>
             )}

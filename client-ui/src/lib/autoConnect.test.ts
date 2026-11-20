@@ -358,8 +358,8 @@ describe('verdicts: one plain sentence each, in both languages', () => {
         // starts with the check that tells them apart — it does not
         // send the person for a new file they could not receive.
         expect(EN[autoVerdictKey('relay_unreachable')]).toContain('no working internet');
-        expect(EN[autoVerdictActionKey('relay_unreachable')]).toMatch(/^Check that other apps or sites work\./);
-        expect(EN[autoVerdictActionKey('relay_unreachable')]).toContain('If they do, ask the person who gave you the file');
+        expect(EN[autoVerdictActionKey('relay_unreachable')]).toMatch(/^If other apps work, ask for a new file\./);
+        expect(EN[autoVerdictActionKey('relay_unreachable')]).toContain('ask for a new file');
         // No sentence promises that trying again "in a moment" helps:
         // after a pass that answered, the ways rest for minutes.
         for (const v of FAILURE_VERDICTS) {
@@ -371,7 +371,7 @@ describe('verdicts: one plain sentence each, in both languages', () => {
         expect(EN['auto.note.udp_blocked_here']).not.toMatch(/network blocks/);
         expect(FA['auto.note.udp_blocked_here']).not.toContain('این شبکه جلوی');
         expect(FA[autoVerdictKey('udp_blocked_here')]).not.toContain('این شبکه جلوی');
-        expect(EN[autoVerdictActionKey('all_failed')]).toContain('ask the person who gave you the file for a new one');
+        expect(EN[autoVerdictActionKey('all_failed')]).toContain('ask for a new file');
         expect(EN[autoVerdictActionKey('all_need_new_file')]).toContain('new one');
     });
     it('an unknown code gets the generic sentence — never the code', () => {

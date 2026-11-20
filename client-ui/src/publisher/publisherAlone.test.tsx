@@ -14,7 +14,9 @@ import recoverCardSource from './SetupRecoveryCard.tsx?raw';
 import accountSheetSource from './AccountCheckSheet.tsx?raw';
 import renewSheetSource from './RenewSheet.tsx?raw';
 import healthPanelSource from './HealthPanel.tsx?raw';
+import relayPageSource from './PublisherRecipientsPage.tsx?raw';
 import addrSource from './DestroyAddresses.tsx?raw';
+import uiSource from './relayStatus.ts?raw';
 import {
     DESTRUCTIVE,
     buttonKey,
@@ -57,6 +59,7 @@ import {
     checkedWorking,
     familyNameKey,
     healthFixture,
+    nowUnix,
     healthLines,
     managementLineKey,
     overallKey,
@@ -65,7 +68,7 @@ import {
 } from './relayHealth';
 import { HealthPanel } from './HealthPanel';
 import { AddressLines, UnreleasedAddresses, addressLineKey, addressLineText, retryNeeded } from './DestroyAddresses';
-import { relayBadge } from './relayStatus';
+import { relayLook } from './relayStatus';
 import { DensityProvider } from '../design/DensityProvider';
 import { failureKey } from './failureText';
 import { classifyPublisherError, recipientArtifact, serverIdFromExists } from './wizardCommands';
@@ -351,6 +354,9 @@ describe('D1 interrupted setup: one card per state', () => {
             new Date(unix * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }),
         );
         expect(healthPanelSource).not.toContain('toISOString');
+        // The relay page's Details too: its dates follow the locale (F.2,
+        // no Latin "2026-11-08" in Farsi).
+        expect(relayPageSource).not.toContain('toISOString');
     });
 
     it('delete and stop / delete whatever was made call relayDestroy(op, true)', async () => {
@@ -429,7 +435,7 @@ describe('D1 cancel offers deletion', () => {
         );
         expect(html).toContain('data-plan="delete"');
         expect(html).toContain('daal-fsn1-0011223344556677');
-        expect(html).toContain('costs money');
+        expect(html).toMatch(/costs money/i);
         const mine = renderToStaticMarkup(
             <DensityProvider><CancelSetupSheet
                 t={t}
@@ -495,9 +501,8 @@ describe('D1 account check', () => {
     });
 
     it('the sheet states the rule once, and the list opens from the relay list when a token is stored', () => {
-        expect(EN['pub.account.rule']).toBe(
-            'Daal only offers to delete things it labelled as its own when it made them. Nothing else in your account is touched.',
-        );
+        // Shortened (C7.1): one line.
+        expect(EN['pub.account.rule']).toBe('Daal only deletes servers it made.');
         expect(accountSheetSource.match(/pub\.account\.rule/g)?.length).toBe(1);
         expect(listSource).toContain("o.has_cloud_token === true");
         expect(listSource).toContain('<AccountCheckSheet');
@@ -519,9 +524,12 @@ describe('D1 account check', () => {
         for (const c of codes) expect(EN[outcomeKey(c)], c).toBeTruthy();
     });
 
-    it('the relay list marks an interrupted setup and opens it', () => {
-        expect(listSource).toContain("op.setup_interrupted === true");
-        expect(EN['pub.relays.interrupted']).toMatch(/costing money/);
+    it('the relay list marks an unfinished setup "may cost money" and opens it in the wizard', () => {
+        // One badge (MUST KEEP 1) instead of a line on a card.
+        expect(uiSource).toContain("labelKey: 'pub.relays.status.unfinished'");
+        expect(EN['pub.relays.status.unfinished']).toMatch(/may cost money/);
+        expect(FA['pub.relays.status.unfinished']).toMatch(/هزینه/);
+        expect(listSource).toContain('if (needsFinishing(op)) onResume(op.id);');
     });
 });
 
@@ -573,16 +581,15 @@ describe('D2 renew everyone', () => {
         expect(EN['pub.renew.removed_stay_removed']).toBe('People you removed stay removed.');
     });
 
-    it('a done row keeps share and save and adds QR and copy; a failed row says why in plain words', () => {
+    it('a done row has one "Send…" (the send sheet holds share, QR, copy, save); a failed row says why in plain words', () => {
         const rep = renewFixture();
-        const send = { onSend: vi.fn(), onSave: vi.fn(), onQr: vi.fn(), onCopy: vi.fn() };
+        const send = { onOpen: vi.fn() };
         const done = renderToStaticMarkup(<RenewResultRow t={t} item={rep.items[0]} send={send} />);
-        for (const k of ['pub.people.send', 'pub.people.save', 'pub.person.qr', 'pub.person.copy']) {
-            expect(done).toContain(t(k));
-        }
+        expect(done).toContain(t('pub.send.open'));
+        expect(done).toContain('data-button="renew-send"');
         const failed = renderToStaticMarkup(<RenewResultRow t={t} item={rep.items[2]} send={send} />);
         expect(failed).toContain('The relay has no room for more people.');
-        expect(failed).not.toContain(t('pub.person.qr'));
+        expect(failed).not.toContain(t('pub.send.open'));
         // The raw text sits in Details only.
         expect(failed.indexOf('mgmt: 507')).toBeGreaterThan(failed.indexOf('<details'));
     });
@@ -625,8 +632,8 @@ describe('D3 health check', () => {
         expect(checkedWorking(healthFixture({ checked_at_unix: now - 601 }), now)).toBe(false);
         expect(checkedWorking(healthFixture({ checked_at_unix: now, overall: 'partly' }), now)).toBe(false);
         expect(checkedWorking(null, now)).toBe(false);
-        expect(relayBadge('provisioned', checkedWorking(healthFixture({ checked_at_unix: now }), now)).tone).toBe('good');
-        expect(relayBadge('provisioned', checkedWorking(healthFixture({ checked_at_unix: now - 3600 }), now)).tone).not.toBe('good');
+        expect(relayLook({ status: 'provisioned', has_signed_sbp: true }, healthFixture({ checked_at_unix: now })).tone).toBe('good');
+        expect(relayLook({ status: 'provisioned', has_signed_sbp: true }, null).tone).not.toBe('good');
     });
 
     it('lines are plain words, ways named by plain name, never the protocol token', () => {
@@ -639,20 +646,39 @@ describe('D3 health check', () => {
             ],
             keys_match: false,
             people_missing: 2,
+            overall: 'partly',
         });
         const html = renderToStaticMarkup(
-            <HealthPanel t={t} health={h} busy={false} failed={null} now={h.checked_at_unix} onCheck={() => {}} />,
+            <DensityProvider>
+                <HealthPanel t={t} health={h} busy={false} failed={null} now={h.checked_at_unix} onCheck={() => {}} />
+            </DensityProvider>,
         );
         for (const raw of ['vless', 'reality', 'naive', 'tuic', 'mystery-proto']) {
             expect(html.toLowerCase()).not.toContain(raw);
         }
+        // Only what failed is on the card (C7.2 §3); the rest is in Details.
         expect(html).toContain('answered as a different server');
-        expect(html).toContain("can&#x27;t be tested from this phone");
+        expect(html).not.toContain("can&#x27;t be tested from this phone");
         expect(html).toContain(EN['pub.health.keys_changed'].replace(/'/g, '&#x27;'));
         expect(html).toContain('2 of the people you gave files to are not on the server');
-        // The honest limit, once.
-        expect(html.split(EN['pub.health.limits']).length - 1).toBe(1);
+        expect(html).toContain(`>${EN['pub.relays.status.partly']}<`);
+        // The hedge, always, once (MUST KEEP 7); the long limit behind "Why".
+        // ("this phone" on a phone, "this computer" on a computer.)
+        const hedges = ['pub.health.hedge', 'pub.health.hedge_desktop'].map(
+            (k) => html.split(EN[k].replace(/'/g, '&#x27;')).length - 1,
+        );
+        expect(hedges[0] + hedges[1]).toBe(1);
+        expect(EN['pub.health.hedge_desktop']).toMatch(/^As far as this computer can tell\. It can't see blocking inside Iran\.$/);
+        expect(html).toContain(EN['pub.health.why'].replace(/'/g, '&#x27;'));
         expect(EN['pub.health.limits']).toMatch(/Nobody outside the country/);
+        // A working relay lists no checklist on the card at all.
+        const ok = renderToStaticMarkup(
+            <DensityProvider>
+                <HealthPanel t={t} health={healthFixture()} busy={false} failed={null} now={nowUnix()} onCheck={() => {}} />
+            </DensityProvider>,
+        );
+        expect(ok).not.toContain('data-testid="health-failing"');
+        expect(ok).toContain(`>${EN['pub.relays.status.working']}<`);
     });
 
     it('keys_changed is serious; the address hint gets its own sentence', () => {
@@ -818,8 +844,8 @@ describe('D5 one person as QR or text', () => {
         expect(recipientArtifact(42)).toBe('recipient:42');
         expect(qrSource).toMatch(/Wizard\.qrRender\(\s*operatorId,\s*artifact,/);
         expect(qrSource).not.toMatch(/Wizard\.qrRender\(\s*operatorId,\s*'shared'/);
-        expect(pageSource).toContain('artifact: recipientArtifact(r.id)');
-        expect(pageSource).toContain('Wizard.copyPasteable(operatorId, recipientArtifact(r.id))');
+        expect(pageSource).toContain('setQrSend({ artifact: recipientArtifact(id), name: p.label })');
+        expect(pageSource).toContain('Wizard.copyPasteable(operatorId, recipientArtifact(id))');
     });
 
     it('a failed per-person QR does not send the publisher to the everyone-file button', () => {
@@ -829,7 +855,10 @@ describe('D5 one person as QR or text', () => {
     });
 
     it('the copy note says only that person can open it', () => {
-        expect(EN['pub.person.copied']).toContain("Paste it into a message. Only {name}'s phone can open it.");
+        // MUST KEEP 17, on the toast and on the send sheet.
+        expect(EN['pub.person.copied']).toContain("Only {name}'s phone can open it.");
+        expect(EN['pub.send.only']).toBe("Only {name}'s phone can open it.");
+        expect(FA['pub.send.only']).toContain('{name}');
     });
 });
 

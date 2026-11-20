@@ -332,3 +332,56 @@ describe('picking a route by hand pins it only when it connected', () => {
         expect(pinAfterTap(p.routeId, outcome)).toBeUndefined();
     });
 });
+
+// ---- the Files page (spec C4) ----
+import { bestRouteOf, fileInUse, fileState, fileUpdatedMs, restingNow } from './networkRows';
+import type { RouteDisplayRow as FileRoute } from '../contract/D2Contract';
+
+describe('Files: one row per file', () => {
+    const r = (id: string, over: Partial<FileRoute> = {}): FileRoute => ({
+        routeId: id,
+        publisherId: 'p',
+        publisherName: 'Maman',
+        routeNickname: id,
+        trustClass: 'trusted',
+        family: 'vless-reality',
+        ...over,
+    });
+    const file = (routes: FileRoute[], bucket?: string) => ({
+        cells: [{ routes }],
+        subscription: bucket ? { lastRefreshBucket: bucket } : undefined,
+    });
+    const NOW = Date.UTC(2026, 10, 20, 12);
+
+    it('its state icon: in use or worked = ok; every way resting = warn; never tried = none', () => {
+        expect(fileState(file([r('a'), r('b')]), 'b', NOW)).toBe('ok');
+        expect(fileState(file([r('a', { proven: true })]), null, NOW)).toBe('ok');
+        expect(fileState(file([r('a', { inCooldown: true, cooldownUntilUnixMs: NOW + 60_000 })]), null, NOW)).toBe('warn');
+        expect(fileState(file([r('a')]), null, NOW)).toBe('none');
+        // A rest that is over is not resting.
+        expect(restingNow(r('a', { inCooldown: true, cooldownUntilUnixMs: NOW - 1 }), NOW)).toBe(false);
+    });
+
+    it('"In use" only on the file that holds the running way', () => {
+        expect(fileInUse(file([r('a')]), 'a')).toBe(true);
+        expect(fileInUse(file([r('a')]), 'z')).toBe(false);
+        expect(fileInUse(file([r('a')]), null)).toBe(false);
+    });
+
+    it('"Updated …" from the refresh hour, or nothing when nothing says', () => {
+        expect(fileUpdatedMs(file([], '2026-11-20T09'))).toBe(Date.UTC(2026, 10, 20, 9));
+        expect(fileUpdatedMs(file([]))).toBeUndefined();
+        expect(fileUpdatedMs(file([], 'yesterday'))).toBeUndefined();
+    });
+
+    it('"Connect with this file" takes the way in use, else the best way that is not resting', () => {
+        const ways = [
+            r('fails', { measured: { grade: 'failing', samples: 2, carried: 0, failed: 2 } }),
+            r('resting', { inCooldown: true, cooldownUntilUnixMs: NOW + 60_000, measured: { grade: 'good', samples: 2, carried: 2, failed: 0 } }),
+            r('works', { measured: { grade: 'good', samples: 2, carried: 2, failed: 0 } }),
+        ];
+        expect(bestRouteOf(file(ways), null, NOW)?.routeId).toBe('works');
+        expect(bestRouteOf(file(ways), 'fails', NOW)?.routeId).toBe('fails');
+        expect(bestRouteOf(file([ways[1]]), null, NOW)).toBeUndefined();
+    });
+});

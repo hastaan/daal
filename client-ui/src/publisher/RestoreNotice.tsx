@@ -9,7 +9,7 @@
 // promising it.
 
 import { useState } from 'react';
-import { Button, Card, Input, Sheet } from '../design/primitives';
+import { Button, Disclosure, Input, Sheet, StateIcon } from '../design/primitives';
 import { Backup, classifyPublisherError } from './wizardCommands';
 import type { RelayHealth, RelayLine, RestoreNotice } from './wizardCommands';
 import { checkHealth } from './relayHealth';
@@ -17,6 +17,7 @@ import { explainFailure, rawErrorText } from './failureText';
 import type { Failure } from './failureText';
 import { WhatIsThis } from './Disclosure';
 import { dayLabel, fill, providersOf, relayLineName, relayNames } from './backup';
+import { useLocale } from './ui';
 
 const BODY: React.CSSProperties = { fontSize: 13, lineHeight: 1.6, color: 'var(--fg)' };
 
@@ -26,40 +27,65 @@ export function RestoreNoticeCard({
     busy,
     onEnterKey,
     onDismiss,
+    whatOpen,
 }: {
     t: (k: string) => string;
     notice: RestoreNotice;
     busy?: boolean;
     onEnterKey: () => void;
     onDismiss: () => void;
+    /** "What to do" starts open. */
+    whatOpen?: boolean;
 }) {
+    const locale = useLocale();
+    // MUST KEEP 6: title + one line visible, the action, then the rest
+    // behind "What to do" (H-07).
     return (
-        <Card>
-            <div style={{ display: 'grid', gap: 10 }} data-testid="restore-notice">
-                <div style={{ fontFamily: 'var(--font-display)', fontSize: 17, color: 'var(--fg)' }}>
-                    {t('pub.restore.oldphone.title')}
-                </div>
-                <div style={BODY}>{t('pub.restore.oldphone.body1')}</div>
-                <div style={BODY}>{t('pub.restore.oldphone.body2')}</div>
-                <div>
-                    <Button variant="secondary" disabled={busy} onClick={onEnterKey} data-button="new-key">
-                        {t('pub.restore.oldphone.newkey')}
-                    </Button>
-                </div>
-                <div style={BODY}>{t('pub.restore.oldphone.body3')}</div>
-                {notice.has_refresh_keys && <div style={BODY}>{t('pub.restore.oldphone.body4')}</div>}
-                {notice.backup_made_at_unix > 0 && (
-                    <div style={BODY} data-testid="restore-later">
-                        {fill(t('pub.restore.oldphone.later'), { date: dayLabel(notice.backup_made_at_unix) })}
+        <div
+            data-testid="restore-notice"
+            style={{
+                border: '1px solid var(--amber)',
+                borderRadius: 'var(--r-card)',
+                background: 'var(--surface)',
+                padding: '14px 16px',
+                display: 'grid',
+                gap: 10,
+                maxWidth: 640,
+            }}
+        >
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ display: 'inline-flex', paddingBlockStart: 2, flexShrink: 0 }}>
+                    <StateIcon state="warn" size={20} />
+                </span>
+                <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--fg)' }}>
+                        {t('pub.restore.oldphone.title')}
                     </div>
-                )}
-                <div>
-                    <Button disabled={busy} onClick={onDismiss} data-button="understand">
-                        {t('pub.restore.oldphone.ok')}
-                    </Button>
+                    <div style={{ ...BODY, color: 'var(--muted)' }}>{t('pub.restore.warn.line')}</div>
                 </div>
             </div>
-        </Card>
+            <div style={{ display: 'grid', gap: 2, justifyItems: 'start' }}>
+                <Button disabled={busy} onClick={onEnterKey} data-button="new-key">
+                    {t('pub.restore.oldphone.newkey')}
+                </Button>
+                <Disclosure summary={t('pub.restore.warn.what')} dataButton="restore-what" defaultOpen={whatOpen}>
+                    <div style={{ display: 'grid', gap: 8 }}>
+                        <div style={BODY}>{t('pub.restore.oldphone.body1')}</div>
+                        <div style={BODY}>{t('pub.restore.oldphone.body2')}</div>
+                        <div style={BODY}>{t('pub.restore.oldphone.body3')}</div>
+                        {notice.has_refresh_keys && <div style={BODY}>{t('pub.restore.oldphone.body4')}</div>}
+                        {notice.backup_made_at_unix > 0 && (
+                            <div style={BODY} data-testid="restore-later">
+                                {fill(t('pub.restore.oldphone.later'), { date: dayLabel(notice.backup_made_at_unix, locale) })}
+                            </div>
+                        )}
+                    </div>
+                </Disclosure>
+                <Button variant="link" disabled={busy} onClick={onDismiss} data-button="understand">
+                    {t('pub.restore.oldphone.ok')}
+                </Button>
+            </div>
+        </div>
     );
 }
 

@@ -20,6 +20,10 @@ describe('colours every web view understands', () => {
         expect(mix('#ffffff', 50, '#000000')).toBe('rgba(128, 128, 128, 1)');
         expect(mix('var(--gold)', 100, 'var(--surface-2)')).toBe('rgba(201, 162, 58, 1)');
     });
+    it('a token defined as another token blends like that token', () => {
+        expect(mix('var(--info)', 16, 'transparent')).toBe(mix('var(--cyan)', 16, 'transparent'));
+        expect(tokens).toMatch(/--info:\s*var\(--cyan\)/);
+    });
     it('an unknown colour comes back as it was', () => {
         expect(mix('var(--no-such)', 50, 'transparent')).toBe('var(--no-such)');
     });
