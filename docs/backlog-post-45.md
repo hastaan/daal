@@ -3527,3 +3527,36 @@ inside to install the app. None is started unless marked.
   before anything real depends on it (the owner's decision: at the very
   end).
 
+## 23. A phone's state must never move without its data (2026-11-20)
+
+- [x] **SD-1. The Samsung opened empty after an update, relay and file
+  gone from view.** Earlier Android builds chose the state directory from
+  $HOME, then the platform data directory, then $TMPDIR; on the Samsung
+  the last one won, and Android points $TMPDIR at the app's CACHE
+  directory. So the relay's signing key and the operator database lived
+  in a directory Android may empty when storage runs low. The fix for
+  phones with no usable $HOME (OP-1, 2026-11-19) chose the app's files
+  directory, and the Samsung started with an empty one. Nothing was lost.
+  Now, at start, if the chosen directory is not yet marked as this
+  install's state home, the most recently used earlier directory that
+  holds state (cache, $TMPDIR, $HOME/.local/share, $XDG_DATA_HOME) is
+  renamed into place; a directory that stood there is renamed aside,
+  never deleted; the chosen one is then marked. Seen on the Samsung:
+  "state moved from …/cache/daal to …/files/daal", relay "Test" live,
+  hosting key and relay key readable, the imported file back. The relay's
+  own files looked missing ("their file is missing on this device"): the
+  staging directory was still worked out from $TMPDIR, and the database
+  stores absolute paths into it. On Android staging now lives inside the
+  state directory, and at start stored paths that point at an old staging
+  place are rewritten when the file exists under the new one. Only a
+  directory with the operator database is ever adopted, so a cache that
+  holds nothing but staged files never replaces real state. Tests:
+  `adopt_tests` (daal-wizard), `moved_path_tests` (operator_db).
+- [ ] **SD-2. An update must be tried on a phone that holds real state
+  before it reaches anyone.** The release check list should include: the
+  previous release installed with a relay and a file, then the new one
+  over it, then the relay page opens live. The rig cannot see this.
+- [ ] **SD-3. Nobody had a backup.** The owner's relay keys existed in
+  one place, a cache directory. Prompt for the first backup as soon as a
+  relay is live, not only on the relay list.
+

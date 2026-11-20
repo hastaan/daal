@@ -400,6 +400,63 @@ pub struct OperatorDb {
 impl OperatorDb {
     /// Open the database at `path` (created if missing) and apply
     /// any pending migrations. Idempotent.
+    /// Point stored file paths at `staging_dir` when the state moved.
+    ///
+    /// The tables listed in `publisher_backup::PATH_COLUMNS` store
+    /// absolute paths into the staging directory. When an update moved a
+    /// phone's state (see `adopt_earlier_state`), those paths still name
+    /// the old place and every file looks missing. A path that does not
+    /// exist, has a `staging` component, and whose remainder does exist
+    /// under `staging_dir` is rewritten. Idempotent; returns how many
+    /// values changed.
+    pub fn repair_moved_paths(&self, staging_dir: &Path) -> Result<usize> {
+        let conn = self.conn.lock().expect("operator db lock");
+        let mut changed = 0;
+        for (table, col) in crate::publisher_backup::PATH_COLUMNS {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|n| n > 0)
+                .unwrap_or(false);
+            if !exists {
+                continue;
+            }
+            let rows: Vec<(i64, String)> = {
+                let mut st = conn.prepare(&format!(
+                    "SELECT rowid, {col} FROM {table} WHERE {col} IS NOT NULL AND {col} != ''"
+                ))?;
+                let it = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                it.collect::<std::result::Result<_, _>>()?
+            };
+            for (rowid, old) in rows {
+                let old_path = Path::new(&old);
+                if !old_path.is_absolute() || old_path.exists() {
+                    continue;
+                }
+                let comps: Vec<_> = old_path.components().collect();
+                let Some(i) = comps.iter().rposition(|c| c.as_os_str() == "staging") else {
+                    continue;
+                };
+                let mut new_path = staging_dir.to_path_buf();
+                for c in &comps[i + 1..] {
+                    new_path.push(c.as_os_str());
+                }
+                if new_path == old_path || !new_path.exists() {
+                    continue;
+                }
+                conn.execute(
+                    &format!("UPDATE {table} SET {col} = ?1 WHERE rowid = ?2"),
+                    rusqlite::params![new_path.to_string_lossy(), rowid],
+                )?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn open_at(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -3885,3 +3942,55 @@ mod tests {
         assert!(err.is_err(), "id=2 must violate CHECK(id=1)");
     }
 }
+
+#[cfg(test)]
+mod moved_path_tests {
+    use super::*;
+
+    fn add_sbp(db: &OperatorDb, id: i64, path: &str) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO signed_sbps (operator_id, signed_at_unix, sbp_path, sbp_sha256, relay_pack_id, route_count, active)
+                 VALUES (?1, 1, ?2, 'h', 'rp', 1, 0)",
+                params![id, path],
+            )
+            .unwrap();
+    }
+
+    fn sbp_paths(db: &OperatorDb, id: i64) -> Vec<String> {
+        let c = db.conn.lock().unwrap();
+        let mut st = c.prepare("SELECT sbp_path FROM signed_sbps WHERE operator_id = ?1").unwrap();
+        let v = st.query_map(params![id], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        v
+    }
+
+    #[test]
+    fn paths_into_a_moved_staging_dir_are_pointed_at_the_new_one() {
+        let t = tempfile::tempdir().unwrap();
+        let db = OperatorDb::open_at(t.path().join("wizard.db")).unwrap();
+        let id = db
+            .insert_pre_provision("{}", "", "", "hetzner", "daal.cloud.0.token", 1)
+            .unwrap();
+        let new_staging = t.path().join("files").join("daal").join("staging");
+        std::fs::create_dir_all(&new_staging).unwrap();
+        std::fs::write(new_staging.join("1.sbp"), b"signed").unwrap();
+        let old = t.path().join("cache").join("daal").join("staging").join("1.sbp");
+        add_sbp(&db, id, &old.to_string_lossy());
+        // A path that still exists, and one whose file is nowhere, are left alone.
+        let kept = t.path().join("elsewhere.sbp");
+        std::fs::write(&kept, b"x").unwrap();
+        add_sbp(&db, id, &kept.to_string_lossy());
+        let gone = t.path().join("cache").join("daal").join("staging").join("9.sbp");
+        add_sbp(&db, id, &gone.to_string_lossy());
+
+        assert_eq!(db.repair_moved_paths(&new_staging).unwrap(), 1);
+        assert_eq!(db.repair_moved_paths(&new_staging).unwrap(), 0, "idempotent");
+        let paths = sbp_paths(&db, id);
+        assert!(paths.contains(&new_staging.join("1.sbp").to_string_lossy().to_string()));
+        assert!(paths.contains(&kept.to_string_lossy().to_string()));
+        assert!(paths.contains(&gone.to_string_lossy().to_string()));
+    }
+}
+
