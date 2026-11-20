@@ -87,6 +87,152 @@ pub fn dir_is_writable(dir: &std::path::Path) -> bool {
     }
 }
 
+/// The file that marks a directory as this install's state home. Written
+/// once a state directory has been chosen, so a later start never adopts
+/// an older directory over one that is in use.
+pub const STATE_HOME_MARKER: &str = ".daal-state-home";
+
+/// What [`adopt_earlier_state`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Adopted {
+    /// `chosen` is already this install's state home, or nothing earlier
+    /// holds state: nothing moved.
+    Nothing,
+    /// An earlier directory was moved into place. A directory that stood
+    /// at `chosen` (made by a build that did not look for earlier state)
+    /// was kept beside it under `set_aside`.
+    Moved { from: std::path::PathBuf, set_aside: Option<std::path::PathBuf> },
+    /// An earlier directory holds state but could not be moved: use it
+    /// where it is, rather than start empty.
+    UseInPlace(std::path::PathBuf),
+}
+
+fn holds_state(dir: &std::path::Path) -> bool {
+    dir.join("wizard.db").is_file()
+        || std::fs::read_dir(dir).map(|mut r| r.next().is_some()).unwrap_or(false)
+}
+
+/// Bring an earlier install's state to `chosen`.
+///
+/// Earlier Android builds chose their state directory from $HOME, then
+/// the platform data directory, then $TMPDIR. On some phones that last
+/// one won: Android points $TMPDIR at the app's CACHE directory, so a
+/// Samsung kept its relay keys and operator database in a directory the
+/// system may empty when storage runs low. The fix for phones without
+/// $HOME (2026-11-19) chose the app's files directory instead, and the
+/// Samsung opened empty (seen 2026-11-20). Nothing was lost; this moves
+/// it back.
+///
+/// Rules: if `chosen` carries [`STATE_HOME_MARKER`], it is in use and
+/// nothing moves. Otherwise the most recently changed `earlier`
+/// directory that holds state is renamed into place; a directory that
+/// already stood at `chosen` is renamed aside, never deleted. If the
+/// rename fails, the earlier directory is used where it is.
+pub fn adopt_earlier_state(chosen: &std::path::Path, earlier: &[std::path::PathBuf], now_unix: u64) -> Adopted {
+    if chosen.join(STATE_HOME_MARKER).is_file() {
+        return Adopted::Nothing;
+    }
+    let mtime = |d: &std::path::Path| {
+        let db = d.join("wizard.db");
+        std::fs::metadata(if db.is_file() { db } else { d.to_path_buf() })
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    let best = earlier
+        .iter()
+        .filter(|d| d.as_path() != chosen && d.is_dir() && holds_state(d))
+        .max_by_key(|d| mtime(d));
+    let Some(from) = best else { return Adopted::Nothing };
+    let mut set_aside = None;
+    if chosen.exists() {
+        let aside = chosen.with_file_name(format!(
+            "{}.superseded-{now_unix}",
+            chosen.file_name().and_then(|n| n.to_str()).unwrap_or("daal")
+        ));
+        if std::fs::rename(chosen, &aside).is_err() {
+            return Adopted::UseInPlace(from.clone());
+        }
+        set_aside = Some(aside);
+    }
+    if let Some(parent) = chosen.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(from, chosen) {
+        Ok(()) => Adopted::Moved { from: from.clone(), set_aside },
+        Err(_) => {
+            // Put back what was set aside, and run from the earlier place.
+            if let Some(a) = &set_aside {
+                let _ = std::fs::rename(a, chosen);
+            }
+            Adopted::UseInPlace(from.clone())
+        }
+    }
+}
+
+/// Mark `dir` as this install's state home (see [`STATE_HOME_MARKER`]).
+pub fn mark_state_home(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(STATE_HOME_MARKER), b"daal state home\n");
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+
+    fn with_db(d: &std::path::Path, body: &[u8]) {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("wizard.db"), body).unwrap();
+    }
+
+    #[test]
+    fn state_left_in_the_cache_directory_is_moved_into_place_and_the_empty_one_kept_aside() {
+        let t = tempfile::tempdir().unwrap();
+        let chosen = t.path().join("files").join("daal");
+        let cache = t.path().join("cache").join("daal");
+        with_db(&cache, b"the relay");
+        with_db(&chosen, b"empty, made by the build that did not look");
+        let r = adopt_earlier_state(&chosen, &[cache.clone()], 42);
+        let aside = t.path().join("files").join("daal.superseded-42");
+        assert_eq!(r, Adopted::Moved { from: cache.clone(), set_aside: Some(aside.clone()) });
+        assert_eq!(std::fs::read(chosen.join("wizard.db")).unwrap(), b"the relay");
+        assert_eq!(std::fs::read(aside.join("wizard.db")).unwrap(), b"empty, made by the build that did not look");
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn a_state_home_in_use_is_never_replaced() {
+        let t = tempfile::tempdir().unwrap();
+        let chosen = t.path().join("files").join("daal");
+        let cache = t.path().join("cache").join("daal");
+        with_db(&cache, b"old");
+        with_db(&chosen, b"current");
+        mark_state_home(&chosen);
+        assert_eq!(adopt_earlier_state(&chosen, &[cache.clone()], 1), Adopted::Nothing);
+        assert_eq!(std::fs::read(chosen.join("wizard.db")).unwrap(), b"current");
+        assert!(cache.join("wizard.db").is_file());
+    }
+
+    #[test]
+    fn nothing_earlier_means_nothing_moves() {
+        let t = tempfile::tempdir().unwrap();
+        let chosen = t.path().join("files").join("daal");
+        let empty = t.path().join("cache").join("daal");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(adopt_earlier_state(&chosen, &[empty, t.path().join("missing")], 1), Adopted::Nothing);
+        assert_eq!(adopt_earlier_state(&chosen, &[chosen.clone()], 1), Adopted::Nothing);
+    }
+
+    #[test]
+    fn with_no_directory_at_the_chosen_place_the_earlier_one_simply_moves() {
+        let t = tempfile::tempdir().unwrap();
+        let chosen = t.path().join("files").join("daal");
+        let old = t.path().join("tmp").join("daal");
+        with_db(&old, b"x");
+        assert_eq!(adopt_earlier_state(&chosen, &[old.clone()], 1), Adopted::Moved { from: old, set_aside: None });
+        assert!(chosen.join("wizard.db").is_file());
+    }
+}
+
 #[cfg(test)]
 mod writable_dir_tests {
     use super::dir_is_writable;
