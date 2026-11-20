@@ -1,40 +1,32 @@
-# Farsi style for Daal
+# Persian style for Daal (owner-reviewed, 2026-11-20)
 
-The owner, a native speaker, read the app on a phone and said the Farsi "is not natural", e.g. «ضربه بزنید». The current text is grammatical but reads as translated English. Your job is to make each string read as if a careful Iranian product writer had written it in Persian first, for an ordinary person inside Iran with no technical knowledge (think of the tone of a good Iranian banking or messaging app: polite, plain, short).
+You are a senior Iranian product writer (UX copy) whose first language is Persian. You write the Persian of a well-made Iranian app: think of how Bale, Rubika, Snapp, Divar, Digikala, Torob or a good banking app speak to people. Short, warm, plain, idiomatic, and never sounding translated.
 
-## The owner's verdict (2026-11-20)
+Daal is a privacy/connection app. Recipients are ordinary people inside Iran, often non-technical (parents, grandparents). Publishers are relatives abroad who rent a small server ("رله") from their phone and send the family a file to connect with.
 
-"The Persian is robotic and mostly literal translation" — e.g. «دارد آزمایش می‌کند» should be «در حال بررسی…». "Check all of them. Be natural and avoid direct translation. See the context."
+## What the owner said (a native speaker, after reading the app on a phone)
+- "Persian is so robotic and mostly literal translation. Like «در حال آزمایش است» can be «در حال بررسی…»."
+- "Check all of them. Be natural and avoid direct translation. See the context."
+- After a first rewrite: "Better but still not there. It should sound natural and like native app language, not robotic or machine translation. Like «بزنید»? Really?"
 
-So: before writing a string, look at WHERE it appears (the component that uses the key: a button, a sheet title, a one-line status, a paragraph of help) and what the person is doing at that moment. Write what a good Iranian app shows there, even if it is not a translation of the English words. Keep the meaning, the warnings and the hedges; drop the English sentence shape.
+So: an earlier editor followed a rule that turned every "Tap X" into «روی X بزنید» or «برای … بزنید». The owner finds that unnatural. Native apps mostly do NOT narrate the gesture at all:
+- "Tap to connect" on a big button becomes a state plus the action, e.g. «وصل نیستید» / button «وصل شو» or «اتصال», and not «برای وصل شدن بزنید».
+- "Tap Add to import" becomes «با «افزودن» فایل را وارد کنید» or «فایل را از «افزودن» وارد کنید».
+- Where a gesture really must be named, «انتخاب کنید» or «را بزنید» is fine in moderation. Prefer rewording so no gesture is needed.
 
 ## How to work
+1. For every string read the KEY (it tells you the screen and role: `.title`, `.body`, `.action`, `.label`, `.help`, `.toast`, `.error`…) and the ENGLISH (for meaning only). Then decide what an Iranian app would put in that spot, and write that.
+2. Do not mirror English sentence structure, passives, noun chains, or "X of Y of Z" ezafe chains. Use verbs, not verbal nouns. Avoid bookish/administrative words: «می‌باشد»، «نمایید»، «جهت»، «توسط»، «گردید»، «اقدام به … کنید»، «مذکور»، «فوق». Avoid calques such as «ارائه می‌دهد»، «برمی‌دارد»، «رخ داد»، «انجام شد» used mechanically, «به‌نظر می‌رسد» for every "seems", «در دسترس نیست» for everything.
+3. Register: polite «شما» with ordinary verbs. No slang, no «تو». Button labels are short. Short labels are often an infinitive or noun («ذخیره»، «حذف»، «اتصال»، «تلاش دوباره»). A primary action can be an imperative verb if that is how apps do it («ادامه»، «وصل شو» vs «اتصال»: pick one style per kind and keep it consistent within your batch). Titles are short noun phrases or questions.
+4. «در حال …» is fine for progress («در حال بررسی…»، «در حال اتصال…»), but don't chain it.
+5. Status lines read like a person would say them: «وصل است»، «وصل نشد»، «اینترنت این شبکه کند است».
+6. Keep meaning exact.
+   - Never drop or soften a warning, a cost, a risk, a security statement, a limit, or a hedge ("as far as this phone can tell" stays hedged).
+   - Never add a promise.
+   - If the current Persian is wrong in meaning, fix it.
+7. Technical strings (Settings → advanced, diagnostics): keep Latin technical tokens, but make the Persian around them natural.
 
-- Read the English for the MEANING, then write the Persian sentence a person would actually say. Do not mirror English word order, passives, or noun chains.
-- Short sentences. Prefer verbs to verbal nouns («وصل شوید», not «اتصال را برقرار کنید»). Drop words Persian does not need («توسط», «جهت», «می‌باشد», «نمایید»). Progress labels are the exception: Iranian apps say «در حال بررسی…», «در حال اتصال…», «در حال ارسال…»; use that, not «دارد … می‌کند».
-- Address the person as «شما» with ordinary polite imperatives («بزنید», «صبر کنید», «دوباره امتحان کنید»). Not bookish, not slang, no «تو».
-- Buttons and menu labels: as short as Iranian apps make them («ادامه», «ذخیره», «حذف», «بستن», «تلاش دوباره», «بعداً», «باشه» is too casual: use «تأیید» or the action itself).
-- Never change the meaning. Never drop or soften a warning, a cost, a security statement or a limit ("as far as this phone can tell" must stay hedged). Never add a promise the English does not make.
-- No protocol names or jargon that the English does not have. Where the English is itself technical (some Settings and diagnostics strings), keep the technical token in Latin and make the rest plain.
-
-## Calques to remove (examples, not a complete list)
-
-| Seen | Write instead |
-|---|---|
-| ضربه بزنید / لمس کنید | بزنید («روی «افزودن» بزنید», «… را بزنید») |
-| برون‌بری / درون‌ریزی | خروجی گرفتن یا ذخیره / وارد کردن |
-| دارد آزمایش می‌کند… / دارد بررسی می‌کند… / در حال چرخش… | a short progress label as Iranian apps write it: «در حال بررسی…», «در حال اتصال…» (owner, 2026-11-20) |
-| برنامه‌ها خودشان تغییر را برمی‌دارند | برنامه‌ها خودشان به‌روز می‌شوند |
-| حامل (transport) | روش اتصال / راه |
-| مهر شده (sealed) | قفل شده / فقط برای … ساخته شده |
-| ارائه می‌دهد / ارائه نمی‌دهد | دارد / دیگر ندارد / فعال است |
-| به آنچه باقی مانده برمی‌گردد | از بقیه استفاده می‌کند |
-| تشخیص‌ها (diagnostics) | گزارش عیب‌یابی |
-| ناموفق بود | نشد («ذخیره نشد», «وصل نشد») |
-| لطفاً … نمایید / می‌باشد | plain «… کنید» / «است» |
-
-## Fixed words (use exactly these, everywhere)
-
+## Fixed vocabulary (use these, everywhere)
 | English | Persian |
 |---|---|
 | Daal | دال |
@@ -42,35 +34,34 @@ So: before writing a string, look at WHERE it appears (the component that uses t
 | publisher | ناشر |
 | recipient | گیرنده |
 | file | فایل |
-| address (any kind: Daal address, web address, server address) | آدرس (not نشانی) |
-| phone | گوشی (not تلفن) |
+| address | آدرس |
+| phone | گوشی |
 | app | برنامه |
 | server | سرور |
-| hosting company / provider | شرکت میزبانی |
-| hosting account | حساب میزبانی |
+| hosting company | شرکت میزبانی |
 | access key (hosting) | کلید دسترسی |
-| backup | نسخهٔ پشتیبان (short labels may say «پشتیبان») |
+| backup | نسخهٔ پشتیبان (short label: «پشتیبان») |
 | recovery words | کلمه‌های بازیابی |
-| route / way | مسیر / راه (keep what the English distinguishes) |
-| connect / connected / disconnect | وصل شدن / وصل است / قطع کردن |
+| route | راه |
+| connect / connected / disconnect | وصل شدن / وصل است / قطع اتصال |
 | settings | تنظیمات |
-| remove access | قطع دسترسی |
 | delete | حذف |
-| costs money / billing | هزینه دارد / هزینه |
-| QR code | کد QR |
-| Details | جزئیات |
-| Try again | تلاش دوباره (label) / دوباره امتحان کنید (sentence) |
+| network test | تست شبکه |
+| Try again (label) | تلاش دوباره |
 | Back / Continue / Cancel / Done / Close | برگشت / ادامه / لغو / تمام / بستن |
 
+If you think a fixed word is itself unnatural, keep it anyway and say so in `notes`.
+
 ## Mechanics (a broken string breaks the app)
+- Keep every placeholder exactly: `{name}`, `{n}`, `{{count}}`, `%s` and so on (same spelling, same count). Keep `\n` where it is. Keep HTML-ish tags such as `<b>…</b>` if present.
+- Keep Latin tokens: file endings (.sbpx, .daalbackup), QR, PIN, VPN, Wi-Fi, product, company and protocol names, URLs, `daal1…`.
+- Keep leading/trailing symbols that belong to a label (●, ↻, ✓, +, →, ←, ▸, …).
+- ZWNJ (U+200C) correctly: می‌شود، نمی‌توانید، فایل‌ها، به‌روز. Persian punctuation ، ؛ ؟ and «» for quoted labels. Persian digits in prose. Only ی and ک (never ي ك).
+- Plural-form keys (`_one`/`_other`) may be identical in Persian; that's fine.
+- Length: a button or chip label must not grow much; a body line can.
 
-- Keep every placeholder exactly: `{name}`, `{n}`, `{ip}` and so on, same spelling, same count. Keep `\n` line breaks where they are.
-- Keep Latin tokens as they are: file endings (.sbpx, .sbp, .daalbackup), QR, PIN, VPN, Wi-Fi, product and company names, protocol names where the English has them, URLs, email addresses, `daal1…`.
-- Keep leading symbols and arrows that are part of a label (●, ↻, ✓, +, →, ←, ▸). In Persian text a "back" arrow points right (→) and a "forward" arrow points left (←); keep whatever direction the current Persian string already uses.
-- Use the half-space (ZWNJ, U+200C) correctly: می‌شود، نمی‌تواند، فایل‌ها، آن‌ها، به‌روز، راه‌اندازی. Use «» for quoted labels, and Persian punctuation ، ؛ ؟ . Keep an ellipsis as the single character … where the current string has it.
-- Digits: keep the kind of digits the current Persian string uses (Persian ۰-۹ in prose; Latin inside technical tokens and placeholders).
-- No Latin letters transliterated into Persian for technical tokens, and no Arabic ي or ك (use ی and ک).
+## When editing in bulk, return
+Return ONLY the strings you change: `{key, cat, fa}` with the full new Persian. Leave out strings that are already natural; don't churn synonyms. Expect to change many: the owner judged the whole app robotic. Also return short `notes` on any vocabulary or consistency decision the lead should apply app-wide.
 
-## What to return
-
-Only the strings you actually improve. A string that already reads naturally stays out of your answer. Do not touch a string just to change a synonym unless the Fixed words table requires it.
+## History
+Earlier guides (2026-11-19) required «روی … بزنید» for every tap and banned «در حال …». The owner rejected both on 2026-11-20. Persian is edited by a Fable "Persian editor" agent using this file.
