@@ -1,0 +1,345 @@
+{
+ "_comment": "Shared importer vectors. bundle/go/uri tests check family and refusal; core/engine TestEveryImportedOutboundParses (-tags singbox) runs every accepted outbound through sing-box 1.13.12's strict option parse. Every secret here is a dummy.",
+ "accepted": [
+  {
+   "name": "vless-reality-spx-no-fp",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@r.example.com:443?security=reality&flow=xtls-rprx-vision&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=6ba85179e30d4fc2&spx=%2F&sni=www.example.com&type=tcp&headerType=none&encryption=none#r",
+   "hint": "",
+   "family": "vless-reality"
+  },
+  {
+   "name": "vless-reality-fp-firefox",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@r.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&fp=firefox&sni=www.example.com",
+   "hint": "",
+   "family": "vless-reality"
+  },
+  {
+   "name": "vless-tls-ws-ed",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@cdn.example.com:443?security=tls&type=ws&path=%2Fws%3Fed%3D2048&host=cdn.example.com&sni=cdn.example.com&alpn=h2%2Chttp%2F1.1&fp=chrome",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "vless-tls-httpupgrade",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@cdn.example.com:443?security=tls&type=httpupgrade&path=%2Fup%3Fed%3D2560&host=cdn.example.com&sni=cdn.example.com",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "vless-tls-grpc",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@g.example.com:443?security=tls&type=grpc&serviceName=svc&sni=g.example.com",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "vmess-ws-tls",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJuZXQiOiAid3MiLCAiaG9zdCI6ICJjZG4uZXhhbXBsZS5jb20iLCAicGF0aCI6ICIvd3MiLCAidGxzIjogInRscyIsICJzbmkiOiAiY2RuLmV4YW1wbGUuY29tIiwgImFscG4iOiAiaDIsaHR0cC8xLjEiLCAiZnAiOiAiY2hyb21lIn0=",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "vmess-grpc",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJ0bHMiOiAidGxzIiwgIm5ldCI6ICJncnBjIiwgInBhdGgiOiAic3ZjIiwgInNuaSI6ICJ2bS5leGFtcGxlLmNvbSJ9",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "trojan-tcp-fp-alpn",
+   "input": "trojan://pw@t.example.com:443?sni=t.example.com&alpn=h2,http/1.1&fp=chrome#t",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "trojan-ws",
+   "input": "trojan://pw@t.example.com:443?security=tls&type=ws&path=%2Ftr&host=cdn.example.com&sni=cdn.example.com",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "trojan-httpupgrade",
+   "input": "trojan://pw@t.example.com:443?type=httpupgrade&path=%2Fup&host=cdn.example.com",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "ss-aead",
+   "input": "ss://aes-256-gcm:secret@s.example.com:8388#s",
+   "hint": "",
+   "family": "shadowsocks"
+  },
+  {
+   "name": "ss-2022",
+   "input": "ss://2022-blake3-aes-128-gcm:AAAAAAAAAAAAAAAAAAAAAA%3D%3D@s.example.com:8388",
+   "hint": "",
+   "family": "shadowsocks"
+  },
+  {
+   "name": "hy2-single",
+   "input": "hy2://pw@h.example.com:443?sni=h.example.com&obfs=salamander&obfs-password=opsk#h",
+   "hint": "",
+   "family": "hysteria2"
+  },
+  {
+   "name": "hy2-hop-authority",
+   "input": "hysteria2://pw@h.example.com:443,20000-50000/?sni=h.example.com&alpn=h3#h",
+   "hint": "",
+   "family": "hysteria2"
+  },
+  {
+   "name": "hy2-hop-range-only",
+   "input": "hysteria2://pw@h.example.com:20000-50000?sni=h.example.com&hop_interval=45",
+   "hint": "",
+   "family": "hysteria2"
+  },
+  {
+   "name": "hy2-hop-mport",
+   "input": "hy2://pw@h.example.com:443?mport=20000-30000,40000&sni=h.example.com",
+   "hint": "",
+   "family": "hysteria2"
+  },
+  {
+   "name": "hy2-hop-ipv6",
+   "input": "hy2://pw@[2001:db8::1]:443,5000-6000?sni=h.example.com",
+   "hint": "",
+   "family": "hysteria2"
+  },
+  {
+   "name": "tuic",
+   "input": "tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:pw@t.example.com:443?congestion_control=bbr&alpn=h3,spdy/3.1&sni=t.example.com",
+   "hint": "",
+   "family": "tuic"
+  },
+  {
+   "name": "wireguard-plain",
+   "input": "[Interface]\nPrivateKey = cGxhaW5wbGFpbnBsYWlucGxhaW5wbGFpbnBsYWlucGw=\nAddress = 10.0.0.2/32\nMTU = 1380\n\n[Peer]\nPublicKey = cGVlcnBlZXJwZWVycGVlcnBlZXJwZWVycGVlcnBlZXI=\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n",
+   "hint": "",
+   "family": "wireguard"
+  },
+  {
+   "name": "amneziawg-junk-only",
+   "input": "[Interface]\nPrivateKey = cGxhaW5wbGFpbnBsYWlucGxhaW5wbGFpbnBsYWlucGw=\nAddress = 10.0.0.2/32\nMTU = 1380\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 0\nS2 = 0\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n\n[Peer]\nPublicKey = cGVlcnBlZXJwZWVycGVlcnBlZXJwZWVycGVlcnBlZXI=\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n",
+   "hint": "",
+   "family": "wireguard"
+  },
+  {
+   "name": "amneziawg-headers",
+   "input": "[Interface]\nPrivateKey = cGxhaW5wbGFpbnBsYWlucGxhaW5wbGFpbnBsYWlucGw=\nAddress = 10.0.0.2/32\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 68\nH1 = 1234567\nH2 = 2345678\nH3 = 3456789\nH4 = 4567890\n\n[Peer]\nPublicKey = cGVlcnBlZXJwZWVycGVlcnBlZXJwZWVycGVlcnBlZXI=\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n",
+   "hint": "",
+   "family": "amneziawg"
+  },
+  {
+   "name": "amneziawg-2.0",
+   "input": "[Interface]\nPrivateKey = cGxhaW5wbGFpbnBsYWlucGxhaW5wbGFpbnBsYWlucGw=\nAddress = 10.0.0.2/32\nJc = 4\nJmin = 40\nJmax = 70\nI1 = <b 0xc0ffee>\nItime = 120\n\n[Peer]\nPublicKey = cGVlcnBlZXJwZWVycGVlcnBlZXJwZWVycGVlcnBlZXI=\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n",
+   "hint": "",
+   "family": "amneziawg"
+  },
+  {
+   "name": "clash",
+   "input": "proxies:\n  - name: tr-ws\n    type: trojan\n    server: tr.example.com\n    port: 443\n    password: pw\n    sni: tr.example.com\n    alpn: [h2, http/1.1]\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: /tr\n      headers:\n        Host: cdn.example.com\n  - name: vl-reality\n    type: vless\n    server: v.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    flow: xtls-rprx-vision\n    servername: www.example.com\n    reality-opts:\n      public-key: AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA\n      short-id: 0123\n  - name: hy-hop\n    type: hysteria2\n    server: h.example.com\n    port: 443\n    ports: 20000-50000\n    password: pw\n    sni: h.example.com\n",
+   "hint": "clash",
+   "family": ""
+  },
+  {
+   "name": "sip008",
+   "input": "{\"version\": 1, \"servers\": [{\"id\": \"x\", \"remarks\": \"r1\", \"server\": \"s.example.com\", \"server_port\": 8388, \"password\": \"p\", \"method\": \"aes-256-gcm\"}]}",
+   "hint": "json",
+   "family": "shadowsocks"
+  },
+  {
+   "name": "vmess-none-over-tls",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJuZXQiOiAidGNwIiwgInR5cGUiOiAibm9uZSIsICJzY3kiOiAibm9uZSIsICJ0bHMiOiAidGxzIiwgInNuaSI6ICJ2bS5leGFtcGxlLmNvbSJ9",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "vmess-raw-tcp-aead",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiODAiLCAiaWQiOiAiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVlIiwgImFpZCI6ICIwIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJub25lIiwgInNjeSI6ICJhZXMtMTI4LWdjbSJ9",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "hy2-hop-interval-clamped",
+   "input": "hy2://pw@h.example.com:443,20000-30000?hopInterval=1ns&sni=h.example.com",
+   "hint": "",
+   "family": "hysteria2"
+  },
+  {
+   "name": "clash-vmess-ws-tls",
+   "input": "proxies:\n  - name: vm-ws\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    alterId: 0\n    cipher: zero\n    tls: true\n    servername: vm.example.com\n    network: ws\n    ws-opts:\n      path: /x\n      headers:\n        Host: cdn.example.com\n  - name: vm-grpc\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    cipher: auto\n    tls: true\n    network: grpc\n    grpc-opts:\n      grpc-service-name: svc\n",
+   "hint": "clash",
+   "family": "other"
+  }
+ ],
+ "refused": [
+  {
+   "name": "vless-xhttp",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=tls&type=xhttp&path=%2Fx&sni=x.example.com",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vless-splithttp",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&type=splithttp",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vless-h2",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=tls&type=h2",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vless-http",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=tls&type=http",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vless-kcp",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=tls&type=kcp",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vless-quic",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=tls&type=quic",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vless-headertype-http",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:80?security=tls&type=tcp&headerType=http&host=x.example.com",
+   "code": "header_type_unsupported"
+  },
+  {
+   "name": "vless-security-none",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:80?security=none&type=ws&path=%2F",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "vless-security-absent",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:80?type=tcp",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "vless-security-xtls",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=xtls&flow=xtls-rprx-direct",
+   "code": "flow_unsupported"
+  },
+  {
+   "name": "vless-flow-udp443",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&flow=xtls-rprx-vision-udp443",
+   "code": "flow_unsupported"
+  },
+  {
+   "name": "vless-encryption",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&encryption=mlkem768x25519plus.native.0rtt.abc",
+   "code": "encryption_unsupported"
+  },
+  {
+   "name": "vless-reality-no-pbk",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=reality&sni=www.example.com",
+   "code": "link_malformed"
+  },
+  {
+   "name": "vless-reality-bad-sid",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=zz",
+   "code": "link_malformed"
+  },
+  {
+   "name": "trojan-grpc",
+   "input": "trojan://pw@t.example.com:443?type=grpc&serviceName=svc",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "trojan-reality",
+   "input": "trojan://pw@t.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "trojan-security-none",
+   "input": "trojan://pw@t.example.com:80?security=none",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "trojan-xhttp",
+   "input": "trojan://pw@t.example.com:443?type=xhttp",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "hy2-bad-range",
+   "input": "hy2://pw@h.example.com:50000-20000",
+   "code": "link_malformed"
+  },
+  {
+   "name": "hy2-range-overflow",
+   "input": "hy2://pw@h.example.com:443,60000-70000",
+   "code": "link_malformed"
+  },
+  {
+   "name": "hy2-bad-mport",
+   "input": "hy2://pw@h.example.com:443?mport=abc",
+   "code": "link_malformed"
+  },
+  {
+   "name": "vmess-xhttp",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJ0bHMiOiAidGxzIiwgIm5ldCI6ICJ4aHR0cCIsICJwYXRoIjogIi94In0=",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "vmess-tcp-http-header",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJ0bHMiOiAidGxzIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJodHRwIiwgImhvc3QiOiAieC5leGFtcGxlLmNvbSJ9",
+   "code": "header_type_unsupported"
+  },
+  {
+   "name": "vmess-none-no-tls",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiODAiLCAiaWQiOiAiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVlIiwgImFpZCI6ICIwIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJub25lIiwgInNjeSI6ICJub25lIiwgInRscyI6ICIifQ==",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "vmess-zero-no-tls",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiODAiLCAiaWQiOiAiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVlIiwgImFpZCI6ICIwIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJub25lIiwgInNjeSI6ICJ6ZXJvIn0=",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "vmess-unknown-cipher",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiODAiLCAiaWQiOiAiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVlIiwgImFpZCI6ICIwIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJub25lIiwgInNjeSI6ICJyYzQtbWQ1IiwgInRscyI6ICJ0bHMifQ==",
+   "code": "encryption_unsupported"
+  },
+  {
+   "name": "vmess-tls-reality",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiODAiLCAiaWQiOiAiYWFhYWFhYWEtYmJiYi1jY2NjLWRkZGQtZWVlZWVlZWVlZWVlIiwgImFpZCI6ICIwIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJub25lIiwgInNjeSI6ICJhdXRvIiwgInRscyI6ICJyZWFsaXR5In0=",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "ss-method-none-legacy",
+   "input": "ss://bm9uZTpwYXNz@s.example.com:8388#s",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "ss-method-plain",
+   "input": "ss://plain:pass@s.example.com:8388#s",
+   "code": "plaintext_refused"
+  },
+  {
+   "name": "hy2-insecure",
+   "input": "hy2://pw@h.example.com:443?insecure=1&sni=h.example.com",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "hysteria2-insecure-true",
+   "input": "hysteria2://pw@h.example.com:443?insecure=true",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vless-reality-ws-vision",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@r.example.com:443?security=reality&flow=xtls-rprx-vision&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01&sni=www.example.com&type=ws&path=%2Fx",
+   "code": "flow_unsupported"
+  },
+  {
+   "name": "vless-tls-grpc-vision",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&flow=xtls-rprx-vision&type=grpc&serviceName=s",
+   "code": "flow_unsupported"
+  },
+  {
+   "name": "vless-headertype-garbage",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&headerType=%3Cx%3Aaaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+   "code": "header_type_unsupported"
+  }
+ ]
+}

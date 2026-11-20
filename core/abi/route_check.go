@@ -150,6 +150,11 @@ const (
 	// The route's publisher revoked it, or it expired.
 	ConnectRefusedRevoked = "revoked"
 	ConnectRefusedExpired = "expired"
+	// The route's family is one this build cannot dial (amneziawg: an
+	// AmneziaWG config whose obfuscation sing-box's WireGuard cannot
+	// reproduce). Trying would send a plain WireGuard handshake to a
+	// server that drops it.
+	ConnectRefusedFamilyUnsupported = "family_unsupported"
 	// Anything else (unknown route, unreadable profile, an outbound
 	// that does not match what was signed).
 	ConnectRefusedOther = "other"
@@ -178,6 +183,8 @@ func refusedCode(err error) string {
 		return ConnectRefusedRevoked
 	case errors.Is(err, errRouteExpired):
 		return ConnectRefusedExpired
+	case errors.Is(err, errRouteFamilyUnsupported):
+		return ConnectRefusedFamilyUnsupported
 	}
 	return ConnectRefusedOther
 }
@@ -252,6 +259,17 @@ func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (ro
 		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteRevoked))
 	case "expired":
 		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteExpired))
+	}
+	// Refused even on an explicit pick: an `amneziawg` route is an
+	// AmneziaWG config this build's WireGuard cannot speak
+	// (bundle/go/uri/wireguard.go amneziaWireCompatible), so every
+	// attempt is a plain WireGuard handshake, from the person's own
+	// address, to a server that drops it. Other unselectable families
+	// (`other`, tor-bridge on a desktop with tor installed) stay
+	// dialable by hand; the automatic connect leaves them all out
+	// (connect_auto.go autoCandidatesLocked).
+	if row.TransportFamily == "amneziawg" {
+		return refuse(fmt.Errorf("abi: route %s: %w", routeID, errRouteFamilyUnsupported))
 	}
 	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok && !ignoreCooldown {
 		return refuse(fmt.Errorf("abi: %s%.0w", reason, errRouteCooling))
@@ -349,6 +367,9 @@ var (
 	errRouteCooling = errors.New("abi: route is cooling down")
 	errRouteRevoked = errors.New("abi: route is revoked")
 	errRouteExpired = errors.New("abi: route is expired")
+	// A family this build knows it cannot dial, where trying anyway
+	// sends something identifiable from the person's own address.
+	errRouteFamilyUnsupported = errors.New("abi: route family cannot be dialled by this build")
 )
 
 // expireFailedConnect clears the error a failed connect left behind

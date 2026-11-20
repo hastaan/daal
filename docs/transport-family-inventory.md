@@ -53,14 +53,14 @@ was.**
 | 1 | `vless-reality` | **yes** — 443/tcp, rendered by `hetzner/profile_render.go` | **yes** — `vless` outbound | `stable` | none; field-proven tier |
 | 2 | `naive` | **yes** — 8444/tcp, `daal-relay-mgmt` | **yes** — naive outbound | `stable` | none; field-proven tier |
 | 3 | `websocket-tls` | **yes** — 8445/tcp, shared `ws-in` inbound | **yes** — vless+ws outbound | `stable` | none; field-proven tier |
-| 4 | `hysteria2` | **yes** — 443/udp, `profile_render.go` | **yes** — `with_quic` | `stable` | none; field-proven tier |
+| 4 | `hysteria2` | **yes** — 443/udp, `profile_render.go` | **yes** — `with_quic` | `stable` | none; field-proven tier. **Iran caveat (2026-11-20): often blocked or throttled in Iran; fails in whitelist phases** — see "Iran caveats" below. The label is about this build, not about Iran |
 | 5 | `tuic` | **yes, but** — 8443/udp, optional `tuic-in`; **8443 is not whitelisted egress in Iran, so the route is worth ~zero there** | **yes** — `with_quic` | `experimental` | none; Wave 1 demoted it from `stable`. Kept as the exemplar experimental family in `core/abi/abi_test.go` |
 | 6 | `shadowsocks` | **yes** (Wave 5, relay lane) — 8446/tcp, shadowsocks-2022 only; same not-whitelisted caveat | **yes** — shadowsocks outbound | `experimental` | none by this lane; label already correct |
 | 7 | `anytls` | **yes** (Wave 5, relay lane) — 8447/tcp; same not-whitelisted caveat | **yes** — `anytls` outbound | `experimental` | new enum value this wave; gated on `spec_version >= 5` |
 | 8 | `tor-bridge` | **n/a — publisher-independent.** No relay inbound, no credentials, no firewall rule. The only route Daal offers with no Daal relay in existence | **NO, not by any artifact that exists.** The `tor` outbound is real and registered, but it EXECS a tor binary and no build packages one: jniLibs carries no `libtor.so` for any ABI, and `tools/build-tor-android.sh` says "STATUS: NEVER RUN" in its own header. Every tor route fails at config time on every installable build | `unsupported` | promoted to `experimental` by the tor lane; **returned to `unsupported` by the repair pass** — the label is a claim about the artifact, not the code. The desktop resolver was also repaired (it looked for the Android filename and could never reach its own PATH fallback), so a Linux desktop with the distro `tor` package now resolves; that is not an artifact Daal ships |
 | 9 | `wireguard` | **no** — port assigned (51820/udp) and a default-off `iran-default` profile candidate, but no relay inbound, no credential, no firewall rule. Paste/import only | **yes** (Wave 5, wireguard lane) — `core/engine/config.go` gained the `endpoints[]` slot and the importer emits a real endpoint object; the Android build passes `with_wireguard` | `experimental` | **fixed the docs** that still called it `stable`, and reconciled `derive_tree.ts`, which the wireguard lane had not yet updated. Note the copy constraint that lane recorded: plain WireGuard is a named immediate-block target in Iran and must not borrow AmneziaWG's track record |
 | 10 | `amneziawg` | **no** | **NO** — sing-box 1.13.12 contains no AmneziaWG code at all, so there is nowhere to put the `Jc/S1/H1..H4` parameters that ARE the family. An AmneziaWG conf imports as a **downgraded plain-wireguard** route, labelled `wireguard`, because WireGuard is what goes on the wire | `unsupported` | **fixed the docs**; became the "never widens" exemplar in `core/abi/d2_summaries_proven_test.go` after wireguard vacated the role |
-| 11 | `webtunnel` | **no** | **not as a family.** It is a Tor pluggable transport; reachable only as `Bridge webtunnel …` inside a `tor-bridge` route (`core/engine/torbin.go` → `libwebtunnel.so`) | `unsupported` (was `experimental`) | **demoted.** Marked `bundle/go/publisher/webtunnel.go` dormant; the `daal-publish webtunnel-bridge` verb now warns at the point of use. **Re-scoped: effective in China, FAILS in Iran** |
+| 11 | `webtunnel` | **no** | **not as a family.** It is a Tor pluggable transport; reachable only as `Bridge webtunnel …` inside a `tor-bridge` route (`core/engine/torbin.go` → `libwebtunnel.so`) | `unsupported` (was `experimental`) | **demoted.** Marked `bundle/go/publisher/webtunnel.go` dormant; the `daal-publish webtunnel-bridge` verb now warns at the point of use. **Re-scoped: effective in China, FAILS in Iran** (as of 2026-11-20: `research/protocol-level-anatomy.md:69,103` — TLS-fingerprint and SNI-whitelist filtering; kept over a single blog post saying "contested") |
 | 12 | `snowflake` | **no** | **not as a family.** Same shape — `Bridge snowflake …` under `tor-bridge` (`libsnowflake.so`) | `unsupported` (was `experimental`) | **demoted. Deleted `core/transports/snowflake`** (Phase 3B WebRTC handler + tests, zero references). We are not vendoring `pion/webrtc` into `core/go.mod` for a transport the tor outbound already carries |
 | 13 | `masque` | **NO, structurally.** A self-hosted MASQUE proxy is one QUIC endpoint with one tenant — none of the provider-anonymity-set value that motivates RFC 9298 | **NO** — no masque outbound in sing-box 1.13.12 | `unsupported` (was `experimental`) | **demoted.** `core/transports/masque` marked DORMANT with both reasons; reason written onto the enum value. Kept: `IsKnownSubmode` has a live (label-only) caller |
 | 14 | `psiphon` | **NO, structurally.** A third party's proprietary network. You can hand a client off to Psiphon Inc.; you cannot host it. There is no server side for a publisher to run | **NO** — psiphon-tunnel-core has never been in `core/go.mod` | `unsupported` (was `experimental`) | **demoted. Deleted `core/transports/psiphon`** (zero references). Fixed `psiphon_compiled_in` (see below). Reason written onto the enum value |
@@ -73,6 +73,36 @@ was.**
 experimental · 9 unsupported · 1 unhandled = 18.** Nine of eighteen
 values in the recipient-side vocabulary cannot be dialled by the
 client that reads it.
+
+### Iran caveats beside the label (2026-11-20)
+
+The label answers "can this build carry it". It does not answer "does
+it get through in Iran", and three entries need that said beside them.
+Source: the review section of `docs/exotic-transports-plan.md`, which
+overrides that plan's wording.
+
+- **`hysteria2`: often blocked or throttled in Iran; fails in whitelist
+  phases.** On TCI (AS58224) the HTTP/3 share fell from about 40% to
+  under 5% by 3 Jan 2026 (`research/filtering-the-flow.md:99`); UDP is
+  otherwise "often blocked, throttled, or has 50% packet loss", and the
+  crisis whitelister passes only DNS/53, HTTP/80 and HTTPS/443 over TCP
+  (`:99`, `:253`). Do not write "blocked since mid-2025": the research
+  does not say that of non-crisis periods. The label stays `stable` for
+  now (rationale in `core/routestore/family.go`). **Open decision for
+  the owner:** turn hysteria2 off by default in `iran-default.json`
+  (`default_enabled: true` today) — a QUIC flow to a graylisted host is
+  itself a signal (`publisher/deploy/profiles/loader.go`), and the
+  change rides a `libdaal_deploy.so` release. The plan's "order
+  hysteria2 after the TCP three" is already true (`iran-default.json`
+  lists it fourth; `iran-tcp443` drops UDP families).
+- **`webtunnel`: fails in Iran**, dated in row 11. Kept rather than
+  softened to "contested" on one external report.
+- **TLS fragmentation is not a family, and is not a no-op everywhere.**
+  REALITY cannot fragment in sing-box 1.13.12 (`reality_client.go`
+  never wraps `tf.NewConn`); `record_fragment` on the `websocket-tls`
+  uTLS/std paths can, unmeasured, and only splits a hello that carries
+  an SNI, which today's ws-tls hello does not.
+  `specs/modifiers/tls_fragment.md` stays PENDING with the detail.
 
 ### How each relay port answers a stranger, and what each family carries (2026-11-18)
 

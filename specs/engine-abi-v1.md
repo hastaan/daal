@@ -490,7 +490,9 @@ A route is connected only once it has carried one real round trip
   code, and for which route. `""` (it was not), `"needs_new_file"` (a
   RelayPack route with no signed endpoint: it was imported from a file
   made before files carried one, and only a new file fixes it),
-  `"cooldown"`, `"revoked"`, `"expired"`, `"other"`. Cleared by the next
+  `"cooldown"`, `"revoked"`, `"expired"`, `"family_unsupported"` (an
+  `amneziawg` route: refused even when picked, since every attempt is a
+  plain WireGuard handshake to a server that drops it), `"other"`. Cleared by the next
   `engine_set_route` that is not refused and by an `engine_clear_route`
   that stops something (above) — however soon after the refusal that
   call comes: a disconnected engine reports no refusal. (Between
@@ -539,8 +541,13 @@ A route is connected only once it has carried one real round trip
     not refuse right now (same function: not revoked, not expired, not
     needing a new file, not cooling down, endpoint guard), minus
     experimental families while that gate is off (`refused:
-    "experimental_off"`) and bulk-capable routes in `lifeline-strict`
-    (`refused: "mode"`). Routes left out are listed after the tried
+    "experimental_off"`), bulk-capable routes in `lifeline-strict`
+    (`refused: "mode"`), and, gate open or closed, every family the
+    path manager never selects (`routestore.IsSelectableFamily` false):
+    `refused: "family_unsupported"` for one this build cannot dial
+    (amneziawg, tor-bridge, ...), `refused: "manual_only"` for `other`
+    or an unknown family (a pasted link to someone else's server,
+    connected only when the person picks it). Routes left out are listed after the tried
     ones with `result: "refused"`; nothing is written to
     `connect_refused`. `candidates` counts the routes that could be
     tried.

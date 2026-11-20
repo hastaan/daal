@@ -10,13 +10,60 @@ import (
 	"strings"
 )
 
-// amneziaFields are the AmneziaWG-only [Interface] knobs: junk-packet
-// counts and sizes (Jc/Jmin/Jmax), the magic-header rewrites (H1..H4)
-// and the init/response packet paddings (S1/S2). Their presence is what
-// distinguishes an AmneziaWG conf from a wg-quick one — and, as of
-// sing-box 1.13.12, nothing else about them can be honoured. See
-// parseWireGuard.
-var amneziaFields = []string{"Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"}
+// amneziaFields are the AmneziaWG-only [Interface] knobs. Their
+// presence is what distinguishes an AmneziaWG conf from a wg-quick one
+// — and, as of sing-box 1.13.12, nothing about them can be honoured.
+// See parseWireGuard.
+//
+//   - 1.x: junk-packet count and sizes (Jc/Jmin/Jmax), the
+//     init/response paddings (S1/S2) and the magic-header rewrites
+//     (H1..H4).
+//   - 2.0: cookie/transport paddings (S3/S4), the signature packets
+//     I1..I5, the controlled-junk packets J1..J3 and their timer ITIME
+//     (research/protocol-level-anatomy.md:79).
+//
+// Matching is case-insensitive: AmneziaVPN writes "Jc", some exporters
+// "JC" or "Itime".
+var amneziaFields = []string{
+	"Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4",
+	"S3", "S4", "I1", "I2", "I3", "I4", "I5", "J1", "J2", "J3", "ITIME",
+}
+
+// amneziaJunkOnly are the fields a plain WireGuard server never sees
+// the effect of: junk packets sent BEFORE the handshake, which the
+// server drops as garbage. A conf whose only AmneziaWG fields are these
+// still speaks the WireGuard handshake byte for byte, so it can be
+// downgraded honestly ("backward compatibility holds if only
+// Jc/Jmin/Jmax are set", research/protocol-level-anatomy.md:79).
+var amneziaJunkOnly = map[string]bool{"Jc": true, "Jmin": true, "Jmax": true}
+
+// amneziaNeutral is the value at which a header/padding field changes
+// nothing on the wire: S1..S4 = 0 adds no padding, and H1..H4 = 1..4
+// ARE WireGuard's own message types. amneziawg-go uses exactly these as
+// its defaults, and AmneziaVPN exports them explicitly.
+var amneziaNeutral = map[string]string{
+	"S1": "0", "S2": "0", "S3": "0", "S4": "0",
+	"H1": "1", "H2": "2", "H3": "3", "H4": "4",
+}
+
+// amneziaWireCompatible reports whether a server configured with these
+// AmneziaWG fields would still accept a plain WireGuard handshake.
+// True only when every field set is junk-only or at its neutral value.
+// Any non-neutral S/H value changes the packet a server accepts, and
+// I1..I5/J1..J3/ITIME are treated as incompatible because nothing here
+// has verified that a 2.0 server accepts a peer that never sends them.
+func amneziaWireCompatible(set map[string]string) bool {
+	for k, v := range set {
+		if amneziaJunkOnly[k] {
+			continue
+		}
+		if n, ok := amneziaNeutral[k]; ok && strings.TrimSpace(v) == n {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 // parseWireGuard parses a wg-quick-style .conf, including AmneziaWG's
 // Iran-flavoured extensions, into a sing-box WireGuard ENDPOINT.
@@ -59,18 +106,23 @@ var amneziaFields = []string{"Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3",
 // an explicit, immediate-block target, over UDP, which the same
 // document states the intent to block completely and permanently.
 //
-// So the import does not fail, and it does not pretend either:
+// So the import does not pretend, and what it does depends on whether
+// a WireGuard handshake would still be ACCEPTED by the server
+// (amneziaWireCompatible):
 //
-//   - The route's family is "wireguard", never "amneziawg", because
-//     WireGuard is what goes on the wire. The badge, the maturity label
-//     and the selector all key off the family; calling this amneziawg
-//     would promise the user resilience this build cannot deliver.
-//   - Provenance.Scheme stays "amneziawg" and HadAmnezia stays true, so
-//     nothing loses the fact that an AmneziaWG conf was what arrived.
-//   - Provenance.Downgrade carries a sentence an importer can show
-//     verbatim, and DroppedParams names the fields, so "why did my
-//     Amnezia config become WireGuard" has an answer at the point of
-//     import.
+//   - Junk-only (Jc/Jmin/Jmax, with any S/H field at its neutral
+//     value): the server accepts WireGuard, so the route is imported as
+//     "wireguard" — never "amneziawg", because WireGuard is what goes
+//     on the wire and the badge, the maturity label and the selector
+//     all key off the family. Notice = NoticeAmneziaDowngraded.
+//   - Anything else (non-neutral S1..S4 / H1..H4, or any 2.0 field):
+//     the server discards a WireGuard initiation, so the downgraded
+//     route could never connect anywhere. It is imported under the
+//     "amneziawg" family, which this build labels unsupported and
+//     never offers. Notice = NoticeAmneziaUnsupported.
+//   - Either way Provenance.Scheme is "amneziawg", HadAmnezia is true,
+//     DroppedParams names the fields and Downgrade carries a sentence
+//     an importer can show verbatim.
 //
 // KNOWN AND STATED: nothing in this repository currently CALLS
 // ParseAny, so the Downgrade text has no UI to reach yet — ParseURI
@@ -177,33 +229,80 @@ func parseWireGuard(body []byte) (Profile, Provenance, error) {
 	// its own dns block, and WireGuardEndpointOptions has no field for
 	// it. Silently keeping it would mean inventing one.
 
-	dropped := []string{}
-	for _, k := range amneziaFields {
-		if v, ok := iface[k]; ok && strings.TrimSpace(v) != "" {
-			dropped = append(dropped, k)
+	set := map[string]string{}
+	for k, v := range iface {
+		if canon := amneziaField(k); canon != "" && strings.TrimSpace(v) != "" {
+			set[canon] = v
 		}
 	}
-	if len(dropped) > 0 {
+	family := "wireguard"
+	if len(set) > 0 {
+		dropped := make([]string, 0, len(set))
+		for k := range set {
+			dropped = append(dropped, k)
+		}
 		sort.Strings(dropped)
 		prov.HadAmnezia = true
 		prov.Scheme = "amneziawg"
 		prov.DroppedParams = dropped
-		prov.Downgrade = "This is an AmneziaWG configuration. The engine in this build " +
-			"(sing-box 1.13.12) has no AmneziaWG support, so its obfuscation parameters (" +
-			strings.Join(dropped, ", ") + ") were dropped and the route was imported as plain " +
-			"WireGuard. It will still connect where WireGuard is allowed. It will NOT survive a " +
-			"network that blocks WireGuard-shaped traffic — which is what AmneziaWG exists to " +
-			"defeat, and what Iran's operators block on sight."
 		prov.WarningCount++
+		if amneziaWireCompatible(set) {
+			// Junk packets only: the handshake is WireGuard's, so the
+			// route connects wherever WireGuard is allowed — and only
+			// there. AUTO-CONNECT MUST NOT RACE IT: an attempt sends the
+			// exact WireGuard handshake Iran's operators throttle and
+			// then block within minutes, from the person's SIM-linked
+			// address. Nothing in this build can mark one route
+			// "connect only when the person picks it"; today the only
+			// thing keeping it out of automatic connects is that
+			// `wireguard` is experimental (off unless the person turns
+			// experimental routes on). See NoticeAmneziaDowngraded.
+			prov.Notice = NoticeAmneziaDowngraded
+			prov.Downgrade = "This is an AmneziaWG configuration. The engine in this build " +
+				"(sing-box 1.13.12) has no AmneziaWG support, so its junk-packet parameters (" +
+				strings.Join(dropped, ", ") + ") were dropped and the route was imported as plain " +
+				"WireGuard. It will still connect where WireGuard is allowed. It will NOT survive a " +
+				"network that blocks WireGuard-shaped traffic — which is what AmneziaWG exists to " +
+				"defeat, and what Iran's operators block on sight."
+		} else {
+			// The server expects a different packet than WireGuard's
+			// (non-default H1..H4 or S1..S4, or 2.0 signature/junk
+			// packets): a WireGuard handshake is discarded and the route
+			// can never connect anywhere. Import it under its real,
+			// unsupported family so the person sees it and sees that
+			// this build cannot dial it. The endpoint below stays a
+			// strictly valid sing-box object so the store and the
+			// engine's parse never choke on it; the FAMILY is what keeps
+			// it from being offered.
+			family = "amneziawg"
+			prov.Notice = NoticeAmneziaUnsupported
+			prov.Downgrade = "This is an AmneziaWG configuration whose settings (" +
+				strings.Join(dropped, ", ") + ") change the WireGuard handshake. The engine in this " +
+				"build (sing-box 1.13.12) has no AmneziaWG support and a server with these settings " +
+				"ignores plain WireGuard, so the route was saved but cannot connect."
+		}
 	}
 
 	return Profile{
-		// "wireguard", even for an AmneziaWG conf: the family names what
-		// is on the wire, and what is on the wire is WireGuard.
-		TransportFamily: "wireguard",
+		// "wireguard" for plain and junk-only AmneziaWG confs: the family
+		// names what is on the wire, and what is on the wire is
+		// WireGuard. "amneziawg" (unsupported, unselectable) when no
+		// WireGuard handshake would be accepted.
+		TransportFamily: family,
 		Outbound:        out,
 		Tag:             "",
 	}, prov, nil
+}
+
+// amneziaField returns the canonical spelling of an AmneziaWG
+// [Interface] key, or "" when k is not one.
+func amneziaField(k string) string {
+	for _, f := range amneziaFields {
+		if strings.EqualFold(k, f) {
+			return f
+		}
+	}
+	return ""
 }
 
 // prefixList parses a comma-separated wg-quick address/allowed-ips list

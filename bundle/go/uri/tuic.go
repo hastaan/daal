@@ -2,28 +2,29 @@ package uri
 
 import (
 	"fmt"
-	"net/url"
 	"strconv"
 )
 
 // parseTUIC handles tuic://uuid:password@host:port?params#name per
 // sing-box's convention.
 func parseTUIC(raw string) (Profile, Provenance, error) {
-	u, err := url.Parse(raw)
+	// parseLink, not url.Parse: url.Error quotes the whole link, and
+	// its userinfo is the route's uuid and password.
+	u, err := parseLink("tuic", raw)
 	if err != nil {
-		return Profile{}, Provenance{}, fmt.Errorf("tuic: bad URL: %w", err)
+		return Profile{}, Provenance{}, err
 	}
 	if u.User == nil {
-		return Profile{}, Provenance{}, fmt.Errorf("tuic: missing userinfo")
+		return Profile{}, Provenance{}, fmt.Errorf("tuic: missing userinfo: %w", ErrMalformed)
 	}
 	uuid := u.User.Username()
 	pwd, _ := u.User.Password()
 	if uuid == "" {
-		return Profile{}, Provenance{}, fmt.Errorf("tuic: missing uuid")
+		return Profile{}, Provenance{}, fmt.Errorf("tuic: missing uuid: %w", ErrMalformed)
 	}
 	port, err := strconv.Atoi(u.Port())
-	if err != nil || port == 0 {
-		return Profile{}, Provenance{}, fmt.Errorf("tuic: invalid port")
+	if err != nil || port < 1 || port > 65535 {
+		return Profile{}, Provenance{}, fmt.Errorf("tuic: invalid port: %w", ErrMalformed)
 	}
 	q := u.Query()
 	out := map[string]any{
@@ -44,7 +45,7 @@ func parseTUIC(raw string) (Profile, Provenance, error) {
 		tls["server_name"] = sni
 	}
 	if alpn := q.Get("alpn"); alpn != "" {
-		tls["alpn"] = []string{alpn}
+		tls["alpn"] = splitALPN(alpn)
 	}
 	out["tls"] = tls
 	return Profile{

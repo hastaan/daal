@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -32,15 +33,31 @@ func parseVMess(raw string) (Profile, Provenance, error) {
 	body := strings.TrimPrefix(raw, "vmess://")
 	dec, err := base64Decode(body)
 	if err != nil {
-		return Profile{}, Provenance{}, fmt.Errorf("vmess: base64 decode: %w", err)
+		return Profile{}, Provenance{}, fmt.Errorf("vmess: base64 decode: %w", ErrMalformed)
 	}
 	var link vmessLink
 	if err := json.Unmarshal(dec, &link); err != nil {
-		return Profile{}, Provenance{}, fmt.Errorf("vmess: bad inner JSON: %w", err)
+		// json's error text can quote a fragment of the body (the uuid).
+		return Profile{}, Provenance{}, fmt.Errorf("vmess: bad inner JSON: %w", ErrMalformed)
 	}
 	port, err := toInt(link.Port)
+	if err != nil || port < 1 || port > 65535 {
+		return Profile{}, Provenance{}, fmt.Errorf("vmess: invalid port: %w", ErrMalformed)
+	}
+	var tlsOn bool
+	switch strings.ToLower(strings.TrimSpace(link.TLS)) {
+	case "", "none":
+	case "tls":
+		tlsOn = true
+	default:
+		// "reality" and anything else: not a VMess shape sing-box has.
+		return Profile{}, Provenance{}, fmt.Errorf("vmess: tls=%s: %w", safeToken(strings.ToLower(link.TLS)), ErrTransportUnsupported)
+	}
+	// none/zero encrypt nothing: without TLS the payload crosses the
+	// DPI box in clear (refuse.go vmessSecurity).
+	security, err := vmessSecurity("vmess", link.Scy, tlsOn)
 	if err != nil {
-		return Profile{}, Provenance{}, fmt.Errorf("vmess: invalid port: %w", err)
+		return Profile{}, Provenance{}, err
 	}
 	aid, _ := toInt(link.Aid)
 	out := map[string]any{
@@ -49,41 +66,37 @@ func parseVMess(raw string) (Profile, Provenance, error) {
 		"server_port": port,
 		"uuid":        link.ID,
 		"alter_id":    aid,
+		"security":    security,
 	}
-	if link.Scy != "" {
-		out["security"] = link.Scy
-	} else {
-		out["security"] = "auto"
+	// The transport goes through the same v2rayTransport as vless:// and
+	// trojan://, so an xhttp/h2/kcp vmess link is refused instead of
+	// silently becoming plain TCP. In the 2dust format `type` is the
+	// header type and a gRPC service name rides in `path`.
+	q := url.Values{}
+	q.Set("type", link.Net)
+	q.Set("headerType", link.Type)
+	q.Set("path", link.Path)
+	q.Set("host", link.Host)
+	q.Set("serviceName", link.Path)
+	transport, err := v2rayTransport("vmess", q, true)
+	if err != nil {
+		return Profile{}, Provenance{}, err
 	}
-	switch link.Net {
-	case "ws":
-		t := map[string]any{"type": "ws"}
-		if link.Path != "" {
-			t["path"] = link.Path
-		}
-		if link.Host != "" {
-			t["headers"] = map[string]any{"Host": link.Host}
-		}
-		out["transport"] = t
-	case "grpc":
-		t := map[string]any{"type": "grpc"}
-		if link.Path != "" {
-			t["service_name"] = link.Path
-		}
-		out["transport"] = t
+	if transport != nil {
+		out["transport"] = transport
 	}
-	if link.TLS == "tls" {
+	if tlsOn {
 		tls := map[string]any{"enabled": true}
 		if link.SNI != "" {
 			tls["server_name"] = link.SNI
 		} else if link.Host != "" {
 			tls["server_name"] = link.Host
 		}
-		if link.ALPN != "" {
-			tls["alpn"] = strings.Split(link.ALPN, ",")
+		if alpn := splitALPN(link.ALPN); len(alpn) > 0 {
+			tls["alpn"] = alpn
 		}
-		if link.Fp != "" {
-			tls["utls"] = map[string]any{"enabled": true, "fingerprint": link.Fp}
+		if fp, ok := utlsFingerprint(link.Fp); ok {
+			tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 		}
 		out["tls"] = tls
 	}

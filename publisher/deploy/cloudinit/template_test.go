@@ -277,7 +277,10 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	//     $MAINPID`, so applying a config is an in-process reload.
 	//   - 2026-11-19: the pin bump to relay-v1.5.1 (artefact URLs and
 	//     hashes in the rendered user-data).
-	const want = "141280b3108d0127d75b83879095857235ae63b8305519712538b928f18de9e4"
+	// 2026-11-20: re-pinned for the hostname alone (review C1, prober's-eye
+	// audit): `hostname: daal-relay` became `hostname: ubuntu`, with a
+	// comment above it. No port, rule or unit moved. Fresh relays only.
+	const want = "88035eeb9401ad6b11cae8f8aacaed499bc50c162d2ba3278081133f7c6a2260"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}

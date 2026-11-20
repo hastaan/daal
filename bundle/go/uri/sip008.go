@@ -30,9 +30,15 @@ func parseSIP008(body []byte) ([]Profile, Provenance, error) {
 	if len(doc.Servers) == 0 {
 		return nil, Provenance{Scheme: "sip008"}, ErrNoMatch
 	}
+	prov := Provenance{Scheme: "sip008"}
 	profiles := make([]Profile, 0, len(doc.Servers))
 	for _, s := range doc.Servers {
 		if s.Server == "" || s.ServerPort == 0 {
+			continue
+		}
+		// method none is a plaintext proxy (refuse.go ssPlaintextMethod).
+		if ssPlaintextMethod(s.Method) {
+			prov.WarningCount++
 			continue
 		}
 		out := map[string]any{
@@ -55,7 +61,7 @@ func parseSIP008(body []byte) ([]Profile, Provenance, error) {
 		})
 	}
 	if len(profiles) == 0 {
-		return nil, Provenance{Scheme: "sip008"}, fmt.Errorf("sip008: no usable servers")
+		return nil, prov, fmt.Errorf("sip008: no usable servers")
 	}
-	return profiles, Provenance{Scheme: "sip008"}, nil
+	return profiles, prov, nil
 }

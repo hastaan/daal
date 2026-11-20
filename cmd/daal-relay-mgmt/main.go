@@ -567,7 +567,9 @@ func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		hdr := r.Header.Get("Authorization")
 		if !strings.HasPrefix(hdr, "Daal-Mgmt-Token ") {
-			http.Error(w, "unauthorized: missing Daal-Mgmt-Token", http.StatusUnauthorized)
+			// The body names nothing: this is the one reply a stranger
+			// who reaches the port gets without knowing the scheme.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
@@ -1198,7 +1200,7 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	var warnings []string
 	certPEM := ""
 	if applied.SNI != "" && contains(applied.Changed, "cover_sni") {
-		newPEM, restoreCert, reissued, cerr := s.reissueDataPlaneCert(applied.SNI)
+		newPEM, restoreCert, reissued, renamed, cerr := s.reissueDataPlaneCert(applied.SNI)
 		switch {
 		case errors.Is(cerr, errNoDataPlaneCert):
 			// A relay with no data-plane certificate serves no family
@@ -1208,6 +1210,13 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 		case reissued:
 			certPEM = newPEM
 			applied.Changed = append(applied.Changed, "tls_certificate")
+			if renamed {
+				// The certificate no longer names the app (tlscert.go,
+				// "THE PRICE"). A stable token for the publisher, and the
+				// sentence for whoever reads the raw reply.
+				applied.Changed = append(applied.Changed, "tls_certificate_subject")
+				warnings = append(warnings, "the relay's TLS certificate no longer carries the app's name; naive files handed out before this rotation trust the old certificate and will stop connecting until their holders get a new file (every other route is unaffected)")
+			}
 			configRollback := rollback
 			rollback = func() {
 				restoreCert()
@@ -1350,12 +1359,16 @@ func ensureSelfSignedCert(certPath, keyPath, fpPath string) (tls.Certificate, er
 	}
 	tmpl := x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "daal-relay-mgmt"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("0.0.0.0")},
+		// Names nothing (it was "daal-relay-mgmt"): the publisher pins
+		// this certificate by its digest, so the name is read by no one
+		// but a stranger. Existing relays keep theirs — the digest is the
+		// relay's token audience, so it never changes.
+		Subject:     pkix.Name{CommonName: "localhost"},
+		NotBefore:   time.Now().Add(-1 * time.Hour),
+		NotAfter:    time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("0.0.0.0")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
 	if err != nil {

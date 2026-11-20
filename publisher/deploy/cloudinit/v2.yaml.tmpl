@@ -3,7 +3,12 @@
 # Extends V1.5 template with daal-relay-mgmt installation and the
 # V2 cloud-provider firewall + persistent narrow-API mgmt service
 # posture. Rendered by publisher/deploy/cloudinit/template.go::RenderV2.
-hostname: daal-relay
+# The OS hostname names nothing. Nothing on this box serves it to a
+# stranger today (ssh is off after provisioning, no MTA, no web
+# server), but the next thing that does - a banner, an error page -
+# should not say what this box is for. "ubuntu" is the image's own
+# default. Cloud-init has no upgrade path: fresh relays only.
+hostname: ubuntu
 manage_etc_hosts: true
 package_update: true
 package_upgrade: false
@@ -348,6 +353,7 @@ runcmd:
     DAAL_IP6="$(ip -6 -o addr show eth0 scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
     DAAL_SAN="IP:${DAAL_IP4}"
     [ -n "$DAAL_IP6" ] && DAAL_SAN="${DAAL_SAN},IP:${DAAL_IP6}"
+    DAAL_CN="${DAAL_IP4}"
 {{- if .CoverSNI }}
     # ONE STABLE DNS NAME, so naive survives an address move (L3).
     # This certificate is minted once and cannot follow the box to a
@@ -364,10 +370,27 @@ runcmd:
     # this certificate on the SAME key (no pin moves) with the new cover
     # host as the first DNS name and this one kept after it.
     DAAL_SAN="${DAAL_SAN},DNS:{{ .CoverSNI }}"
+    DAAL_CN="{{ .CoverSNI }}"
 {{- end }}
+    # THE SUBJECT NAMES NOTHING THE CERTIFICATE DOES NOT ALREADY SAY.
+    # This certificate is served to anybody who completes a handshake
+    # on 8444, 8445 or 443/udp, credentials or not. Its subject used to
+    # be the app's name, identical on every relay, readable by any
+    # prober (review C1). The subject is now the certificate's own first
+    # name — the cover host, or the address when there is none — which
+    # is what the ordinary self-signed recipe (`openssl req -x509 -subj
+    # /CN=<host>`, Debian's snakeoil cert) produces, differs per relay,
+    # and repeats a SAN, so it adds nothing a prober could not already
+    # read. Nothing verifies it: six families pin the key, and naive
+    # (Cronet) matches names in the SAN only. It must never change
+    # after this: daal-relay-mgmt copies it on re-issue, because a
+    # naive pack's trusted root is found by this name (tlscert.go).
+    # 64 is X.509's limit on a CN (openssl refuses longer).
+    if [ "${#DAAL_CN}" -gt 64 ]; then DAAL_CN="${DAAL_IP4}"; fi
+    if [ -z "$DAAL_CN" ]; then DAAL_CN="${DAAL_IP6:-localhost}"; fi
     run openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
       -keyout /etc/daal/tls-key.pem -out /etc/daal/tls-cert.pem \
-      -days 90 -nodes -subj /CN=daal-relay \
+      -days 90 -nodes -subj "/CN=${DAAL_CN}" \
       -addext "subjectAltName=${DAAL_SAN}"
     run chmod 0600 /etc/daal/tls-key.pem
     run chmod 0644 /etc/daal/tls-cert.pem

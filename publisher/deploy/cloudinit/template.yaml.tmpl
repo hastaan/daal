@@ -1,7 +1,12 @@
 #cloud-config
 # Daal relay cloud-init — supplement §9.3 (verbatim shape).
 # Rendered by publisher/deploy/cloudinit/template.go.
-hostname: daal-relay
+# The OS hostname names nothing. Nothing on this box serves it to a
+# stranger today (ssh is off after provisioning, no MTA, no web
+# server), but the next thing that does - a banner, an error page -
+# should not say what this box is for. "ubuntu" is the image's own
+# default. Cloud-init has no upgrade path: fresh relays only.
+hostname: ubuntu
 manage_etc_hosts: true
 package_update: true
 package_upgrade: false

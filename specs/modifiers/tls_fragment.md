@@ -24,6 +24,45 @@ library, which fragmentation policy, whether to include record-layer
 re-segmentation in addition to TCP-segment manipulation) are pending
 the censor-lab review that gates the PASS record.
 
+## What the shipped engine can do today (2026-11-20)
+
+Read from the vendored source, not measured. Recorded so nobody
+"enables" this on a tier where it cannot run, and so nobody closes it
+as a no-op on the tier where it can. Source: the review section of
+`docs/exotic-transports-plan.md` (item A6), which corrects that plan's
+"no-op on every tier".
+
+- REALITY cannot fragment in sing-box 1.13.12.
+  `common/tls/reality_client.go` builds `utls.UClient` on the raw
+  connection (:127) and never wraps `tf.NewConn`, so neither
+  `fragment` nor `record_fragment` reaches a `vless-reality` hello.
+- `record_fragment` on the `websocket-tls` uTLS path can.
+  `common/tls/utls_client.go:61-62` (and std TLS,
+  `common/tls/std_client.go:53-54`) wrap the connection in
+  `tf.NewConn` when `record_fragment` is set. `fragment` alone, with
+  `record_fragment` unset, does not wrap on either path.
+- Unmeasured. Nothing in `test-rigs/` or the field has run it, against
+  any censor model.
+- It only splits at an SNI. `common/tlsfragment/conn.go` `Write`
+  splits the first packet only when `IndexTLSServerName` finds a
+  server name. Today's `websocket-tls` pack puts the relay IP in
+  `server_name`, which Go and uTLS strip
+  (`publisher/deploy/relaypack/client_outbound.go`, near
+  `pinnedTLSOpts`), so the hello has no SNI and the wrapper passes it
+  through unchanged. It can matter only after the real-SNI work (plan
+  W2-R) lands.
+- `naive` refuses both options outright
+  (`protocol/naive/outbound.go:75-76`).
+- Iran evidence is split. Older work says the DPI reads only the
+  first packets and does not reassemble
+  (`research/intel-and-some-working-methods.md:77`); a 2026
+  single-user report says it reassembles 10-30 byte fragments and
+  still reads the SNI. Our relays mostly avoid a blocked-SNI problem
+  anyway: REALITY sends an allowed cover name.
+
+The status stays PENDING. Nothing above is a pass or a rejection; it
+narrows the methodology to the one tier that can carry the modifier.
+
 ## Pass record
 
 - **status**: PENDING
@@ -32,7 +71,9 @@ the censor-lab review that gates the PASS record.
   parameterised family), define the target ASNs and services, and
   specify the falsifying observation that would flip the record to
   `REJECTED`.
-- **observed**: TBD — pending censor-lab run.
+- **observed**: TBD — pending censor-lab run. Only `websocket-tls`
+  with `record_fragment` can be tested at all (see "What the shipped
+  engine can do today"); REALITY cannot fragment in this engine.
 - **reviewer**: TBD
 - **date**: TBD
 

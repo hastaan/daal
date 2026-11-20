@@ -95,6 +95,15 @@ const (
 	// The current mode forbids the route outright (lifeline-strict and
 	// a bulk-capable route).
 	AutoRefusedMode = "mode"
+	// A family the path manager never selects by itself: `other` (a
+	// pasted vless+tls, vmess or trojan link to someone else's server)
+	// or a family value this build does not know. It is still
+	// connected when the person picks it.
+	AutoRefusedManualOnly = "manual_only"
+	// A family this build cannot dial at all (routestore
+	// MaturityUnsupported: amneziawg, tor-bridge, ...). Same code as
+	// ConnectRefusedFamilyUnsupported.
+	AutoRefusedFamilyUnsupported = ConnectRefusedFamilyUnsupported
 )
 
 // autoFailureMemory is how long a failure on a network keeps a route at
@@ -839,6 +848,18 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 	var usable []pathmanager.Route
 	for _, row := range rows {
 		if row.RouteID == exclude {
+			continue
+		}
+		// Never raced without the person asking for it, whatever the
+		// experimental gate says: the ranking below only filters
+		// experimental families, and these are not experimental, they
+		// are unselectable (routestore.IsSelectableFamily).
+		if !routestore.IsSelectableFamily(row.TransportFamily) {
+			code := AutoRefusedManualOnly
+			if routestore.IsUnsupportedFamily(row.TransportFamily) {
+				code = AutoRefusedFamilyUnsupported
+			}
+			left = append(left, AutoTried{RouteID: row.RouteID, Family: row.TransportFamily, Result: AutoResultRefused, Refused: code})
 			continue
 		}
 		_, body, err := c.prepareRouteOpts(row.RouteID, false, false)
