@@ -2966,7 +2966,20 @@ fn build_wizard_ctx(state_dir: &PathBuf) -> Result<wcmd::WizardCtx, String> {
     let keystore = Arc::new(Keystore::new_in_memory(state_dir));
     #[cfg(not(feature = "dev-no-keystore"))]
     let keystore = Arc::new(Keystore::new_os(state_dir));
+    // On Android the staging directory lives inside the state directory.
+    // Before, it was $TMPDIR/daal/staging, which Android points at the
+    // CACHE directory: the signed files every person's file is made from
+    // could be emptied by the system, and when the state moved out of the
+    // cache (adopt_earlier_state) they looked missing (seen 2026-11-20).
+    #[cfg(target_os = "android")]
+    let staging_dir = state_dir.join("staging");
+    #[cfg(not(target_os = "android"))]
     let staging_dir = default_staging_dir();
+    match db.repair_moved_paths(&staging_dir) {
+        Ok(0) => {}
+        Ok(n) => log::warn!("{n} stored file paths pointed at an old place and now point into {staging_dir:?}"),
+        Err(e) => log::warn!("could not check stored file paths: {e}"),
+    }
 
     // On Android, daal-deploy is bundled as libdaal_deploy.so in the
     // same native-library directory as libdaalcore.so. The system

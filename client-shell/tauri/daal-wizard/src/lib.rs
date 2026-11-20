@@ -107,9 +107,11 @@ pub enum Adopted {
     UseInPlace(std::path::PathBuf),
 }
 
+/// Only a directory with the operator database counts: a cache directory
+/// that holds nothing but staged temporary files (as on a phone that never
+/// kept its state there) must never replace real state.
 fn holds_state(dir: &std::path::Path) -> bool {
     dir.join("wizard.db").is_file()
-        || std::fs::read_dir(dir).map(|mut r| r.next().is_some()).unwrap_or(false)
 }
 
 /// Bring an earlier install's state to `chosen`.
@@ -210,6 +212,18 @@ mod adopt_tests {
         assert_eq!(adopt_earlier_state(&chosen, &[cache.clone()], 1), Adopted::Nothing);
         assert_eq!(std::fs::read(chosen.join("wizard.db")).unwrap(), b"current");
         assert!(cache.join("wizard.db").is_file());
+    }
+
+    #[test]
+    fn a_cache_directory_with_only_staged_files_never_replaces_state() {
+        let t = tempfile::tempdir().unwrap();
+        let chosen = t.path().join("files").join("daal");
+        with_db(&chosen, b"the phone's state");
+        let cache = t.path().join("cache").join("daal");
+        std::fs::create_dir_all(cache.join("staging")).unwrap();
+        std::fs::write(cache.join("staging").join("picked.bin"), b"x").unwrap();
+        assert_eq!(adopt_earlier_state(&chosen, &[cache], 1), Adopted::Nothing);
+        assert_eq!(std::fs::read(chosen.join("wizard.db")).unwrap(), b"the phone's state");
     }
 
     #[test]
