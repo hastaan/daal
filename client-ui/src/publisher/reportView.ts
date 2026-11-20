@@ -91,6 +91,7 @@ export const RESULTS = [
     'unreachable',
     'dns_wrong_public',
     'cert_invalid',
+    'dns_unlisted',
 ] as const;
 
 export const QUESTIONS = [

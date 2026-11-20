@@ -115,17 +115,173 @@ func TestH2_WrongPublicAnswerIsNotDialled(t *testing.T) {
 		t.Fatal("the summary does not say DNS gave wrong addresses")
 	}
 
-	// The public resolver says the same (injected on the path): Stage B
-	// has no Google address and skips it.
+	// The public resolver says the same, on a network seen writing
+	// answers on the path (the world's 1.1.1.1 calibration answer is a
+	// sinkhole): the two agree, but agreement is no evidence here, so
+	// Stage B has no Google address and skips it.
 	w = newWorld(t)
 	w.dns.answers[dnsKey(netip.AddrPort{}, w.t.Google, dns.TypeA)] = DNSAnswer{Typed: true, Addrs: []netip.Addr{domestic}}
 	res = Run(context.Background(), w.env())
-	if findResult(res, "A6", "fill_google") != "dns_wrong_public" || findResult(res, "B1", "") != "skipped" {
-		t.Fatalf("A6 fill_google=%s B1=%s", findResult(res, "A6", "fill_google"), findResult(res, "B1", ""))
+	if findResult(res, "A6", "calibration") != "bogon" {
+		t.Fatalf("calibration = %s", findResult(res, "A6", "calibration"))
+	}
+	if findResult(res, "A1", "a") != "dns_unlisted" || findResult(res, "A6", "fill_google") != "dns_unlisted" || findResult(res, "B1", "") != "skipped" {
+		t.Fatalf("A1=%s A6 fill_google=%s B1=%s", findResult(res, "A1", "a"), findResult(res, "A6", "fill_google"), findResult(res, "B1", ""))
 	}
 	for _, d := range w.net.dials {
 		if d.Addr() == domestic {
 			t.Fatal("dialled the injected address")
+		}
+	}
+}
+
+// swedishWorld is a plain network: the link resolver and 1.1.1.1 give
+// real answers, nothing is written on the path, and GitHub answers from
+// an address the list does not hold (it moved into new ranges).
+func swedishWorld(t *testing.T, moved netip.Addr) *world {
+	w := newWorld(t)
+	A := func(a netip.Addr) DNSAnswer { return DNSAnswer{Typed: true, Addrs: []netip.Addr{a}} }
+	w.dns.answers[dnsKey(linkDNS, w.t.WhiteName, dns.TypeA)] = A(addrWhite)
+	w.dns.answers[dnsKey(netip.AddrPort{}, w.t.CFDNSName, dns.TypeA)] = A(addrCF)
+	w.dns.answers[dnsKey(netip.AddrPort{}, w.t.GitHub, dns.TypeA)] = A(moved)
+	w.net.byAddr[moved] = w.net.byAddr[addrGitHub]
+	return w
+}
+
+// roleResult is the result of the first record of id for role/variant.
+func roleResult(res *Result, id, role, variant string) string {
+	for _, p := range res.Probes {
+		if p.ID == id && p.TargetRole == role && p.Variant == variant {
+			return p.Result
+		}
+	}
+	return ""
+}
+
+func summaryHas(res *Result, key string) bool {
+	for _, k := range Summary(res, Findings(res)) {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+func TestH2_UnlistedButAgreedIsUsed(t *testing.T) {
+	moved := netip.MustParseAddr("198.51.100.7")
+	w := swedishWorld(t, moved)
+	if w.t.Allowed("github", moved) {
+		t.Fatal("the test address is inside GitHub's blocks")
+	}
+	res := Run(context.Background(), w.env())
+	if got := roleResult(res, "A1", "github", "a"); got != "dns_unlisted" {
+		t.Fatalf("A1 = %s", got)
+	}
+	if got := findResult(res, "A6", "fill_github"); got != "dns_unlisted" {
+		t.Fatalf("A6 fill_github = %s", got)
+	}
+	var b4 *ProbeRecord
+	for i := range res.Probes {
+		if res.Probes[i].ID == "B4" {
+			b4 = &res.Probes[i]
+		}
+	}
+	if b4 == nil || b4.Variant != "addr_agreed" || !okish(b4.Result) {
+		t.Fatalf("B4 %+v", b4)
+	}
+	dialled := false
+	for _, d := range w.net.dials {
+		dialled = dialled || d.Addr() == moved
+	}
+	if !dialled {
+		t.Fatal("the agreed address was not used")
+	}
+	for _, f := range Failures(res) {
+		if f.Category == "dns_poisoned" {
+			t.Fatal("an unlisted answer tallied as dns_poisoned")
+		}
+	}
+	if summaryHas(res, SumDNSWrongAddresses) {
+		t.Fatal("the summary says DNS gave wrong addresses")
+	}
+	if !summaryHas(res, SumGoogleGithubOpen) {
+		t.Fatalf("summary %v", Summary(res, Findings(res)))
+	}
+	if _, err := BuildReport(res, Meta{Targets: w.t, Now: time.Now()}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+
+	// The same address, but the certificate is not GitHub's: both
+	// resolvers named a host that is not the name's. That is evidence.
+	w = swedishWorld(t, moved)
+	env := w.env()
+	env.Roots = x509.NewCertPool()
+	res = Run(context.Background(), env)
+	if findResult(res, "B4", "") != "cert_invalid" || !summaryHas(res, SumDNSWrongAddresses) {
+		t.Fatalf("B4=%s summary %v", findResult(res, "B4", ""), Summary(res, Findings(res)))
+	}
+}
+
+func TestH2_UnlistedDisagreementIsWrong(t *testing.T) {
+	domestic := netip.MustParseAddr("5.200.200.200")
+	for _, pub := range []netip.Addr{netip.MustParseAddr("198.51.100.7"), addrGitHub} {
+		w := swedishWorld(t, pub)
+		w.dns.answers[dnsKey(linkDNS, w.t.GitHub, dns.TypeA)] = DNSAnswer{Typed: true, Addrs: []netip.Addr{domestic}}
+		res := Run(context.Background(), w.env())
+		if got := roleResult(res, "A1", "github", "a"); got != "dns_wrong_public" {
+			t.Fatalf("1.1.1.1 says %s: A1 = %s", pub, got)
+		}
+		for _, d := range w.net.dials {
+			if d.Addr() == domestic {
+				t.Fatal("dialled the link resolver's address")
+			}
+		}
+		if !summaryHas(res, SumDNSWrongAddresses) {
+			t.Fatal("the summary does not say DNS gave wrong addresses")
+		}
+		if pub == addrGitHub {
+			// 1.1.1.1's answer is inside the blocks: B4 uses it.
+			if findResult(res, "A6", "fill_github") != "ok" || findResult(res, "B4", "") == "skipped" {
+				t.Fatalf("fill=%s B4=%s", findResult(res, "A6", "fill_github"), findResult(res, "B4", ""))
+			}
+			continue
+		}
+		// Two unlisted answers that disagree: neither is dialled, and
+		// GitHub is not "closed" — it was not checked.
+		if findResult(res, "A6", "fill_github") != "dns_unlisted" || findResult(res, "B4", "") != "skipped" {
+			t.Fatalf("fill=%s B4=%s", findResult(res, "A6", "fill_github"), findResult(res, "B4", ""))
+		}
+		for _, d := range w.net.dials {
+			if d.Addr() == pub {
+				t.Fatal("dialled 1.1.1.1's unconfirmed address")
+			}
+		}
+		if summaryHas(res, SumSomeForeignOpen) || !summaryHas(res, SumGoogleOpenGithubUnchecked) {
+			t.Fatalf("summary %v", Summary(res, Findings(res)))
+		}
+	}
+}
+
+func TestH2_UnlistedUnconfirmedIsUnknown(t *testing.T) {
+	moved := netip.MustParseAddr("198.51.100.7")
+	w := swedishWorld(t, moved)
+	w.dns.deadAt = map[netip.Addr]bool{netip.MustParseAddr("1.1.1.1"): true}
+	res := Run(context.Background(), w.env())
+	if roleResult(res, "A1", "github", "a") != "dns_unlisted" || findResult(res, "A6", "fill_github") != "dns_timeout" ||
+		findResult(res, "B4", "") != "skipped" {
+		t.Fatalf("A1=%s fill=%s B4=%s", roleResult(res, "A1", "github", "a"), findResult(res, "A6", "fill_github"), findResult(res, "B4", ""))
+	}
+	for _, d := range w.net.dials {
+		if d.Addr() == moved {
+			t.Fatal("dialled an address no second resolver confirmed")
+		}
+	}
+	if summaryHas(res, SumDNSWrongAddresses) || summaryHas(res, SumSomeForeignOpen) || !summaryHas(res, SumGoogleOpenGithubUnchecked) {
+		t.Fatalf("summary %v", Summary(res, Findings(res)))
+	}
+	for _, f := range Findings(res) {
+		if f.Question == "github_feed_fetchable" {
+			t.Fatalf("a GitHub finding from a skipped probe: %+v", f)
 		}
 	}
 }

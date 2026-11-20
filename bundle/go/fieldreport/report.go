@@ -169,7 +169,7 @@ var (
 		"ok", "ok_carried", "reset_injected_likely", "reset", "silent_drop_forward", "silent_no_reply",
 		"flow_capped_suspected", "refused", "closed", "tls_alert", "timeout", "auth_failed", "skipped",
 		"bogon", "nxdomain", "servfail", "dns_timeout", "type_dropped", "answer_altered",
-		"local_error", "unreachable", "dns_wrong_public", "cert_invalid",
+		"local_error", "unreachable", "dns_wrong_public", "cert_invalid", "dns_unlisted",
 	)
 	Phases      = set("reach", "handshake", "carry", "none")
 	RTTBuckets  = set("<20", "<40", "<80", "<160", "<320", "<640", ">=640")

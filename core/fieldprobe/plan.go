@@ -195,12 +195,28 @@ type runner struct {
 	location                                  string
 	relay                                     RelayTarget
 	haveRelay                                 bool
+
+	// unlisted: the link resolver's A answers that were public but
+	// outside the role's blocks (dns_unlisted), by name, waiting for
+	// A6 to ask 1.1.1.1 the same name. pubClean: A6's calibration
+	// question came back clean (inside Cloudflare's blocks), so this
+	// network was not seen writing answers from 1.1.1.1 on the path.
+	unlisted map[string]*linkUnlisted
+	pubClean bool
+}
+
+// linkUnlisted is one dns_unlisted link answer: the record to revise
+// once 1.1.1.1 has been asked, and the addresses it gave.
+type linkUnlisted struct {
+	idx   int
+	role  string
+	addrs []netip.Addr
 }
 
 // addrPick is an address and where it came from.
 type addrPick struct {
 	a   netip.Addr
-	src string // addr_link | addr_public | addr_hint
+	src string // addr_link | addr_public | addr_agreed | addr_hint
 }
 
 func (p addrPick) ok() bool { return p.a.IsValid() }
@@ -238,7 +254,7 @@ func Run(parent context.Context, env Env) *Result {
 	if env.QUIC == nil {
 		env.QUIC = quicGo{net: env.Net, timeout: env.Timeouts.QUIC}
 	}
-	r := &runner{env: env, res: &Result{}, t: env.Targets, fps: map[string]bool{}}
+	r := &runner{env: env, res: &Result{}, t: env.Targets, fps: map[string]bool{}, unlisted: map[string]*linkUnlisted{}}
 	if env.Relay != nil {
 		r.relay, r.haveRelay = env.Relay.Target()
 		if r.haveRelay {
@@ -494,26 +510,87 @@ func (r *runner) linkResolver() (netip.AddrPort, bool) {
 }
 
 // judgeA holds an A answer for a role to the role's address blocks: the
-// first answer inside them is the address Stage B may use; a public
-// answer with none inside them is dns_wrong_public, and nothing is used.
-func (r *runner) judgeA(role string, ans DNSAnswer, res string) (string, netip.Addr) {
+// first answer inside them is the address Stage B may use. A public
+// answer with none inside them is dns_unlisted: not by itself a lie (a
+// big service moves into new ranges before the list is re-signed), but
+// not dialled on its own word either — an Iranian resolver can answer a
+// foreign name with a public domestic address. The unlisted addresses
+// are returned for the comparison with 1.1.1.1 (A6, settle).
+func (r *runner) judgeA(role string, ans DNSAnswer, res string) (string, netip.Addr, []netip.Addr) {
 	if res != "ok" || len(r.t.allow[role]) == 0 {
-		return res, netip.Addr{}
+		return res, netip.Addr{}, nil
 	}
-	public := false
+	var unlisted []netip.Addr
 	for _, a := range ans.Addrs {
 		if !a.Is4() || isBogon(a, r.t.calibration) {
 			continue
 		}
 		if r.t.Allowed(role, a) {
-			return res, a
+			return res, a, nil
 		}
-		public = true
+		unlisted = append(unlisted, a)
 	}
-	if public {
-		return "dns_wrong_public", netip.Addr{}
+	if len(unlisted) > 0 {
+		return "dns_unlisted", netip.Addr{}, unlisted
 	}
-	return res, netip.Addr{}
+	return res, netip.Addr{}, nil
+}
+
+// agree: the two answers name the same host — an address in common,
+// or failing that two addresses in one /24 (a rotating pool, or two
+// caches holding different slices of it). It returns the link answer's
+// address to dial. A forger answering both questions would answer them
+// alike, so this is not proof of identity; the certificate check of
+// Stage B is, and A6's calibration has to be clean first (settle).
+func agree(link, pub []netip.Addr) (netip.Addr, bool) {
+	for _, a := range link {
+		for _, b := range pub {
+			if a == b {
+				return a, true
+			}
+		}
+	}
+	for _, a := range link {
+		pa, _ := a.Prefix(24)
+		for _, b := range pub {
+			if b.Is4() && pa.Contains(b) {
+				return a, true
+			}
+		}
+	}
+	return netip.Addr{}, false
+}
+
+// settle compares a dns_unlisted link answer with 1.1.1.1's answer for
+// the same name (res, and the unlisted addresses pubUnlisted when res
+// is dns_unlisted). It returns the address Stage B may use, if the two
+// agree; and it turns the link record into dns_wrong_public when they
+// disagree. When 1.1.1.1 gave nothing usable (no answer, a bogon, an
+// error) the link record stays dns_unlisted — unknown, not dialled.
+func (r *runner) settle(p *linkUnlisted, res string, ans DNSAnswer, pubUnlisted []netip.Addr) (netip.Addr, bool) {
+	switch res {
+	case "ok":
+		// 1.1.1.1 named an address inside the blocks.
+		if _, same := agree(p.addrs, ans.Addrs); !same {
+			r.revise(p.idx, "dns_wrong_public")
+		}
+	case "dns_unlisted":
+		a, same := agree(p.addrs, pubUnlisted)
+		switch {
+		case !same:
+			r.revise(p.idx, "dns_wrong_public")
+		case r.pubClean:
+			return a, true
+		}
+	}
+	return netip.Addr{}, false
+}
+
+// revise changes the result of an earlier record, and logs it.
+func (r *runner) revise(idx int, result string) {
+	p := &r.res.Probes[idx]
+	p.Result = result
+	r.env.Log(fmt.Sprintf("fieldprobe step=%s variant=%s result=%s phase=%s revised", p.ID, p.Variant, p.Result, p.Phase))
 }
 
 // ask runs one question against the link resolver and records it. For
@@ -536,8 +613,9 @@ func (r *runner) ask(ctx context.Context, id, role, variant, name string, qtype 
 	}
 	res := classifyDNS(ans, err, ex, aAnswered)
 	var pick netip.Addr
+	var unlisted []netip.Addr
 	if qtype == dns.TypeA {
-		res, pick = r.judgeA(role, ans, res)
+		res, pick, unlisted = r.judgeA(role, ans, res)
 	}
 	if qtype == dns.TypeHTTPS && res == "ok" && len(ans.ECH) > 0 {
 		r.echConfig = ans.ECH
@@ -547,7 +625,16 @@ func (r *runner) ask(ctx context.Context, id, role, variant, name string, qtype 
 		sig.DNSRcode = dnsRcode(ans.Rcode)
 	}
 	r.add(id, role, variant, res, "reach", sig)
+	if res == "dns_unlisted" {
+		r.unlisted[name] = &linkUnlisted{idx: len(r.res.Probes) - 1, role: role, addrs: unlisted}
+	}
 	return res, pick
+}
+
+// answered: an A question got an answer (for the type_dropped rule of
+// the questions that follow it).
+func answered(res string) bool {
+	return res == "ok" || res == "bogon" || res == "dns_wrong_public" || res == "dns_unlisted"
 }
 
 func (r *runner) a1(ctx context.Context) {
@@ -559,7 +646,7 @@ func (r *runner) a1(ctx context.Context) {
 		if a.IsValid() {
 			*n.pick = addrPick{a, "addr_link"}
 		}
-		r.ask(ctx, "A1", n.role, "aaaa", n.name, dns.TypeAAAA, dnsExpect{}, res == "ok" || res == "bogon" || res == "dns_wrong_public")
+		r.ask(ctx, "A1", n.role, "aaaa", n.name, dns.TypeAAAA, dnsExpect{}, answered(res))
 	}
 }
 
@@ -568,7 +655,7 @@ func (r *runner) a2(ctx context.Context) {
 	if a.IsValid() {
 		r.cfAddr = addrPick{a, "addr_link"}
 	}
-	r.ask(ctx, "A2", "cf_edge", "https", r.t.CFECHOuter, dns.TypeHTTPS, dnsExpect{}, res == "ok" || res == "bogon" || res == "dns_wrong_public")
+	r.ask(ctx, "A2", "cf_edge", "https", r.t.CFECHOuter, dns.TypeHTTPS, dnsExpect{}, answered(res))
 }
 
 func (r *runner) a3(ctx context.Context) {
@@ -604,15 +691,27 @@ func (r *runner) a6(ctx context.Context) {
 		}
 		res := classifyDNS(ans, err, dnsExpect{qtype: dns.TypeA, calibration: r.t.calibration}, false)
 		// The answer from 1.1.1.1 is held to the same blocks: UDP/53 to
-		// a foreign resolver is answered on the path, too.
-		res, a := r.judgeA(allowRole, ans, res)
+		// a foreign resolver is answered on the path, too. An unlisted
+		// answer here is used only when the link resolver gave the same
+		// one (settle); on its own it is not dialled.
+		res, a, unlisted := r.judgeA(allowRole, ans, res)
+		src := "addr_public"
+		if p := r.unlisted[name]; p != nil && allowRole != "" && p.role == allowRole {
+			delete(r.unlisted, name)
+			if x, ok := r.settle(p, res, ans, unlisted); ok {
+				a, src = x, "addr_agreed"
+			}
+		}
+		if variant == "calibration" && res == "ok" {
+			r.pubClean = true
+		}
 		sig := fieldreport.Signals{}
 		if err == nil {
 			sig.DNSRcode = dnsRcode(ans.Rcode)
 		}
 		r.add("A6", "public_resolver", variant, res, "reach", sig)
 		if pick != nil && !pick.ok() && a.IsValid() {
-			*pick = addrPick{a, "addr_public"}
+			*pick = addrPick{a, src}
 		}
 	}
 	one("calibration", r.t.CFDNSName, "cf_edge", nil)
@@ -621,7 +720,7 @@ func (r *runner) a6(ctx context.Context) {
 	}
 	// Names whose link answer was missing, a lie or outside the name's
 	// blocks: ask once here, so Stage B connects to a real address of
-	// the name.
+	// the name (and an unlisted link answer is confirmed or refuted).
 	for _, f := range []struct {
 		v, name, role string
 		pick          *addrPick

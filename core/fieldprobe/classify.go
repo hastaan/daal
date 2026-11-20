@@ -240,6 +240,7 @@ func failureCategory(result, phase string, udp bool) string {
 	case "cert_invalid":
 		return "tls_sni_or_cert_block_suspected"
 	}
-	// local_error is the device, not the network: not tallied.
+	// local_error is the device, not the network: not tallied. Neither
+	// is dns_unlisted: an answer outside the list is not a failure.
 	return ""
 }

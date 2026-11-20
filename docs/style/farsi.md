@@ -2,10 +2,16 @@
 
 The owner, a native speaker, read the app on a phone and said the Farsi "is not natural", e.g. «ضربه بزنید». The current text is grammatical but reads as translated English. Your job is to make each string read as if a careful Iranian product writer had written it in Persian first, for an ordinary person inside Iran with no technical knowledge (think of the tone of a good Iranian banking or messaging app: polite, plain, short).
 
+## The owner's verdict (2026-11-20)
+
+"The Persian is robotic and mostly literal translation" — e.g. «دارد آزمایش می‌کند» should be «در حال بررسی…». "Check all of them. Be natural and avoid direct translation. See the context."
+
+So: before writing a string, look at WHERE it appears (the component that uses the key: a button, a sheet title, a one-line status, a paragraph of help) and what the person is doing at that moment. Write what a good Iranian app shows there, even if it is not a translation of the English words. Keep the meaning, the warnings and the hedges; drop the English sentence shape.
+
 ## How to work
 
 - Read the English for the MEANING, then write the Persian sentence a person would actually say. Do not mirror English word order, passives, or noun chains.
-- Short sentences. Prefer verbs to verbal nouns («وصل شوید», not «اتصال را برقرار کنید»). Drop words Persian does not need («در حال …» chains, «توسط», «جهت», «می‌باشد», «نمایید»).
+- Short sentences. Prefer verbs to verbal nouns («وصل شوید», not «اتصال را برقرار کنید»). Drop words Persian does not need («توسط», «جهت», «می‌باشد», «نمایید»). Progress labels are the exception: Iranian apps say «در حال بررسی…», «در حال اتصال…», «در حال ارسال…»; use that, not «دارد … می‌کند».
 - Address the person as «شما» with ordinary polite imperatives («بزنید», «صبر کنید», «دوباره امتحان کنید»). Not bookish, not slang, no «تو».
 - Buttons and menu labels: as short as Iranian apps make them («ادامه», «ذخیره», «حذف», «بستن», «تلاش دوباره», «بعداً», «باشه» is too casual: use «تأیید» or the action itself).
 - Never change the meaning. Never drop or soften a warning, a cost, a security statement or a limit ("as far as this phone can tell" must stay hedged). Never add a promise the English does not make.
@@ -17,7 +23,7 @@ The owner, a native speaker, read the app on a phone and said the Farsi "is not 
 |---|---|
 | ضربه بزنید / لمس کنید | بزنید («روی «افزودن» بزنید», «… را بزنید») |
 | برون‌بری / درون‌ریزی | خروجی گرفتن یا ذخیره / وارد کردن |
-| در حال چرخش… / در حال بررسی … و پرسیدن اینکه… | «کمی صبر کنید…» or the plain action: «دارد بررسی می‌کند…» |
+| دارد آزمایش می‌کند… / دارد بررسی می‌کند… / در حال چرخش… | a short progress label as Iranian apps write it: «در حال بررسی…», «در حال اتصال…» (owner, 2026-11-20) |
 | برنامه‌ها خودشان تغییر را برمی‌دارند | برنامه‌ها خودشان به‌روز می‌شوند |
 | حامل (transport) | روش اتصال / راه |
 | مهر شده (sealed) | قفل شده / فقط برای … ساخته شده |

@@ -340,7 +340,8 @@
               "local_error",
               "unreachable",
               "dns_wrong_public",
-              "cert_invalid"
+              "cert_invalid",
+              "dns_unlisted"
             ]
           },
           "phase": {

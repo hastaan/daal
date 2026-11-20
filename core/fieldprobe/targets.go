@@ -70,15 +70,20 @@ type Targets struct {
 	CalibrationNet  string        `json:"calibration_bogon"`
 	KnownZone       []KnownRecord `json:"known_zone"`
 	// AllowNets: per target role, the address blocks the role's operator
-	// announces (Google, GitHub, Cloudflare). A resolver's answer is
-	// connected to ONLY when it falls inside its role's blocks; a public
-	// answer outside them is recorded as dns_wrong_public and not used —
+	// announces (Google, GitHub, Cloudflare). A resolver's answer inside
+	// its role's blocks is connected to. A public answer outside them is
+	// dns_unlisted and is connected to only when the link resolver and
+	// 1.1.1.1 gave the same one (and 1.1.1.1's calibration answer was
+	// clean); when they disagree the link answer is dns_wrong_public —
 	// an Iranian resolver can answer a foreign name with a public
 	// domestic address, and the test must never open a connection to a
-	// domestic host. Re-checked against the operators' published lists
-	// whenever the list is re-signed (specs/field-probe-v2.md).
-	AllowNets map[string][]string `json:"allow_nets"`
-	Domestic  []string            `json:"domestic,omitempty"`
+	// domestic host on one resolver's word. Re-checked against the
+	// operators' published lists whenever the list is re-signed
+	// (specs/field-probe-v2.md); AllowNetsChecked is the day of the
+	// last check.
+	AllowNets        map[string][]string `json:"allow_nets"`
+	AllowNetsChecked string              `json:"allow_nets_checked,omitempty"`
+	Domestic         []string            `json:"domestic,omitempty"`
 
 	// Filled by LoadTargets.
 	SHA256      string         `json:"-"`
@@ -92,6 +97,11 @@ type Targets struct {
 // allowRoles are the roles whose answers Stage B connects to: each must
 // have its blocks.
 var allowRoles = []string{"google", "github", "cf_edge", "white_name"}
+
+// maxAllowNets caps the blocks of one role. GitHub publishes its web,
+// API and git addresses as ~110 small blocks (Azure /28s and /32s);
+// they are kept as published rather than widened to fit.
+const maxAllowNets = 128
 
 // ErrTargets wraps every refusal of a list.
 var ErrTargets = errors.New("fieldprobe: target list refused")
@@ -166,7 +176,7 @@ func LoadTargets(raw []byte) (*Targets, error) {
 		for _, r := range allowRoles {
 			known = known || r == role
 		}
-		if !known || len(nets) == 0 || len(nets) > 64 {
+		if !known || len(nets) == 0 || len(nets) > maxAllowNets {
 			return nil, fmt.Errorf("%w: allow_nets %s", ErrTargets, role)
 		}
 		for _, n := range nets {

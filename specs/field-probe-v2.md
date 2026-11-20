@@ -135,12 +135,12 @@ target list (below), addresses only from DNS answers or the held pack.
 
 | id | probe | answers |
 |---|---|---|
-| A1 | A + AAAA for the Google and GitHub names, link resolver | resolver alive; bogon on allowed names; `dns_wrong_public` |
+| A1 | A + AAAA for the Google and GitHub names, link resolver | resolver alive; bogon on allowed names; `dns_unlisted` / `dns_wrong_public` |
 | A2 | A + HTTPS (65) for `cloudflare-ech.com` | ECH config delivered or stripped |
 | A3 | A for the white name | real CDN address or sinkhole |
 | A4 | A, AAAA, CNAME, TXT of the known-answer records | recursion per record type, answer intact |
 | A5 | A for `cloudflare-dns.com`, link resolver | calibration (expected bogon 10.10.34.34–36) |
-| A6 | A for A5's and A4's first name to `1.1.1.1:53`; then, for each of Google/GitHub/Cloudflare/white whose link answer was missing, a lie or outside the role's blocks, one A to `1.1.1.1` (`fill_*`), held to the same blocks | on-path injection vs resolver poisoning; real addresses for Stage B |
+| A6 | A for A5's and A4's first name to `1.1.1.1:53`; then, for each of Google/GitHub/Cloudflare/white whose link answer was missing, a lie or outside the role's blocks, one A to `1.1.1.1` (`fill_*`), held to the same blocks and compared with the link answer (below) | on-path injection vs resolver poisoning; real addresses for Stage B; an unlisted link answer confirmed or contradicted |
 | B1 | TLS Google, `GET /generate_204` | is international TLS up. **Blackout: B1 failed at reach/handshake (or had no address) and every A6 question timed out → short circuit: C2 only, then stop.** Link-resolver answers are not evidence: domestic resolvers keep answering in a shutdown |
 | B2 | Google address, SNI Google, `Host:` front host, list path | does the Host switch pass (status class only) |
 | B3 | one redirect, only to a name under `googleusercontent.com`, fronted the same way | claim 32 |
@@ -171,9 +171,35 @@ schema. Connections to the relay are capped at 9 per run
 (`MaxRelayFlows`; the full C2–C9 set would be 10).
 
 Stage B probes connect only to an address inside the role's blocks
-(`allow_nets`, below) and verify the server's chain for the name in the
-hello against the device's roots. A chain that does not verify is
-`cert_invalid`, and no HTTP request is sent to that host.
+(`allow_nets`, below), or to an unlisted address both resolvers agreed
+on (variant `addr_agreed`, below), and verify the server's chain for the
+name in the hello against the device's roots. A chain that does not
+verify is `cert_invalid`, and no HTTP request is sent to that host.
+
+**An answer outside the blocks.** A public A answer with no address in
+the role's blocks is `dns_unlisted`, not by itself a lie: big services
+move into new ranges before the list is re-signed (GitHub's
+`172.130.18.192`, November 2026). It is never dialled on one resolver's
+word — an Iranian resolver can answer a foreign name with a public
+domestic address — so A6 asks `1.1.1.1` the same name and compares:
+
+| link answer | `1.1.1.1` answer | link record | Stage B |
+|---|---|---|---|
+| unlisted X | inside the blocks, and X among its addresses | `dns_unlisted` | `1.1.1.1`'s address (`addr_public`) |
+| unlisted X | inside the blocks, X not among them | `dns_wrong_public` | `1.1.1.1`'s address (`addr_public`) |
+| unlisted X | unlisted, agrees with X (an address in common, or one in the same /24), **and A6's calibration answer was clean** (`ok`) | `dns_unlisted` | X (`addr_agreed`) |
+| unlisted X | unlisted, agrees, calibration not clean (on-path writing seen, or not asked) | `dns_unlisted` | skipped (`no_address`) |
+| unlisted X | unlisted, no agreement | `dns_wrong_public` | skipped |
+| unlisted X | no answer, timeout, bogon, error, not asked | `dns_unlisted` (unknown) | skipped |
+
+The A6 record is `ok` when its answer is inside the blocks, `dns_unlisted`
+when it is public and outside them (dialled only as above), `bogon` for a
+sinkhole. A forger answering both questions alike would pass the
+comparison; the certificate check is the proof of identity, and a
+`cert_invalid` on an `addr_agreed` address counts as DNS evidence in the
+summary. The calibration condition keeps the comparison out of networks
+seen writing `1.1.1.1`'s answers on the path (Iran today: the DoH name
+comes back as `10.10.34.x`), where an unlisted answer stays unchecked.
 
 **C4–C6 and the cover forward.** REALITY hands a hello it does not own to
 the cover site, so C4–C6 talk to the cover origin. A foreign name there
@@ -229,7 +255,8 @@ the side instance does not expose them (gap).
 | DNS `nxdomain`, `servfail`, `dns_timeout` | as named |
 | DNS `type_dropped` | A answered, this type silent or empty where an answer is expected |
 | DNS `answer_altered` | known-answer record present and not the expected value |
-| DNS `dns_wrong_public` | an A answer that is public but outside the role's blocks (an Iranian resolver answering a foreign name with a domestic address): not used, the name is asked of `1.1.1.1` instead, held to the same blocks |
+| DNS `dns_unlisted` | an A answer that is public but outside the role's blocks: not counted as tampering, not tallied; dialled only when the link resolver and `1.1.1.1` agree (above) |
+| DNS `dns_wrong_public` | a link-resolver A answer outside the role's blocks that `1.1.1.1` contradicted (an Iranian resolver answering a foreign name with a domestic address): not used; tallied `dns_poisoned` |
 
 Side-probe outcomes follow the engine taxonomy
 (`diagnostics.ClassifyObservation`); `relay_no_egress` counts as reached
@@ -269,14 +296,19 @@ empty: no address was invented.
 
 `allow_nets` holds, per role (`google`, `github`, `cf_edge`,
 `white_name`), the address blocks the operator announces; the loader
-refuses a missing role, a block shorter than /8 (IPv4) or /19 (IPv6), and
-any non-public block, and every `white_hints` entry must fall inside
-`white_name`'s blocks. Current blocks: Google's own (not Cloud) ranges,
-GitHub's web ranges, Cloudflare's published IPv4 list (also used for the
-white name, on the assumption that `hcaptcha.com` is served from
-Cloudflare). **Re-check all of them against the operators' published
-lists when the list is re-signed**: an answer outside the blocks is
-`dns_wrong_public` and its probe is skipped.
+refuses a missing role, more than 128 blocks for one role, a block
+shorter than /8 (IPv4) or /19 (IPv6), and any non-public block, and every
+`white_hints` entry must fall inside `white_name`'s blocks. Current
+blocks (`allow_nets_checked`: 2026-11-20, list `2026-11-20.3`): Google's
+own front-end ranges, a subset of `gstatic.com/ipranges/goog.json` with
+nothing from `cloud.json`; GitHub's IPv4 `web`, `api` and `git` ranges
+from `api.github.com/meta`, merged only where adjacent (112 blocks, none
+widened); Cloudflare's published IPv4 list (`cloudflare.com/ips-v4`,
+also used for the white name, on the assumption that `hcaptcha.com` is
+served from Cloudflare). **Re-check all of them against the operators'
+published lists when the list is re-signed**: an answer outside the
+blocks is `dns_unlisted`, and is used only when `1.1.1.1` agrees on a
+network with a clean calibration answer.
 
 `resolver_recurses_foreign_zone` (A4) uses `github.com` / `google.com`
 records, which every resolver has cached: it shows the record type
@@ -322,6 +354,20 @@ when a probe it rests on ran.
 The summary shown before sending is a list of i18n keys
 (`netTest.summary.*`, `core/fieldprobe/findings.go`), 2–8 lines, the
 privacy line always last.
+
+- `dnsWrongAddresses` only on evidence: a `bogon` or `dns_wrong_public`
+  in A1–A3, `dns_injection_on_path` = yes (A6's calibration is a
+  `bogon`), or a `cert_invalid` on an `addr_agreed` address. A
+  `dns_unlisted` answer is not evidence, and an unlisted calibration
+  answer makes `dns_injection_on_path` unclear, not yes.
+- Google is open when B1 is `ok`, closed when every counted B1 failed;
+  GitHub open when `github_feed_fetchable` is yes, closed when no. Any
+  other state (skipped for want of a usable address, not run, an answer
+  that decides nothing) is *unchecked*, never closed: both checked gives
+  `googleGithubOpen` / `someForeignOpen` / `googleGithubClosed`; one
+  unchecked gives `googleOpenGithubUnchecked`,
+  `googleClosedGithubUnchecked`, `githubOpenGoogleUnchecked` or
+  `githubClosedGoogleUnchecked`; both unchecked, no line.
 
 ## Storage
 

@@ -181,8 +181,10 @@ func Findings(res *Result) []fieldreport.Finding {
 			continue
 		}
 		// 1.1.1.1 never answers its own DoH name with a sinkhole: a
-		// bogon here was written on the path.
-		add("dns_injection_on_path", "", yesNo(p.Result == "bogon" || p.Result == "dns_wrong_public", p.Result == "ok"), "A5", "A6")
+		// bogon here was written on the path. A public address outside
+		// Cloudflare's blocks (dns_unlisted) decides nothing: Cloudflare
+		// may have added a range since the list was signed.
+		add("dns_injection_on_path", "", yesNo(p.Result == "bogon", p.Result == "ok"), "A5", "A6")
 	}
 	if ran(m["B9"]) {
 		add("quic_443_alive", "", yesNo(anyOK(m["B9"]), allFailed(m["B9"])), "B9")
@@ -254,6 +256,16 @@ const (
 	SumPrivacy            = "netTest.summary.privacy"
 )
 
+// One of Google and GitHub was checked, the other could not be (no
+// usable address, an answer that decides nothing, or the run stopped
+// first): never read as "does not open".
+const (
+	SumGoogleOpenGithubUnchecked   = "netTest.summary.googleOpenGithubUnchecked"
+	SumGoogleClosedGithubUnchecked = "netTest.summary.googleClosedGithubUnchecked"
+	SumGithubOpenGoogleUnchecked   = "netTest.summary.githubOpenGoogleUnchecked"
+	SumGithubClosedGoogleUnchecked = "netTest.summary.githubClosedGoogleUnchecked"
+)
+
 // Summary picks the lines for a run.
 func Summary(res *Result, fs []fieldreport.Finding) []string {
 	ans := map[string]string{}
@@ -290,24 +302,10 @@ func Summary(res *Result, fs []fieldreport.Finding) []string {
 	if ans["white_name_helps_on_relay_ip"] == "yes" {
 		out = append(out, SumWhiteNameHelps)
 	}
-	g, gh := anyOK(m["B1"]), ans["github_feed_fetchable"] == "yes"
-	switch {
-	case g && gh:
-		out = append(out, SumGoogleGithubOpen)
-	case g || gh:
-		out = append(out, SumSomeForeignOpen)
-	case ran(m["B1"]) || ran(m["B4"]):
-		out = append(out, SumGoogleGithubClosed)
+	if line := foreignLine(googleState(m), githubState(m, ans)); line != "" {
+		out = append(out, line)
 	}
-	bogon := ans["dns_injection_on_path"] == "yes"
-	for _, id := range []string{"A1", "A2", "A3"} {
-		for _, p := range m[id] {
-			if p.Result == "bogon" || p.Result == "dns_wrong_public" {
-				bogon = true
-			}
-		}
-	}
-	if bogon {
+	if dnsWrong(m, ans) {
 		out = append(out, SumDNSWrongAddresses)
 	}
 	if ans["cloudflare_edge_reachable"] == "no" {
@@ -326,4 +324,81 @@ func Summary(res *Result, fs []fieldreport.Finding) []string {
 		out = out[:7]
 	}
 	return append(out, SumPrivacy)
+}
+
+// Whether a site opened: a probe skipped for want of a usable address,
+// or one whose answer decides nothing, is "unchecked", never "closed".
+const (
+	siteUnchecked = iota
+	siteOpen
+	siteClosed
+)
+
+func googleState(m map[string][]ProbeRecord) int {
+	switch {
+	case anyOK(m["B1"]):
+		return siteOpen
+	case allFailed(m["B1"]):
+		return siteClosed
+	}
+	return siteUnchecked
+}
+
+func githubState(m map[string][]ProbeRecord, ans map[string]string) int {
+	switch ans["github_feed_fetchable"] {
+	case "yes":
+		return siteOpen
+	case "no":
+		return siteClosed
+	}
+	return siteUnchecked
+}
+
+func foreignLine(g, gh int) string {
+	switch {
+	case g == siteOpen && gh == siteOpen:
+		return SumGoogleGithubOpen
+	case g == siteClosed && gh == siteClosed:
+		return SumGoogleGithubClosed
+	case g != siteUnchecked && gh != siteUnchecked:
+		return SumSomeForeignOpen
+	case g == siteOpen:
+		return SumGoogleOpenGithubUnchecked
+	case g == siteClosed:
+		return SumGoogleClosedGithubUnchecked
+	case gh == siteOpen:
+		return SumGithubOpenGoogleUnchecked
+	case gh == siteClosed:
+		return SumGithubClosedGoogleUnchecked
+	}
+	return ""
+}
+
+// dnsWrong: the summary says DNS gave wrong addresses only on evidence —
+// a sinkhole or private answer from the link resolver (A1–A3), an
+// answer written on the path to 1.1.1.1 (dns_injection_on_path), a link
+// answer outside the blocks that 1.1.1.1 contradicted
+// (dns_wrong_public), or an address both resolvers agreed on that then
+// showed a certificate not valid for the name. An answer that is merely
+// outside the list (dns_unlisted) is not evidence: a big service moves
+// into new ranges before the list is re-signed.
+func dnsWrong(m map[string][]ProbeRecord, ans map[string]string) bool {
+	if ans["dns_injection_on_path"] == "yes" {
+		return true
+	}
+	for _, id := range []string{"A1", "A2", "A3"} {
+		for _, p := range m[id] {
+			if p.Result == "bogon" || p.Result == "dns_wrong_public" {
+				return true
+			}
+		}
+	}
+	for _, id := range []string{"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"} {
+		for _, p := range m[id] {
+			if p.Result == "cert_invalid" && p.Variant == "addr_agreed" {
+				return true
+			}
+		}
+	}
+	return false
 }
