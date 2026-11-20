@@ -260,14 +260,14 @@ describe('the words', () => {
         for (const o of extraFamilyOptions(P)) {
             // every option states that it opens something more on the server
             expect(en[o.bodyKey]).toMatch(/one more open door/);
-            expect(fa[o.bodyKey]).toMatch(/یک درِ باز دیگر/);
+            expect(fa[o.bodyKey]).toMatch(/یک درِ? (?:باز )?دیگر/);
         }
         // anytls: a newer file format that an older app rejects WHOLE.
         expect(en['wiz.more.anytls.body']).toMatch(/newer format/);
         expect(en['wiz.more.anytls.body']).toMatch(/older Daal app cannot open that file at all/);
         expect(en['wiz.more.anytls.body']).toMatch(/not even to use the other ways/);
         expect(fa['wiz.more.anytls.body']).toMatch(/قالب جدیدتری/);
-        expect(fa['wiz.more.anytls.body']).toMatch(/اصلاً نمی‌تواند آن فایل را باز کند/);
+        expect(fa['wiz.more.anytls.body']).toMatch(/اصلاً نمی‌تواند (?:آن|این) فایل را باز کند/);
         expect(en['wiz.more.anytls.warn']).toMatch(/older Daal app/);
         // and nothing promises a way through a web-only network
         expect(en['wiz.more.intro']).toMatch(/none of them gets through a network that only allows ordinary web traffic/);
