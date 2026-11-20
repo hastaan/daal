@@ -31,7 +31,8 @@ const ROUTE_PARS_RESCUE_03: RouteDisplayRow = {
     publisherName: 'Pars Relays',
     routeNickname: 'Rescue 03',
     trustClass: 'trusted',
-    family: 'pars',
+    family: 'websocket-tls',
+    familyMaturity: 'stable',
     inCooldown: false,
     budgetExhausted: false,
     healthPct: 96,
@@ -44,7 +45,8 @@ const ROUTE_PARS_RESCUE_01: RouteDisplayRow = {
     publisherName: 'Pars',
     routeNickname: 'Rescue 01',
     trustClass: 'trusted',
-    family: 'pars',
+    family: 'hysteria2',
+    familyMaturity: 'stable',
     inCooldown: true,
     budgetExhausted: true,
     healthPct: 64,
@@ -57,7 +59,8 @@ const ROUTE_FRIEND_MAY6: RouteDisplayRow = {
     publisherName: 'Friend',
     routeNickname: 'May 6',
     trustClass: 'pinned',
-    family: 'friend',
+    family: 'vless-reality',
+    familyMaturity: 'stable',
     inCooldown: false,
     budgetExhausted: false,
     healthPct: 28,
@@ -70,7 +73,8 @@ const ROUTE_EMERGENCY_K3F: RouteDisplayRow = {
     publisherName: 'Emergency',
     routeNickname: 'K3F',
     trustClass: 'unknown',
-    family: 'emergency',
+    family: 'naive',
+    familyMaturity: 'stable',
     inCooldown: false,
     budgetExhausted: false,
     healthPct: 50,
@@ -142,7 +146,7 @@ const WAY_SLOW = way(2, 'Way 2', 'websocket-tls', {
 const WAY_FAILING = way(3, 'Way 3', 'hysteria2', {
     grade: 'failing', samples: 3, carried: 0, failed: 3, last: lastBucketText(1795078800),
 });
-const WAY_UNTRIED = way(4, 'Way 4', 'trojan', {
+const WAY_UNTRIED = way(4, 'Way 4', 'naive', {
     grade: 'unknown', samples: 0, carried: 0, failed: 0,
 });
 const MEASURED_ROUTES: RouteDisplayRow[] = [WAY_GOOD, WAY_SLOW, WAY_FAILING, WAY_UNTRIED];
@@ -157,6 +161,94 @@ const NEW_NETWORK_ROUTES: RouteDisplayRow[] = [
     way(3, 'Way 3', 'tuic', { grade: 'unknown', samples: 0, carried: 0, failed: 0 }),
     way(4, 'Way 4', 'websocket-tls', { grade: 'unknown', samples: 0, carried: 0, failed: 0 }),
 ];
+
+// One file as a real relay makes it (the Files tab, lib/fileFacts.ts):
+// the publisher's relay names its ways r1..r4, two of them are the same
+// kind, and the engine has seen each one differently on this network —
+// one carried fast, one carried slowly, one failed three times and is
+// resting, one is an experimental kind never tried here.
+const RELAY_REST_UNTIL = Date.now() + 38 * 60 * 1000;
+/** The engine's hour bucket `h` hours back, as parseMeasured keeps it. */
+const lastHour = (h: number) => {
+    const unix = Math.floor(Date.now() / 3600_000) * 3600 - h * 3600;
+    return { last: lastBucketText(unix), lastUnix: unix };
+};
+const relayWay = (n: number, family: string, over: Partial<RouteDisplayRow>): RouteDisplayRow => ({
+    routeId: `test-r${n}`,
+    publisherId: 'b7e1c2d4f9a03e55',
+    publisherName: 'Test',
+    routeNickname: `r${n}`,
+    trustClass: 'trusted',
+    family,
+    familyMaturity: 'stable',
+    inCooldown: false,
+    budgetExhausted: false,
+    ...over,
+});
+const RELAY_R1 = relayWay(1, 'vless-reality', {
+    healthPct: 94,
+    proven: true,
+    measured: { grade: 'good', setupMs: 380, samples: 7, carried: 7, failed: 0, ...lastHour(0) },
+});
+const RELAY_R2 = relayWay(2, 'vless-reality', {
+    healthPct: 71,
+    proven: true,
+    measured: { grade: 'slow', setupMs: 2600, samples: 4, carried: 3, failed: 1, ...lastHour(2) },
+});
+const RELAY_R3 = relayWay(3, 'hysteria2', {
+    healthPct: 22,
+    inCooldown: true,
+    cooldownUntilUnixMs: RELAY_REST_UNTIL,
+    measured: { grade: 'failing', samples: 3, carried: 0, failed: 3, ...lastHour(1) },
+});
+const RELAY_R4 = relayWay(4, 'tuic', {
+    familyMaturity: 'experimental',
+    measured: { grade: 'unknown', samples: 0, carried: 0, failed: 0 },
+});
+// A second file, from a subscription, with names of its own.
+const SUB_WAY = (n: number, nickname: string, family: string, over: Partial<RouteDisplayRow>): RouteDisplayRow => ({
+    routeId: `pars-sub-${n}`,
+    publisherId: 'pars-relays',
+    publisherName: 'Pars Relays',
+    routeNickname: nickname,
+    trustClass: 'trusted',
+    family,
+    familyMaturity: 'stable',
+    inCooldown: false,
+    budgetExhausted: false,
+    sourceName: 'Pars Relays',
+    ...over,
+});
+const RELAY_FILE_ROUTES: RouteDisplayRow[] = [
+    RELAY_R1,
+    RELAY_R2,
+    RELAY_R3,
+    RELAY_R4,
+    SUB_WAY(1, 'Rescue 03', 'websocket-tls', {
+        healthPct: 88,
+        proven: true,
+        measured: { grade: 'ok', setupMs: 1150, samples: 2, carried: 2, failed: 0, ...lastHour(5) },
+    }),
+    SUB_WAY(2, 'shadowsocks', 'shadowsocks', {
+        familyMaturity: 'experimental',
+        measured: { grade: 'unknown', samples: 0, carried: 0, failed: 0 },
+    }),
+    SUB_WAY(3, 'Old WG', 'wireguard', { familyMaturity: 'unsupported' }),
+];
+// The same two files when the engine has no record for the network the
+// phone is on now (the VPN service is not running): no `measured` block
+// at all, so nothing is said about "here".
+const RELAY_FILE_ROUTES_NO_NETWORK: RouteDisplayRow[] = RELAY_FILE_ROUTES.map(({ measured: _m, ...r }) => r);
+const RELAY_AUTO_ON_R1 = {
+    state: 'connected' as const,
+    mode: true,
+    trying: '',
+    index: 0,
+    total: 0,
+    tried: [{ routeId: RELAY_R1.routeId, family: RELAY_R1.family, result: 'carried' as const, category: '', setupMs: 380 }],
+    verdict: '',
+    routeId: RELAY_R1.routeId,
+};
 
 // ---- scenario type ----
 
@@ -310,6 +402,28 @@ const WHY_CONNECTED: WhyThisRouteSummary = {
 // What the panel shows today on a real device: the selector was handed
 // a one-route slice, so there is no comparison to report. `null`, not
 // `[]` — the difference is the whole point of this scenario.
+// Home while connected, as a real engine answers today: the selector
+// compared nothing (`skipped: null`), and the path manager is resting
+// one kind of connection on this network (measured).
+const whyLive = (active: RouteDisplayRow, decisionId: string): WhyThisRouteSummary => ({
+    active,
+    reasonText: `Tunnel up on ${active.routeId}.`,
+    skipped: null,
+    skippedFamilies: [
+        { family: 'hysteria2', ladderStep: 2, untilUnixMs: Date.now() + 9 * 60 * 1000, reasonTag: 'udp_unavailable' },
+    ],
+    decisionId,
+});
+
+// The default file on Home, measured on this network: one way carried
+// here quickly before, one did not, two were never tried.
+const HOME_ROUTES: RouteDisplayRow[] = [
+    { ...ROUTE_PARS_RESCUE_03, measured: { grade: 'good', setupMs: 610, samples: 6, carried: 6, failed: 0 } },
+    { ...ROUTE_PARS_RESCUE_01, measured: { grade: 'failing', samples: 3, carried: 0, failed: 3 } },
+    { ...ROUTE_FRIEND_MAY6, measured: { grade: 'unknown', samples: 0, carried: 0, failed: 0 } },
+    { ...ROUTE_EMERGENCY_K3F, measured: { grade: 'unknown', samples: 0, carried: 0, failed: 0 } },
+];
+
 const WHY_NOT_EVALUATED: WhyThisRouteSummary = {
     active: ROUTE_FRESH_UNMEASURED,
     reasonText: 'Tunnel up on fresh-import-01.',
@@ -350,9 +464,12 @@ const sendEveryone = (item: string): DriveStep[] => [{ click: 'btn:everyone-send
 /** Publisher with no relay: the empty state's "Start" opens the wizard. */
 const START_WIZARD: DriveStep[] = [{ click: 'btn:new-relay' }];
 
+/** Past "Where should your relay live?" (Hetzner is already chosen). */
+const WIZARD_TO_KEY: DriveStep[] = [...START_WIZARD, { click: 'btn:wiz-next' }];
+
 /** Hosting key pasted, then on to "name and size". */
 const WIZARD_TO_2: DriveStep[] = [
-    ...START_WIZARD,
+    ...WIZARD_TO_KEY,
     { type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' },
     { click: 'key:wiz.nav.next' },
 ];
@@ -375,6 +492,9 @@ const PASTE: DriveStep[] = [
 export const SCENARIOS: Scenario[] = [
     // --- Connection ---
     {
+        // Automatic: the way that did not work here last time was tried
+        // first this time too (its rest had ended) and did not get
+        // through; the next one carried.
         id: 'connection-connected',
         title: 'Connection · connected',
         screen: 'connection',
@@ -383,21 +503,70 @@ export const SCENARIOS: Scenario[] = [
             ...CONN_BASE,
             state: 'connected',
             connectedSinceUnixMs: Date.now() - 8078 * 1000,
-            activeRoute: ROUTE_PARS_RESCUE_03,
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: HOME_ROUTES[0],
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 2,
+                total: 4,
+                tried: [
+                    { routeId: ROUTE_PARS_RESCUE_01.routeId, family: ROUTE_PARS_RESCUE_01.family, result: 'not_carrying', category: 'udp_no_reply', refined: 'udp_blocked_here' },
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: ROUTE_PARS_RESCUE_03.family, result: 'carried', category: '', setupMs: 640 },
+                ],
+                verdict: 'moved_on',
+                routeId: ROUTE_PARS_RESCUE_03.routeId,
+            },
         },
-        why: WHY_CONNECTED,
+        why: whyLive(HOME_ROUTES[0], 'harness-decision-010'),
         pointer: POINTER_OK,
         routeHealth: DEFAULT_ROUTE_HEALTH,
-        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        availableRoutes: HOME_ROUTES,
         throughput: DEFAULT_THROUGHPUT,
     },
     {
+        // The same, with the facts card's Details open: every way and
+        // how it did here, the kind being rested, this pass's tries.
+        id: 'connection-connected-details',
+        title: 'Connection · connected, Details open',
+        screen: 'connection',
+        state: 'connected',
+        connection: {
+            ...CONN_BASE,
+            state: 'connected',
+            routeRunning: true,
+            routeCheck: 'ok',
+            activeRoute: HOME_ROUTES[0],
+            auto: {
+                state: 'connected',
+                mode: true,
+                trying: '',
+                index: 2,
+                total: 4,
+                tried: [
+                    { routeId: ROUTE_PARS_RESCUE_01.routeId, family: ROUTE_PARS_RESCUE_01.family, result: 'not_carrying', category: 'udp_no_reply', refined: 'udp_blocked_here' },
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: ROUTE_PARS_RESCUE_03.family, result: 'carried', category: '', setupMs: 640 },
+                ],
+                verdict: 'moved_on',
+                routeId: ROUTE_PARS_RESCUE_03.routeId,
+            },
+        },
+        why: whyLive(HOME_ROUTES[0], 'harness-decision-012'),
+        routeHealth: DEFAULT_ROUTE_HEALTH,
+        availableRoutes: HOME_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
+        steps: [{ click: 'btn:home-details' }, { scroll: 'btn:home-details' }],
+    },
+    {
+        // Ready: four ways, one of which carried on this network before.
         id: 'connection-disconnected',
         title: 'Connection · disconnected',
         screen: 'connection',
         state: 'disconnected',
         connection: { ...CONN_BASE, state: 'disconnected' },
-        availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        availableRoutes: HOME_ROUTES,
     },
     {
         id: 'connection-connecting',
@@ -473,7 +642,7 @@ export const SCENARIOS: Scenario[] = [
                 index: 2,
                 total: 4,
                 tried: [
-                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'hysteria2', result: 'not_carrying', category: 'udp_no_reply' },
+                    { routeId: ROUTE_PARS_RESCUE_01.routeId, family: ROUTE_PARS_RESCUE_01.family, result: 'not_carrying', category: 'udp_no_reply' },
                 ],
                 verdict: '',
                 routeId: '',
@@ -498,15 +667,20 @@ export const SCENARIOS: Scenario[] = [
                 trying: '',
                 index: 2,
                 total: 4,
+                // The way that was up (Hysteria 2) stopped carrying; the
+                // engine put it back last ('was_connected') and moved on.
                 tried: [
-                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: 'hysteria2', result: 'not_carrying', category: 'udp_no_reply' },
-                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'vless-reality', result: 'carried', category: '' },
+                    { routeId: ROUTE_PARS_RESCUE_01.routeId, family: ROUTE_PARS_RESCUE_01.family, result: 'not_carrying', category: 'udp_no_reply', why: 'was_connected' },
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: ROUTE_PARS_RESCUE_03.family, result: 'carried', category: '', setupMs: 720, why: 'ranked' },
                 ],
                 verdict: 'moved_on',
                 routeId: ROUTE_PARS_RESCUE_03.routeId,
             },
         },
+        why: whyLive(ROUTE_PARS_RESCUE_03, 'harness-decision-013'),
+        routeHealth: DEFAULT_ROUTE_HEALTH,
         availableRoutes: DEFAULT_AVAILABLE_ROUTES,
+        throughput: DEFAULT_THROUGHPUT,
     },
     {
         id: 'connection-auto-failed',
@@ -522,10 +696,11 @@ export const SCENARIOS: Scenario[] = [
                 mode: false,
                 trying: '',
                 index: 0,
-                total: 2,
+                total: 3,
                 tried: [
-                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'vless-reality', result: 'start_failed', category: 'tcp_connect_timeout' },
-                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: 'websocket-tls', result: 'start_failed', category: 'tcp_connect_timeout' },
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: ROUTE_PARS_RESCUE_03.family, result: 'start_failed', category: 'tcp_connect_timeout', refined: 'relay_unreachable' },
+                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: ROUTE_FRIEND_MAY6.family, result: 'start_failed', category: 'tcp_connect_timeout', refined: 'relay_unreachable' },
+                    { routeId: ROUTE_PARS_RESCUE_01.routeId, family: ROUTE_PARS_RESCUE_01.family, result: 'not_carrying', category: 'udp_no_reply' },
                 ],
                 verdict: 'relay_unreachable',
                 routeId: '',
@@ -601,21 +776,27 @@ export const SCENARIOS: Scenario[] = [
                 trying: '',
                 index: 1,
                 total: 3,
-                tried: [{ routeId: WAY_GOOD.routeId, family: WAY_GOOD.family, result: 'carried', category: '', setupMs: 310 }],
+                tried: [{ routeId: WAY_GOOD.routeId, family: WAY_GOOD.family, result: 'carried', category: '', setupMs: 310, why: 'carried_here' }],
                 verdict: '',
                 routeId: WAY_GOOD.routeId,
             },
         },
+        why: whyLive(WAY_GOOD, 'harness-decision-011'),
         availableRoutes: MEASURED_ROUTES,
-        throughput: DEFAULT_THROUGHPUT,
+        throughput: { upBytesPerSec: 41 * 1024, downBytesPerSec: Math.round(2.4 * 1024 * 1024), windowMs: 1000 },
     },
     {
         id: 'connection-connected-slow',
         title: 'Connection · connected, slow here',
         screen: 'connection',
         state: 'connected',
+        // On metered mobile data, with the file's connection details
+        // running out in two days.
         connection: {
             ...CONN_BASE,
+            network: { fromHost: true, kind: 'cellular', validated: 1, metered: 1 },
+            networkLabel: 'Cellular',
+            pointerValidDays: 2,
             state: 'connected',
             routeRunning: true,
             routeCheck: 'degraded',
@@ -633,7 +814,7 @@ export const SCENARIOS: Scenario[] = [
             },
         },
         availableRoutes: MEASURED_ROUTES,
-        throughput: DEFAULT_THROUGHPUT,
+        throughput: { upBytesPerSec: 3 * 1024, downBytesPerSec: 46 * 1024, windowMs: 1000 },
     },
     {
         id: 'connection-moved-faster',
@@ -760,6 +941,58 @@ export const SCENARIOS: Scenario[] = [
         pointer: POINTER_EMBEDDED,
         why: WHY_NOT_EVALUATED,
     },
+
+    // --- Files: one file as a real relay makes it (r1..r4) ---
+    ...filesRelay({
+        id: 'files-relay',
+        title: 'Files · a relay file (r1..r4) and a subscription, connected',
+    }, []),
+    ...filesRelay({
+        id: 'files-relay-sheet',
+        title: 'Files · the relay file opened: kinds, state, setup time',
+    }, [
+        { click: 'text:Test' },
+    ]),
+    ...filesRelay({
+        id: 'files-relay-way',
+        title: 'Files · one way opened: what it is, what Daal saw here',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:way-row', nth: 0 },
+    ]),
+    ...filesRelay({
+        id: 'files-relay-way-resting',
+        title: 'Files · a way resting after failing here',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:way-row', nth: 2 },
+    ]),
+    ...filesRelay({
+        id: 'files-relay-idle',
+        title: 'Files · not connected, an experimental way opened',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:way-row', nth: 3 },
+    ], { connection: { ...CONN_BASE, state: 'disconnected' } }),
+    ...filesRelay({
+        id: 'files-relay-sub',
+        title: 'Files · the subscription file opened (named ways, unsupported kind)',
+    }, [
+        { click: 'text:Pars Relays' },
+    ]),
+    ...filesRelay({
+        id: 'files-relay-dev',
+        title: 'Files · the relay file opened, developer tools on',
+    }, [
+        { click: 'text:Test' },
+    ], { dev: true }),
+    ...filesRelay({
+        id: 'files-relay-no-network',
+        title: 'Files · no record for this network: nothing said about here',
+    }, [], {
+        connection: { ...CONN_BASE, state: 'disconnected' },
+        availableRoutes: RELAY_FILE_ROUTES_NO_NETWORK,
+    }),
 
     // --- Sources ---
     {
@@ -1062,10 +1295,11 @@ export const SCENARIOS: Scenario[] = [
                 mode: false,
                 trying: '',
                 index: 0,
-                total: 2,
+                total: 3,
                 tried: [
-                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: 'vless-reality', result: 'start_failed', category: 'tcp_connect_timeout' },
-                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: 'websocket-tls', result: 'start_failed', category: 'tcp_connect_timeout' },
+                    { routeId: ROUTE_PARS_RESCUE_03.routeId, family: ROUTE_PARS_RESCUE_03.family, result: 'start_failed', category: 'tcp_connect_timeout', refined: 'relay_unreachable' },
+                    { routeId: ROUTE_FRIEND_MAY6.routeId, family: ROUTE_FRIEND_MAY6.family, result: 'start_failed', category: 'tcp_connect_timeout', refined: 'relay_unreachable' },
+                    { routeId: ROUTE_PARS_RESCUE_01.routeId, family: ROUTE_PARS_RESCUE_01.family, result: 'not_carrying', category: 'udp_no_reply' },
                 ],
                 verdict: 'relay_unreachable',
                 routeId: '',
@@ -1443,15 +1677,20 @@ export const SCENARIOS: Scenario[] = [
     ...pub(
         {
             id: 'pub-wizard-1',
-            title: 'Wizard · 1 hosting account',
+            title: 'Wizard · 1 where the relay lives (hosting companies)',
         }, { relays: 'none', steps: START_WIZARD }),
+    ...pub(
+        {
+            id: 'pub-wizard-1-key',
+            title: 'Wizard · 1 hosting account key',
+        }, { relays: 'none', steps: WIZARD_TO_KEY }),
     ...pub(
         {
             id: 'pub-wizard-1-filled',
             title: 'Wizard · 1 key pasted',
         }, {
         relays: 'none',
-        steps: [...START_WIZARD, { type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' }],
+        steps: [...WIZARD_TO_KEY, { type: 'css:input', text: 'hcloud_Zx9VtQe1pL4mR7sK2wY8bN3cF6hJ0dA5' }],
     }),
     ...pub(
         {
@@ -1748,6 +1987,34 @@ function pub({ id, title }: { id: string; title: string }, fake: Partial<FakeShe
             state: 'fake-shell',
             connection: { ...CONN_BASE, state: 'disconnected' },
             fake: { relays: 'two', health: 'good', open: 'publisher', ...fake },
+        },
+    ];
+}
+
+/** The Files tab with the relay file (RELAY_FILE_ROUTES), connected
+ *  automatically on r1 unless `over` says otherwise; `steps` open it. */
+function filesRelay(
+    { id, title }: { id: string; title: string },
+    steps: DriveStep[],
+    over: Partial<Scenario> = {},
+): Scenario[] {
+    return [
+        {
+            id,
+            title,
+            screen: 'network',
+            initialRoute: '/routes',
+            connection: {
+                ...CONN_BASE,
+                state: 'connected',
+                routeRunning: true,
+                routeCheck: 'ok',
+                activeRoute: RELAY_R1,
+                auto: RELAY_AUTO_ON_R1,
+            },
+            availableRoutes: RELAY_FILE_ROUTES,
+            steps,
+            ...over,
         },
     ];
 }

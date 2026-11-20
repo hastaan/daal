@@ -113,7 +113,7 @@ interface Props {
 }
 
 /** What the system Back does in the wizard. */
-export type WizardBack = 'refuse' | 'wait' | 'done' | 'step' | 'root' | 'none';
+export type WizardBack = 'refuse' | 'wait' | 'done' | 'step' | 'host' | 'root' | 'none';
 
 export function wizardBack(o: {
     building: boolean;
@@ -125,12 +125,16 @@ export function wizardBack(o: {
     /** The relay row is already gone and the screen leaves only through
      *  Done: Back does what Done does, never a step onto a dead relay. */
     leavesOnlyByDone?: boolean;
+    /** Screen 1 shows the key field after the hosting-company list:
+     *  Back returns to the list before it leaves the wizard. */
+    keyAfterHost?: boolean;
 }): WizardBack {
     // A setup in progress keeps its guard: Back never interrupts it.
     if (o.building) return 'refuse';
     if (o.busyElsewhere) return 'wait';
     if (o.leavesOnlyByDone) return 'done';
     if (o.stepIdx > 0) return 'step';
+    if (o.keyAfterHost) return 'host';
     if (o.hasRootBack) return 'root';
     return 'none';
 }
@@ -208,6 +212,7 @@ const CLOUD_PROVIDERS = [
         tokenHintKey: 'wiz.provider.hetzner.tokenHint',
         signupUrl: 'https://console.hetzner.cloud/register',
         recommended: true,
+        available: true,
     },
     {
         id: 'vultr',
@@ -217,6 +222,7 @@ const CLOUD_PROVIDERS = [
         tokenHintKey: 'wiz.provider.vultr.tokenHint',
         signupUrl: 'https://www.vultr.com/',
         recommended: false,
+        available: false,
     },
     {
         id: 'digitalocean',
@@ -226,27 +232,43 @@ const CLOUD_PROVIDERS = [
         tokenHintKey: 'wiz.provider.do.tokenHint',
         signupUrl: 'https://cloud.digitalocean.com/registrations/new',
         recommended: false,
+        available: false,
     },
     {
         id: 'linode',
-        labelKey: 'wiz.provider.linode.label',
+        labelKey: 'wiz.host.linode',
         regionKey: 'wiz.provider.linode.region',
         defaultServer: 'g6-nanode-1',
         tokenHintKey: 'wiz.provider.linode.tokenHint',
         signupUrl: 'https://login.linode.com/signup',
         recommended: false,
+        available: false,
     },
     {
         id: 'custom',
-        labelKey: 'wiz.provider.custom.label',
+        labelKey: 'wiz.host.own',
         regionKey: 'wiz.provider.custom.region',
         defaultServer: 'custom',
         tokenHintKey: 'wiz.provider.custom.tokenHint',
         signupUrl: '',
         recommended: false,
+        available: false,
     },
 ] as const;
 type ProviderId = (typeof CLOUD_PROVIDERS)[number]['id'];
+
+/** The hosting companies Daal can rent from today. The others are shown
+ *  on the first screen as "In development" and cannot be chosen: there
+ *  is no engine path behind them, so the card says nothing else about
+ *  them (no price, no region). */
+const AVAILABLE_PROVIDERS = CLOUD_PROVIDERS.filter((p) => p.available);
+
+/** What the first screen says under a company that works. Only facts the
+ *  wizard already holds: the region it rents in (REGION_MAP) and the
+ *  price range of the cost line. */
+const HOST_LINE: Partial<Record<ProviderId, string>> = {
+    hetzner: 'wiz.host.hetzner.line',
+};
 
 const REGION_MAP: Record<string, string> = {
     hetzner: 'fsn1',
@@ -381,6 +403,13 @@ export default function PublisherWizard({
 
     // Screen 1 — provider & token.
     const [provider, setProvider] = useState<ProviderId>('hetzner');
+    // Screen 1 opens on "Where should your relay live?" (the hosting
+    // companies), then shows the key field for the one chosen. A resume
+    // already has its company (the relay row holds it), so it starts on
+    // the key field and the list is never offered again.
+    const canPickHost = resumeOperatorId == null;
+    const [hostChosen, setHostChosen] = useState(!canPickHost);
+    const onHostList = stepIdx === 0 && !hostChosen;
     const [token, setToken] = useState('');
     // On a resume the token is already sealed under custody and never
     // comes back over IPC. Without this flag the Next gate would demand
@@ -744,6 +773,7 @@ export default function PublisherWizard({
     function resetAfterCancel() {
         setOperatorId(null);
         setStepIdx(0);
+        setHostChosen(!canPickHost);
         setCompleted(NO_MARKS);
         setStage('idle');
         setFailedAt(null);
@@ -1122,8 +1152,9 @@ export default function PublisherWizard({
         const h = setTimeout(() => setBackNotice(null), 4000);
         return () => clearTimeout(h);
     }, [backNotice]);
+    const keyAfterHost = stepIdx === 0 && hostChosen && canPickHost;
     useBack(
-        stepIdx > 0 || !!rootBack || recoveryLeaving,
+        stepIdx > 0 || keyAfterHost || !!rootBack || recoveryLeaving,
         () => {
             switch (
                 wizardBack({
@@ -1132,6 +1163,7 @@ export default function PublisherWizard({
                     hasRootBack: !!rootBack,
                     busyElsewhere: recoveryBusy || cancelBusy || busy,
                     leavesOnlyByDone: recoveryLeaving,
+                    keyAfterHost,
                 })
             ) {
                 case 'refuse':
@@ -1145,6 +1177,9 @@ export default function PublisherWizard({
                     return;
                 case 'step':
                     setStepIdx(stepIdx - 1);
+                    return;
+                case 'host':
+                    setHostChosen(false);
                     return;
                 case 'root':
                     rootBack?.();
@@ -1210,11 +1245,12 @@ export default function PublisherWizard({
                 locked={building}
                 onJump={setStepIdx}
                 t={t}
+                titleKey={onHostList ? 'wiz.host.title' : undefined}
             />
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <Card>
-                    {!(step.id === 'build' && stage === 'done') && (
+                    {!(step.id === 'build' && stage === 'done') && !onHostList && (
                         <p
                             style={{
                                 color: step.id === 'cloud' ? 'var(--fg)' : 'var(--muted)',
@@ -1246,8 +1282,29 @@ export default function PublisherWizard({
                         </div>
                     )}
 
-                    {/* ===== SCREEN 1: CLOUD ACCOUNT ===== */}
-                    {step.id === 'cloud' && (
+                    {/* ===== SCREEN 1a: WHERE THE RELAY LIVES ===== */}
+                    {onHostList && (
+                        <HostList
+                            t={t}
+                            provider={provider}
+                            onPick={(id) => {
+                                if (id === provider) return;
+                                const def = CLOUD_PROVIDERS.find((p) => p.id === id)!;
+                                setProvider(id);
+                                setServerType(def.defaultServer);
+                                setServerOptions([]);
+                                setUseExisting(null);
+                            }}
+                            onCancel={onCancel}
+                            onContinue={() => {
+                                setError(null);
+                                setHostChosen(true);
+                            }}
+                        />
+                    )}
+
+                    {/* ===== SCREEN 1b: CLOUD ACCOUNT ===== */}
+                    {step.id === 'cloud' && !onHostList && (
                         <div>
                             {/* No provider chooser (H-46): Hetzner is the
                                 only one that works. The provider code path
@@ -1354,8 +1411,8 @@ export default function PublisherWizard({
 
                             <NavRow
                                 t={t}
-                                backLabel={t('wiz.nav.cancel')}
-                                onBack={onCancel}
+                                backLabel={t(canPickHost ? 'wiz.nav.back' : 'wiz.nav.cancel')}
+                                onBack={canPickHost ? () => setHostChosen(false) : onCancel}
                                 nextDisabled={
                                     busy ||
                                     (!token.trim() &&
@@ -2130,6 +2187,7 @@ function StepStrip({
     onJump,
     t,
     ready,
+    titleKey,
 }: {
     stepIdx: number;
     completed: Record<StepId, boolean>;
@@ -2140,6 +2198,9 @@ function StepStrip({
     t: (k: string) => string;
     /** The relay is built: the step name says "Ready", not "Building". */
     ready?: boolean;
+    /** The current screen's own title, when a step has two screens
+     *  (step 1: the hosting company, then its key). */
+    titleKey?: string;
 }) {
     // A compact stepper: three dots, then the current step's name. The
     // dots are buttons (a done step can be revisited); each has a 44 px
@@ -2202,7 +2263,7 @@ function StepStrip({
                     lineHeight: 1.3,
                 }}
             >
-                {ready ? t('wiz.step.build.ready') : t(STEPS[stepIdx]?.titleKey ?? 'wiz.step.cloud.title')}
+                {ready ? t('wiz.step.build.ready') : t(titleKey ?? STEPS[stepIdx]?.titleKey ?? 'wiz.step.cloud.title')}
             </h2>
         </div>
     );
@@ -2292,6 +2353,199 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
             }}
         >
             {children}
+        </div>
+    );
+}
+
+/**
+ * Screen 1a — "Where should your relay live?": the hosting companies.
+ *
+ * Only the ones Daal can rent from today are choosable. The rest are
+ * dimmed, carry "In development" and do nothing when pressed: they are
+ * there so a publisher sees what is coming, not a promise of a price or
+ * a region. With one company available it is already chosen, so the
+ * screen is one tap ("Continue").
+ */
+export function HostList({
+    t,
+    provider,
+    onPick,
+    onCancel,
+    onContinue,
+}: {
+    t: (k: string) => string;
+    provider: ProviderId;
+    onPick?: (id: ProviderId) => void;
+    onCancel: () => void;
+    onContinue: () => void;
+}) {
+    const chosenOk = AVAILABLE_PROVIDERS.some((p) => p.id === provider);
+    return (
+        <div>
+            <p
+                style={{
+                    color: 'var(--muted)',
+                    fontSize: 14,
+                    lineHeight: 1.5,
+                    margin: '0 0 14px',
+                    maxInlineSize: '64ch',
+                }}
+            >
+                {t('wiz.host.intro')}
+            </p>
+            <div
+                role="radiogroup"
+                aria-label={t('wiz.host.title')}
+                data-testid="wizard-hosts"
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}
+            >
+                {AVAILABLE_PROVIDERS.map((p) => {
+                    const sel = provider === p.id;
+                    const lineKey = HOST_LINE[p.id];
+                    return (
+                        <button
+                            key={p.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={sel}
+                            data-button={`host-${p.id}`}
+                            data-host="available"
+                            onClick={() => onPick?.(p.id)}
+                            style={{
+                                inlineSize: '100%',
+                                minBlockSize: 64,
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 12,
+                                padding: '10px 14px',
+                                background: 'var(--surface-2)',
+                                border: `1.5px solid ${sel ? 'var(--gold)' : 'var(--line-soft)'}`,
+                                borderRadius: 'var(--r-tile)',
+                                cursor: 'pointer',
+                                color: 'var(--fg)',
+                                fontFamily: 'var(--font-body)',
+                                textAlign: 'start',
+                            }}
+                        >
+                            <span
+                                aria-hidden
+                                style={{
+                                    inlineSize: 36,
+                                    blockSize: 36,
+                                    flexShrink: 0,
+                                    borderRadius: '50%',
+                                    display: 'grid',
+                                    placeItems: 'center',
+                                    background: 'var(--surface-3)',
+                                    color: sel ? 'var(--gold)' : 'var(--muted)',
+                                }}
+                            >
+                                <Icon name="server" size={18} />
+                            </span>
+                            <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
+                                    <span dir="auto" style={{ fontSize: 15, fontWeight: 600, unicodeBidi: 'isolate' }}>
+                                        {t(p.labelKey)}
+                                    </span>
+                                    <Badge tone="good" size="sm" icon={false}>
+                                        {t('wiz.host.available')}
+                                    </Badge>
+                                </span>
+                                {lineKey && (
+                                    <span style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.4 }}>
+                                        {t(lineKey)}
+                                    </span>
+                                )}
+                            </span>
+                            <span
+                                aria-hidden
+                                style={{
+                                    inlineSize: 22,
+                                    blockSize: 22,
+                                    flexShrink: 0,
+                                    borderRadius: '50%',
+                                    boxSizing: 'border-box',
+                                    border: `2px solid ${sel ? 'var(--gold)' : 'var(--line)'}`,
+                                    display: 'grid',
+                                    placeItems: 'center',
+                                }}
+                            >
+                                {sel && (
+                                    <span
+                                        style={{
+                                            inlineSize: 10,
+                                            blockSize: 10,
+                                            borderRadius: '50%',
+                                            background: 'var(--gold)',
+                                        }}
+                                    />
+                                )}
+                            </span>
+                        </button>
+                    );
+                })}
+                {/* The ones still being built: smaller, dimmed, inert. */}
+                <div
+                    style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                        gap: 8,
+                    }}
+                >
+                    {CLOUD_PROVIDERS.filter((p) => !p.available).map((p) => (
+                        <button
+                            key={p.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={false}
+                            aria-disabled
+                            disabled
+                            data-button={`host-${p.id}`}
+                            data-host="in-development"
+                            style={{
+                                minBlockSize: 64,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'flex-start',
+                                justifyContent: 'center',
+                                gap: 4,
+                                padding: '8px 12px',
+                                background: 'transparent',
+                                border: '1px dashed var(--line)',
+                                borderRadius: 'var(--r-tile)',
+                                cursor: 'default',
+                                color: 'var(--muted)',
+                                fontFamily: 'var(--font-body)',
+                                textAlign: 'start',
+                                minWidth: 0,
+                            }}
+                        >
+                            <span
+                                dir="auto"
+                                style={{
+                                    fontSize: 14,
+                                    fontWeight: 600,
+                                    unicodeBidi: 'isolate',
+                                    maxInlineSize: '100%',
+                                }}
+                            >
+                                {t(p.labelKey)}
+                            </span>
+                            <Badge tone="neutral" size="sm" icon="clock">
+                                {t('wiz.host.soon')}
+                            </Badge>
+                        </button>
+                    ))}
+                </div>
+            </div>
+            <NavRow
+                t={t}
+                backLabel={t('wiz.nav.cancel')}
+                onBack={onCancel}
+                nextDisabled={!chosenOk}
+                nextLabel={t('common.continue')}
+                onNext={onContinue}
+            />
         </div>
     );
 }

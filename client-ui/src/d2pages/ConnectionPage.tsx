@@ -1,14 +1,19 @@
 // ConnectionPage.tsx — Home (spec C2).
 //
 // One column, top to bottom: the ⋯ menu; at most one notice; the bird,
-// which IS the button; one headline; at most one line; at most two
-// badges (Slow, Manual, Lifeline); the one gold button and the one link
-// a state has. Everything for the person helping — why this way, how
-// each way did, the pointer list, the numbers — sits in one fold at the
-// bottom, in developer mode only.
+// which IS the button; one headline; at most one line ("Using Pars
+// Relays · VLESS Reality", "Trying VLESS Reality · 2 of 4" with step
+// dots, "4 ways ready · …" with the kinds as chips); at most two badges
+// (Slow, Manual, Lifeline); the one gold button and the one link a
+// state has. Connected, a card of what Daal knows sits under it: why
+// this way, the network, live speed, quality — each row only when the
+// engine sent its fact (lib/homeFacts.ts) — with a Details fold listing
+// every way once, with its state here and its score. Developer mode
+// adds the raw engine detail (ids, decision id, scores) in its own fold.
 //
-// Desktop: the same column centred; a side panel only while connected
-// ("This connection") or failed ("What Daal tried").
+// Desktop: two columns in every state, so the bird never moves: the
+// card is the right column while connected ("This connection"), "What
+// Daal tried" after a failure, and the ways on this computer otherwise.
 //
 // What is shown and what a tap does is decided in lib/mainScreen.ts;
 // this file draws it and runs the actions. Data contract:
@@ -17,7 +22,6 @@
 // exportDiagnostics).
 
 import { useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type {
     ConnectionSummary,
@@ -38,7 +42,7 @@ import MeasuredDetails from '../components/connection/MeasuredDetails';
 import { anyMeasured } from '../lib/measured';
 import AddSheet from '../components/AddSheet';
 import MyAddressSheet from '../components/MyAddressSheet';
-import { Badge, Button, Disclosure, Icon, OverflowMenu, Sheet, StateIcon, useToast } from '../design/primitives';
+import { Badge, Button, Disclosure, Icon, OverflowMenu, Sheet, useToast } from '../design/primitives';
 import type { MenuItem } from '../design/primitives';
 import {
     autoFailure,
@@ -50,7 +54,9 @@ import {
     startConnect,
     type PassFailure,
 } from '../lib/autoConnect';
-import { failureDetailsShown, homeBadges, mainScreenView, retryTarget, runMainTap, usingName } from '../lib/mainScreen';
+import { failureDetailsShown, homeBadges, mainScreenView, retryTarget, runMainTap } from '../lib/mainScreen';
+import { connectedFacts, rateText, triedRows, wayRows } from '../lib/homeFacts';
+import { HomeDetails, HomeFactsCard, ReadyChips, TriedList, TryingSteps, WayList } from '../components/connection/HomeFacts';
 import WhyThisRoute from '../components/connection/WhyThisRoute';
 import RouteHealthBars from '../components/connection/RouteHealthBars';
 import PointerBanner from '../components/connection/PointerBanner';
@@ -72,22 +78,6 @@ interface Props {
 
 /** How often the route list is re-read while it could not be read. */
 const ROUTES_RETRY_MS = 10_000;
-
-// `bps` is nullable on purpose: null means the build has no byte
-// accounting, which is NOT the same as a measured zero. The caller
-// shows no speed line in that case rather than "0 B/s"; see
-// ThroughputSnapshot in contract/D2Contract.ts.
-function formatBps(bps: number): string {
-    if (!Number.isFinite(bps) || bps <= 0) return '0 B/s';
-    const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
-    let v = bps;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-        v /= 1024;
-        i++;
-    }
-    return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
 
 /** "01:02:03" in the page's digits. (The desktop panel no longer
  *  repeats the elapsed time; the title bar shows it.) */
@@ -503,8 +493,36 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     const somethingRunning = state === 'connected' || state === 'connecting';
     const isPhone = density === 'phone';
     const isDesktop = density === 'desktop';
-    const badges = homeBadges(view, mode);
-    const name = usingName(conn, t);
+    // What Daal knows about the connection, as icon rows: why this way,
+    // the network, live speed, quality — each only when the engine sent
+    // it (lib/homeFacts.ts).
+    const showFacts = state === 'connected' && !view.holding && !optimistic;
+    // Slow while connected: the amber ring and the card's Quality badge
+    // say it already; a third "Slow" pill under the line was one too many.
+    const badges = homeBadges(view, mode).filter((b) => b !== 'slow' || !showFacts);
+    const facts = showFacts ? connectedFacts({ t, locale, conn, throughput, pinnedId }) : {};
+    // Every way on the device, once each: its state here (in use,
+    // resting, failed just now, the engine's grade) and its score. The
+    // tries of THIS pass count only while the engine's automatic pass is
+    // the one that is up (after a connect by hand an older pass may
+    // still be in the block).
+    const passUp = conn?.auto?.mode === true && conn.auto.state === 'connected';
+    const scores = new Map<string, number>();
+    for (const h of health) if (typeof h.pct === 'number') scores.set(h.routeId, h.pct);
+    const allWays = wayRows({
+        t,
+        locale,
+        routes,
+        activeId: state === 'connected' ? conn?.activeRoute?.routeId : undefined,
+        why,
+        tried: showFacts && passUp ? conn?.auto?.tried : undefined,
+        scores,
+        nowMs: Date.now(),
+    });
+    const waysTitle = t(isPhone ? 'home.details.ways' : 'home.details.ways_device');
+    // No fold that opens onto nothing.
+    const details = showFacts && allWays.length > 0 ? <HomeDetails t={t} locale={locale} ways={allWays} title={waysTitle} /> : null;
+    const failureRows = failure ? triedRows(t, failure.tried, routes) : [];
 
     // One notice at most: Daal did not start > the saved files were
     // reset > this build cannot carry traffic > the engine refused.
@@ -576,14 +594,19 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     moreItems.push({ id: 'my-address', label: t('conn.more.address'), icon: 'person', onSelect: () => setShowAddress(true) });
     moreItems.push({ id: 'status', label: t('conn.more.status'), icon: 'info', onSelect: () => onNavigate('status') });
 
-    // The desktop side panel: only while connected, or after a failure.
-    const panel: 'connected' | 'failed' | null = !isDesktop
+    // The desktop's right column, in every state so the bird never moves
+    // sideways: this connection while connected, what was tried after a
+    // failure, the ways on this computer otherwise (an empty column when
+    // there are none).
+    const panel: 'connected' | 'failed' | 'ways' | 'empty' | null = !isDesktop
         ? null
-        : state === 'connected' && !view.holding
+        : showFacts
         ? 'connected'
         : failure && !view.holding && failureDetailsShown(failure.tried, dev)
         ? 'failed'
-        : null;
+        : allWays.length > 0
+        ? 'ways'
+        : 'empty';
 
     const helperFold = dev ? (
         <div data-dev style={{ inlineSize: '100%', maxWidth: 'var(--content-max)', marginBlockStart: 24 }}>
@@ -599,8 +622,8 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                                 className="d2-throughput"
                                 style={{ display: 'flex', gap: 18, fontFamily: 'var(--font-mono)', fontSize: 12 }}
                             >
-                                <span aria-label={t('conn.throughput.up')}>↑ {formatBps(throughput.upBytesPerSec)}</span>
-                                <span aria-label={t('conn.throughput.down')}>↓ {formatBps(throughput.downBytesPerSec)}</span>
+                                <bdi dir="ltr" aria-label={t('conn.throughput.down')}>↓ {rateText(throughput.downBytesPerSec, locale)}</bdi>
+                                <bdi dir="ltr" aria-label={t('conn.throughput.up')}>↑ {rateText(throughput.upBytesPerSec, locale)}</bdi>
                             </div>
                         )}
                     {routes && anyMeasured(routes) && (
@@ -674,6 +697,15 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     <span dir={locale === 'fa' ? 'rtl' : 'ltr'}>{view.line}</span>
                 </p>
             )}
+            {view.trying && !view.holding && <TryingSteps fact={view.trying} />}
+            {view.readyKinds.tags.length > 0 && (
+                <ReadyChips
+                    t={t}
+                    kinds={view.readyKinds.tags}
+                    more={view.readyKinds.more}
+                    moreText={`+${locale === 'fa' ? toFaDigits(String(view.readyKinds.more)) : view.readyKinds.more}`}
+                />
+            )}
             {badges.length > 0 && (
                 <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap', marginBlockStart: 12 }}>
                     {badges.map((b) =>
@@ -688,7 +720,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                                 icon="lock"
                                 onClick={() => setChooserOpen(true)}
                                 dataButton="badge-manual"
-                                title={pinnedRow ? routeLabel(pinnedRow) : undefined}
+                                title={pinnedRow ? routeLabel(t, pinnedRow, routes) : undefined}
                             >
                                 {t('conn.badge.manual')}
                             </Badge>
@@ -708,84 +740,121 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
             )}
             {/* Nothing tried (the phone itself has no internet): no
                 empty fold (spec F.2). */}
-            {failure && !panel && failureDetailsShown(failure.tried, dev) && (
+            {failure && panel !== 'failed' && failureDetailsShown(failure.tried, dev) && (
                 <div style={{ marginBlockStart: 8 }}>
-                    <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev={dev} />
+                    <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev={dev} rows={failureRows} />
+                </div>
+            )}
+            {/* Phone, ready: every way here and how it did, folded away
+                under the chips (the computer shows it as its right
+                column). */}
+            {!isDesktop && !showFacts && !failure && view.readyKinds.tags.length > 0 && allWays.length > 0 && (
+                <div
+                    data-testid="home-ready-ways"
+                    style={{
+                        inlineSize: '100%',
+                        maxWidth: 420,
+                        marginBlockStart: 24,
+                        background: 'var(--surface)',
+                        borderRadius: 'var(--r-card)',
+                        padding: '0 16px',
+                        boxSizing: 'border-box',
+                    }}
+                >
+                    <Disclosure summary={waysTitle} dataButton="home-ready-ways">
+                        <div style={{ paddingBlockEnd: 12, textAlign: 'start' }}>
+                            <WayList t={t} locale={locale} ways={allWays} />
+                        </div>
+                    </Disclosure>
+                </div>
+            )}
+            {/* Phone: the facts card under the bird, Details at its foot. */}
+            {showFacts && !isDesktop && (
+                <div style={{ inlineSize: '100%', maxWidth: 420, marginBlockStart: 24 }}>
+                    <HomeFactsCard t={t} facts={facts}>
+                        {details}
+                    </HomeFactsCard>
                 </div>
             )}
         </section>
     );
 
-    const triedName = (routeId: string): string => {
-        const r = routes?.find((x) => x.routeId === routeId);
-        return r ? routeLabel(routeForDisplay(r, t) ?? r) : t('conn.route_unnamed');
+    // The column's card: top-aligned with the ring, and never taller than
+    // the window — Details scrolls inside it rather than scrolling the
+    // bird out of view.
+    const panelCard = {
+        maxHeight: 'calc(100vh - 140px)',
+        overflowY: 'auto' as const,
     };
-
-    const sidePanel = panel ? (
-        <aside
-            className="d2-home-panel"
-            data-testid="home-panel"
-            style={{
-                background: 'var(--surface)',
-                borderRadius: 'var(--r-card)',
-                padding: '16px 18px',
-                inlineSize: '100%',
-                maxWidth: 320,
-                alignSelf: 'center',
-                textAlign: 'start',
-            }}
-        >
-            <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--fs-lg)', fontWeight: 600, margin: '0 0 6px' }}>
-                {t(panel === 'connected' ? 'conn.panel.title' : 'conn.panel.tried')}
-            </h2>
-            {panel === 'connected' ? (
-                <>
-                    <dl style={{ margin: 0 }}>
-                        {name && <PanelRow label={t('conn.panel.using')} value={<bdi>{name}</bdi>} />}
-                        {/* The elapsed time is in the title bar, once. */}
-                        {/* Quality only when it was measured: "Good" after a
-                            check that passed, "Slow" after one that found it
-                            slow. Before that (checking, an older engine, the
-                            first moments) there is no row, not a default. */}
-                        {(conn?.routeCheck === 'ok' || conn?.routeCheck === 'degraded') && (
-                            <PanelRow
-                                label={t('conn.panel.quality')}
-                                value={
-                                    <Badge tone={conn.routeCheck === 'degraded' ? 'warn' : 'good'} size="sm">
-                                        {t(conn.routeCheck === 'degraded' ? 'conn.badge.slow' : 'conn.quality.good')}
-                                    </Badge>
-                                }
-                            />
-                        )}
-                    </dl>
+    const sidePanel =
+        panel === 'connected' ? (
+            <aside className="d2-home-panel" data-testid="home-panel" style={{ inlineSize: '100%', maxWidth: 340, alignSelf: 'start' }}>
+                <HomeFactsCard t={t} facts={facts} showWay title={t('conn.panel.title')} style={panelCard}>
                     {routes && routes.length >= 2 && (
-                        <Button variant="link" onClick={() => setChooserOpen(true)} dataButton="panel-choose">
-                            {t('conn.more.choose')}
-                        </Button>
+                        <div style={{ borderBlockStart: '1px solid var(--line-soft)' }}>
+                            <Button variant="link" onClick={() => setChooserOpen(true)} dataButton="panel-choose">
+                                {t('conn.more.choose')}
+                            </Button>
+                        </div>
                     )}
-                </>
-            ) : (
-                <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 10 }}>
-                    {(failure?.tried ?? []).slice(0, 5).map((x, i) => (
-                        <li key={`${x.routeId}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14 }}>
-                            <StateIcon state="bad" size={18} />
-                            <bdi style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {triedName(x.routeId)}
-                            </bdi>
-                        </li>
-                    ))}
-                    {(failure?.tried ?? []).length === 0 && (
-                        <li style={{ fontSize: 14, color: 'var(--muted)' }}>{t('auto.details.none')}</li>
-                    )}
-                </ul>
-            )}
-            {panel === 'failed' && dev && failure && (
-                <div style={{ marginBlockStart: 8 }}>
-                    <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev />
-                </div>
-            )}
-        </aside>
-    ) : null;
+                    {details}
+                </HomeFactsCard>
+            </aside>
+        ) : panel === 'failed' ? (
+            <aside
+                className="d2-home-panel"
+                data-testid="home-panel"
+                style={{
+                    background: 'var(--surface)',
+                    borderRadius: 'var(--r-card)',
+                    padding: '16px 18px',
+                    inlineSize: '100%',
+                    maxWidth: 340,
+                    textAlign: 'start',
+                    alignSelf: 'start',
+                    boxSizing: 'border-box',
+                    ...panelCard,
+                }}
+            >
+                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--fs-lg)', fontWeight: 600, margin: '0 0 12px' }}>
+                    {t('conn.panel.tried')}
+                </h2>
+                {failureRows.length > 0 ? (
+                    <TriedList rows={failureRows.slice(0, 6)} />
+                ) : (
+                    <div style={{ fontSize: 14, color: 'var(--muted)' }}>{t('auto.details.none')}</div>
+                )}
+                {dev && failure && (
+                    <div style={{ marginBlockStart: 8 }}>
+                        <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev />
+                    </div>
+                )}
+            </aside>
+        ) : panel === 'ways' ? (
+            <aside
+                className="d2-home-panel"
+                data-testid="home-panel"
+                data-panel="ways"
+                style={{
+                    background: 'var(--surface)',
+                    borderRadius: 'var(--r-card)',
+                    padding: '16px 18px',
+                    inlineSize: '100%',
+                    maxWidth: 340,
+                    alignSelf: 'start',
+                    textAlign: 'start',
+                    boxSizing: 'border-box',
+                    ...panelCard,
+                }}
+            >
+                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--fs-lg)', fontWeight: 600, margin: '0 0 8px' }}>
+                    {waysTitle}
+                </h2>
+                <WayList t={t} locale={locale} ways={allWays} />
+            </aside>
+        ) : panel === 'empty' ? (
+            <aside className="d2-home-panel" aria-hidden style={{ inlineSize: '100%', maxWidth: 340 }} />
+        ) : null;
 
     return (
         <div
@@ -814,7 +883,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'flex-start',
-                    paddingBlockStart: isPhone ? 'max(16px, calc(22vh - 52px))' : 'max(24px, calc(20vh - 64px))',
+                    paddingBlockStart: isPhone ? 'max(12px, calc(16vh - 56px))' : 'max(24px, calc(20vh - 64px))',
                     gap: 24,
                 }}
             >
@@ -881,36 +950,6 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 />
             )}
             {toast.node}
-        </div>
-    );
-}
-
-function PanelRow({ label, value }: { label: string; value: ReactNode }) {
-    return (
-        <div
-            style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 12,
-                minHeight: 44,
-                borderBlockEnd: '1px solid var(--line-soft)',
-                fontSize: 14,
-            }}
-        >
-            <dt style={{ color: 'var(--muted)' }}>{label}</dt>
-            <dd
-                style={{
-                    margin: 0,
-                    color: 'var(--fg)',
-                    minWidth: 0,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                }}
-            >
-                {value}
-            </dd>
         </div>
     );
 }

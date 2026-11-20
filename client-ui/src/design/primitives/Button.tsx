@@ -68,9 +68,9 @@ export function Button({
     } as const;
     const variants: Record<Variant, React.CSSProperties> = {
         primary: {
-            background: 'var(--gold)',
+            background: 'var(--gold-fill)',
             border: 0,
-            color: '#1f1401',
+            color: 'var(--on-gold)',
         },
         secondary: {
             background: 'var(--surface-2)',

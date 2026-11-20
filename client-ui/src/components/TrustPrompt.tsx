@@ -125,7 +125,10 @@ export default function TrustPrompt({ t, preview, onResolve, locale }: Props) {
 }
 
 /** A set of check words in even rows (4 across, 2 on a phone), so no
- *  word is ever left alone on a line of its own. */
+ *  word is ever left alone on a line of its own. The language sits in a
+ *  small header row above its words (the globe; its name is the
+ *  group's label for screen readers), and both sets share the same
+ *  column edges and the same cells — only the text size differs. */
 function WordSet({
     words,
     rtl,
@@ -140,30 +143,26 @@ function WordSet({
     cols: number;
 }) {
     return (
-        <div
-            role="group"
-            aria-label={label}
-            dir={rtl ? 'rtl' : 'ltr'}
-            style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}
-        >
-            <span aria-hidden style={{ color: 'var(--muted)', display: 'inline-flex', marginInlineEnd: 2, paddingBlockStart: large ? 8 : 4 }}>
-                <Icon name="globe" size={large ? 18 : 14} />
+        <div role="group" aria-label={label} style={{ display: 'grid', gap: 6 }}>
+            <span aria-hidden style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 12 }}>
+                <Icon name="globe" size={14} />
             </span>
-            <span style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(max-content, 1fr))`, gap: 6 }}>
+            <span dir={rtl ? 'rtl' : 'ltr'} style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 6 }}>
             {words.map((w, i) => (
                 <span
                     key={i}
                     style={{
                         textAlign: 'center',
-                        // A check word is never broken inside: the column
-                        // grows to the word instead.
+                        // A check word is never broken inside.
                         whiteSpace: 'nowrap',
+                        overflow: 'hidden',
                         background: 'var(--surface-2)',
                         border: '1px solid var(--line-soft)',
                         borderRadius: 'var(--radius-sm)',
-                        padding: large ? '6px 4px' : '3px 4px',
-                        fontFamily: rtl ? 'var(--font-fa)' : 'var(--font-mono)',
-                        fontSize: large ? 18 : 13,
+                        padding: large ? '7px 4px' : '5px 4px',
+                        fontFamily: rtl ? 'var(--font-fa)' : 'var(--font-body)',
+                        fontSize: large ? 18 : 14,
+                        lineHeight: 1.4,
                         color: large ? 'var(--fg)' : 'var(--muted)',
                     }}
                 >

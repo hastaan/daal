@@ -137,7 +137,7 @@ button {
 /* Hover tints for rows and menu items (touch has no hover; nothing
  * depends on it). */
 .daal-hover:hover {
-    background: rgba(246, 241, 233, 0.04);
+    background: var(--hover);
 }
 
 /* The breathing dot of a pulsing Badge. */

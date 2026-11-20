@@ -167,7 +167,7 @@ describe('Back, rendered', () => {
         await m.unmount();
     });
 
-    it('the wizard: Back at step 2 goes to step 1; at step 1 from the list it returns to the list', async () => {
+    it('the wizard: Back at step 2 goes to the key, then to the hosting companies; from there it returns to the list', async () => {
         const { default: PublisherWizard } = await import('../publisher/PublisherWizard');
         let rootBacks = 0;
         let cancels = 0;
@@ -180,12 +180,19 @@ describe('Back, rendered', () => {
             />,
         );
         const stepTitle = () => all(m.container, (n) => n.nodeName === 'H2')[0]?.textContent ?? '';
+        // It opens on "Where should your relay live?"; Hetzner is chosen.
         const first = stepTitle();
+        expect(first).toBe(t('wiz.host.title'));
+        await click(byText(m.container, t('common.continue')));
+        const key = stepTitle();
+        expect(key).toBe(t('wiz.step.cloud.title'));
         await type(all(m.container, (n) => n.nodeName === 'INPUT' && n.getAttribute('type') === 'password')[0], 'tok');
         // "Next" is the primary button of the nav row.
         await click(byText(m.container, t('wiz.nav.next')));
         const second = stepTitle();
-        expect(second).not.toBe(first);
+        expect(second).not.toBe(key);
+        await back();
+        expect(stepTitle()).toBe(key);
         await back();
         expect(stepTitle()).toBe(first);
         expect(rootBacks).toBe(0);

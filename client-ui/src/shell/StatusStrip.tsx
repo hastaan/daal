@@ -6,6 +6,7 @@
 //   inline-end:   nothing while the engine answers. When it stops
 //                 answering: "Daal stopped working", which opens Status.
 
+import { sep } from '../lib/format';
 import { useEffect, useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type { ConnState } from '../contract/D2Contract';
@@ -71,7 +72,7 @@ export default function StatusStrip({ t, locale, engineHealthy, onOpenConnection
                 {t('connection.connected')}
                 {since != null && (
                     <>
-                        {' · '}
+                        {sep()}
                         <bdi dir="ltr">{locale === 'fa' ? toFaDigits(elapsed) : elapsed}</bdi>
                     </>
                 )}

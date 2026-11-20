@@ -199,7 +199,7 @@ export function OverflowMenu({ label, items, title, dataButton = 'more' }: Overf
                 background: 'var(--surface)',
                 border: '1px solid var(--line)',
                 borderRadius: 'var(--r-tile)',
-                boxShadow: '0 30px 60px rgba(0,0,0,0.45)',
+                boxShadow: 'var(--shadow-lg)',
                 color: 'var(--fg)',
             }}
         >

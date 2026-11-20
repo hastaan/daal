@@ -110,11 +110,11 @@ export function MenuSheet({ title, subtitle, items, primaryId, onClose, footer }
                                         alignItems: 'center',
                                         justifyContent: 'center',
                                         background: primary
-                                            ? 'var(--gold)'
+                                            ? 'var(--gold-fill)'
                                             : danger
                                               ? mix('var(--red)', 16, 'transparent')
                                               : 'var(--surface-2)',
-                                        color: primary ? '#1f1401' : danger ? 'var(--red)' : 'var(--fg)',
+                                        color: primary ? 'var(--on-gold)' : danger ? 'var(--red)' : 'var(--fg)',
                                     }}
                                 >
                                     {it.icon && <Icon name={it.icon} size={20} />}

@@ -11,6 +11,7 @@
 // A row whose value is unknown is not drawn. Nothing reads "not
 // measured yet", and no tile text can break inside a word.
 
+import { sep } from '../lib/format';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useContract } from '../contract/ContractProvider';
@@ -55,7 +56,7 @@ export function wayName(t: (k: string) => string, r: RouteDisplayRow | undefined
     const d = routeForDisplay(r, t);
     if (!d) return undefined;
     const parts = [d.publisherName, d.routeNickname].filter((s) => !!s && s.trim() !== '');
-    return parts.length ? parts.join(' · ') : undefined;
+    return parts.length ? parts.join(sep()) : undefined;
 }
 
 /** The summary's rollup of per-way health. Only MEASURED ways count:

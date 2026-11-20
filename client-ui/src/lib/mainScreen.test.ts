@@ -24,6 +24,8 @@ import mobileEn from '../i18n/d2/mobile.en.json';
 
 const EN = { ...(legacyEn as object), ...(desktopEn as object), ...(mobileEn as object), ...(en as object) } as Record<string, string>;
 const t = (k: string) => EN[k] ?? k;
+/** The text as a person reads it: without the direction isolates. */
+const plain = (s: string | undefined) => s?.replace(/[\u2066-\u2069]/g, '');
 
 const way = (id: string, over: Partial<RouteDisplayRow> = {}): RouteDisplayRow => ({
     routeId: id,
@@ -116,14 +118,19 @@ describe('the main screen: a tap connects by itself', () => {
         expect(before.tone).toBe('ready');
         expect(before.primary).toBeUndefined();
         expect(before.plan).toEqual({ kind: 'auto' });
+        // Ready says what is ready, by kind: three ways, one kind.
+        expect(before.line).toBe('3 ways ready');
+        expect(before.readyKinds).toMatchObject({ names: ['VLESS Reality'], more: 0 });
         await p.tap();
         expect(p.calls).toEqual(['connectAuto']);
         await p.poll();
         const after = p.view();
         expect(after.state).toBe('connected');
         expect(after.headline).toBe('Connected');
-        expect(after.line).toBe('Using Pars');
+        // Who made the file, and the kind of connection in use.
+        expect(plain(after.line)).toBe('Using Pars · VLESS Reality');
         expect(after.tone).toBe('good');
+        expect(after.readyKinds.names).toEqual([]);
         // It moved past a way that did not work, and says so.
         expect(after.connectedNoteKey).toBe('auto.note.moved_on');
         expect(after.engineAuto).toBe(true);
@@ -194,9 +201,10 @@ describe('the main screen: a tap connects by itself', () => {
         const v = p.view();
         expect(v.state).toBe('connecting');
         expect(v.showProgress).toBe(true);
-        // "Connecting…" and nothing else: no "way 1 of 2" on Home.
+        // "Connecting…", and under it which kind and how far along.
         expect(v.headline).toBe('Connecting…');
-        expect(v.line).toBeUndefined();
+        expect(v.line).toBe('Trying VLESS Reality · 1 of 2');
+        expect(v.trying).toMatchObject({ index: 1, total: 2 });
         expect(v.detail).toBe('Trying way 1 of 2…');
         expect(v.tone).toBe('busy');
         expect(v.tapLabel).toBe('Cancel');
@@ -399,7 +407,7 @@ describe('Home: one headline, one line, at most one button and one link (spec C2
         };
         const v = base({ conn: c });
         expect(v.headline).toBe('Connected');
-        expect(v.line).toBe('Using Maman');
+        expect(plain(v.line)).toBe('Using Maman · VLESS Reality');
         expect(v.slow).toBe(true);
         expect(v.tone).toBe('slow');
         expect(v.primary).toBeUndefined();
@@ -431,5 +439,80 @@ describe('the failure Details fold', () => {
         expect(failureDetailsShown([], false)).toBe(false);
         // Developer mode keeps it, for the verdict code.
         expect(failureDetailsShown([], true)).toBe(true);
+    });
+});
+
+describe('Home says what Daal knows, and nothing it does not', () => {
+    const view = (over: Partial<MainScreenInput>) =>
+        mainScreenView({
+            t,
+            locale: 'en',
+            nowMs: 1_000_000,
+            conn: null,
+            optimistic: null,
+            connectInFlight: false,
+            intent: null,
+            hostFailed: false,
+            pinnedRaw: null,
+            routes: [way('r1'), way('r2')],
+            wasConnected: false,
+            remembered: undefined,
+            ...over,
+        });
+    const trying = (over: Partial<AutoStatus>): ConnectionSummary => ({
+        state: 'connecting',
+        mode: 'normal',
+        routeRunning: true,
+        routeCheck: 'verifying',
+        auto: auto({ state: 'trying', mode: true, trying: 'r2', index: 2, total: 4, ...over }),
+    });
+
+    it('ready: the count, and the kind that carried here only when it was measured here', () => {
+        const routes = [
+            way('r1', { family: 'hysteria2', measured: { grade: 'failing', samples: 2, carried: 0, failed: 2 } }),
+            way('r2', { family: 'websocket-tls', measured: { grade: 'good', setupMs: 300, samples: 4, carried: 4, failed: 0 } }),
+            way('r3', { family: 'wireguard', familyMaturity: 'unsupported' }),
+        ];
+        const v = view({ conn: { state: 'disconnected', mode: 'normal' }, routes });
+        // The kind this build cannot dial is not "ready".
+        expect(v.line).toBe('2 ways ready · WebSocket TLS worked here before');
+        // In the engine's order: the kind that carried here first, the
+        // one that failed here last.
+        expect(v.readyKinds.names).toEqual(['WebSocket TLS', 'Hysteria 2']);
+        expect(v.readyKinds.tags.map((k) => k.mark)).toEqual(['good', 'bad']);
+        // Nothing measured: the count alone.
+        expect(view({ conn: { state: 'disconnected', mode: 'normal' }, routes: [way('r1')] }).line).toBe('1 way ready');
+        // The list could not be read: nothing at all, not "0 ways".
+        expect(view({ conn: { state: 'disconnected', mode: 'normal' }, routes: undefined }).line).toBeUndefined();
+        // The engine refused the last connect: its notice speaks, no "ready".
+        const refused = view({ conn: { state: 'disconnected', mode: 'normal', connectRefused: 'needs_new_file' } });
+        expect(refused.line).toBeUndefined();
+        expect(refused.readyKinds.names).toEqual([]);
+    });
+    it('a kind this app cannot name is never printed (a family comes from a file)', () => {
+        const v = view({ conn: { state: 'disconnected', mode: 'normal' }, routes: [way('r1', { family: 'evil<b>' })] });
+        expect(v.line).toBe('1 way ready');
+        expect(v.readyKinds.names).toEqual([]);
+    });
+    it('trying: by kind, "n of m", and two at once by both kinds', () => {
+        const routes = [way('r1', { family: 'hysteria2' }), way('r2', { family: 'vless-reality' }), way('r3', { family: 'tuic' }), way('r4')];
+        const one = view({ conn: trying({}), routes });
+        expect(one.line).toBe('Trying VLESS Reality · 2 of 4');
+        expect(one.trying).toEqual({ text: 'Trying VLESS Reality · 2 of 4', index: 2, total: 4 });
+        const two = view({ conn: trying({ trying: 'r2', racing: ['r2', 'r3'], index: 2 }), routes });
+        expect(two.line).toBe('Trying VLESS Reality and TUIC at once');
+        expect(two.trying?.racing).toBe(true);
+        // The engine said no position: the kind, without "of".
+        expect(view({ conn: trying({ index: 0, total: 0 }), routes }).line).toBe('Trying VLESS Reality');
+        // A way this app cannot name: plain "Connecting…", no line.
+        const unknown = view({ conn: trying({ trying: 'r9' }), routes });
+        expect(unknown.line).toBeUndefined();
+        expect(unknown.trying).toBeUndefined();
+        // After a connection dropped: no "Trying …" under "Connecting…".
+        expect(view({ conn: trying({}), routes, wasConnected: true }).line).toBeUndefined();
+    });
+    it('connected on a way whose kind is unknown: the publisher alone', () => {
+        const v = view({ conn: { state: 'connected', mode: 'normal', routeCheck: 'ok', activeRoute: way('r1', { publisherName: 'Maman', family: 'x' }) } });
+        expect(plain(v.line)).toBe('Using Maman');
     });
 });

@@ -1,17 +1,22 @@
 // NetworkPage.tsx — the Files tab (spec C4).
 //
-// What the recipient holds: one row per file (a publisher who sent
-// ways to connect), with a state icon, "In use" on the one in use and
-// when it was last updated. A tap opens the file: the one connect
-// action, the ways inside in plain words, and Check for updates /
-// Remove behind ⋯. "+" adds a file; ⋯ has My Daal address. Engine words
-// (kinds of connection, route ids, cooldown and data-cap controls) are
-// in developer mode only.
+// What the recipient holds: one card per file (a publisher who sent
+// ways to connect) with its true state (in use / works here / not
+// working here / resting / not tried here…), how many ways it holds
+// and when it was updated, and the kinds of connection inside
+// ("VLESS Reality ×2", each with a dot for how it does here). A tap
+// opens the file: the one connect action, every way titled by its kind
+// with what Daal measured of it on this network, a tap on a way for
+// what the kind is and "Use only this way", and Check for updates /
+// Remove behind ⋯ (components/files/FileParts.tsx, lib/fileFacts.ts).
+// "+" adds a file; ⋯ has My Daal address. Route ids, cooldown and
+// data-cap controls are in developer mode only.
 //
 // The tree comes from listPublishers() (Publisher → Cell → Route, as
 // core/routestore stores it); the connect rules per route are
 // lib/networkRows.ts.
 
+import { sep } from '../lib/format';
 import { useEffect, useRef, useState } from 'react';
 import AddSheet from '../components/AddSheet';
 import MyAddressSheet from '../components/MyAddressSheet';
@@ -30,7 +35,6 @@ import {
     Card,
     EmptyState,
     IconButton,
-    ListRow,
     OverflowMenu,
     PageHeader,
     Sheet,
@@ -58,9 +62,7 @@ import {
     bestRouteOf,
     connectionsModeLine,
     fileInUse,
-    fileState,
     fileUpdatedMs,
-    restingNow,
     modeLineTexts,
     rowMetaText,
     listView,
@@ -82,8 +84,20 @@ import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotic
 import { EngineStartNotice, FailureBox, NoticeRow, StoreResetNotice } from './PageNotices';
 import { useEngineStartProblem } from '../lib/engineStart';
 import { autoIsUsing, getPinnedRoute, setPinnedRoute, startConnect } from '../lib/autoConnect';
-import { chipHereText, chipScoreText } from '../lib/measured';
+import { chipHereText, chipScoreText, familyHere } from '../lib/measured';
 import { effectiveLocale } from '../lib/i18n';
+import type { Locale } from '../lib/i18n';
+import { formatTime } from '../lib/format';
+import {
+    familyTags,
+    fileOrder,
+    fileState as fileStateOf,
+    restingUntilMs,
+    waysCountText,
+    wayState,
+    wayTitles,
+} from '../lib/fileFacts';
+import { FileCard, WayRow } from '../components/files/FileParts';
 
 interface Props {
     t: (k: string) => string;
@@ -398,6 +412,20 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     const nowMs = Date.now();
     const locale = effectiveLocale();
     const openFile = tree?.find((p) => p.displayName === openName) ?? null;
+    const stateOf = (routeId: string) => rowState(routeId, activeRouteId, pendingId, verifying);
+    // "Back to automatic": the choice goes, and a connection on the way
+    // that was chosen by hand is handed to the engine now (as the main
+    // screen does): engine_connect_auto on a connected engine starts
+    // nothing and takes charge of the route that is up.
+    const onBackToAuto = () => {
+        setPinnedRoute(null);
+        setPinnedId(null);
+        if (summaryNow?.state === 'connected' && summaryNow.auto?.mode !== true && pendingId === null) {
+            void contract.connectAuto().catch(() => {
+                /* the page keeps saying what is true */
+            });
+        }
+    };
 
     const onRefreshFile = async (p: PublisherTreeRow) => {
         if (!p.subscription) return;
@@ -546,36 +574,44 @@ export default function NetworkPage({ t, onNavigate }: Props) {
                     }
                 />
             ) : (
-                <Card style={{ padding: 0 }}>
-                    {tree.map((p, i) => {
+                // The rows sit inside the card's own padding: with none, the
+                // state disc of each row hung half outside its edge.
+                <Card style={{ paddingBlock: 0, paddingInline: 16 }}>
+                    {/* The file carrying traffic first, then the ones that
+                        work here, then the rest (fileOrder). */}
+                    {tree
+                        .map((p) => ({ p, state: fileStateOf(p, activeRouteId, stateOf, nowMs) }))
+                        .map((x, i) => ({ ...x, i }))
+                        .sort((a, b) => fileOrder(a.state) - fileOrder(b.state) || a.i - b.i)
+                        .map(({ p, state }, i) => {
+                        const routes = p.cells.flatMap((c) => c.routes);
                         const updated = fileUpdatedMs(p);
-                        const inUse = fileInUse(p, activeRouteId);
+                        const until = state === 'resting' ? restingUntilMs(routes, nowMs) : undefined;
+                        const summary = [
+                            waysCountText(t, locale, routes.length),
+                            updated !== undefined
+                                ? t('network.updated').replace('{ago}', formatAgo(locale, nowMs - updated))
+                                : undefined,
+                        ]
+                            .filter(Boolean)
+                            .join(sep());
                         return (
-                            <ListRow
+                            <FileCard
                                 // displayName, not publisherId: the tree is
                                 // grouped by display name (unique by
                                 // construction) and publisherId is empty for
                                 // a subscription whose first refresh has not
                                 // landed.
                                 key={p.displayName}
-                                leading={<StateIcon state={fileState(p, activeRouteId, nowMs)} size={22} />}
-                                title={<bdi>{p.displayName}</bdi>}
-                                badge={
-                                    inUse ? (
-                                        <Badge tone="good" size="sm">
-                                            {t('network.in_use')}
-                                        </Badge>
-                                    ) : undefined
-                                }
-                                subtitle={
-                                    updated !== undefined
-                                        ? t('network.updated').replace('{ago}', formatAgo(locale, nowMs - updated))
-                                        : undefined
-                                }
-                                chevron
-                                onClick={() => setOpenName(p.displayName)}
+                                t={t}
+                                locale={locale}
+                                p={p}
+                                state={state}
+                                summary={summary}
+                                tags={familyTags(t, routes, activeRouteId, nowMs)}
+                                restingUntil={until !== undefined ? formatTime(locale, new Date(until)) : undefined}
                                 last={i === tree.length - 1}
-                                dataButton="file-row"
+                                onOpen={() => setOpenName(p.displayName)}
                             />
                         );
                     })}
@@ -593,6 +629,8 @@ export default function NetworkPage({ t, onNavigate }: Props) {
                     activeRouteId={activeRouteId}
                     autoRouteId={autoRouteId}
                     pinnedId={pinnedId}
+                    locale={locale}
+                    onBackToAuto={onBackToAuto}
                     onClose={() => setOpenName(null)}
                     onConnectRoute={onConnectRoute}
                     onDisconnect={onDisconnect}
@@ -650,15 +688,6 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     );
 }
 
-/** A way's plain name: the name its file gives it, else the kind's own
- *  title when there is one, else our words. */
-function wayName(t: (k: string) => string, r: RouteDisplayRow): string {
-    if (r.routeNickname) return r.routeNickname;
-    const key = `network.family.${r.family.replace(/-/g, '_')}`;
-    const title = t(key);
-    return title !== key ? title : t('conn.route_unnamed');
-}
-
 interface FileSheetProps {
     t: (k: string) => string;
     p: PublisherTreeRow;
@@ -669,6 +698,9 @@ interface FileSheetProps {
     activeRouteId: string | null;
     autoRouteId: string | null;
     pinnedId: string | null;
+    locale: Locale;
+    /** Forget the way chosen by hand: Daal chooses again. */
+    onBackToAuto: () => void;
     onClose: () => void;
     onConnectRoute: (routeId: string) => void | Promise<void>;
     onDisconnect: () => void | Promise<void>;
@@ -692,6 +724,8 @@ function FileSheet({
     activeRouteId,
     autoRouteId,
     pinnedId,
+    locale,
+    onBackToAuto,
     onClose,
     onConnectRoute,
     onDisconnect,
@@ -702,7 +736,11 @@ function FileSheet({
     onBudget,
 }: FileSheetProps) {
     const [confirmRemove, setConfirmRemove] = useState(false);
+    // The way whose details are open (one at a time).
+    const [openWay, setOpenWay] = useState<string | null>(null);
     const routes = p.cells.flatMap((c) => c.routes);
+    const titles = wayTitles(t, routes, locale);
+    const here = chipHereText(t, locale, familyHere(routes));
     const verified = p.trustLevel === 'trusted' || p.trustLevel === 'pinned';
     const inUse = fileInUse(p, activeRouteId);
     const best = bestRouteOf(p, activeRouteId, nowMs);
@@ -778,74 +816,81 @@ function FileSheet({
                         <OverflowMenu label={t('ui.more')} items={items} dataButton="file-more" />
                     </div>
                     {pendingHere && <div style={{ fontSize: 13, color: 'var(--muted)' }}>{t('conn.headline_connecting')}</div>}
-                    <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-                        {routes.map((r) => {
-                            const st = rowState(r.routeId, activeRouteId, pendingId, verifying);
-                            const resting = restingNow(r, nowMs);
-                            const icon =
-                                st === 'connected'
-                                    ? 'ok'
-                                    : st === 'checking' || st === 'lost'
-                                    ? 'busy'
-                                    : resting
-                                    ? 'warn'
-                                    : r.measured?.grade === 'failing'
-                                    ? 'bad'
-                                    : r.proven || r.measured?.grade === 'good' || r.measured?.grade === 'slow'
-                                    ? 'ok'
-                                    : 'none';
-                            return (
-                                <li
-                                    key={r.routeId}
-                                    style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: 10,
-                                        minHeight: 44,
-                                        borderBlockEnd: '1px solid var(--line-soft)',
-                                        flexWrap: 'wrap',
-                                    }}
-                                >
-                                    <StateIcon state={icon} size={18} />
-                                    <bdi style={{ flex: 1, minWidth: 0, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                        {wayName(t, r)}
-                                    </bdi>
-                                    {resting && (
-                                        <Badge tone="warn" size="sm">
-                                            {t('network.resting')}
-                                        </Badge>
-                                    )}
-                                    {dev && (
-                                        <span data-dev style={{ display: 'flex', gap: 4, flexBasis: '100%', flexWrap: 'wrap', paddingBlockEnd: 6 }}>
-                                            <code dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', flexBasis: '100%' }}>
-                                                {rowMetaText(t, r, {
-                                                    stateLabelKey: rowStateLabelKey(st),
-                                                    isAuto: r.routeId === autoRouteId,
-                                                    isPinned: r.routeId === pinnedId,
-                                                })}{' '}
-                                                · {r.routeId}
-                                            </code>
-                                            <RouteActionButton
-                                                t={t}
-                                                routeId={r.routeId}
-                                                activeRouteId={activeRouteId}
-                                                pendingId={pendingId}
-                                                verifying={verifying}
-                                                onConnectRoute={onConnectRoute}
-                                                onDisconnect={onDisconnect}
-                                            />
-                                            <Button size="sm" variant="secondary" disabled={pendingId !== null} onClick={() => void onCool(r.routeId)}>
-                                                {t('network.cool_15m')}
-                                            </Button>
-                                            <Button size="sm" variant="secondary" onClick={() => onBudget(r)}>
-                                                {t('network.cap')}
-                                            </Button>
-                                        </span>
-                                    )}
-                                </li>
-                            );
-                        })}
-                    </ul>
+                    <div>
+                        <div
+                            style={{
+                                display: 'flex',
+                                alignItems: 'baseline',
+                                justifyContent: 'space-between',
+                                gap: 12,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                color: 'var(--muted)',
+                                marginBlockEnd: 2,
+                            }}
+                        >
+                            <span>{t('files.sheet.ways')}</span>
+                            {here && <span style={{ fontWeight: 500 }}>{here}</span>}
+                        </div>
+                        <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                            {routes.map((r, i) => {
+                                const st = rowState(r.routeId, activeRouteId, pendingId, verifying);
+                                const ws = wayState(r, st, nowMs);
+                                return (
+                                    <WayRow
+                                        key={r.routeId}
+                                        t={t}
+                                        locale={locale}
+                                        r={r}
+                                        title={titles.get(r.routeId) ?? { title: r.routeId }}
+                                        state={ws}
+                                        open={openWay === r.routeId}
+                                        onToggle={() => setOpenWay((w) => (w === r.routeId ? null : r.routeId))}
+                                        pinned={r.routeId === pinnedId}
+                                        chosenByDaal={r.routeId === autoRouteId}
+                                        busy={pendingId !== null}
+                                        otherConnected={activeRouteId !== null && activeRouteId !== r.routeId}
+                                        // Connecting a way from this page IS
+                                        // choosing it: it is pinned once the
+                                        // engine reports it connected
+                                        // (pinAfterTap), as before.
+                                        onUseOnly={() => void onConnectRoute(r.routeId)}
+                                        onBackToAuto={onBackToAuto}
+                                        last={i === routes.length - 1}
+                                        dev={
+                                            dev ? (
+                                                <span data-dev style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingBlockEnd: 8 }}>
+                                                    <code dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', flexBasis: '100%' }}>
+                                                        {rowMetaText(t, r, {
+                                                            stateLabelKey: rowStateLabelKey(st),
+                                                            isAuto: r.routeId === autoRouteId,
+                                                            isPinned: r.routeId === pinnedId,
+                                                        })}{' '}
+                                                        · {r.routeId}
+                                                    </code>
+                                                    <RouteActionButton
+                                                        t={t}
+                                                        routeId={r.routeId}
+                                                        activeRouteId={activeRouteId}
+                                                        pendingId={pendingId}
+                                                        verifying={verifying}
+                                                        onConnectRoute={onConnectRoute}
+                                                        onDisconnect={onDisconnect}
+                                                    />
+                                                    <Button size="sm" variant="secondary" disabled={pendingId !== null} onClick={() => void onCool(r.routeId)}>
+                                                        {t('network.cool_15m')}
+                                                    </Button>
+                                                    <Button size="sm" variant="secondary" onClick={() => onBudget(r)}>
+                                                        {t('network.cap')}
+                                                    </Button>
+                                                </span>
+                                            ) : undefined
+                                        }
+                                    />
+                                );
+                            })}
+                        </ul>
+                    </div>
                     {dev && (
                         <div data-dev style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                             {p.cells.flatMap((c) => c.families).map((f) => (

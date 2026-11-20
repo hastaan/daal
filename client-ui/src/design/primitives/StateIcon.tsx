@@ -7,6 +7,9 @@ interface StateIconProps {
     size?: number;
     /** Gives it a name (role="img"); without it, it is decoration. */
     label?: string;
+    /** 'outline': a coloured ring and glyph on no disc — the quieter
+     *  form, for "works" beside a filled "in use". */
+    variant?: 'filled' | 'outline';
 }
 
 const FILL: Record<'ok' | 'warn' | 'bad' | 'off', string> = {
@@ -16,7 +19,7 @@ const FILL: Record<'ok' | 'warn' | 'bad' | 'off', string> = {
     off: 'var(--muted)',
 };
 
-// Glyphs drawn dark on the disc, on a 24-unit grid.
+// Glyphs drawn on the disc in --on-accent (dark; white in the light theme), on a 24-unit grid.
 const GLYPH: Record<'ok' | 'warn' | 'bad' | 'off', JSX.Element> = {
     ok: <path d="M7 12.5l3.3 3.3L17 9" />,
     warn: (
@@ -29,7 +32,7 @@ const GLYPH: Record<'ok' | 'warn' | 'bad' | 'off', JSX.Element> = {
     off: <path d="M8 12h8" />,
 };
 
-export function StateIcon({ state, size = 20, label }: StateIconProps) {
+export function StateIcon({ state, size = 20, label, variant = 'filled' }: StateIconProps) {
     const a11y = label
         ? { role: 'img' as const, 'aria-label': label }
         : { 'aria-hidden': true as const };
@@ -65,11 +68,23 @@ export function StateIcon({ state, size = 20, label }: StateIconProps) {
             </span>
         );
     }
+    if (variant === 'outline') {
+        return (
+            <span {...a11y} data-state={state} data-variant="outline" style={box}>
+                <svg viewBox="0 0 24 24" width={size} height={size} style={{ display: 'block' }}>
+                    <circle cx="12" cy="12" r="10" fill="none" stroke={FILL[state]} strokeWidth={1.8} />
+                    <g fill="none" stroke={FILL[state]} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+                        {GLYPH[state]}
+                    </g>
+                </svg>
+            </span>
+        );
+    }
     return (
         <span {...a11y} data-state={state} style={box}>
             <svg viewBox="0 0 24 24" width={size} height={size} style={{ display: 'block' }}>
                 <circle cx="12" cy="12" r="11" fill={FILL[state]} />
-                <g fill="none" stroke="#0b1f24" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+                <g fill="none" stroke="var(--on-accent)" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
                     {GLYPH[state]}
                 </g>
             </svg>

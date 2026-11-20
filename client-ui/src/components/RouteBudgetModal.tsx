@@ -44,7 +44,7 @@ export default function RouteBudgetModal({ t, route, onClose, onSaved }: Props) 
             style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'rgba(0,0,0,0.55)',
+                background: 'var(--scrim)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -123,8 +123,8 @@ export default function RouteBudgetModal({ t, route, onClose, onSaved }: Props) 
                         onClick={save}
                         disabled={busy}
                         style={{
-                            background: 'var(--gold)',
-                            color: '#1A1208',
+                            background: 'var(--gold-fill)',
+                            color: 'var(--on-gold)',
                             border: 0,
                             padding: '6px 14px',
                             borderRadius: 'var(--radius-md)',

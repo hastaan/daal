@@ -255,6 +255,33 @@ const PATHS = {
         </>
     ),
     external: <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />,
+    // Mobile data: four rising bars.
+    signal: <path d="M5 19v-3M10 19v-6M15 19v-9M20 19V6" />,
+    // Speed: a gauge with its needle.
+    speed: (
+        <>
+            <path d="M4.5 17a8.5 8.5 0 1 1 15 0" />
+            <path d="M12 13.5l4-4" />
+            <circle cx="12" cy="13.5" r="1.2" {...FILLED} />
+        </>
+    ),
+    // Traffic both ways: an arrow down beside an arrow up.
+    updown: <path d="M8 4v15M4 15l4 4 4-4M16 20V5M12 9l4-4 4 4" />,
+    // A reason: a light bulb (the "why this way" line on Home).
+    bulb: (
+        <>
+            <path d="M9 18h6M10 21h4" />
+            <path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z" />
+        </>
+    ),
+    // A way in: two arrows through a gap.
+    route: (
+        <>
+            <circle cx="6" cy="18" r="2.2" />
+            <circle cx="18" cy="6" r="2.2" />
+            <path d="M8 18h6.5a3.5 3.5 0 0 0 0-7h-5a3.5 3.5 0 0 1 0-7H16" />
+        </>
+    ),
 } satisfies Record<string, JSX.Element>;
 
 export type IconName = keyof typeof PATHS;

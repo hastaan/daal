@@ -36,6 +36,7 @@ import {
     type PassFailure,
 } from './autoConnect';
 import { connectedQualityKey } from './measured';
+import { readyKinds, readyLine, tryingFact, usingLine, type ReadyKind, type TryingFact } from './homeFacts';
 import { routeForDisplay } from './activeRoute';
 import {
     checkHeadlineKey,
@@ -47,6 +48,7 @@ import {
     type RouteCheck,
     type TapAction,
 } from './routeCheck';
+import { meaningfulNickname } from './familyName';
 
 const HEADLINE_KEY: Record<ConnState, string> = {
     disconnected: 'conn.headline_disconnected',
@@ -146,6 +148,13 @@ export interface MainScreenView {
     noRoutes: boolean;
     needFile: boolean;
     showProgress: boolean;
+    /** What automatic connect is trying, by kind ("Trying VLESS Reality
+     *  · 2 of 4") and where it is, for the step dots. `undefined` when
+     *  the engine named no way this app can name. */
+    trying: TryingFact | undefined;
+    /** Ready: the kinds of connection on this phone, as chips (empty
+     *  in every other state). */
+    readyKinds: { names: string[]; more: number; tags: ReadyKind[] };
     /** i18n key of the note under "You're connected.", if any. ONE
      *  line: what just happened (Daal moved to another way) when there
      *  is such news, otherwise how this way does here, when that helps
@@ -242,12 +251,17 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         ? t('auto.state.trying')
         : t(checkStateLabelKey(state, routeCheck) ?? STATE_LABEL_KEY[state]);
     const slow = state === 'connected' && !optimistic && conn?.routeCheck === 'degraded';
+    const trying = showProgress && !optimistic ? tryingFact(t, locale, conn, routes) : undefined;
+    // The engine refused the last connect: its notice says why, and a
+    // "ways ready" line under it would contradict it.
+    const refusedNow = !!conn?.connectRefused && !optimistic;
     let tone: HomeTone;
     let headline: string;
     let line: string | undefined;
     let lineNoInternet = false;
     let primary: HomePrimary | undefined;
     let link: HomeLink | undefined;
+    let kinds: { names: string[]; more: number; tags: ReadyKind[] } = { names: [], more: 0, tags: [] };
     if (needFile) {
         tone = 'none';
         headline = t('auto.need_file.headline');
@@ -292,18 +306,29 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         const lost = routeCheck === 'failed' && !showProgress;
         tone = lost ? 'holding' : 'busy';
         headline = t(lost ? 'conn.headline_lost' : 'conn.headline_connecting');
+        // Which way, by its kind, and how far along: "Trying VLESS
+        // Reality · 2 of 4". After a connection dropped, the words are
+        // "that way stopped working" instead (the developer fold has it).
+        if (showProgress && !input.wasConnected && trying) line = trying.text;
         // The bird stops it too, but nobody should have to guess that.
         link = 'cancel';
     } else if (state === 'connected') {
         tone = slow ? 'slow' : 'good';
         headline = t('conn.headline_connected');
-        const name = usingName(conn, t);
-        line = name ? t('conn.using').replace('{name}', name) : undefined;
+        // "Using Pars Relays · VLESS Reality": who made the file, and
+        // which kind of connection carries the traffic.
+        line = usingLine(t, usingName(conn, t), conn);
         // A quiet way out that is visible, beside the bird.
         link = 'disconnect';
     } else {
         tone = 'ready';
         headline = t('conn.headline_disconnected');
+        // "4 ways ready · VLESS Reality worked here before": the second
+        // half only when the engine measured it on this network.
+        if (state === 'disconnected' && !refusedNow) {
+            line = readyLine(t, locale, routes);
+            if (line) kinds = readyKinds(t, routes, 4, input.nowMs);
+        }
     }
 
     const tapLabel = t(mainTapLabelKey(plan, auto, tapLabelKey(action, polled, routeCheck), holding));
@@ -351,6 +376,8 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         noRoutes,
         needFile,
         showProgress,
+        trying,
+        readyKinds: kinds,
         connectedNoteKey,
         refusedKey,
         engineAuto: auto?.mode === true,
@@ -364,7 +391,8 @@ export function usingName(conn: ConnectionSummary | null, t: (k: string) => stri
     if (!conn || conn.state !== 'connected') return undefined;
     const r = routeForDisplay(conn.activeRoute, t);
     if (!r) return undefined;
-    return r.publisherName || r.routeNickname || undefined;
+    // A bare "r1" names nothing; the kind of connection is said beside it.
+    return r.publisherName || meaningfulNickname(r) || undefined;
 }
 
 /** The badges under the headline (spec C2, at most two): Slow, then

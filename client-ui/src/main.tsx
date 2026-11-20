@@ -13,16 +13,16 @@ import './styles.css';
 // `prefers-color-scheme: light` override that we only want to honor
 // when the user explicitly chose "system" *and* the OS is light.
 // Default is dark to match the design.
+//
+// The choice is the one Settings keeps (Prefs: `daal.d2.theme`). An
+// earlier build read `daal.theme_pref`, which nothing wrote, so a light
+// choice was lost at the next start; that key is still honoured.
+// "System" leaves the attribute empty, as Settings does, so the
+// stylesheet follows the phone when it switches between day and night.
 function bootstrapTheme() {
     try {
-        const saved = localStorage.getItem('daal.theme_pref'); // 'system'|'dark'|'light'
-        let resolved: 'dark' | 'light' = 'dark';
-        if (saved === 'light') {
-            resolved = 'light';
-        } else if (saved === 'system') {
-            const mq = window.matchMedia?.('(prefers-color-scheme: light)');
-            resolved = mq?.matches ? 'light' : 'dark';
-        }
+        const saved = localStorage.getItem('daal.d2.theme') ?? localStorage.getItem('daal.theme_pref');
+        const resolved = saved === 'light' ? 'light' : saved === 'system' ? '' : 'dark';
         document.documentElement.setAttribute('data-theme', resolved);
     } catch {
         document.documentElement.setAttribute('data-theme', 'dark');

@@ -44,6 +44,7 @@
 //   * The operator <select>. Relay choice happens on RelayListPage,
 //     explicitly. This page is told which relay it is.
 
+import { sep } from '../lib/format';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Wizard, classifyPublisherError, storedFileName } from './wizardCommands';
 import type {
@@ -1348,7 +1349,7 @@ export default function PublisherRecipientsPage({
                                               t('pub.relays.no_ip'),
                                           [operator.provider, operator.server_type, operator.region]
                                               .filter(Boolean)
-                                              .join(' · '),
+                                              .join(sep()),
                                       ]
                                           .filter(Boolean)
                                           .join(' — ')
@@ -1367,7 +1368,7 @@ export default function PublisherRecipientsPage({
                                     : '',
                             ]
                                 .filter(Boolean)
-                                .join(' · ')}
+                                .join(sep())}
                             wrapSubtitle
                         />
                     )}
@@ -1413,7 +1414,7 @@ export default function PublisherRecipientsPage({
                                         </span>
                                         {rawArtifact.modified_at_unix > 0 && (
                                             <>
-                                                {' · '}
+                                                {sep()}
                                                 {formatDate(locale, rawArtifact.modified_at_unix, 'dayTime')}
                                             </>
                                         )}

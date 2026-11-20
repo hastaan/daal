@@ -21,6 +21,7 @@
 // recorded, in words that say so ("Set up", never a green "LIVE") — see
 // relayStatus.ts.
 
+import { sep } from '../lib/format';
 import { useCallback, useEffect, useState } from 'react';
 import { Wizard } from './wizardCommands';
 import type {
@@ -116,7 +117,7 @@ export function ReleaseResults({
                     <span dir="ltr" style={{ fontFamily: 'var(--font-mono)' }}>
                         {r.address}
                     </span>
-                    {' · '}
+                    {sep()}
                     {t(releaseResultKey(r.code))}
                 </div>
             ))}

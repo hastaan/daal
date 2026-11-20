@@ -64,7 +64,7 @@ export function Toggle({
                         width: 36,
                         height: 20,
                         borderRadius: 10,
-                        background: checked ? 'var(--gold)' : 'var(--surface-3)',
+                        background: checked ? 'var(--gold-fill)' : 'var(--surface-3)',
                         position: 'relative',
                         display: 'block',
                         transition: 'background var(--t-fast)',
@@ -77,7 +77,8 @@ export function Toggle({
                             insetInlineStart: checked ? 18 : 2,
                             width: 16,
                             height: 16,
-                            background: 'var(--fg)',
+                            background: 'var(--knob)',
+                            boxShadow: 'var(--knob-shadow)',
                             borderRadius: '50%',
                             transition: 'inset-inline-start var(--t-fast)',
                         }}

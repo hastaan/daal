@@ -659,7 +659,7 @@ function CameraLane({
                             position: 'absolute',
                             insetBlockEnd: 10,
                             insetInlineEnd: 10,
-                            background: 'rgba(0,0,0,0.55)',
+                            background: 'var(--scrim)',
                             borderRadius: '50%',
                             padding: 4,
                         }}

@@ -82,7 +82,7 @@ export function Toast({ tone = 'neutral', children, onDismiss, autoHideMs = 3500
                 background: 'var(--surface-2)',
                 border: '1px solid var(--line)',
                 borderRadius: 'var(--r-tile)',
-                boxShadow: '0 16px 40px rgba(0,0,0,0.4)',
+                boxShadow: 'var(--shadow-md)',
                 color: 'var(--fg)',
             }}
         >

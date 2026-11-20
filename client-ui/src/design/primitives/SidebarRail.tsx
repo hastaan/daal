@@ -3,6 +3,7 @@
 
 import type { SectionId } from './icons';
 import { SECTION_ICONS } from './icons';
+import { mix } from '../mix';
 
 interface Item {
     id: SectionId;
@@ -50,7 +51,7 @@ export function SidebarRail({ active, items, onChange, footer }: Props) {
                             height: 48,
                             border: 0,
                             background: on
-                                ? 'rgba(201,162,58,0.12)'
+                                ? mix('var(--gold)', 12, 'transparent')
                                 : 'transparent',
                             color: on ? 'var(--gold-warm)' : 'var(--muted)',
                             borderRadius: 12,

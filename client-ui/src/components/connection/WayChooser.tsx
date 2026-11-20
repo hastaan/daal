@@ -7,8 +7,10 @@
 // and never has to open it. A person who did pick one sees that they
 // did, in words, with the way back right beside it.
 //
-// Rows are named "publisher · nickname", the way the rest of the app
-// names a route. No protocol name is printed here.
+// Rows are named by their kind of connection ("VLESS Reality", the
+// same name Home and Files print, lib/familyName.ts), with the file it
+// came from and the engine's grade on this network under it. A file's
+// own "r1" / "Way 2" says nothing and is left out (meaningfulNickname).
 //
 // WHAT IS TRUE NOW vs WHAT WAS CHOSEN FOR NEXT TIME. While something is
 // connected the chip says what the ENGINE is doing — it is choosing
@@ -20,8 +22,13 @@
 // In automatic mode no route is named on the main path: the name the
 // engine has for a route falls back to its raw id, and a person who
 // chose nothing has no use for either. Names are for the list.
+import { sep } from '../../lib/format';
 import type { RouteDisplayRow } from '../../contract/D2Contract';
-import { Button } from '../../design/primitives';
+import { Button, StateIcon } from '../../design/primitives';
+import { familyLabel, familyName } from '../../lib/familyName';
+import { setupText, wayTitles } from '../../lib/fileFacts';
+import { gradeText } from '../../lib/measured';
+import { effectiveLocale } from '../../lib/i18n';
 
 interface Props {
     t: (k: string) => string;
@@ -50,10 +57,23 @@ interface Props {
     bare?: boolean;
 }
 
-export function routeLabel(r: RouteDisplayRow): string {
-    return r.publisherName || r.routeNickname
-        ? `${r.publisherName} · ${r.routeNickname}`
-        : r.routeId;
+/** The way's kind, told apart from another of the same kind in its
+ *  file ("VLESS Reality · 2"), and its own name when it means something. */
+function wayTitle(t: (k: string) => string, r: RouteDisplayRow, routes?: readonly RouteDisplayRow[]) {
+    const peers = (routes ?? []).filter((x) => x.publisherId === r.publisherId);
+    if (!peers.some((x) => x.routeId === r.routeId)) peers.push(r);
+    return wayTitles(t, peers, effectiveLocale()).get(r.routeId) ?? { title: familyName(t, r.family) };
+}
+
+/** "Pars Relays · VLESS Reality": the file, then the kind of connection
+ *  (with the way's own name only when it means something). */
+export function routeLabel(t: (k: string) => string, r: RouteDisplayRow, routes?: readonly RouteDisplayRow[]): string {
+    const w = wayTitle(t, r, routes);
+    // A kind this app cannot name adds nothing to a label that has the
+    // file's name ("Current connection · name not available" stays as is).
+    const kind = familyLabel(t, r.family) ? w.title : undefined;
+    const label = [r.publisherName, kind, w.nickname].filter(Boolean).join(sep());
+    return label || w.title;
 }
 
 export default function WayChooser({
@@ -75,14 +95,14 @@ export default function WayChooser({
     // is doing: choosing by itself, or staying on one way.
     const nowOwn: RouteDisplayRow | null = running ? (engineAuto ? null : running) : pinned;
     const title = nowOwn
-        ? t('auto.chooser.pinned').replace('{name}', routeLabel(nowOwn))
+        ? t('auto.chooser.pinned').replace('{name}', routeLabel(t, nowOwn, routes))
         : t('auto.chooser.automatic');
     const hint = nowOwn ? t('auto.chooser.pinned_hint') : t('auto.chooser.automatic_hint');
     // The saved choice, when it is not what is in force.
     const next = !running
         ? undefined
         : pinned && (engineAuto || pinned.routeId !== running.routeId)
-        ? t('auto.chooser.next_pinned').replace('{name}', routeLabel(pinned))
+        ? t('auto.chooser.next_pinned').replace('{name}', routeLabel(t, pinned, routes))
         : !pinned && !engineAuto
         ? t('auto.chooser.next_auto')
         : undefined;
@@ -95,7 +115,7 @@ export default function WayChooser({
         const selectedId = pinned?.routeId ?? nowOwn?.routeId ?? null;
         const pendingPick =
             running && pinned && (engineAuto || pinned.routeId !== running.routeId)
-                ? t('auto.chooser.next_pinned').replace('{name}', routeLabel(pinned))
+                ? t('auto.chooser.next_pinned').replace('{name}', routeLabel(t, pinned, routes))
                 : undefined;
         const hasList = routes !== undefined && routes.length > 0;
         return (
@@ -205,14 +225,42 @@ function ChoiceList({
                             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--muted)', marginBlockStart: 6 }}>
                                 {t('auto.chooser.advanced')}
                             </div>
-                            {routes.map((r) => (
-                                <ChoiceRow
-                                    key={r.routeId}
-                                    label={routeLabel(r)}
-                                    selected={selectedId === r.routeId}
-                                    onClick={() => onPick(r.routeId)}
-                                />
-                            ))}
+                            {routes.map((r) => {
+                                const w = wayTitle(t, r, routes);
+                                // Under the kind: which file and the way's own
+                                // name if it has one; then how it did on this
+                                // network, with the Files tab's disc (only
+                                // when the engine graded it); its time to
+                                // connect here at the end.
+                                const sub = [r.publisherName, w.nickname].filter(Boolean).join(sep());
+                                const g = r.measured?.grade;
+                                const gradeLine = gradeText(t, r.measured);
+                                return (
+                                    <ChoiceRow
+                                        key={r.routeId}
+                                        label={w.title}
+                                        sub={sub || undefined}
+                                        grade={
+                                            gradeLine
+                                                ? {
+                                                      text: gradeLine,
+                                                      state:
+                                                          g === 'good' || g === 'ok'
+                                                              ? 'ok'
+                                                              : g === 'slow'
+                                                              ? 'warn'
+                                                              : g === 'failing'
+                                                              ? 'bad'
+                                                              : 'none',
+                                                  }
+                                                : undefined
+                                        }
+                                        setup={setupText(t, effectiveLocale(), r.measured?.setupMs)}
+                                        selected={selectedId === r.routeId}
+                                        onClick={() => onPick(r.routeId)}
+                                    />
+                                );
+                            })}
                         </>
                     )}
                     {note && (
@@ -229,14 +277,37 @@ function ChoiceList({
     );
 }
 
+const GRADE_COLOR: Record<'ok' | 'warn' | 'bad' | 'none', string> = {
+    ok: 'var(--green)',
+    warn: 'var(--amber)',
+    bad: 'var(--red)',
+    none: 'var(--muted)',
+};
+
+/** A radio you can see: a 20 px ring, filled at the centre when chosen. */
+function Radio({ selected }: { selected: boolean }) {
+    return (
+        <svg aria-hidden viewBox="0 0 20 20" width={20} height={20} style={{ flexShrink: 0, display: 'block' }}>
+            <circle cx="10" cy="10" r="8.6" fill="none" stroke={selected ? 'var(--gold-warm)' : 'var(--muted)'} strokeWidth={1.8} />
+            {selected && <circle cx="10" cy="10" r="4.6" fill="var(--gold-warm)" />}
+        </svg>
+    );
+}
+
 function ChoiceRow({
     label,
     sub,
+    grade,
+    setup,
     selected,
     onClick,
 }: {
     label: string;
     sub?: string;
+    /** How it did here, with its disc. */
+    grade?: { text: string; state: 'ok' | 'warn' | 'bad' | 'none' };
+    /** "0.4 s" to connect here. */
+    setup?: string;
     selected: boolean;
     onClick: () => void;
 }) {
@@ -250,11 +321,11 @@ function ChoiceRow({
                 appearance: 'none',
                 display: 'flex',
                 alignItems: 'center',
-                gap: 10,
+                gap: 12,
                 inlineSize: '100%',
                 textAlign: 'start',
-                background: selected ? 'rgba(255,255,255,0.06)' : 'transparent',
-                border: '1px solid var(--teal-hairline)',
+                background: selected ? 'var(--tint-2)' : 'transparent',
+                border: selected ? '1px solid var(--gold-warm)' : '1px solid var(--teal-hairline)',
                 borderRadius: 10,
                 padding: '10px 12px',
                 color: 'var(--fg)',
@@ -263,13 +334,31 @@ function ChoiceRow({
                 minBlockSize: 44,
             }}
         >
-            <span aria-hidden style={{ inlineSize: 14, color: 'var(--gold-soft)' }}>
-                {selected ? '●' : '○'}
+            <Radio selected={selected} />
+            <span style={{ flex: 1, minWidth: 0, display: 'grid', gap: 2 }}>
+                {/* The block takes the page's direction (a Latin name keeps its
+                    own inside the <bdi>), so the rows line up on the start
+                    side in Persian too. */}
+                <span style={{ display: 'block', fontSize: 14, fontWeight: 600 }}>
+                    <bdi>{label}</bdi>
+                </span>
+                {sub && (
+                    <span style={{ display: 'block', fontSize: 12, color: 'var(--ink-soft)' }}>
+                        <bdi>{sub}</bdi>
+                    </span>
+                )}
+                {grade && (
+                    <span data-grade={grade.state} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: GRADE_COLOR[grade.state] }}>
+                        <StateIcon state={grade.state} size={14} />
+                        <span>{grade.text}</span>
+                    </span>
+                )}
             </span>
-            <span>
-                <bdi style={{ display: 'block' }}>{label}</bdi>
-                {sub && <span style={{ fontSize: 12, color: 'var(--ink-soft)' }}>{sub}</span>}
-            </span>
+            {setup && (
+                <span style={{ flexShrink: 0, fontSize: 12.5, color: 'var(--fg)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                    {setup}
+                </span>
+            )}
         </button>
     );
 }

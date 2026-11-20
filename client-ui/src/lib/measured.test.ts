@@ -379,8 +379,8 @@ describe('family chips on the Connections page', () => {
         expect(familyHere(routes.slice(0, 3))).toEqual({ worked: 1, tried: 2 });
         expect(familyHere([routes[3]])).toEqual({ worked: 0, tried: 0 });
         expect(familyHere([routes[4]])).toBeUndefined();
-        expect(chipHereText(t, 'en', { worked: 1, tried: 2 })).toBe('1 of 2 worked here');
-        expect(chipHereText(tFa, 'fa', { worked: 1, tried: 2 })).toBe('۱ از ۲ این‌جا کار کرد');
+        expect(chipHereText(t, 'en', { worked: 1, tried: 2 })).toBe('1 of 2 tried worked here');
+        expect(chipHereText(tFa, 'fa', { worked: 1, tried: 2 })).toBe('از ۲ راهِ امتحان‌شده، ۱ راه اینجا کار کرد');
         expect(chipHereText(t, 'en', { worked: 0, tried: 0 })).toBe('Not tried here yet');
         expect(chipHereText(t, 'en', undefined)).toBeUndefined();
     });

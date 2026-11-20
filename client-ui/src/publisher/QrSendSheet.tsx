@@ -40,6 +40,7 @@
 // has actually done (frames shown, passes completed) and says plainly
 // that the other phone is the only thing that knows when to stop.
 
+import { sep } from '../lib/format';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { Wizard, onQrFrame } from './wizardCommands';
@@ -388,7 +389,7 @@ export function QrSendSheet({ t, operatorId, relayName, artifact, name, onClose 
                         </span>
                         <span>
                             {t('qr.send.pass').replace('{n}', String(pass))}
-                            {' · '}
+                            {sep()}
                             {t('qr.send.elapsed').replace('{s}', String(elapsed))}
                         </span>
                         <span>{t(stateKey)}</span>

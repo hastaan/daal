@@ -8,6 +8,7 @@
 import type { ReactNode } from 'react';
 import type { SectionId } from './icons';
 import { SECTION_ICONS } from './icons';
+import { mix } from '../mix';
 
 interface Item {
     id: SectionId;
@@ -98,7 +99,7 @@ export function SidebarFull({
                                         padding: '10px 18px',
                                         color: on ? 'var(--fg)' : 'var(--muted)',
                                         background: on
-                                            ? 'rgba(201,162,58,0.08)'
+                                            ? mix('var(--gold)', 8, 'transparent')
                                             : 'transparent',
                                         borderInlineStart: `2px solid ${
                                             on ? 'var(--gold)' : 'transparent'

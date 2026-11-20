@@ -20,6 +20,20 @@ export function isolate(s: string): string {
     return `${FSI}${s}${PDI}`;
 }
 
+/** The separator between facts on one line. In Persian a middle dot
+ *  next to Persian digits reads as the digit zero («۴ راه · ۵۲» looks
+ *  like «۴ راه ۰ ۵۲»), so Persian gets its own comma. */
+export function sep(): string {
+    try {
+        const el = document.documentElement;
+        const lang = (el.getAttribute('lang') ?? '').toLowerCase();
+        if (lang.startsWith('fa') || el.getAttribute('dir') === 'rtl') return '، ';
+    } catch {
+        /* no document (tests): English */
+    }
+    return ' · ';
+}
+
 /** A Date from a Date or from Unix SECONDS. */
 function toDate(v: number | Date): Date {
     return v instanceof Date ? v : new Date(v * 1000);

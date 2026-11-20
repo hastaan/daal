@@ -380,7 +380,7 @@ describe('MenuSheet', () => {
         expect(m.container.textContent).toContain("Only Maman's phone can open it.");
         expect(m.container.textContent).toContain('Check words');
         expect(m.container.textContent).toContain('On their phone');
-        expect(styled(m.container, 'background', 'var(--gold)').length).toBe(1);
+        expect(styled(m.container, 'background', 'var(--gold-fill)').length).toBe(1);
         // No Cancel button: only the two items are buttons.
         expect(buttons(m.container).map((b) => b.getAttribute('data-button'))).toEqual(['share', 'qr']);
         await click(byAttr(m.container, 'data-button', 'qr'));

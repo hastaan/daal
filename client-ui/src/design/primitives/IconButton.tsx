@@ -5,6 +5,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { Icon } from './icons';
 import type { IconName } from './icons';
+import { mix } from '../mix';
 
 interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'> {
     /** The glyph; or pass `icon` instead. */
@@ -50,7 +51,7 @@ export function IconButton({
                 alignItems: 'center',
                 justifyContent: 'center',
                 background: active
-                    ? 'rgba(201,162,58,0.10)'
+                    ? mix('var(--gold)', 10, 'transparent')
                     : 'transparent',
                 border: 0,
                 borderRadius: 12,

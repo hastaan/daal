@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import WayChooser from './WayChooser';
 import AutoFailure from './AutoFailure';
+import { triedRows } from '../../lib/homeFacts';
 import { DensityProvider } from '../../design/DensityProvider';
 import type { RouteDisplayRow } from '../../contract/D2Contract';
 import legacyEn from '../../i18n/en.json';
@@ -52,13 +53,16 @@ describe('WayChooser', () => {
         expect(html).not.toContain('No route selected');
         for (const f of FAMILIES) expect(html).not.toContain(f);
         // Folded: the routes are not listed.
-        expect(html).not.toContain('Pars · r2');
+        expect(html).not.toContain('WebSocket TLS');
     });
-    it('opened: the routes are the ADVANCED choice, named without their protocol', () => {
+    it('opened: the routes are the ADVANCED choice, named by their kind, never by "r1" or a raw token', () => {
         const html = chooser({ open: true });
         expect(html).toContain('Choose one yourself (advanced)');
         expect(html.indexOf('Automatic')).toBeLessThan(html.indexOf('Choose one yourself (advanced)'));
-        for (const r of ROUTES) expect(html).toContain(`Pars · ${r.routeNickname}`);
+        for (const r of ROUTES) expect(html).toContain(`>${EN[`network.family.${r.family.replace(/-/g, '_')}`]}<`);
+        // The file each comes from is said under it; its "r1" is not.
+        expect(html).toContain('>Pars<');
+        for (const r of ROUTES) expect(html).not.toContain(`>${r.routeNickname}<`);
         for (const f of FAMILIES) expect(html).not.toContain(f);
         expect(html).toContain('Open my files');
         // Automatic is the selected one.
@@ -66,7 +70,7 @@ describe('WayChooser', () => {
     });
     it('a pinned route is said in words, with the way back right there — also folded', () => {
         const html = chooser({ pinned: ROUTES[2] });
-        expect(html).toContain('Only this one: Pars · r3');
+        expect(html).toContain('Only this one: Pars · Naive');
         expect(html).toContain('You chose it yourself. Daal will not try the others.');
         expect(html).toContain('>Back to automatic<');
         expect(html).not.toContain('naive');
@@ -91,22 +95,22 @@ describe('WayChooser', () => {
         expect(html).toContain('Daal chooses the best way');
         expect(html).not.toContain('Daal will not try the others');
         // Folded, and still visible.
-        expect(html).toContain('From the next time you connect: only Pars · r3');
+        expect(html).toContain('From the next time you connect: only Pars · Naive');
     });
     it('connected on a way picked by hand, then "Back to automatic": still that way until the engine takes over', () => {
         const html = chooser({ running: ROUTES[2], engineAuto: false, pinned: null, busy: true });
         const chip = html.slice(html.indexOf('<button'), html.indexOf('</button>'));
-        expect(chip).toContain('Only this one: Pars · r3');
+        expect(chip).toContain('Only this one: Pars · Naive');
         expect(html).toContain('From the next time you connect: automatic');
         // The same pick, in force: nothing to add.
         const same = chooser({ running: ROUTES[2], engineAuto: false, pinned: ROUTES[2], busy: true });
-        expect(same).toContain('Only this one: Pars · r3');
+        expect(same).toContain('Only this one: Pars · Naive');
         expect(same).not.toContain('From the next time');
     });
     it('the sheet: the selected radio is what is in force (the way held by hand), with one hint line and no "next time" lines', () => {
         // Connected on a way picked earlier, nothing saved: Home shows "Manual".
         const html = chooser({ bare: true, open: true, running: ROUTES[2], engineAuto: false, pinned: null, busy: true });
-        expect(html).toMatch(/aria-checked="true"[^>]*>.*?Pars · r3/s);
+        expect(html).toMatch(/aria-checked="true"[^>]*>.*?Naive/s);
         expect(html).toMatch(/aria-checked="false"[^>]*>.*?Automatic/s);
         expect(html).not.toContain('From the next time');
         expect(html).not.toContain('Your choice is used the next time you connect.');
@@ -118,8 +122,8 @@ describe('WayChooser', () => {
         );
         // A pick saved while the engine chooses: selected, and its one line says when it applies.
         const saved = chooser({ bare: true, open: true, running: ROUTES[0], engineAuto: true, pinned: ROUTES[3], busy: true });
-        expect(saved).toMatch(/aria-checked="true"[^>]*>.*?Pars · r4/s);
-        expect(saved).toContain('From the next time you connect: only Pars · r4');
+        expect(saved).toMatch(/aria-checked="true"[^>]*>.*?Hysteria 2/s);
+        expect(saved).toContain('From the next time you connect: only Pars · Hysteria 2');
         expect(saved).not.toContain('Daal won&#x27;t switch');
     });
     it('offers no route list when the list could not be read', () => {
@@ -175,6 +179,18 @@ describe('AutoFailure: the Details fold under a failed connect', () => {
         const html = box({ tried: [], verdict: 'network_down', dev: true });
         expect(html).toContain('Daal did not get as far as trying anything.');
         expect(html).not.toContain('<ol');
+    });
+    it('with the rows the page passes: each try by kind, in plain words — still no engine token', () => {
+        const rows = triedRows(tr(EN), tried, undefined);
+        const html = box({ rows });
+        expect(html).toContain('VLESS Reality');
+        expect(html).toContain('Hysteria 2');
+        expect(html).toContain('The server did not answer');
+        for (const raw of ['vless-reality', 'hysteria2', 'tcp_connect_timeout', 'udp_no_reply', 'start_failed']) {
+            expect(html, raw).not.toContain(raw);
+        }
+        const htmlFa = box({ locale: 'fa', rows: triedRows(tr(FA), tried, undefined) }, FA);
+        expect(htmlFa).toContain(FA['home.tried.no_answer']);
     });
     it('renders in Persian, with Persian digits', () => {
         const html = box({ locale: 'fa' }, FA);

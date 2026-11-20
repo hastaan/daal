@@ -6,8 +6,9 @@
 //  - the app's own confirm sheet in place of window.confirm (H-29);
 //  - the QR sheet: no counters unless developer mode; it draws under
 //    StrictMode (H-39);
-//  - the wizard: no "Coming soon", the token path once, the cost line,
-//    and "Add the first person" at the end.
+//  - the wizard: it opens on the hosting companies (only Hetzner can be
+//    chosen, the rest say "In development"), the token path once, the
+//    cost line, and "Add the first person" at the end.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { StrictMode } from 'react';
@@ -15,7 +16,7 @@ import en from '../i18n/d2/d2-extra.en.json';
 import fa from '../i18n/d2/d2-extra.fa.json';
 import uiEn from '../i18n/en.json';
 import uiFa from '../i18n/fa.json';
-import { byAttr } from '../test/miniDom';
+import { all, byAttr } from '../test/miniDom';
 import type { FakeNode } from '../test/miniDom';
 import { createRig } from '../test/rig';
 import type { Rig } from '../test/rig';
@@ -189,7 +190,7 @@ describe('the QR sheet (C7.2b)', () => {
 });
 
 describe('the wizard (C7.8)', () => {
-    it('step 1: no provider tiles, the token path once, the cost line first', () => {
+    it('step 1 key screen: the token path once, the cost line first', () => {
         expect(wizardSource.includes("t('wiz.provider.soon')")).toBe(false);
         expect(wizardSource.includes("t('wiz.provider.label')")).toBe(false);
         expect(wizardSource.includes("t('wiz.provider.vps.tip.body')")).toBe(false);
@@ -204,6 +205,101 @@ describe('the wizard (C7.8)', () => {
         expect(UI_FA['wiz.step.cloud.line']).toMatch(/۵ تا ۸ یورو/);
         expect(wizardSource).toContain("blurbKey: 'wiz.step.cloud.line'");
         expect(wizardSource.includes("t('wiz.eyebrow')")).toBe(false);
+    });
+
+    it('step 1 opens on the hosting companies: Hetzner chosen, the rest in development and inert', async () => {
+        const { HostList } = await import('./PublisherWizard');
+        const picked: string[] = [];
+        let continued = 0;
+        let cancelled = 0;
+        const m = await rig.mount(
+            <HostList
+                t={t}
+                provider="hetzner"
+                onPick={(id) => picked.push(id)}
+                onCancel={() => (cancelled += 1)}
+                onContinue={() => (continued += 1)}
+            />,
+        );
+        const hosts = all(m.container, (n) => n.getAttribute?.('role') === 'radio');
+        expect(hosts.map((n) => n.getAttribute('data-button'))).toEqual([
+            'host-hetzner',
+            'host-vultr',
+            'host-digitalocean',
+            'host-linode',
+            'host-custom',
+        ]);
+        const hetzner = button(m.container, 'host-hetzner')!;
+        expect(hetzner.getAttribute('aria-checked')).toBe('true');
+        expect(hetzner.textContent).toContain(EN['wiz.host.available']);
+        expect(hetzner.textContent).toContain(EN['wiz.host.hetzner.line']);
+        for (const id of ['vultr', 'digitalocean', 'linode', 'custom']) {
+            const card = button(m.container, `host-${id}`)!;
+            expect(card.getAttribute('data-host')).toBe('in-development');
+            expect(card.getAttribute('aria-disabled')).toBe('true');
+            expect(card.textContent).toContain(EN['wiz.host.soon']);
+            // No price and no region for a company Daal cannot rent from.
+            expect(card.textContent).not.toMatch(/€|\$|month|Germany|Worldwide/);
+            await rig.click(card);
+            expect(card.getAttribute('aria-checked')).toBe('false');
+        }
+        expect(picked).toEqual([]);
+        expect(hetzner.getAttribute('aria-checked')).toBe('true');
+        // One tap: Continue is ready because the only company is chosen.
+        const next = button(m.container, 'wiz-next')!;
+        expect(next.getAttribute('disabled')).toBeNull();
+        expect(next.textContent).toContain(UI_EN['common.continue']);
+        await rig.click(next);
+        expect(continued).toBe(1);
+        await rig.click(button(m.container, 'wiz-back'));
+        expect(cancelled).toBe(1);
+    });
+
+    it('the wizard shows the key after Continue; Back returns to the companies', async () => {
+        const { default: PublisherWizard } = await import('./PublisherWizard');
+        const m = await rig.mount(<PublisherWizard t={t} onDone={() => {}} onCancel={() => {}} />);
+        const title = () => all(m.container, (n) => n.nodeName === 'H2')[0]?.textContent ?? '';
+        expect(title()).toBe(EN['wiz.host.title']);
+        expect(byAttr(m.container, 'data-testid', 'wizard-hosts')).not.toBeNull();
+        // The key field is not on the first screen.
+        expect(all(m.container, (n) => n.nodeName === 'INPUT').length).toBe(0);
+        // Still step 1 of 3.
+        expect(button(m.container, 'wizard-step-1')!.getAttribute('aria-current')).toBe('step');
+        await rig.click(button(m.container, 'wiz-next'));
+        expect(title()).toBe(UI_EN['wiz.step.cloud.title']);
+        expect(byAttr(m.container, 'data-testid', 'wizard-cost')!.textContent).toBe(UI_EN['wiz.step.cloud.line']);
+        expect(button(m.container, 'wizard-step-1')!.getAttribute('aria-current')).toBe('step');
+        const back = button(m.container, 'wiz-back')!;
+        expect(back.textContent).toContain(UI_EN['wiz.nav.back']);
+        await rig.click(back);
+        expect(title()).toBe(EN['wiz.host.title']);
+    });
+
+    it('a resumed setup starts on the key: its company is already fixed', async () => {
+        const { default: PublisherWizard } = await import('./PublisherWizard');
+        const m = await rig.mount(<PublisherWizard t={t} operatorId={7} onDone={() => {}} onCancel={() => {}} />);
+        expect(byAttr(m.container, 'data-testid', 'wizard-hosts')).toBeNull();
+        expect(button(m.container, 'wiz-back')!.textContent).toContain(UI_EN['wiz.nav.cancel']);
+    });
+
+    it('Back on the key screen goes to the companies before it leaves', async () => {
+        const { wizardBack } = await import('./PublisherWizard');
+        expect(wizardBack({ building: false, stepIdx: 0, hasRootBack: true, keyAfterHost: true })).toBe('host');
+        expect(wizardBack({ building: false, stepIdx: 0, hasRootBack: false, keyAfterHost: true })).toBe('host');
+        expect(wizardBack({ building: false, stepIdx: 1, hasRootBack: true, keyAfterHost: false })).toBe('step');
+        expect(wizardBack({ building: true, stepIdx: 0, hasRootBack: true, keyAfterHost: true })).toBe('refuse');
+    });
+
+    it('the company strings exist in both languages and the Persian is the house vocabulary', () => {
+        for (const k of ['wiz.host.title', 'wiz.host.intro', 'wiz.host.hetzner.line', 'wiz.host.available', 'wiz.host.soon', 'wiz.host.linode', 'wiz.host.own']) {
+            expect(EN[k], k).toBeTruthy();
+            expect(FA[k], k).toBeTruthy();
+        }
+        expect(FA['wiz.host.soon']).toBe('در دست ساخت');
+        expect(FA['wiz.host.intro']).toContain('حساب میزبانی');
+        // The price range is the cost line's, not a new claim.
+        expect(EN['wiz.host.hetzner.line']).toContain('€5–8');
+        expect(UI_EN['wiz.step.cloud.line']).toContain('€5–8');
     });
 
     it('done: "Add the first person" is the one primary, the check words are chips, no hex', () => {

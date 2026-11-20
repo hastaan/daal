@@ -91,6 +91,143 @@
 
   /* information tone (badges, notices) */
   --info:       var(--cyan);
+
+  /* roles that differ between the themes. In dark each one is the value
+   * the components used to spell out, so the dark theme is unchanged. */
+  --gold-fill:       var(--gold);       /* primary button, toggle on */
+  --gold-warm-fill:  var(--gold-warm);  /* selected segment, tab mark */
+  --on-gold:         #1f1401;           /* text and icons on a gold fill */
+  --on-accent:       #0b1f24;           /* glyph on a green/amber/red disc */
+  --knob:            var(--fg);         /* toggle knob */
+  --knob-shadow:     none;
+  --hover:           rgba(246, 241, 233, 0.04);
+  --tint-1:          rgba(255, 255, 255, 0.04);  /* a faint lift: chips, keys */
+  --tint-2:          rgba(255, 255, 255, 0.06);  /* selected row */
+  --scrim:           rgba(0, 0, 0, 0.55);
+  --shadow-md:       0 16px 40px rgba(0, 0, 0, 0.4);
+  --shadow-lg:       0 30px 60px rgba(0, 0, 0, 0.45);
+  --body-glow-1:     #15414b;
+  --body-glow-2:     #104040;
+}
+
+/* ---- light theme ------------------------------------------------------
+ * Warm paper page, near-white cards on a hairline, dark teal text.
+ * Gold, green, amber, red and cyan are darkened so that as text or icon
+ * they reach WCAG AA (4.5:1) on every light surface and on their own 16 %
+ * badge tint; a gold *fill* stays bright and keeps dark text (--gold-fill,
+ * --on-gold). Glyphs on a coloured disc turn white (--on-accent).
+ *
+ * Two ways in, the same values: Settings → Light sets
+ * html[data-theme="light"]; Settings → System leaves the attribute empty
+ * and the phone's own setting decides (prefers-color-scheme). `:root[...]`
+ * outranks the generated legacy overrides in styles.tokens.css, which load
+ * after this file. The old token names are pointed at the new ones so the
+ * screens still on them follow too. design/mix.ts mirrors these values
+ * (LIGHT); a test holds the two together.
+ */
+:root[data-theme="light"] {
+  --bg:         #f6f2ea;
+  --bg-deep:    #efe9de;
+  --surface:    #fffdf9;
+  --surface-2:  #f2ede4;
+  --surface-3:  #ddd6ca;
+  --line:       #d9d1c3;
+  --line-soft:  #e7e0d4;
+  --fg:         #14353c;
+  --muted:      #4c5f64;
+  --dim:        #5a6b70;
+  --gold:       #7a580b;
+  --gold-warm:  #7c5509;
+  --gold-deep:  #6a4b09;
+  --green:      #1b6a3c;
+  --green-dim:  #336a47;
+  --amber:      #a64b00;
+  --red:        #ac2820;
+  --cyan:       #19656e;
+  --info:       var(--cyan);
+
+  --gold-fill:       #d2a640;
+  --gold-warm-fill:  #dcae52;
+  --on-gold:         #1f1401;
+  --on-accent:       #ffffff;
+  --knob:            #ffffff;
+  --knob-shadow:     0 1px 3px rgba(20, 53, 60, 0.3);
+  --hover:           rgba(20, 53, 60, 0.05);
+  --tint-1:          rgba(20, 53, 60, 0.04);
+  --tint-2:          rgba(20, 53, 60, 0.07);
+  --scrim:           rgba(20, 30, 30, 0.28);
+  --shadow-md:       0 10px 28px rgba(20, 53, 60, 0.16);
+  --shadow-lg:       0 20px 44px rgba(20, 53, 60, 0.18);
+  --body-glow-1:     #fbf8f2;
+  --body-glow-2:     #edf1ec;
+
+  --teal-deep:     var(--bg);
+  --teal-surface:  var(--surface);
+  --teal-raised:   var(--surface-2);
+  --teal-border:   var(--line);
+  --teal-hairline: var(--line-soft);
+  --paper:         var(--fg);
+  --paper-dim:     var(--muted);
+  --ink-soft:      var(--muted);
+  --ink-mute:      var(--dim);
+  --danger:        var(--red);
+  --success:       var(--green);
+  --warn:          var(--amber);
+  --gold-soft:     var(--gold-warm);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg:         #f6f2ea;
+    --bg-deep:    #efe9de;
+    --surface:    #fffdf9;
+    --surface-2:  #f2ede4;
+    --surface-3:  #ddd6ca;
+    --line:       #d9d1c3;
+    --line-soft:  #e7e0d4;
+    --fg:         #14353c;
+    --muted:      #4c5f64;
+    --dim:        #5a6b70;
+    --gold:       #7a580b;
+    --gold-warm:  #7c5509;
+    --gold-deep:  #6a4b09;
+    --green:      #1b6a3c;
+    --green-dim:  #336a47;
+    --amber:      #a64b00;
+    --red:        #ac2820;
+    --cyan:       #19656e;
+    --info:       var(--cyan);
+
+    --gold-fill:       #d2a640;
+    --gold-warm-fill:  #dcae52;
+    --on-gold:         #1f1401;
+    --on-accent:       #ffffff;
+    --knob:            #ffffff;
+    --knob-shadow:     0 1px 3px rgba(20, 53, 60, 0.3);
+    --hover:           rgba(20, 53, 60, 0.05);
+    --tint-1:          rgba(20, 53, 60, 0.04);
+    --tint-2:          rgba(20, 53, 60, 0.07);
+    --scrim:           rgba(20, 30, 30, 0.28);
+    --shadow-md:       0 10px 28px rgba(20, 53, 60, 0.16);
+    --shadow-lg:       0 20px 44px rgba(20, 53, 60, 0.18);
+    --body-glow-1:     #fbf8f2;
+    --body-glow-2:     #edf1ec;
+
+    --teal-deep:     var(--bg);
+    --teal-surface:  var(--surface);
+    --teal-raised:   var(--surface-2);
+    --teal-border:   var(--line);
+    --teal-hairline: var(--line-soft);
+    --paper:         var(--fg);
+    --paper-dim:     var(--muted);
+    --ink-soft:      var(--muted);
+    --ink-mute:      var(--dim);
+    --danger:        var(--red);
+    --success:       var(--green);
+    --warn:          var(--amber);
+    --gold-soft:     var(--gold-warm);
+    color-scheme: light;
+  }
 }
 
 /* busy rings, indeterminate progress */
@@ -110,8 +247,8 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   background-image:
-    radial-gradient(1100px 600px at 12% -10%, #15414b 0%, transparent 60%),  /* oklch(35% 0.05 215) */
-    radial-gradient(900px 500px at 92% 8%, #104040 0%, transparent 60%);  /* oklch(34% 0.05 195) */
+    radial-gradient(1100px 600px at 12% -10%, var(--body-glow-1) 0%, transparent 60%),  /* dark: oklch(35% 0.05 215) */
+    radial-gradient(900px 500px at 92% 8%, var(--body-glow-2) 0%, transparent 60%);  /* dark: oklch(34% 0.05 195) */
   background-attachment: fixed;
 }
 
