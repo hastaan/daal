@@ -42,6 +42,13 @@ use crate::relay_identity::{resign_and_republish, Freshness};
 /// Nothing was rented. The UI says "Hetzner has not allowed this account
 /// a second address yet" with the support link.
 pub const E_STANDBY_LIMIT: &str = "E_STANDBY_LIMIT";
+/// The relay can bind an address but binds it where its own traffic could
+/// leave from it (relay-v1.5.1 and older: no `scope link`), which would
+/// reveal a sealed standby after a lost DHCP lease. The helper asks the
+/// box before renting (exit 10), so nothing bills. Only a new relay fixes
+/// it; the UI says "This relay is too old for a standby address. Set up a
+/// new relay to use it."
+pub const E_STANDBY_NEEDS_REBUILD: &str = "E_STANDBY_NEEDS_REBUILD";
 /// Open mode asked for while the relay has an Everyone file (D-1).
 pub const E_STANDBY_OPEN_REFUSED: &str = "E_STANDBY_OPEN_REFUSED";
 /// The standby could not be given back and is still billing; the row
@@ -177,6 +184,7 @@ fn map_cli_err(e: BridgeError) -> WizardError {
     if let BridgeError::SubprocessFailed { rc, stderr } = &e {
         match *rc {
             9 => return coded(E_STANDBY_LIMIT, stderr.trim()),
+            10 => return coded(E_STANDBY_NEEDS_REBUILD, stderr.trim()),
             8 => return coded(E_NOT_BUILT, stderr.trim()),
             6 => return coded(E_STANDBY_STILL_BILLING, stderr.trim()),
             _ => {}

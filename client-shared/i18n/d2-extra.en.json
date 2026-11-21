@@ -1832,6 +1832,7 @@
   "pub.addons.google.hand.url": "Web app address",
   "pub.addons.google.hand.secret": "The script holds this relay's write key. Share it with no one.",
   "pub.addons.err.E_STANDBY_LIMIT": "Hetzner does not give this account a second address yet. Ask Hetzner support to raise the limit.",
+  "pub.addons.err.E_STANDBY_NEEDS_REBUILD": "This relay is too old for a standby address. Set up a new relay to use it.",
   "pub.addons.err.E_STANDBY_STILL_BILLING": "The standby address was not given back and still bills.",
   "pub.addons.err.E_STANDBY_NOT_PUBLISHED": "People's apps have not been told yet, so the standby stays, and bills, until they are.",
   "pub.addons.err.E_CDN_NO_TOKEN": "Connect Cloudflare first.",

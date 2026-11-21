@@ -33,7 +33,9 @@
 #         key → no dial, typed key, open variant, stale address), the CDN
 #         front (provisioning against the lab's Cloudflare, every cdn-*
 #         censor) and the Google channel (Path A/B, every refresh-google-*
-#         censor). Parts that wait on engine code still landing report
+#         censor) on the tree daemon; then the standby ops and one cdn-*
+#         world again on the PINNED release box (standby.pinned,
+#         cdn-sni-block-ech.pinned). Parts that wait on engine code still landing report
 #         SKIPPED "WAITS ON <lane> <item>" (driver/addons_net.go).
 #
 # Each world is one ./run.sh (own namespaces, own evidence directory under
@@ -88,6 +90,13 @@ addon_worlds() { # [family…] for the scenario worlds; none = every family (ful
       refresh-google-*) plan+=("$s"$'\t'"--mgmt=tree --ops google-refresh $s${fams:+ $fams}") ;;   # the walk through the Google front under this censor (google_expect)
     esac
   done
+  # The add-ons on the PINNED box (no --mgmt=tree: the box downloads the
+  # release this tree pins from the lab mirror, as a real relay does). The
+  # box side of both add-ons is the release's daal-relay-mgmt — the standby
+  # bound with `scope link`, the door at POST /cdn — so the tree daemon
+  # above cannot speak for what people's relays actually run.
+  plan+=("standby.pinned"$'\t'"--ops standby,standby-promote,standby-sealed,standby-open,standby-stale clean vless-reality hysteria2")   # add-on 1 on the released relay
+  plan+=("cdn-sni-block-ech.pinned"$'\t'"--ops cdn cdn-sni-block-ech${fams:+ $fams}")   # add-on 2 on the released relay: the door, the route through the edge with ECH, one censor
 }
 plan=()
 if [[ "$mode" == addons ]]; then

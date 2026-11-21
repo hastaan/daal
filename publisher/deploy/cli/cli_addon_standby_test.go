@@ -169,6 +169,55 @@ func TestStandbyAdd_OldBoxRefusedBeforeRenting(t *testing.T) {
 	}
 }
 
+// A relay that binds the standby as a global address (relay-v1.5.1:
+// bind-address, no cdn) could send its own traffic from it after a lost
+// DHCP lease and reveal it. Refused with its own code and exit, before
+// anything is rented.
+func TestStandbyAdd_GlobalBindingBoxRefusedBeforeRenting(t *testing.T) {
+	b := newFakeBox()
+	b.caps = &mgmt.BoxCapabilities{OK: true, MgmtAPIVersion: mgmt.MgmtAPIVersionSplitRotation,
+		Capabilities: []string{mgmt.CapRotateCredentialsScoped, mgmt.CapRotateTLSScoped, mgmt.CapShadowsocks2022,
+			mgmt.CapAnyTLSInbound, mgmt.CapTUICUsers, mgmt.CapBindAddress}} // what relay-v1.5.1 advertises
+	box := withFakeBox(t, b)
+	f := newStandbyFake(box)
+	withFakeProvider(t, f)
+	recordFile, tokenFile, keyFile := standbyFixture(t, nil)
+	var stdout, stderr bytes.Buffer
+	if rc := Run(standbyAddArgs(recordFile, tokenFile, keyFile), &stdout, &stderr); rc != exitStandbyNeedsRebuild {
+		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "E_STANDBY_NEEDS_REBUILD:") {
+		t.Errorf("first stderr line is not the code: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Nothing was rented") {
+		t.Errorf("stderr does not say nothing was rented: %q", stderr.String())
+	}
+	if strings.Join(box.calls, "|") != "capabilities" {
+		t.Errorf("calls = %v, want the probe only (nothing rented, nothing bound)", box.calls)
+	}
+	if len(f.removed) != 0 || stdout.Len() != 0 {
+		t.Errorf("released %v, stdout %q", f.removed, stdout.String())
+	}
+}
+
+// The exit codes the wizard maps one by one (addon_standby.rs
+// map_cli_err, and 3 through map_rotation_err) stay distinct.
+func TestStandbyExitCodesDistinct(t *testing.T) {
+	seen := map[int]string{}
+	for _, c := range []struct {
+		name string
+		code int
+	}{
+		{"usage", 2}, {"capability", exitCapabilityUnsupported}, {"still-reserved", exitAddressStillReserved},
+		{"not-built", exitNotBuilt}, {"limit", exitStandbyLimit}, {"needs-rebuild", exitStandbyNeedsRebuild},
+	} {
+		if prev, dup := seen[c.code]; dup {
+			t.Errorf("exit %d is both %s and %s", c.code, prev, c.name)
+		}
+		seen[c.code] = c.name
+	}
+}
+
 func TestStandbyAdd_ShadowsocksOnlyRelayRefused(t *testing.T) {
 	box := withFakeBox(t, newFakeBox())
 	withFakeProvider(t, newStandbyFake(box))

@@ -58,6 +58,10 @@ func opDesync(rc *RunCtx) {
 		presets = []string{"sni-cut"}
 	}
 	for _, f := range rc.activeFamilies() {
+		if why, refused := desyncRefused[f.Name]; refused {
+			rc.desyncRefusedSessions(f, phase, presets, why)
+			continue
+		}
 		if !desyncFamilies[f.Name] {
 			rc.R.Add(f.Name, phase, "sessions", Skipped, Skipped,
 				"the split cannot sit under this family's outbound ("+desyncWhyNot(f.Name)+")", nil, time.Now())
@@ -82,10 +86,78 @@ func opDesync(rc *RunCtx) {
 }
 
 // desyncFamilies are the families whose route outbound the engine puts
-// behind the desync detour (core/engine desync.go desyncTypes: vless,
-// shadowsocks, anytls, …). Not naive (Cronet opens its own sockets),
-// not hysteria2 / tuic (UDP: no TCP hello).
-var desyncFamilies = map[string]bool{"vless-reality": true, "websocket-tls": true, "shadowsocks": true, "anytls": true}
+// behind the desync detour (core/engine desync.go desyncTypes and
+// desyncApplicable: vless, anytls, …). Not naive (Cronet opens its own
+// sockets), not hysteria2 / tuic (UDP: no TCP hello), and not
+// shadowsocks (desyncRefused).
+var desyncFamilies = map[string]bool{"vless-reality": true, "websocket-tls": true, "anytls": true}
+
+// desyncRefused are the families the detour COULD sit under and the
+// engine must refuse to cut, and why. They still get one session per
+// preset — the phone asks for the cut exactly as for the others — and
+// the checks are that the route works and that nothing was cut.
+//
+// shadowsocks: a cut breaks it. Its server reads the fixed-length
+// request header with one Read and resets the connection when that Read
+// is short (sing-shadowsocks shadowaead_2022, ErrBadHeader), and every
+// preset's first segment is 1 byte. Until the engine refused it, split1,
+// sni-cut and chain turned this family's working route into tcp_reset
+// on 8446 in both sni-rst worlds — while there was nothing to hide: the
+// stream has no ClientHello, so no SNI filter reads it uncut either.
+var desyncRefused = map[string]string{
+	"shadowsocks": "its server reads the request header in one Read and resets on a short one; there is no ClientHello to hide",
+}
+
+// desyncRefusedSessions: for a family the engine must not cut, each
+// preset asked for still connects (the scenario's desync expectation,
+// which for these families is the same as without the cut), and the
+// censor-side tap shows no flow that began with the 1-byte segment every
+// preset would have sent.
+func (rc *RunCtx) desyncRefusedSessions(f Family, phase string, presets []string, why string) {
+	for _, preset := range presets {
+		expect, err := rc.Scn.DesyncExpect(preset, f.Name)
+		if err != nil {
+			rc.R.Add(f.Name, phase, preset+".expectation", Pass, Fail, err.Error(), nil, time.Now())
+			continue
+		}
+		from := time.Now()
+		saved := rc.R.prefix
+		rc.R.prefix = preset + "."
+		rc.desync = fmt.Sprintf(`{"preset":%q}`, preset)
+		outcome := rc.Session(f, rc.Pack, phase, expect)
+		rc.desync = ""
+		rc.R.prefix = saved
+		t0 := time.Now()
+		check := preset + ".not_cut"
+		if outcome == Skipped || outcome == Refused {
+			rc.R.Add(f.Name, phase, check, Skipped, Skipped, "the session did not dial ("+outcome+")", nil, t0)
+			continue
+		}
+		pkts, err := ReadFlowTap(rc.P)
+		if err != nil {
+			rc.R.Add(f.Name, phase, check, Pass, Fail, "flow tap: "+err.Error(), nil, t0)
+			continue
+		}
+		var flows [][]int
+		cut := 0
+		for _, fd := range firstData(pkts, f.Endpoint.Port, from, time.Now()) {
+			flows = append(flows, fd.Sizes)
+			if len(fd.Sizes) > 0 && fd.Sizes[0] == 1 {
+				cut++
+			}
+		}
+		ev := map[string]any{"port": f.Endpoint.Port, "flows": len(flows), "first_data_packets": flows, "why": why}
+		switch {
+		case len(flows) == 0:
+			rc.R.Add(f.Name, phase, check, Pass, Fail, "no TCP flow to the family's endpoint opened during the session", ev, t0)
+		case cut > 0:
+			rc.R.Add(f.Name, phase, check, Pass, Fail,
+				fmt.Sprintf("%d of %d flows began with a 1-byte data packet: the engine cut a %s route (%s)", cut, len(flows), f.Name, why), ev, t0)
+		default:
+			rc.R.Add(f.Name, phase, check, Pass, Pass, "", ev, t0)
+		}
+	}
+}
 
 func desyncWhyNot(family string) string {
 	switch family {

@@ -143,7 +143,9 @@ type Scenario struct {
 	// Desync: what op desync expects when the engine's production
 	// ClientHello split (core/desync, plan T2) is on — preset name →
 	// family (or "*") → pass|blocked. The op runs every preset listed
-	// here, on every family the split can sit under (desyncFamilies); a
+	// here, on every family the split can sit under (desyncFamilies), and
+	// on every family the engine must refuse to cut (desyncRefused:
+	// shadowsocks), whose expectation is the one it has uncut; a
 	// scenario that lists none is run with sni-cut only and the
 	// scenario's own expectation ("the split must break nothing").
 	Desync map[string]map[string]string `json:"desync,omitempty"`

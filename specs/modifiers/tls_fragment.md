@@ -76,7 +76,10 @@ route on the current network (the automatic pass's connect ladder,
 the pack offer, then sni-cut, tlsrec-sni, chain; at most two per route
 per pass; the winner remembered per network); a pack's `apply: always` is held as an
 offer until this record is PASS. Not applied together with
-`fragment`/`record_fragment` (stock_fragment) or `tcp_fast_open`.
+`fragment`/`record_fragment` (stock_fragment) or `tcp_fast_open`, and
+never to shadowsocks (`header_in_one_read`: its server reads the fixed
+request header in one Read and resets on the 1-byte first segment every
+preset sends; worldbox saw `tcp_reset` until the engine refused it).
 
 Measured in worldbox only: against the `sni-rst-first-two` model (first
 two data packets joined, partial parse, RST to client) split1 is

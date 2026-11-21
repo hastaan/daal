@@ -8,13 +8,21 @@ package cli
 //	standby add     --record-file --token-file --priv-key --helper-ip [--mode sealed|open]
 //	                    rent (or adopt what a killed run rented), assign without
 //	                    adopting, bind on the box, check the mgmt pin and the data
-//	                    port over it; rolls back on any failure
+//	                    port over it; rolls back on any failure. Asks the box
+//	                    first, and rents nothing for one that cannot bind (exit 3)
+//	                    or binds the address where its own traffic could leave
+//	                    from it (exit 10, E_STANDBY_NEEDS_REBUILD)
 //	standby promote --record-file --token-file
 //	                    the standby becomes the advertised address (record only)
 //	standby remove  --record-file --token-file --priv-key --helper-ip [--skip-unbind]
 //	                    unbind on the box, then release every standby of this relay
 //	                    the record does not advertise; the caller has already
 //	                    signed and published a pack without it
+//
+// Exit status beyond 0/1/2: 3 the relay cannot bind an address at all;
+// 6 a standby could not be given back and is still billing (remove);
+// 9 E_STANDBY_LIMIT; 10 E_STANDBY_NEEDS_REBUILD (add: the relay is too
+// old to bind a standby safely — a new relay is the fix).
 //
 // Output: one JSON object on stdout (the updated record is inside it;
 // --record-file is read, never written). It carries the standby key,
@@ -57,6 +65,15 @@ import (
 // this account (GATE S-1). Nothing is billing. First stderr line starts
 // with "E_STANDBY_LIMIT:".
 const exitStandbyLimit = 9
+
+// exitStandbyNeedsRebuild: the relay can bind an address but binds it
+// as a global one (relay-v1.5.1 and older; mgmt.BindsStandbySafely), so
+// after a lost DHCP lease its own traffic could leave from the sealed
+// standby and show it. Refused before anything is rented: nothing is
+// billing. Only a relay built from a newer pin binds it safely, so the
+// fix is a new relay, not a retry. First stderr line starts with
+// "E_STANDBY_NEEDS_REBUILD:".
+const exitStandbyNeedsRebuild = 10
 
 // standbyProvider is the provider surface the verbs need. Only the
 // Hetzner adapter has it; any other answers "not supported".
@@ -372,6 +389,15 @@ func runStandbyAdd(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	if !caps.Has(mgmt.CapBindAddress) {
 		fmt.Fprintf(stderr, "standby add: %v\n", mgmt.UnsupportedCapabilityError(caps, mgmt.CapBindAddress))
 		return exitCapabilityUnsupported
+	}
+	// A box that binds the standby as a global address would, after a
+	// lost DHCP lease, send its own traffic from it: the sealed address
+	// shown before anyone was told it. Also before renting.
+	if !mgmt.BindsStandbySafely(caps) {
+		fmt.Fprintf(stderr, "E_STANDBY_NEEDS_REBUILD: this relay's software binds a second address where the relay's own traffic "+
+			"could leave from it, which would reveal a standby address; a relay set up with a newer Daal binds it safely. "+
+			"Nothing was rented (the relay advertises: %s)\n", caps.Advertised())
+		return exitStandbyNeedsRebuild
 	}
 
 	out := newStandbyOut(rec)

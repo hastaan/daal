@@ -47,6 +47,8 @@ No sudo, no network, no VPS, no phone.
 | | `udp-blackhole` (+ops) | recipients and the three rotation rungs (L1, L3, L2 — the other order) **under a censor** |
 | | `release.all-families` | the pinned artefacts × all 7 families — FINDINGS F-002, kept visible until the release. **Until the pin moves, every pinned world stops at `provision`: this tree's publisher will not pin a management fingerprint the pinned health binary cannot authenticate (FINDINGS BOOT-1), and could not authenticate to the pinned daemon if it did (REL-1)** |
 | | `narrow-relay` | a relay provisioned with `--families shadowsocks,anytls` only — FINDINGS FAM-4 |
+| **addons** (and in full) | `standby*`, `cdn-*`, `refresh-google-*`, `google-channel` | the add-ons on the tree daemon (see the e2e.sh header) |
+| | `standby.pinned`, `cdn-sni-block-ech.pinned` | the standby ops and one CDN world again on the **pinned release box**: the box side of both add-ons is the release's daemon (the standby bound `scope link`, the door at `POST /cdn`), which the tree daemon cannot speak for |
 
 Which daemon a world's box runs is in its plan line (`./e2e.sh quick
 --plan`) and in every check's `box` field. In quick, **every world except
@@ -140,8 +142,8 @@ your user (`/etc/subuid`, `newuidmap`), `/dev/net/tun`, nftables with
 conntrack and NFQUEUE usable inside a user namespace, and `go gcc ip nft tc
 ss python3(+PyYAML) openssl flock timeout`. `run.sh --preflight` checks all
 of it and says what is missing (exit 77). The release artefacts this
-tree PINS must be staged in `dist-release/relay-v1.5.1/` (`gh release
-download relay-v1.5.1 --dir dist-release/relay-v1.5.1`, as CI does). The
+tree PINS must be staged in `dist-release/relay-v1.6.0/` (`gh release
+download relay-v1.6.0 --dir dist-release/relay-v1.6.0`, as CI does). The
 release script builds a release FROM THIS TREE into its own tag's
 directory and, without `--upload`, publishes nothing;
 `tools/release/README.md` says how the "pinned" box is pointed at such a
@@ -684,8 +686,8 @@ L1/L2/L3 on the four default families (FINDINGS LC-O4).
 plan T2 of `docs/blackout-tier-plan.md`) against the world's censor, where
 the scenario's `split: true` proof only runs a probe-harness one. For each
 family whose outbound the split can sit under (vless-reality,
-websocket-tls, shadowsocks, anytls — not naive, whose Cronet dials the
-relay itself, nor the UDP families) and each preset the scenario lists in
+websocket-tls, anytls — not naive, whose Cronet dials the relay itself,
+nor the UDP families; shadowsocks below) and each preset the scenario lists in
 its `desync` map (preset → family → `pass`|`blocked`; `sni-cut` alone,
 expected as the scenario expects, when it lists none), one fresh phone
 connects with the preset turned on for its route — `wb-client --desync`
@@ -710,6 +712,16 @@ forwards out-of-order segments unread). Run by the full plan in `sni-rst-statele
 listed passes) and `sni-rst-first-two` (`split1` is caught — its first
 two packets hold the whole hello — and `sni-cut`, `chain`, `tlsrec-sni`
 pass).
+
+shadowsocks is asked for every preset too, and the engine must REFUSE
+the cut (`core/engine` `desyncApplicable`: `header_in_one_read`): its
+server reads the fixed request header with one Read and resets the
+connection when that Read is short (sing-shadowsocks `shadowaead_2022`),
+and every preset's first segment is 1 byte — before the refusal, `split1`,
+`sni-cut` and `chain` turned its working route into `tcp_reset` on 8446
+in both worlds, with no ClientHello to hide. The checks are its ordinary
+session (expected as without the cut) and `<preset>.not_cut`: no flow to
+8446 began with a 1-byte data packet.
 
 #### Client-side ops — one phone that stays up
 

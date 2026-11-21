@@ -355,6 +355,37 @@ fn the_limit_is_its_own_code() {
 }
 
 #[test]
+fn a_relay_that_binds_the_standby_unsafely_is_its_own_code() {
+    // relay-v1.5.1 binds a second address as a global one: the helper
+    // refuses before renting (exit 10), and the wizard says so in its own
+    // words — not "too old for this" in general, not a retry.
+    let f = fx();
+    let op = provisioned(&f);
+    let before = rec_of(&f, op);
+    f.helper.lock().unwrap().fail_add = Some((
+        10,
+        "E_STANDBY_NEEDS_REBUILD: this relay's software binds a second address where the relay's own traffic could leave from it, which would reveal a standby address; a relay set up with a newer Daal binds it safely. Nothing was rented (the relay advertises: bind-address,rotate-credentials-scoped)\n".into(),
+    ));
+    let e = add(
+        &f.ctx,
+        StandbyAddInput {
+            operator_id: op,
+            mode: String::new(),
+        },
+        &mut noop(),
+    )
+    .unwrap_err();
+    assert!(
+        e.to_string().starts_with(&format!("{E_STANDBY_NEEDS_REBUILD}:")),
+        "{e}"
+    );
+    // Nothing rented, so nothing to give back and no row that bills.
+    assert!(list(&f.ctx, op).unwrap().is_empty());
+    assert_eq!(verbs(&f), ["price", "add"]);
+    assert_eq!(rec_of(&f, op), before);
+}
+
+#[test]
 fn a_signature_that_fails_gives_the_address_back() {
     let f = fx();
     let op = provisioned(&f);

@@ -1043,8 +1043,8 @@ func (a *autoOp) fallOver() {
 var ladderRungs = []string{"sni-cut", "tlsrec-sni"}
 
 // ladderHelloFamilies: the families whose first flight is a TLS hello the
-// split can sit under (core/engine RouteDesyncReason; desyncFamilies
-// less shadowsocks, which sends no hello).
+// split can sit under (core/engine RouteDesyncReason; desyncFamilies —
+// shadowsocks, which sends no hello and which a cut breaks, is not one).
 var ladderHelloFamilies = map[string]bool{"vless-reality": true, "websocket-tls": true, "anytls": true}
 
 // ladderCanCarry: the family is stopped as it is, and a rung of the

@@ -388,13 +388,21 @@ func opCDN(rc *RunCtx) {
 	// The seeds are the published prefixes; the roots are the ones the
 	// lab's edge chains to (the lab CA stands in for the public roots the
 	// app ships, as it does for every other lab TLS server).
-	v := rc.Pub.BindAndSign(rc.Ctx, "base-cdn.sbp", "--cdn-front", recFile, "--cdn-edge-seeds", strings.Join(CDNPublishedV4, ","),
-		"--cdn-roots-file", rc.P.CA())
+	cdnSign := []string{"--cdn-front", recFile, "--cdn-edge-seeds", strings.Join(CDNPublishedV4, ","), "--cdn-roots-file", rc.P.CA()}
+	v := rc.Pub.BindAndSign(rc.Ctx, "base-cdn.sbp", cdnSign...)
 	if !rc.R.Add("", phase, "verb.bind-and-sign.with-cdn", Pass, got(v.OK(), Pass, Fail), v.Tail(), nil, t0) {
 		return
 	}
 	_ = rc.Pub.UsersRevoke(rc.Ctx, "r1")
 	if vp := rc.Pub.UsersProvision(rc.Ctx, "r1"); !rc.R.Add("", phase, "verb.users-provision.r1", Pass, got(vp.OK(), Pass, Fail), vp.Tail(), nil, t0) {
+		return
+	}
+	// r1 is this relay's only recipient: the revoke took the shadowsocks
+	// server key with it and the provision minted a new one. The app signs
+	// again on such a reply before it builds a file (heal_after_reply), so
+	// the rig does too — with the CDN flags, since that is the pack r1's
+	// file is minted from.
+	if !rc.healAfterReply(phase, "r1", "base-cdn.sbp", cdnSign...) {
 		return
 	}
 	vp := rc.Pub.PackSBP(rc.Ctx, "base-cdn.sbp", "creds-r1.json", "pack-r1-cdn.sbp", "--cdn-roots-file", rc.P.CA(), "--cdn-front", recFile)

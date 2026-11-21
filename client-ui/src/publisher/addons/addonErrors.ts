@@ -15,6 +15,7 @@ import { classifyPublisherError } from '../wizardCommands';
 export const ADDON_ERROR_CODES = [
     // addon_standby.rs
     'E_STANDBY_LIMIT',
+    'E_STANDBY_NEEDS_REBUILD',
     'E_STANDBY_STILL_BILLING',
     'E_STANDBY_NOT_PUBLISHED',
     // addon_cdn.rs

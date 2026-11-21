@@ -718,3 +718,38 @@ func TestAddonPlanRunsEveryAddonScenario(t *testing.T) {
 		}
 	}
 }
+
+// The add-ons' box side is the RELEASED daemon's (the standby bound
+// `scope link`, the door at POST /cdn), so the release coverage must not
+// be tree-only: addons and full each run the standby ops and one cdn-*
+// world on the pinned box (no --mgmt=tree).
+func TestAddonPlanRunsTheAddonsOnThePinnedBox(t *testing.T) {
+	for _, mode := range []string{"addons", "full"} {
+		standby, cdn := false, false
+		for _, args := range e2ePlan(t, mode) {
+			if strings.Contains(args, "--mgmt=tree") {
+				continue
+			}
+			f := strings.Fields(args)
+			for i := 0; i+1 < len(f); i++ {
+				if f[i] != "--ops" {
+					continue
+				}
+				for _, o := range strings.Split(f[i+1], ",") {
+					if o == "standby" {
+						standby = true
+					}
+					if o == "cdn" && i+2 < len(f) && strings.HasPrefix(f[i+2], "cdn-") {
+						cdn = true
+					}
+				}
+			}
+		}
+		if !standby {
+			t.Errorf("%s mode runs op standby on no pinned box", mode)
+		}
+		if !cdn {
+			t.Errorf("%s mode runs op cdn under a cdn-* censor on no pinned box", mode)
+		}
+	}
+}

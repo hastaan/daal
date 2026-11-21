@@ -88,6 +88,19 @@ describe('what a failure says', () => {
         expect(e.line).toBe(en('pub.addons.err.E_STANDBY_LIMIT'));
         expect(e.detail).toContain('resource_limit_exceeded');
         expect(errs.addonErrorText(en, 'kaboom').line).toBe(en('pub.addons.err.other'));
+        // A relay that would bind the standby where its own traffic can
+        // leave from it: one plain line, the helper's text in Details only.
+        const old = 'E_STANDBY_NEEDS_REBUILD: E_STANDBY_NEEDS_REBUILD: this relay\'s software binds a second address where the relay\'s own traffic could leave from it; Nothing was rented (the relay advertises: bind-address)';
+        const r = errs.addonErrorText(en, old);
+        expect(r.code).toBe('E_STANDBY_NEEDS_REBUILD');
+        expect(r.line).toBe('This relay is too old for a standby address. Set up a new relay to use it.');
+        expect(r.line).not.toContain('bind-address');
+        expect(r.detail).toContain('Nothing was rented');
+        const rf = errs.addonErrorText(fa, old);
+        expect(rf.line).toBe(FA['pub.addons.err.E_STANDBY_NEEDS_REBUILD']);
+        expect(rf.line).toContain('آدرس یدکی');
+        expect(rf.line).not.toContain('بزنید');
+        expect(rf.line).not.toMatch(/[A-Za-z]/);
         // The Google check's tail names its reason.
         const g = errs.addonErrorText(en, 'E_GOOGLE_CHECK_FAILED: not_deployed: the script did not answer');
         expect(g.line).toContain(en('pub.addons.err.E_GOOGLE_CHECK_FAILED'));

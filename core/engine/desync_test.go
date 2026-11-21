@@ -325,6 +325,8 @@ func TestDesyncNotApplicable(t *testing.T) {
 		{"tfo", "vless-reality", `{"type":"vless","tag":"active","server":"203.0.113.10","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","tcp_fast_open":true,"tls":{"enabled":true,"server_name":"a"}}`, "tcp_fast_open"},
 		{"fragment", "vless-reality", `{"type":"vless","tag":"active","server":"203.0.113.10","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","tls":{"enabled":true,"server_name":"a","fragment":true}}`, "stock_fragment"},
 		{"record_fragment", "trojan", `{"type":"trojan","tag":"active","server":"203.0.113.10","server_port":443,"password":"p","tls":{"enabled":true,"server_name":"a","record_fragment":true}}`, "stock_fragment"},
+		// The server reads its fixed header in one Read: a cut breaks it.
+		{"shadowsocks", "shadowsocks", `{"type":"shadowsocks","tag":"active","server":"203.0.113.10","server_port":8446,"method":"2022-blake3-aes-128-gcm","password":"x"}`, "header_in_one_read"},
 	}
 	for _, c := range cases {
 		row := routestore.RouteRow{RouteID: "na-" + c.name, TransportFamily: c.family}
@@ -349,15 +351,15 @@ func TestDesyncNotApplicable(t *testing.T) {
 	}
 	// Cuttable but with no TLS hello: the ladder's question says no,
 	// though an explicit strategy would still be applied.
-	ss := routestore.RouteRow{RouteID: "na-ss", TransportFamily: "shadowsocks"}
-	ssProfile := `{"type":"shadowsocks","tag":"active","server":"203.0.113.10","server_port":8388,"method":"2022-blake3-aes-128-gcm","password":"x"}`
-	if got := RouteDesyncReason(ss, []byte(ssProfile)); got != "no_tls_hello" {
-		t.Fatalf("shadowsocks: RouteDesyncReason = %q, want no_tls_hello", got)
+	vm := routestore.RouteRow{RouteID: "na-vmess", TransportFamily: "vmess"}
+	vmProfile := `{"type":"vmess","tag":"active","server":"203.0.113.10","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555"}`
+	if got := RouteDesyncReason(vm, []byte(vmProfile)); got != "no_tls_hello" {
+		t.Fatalf("plain vmess: RouteDesyncReason = %q, want no_tls_hello", got)
 	}
 	var ob map[string]any
-	_ = json.Unmarshal([]byte(ssProfile), &ob)
-	if got := desyncApplicable(ss, ob); got != "" {
-		t.Fatalf("shadowsocks: desyncApplicable = %q, want applicable", got)
+	_ = json.Unmarshal([]byte(vmProfile), &ob)
+	if got := desyncApplicable(vm, ob); got != "" {
+		t.Fatalf("plain vmess: desyncApplicable = %q, want applicable", got)
 	}
 	for _, p := range []string{
 		`{"type":"anytls","tag":"active","server":"203.0.113.10","server_port":443,"password":"p"}`,
@@ -366,6 +368,55 @@ func TestDesyncNotApplicable(t *testing.T) {
 		if got := RouteDesyncReason(routestore.RouteRow{RouteID: "ok", TransportFamily: "vmess"}, []byte(p)); got != "" {
 			t.Errorf("%s: RouteDesyncReason = %q", p, got)
 		}
+	}
+}
+
+// A shadowsocks route is never cut, whatever asks for it. Its server
+// reads the fixed request header in ONE Read and resets the connection
+// when that Read is short (sing-shadowsocks shadowaead_2022), and every
+// preset's first segment is 1 byte: a cut turns a working route into
+// tcp_reset (seen in the censor lab under both SNI-reset models).
+func TestDesyncNeverCutsShadowsocks(t *testing.T) {
+	t.Cleanup(ClearAllRouteDesync)
+	allowPackAlways(t)
+	const ssProfile = `{"type":"shadowsocks","tag":"active","server":"203.0.113.10","server_port":8446,"method":"2022-blake3-aes-128-gcm","password":"a:b"}`
+	row := routestore.RouteRow{RouteID: "rt-ss", TransportFamily: "shadowsocks",
+		FamilySpecificConfigJSON: `{"_desync":{"v":1,"apply":"always","strategy":{"preset":"sni-cut"}}}`}
+	if got := RouteDesyncReason(row, []byte(ssProfile)); got != "header_in_one_read" {
+		t.Fatalf("RouteDesyncReason = %q, want header_in_one_read", got)
+	}
+	if RouteCanDesync(row, []byte(ssProfile)) {
+		t.Fatal("the ladder would spend an attempt cutting shadowsocks")
+	}
+	check := func(source string, cfg *SingBoxConfig, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", source, err)
+		}
+		t.Cleanup(retireRefreshInlet)
+		var raw map[string]any
+		_ = json.Unmarshal(mustJSON(t, cfg), &raw)
+		active, ds := activeAndDesync(raw)
+		if ds != nil || active["detour"] != nil {
+			t.Errorf("%s: shadowsocks put behind the desync detour (detour=%v)", source, active["detour"])
+		}
+		if active["server_port"] != float64(8446) || active["password"] != "a:b" {
+			t.Errorf("%s: the outbound changed: %v", source, active)
+		}
+	}
+	// The pack's "always", with the gate open.
+	cfg, err := BuildSingBoxConfig(row, []byte(ssProfile))
+	check("pack always", cfg, err)
+	// A remembered choice for the route.
+	if err := SetRouteDesync(row.RouteID, desync.Strategy{Preset: "split1"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = BuildSingBoxConfig(row, []byte(ssProfile))
+	check("remembered", cfg, err)
+	// A strategy handed to one build, for each preset.
+	for name := range desync.Presets {
+		cfg, err = BuildSingBoxConfigWithDesync(row, []byte(ssProfile), desync.Strategy{Preset: name})
+		check("explicit "+name, cfg, err)
 	}
 }
 

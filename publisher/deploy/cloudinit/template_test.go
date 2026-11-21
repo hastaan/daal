@@ -280,7 +280,11 @@ func TestRender_GoldenSHA256(t *testing.T) {
 	// 2026-11-20: re-pinned for the hostname alone (review C1, prober's-eye
 	// audit): `hostname: daal-relay` became `hostname: ubuntu`, with a
 	// comment above it. No port, rule or unit moved. Fresh relays only.
-	const want = "88035eeb9401ad6b11cae8f8aacaed499bc50c162d2ba3278081133f7c6a2260"
+	// 2026-11-21: the pin bump to relay-v1.6.0 (artefact URLs, and the
+	// daal-relay-health / daal-relay-mgmt hashes and signatures, in the
+	// rendered user-data). Nothing else: at HEAD before the bump the
+	// old value still matched.
+	const want = "5956f998ec2120da8c03347c526aa2bc9bb15f4cd8f95e270d15817a98819ad9"
 	if gotHex != want {
 		t.Errorf("rendered cloud-init drift: got %s want %s", gotHex, want)
 	}
@@ -378,7 +382,7 @@ func TestArtifacts_FieldFormats(t *testing.T) {
 func TestArtifacts_AllSigsVerifyAgainstPubkey(t *testing.T) {
 	dir := os.Getenv("DAAL_ARTIFACT_TESTDATA_DIR")
 	if dir == "" {
-		dir = filepath.Clean("../../../dist-release/relay-v1.5.1")
+		dir = filepath.Clean("../../../dist-release/relay-v1.6.0")
 	}
 	if _, err := os.Stat(filepath.Join(dir, V2Artifacts.Artefacts[0].Name)); err != nil {
 		t.Skipf("release artifacts not staged under %s", dir)

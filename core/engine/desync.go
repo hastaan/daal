@@ -138,8 +138,9 @@ func RouteCanDesync(row routestore.RouteRow, profile []byte) bool {
 
 // RouteDesyncReason is "" when the route's outbound can be put behind
 // the desync detour AND opens with a TLS hello; otherwise a closed word
-// (desyncApplicable's, or "no_tls_hello" for an outbound that can be cut
-// but sends no hello: shadowsocks, plain vmess, ssh, socks, http).
+// (desyncApplicable's — "header_in_one_read" for shadowsocks, which a
+// cut breaks — or "no_tls_hello" for an outbound that can be cut but
+// sends no hello: plain vmess, ssh, socks, http).
 func RouteDesyncReason(row routestore.RouteRow, profile []byte) string {
 	var ob map[string]any
 	if json.Unmarshal(profile, &ob) != nil {
@@ -169,7 +170,9 @@ func sendsTLSHello(ob map[string]any) bool {
 // one TCP connection opened through sing-box's own dialer, which is what
 // honours `detour`. Not here: naive (Cronet opens its own sockets), tor
 // (a tor process), the UDP families (hysteria2, tuic: no TCP hello),
-// endpoints (wireguard), and every type not named.
+// endpoints (wireguard), and every type not named. shadowsocks is here
+// (its dialer would honour the detour) and is still refused, by
+// desyncApplicable: a cut first flight is one its server refuses.
 var desyncTypes = map[string]bool{
 	"vless": true, "vmess": true, "trojan": true, "shadowsocks": true,
 	"anytls": true, "shadowtls": true, "http": true, "socks": true, "ssh": true,
@@ -202,6 +205,21 @@ func desyncApplicable(row routestore.RouteRow, ob map[string]any) string {
 		return "endpoint"
 	case !desyncTypes[t]:
 		return "type_not_supported"
+	case t == "shadowsocks":
+		// Not merely nothing to gain (no hello: the stream is random
+		// bytes from the first one, which no SNI filter can read): a cut
+		// BREAKS the route. A shadowsocks-2022 server reads the client's
+		// fixed-length request header with ONE Read and refuses the
+		// connection when that Read returns less (sing-shadowsocks
+		// shadowaead_2022 service.go newConnection and service_multi.go
+		// NewConnection0: `n < len(header)` → ErrBadHeader, by design
+		// against probing). Every preset sends a 1-byte first segment,
+		// so the server's first Read sees 1 byte and resets: the censor
+		// lab saw tcp_reset on 8446 for split1, sni-cut and chain while
+		// the same route connected uncut. So no source — a ladder attempt,
+		// a remembered choice, an explicit strategy, a pack offer —
+		// may put it behind the detour.
+		return "header_in_one_read"
 	}
 	if d, ok := ob["detour"]; ok && d != desync.Tag {
 		return "already_detoured"

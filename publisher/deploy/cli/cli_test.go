@@ -803,7 +803,10 @@ func newFakeBox() *fakeBox {
 	return &fakeBox{caps: &mgmt.BoxCapabilities{
 		OK:             true,
 		MgmtAPIVersion: mgmt.MgmtAPIVersionAddressBinding,
-		Capabilities:   []string{mgmt.CapRotateCredentialsScoped, mgmt.CapRotateTLSScoped, mgmt.CapBindAddress},
+		// CapCDNDoor: a box of today (relay-v1.6.0+), which binds a
+		// standby where its own traffic cannot leave from it
+		// (mgmt.BindsStandbySafely).
+		Capabilities: []string{mgmt.CapRotateCredentialsScoped, mgmt.CapRotateTLSScoped, mgmt.CapBindAddress, mgmt.CapCDNDoor},
 	}}
 }
 

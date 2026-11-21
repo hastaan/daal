@@ -1832,6 +1832,7 @@
   "pub.addons.google.hand.url": "آدرس وب‌اپ",
   "pub.addons.google.hand.secret": "اسکریپت کلید نوشتن این رله را دارد. آن را به کسی ندهید.",
   "pub.addons.err.E_STANDBY_LIMIT": "Hetzner هنوز به این حساب آدرس دوم نمی‌دهد. از پشتیبانی Hetzner بخواهید سقف را بالا ببرد.",
+  "pub.addons.err.E_STANDBY_NEEDS_REBUILD": "این رله برای آدرس یدکی قدیمی است. برای داشتنش یک رلهٔ جدید بسازید.",
   "pub.addons.err.E_STANDBY_STILL_BILLING": "آدرس یدکی پس داده نشد و هنوز هزینه دارد.",
   "pub.addons.err.E_STANDBY_NOT_PUBLISHED": "هنوز به برنامهٔ افراد خبر نرسیده؛ تا برسد، آدرس یدکی می‌ماند و هزینه دارد.",
   "pub.addons.err.E_CDN_NO_TOKEN": "اول Cloudflare را وصل کنید.",
