@@ -23,7 +23,7 @@ const keys = new Set([
 ]);
 
 // Ids built from a template in the source (`tab-${id}`, `nav-${id}`, …).
-const TEMPLATED = /^(tab|nav|lang|dev|settle-keep|settle-removed|wizard-step|relay-only-more)-/;
+const TEMPLATED = /^(tab|nav|lang|dev|settle-keep|settle-removed|wizard-step|relay-only-more|account)-/;
 
 function matchers(step: DriveStep): string[] {
     const one = 'click' in step ? step.click

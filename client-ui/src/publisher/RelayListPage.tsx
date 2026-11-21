@@ -83,6 +83,8 @@ interface Props {
     onBackup?: () => void;
     /** Open the restore page. */
     onRestore?: () => void;
+    /** Open «حساب‌ها». */
+    onAccounts?: () => void;
     /** Backup and restore commands (the harness passes a fake). */
     backup?: BackupApi;
 }
@@ -756,6 +758,7 @@ export default function RelayListPage({
     onResume,
     onBackup,
     onRestore,
+    onAccounts,
     backup = backupApi(),
 }: Props) {
     const locale = useLocale();
@@ -981,6 +984,7 @@ export default function RelayListPage({
     const retired = operators.filter((o) => o.status === 'decommissioned');
 
     const menu: MenuItem[] = [
+        ...(onAccounts ? [{ id: 'accounts', label: t('pub.accounts.title'), icon: 'key' as const, onSelect: onAccounts }] : []),
         ...(onBackup ? [{ id: 'backup', label: t('pub.more.backup'), icon: 'shield' as const, onSelect: onBackup }] : []),
         ...(onRestore ? [{ id: 'restore-link', label: t('pub.restore.link'), icon: 'download' as const, onSelect: onRestore }] : []),
         ...(anyToken

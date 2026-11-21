@@ -26,10 +26,11 @@ import { parseEngineStatus, publisherBootFailureKey } from '../lib/engineStart';
 import { FailureBox } from './PageNotices';
 import PublisherWizard from '../publisher/PublisherWizard';
 import PublisherRecipientsPage from '../publisher/PublisherRecipientsPage';
-import RelayListPage from '../publisher/RelayListPage';
+import RelayListPage, { relayTitle } from '../publisher/RelayListPage';
 import CustodyGate from '../publisher/CustodyGate';
 import BackupPage from '../publisher/BackupPage';
 import RestorePage from '../publisher/RestorePage';
+import AccountsPage from '../publisher/AccountsPage';
 import { Wizard } from '../publisher/wizardCommands';
 import type { OperatorSummary } from '../publisher/wizardCommands';
 import { useBack } from '../lib/useBack';
@@ -45,7 +46,9 @@ export type View =
     /** `addPerson`: open with "Add a person" showing (from the wizard). */
     | { k: 'relay'; operatorId: number; addPerson?: boolean }
     | { k: 'backup' }
-    | { k: 'restore'; from: 'list' | 'wizard' };
+    | { k: 'restore'; from: 'list' | 'wizard' }
+    /** «حساب‌ها»: from the list, or from a relay page (Back returns there). */
+    | { k: 'accounts'; from: 'list' | number };
 
 /** Where a restore page goes back to. */
 export function restoreBackView(from: 'list' | 'wizard'): View {
@@ -199,6 +202,26 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                         }
                         onBackup={() => setView({ k: 'backup' })}
                         onRestore={() => setView({ k: 'restore', from: 'list' })}
+                        onAccounts={() => setView({ k: 'accounts', from: 'list' })}
+                    />
+                )}
+
+                {view.k === 'accounts' && (
+                    <AccountsPage
+                        t={t}
+                        backLabel={
+                            view.from === 'list'
+                                ? t('pub.relays.title')
+                                : (() => {
+                                      const op = operators.find((o) => o.id === view.from);
+                                      return op ? relayTitle(op) : t('pub.relays.title');
+                                  })()
+                        }
+                        onBack={() => {
+                            if (view.from === 'list') toList();
+                            else setView({ k: 'relay', operatorId: view.from });
+                        }}
+                        onConnectHetzner={() => setView({ k: 'wizard', from: 'list' })}
                     />
                 )}
 
@@ -245,6 +268,7 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                         operatorId={view.operatorId}
                         openAdd={view.addPerson}
                         onBackup={() => setView({ k: 'backup' })}
+                        onAccounts={() => setView({ k: 'accounts', from: view.operatorId })}
                         onBack={() => {
                             void refreshOperators();
                             toList();

@@ -27,7 +27,9 @@ import type {
     AddonProgress,
     AddonRemoveReport,
     AddonRow,
+    CdnAccount,
     CdnBuildInput,
+    CdnConnectInput,
     CdnPlainFallbackInput,
     CdnPosture,
     CdnPostureInput,
@@ -1904,6 +1906,13 @@ export const Addons = {
     /** The pasted token crosses this boundary once, inbound. */
     cdnSetToken: (input: CdnTokenInput) =>
         invoke<CdnTokenCheck>('wizard_addon_cdn_set_token', { input }),
+    /** The Accounts page: check and keep a key for every relay. */
+    cdnConnect: (input: CdnConnectInput) =>
+        invoke<CdnTokenCheck>('wizard_addon_cdn_connect', { input }),
+    /** Whether an account key is kept, and its zone. Local. */
+    cdnAccount: () => invoke<CdnAccount>('wizard_addon_cdn_account'),
+    /** Forget the account key; relays keep their own copies. */
+    cdnDisconnect: () => invoke<void>('wizard_addon_cdn_disconnect'),
     cdnBuild: (input: CdnBuildInput) =>
         invoke<AddonRow>('wizard_addon_cdn_build', { input }),
     cdnPosture: (input: CdnPostureInput) =>

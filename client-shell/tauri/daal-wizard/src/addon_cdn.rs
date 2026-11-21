@@ -34,6 +34,16 @@
 //! `cdn-remove`). Only when that removal is incomplete does the row stay,
 //! `building` with its front record, so [`remove`] is the retry.
 //!
+//! # The Cloudflare account (Accounts page)
+//!
+//! [`connect`] checks a token the same way without a relay and keeps it
+//! under [`ACCOUNT_ALIAS`], with the one zone it sees under
+//! [`ACCOUNT_ZONE_ALIAS`]. A relay that has no key of its own takes a
+//! copy of the account's the first time it needs one (`cf_token`), so
+//! from then on it is that relay's key exactly as [`set_token`] would
+//! have stored it: backed up, forgotten by [`remove`]. [`account`] says
+//! whether one is kept; [`disconnect`] forgets it (relays keep theirs).
+//!
 //! The older FRP-8 commands (`wizard_store_cloudflare_token`,
 //! `wizard_provision_cdn_front`, `wizard_list_cdn_fronts`,
 //! `wizard_verify_cdn_posture`) are left in `commands.rs` until the
@@ -73,6 +83,11 @@ pub const E_CDN_LEFT_BEHIND: &str = "E_CDN_LEFT_BEHIND";
 /// using the name, a permission short of Edit). Nothing is left.
 pub const E_CDN_PROVISION: &str = "E_CDN_PROVISION";
 
+/// The Cloudflare account's key, kept apart from any relay.
+pub const ACCOUNT_ALIAS: &str = "daal.cloudflare.account.token";
+/// The one zone the account's key sees (not a secret; kept beside it).
+pub const ACCOUNT_ZONE_ALIAS: &str = "daal.cloudflare.account.zone";
+
 /// The record member the binder reads for the CDN route.
 pub const RECORD_MEMBER: &str = "cdn_front";
 
@@ -86,6 +101,24 @@ pub struct CdnTokenInput {
     pub token: String,
     /// The zone the publisher means, when they already know it.
     #[serde(default)]
+    pub zone: String,
+}
+
+/// `wizard_addon_cdn_connect`: check a pasted Cloudflare token without a
+/// relay (the Accounts page) and keep it for every relay.
+///
+/// No `Debug`: the token must never reach a log line.
+#[derive(Clone, Deserialize)]
+pub struct CdnConnectInput {
+    pub token: String,
+}
+
+/// `wizard_addon_cdn_account`: whether this phone keeps a Cloudflare
+/// account key, and the zone it sees.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct CdnAccount {
+    pub connected: bool,
+    /// The zone's name; empty when not connected.
     pub zone: String,
 }
 
@@ -306,16 +339,27 @@ fn set_detail_field(ctx: &WizardCtx, row_id: i64, key: &str, v: Value) -> Result
     addons::set_detail(ctx, row_id, &d)
 }
 
-fn cf_token(ctx: &WizardCtx, op: i64) -> Result<Zeroizing<String>> {
-    match custody_get_string(ctx, &cloudflare_alias(op)) {
-        Ok(t) if !t.trim().is_empty() => Ok(t),
-        Ok(_) => Err(coded(E_CDN_NO_TOKEN, "no Cloudflare key is kept for this relay")),
-        Err(WizardError::Coded(c)) if c.starts_with(crate::commands::E_SECRET_MISSING) => Err(coded(
-            E_CDN_NO_TOKEN,
-            "no Cloudflare key is kept for this relay",
-        )),
+/// A kept token, or `None` when there is none under `alias`.
+fn kept(ctx: &WizardCtx, alias: &str) -> Result<Option<Zeroizing<String>>> {
+    match custody_get_string(ctx, alias) {
+        Ok(t) if !t.trim().is_empty() => Ok(Some(t)),
+        Ok(_) => Ok(None),
+        Err(WizardError::Coded(c)) if c.starts_with(crate::commands::E_SECRET_MISSING) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// The relay's key; when it has none, a copy of the account's, kept as
+/// the relay's own from now on.
+fn cf_token(ctx: &WizardCtx, op: i64) -> Result<Zeroizing<String>> {
+    if let Some(t) = kept(ctx, &cloudflare_alias(op))? {
+        return Ok(t);
+    }
+    if let Some(t) = kept(ctx, ACCOUNT_ALIAS)? {
+        custody_put(ctx, &cloudflare_alias(op), t.as_bytes())?;
+        return Ok(t);
+    }
+    Err(coded(E_CDN_NO_TOKEN, "no Cloudflare key is kept for this relay"))
 }
 
 /// The hosting token, when this phone holds one: it closes the firewall
@@ -538,14 +582,79 @@ pub fn set_token(
         return Err(WizardError::EmptyToken);
     }
     let _ = ctx.db.get(op)?;
+    let mut check = check_token(ctx, op, &token, input.zone.trim(), on_progress)?;
+    if check.verdict == "ok" {
+        custody_put(ctx, &cloudflare_alias(op), token.as_bytes())?;
+        check.stored = true;
+        on_progress(progress(op, "token", "ok", ""));
+    } else {
+        on_progress(progress(op, "token", "failed", check.verdict.clone()));
+    }
+    Ok(check)
+}
+
+/// The Accounts page: the same check, no relay. Kept only when the key
+/// sees exactly one zone (`too_broad` otherwise), so every relay knows
+/// which zone to use without asking. Progress is on relay id 0.
+pub fn connect(
+    ctx: &WizardCtx,
+    mut input: CdnConnectInput,
+    on_progress: &mut dyn FnMut(AddonProgress),
+) -> Result<CdnTokenCheck> {
+    let token = Zeroizing::new(std::mem::take(&mut input.token).trim().to_string());
+    if token.is_empty() {
+        return Err(WizardError::EmptyToken);
+    }
+    let mut check = check_token(ctx, 0, &token, "", on_progress)?;
+    if check.verdict == "ok" && check.zones.len() > 1 {
+        check.verdict = "too_broad".into();
+    }
+    if check.verdict == "ok" {
+        custody_put(ctx, ACCOUNT_ALIAS, token.as_bytes())?;
+        custody_put(ctx, ACCOUNT_ZONE_ALIAS, check.zones[0].as_bytes())?;
+        check.stored = true;
+        on_progress(progress(0, "token", "ok", ""));
+    } else {
+        on_progress(progress(0, "token", "failed", check.verdict.clone()));
+    }
+    Ok(check)
+}
+
+/// Whether an account key is kept, and its zone. Local, no network.
+pub fn account(ctx: &WizardCtx) -> Result<CdnAccount> {
+    if kept(ctx, ACCOUNT_ALIAS)?.is_none() {
+        return Ok(CdnAccount::default());
+    }
+    let zone = kept(ctx, ACCOUNT_ZONE_ALIAS)?.map(|z| z.trim().to_string()).unwrap_or_default();
+    Ok(CdnAccount { connected: true, zone })
+}
+
+/// Forget the account key. Relays that took a copy keep theirs, so a
+/// way in that is on stays removable.
+pub fn disconnect(ctx: &WizardCtx) -> Result<()> {
+    for a in [ACCOUNT_ALIAS, ACCOUNT_ZONE_ALIAS] {
+        let _ = ctx.custody.forget(a);
+    }
+    Ok(())
+}
+
+/// `cdn-token-check` on a token: what it sees and whether it is exactly
+/// what Daal needs. Stores nothing.
+fn check_token(
+    ctx: &WizardCtx,
+    op: i64,
+    token: &str,
+    zone: &str,
+    on_progress: &mut dyn FnMut(AddonProgress),
+) -> Result<CdnTokenCheck> {
     on_progress(progress(op, "token", "running", ""));
     let mut args = vec!["cdn-token-check".to_string()];
-    if !input.zone.trim().is_empty() {
-        args.extend(["--zone".to_string(), input.zone.trim().to_string()]);
+    if !zone.is_empty() {
+        args.extend(["--zone".to_string(), zone.to_string()]);
     }
     let req = AddonCliRequest {
         args,
-        secret_files: vec![("--token-file", token.as_str())],
+        secret_files: vec![("--token-file", token)],
         stdin: &[],
         progress: false,
     };
@@ -584,13 +693,6 @@ pub fn set_token(
     };
     if check.verdict == "ok" && check.zones.is_empty() {
         check.verdict = "no_zone".into();
-    }
-    if check.verdict == "ok" {
-        custody_put(ctx, &cloudflare_alias(op), token.as_bytes())?;
-        check.stored = true;
-        on_progress(progress(op, "token", "ok", ""));
-    } else {
-        on_progress(progress(op, "token", "failed", check.verdict.clone()));
     }
     Ok(check)
 }

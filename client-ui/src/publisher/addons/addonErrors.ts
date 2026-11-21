@@ -3,8 +3,11 @@
 // The Rust side prefixes every refusal with a stable code
 // (`E_STANDBY_LIMIT: …`). The add-on codes live in the add-on modules
 // (addon_standby.rs, addon_cdn.rs, addon_google.rs); the shared ones in
-// wizardCommands.ts. This file knows both, so a card can say what
-// happened and keep the raw text for Details only.
+// wizardCommands.ts. This file knows both, so a row can say what
+// happened in one line and keep the raw text for Details only.
+//
+// E_STANDBY_OPEN_REFUSED is not here: the UI only ever asks for a sealed
+// standby, so the shell has no reason to answer it.
 
 import { classifyPublisherError } from '../wizardCommands';
 
@@ -12,7 +15,6 @@ import { classifyPublisherError } from '../wizardCommands';
 export const ADDON_ERROR_CODES = [
     // addon_standby.rs
     'E_STANDBY_LIMIT',
-    'E_STANDBY_OPEN_REFUSED',
     'E_STANDBY_STILL_BILLING',
     'E_STANDBY_NOT_PUBLISHED',
     // addon_cdn.rs
@@ -46,43 +48,6 @@ export const SHARED_CODES_WITH_COPY = [
     'E_HELPER_IP_MISSING',
     'E_NOT_SUPPORTED',
 ] as const;
-
-/** The progress step words the add-on modules emit (AddonProgress.step).
- *  A step outside this list is the helper's own word and is not shown. */
-export const STEP_WORDS = [
-    // standby
-    'renting',
-    'attaching',
-    'checking',
-    'signing',
-    'publishing',
-    'releasing',
-    // cdn
-    'token',
-    'cloudflare',
-    'firewall',
-    'door',
-    'testing',
-    'posture',
-    'rolling_back',
-    // google
-    'script',
-    'signing_in',
-    'deploying',
-    'removing',
-] as const;
-
-/** Warning words of an AddonRemoveReport that have a sentence. */
-export const WARNING_WORDS = [
-    'republish_failed',
-    'pack_still_names_channel',
-    'clear_failed',
-    'relay_door_left_on',
-    'no_cloudflare_key',
-] as const;
-
-/** By-hand words of an AddonRemoveReport. */
-export const BY_HAND_WORDS = ['delete_cloudflare_token', 'cancel_domain', 'delete_google_project'] as const;
 
 function messageOf(e: unknown): string {
     return typeof e === 'string' ? e : e instanceof Error ? e.message : String(e ?? '');
@@ -126,14 +91,6 @@ export function addonErrorText(t: (k: string) => string, e: unknown): AddonError
         if (r && r !== rk) line = `${line} ${r}`;
     }
     return { code, line, detail: raw };
-}
-
-/** The sentence for a removal warning word, or null for provider text
- *  (which goes to Details). */
-export function warningLine(t: (k: string) => string, w: string): string | null {
-    const word = w.split(':')[0];
-    if ((WARNING_WORDS as readonly string[]).includes(word)) return t(`pub.addons.warn.${word}`);
-    return null;
 }
 
 /** "€3.00" / "۳٫۰۰ یورو" from cents and an ISO currency. The digits

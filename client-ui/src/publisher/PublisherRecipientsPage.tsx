@@ -129,6 +129,8 @@ interface Props {
     onBack: () => void;
     /** Open the backup page (the stale-backup card's button). */
     onBackup?: () => void;
+    /** Open «حساب‌ها». */
+    onAccounts?: () => void;
     backup?: BackupApi;
     /** Open with the "Add a person" sheet showing (the wizard's
      *  "Add the first person"). */
@@ -223,6 +225,7 @@ export default function PublisherRecipientsPage({
     operatorId,
     onBack,
     onBackup,
+    onAccounts,
     backup = backupApi(),
     openAdd = false,
 }: Props) {
@@ -1097,6 +1100,7 @@ export default function PublisherRecipientsPage({
             ? [{ id: 'test-relay', label: t('pub.more.testRelay'), icon: 'signal' as const, onSelect: () => setTestRelayOpen(true) }]
             : []),
         ...(onBackup ? [{ id: 'backup', label: t('pub.more.backup'), icon: 'shield' as const, onSelect: onBackup }] : []),
+        ...(onAccounts ? [{ id: 'accounts', label: t('pub.accounts.title'), icon: 'key' as const, onSelect: onAccounts }] : []),
     ];
 
     const scrollToQuestion = () => {
@@ -1343,9 +1347,9 @@ export default function PublisherRecipientsPage({
                 }
             />
 
-            {/* ---------------- Add-ons ----------------
-                Optional extras that keep people connecting when the
-                relay is blocked. Folded away, all off by default. */}
+            {/* ---------------- More protection ----------------
+                Three switches that keep people connecting when the
+                relay is blocked. All off by default. */}
             {provisioned && <AddonsSection t={t} operatorId={operatorId} />}
 
             {/* ---------------- Details ----------------

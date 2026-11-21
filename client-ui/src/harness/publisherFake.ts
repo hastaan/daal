@@ -366,6 +366,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         updated_at_unix: number;
     };
     let addons: FakeAddon[] = [];
+    let cfAccount = { connected: false, zone: '' };
     const STANDBY_KEY = '000G40 R40M3 0E209 185WP 03H2G';
     const addonOp = (a: Args) => Number((a?.input as { operator_id?: number })?.operator_id ?? LIVE_RELAY_ID);
     const addonStep = async (operator_id: number, kind: FakeAddon['kind'], step: string) => {
@@ -438,6 +439,18 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
             return { addon: r, key: STANDBY_KEY, refresh_note_published: true, warnings: [] };
         },
         wizard_addon_standby_key: () => ({ key: STANDBY_KEY }),
+        // The Cloudflare account (Accounts page): kept for every relay.
+        wizard_addon_cdn_account: () => cfAccount,
+        wizard_addon_cdn_connect: (a) => {
+            const tok = String((a?.input as { token?: string })?.token ?? '');
+            if (tok.includes('broad')) return { zones: ['example.com', 'other.org'], verdict: 'too_broad', stored: false };
+            cfAccount = { connected: true, zone: 'example.com' };
+            return { zones: ['example.com'], verdict: 'ok', stored: true };
+        },
+        wizard_addon_cdn_disconnect: () => {
+            cfAccount = { connected: false, zone: '' };
+            return null;
+        },
         wizard_addon_cdn_set_token: (a) => {
             const tok = String((a?.input as { token?: string })?.token ?? '');
             return tok.includes('broad')
@@ -470,8 +483,10 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
             code_gs: '// Daal update channel\nvar WRITE_KEY = "harness-not-a-real-key";\nfunction doGet(e) { /* … */ }',
             manifest_json: '{}',
         }),
-        wizard_addon_google_sign_in: () => {
-            throw 'E_GOOGLE_NOT_CONFIGURED: this build has no Google sign-in client';
+        wizard_addon_google_sign_in: async (a) => {
+            const o = addonOp(a);
+            for (const step of ['signing_in', 'deploying', 'checking']) await addonStep(o, 'google', step);
+            return addAddon(o, 'google', { path: 'A' }, 0, '');
         },
         wizard_addon_google_attach: async (a) => {
             const o = addonOp(a);

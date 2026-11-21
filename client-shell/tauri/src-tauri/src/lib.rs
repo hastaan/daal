@@ -2141,6 +2141,38 @@ async fn wizard_addon_cdn_set_token(
     )
 }
 
+/// The Accounts page: the same Cloudflare check, no relay. The token
+/// crosses here once, inbound, and is kept for every relay.
+#[tauri::command]
+async fn wizard_addon_cdn_connect(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_cdn::CdnConnectInput,
+) -> Result<daal_wizard::addon_cdn::CdnTokenCheck, String> {
+    cmdlog::result(
+        "wizard_addon_cdn_connect",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_cdn::connect(ctx, input, p)).await,
+    )
+}
+
+/// Whether a Cloudflare account key is kept, and its zone. Local.
+#[tauri::command]
+fn wizard_addon_cdn_account(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<daal_wizard::addon_cdn::CdnAccount, String> {
+    cmdlog::logged("wizard_addon_cdn_account", || {
+        daal_wizard::addon_cdn::account(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
+/// Forget the Cloudflare account key (relays keep their own copies).
+#[tauri::command]
+fn wizard_addon_cdn_disconnect(wstate: State<'_, WizardStateMgr>) -> Result<(), String> {
+    cmdlog::logged("wizard_addon_cdn_disconnect", || {
+        daal_wizard::addon_cdn::disconnect(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
 #[tauri::command]
 async fn wizard_addon_cdn_build(
     app: AppHandle,
@@ -4146,6 +4178,9 @@ pub fn run() {
             wizard_addon_standby_promote,
             wizard_addon_standby_key,
             wizard_addon_cdn_set_token,
+            wizard_addon_cdn_connect,
+            wizard_addon_cdn_account,
+            wizard_addon_cdn_disconnect,
             wizard_addon_cdn_build,
             wizard_addon_cdn_posture,
             wizard_addon_cdn_set_plain_fallback,

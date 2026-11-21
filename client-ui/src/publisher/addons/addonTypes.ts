@@ -77,7 +77,7 @@ export interface StandbyPrice {
 }
 export interface StandbyAddInput {
     operator_id: number;
-    /** 'sealed' (default) | 'open' (refused while an Everyone file exists). */
+    /** Always 'sealed' from the UI (the engine still knows 'open'). */
     mode?: 'sealed' | 'open';
 }
 export interface StandbyPromoteInput {
@@ -105,6 +105,17 @@ export interface CdnTokenInput {
     token: string;
     /** The zone meant, when known. */
     zone?: string;
+}
+/** The Accounts page: a Cloudflare key checked without a relay. */
+export interface CdnConnectInput {
+    /** Crosses this boundary once, inbound. */
+    token: string;
+}
+/** daal_wizard::addon_cdn::CdnAccount */
+export interface CdnAccount {
+    connected: boolean;
+    /** The one zone the key sees; '' when not connected. */
+    zone: string;
 }
 export type CdnTokenVerdict =
     | 'ok'

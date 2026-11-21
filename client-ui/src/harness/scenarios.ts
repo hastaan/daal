@@ -1437,6 +1437,26 @@ export const SCENARIOS: Scenario[] = [
     }),
     ...pub(
         {
+            id: 'pub-accounts',
+            title: 'Accounts (Hetzner, Cloudflare, Google)',
+        }, { steps: relaysMenu('accounts') }),
+    ...pub(
+        {
+            id: 'pub-accounts-cloudflare',
+            title: 'Accounts · connect Cloudflare',
+        }, { steps: [...relaysMenu('accounts'), { click: 'btn:account-cloudflare-connect' }] }),
+    ...pub(
+        {
+            id: 'pub-accounts-google',
+            title: 'Accounts · connect Google',
+        }, { steps: [...relaysMenu('accounts'), { click: 'btn:account-google-connect' }] }),
+    ...pub(
+        {
+            id: 'pub-relay-protect',
+            title: 'Relay page · More protection',
+        }, { steps: [...OPEN_RELAY, { scroll: 'key:pub.addons.title' }] }),
+    ...pub(
+        {
             id: 'pub-relay-healthy',
             title: 'Relay page · working',
         }, { steps: OPEN_RELAY }),

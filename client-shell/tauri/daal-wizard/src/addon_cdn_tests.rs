@@ -557,3 +557,51 @@ fn the_json_of_a_refusal_is_found_inside_the_failure_text() {
     assert!(json_in("no json").is_none());
     assert!(json_in("} {").is_none());
 }
+
+// ---------------------------------------------------------------------
+// The Cloudflare account (Accounts page): no relay needed
+// ---------------------------------------------------------------------
+
+#[test]
+fn an_account_key_is_checked_without_a_relay_and_kept_with_its_one_zone() {
+    let f = fx();
+    assert_eq!(account(&f.ctx).unwrap(), CdnAccount::default());
+    let c = connect(&f.ctx, CdnConnectInput { token: format!(" {CF_TOKEN}\n") }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored), ("ok", true));
+    assert_eq!(verbs(&f), ["cdn-token-check"]);
+    assert_eq!(
+        account(&f.ctx).unwrap(),
+        CdnAccount { connected: true, zone: "example.com".into() }
+    );
+    let kept = f.ctx.custody.get(ACCOUNT_ALIAS).unwrap();
+    assert_eq!(String::from_utf8(kept).unwrap(), CF_TOKEN);
+    disconnect(&f.ctx).unwrap();
+    assert_eq!(account(&f.ctx).unwrap(), CdnAccount::default());
+    let e = connect(&f.ctx, CdnConnectInput { token: "  ".into() }, &mut noop()).unwrap_err();
+    assert!(matches!(e, WizardError::EmptyToken));
+}
+
+#[test]
+fn an_account_key_that_sees_two_zones_is_not_kept() {
+    let f = fx();
+    f.helper.lock().unwrap().token_check =
+        Some(Ok(serde_json::json!({"verdict":"ok","zones":[{"name":"example.com"},{"name":"other.org"}]})));
+    let c = connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into() }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored), ("too_broad", false));
+    assert!(!account(&f.ctx).unwrap().connected);
+}
+
+#[test]
+fn a_relay_without_its_own_key_builds_with_a_copy_of_the_accounts_and_remove_forgets_only_the_copy() {
+    let f = fx();
+    let op = provisioned(&f);
+    connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into() }, &mut noop()).unwrap();
+    assert!(token_of(&f, op).is_none());
+    let row = built(&f, op);
+    assert_eq!(row.state, AddonState::Ready);
+    assert_eq!(token_of(&f, op).as_deref(), Some(CF_TOKEN), "the relay keeps its own copy");
+    let rep = crate::addons::remove(&f.ctx, row.id, &mut noop()).unwrap();
+    assert!(rep.removed);
+    assert!(token_of(&f, op).is_none());
+    assert!(account(&f.ctx).unwrap().connected, "the account stays connected");
+}
