@@ -620,7 +620,40 @@ func (c *cloud) enforce() error {
 			return err
 		}
 	}
+	c.dumpFirewalls()
 	return nil
+}
+
+// CloudFirewall is one line of cloud-firewalls.json: the account's
+// firewalls as the provider holds them, for checks (and for the ops that
+// need a firewall's id, as the wizard has it from provisioning).
+type CloudFirewall struct {
+	ID        int64                 `json:"id"`
+	Name      string                `json:"name"`
+	Servers   []int64               `json:"servers"`
+	Rules     []schema.FirewallRule `json:"rules"`
+}
+
+func (c *cloud) dumpFirewalls() {
+	var out []CloudFirewall
+	for _, f := range c.firewalls {
+		cf := CloudFirewall{ID: f.ID, Name: f.Name, Rules: f.Rules}
+		for _, res := range f.AppliedTo {
+			if res.Server != nil {
+				cf.Servers = append(cf.Servers, res.Server.ID)
+			}
+		}
+		out = append(out, cf)
+	}
+	body, _ := json.MarshalIndent(out, "", "  ")
+	_ = os.WriteFile(filepath.Join(c.p.Run, "cloud-firewalls.json"), body, 0o644)
+}
+
+func CloudFirewalls(p Paths) []CloudFirewall {
+	var out []CloudFirewall
+	body, _ := os.ReadFile(filepath.Join(p.Run, "cloud-firewalls.json"))
+	_ = json.Unmarshal(body, &out)
+	return out
 }
 
 func (c *cloud) enforceServer(s *server) error {

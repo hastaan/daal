@@ -581,3 +581,43 @@ func TestBoxCapabilities_DecodesCapabilityNotes(t *testing.T) {
 		t.Fatalf("capability_notes = %v — a value the box sends and the publisher needs must be declared on the struct in the middle", got.CapabilityNotes)
 	}
 }
+
+// BindsStandbySafely: the /health of each release, as it is on the wire.
+// relay-v1.5.1 can bind (bind-address) but binds globally — its own
+// traffic could leave from a sealed standby — so it is refused;
+// relay-v1.6.0 (cdn, the token that shipped with the `scope link` bind)
+// is accepted; a box that cannot bind at all is not "safe" either.
+func TestBindsStandbySafely(t *testing.T) {
+	body := func(caps ...string) *BoxCapabilities {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{"ok": true, "mgmt_api_version": 2, "capabilities": caps})
+		var c BoxCapabilities
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+		return &c
+	}
+	v151 := body("rotate-credentials-scoped", "rotate-tls-scoped", "shadowsocks-2022", "anytls-inbound", "tuic-users", "bind-address")
+	v160 := body("rotate-credentials-scoped", "rotate-tls-scoped", "shadowsocks-2022", "anytls-inbound", "tuic-users", "cdn", "bind-address")
+	v160NoNetAdmin := body("rotate-credentials-scoped", "rotate-tls-scoped", "shadowsocks-2022", "anytls-inbound", "tuic-users", "cdn")
+	cases := []struct {
+		name string
+		caps *BoxCapabilities
+		want bool
+	}{
+		{"relay-v1.5.1", v151, false},
+		{"relay-v1.6.0", v160, true},
+		{"relay-v1.6.0 without CAP_NET_ADMIN", v160NoNetAdmin, false},
+		{"no answer", nil, false},
+		{"version only", &BoxCapabilities{OK: true, MgmtAPIVersion: 99}, false},
+	}
+	for _, c := range cases {
+		if got := BindsStandbySafely(c.caps); got != c.want {
+			t.Errorf("%s: BindsStandbySafely = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// The pairing this rests on: the token read is the CDN door's.
+	if CapCDNDoor != "cdn" || CapBindAddress != "bind-address" {
+		t.Fatalf("token literals moved (cdn=%q bind=%q): re-check which token says the box binds scope link", CapCDNDoor, CapBindAddress)
+	}
+}

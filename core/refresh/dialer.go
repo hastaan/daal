@@ -97,6 +97,15 @@ var ErrTunnelRequired = errors.New(
 var (
 	tunnelRequiredMu sync.RWMutex
 	tunnelRequired   bool
+	// recoveryWindow: the engine has stopped a dead route's instance for
+	// ONE bounded walk of the freshness mirrors (blackout plan C0,
+	// relaypack_recover.go). No route is active — tunnelRequired is
+	// false — but the person has not disconnected, so every ORDINARY
+	// fetcher (subscription, revocation, bootstrap, the scheduled
+	// freshness poll) must keep behaving as if one were: TunnelRequired()
+	// says true. Only the walk's own dialer (directDial) asks the
+	// narrower question, RouteActive().
+	recoveryWindow bool
 )
 
 // SetTunnelRequired records whether the engine currently holds an active
@@ -107,12 +116,38 @@ func SetTunnelRequired(b bool) {
 	tunnelRequiredMu.Unlock()
 }
 
+// SetRecoveryWindow opens or closes the recovery window (see
+// recoveryWindow). Driven by the ABI's recovery walk only.
+func SetRecoveryWindow(b bool) {
+	tunnelRequiredMu.Lock()
+	recoveryWindow = b
+	tunnelRequiredMu.Unlock()
+}
+
 // TunnelRequired reports whether egress outside the tunnel is currently
-// forbidden.
+// forbidden for every ordinary fetcher: a route is active, or the engine
+// has paused a dead one for its recovery walk.
 func TunnelRequired() bool {
 	tunnelRequiredMu.RLock()
 	defer tunnelRequiredMu.RUnlock()
+	return tunnelRequired || recoveryWindow
+}
+
+// RouteActive reports whether an engine instance is serving a route —
+// TunnelRequired without the recovery window. ONLY the unscheduled
+// freshness kinds' direct dialer may ask this narrower question
+// (relaypack_recover.go); everything else asks TunnelRequired.
+func RouteActive() bool {
+	tunnelRequiredMu.RLock()
+	defer tunnelRequiredMu.RUnlock()
 	return tunnelRequired
+}
+
+// RecoveryWindowOpen reports whether the recovery window is open.
+func RecoveryWindowOpen() bool {
+	tunnelRequiredMu.RLock()
+	defer tunnelRequiredMu.RUnlock()
+	return recoveryWindow
 }
 
 // directFallback is the same defaulting logic the Refresher used in

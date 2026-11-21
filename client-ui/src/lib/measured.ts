@@ -14,6 +14,7 @@
 //   * a grade this app does not know is "the engine said nothing": the
 //     row then claims nothing, rather than printing a raw code or
 //     guessing "not tried".
+import { sep } from './format';
 import type {
     ConnectionSummary,
     Measured,
@@ -59,6 +60,7 @@ export function parseMeasured(v: unknown): Measured | undefined {
     if (typeof grade !== 'string' || !(GRADES as readonly string[]).includes(grade)) return undefined;
     const setup = count(m.setup_ms);
     const last = bucket(m.last);
+    const lastUnix = typeof m.last === 'number' && last ? Math.floor(m.last) : undefined;
     return {
         grade: grade as MeasuredGrade,
         ...(setup > 0 ? { setupMs: setup } : {}),
@@ -66,6 +68,7 @@ export function parseMeasured(v: unknown): Measured | undefined {
         carried: count(m.carried),
         failed: count(m.failed),
         ...(last ? { last } : {}),
+        ...(lastUnix ? { lastUnix } : {}),
     };
 }
 
@@ -206,7 +209,7 @@ export function measuredWords(t: (k: string) => string, locale: string, m: Measu
                 .replace('{b}', localDigits(m.failed, locale)),
         );
     }
-    return parts.join(' · ');
+    return parts.join(sep());
 }
 
 /** Details only: the same facts as the engine names them, to be read
@@ -220,7 +223,7 @@ export function measuredCode(routeId: string, family: string, m: Measured | unde
         parts.push(`n=${m.samples}`, `ok=${m.carried}`, `fail=${m.failed}`);
         if (m.last) parts.push(m.last);
     }
-    return parts.filter(Boolean).join(' · ');
+    return parts.filter(Boolean).join(sep());
 }
 
 /** Does any route carry a measured block? The Details fold is offered

@@ -66,16 +66,17 @@ describe('PickedFileNote', () => {
 
 describe('the add sheet speaks plainly (PH-27)', () => {
     const PROTOCOL = /vless|vmess|trojan|wg:|\.sbpx?|subscription url|uri\b/i;
-    it('the paste box and the file button use plain words', () => {
+    it('the paste box and the three ways in use plain words', () => {
         expect(EN['add.paste_placeholder']).toBe('Paste what you were sent');
-        expect(EN['add.file.choose']).toBe('Choose the file you were sent');
-        expect(EN['add.lede.paste']).toBe('Paste what you were sent.');
+        expect(EN['add.choose.file']).toBe('Choose a file');
+        expect(EN['add.choose.paste']).toBe('Paste text');
+        expect(EN['add.choose.scan']).toBe('Scan a code');
     });
     it('no protocol list outside the "What can I paste?" disclosure', () => {
         const outside = [
-            'add.title', 'add.tab.paste', 'add.tab.file', 'add.paste_placeholder', 'add.lede.paste',
-            'add.file.choose', 'add.file.change', 'add.file.picked', 'add.file.preview_routes',
-            'add.detect.sbp', 'add.detect.sbpx', 'add.detect.subscription', 'add.detect.uri', 'add.detect.unknown',
+            'add.title', 'add.choose.file', 'add.choose.paste', 'add.choose.scan', 'add.paste_placeholder',
+            'add.working', 'add.done', 'add.done.from', 'add.done.connect', 'add.done.later', 'add.refused.title',
+            'add.detect.ok', 'add.detect.subscription', 'add.detect.uri', 'add.detect.unknown',
             'add.paste_help.title',
         ];
         for (const k of outside) {

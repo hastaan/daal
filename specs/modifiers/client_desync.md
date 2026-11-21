@@ -24,6 +24,26 @@ websocket-tls) without changing the recipient's `exposure_mode`. A
 `direct_vps` candidate for cooldown attribution per §13.4 — only the
 packet shape changes.
 
+## Field note (2026-11-20)
+
+Recorded from `docs/exotic-transports-plan.md` (the client-side
+desync / FakeSNI entry); not measured by Daal. This slot stays a
+dormant reservation, Linux desktop only.
+
+- Short-lived in Iran. Both the sequence-number and low-TTL decoy
+  variants beat Iran's DPI for about four days in 2026, until Cloudflare
+  IPs were put behind a stateful NAT that checks sequence numbers and
+  checksums (Lantern corpus, tuleo1 2026).
+  `research/intel-and-some-working-methods.md:128` warns that one
+  signature kills the whole tool class.
+- Not on Android. The sequence-forging variant needs raw sockets
+  (`CAP_NET_RAW`), NFQUEUE and a system-wide conntrack sysctl
+  (`research/intel-and-some-working-methods.md:120-126`); a non-root
+  app has none of these.
+- It fixes a problem our relays mostly do not have. It only spoofs the
+  SNI, and REALITY already sends an allowed cover name; the destination
+  IP must still pass.
+
 ## Pass record
 
 - **status**: PENDING

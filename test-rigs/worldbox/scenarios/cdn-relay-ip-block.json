@@ -1,0 +1,19 @@
+{
+  "name": "cdn-relay-ip-block",
+  "description": "The relay's address is null-routed at the border (as relay-ip-block), while Cloudflare's edges stay open. Every direct family dies; the CDN route, dialled at an edge address from the signed seeds with the zone's name inside ECH, is what must carry (op cdn). Plan §2.1: the add-on's first rescue.",
+  "analogue": "A burned VPS address with Cloudflare's ranges untouched: the common death of a REALITY address on MCI (2-7 days), and the reason the CDN route is in the pack from day one (plan decision 2). Model: one relay address silently dropped; every edge address answers. Not modelled: per-ISP Cloudflare prefix health (cdn-edge-allowlist and cdn-grey-budget are two shapes of it), Cloudflare's own interference with long VLESS-over-WebSocket flows (a real-account gate).",
+  "world": ["cdn"],
+  "censor": {
+    "nft": ["ip daddr $RELAY_IP drop"]
+  },
+  "prove": [
+    {"name": "relay-tcp-dropped", "probe": "tcp", "to": "relay", "port": 443, "expect": "connect_timeout"},
+    {"name": "relay-udp-dropped", "probe": "udp", "to": "relay", "port": 443, "shape": "plain", "expect": "dropped"},
+    {"name": "edge-ech-open", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "edge-long-flow-open", "probe": "exchange", "to": "edge-c", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "elsewhere-tcp-spared", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "blocked"},
+  "category": {"*": "tcp_connect_timeout", "hysteria2": "udp_address_blocked", "tuic": "udp_address_blocked"},
+  "cdn": {"expect": "pass"}
+}

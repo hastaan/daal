@@ -305,6 +305,209 @@ CDN posture" button (`publisher/deploy/cloudflare/posture.go`),
 which re-fetches Origin CA fingerprint, AOP flag, firewall rule,
 and the proxied-DNS state from Cloudflare and surfaces drift.
 
+### `_report_to` key (additive, no `spec_version` bump)
+
+A route's `family_specific_config` MAY carry `"_report_to": "daal1…"`:
+the publisher's network-test report address (`specs/sealed-report-v1.md`,
+`daal-deploy report-keygen`). It is signed with the manifest like every
+other member; builds that predate it ignore it (no decoder of the
+top-level object is strict). Routes that carry it are the **Test relay**
+(`specs/field-probe-v2.md`): the engine offers the network test only when
+a held route carries a valid address, and seals results only to it. An
+invalid address is treated as absent. The validator does not require it
+and does not reject it. The binder writes it on every route of the pack
+when signed with `bind-and-sign --report-to daal1…`
+(`relaypack.BindOpts.ReportTo`; a malformed address refuses to sign).
+
+The Test relay MUST be its own address: no route the family uses every
+day (one without `_report_to`) may point at the same server address. The
+test sends plain hellos with three different names to that address in
+about 20 s, which must never happen to a daily relay; the engine refuses
+to start (`test_relay_shared`) when it sees the two share an address.
+The report is sealed to the `_report_to` of the route the test proves
+(the REALITY/443 route), and the test's alt-port and UDP routes come only
+from that route's pack.
+
+### `_cover_names` key (additive, no `spec_version` bump)
+
+A route's `family_specific_config` MAY carry the signed list of OTHER
+names its TLS first flight may present
+(`docs/adaptive-cover-names-plan.md` §1.3, §1.7; parser
+`bundle/go/bundle/cover_names.go`). It is a sibling of `_endpoint`,
+`_relaypack` and `_desync` — never inside the endpoint commitment, whose
+decoder is strict. Covered by the manifest signature; builds that predate
+it ignore it.
+
+```jsonc
+"_cover_names": {
+  "v": 1,
+  "names": [
+    {"id": 1, "name": "www.example.com",    "class": "foreign"},
+    {"id": 2, "name": "static.example.net", "class": "cdn", "cdn": "fastly"},
+    {"id": 4, "name": "mirror.example.org", "class": "mirror", "reality": true}
+  ]
+}
+```
+
+- `id` (required): the entry's stable identity, 1..9999, unique in the
+  list. The engine refers to an entry ONLY by its id (memory and every
+  report hold the id, never the name or its position). A publisher gives
+  each new entry an id that list never used before and NEVER reuses one;
+  entries may then be dropped (a name retired fleet-wide) or reordered
+  without what a device remembers about one id describing another name.
+- `class` ∈ `foreign | cdn | mirror`. `cdn`: which CDN or prefix the name
+  lives on, `[a-z0-9-]{1,32}` — required on a `cdn` entry, absent on any
+  other. `reality` (optional, default false): the route's relay's
+  REALITY inbound answers for this name (it is in the inbound's server
+  names). A vless-reality route offers ONLY such entries; websocket-tls
+  and anytls (relay proved by its SPKI pin) offer any entry; no other
+  family uses the list. This build offers NO `cdn` entry (a CDN-hosted
+  name sent to a plain VPS address is the name/prefix mismatch a censor
+  checks; that waits for a CDN-fronted family).
+- At most 8 entries; names are full LDH DNS names in canonical form —
+  lower case, no trailing dot, no spaces (a non-canonical name is
+  refused, not normalised) — no address, no duplicates.
+- **Refused at parse, the whole list** (fail closed): any domestic name —
+  under `.ir` (or `.ایران`), or on the known-domestic list in the parser
+  — or the class `domestic`; an unknown member; an unknown class; a bad
+  or repeated id; a bad `cdn` word; a version other than 1.
+- The engine never resolves a listed name: it is only a string in the
+  hello. It offers the list only for a route with a signed `_endpoint`
+  from a trusted or TOFU-pinned publisher whose outbound is proved by its
+  key.
+- **On the device.** The importer keeps the members of
+  `family_specific_config` the engine reads at connect time —
+  `_desync` and `_cover_names`, an allowlist
+  (`bundle.EngineFamilyConfigKeys`) — on the route's row, and only for a
+  route with a signed endpoint; `_endpoint` (an address and a key) and
+  `_relaypack` are never copied there (the row is not the encrypted half
+  of the store). Every import and refresh rewrites it.
+- How it is used: `specs/engine-abi-v1.md` "The connect ladder". The
+  publisher side that writes the list is not built yet.
+
+### `_standby` key (additive, no `spec_version` bump) — optional add-ons
+
+Reserved 2026-11-20 for the standby-address add-on
+(`docs/optional-addons-plan.md` §1, `specs/optional-addons-v1.md` §3).
+**Built:** parser, commitment and key functions
+`bundle/go/bundle/standby.go` (S1); importer
+(`bundle/go/importer/endpoint_plan.go`) and set-route guard
+(`core/abi/endpoint_guard.go`) (S2); the signing check RP027
+(`relaypackvalidate.ValidateForSigning`); the binder
+`publisher/deploy/relaypack/endpoint.go` (S5); the store keeping it
+(`core/trust` SaveImport; both secrets go with the route,
+`routestore.perRouteSecretKeys`); the engine's address variant and
+`engine_standby_key` (S7); a key carried by a `daal-refresh-v1`
+container is offered to the same store by the refresh walk
+(`abi.StandbyKeySink`). All built 2026-11-20.
+
+**Compatibility.** Every build ignores a member of
+`family_specific_config` it does not know: no decoder of that object is
+strict, `_endpoint` is read by its own key, and the engine's row keeps
+only `bundle.EngineFamilyConfigKeys`. So a phone on a build from before
+this member imports a pack that carries it exactly as if it were
+absent, the freshness merge included. Tested against a frozen copy of
+the rules as they shipped (`bundle/go/importer/compat_old_test.go`,
+`internal/oldrules`, frozen from 079ef96).
+
+A route's `family_specific_config` MAY carry `_standby`: a second address
+of the same relay, on the same ports with the same keys, that the route
+may be dialled at. It is a sibling of `_endpoint` — never inside the
+endpoint commitment, whose decoder is strict — and is covered by the
+manifest signature. Two shapes:
+
+```jsonc
+// sealed (the default): only a commitment to the address
+"_standby": { "v": 1, "mode": "sealed", "commit": "<base64, 32 bytes>" }
+// open: the address itself
+"_standby": { "v": 1, "mode": "open", "server": "203.0.113.20" }
+```
+
+- **Shape.** `v` is `1`. `mode` is `sealed` (exactly the members `v`,
+  `mode`, `commit`) or `open` (exactly `v`, `mode`, `server`). `commit` is
+  standard base64 with padding of 32 bytes. `server` is a canonical
+  dotted-quad IPv4 address (no leading zeros) that is not unspecified,
+  loopback, private, link-local, multicast or broadcast, and is not
+  `_endpoint.server`. Anything else — an unknown member, another
+  version, a missing member, a bad length — makes `_standby` malformed,
+  and a malformed `_standby` is treated as **absent**: no standby is
+  dialled for that route. The import is not refused for it and the
+  route's `_endpoint` is unaffected. (`_standby` can only widen what a
+  route may dial, so ignoring it is the closed reading; a malformed
+  `_endpoint` still refuses the pack.)
+- **The commitment.** `commit = SHA-256("daal/standby-v1" ‖ salt ‖ ipv4)`:
+  the 15 ASCII bytes of the domain string with no terminator, a 12-byte
+  random `salt`, and the 4 address bytes in network order. One relay has
+  one standby, so every route of it carries the same `_standby`.
+- **The standby key** is `salt ‖ ipv4`, 16 bytes. It needs no signature:
+  the signed pack already committed to it, so a forged or mistyped key
+  matches no commitment and is refused, and can steer nobody anywhere. It
+  is not a secret once used; it is an address.
+  - Text form (what a person reads aloud or types): the 128 bits, most
+    significant first, followed by two zero bits, as 26 symbols of
+    Crockford's base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), shown in
+    five groups of 6-5-5-5-5 separated by one space. On input case is
+    ignored, spaces and `-` are ignored, `O` reads as `0` and `I` and
+    `L` as `1`; any other symbol, a count other than 26, or non-zero
+    trailing bits is malformed.
+  - DNS form: the 16 bytes as one AAAA record.
+  - There is no checksum: the commitment is the check.
+  - Test vector (`bundle/go/bundle/standby_test.go`, cross-checked with
+    an independent implementation): salt `00 01 02 … 0b`, address
+    `203.0.113.20` →
+    key text `000G40 R40M3 0E209 185WP 03H2G`;
+    commit `oLKATgHpOx6iddfCqnGCuDAi1XSE7ysXDZ1tUmE5HHY=`;
+    DNS form `1:203:405:607:809:a0b:cb00:7114`.
+    Sixteen `ff` bytes read `ZZZZZZ ZZZZZ ZZZZZ ZZZZZ ZZZZW` (the two
+    trailing bits are zero).
+  - A key whose address is not a public IPv4 address (the rules for
+    `server` above) is never acted on, even when it matches.
+- **Families.** Never on `shadowsocks` (no server authentication that is
+  independent of the shared key, so a stale standby could hand a
+  stranger the traffic): the binder does not write it there, and a
+  `_standby` on a shadowsocks route is ignored. For every other family a
+  stale standby fails closed — the handshake is to the committed key.
+- **The endpoint rule, amended.** Where "Endpoint commitment" below
+  requires an outbound's `server` to equal `_endpoint.server`, it may
+  instead equal the open `_standby.server`, or the address inside a held
+  standby key that matches `_standby.commit`. Nothing else moves: port,
+  `server_name`, TLS pin, REALITY public key, shadowsocks method and
+  digest are checked exactly as before, and the stored profile itself
+  keeps the committed address (the standby is a dial-time variant,
+  `specs/optional-addons-v1.md` §3.3).
+- **Import.** The importer hands the store the `_standby` of every
+  route that may use one, exactly as signed (`importer.RouteInput.Standby`;
+  nil when absent, malformed, on shadowsocks, or on a route without a
+  direct `_endpoint`). An outbound in a file may sit at the open standby
+  address; a sealed standby needs a key, and none is held at import, so
+  there the outbound must be at `_endpoint.server`. Publishers mint at
+  `_endpoint.server` (older builds require it).
+- **On the device.** Not in `bundle.EngineFamilyConfigKeys`: open mode
+  holds an address, and the route row is not the encrypted half of the
+  store. The engine keeps it beside the route's commitment, as signed,
+  under `standby:<route_id>` (`bundle.StandbyStoreKey`), with an accepted
+  key as its 16 raw bytes under `standby-key:<route_id>`
+  (`bundle.StandbyKeyStoreKey`); every import and refresh rewrites the
+  first, a newer commitment without `_standby` removes both, and a key
+  that no longer matches the held commitment is never used (the guard
+  checks the match at every connect). The set-route guard
+  (`routeEndpointGuard`) accepts an outbound at the committed server,
+  the open standby, or the address of a held key that matches.
+- **Signing.** RP027 (signing only): a malformed `_standby`, one on
+  shadowsocks or on a route without a direct `_endpoint`, an open one
+  equal to the endpoint's server, or routes of one relay address that
+  do not all carry the same one (shadowsocks excepted).
+- **Where a key comes from.** A key the person types
+  (`engine_standby_key`, `specs/optional-addons-v1.md` §3.4), the
+  `standby_key` member of a `daal-refresh-v1` container (below), or a
+  file. When the publisher switches to the standby, the next signed pack
+  names it as `_endpoint.server` and needs no key at all.
+- **Publisher rules.** Sealed is the default; open is offered only while
+  no Everyone file exists for the relay (owner decision D-1). Removing a
+  standby signs and publishes a pack without `_standby` **before** the
+  address is released, so no current commitment names an address that
+  may be handed to someone else.
+
 ### Freshness JSON shape (sub-key-aware) — `daal/freshness-v2`
 
 Per FRP-8 §6: a publisher's freshness document is **either** root-
@@ -384,6 +587,107 @@ selection). The publisher half is
 `publisher/deploy/freshness/document.go`, whose struct this one
 mirrors field for field.
 
+### Mirror provider `appsscript` — optional add-ons
+
+Reserved 2026-11-20 for the Google update-channel add-on
+(`docs/optional-addons-plan.md` §3, `specs/optional-addons-v1.md` §5).
+**Built 2026-11-20:** publisher backend G1/G2
+(`publisher/deploy/freshness/backends/appsscript/`, one more backend of
+`publish-freshness`), the recipient's front fetcher G4
+(`core/bootstrap/{front.go,h2mini.go,hpack_tables.go}`: Chrome-shaped
+uTLS hello, HTTP/2 framed by hand with no `net/http`, the one allowed
+redirect, the bounded read) and its walk G5 (`core/refresh/frontmirror.go`:
+which endpoints are Google mirrors, the container, the D-3 rule in
+`refresh.ValidateMirrorSet`). Details the built walk fixes:
+
+- An `appsscript` mirror is walked only by the two unscheduled walks
+  (the engine's failure walk and the person's button), only when the
+  walk dials direct (the C0 walk with the tunnel down), and **last**,
+  after the ordinary mirrors in their random order. The scheduled poll
+  and anything riding the tunnel skip it.
+- The random delay before the first connection is bounded by what is
+  left of the walk's own budget, not by the full 120 s (accepted by the
+  lead, 2026-11-20).
+- A standby key in the container is offered to the engine's store after
+  the document (and the pack, if any) was applied; a walk whose key was
+  kept counts as one that found a new address.
+
+- **The entry.** One member of the signed mirror set
+  (`trust/freshness-mirrors.json`, `daal/freshness-mirrors-v1`):
+  `{"provider": "appsscript", "url": "https://script.google.com/macros/s/<id>/exec?k=<token>"}`.
+  The URL is exactly that shape: host `script.google.com`, path
+  `/macros/s/<id>/exec` with `<id>` of 20–120 characters from
+  `[A-Za-z0-9_-]`, and one query parameter `k`, 22 base64url characters
+  (16 random bytes, the "path token"), nothing else. It is a mirror like
+  any other for the set's rules (https, no credentials, distinct host).
+- **What it serves** is not a freshness document but a `daal-refresh-v1`
+  container (next section) holding one.
+- **How a recipient fetches it** (G4): through the Google front — SNI
+  `www.google.com`, HTTP/2 `:authority script.google.com`, a Chrome-shaped
+  hello — following exactly one redirect, and only to
+  `script.googleusercontent.com` over the same front; a bounded read of
+  64 KiB; if the fronted attempt fails, one plain attempt with SNI
+  `script.google.com`. At most two connections to Google per walk, and
+  0–120 s of random delay before the first (the script's quota is 30
+  simultaneous executions). A recipient fetches it only after a route
+  died and with no tunnel up, like every mirror. A mirror in a
+  freshness document's `mirrors[]` (which carries URLs only) is treated
+  as `appsscript` exactly when its URL has this shape.
+- **The two-mirror rule, amended** (owner decision D-3): a mirror set
+  whose only provider is `appsscript` is accepted with that one mirror.
+  Every other set still needs at least two distinct providers. This
+  applies where the rule is enforced today: the publisher's
+  `NewMirrorSet` and the recipient's verification of the set
+  (`core/refresh`). The card says that a Google suspension then stops
+  updates.
+
+### The `daal-refresh-v1` container — optional add-ons
+
+The body the `appsscript` mirror serves (and the only thing it stores):
+the freshness document, the signed credential-less pack it names, and
+optionally a standby key, in one small text object, so a recipient
+behind the Google front needs no second fetch.
+
+```jsonc
+{
+  "kind":        "daal-refresh-v1",
+  "freshness":   "<base64 of the freshness document, its exact bytes>",
+  "pack":        "<base64 of the signed credential-less .sbp>",  // optional
+  "standby_key": "<the 26-symbol standby key>"                  // optional
+}
+```
+
+- UTF-8 JSON, at most 65 536 bytes in all; `freshness` at most 16 KiB
+  decoded, `pack` at most 48 KiB decoded. `kind` must be exactly
+  `daal-refresh-v1`. Unknown members are ignored: every part
+  authenticates itself, and nothing in the container is trusted because
+  of where it came from.
+- `freshness` is verified exactly as a document fetched from any mirror
+  (signature chain, `relay_pack_id` / `supersedes`, `sequence` high-water
+  mark, `not_after`). Nothing else in the container is used unless it
+  verifies.
+- `pack` is used only when its SHA-256 equals the document's
+  `current_bundle_sha256`, and then goes through the same merge as a
+  pack fetched from `current_signed_url` (rules 3–4 of "Recipient
+  rules"); `current_signed_url` is not fetched.
+- `standby_key` is accepted only when it matches a held route's
+  `_standby.commit` (after the pack, if any, was applied). It is the 26
+  symbols run together, upper case, the last symbol's two padding bits
+  zero; the publisher's builder takes the key in any form
+  `bundle.ParseStandbyKeyText` reads (the grouped form people are shown)
+  and writes this one.
+- `{"kind": "daal-refresh-v1"}` with no `freshness` is the empty
+  container a removed channel serves: "nothing new", not an error.
+- **The update** (publisher → script; recipients never see it) is one
+  HTTPS POST of `{"seq": <integer>, "blob": "<the container JSON as a
+  string>", "mac": "<64 lower-case hex>"}` with
+  `mac = HMAC-SHA256(write_key, ASCII decimal seq ‖ 0x0A ‖ blob)` and
+  `write_key` 32 random bytes the publisher's app generated and embedded
+  in the script. The script stores the blob only when the MAC holds and
+  `seq` is greater than the stored one. The write key only prevents
+  vandalism of the channel; recipients trust the publisher's signature,
+  never the script.
+
 ### `Manifest.relay_pack.freshness_url` (lifted at V1.6)
 
 The slot is reserved at FRP-1 and held empty at V1.5 by RP021.
@@ -454,6 +758,8 @@ validator code.
 | RP021 | error | `relay_pack.freshness_url` is populated at V1.5. The slot is reserved at FRP-1; FRP-8 lifts acceptance at V1.6 — where the blanket rejection is **replaced by a shape check**, not removed: absolute `https://`, a fully-qualified host that is not an IP literal / loopback, no embedded credentials, ≤2048 bytes. |
 | RP022 | error | At `Phase: V16`, every `cdn_fronted` candidate's `_cdn_attestation` blob (additive sub-field inside the FRP-1 `_relaypack` opaque container — no `spec_version` bump) must carry `origin_ca_fingerprint`, `aop_enabled: true`, `firewall_id`. Validator does NOT call Cloudflare; live-posture re-verification is the wizard's "Verify CDN posture" job. |
 | RP023 | error | `_cdn_attestation.dns_only_present` is `true` (the wizard's deploy-time check found a DNS-only A/AAAA record on the chosen subdomain — §11.7 hard rule). Distinguishes "attestation missing" (RP022) from "attestation present but reports posture failure" (RP023). |
+| RP026 | error (signing only) | `relaypackvalidate.ValidateForSigning`: a `cdn_fronted` candidate's `_cdn_endpoint` is missing or unusable, sits beside an `_endpoint`, is on a family other than `websocket-tls`, or could never be dialled (no `ech_config`, `plain_fallback` off); or a candidate that is not `cdn_fronted` carries `_cdn_endpoint`. **Never run on a recipient** (`Validate` does not include it): a newer publisher's shape must cost a recipient one route, not the pack. |
+| RP027 | error (signing only) | `ValidateForSigning`: a `_standby` is malformed, sits on shadowsocks or on a route without a direct `_endpoint`, is an open standby equal to `_endpoint.server`, or the routes of one relay address do not all carry the same one (shadowsocks excepted). Recipients treat every such `_standby` as absent. |
 | RP019 | warn  | All RelayPack candidates share every `public_risk_tag` (no diversity at all). UI nudge: add a CDN front, a second VPS, or a different provider. |
 | RP020 | warn  | The bundle has no `udp_gated:true` AND no UDP-shaped families. Recipients on UDP-only paths will have no candidate. |
 | RP024 | warn  | A `cdn_fronted` candidate without a `direct_vps` sibling in the same RelayPack — UI nudge: "consider adding a direct route as fallback". |
@@ -552,6 +858,16 @@ The schema is **additive only**:
 - `freshness_url` is already part of the struct at FRP-1 but must be
   empty at V1.5 (`RP021` rejects non-empty values); FRP-8 lifts the
   validator to accept non-empty values; no `spec_version` bump.
+- New data for a route goes in a **sibling** member of
+  `family_specific_config` that older builds ignore (`_report_to`,
+  `_cover_names`, `_standby`, `_cdn_endpoint`), never inside
+  `_endpoint`, whose decoder is strict and whose refusal costs the whole
+  pack. A route whose outbound older builds must not see (they would
+  refuse the pack for an outbound with no `_endpoint`) wraps it in its
+  profile under a key of its own with no top-level `type`
+  (`_daal_cdn_outbound`). Each such member is refused only at signing
+  (`ValidateForSigning`); a recipient that cannot read one drops that
+  member or that route, never the pack.
 
 The next `spec_version` bump after FRP-1 is **FRP-7.5** (sub-key
 cert chain), which lifts `spec_version` from 3 to 4. FRP-7.5 is
@@ -657,7 +973,8 @@ the on-device cadence policy. Verified by
 ## Endpoint commitment — "signed endpoint, local credential"
 
 **Normative.** Implemented by `bundle/go/bundle/endpoint.go` (format,
-check, merge), `bundle/go/importer/endpoint_plan.go` (import policy),
+check, merge; the CDN-fronted shape in `cdn_endpoint.go`, the standby
+in `standby.go`), `bundle/go/importer/endpoint_plan.go` (import policy),
 `publisher/deploy/relaypack/endpoint.go` (signing) and
 `core/abi/endpoint_guard.go` (set-route).
 
@@ -736,6 +1053,162 @@ Pinned by `TestCheckOutbound_RefusesFoldedKeySpellings`
 field that does not belong to the route's family makes the commitment
 malformed (`endpoint_malformed`) — a commitment this build would not
 fully enforce is not one it may partially enforce.
+
+### The CDN-fronted endpoint — optional add-ons (additive)
+
+Reserved 2026-11-20 for the Cloudflare add-on
+(`docs/optional-addons-plan.md` §2, `specs/optional-addons-v1.md` §4).
+**Built (B-4, endpoint part):** format, check and merge
+`bundle/go/bundle/cdn_endpoint.go`; import
+(`bundle/go/importer/endpoint_plan.go` `planCDNRoute`); set-route guard
+(`core/abi/endpoint_guard.go`); the signing check RP026
+(`relaypackvalidate.ValidateForSigning`). **Built 2026-11-20 (B-4
+outbound part, B-6, B-6b, integration):** the binder writing it
+(`relaypack.BindOpts.CDN`; `bind-and-sign` fills it from the operator
+record's `cdn_front` member, seeds from the Cloudflare ranges the front
+record holds, roots = the shipped set `relaypack.CDNShippedRootDigests`,
+or `--cdn-*` flags), the minter (`relaypack/client_outbound.go`
+`CDNClientOutbound`, wrapped by `client_pack.go`; the door's path from
+the creds file's `cdn_ws_path` or `users-pack-sbp[x] --cdn-front`, the
+roots shipped or `--cdn-roots-file`), the engine's edge pick
+(`core/edgepick`) and hello order (`core/abi/connect_cdn.go`).
+
+A `websocket-tls` route whose `_relaypack.exposure_mode` is `cdn_fronted`
+commits to a host name and a root set instead of an address and a key
+pin.
+
+**Where it travels — and why not in `_endpoint`.** `_endpoint` is
+decoded strictly (below), and every build since endpoint commitments
+refuses the **whole** pack — every other route and the freshness merge
+of the signed skeleton with it — for one unknown member there. Families
+may stay on an older build for a long time, so the CDN commitment is a
+sibling member of its own, and the route carries **no** `_endpoint`:
+
+```jsonc
+"family_specific_config": {
+  "_relaypack": { "exposure_mode": "cdn_fronted", /* … RP005–RP007 */ },
+  "_cdn_attestation": { /* RP022 / RP023, unchanged */ },
+  "_cdn_endpoint": {
+    "v": 1,
+    "server": "<label>.<zone>",          // a host name, never resolved by a recipient
+    "port": 443,
+    "server_name": "<label>.<zone>",     // equals server
+    "cdn": "cloudflare",
+    "edge_seeds": ["104.16.0.0/13", "..."],
+    "ech_config": "<base64 ECHConfigList>",               // optional
+    "tls_roots_sha256": ["<base64 SHA-256 of a root's SubjectPublicKeyInfo>", "..."],
+    "plain_fallback": false                               // optional, default false
+  }
+}
+```
+
+and the recipient's outbound for the route is **wrapped** in its
+profile, beside the minter's `_daal_unavailable` marker, with no
+top-level `type`:
+
+```jsonc
+// profiles/<id>.json of a CDN-fronted route in a recipient's file
+{
+  "_daal_unavailable": { "family": "websocket-tls", "reason": "…" },
+  "_daal_cdn_outbound": { "type": "vless", "server": "104.16.1.2", /* … */ }
+}
+```
+
+(`bundle.WrapCDNOutbound`; `bundle.CDNProfileOutbound` unwraps, and also
+accepts an outbound at the top of the profile.) A build from before this
+amendment therefore sees, for that one route, no commitment and no
+outbound: it reports the route `not_offered` ("not included in this
+file … nothing is wrong with your phone"), imports every other route,
+and on the freshness path merges every other route and reports this one
+`no_credentials`. Tested against a frozen copy of those rules, and
+against the real code of 079ef96 on packs this build produced
+(`bundle/go/importer/compat_old_test.go`; the same file shows the
+earlier proposal — these members inside `_endpoint` — refused whole by
+the old rules). A recipient's old build also runs the RelayPack
+validator, which already accepts a `cdn_fronted` `websocket-tls`
+candidate at V1.6 when RP005–RP007 and RP022/RP023 hold, so the minter
+MUST write `_cdn_attestation` and the tags.
+
+The member is covered by the manifest signature like every other
+member of `family_specific_config` (canonicalisation re-parses the
+object and sorts its keys); the wrapped outbound, like every outbound,
+is not signed and is held to the commitment.
+
+- **Shape.** Decoded strictly: an unknown member, a version other than
+  `1`, or any rule below broken makes it unusable for this build. On a
+  recipient that costs **that route only** — it is reported
+  `needs_newer_app` and the rest of the pack is used: the member is
+  signed, so a shape this build does not know is a newer publisher, not
+  an altered file. A route carrying both `_endpoint` and `_cdn_endpoint`
+  refuses the pack (`endpoint_malformed`). RP026 refuses all of these
+  at signing.
+  - `cdn`: `cloudflare` (the only value). Family: `websocket-tls` only.
+  - `server`: a canonical LDH host name of at least two labels — lower
+    case, no trailing dot, not an IP literal, not domestic (`.ir`, its
+    IDN, or the known-domestic list of `_cover_names`).
+  - `edge_seeds`: 1–8 canonical (host bits zero, as `netip` prints it)
+    IPv4 or IPv6 CIDR prefixes of public unicast space, no repeats,
+    taken by the publisher abroad from the CDN's published ranges at
+    sign time. Recipients dial an address inside them and never
+    download a range list or resolve the host name (domestic DNS would
+    answer `10.10.34.x`).
+  - `ech_config`: standard base64 (padded) of the ECHConfigList in the
+    host name's HTTPS record (a 2-byte length then that many bytes),
+    read over DoH from abroad at sign time and at every freshness
+    publish; at most 512 bytes decoded. Absent means the zone serves no
+    ECH ("Name hidden: no"). It is the same for every site on the CDN and
+    identifies nobody; a stale one costs one round trip (the edge
+    answers with retry configs).
+  - `tls_roots_sha256`: 1–8 standard-base64 SHA-256 digests of root
+    certificates' SubjectPublicKeyInfo, no repeats. The app ships the
+    root set; the minter installs the listed roots in the outbound.
+  - `plain_fallback`: the signed per-pack flag of owner decision D-2.
+    A commitment with no `ech_config` and `plain_fallback` off could
+    never be dialled; RP026 refuses to sign it.
+- **The outbound must** (`bundle.CheckCDNOutbound`) be `vless` over a
+  `ws` transport whose `Host` header is set exactly once (any spelling
+  of the name), to one value, `server_name`; TLS on with
+  `tls.server_name` = `server_name`; `server` an IP address inside one
+  of `edge_seeds` (the engine's edge pick writes it; a host name there
+  is refused) and `server_port` = `port`; no
+  `certificate_public_key_sha256`; REALITY absent or off; no
+  `tls.insecure`, no `disable_sni`; no `certificate_path` or
+  `certificate_directory_path`; at least one root installed as
+  `tls.certificate`, **every** one of which has a listed SPKI digest —
+  sing-box then trusts those roots and nothing else, whatever the
+  platform holds. ECH: `tls.ech.enabled` with `tls.ech.config` exactly
+  the committed ECHConfigList (PEM `ECH CONFIGS`) and no `config_path`
+  or `query_server_name` — never a configuration fetched by a DNS
+  lookup (which would put the zone name in a query) or read from the
+  device; ECH off is accepted **only** when `plain_fallback` is true.
+  The general rules above (plain lower-case member names, no `detour`,
+  bind knobs or `server_ports`) apply unchanged and extend to the
+  `transport` and `tls.ech` objects. The ws path is a credential: it
+  stays in the profile, the same for every recipient of the route.
+- **Import.** As rules 1–4 of "Recipient rules" with this checker: an
+  outbound in the file that does not match refuses the whole pack
+  (`endpoint_mismatch`); the unwrapped outbound is what is stored, and
+  the `_cdn_endpoint` object (as signed) is the route's stored
+  commitment (`endpoint:<route_id>`; a reader tells the two shapes apart
+  by the `cdn` member, `bundle.IsCDNCommitment`). The set-route guard
+  holds the stored outbound to it.
+- **Hello order** (engine, B-6b): ECH; then ECH with the outer hello
+  split (`record_fragment` + `fragment`); then stop. A plain hello
+  (which shows the zone name) only when `plain_fallback` is true. The
+  route is tried after every direct route and after the open standby.
+- **Merge** (`bundle.MergeCDNEndpoint`, freshness or a later file, into
+  a device route whose stored commitment is a CDN one) moves the port,
+  `tls.server_name`, the ws `Host`, the ECH configuration (removed when
+  none is committed), and the edge address when it is no longer inside
+  the seeds (to the first address of the first seed; the device
+  re-picks). Installed roots that are no longer listed are dropped; if
+  none is left the route is `needs_new_file` and left as it was.
+  Credentials (uuid, ws path) stay.
+- **Stated limit.** The CDN terminates TLS, so it can read the VLESS
+  header — the recipient's UUID and each destination host and port —
+  and sees every recipient's address. Payloads that are themselves TLS
+  stay opaque. Weaker than a key pin in that one way, and the
+  publisher's card says so before anything is bought.
 
 No manifest struct changes, so the canonical bytes of every existing
 field are unchanged and **`spec_version` does not move**:
@@ -828,7 +1301,10 @@ rig `op:tamper uncommitted_replacement.*`.
 ### Recipient rules (import)
 
 For a bundle with `Manifest.relay_pack != nil`, per usable route, before
-any trust prompt and again before persistence:
+any trust prompt and again before persistence (a route carrying
+`_cdn_endpoint` follows the same rules with that commitment in place of
+`_endpoint`, its outbound unwrapped from the profile; "The CDN-fronted
+endpoint"):
 
 1. **Outbound present** (the profile is a JSON object with a non-empty
    `type`): the route MUST carry a valid `_endpoint` and the outbound
@@ -840,7 +1316,9 @@ any trust prompt and again before persistence:
    minter's `_daal_unavailable` marker): the route is **not stored**. It
    is not listed, not selectable, not activatable. It is reported in
    `Verdict.Unavailable` with a reason — `not_offered` (marker),
-   `no_credentials`, `needs_new_file`, or `older_than_device`.
+   `no_credentials`, `needs_new_file`, `older_than_device`, or
+   `needs_newer_app` (a signed add-on member this build cannot read;
+   "The CDN-fronted endpoint").
 3. **Merge.** If the route has a commitment and the device already holds
    an outbound for the same route id, from the **same publisher**, of the
    **same family**, the new signed endpoint is applied to that outbound
@@ -1053,6 +1531,7 @@ contract lives in `specs/daal-relay-mgmt-v1.md`.
 - FRP-4b (`34-phase-frp-4b-direct-deploy-integration.md`) — Helper-side `BindAndSign` that turns the OperatorRecord into a signed `.sbp`.
 - FRP-8 (`38-phase-frp-8-v1-6-cdn-fronted.md`) — lifts `cdn_fronted` and non-empty `freshness_url` to V1.6.
 - FRP-11 (`41-phase-frp-11-trusted-cells.md`) — lifts `cell_scope`. See §"V2 cell aggregation" below.
+- `specs/optional-addons-v1.md` and `docs/optional-addons-plan.md` — the `_standby` key, the CDN-fronted endpoint, the `appsscript` mirror provider and the `daal-refresh-v1` container (reserved and built 2026-11-20).
 
 ## V2 cell aggregation (FRP-11 amendment)
 

@@ -1,6 +1,7 @@
 // edge_ranges.go fetches Cloudflare's published edge IP ranges so
 // the Helper can apply them to the cloud-provider firewall rule
-// that locks origin 443/tcp to Cloudflare-only sources.
+// that locks the relay's CDN origin port (relayports.CDNOrigin) to
+// Cloudflare-only sources.
 //
 // Per supplement §11.7, this fetch runs from the FRP Helper
 // machine (not from the origin box). The Helper holds the
@@ -18,6 +19,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
+	"sort"
 	"strings"
 	"time"
 )
@@ -135,7 +138,7 @@ func FetchEdgeRanges(ctx context.Context, f EdgeRangeFetcher, now func() time.Ti
 // implements this. Vultr / Stark (FRP-10) plug in later.
 type FirewallApplier interface {
 	// ApplyCloudflareRule creates or updates a firewall rule
-	// allowing inbound 443/tcp ONLY from the supplied edge
+	// allowing inbound tcp on the CDN origin port ONLY from the supplied edge
 	// ranges. Returns the rule's provider-side ID.
 	ApplyCloudflareRule(ctx context.Context, firewallID string, ranges *EdgeRanges) (string, error)
 }
@@ -162,4 +165,44 @@ func RefreshFirewall(
 		return "", ranges, err
 	}
 	return id, ranges, nil
+}
+
+// EdgeSeedsFromRanges picks the signed edge seeds of the CDN route from
+// the ranges Cloudflare published (FrontRecord.EdgeRanges): the widest
+// prefixes first (the most edge addresses to pick a clean one from),
+// IPv4 before IPv6, at most max, each canonical and once. Published
+// order breaks ties, so the same list always gives the same seeds.
+func EdgeSeedsFromRanges(ranges []string, max int) []string {
+	type cand struct {
+		p   netip.Prefix
+		idx int
+	}
+	var cs []cand
+	seen := map[netip.Prefix]bool{}
+	for i, r := range ranges {
+		p, err := netip.ParsePrefix(strings.TrimSpace(r))
+		if err != nil || p != p.Masked() || p.Bits() == 0 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		cs = append(cs, cand{p, i})
+	}
+	sort.SliceStable(cs, func(i, j int) bool {
+		a, b := cs[i].p, cs[j].p
+		if a.Addr().Is4() != b.Addr().Is4() {
+			return a.Addr().Is4()
+		}
+		if a.Bits() != b.Bits() {
+			return a.Bits() < b.Bits()
+		}
+		return cs[i].idx < cs[j].idx
+	})
+	var out []string
+	for _, c := range cs {
+		if len(out) == max {
+			break
+		}
+		out = append(out, c.p.String())
+	}
+	return out
 }

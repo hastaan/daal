@@ -68,6 +68,19 @@ func ensureRelayPackRefresh() (*refresh.RelayPackRefresher, error) {
 			}),
 			Now:     nowUTC,
 			Recover: recoverViaBootstrapPointers,
+			// A daal-refresh-v1 container (the Google channel) may carry
+			// a standby key; it is kept on every route whose sealed
+			// standby it opens. AcceptStandbyKey takes Core.mu, so this
+			// refresher is only ever run without it held (the scheduler
+			// executor, the recover walk, the person's button).
+			StandbyKeys: StandbyKeySink{},
+			// A scheduled poll that would ride the tunnel of a route the
+			// connection check has failed is not made (and does not
+			// escalate): it would reach nothing (blackout plan C0).
+			TunnelHealthy: func() bool {
+				st, _, running := c.check.snapshot()
+				return !(running && st == RouteCheckFailed)
+			},
 		}
 	}
 	c.mu.Lock()

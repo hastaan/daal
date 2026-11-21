@@ -379,7 +379,7 @@
     font-weight: 500;
 }
 .d2-conn-route-chip {
-    background: rgba(255,255,255,0.04);
+    background: var(--tint-1);
     border: 1px solid var(--teal-hairline);
     border-radius: 100px;
     padding: 8px 16px;
@@ -861,9 +861,43 @@
 .d2-kbd {
     font-family: var(--font-mono);
     font-size: 10px;
-    background: rgba(255,255,255,0.06);
+    background: var(--tint-2);
     color: var(--paper-dim);
     padding: 1px 5px;
     border-radius: 3px;
     border: 1px solid var(--teal-hairline);
+}
+
+/* ---- Home (spec C2) --------------------------------------------------- */
+
+/* The ready ring breathes: tap to connect. */
+@keyframes d2-ring-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+.d2-bird-breathe { animation: d2-ring-breathe 2.4s ease-in-out infinite; }
+.d2-bird { transition: transform var(--t-fast); }
+.d2-bird:active { transform: scale(0.97); }
+/* The way being tried now, among the step dots under "Trying …". */
+.d2-step-now { animation: d2-ring-breathe 1.6s ease-in-out infinite; }
+
+/* Desktop: the side panel sits beside the hero from 1100 px, under it
+ * below that. */
+@media (min-width: 1100px) {
+  .d2-home-body--panel {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    align-items: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .d2-bird-breathe, .d2-step-now { animation: none; }
+}
+
+/* The developer fold reuses the old rail sections: sentence case there
+ * too (no capitals, no letter-spacing on labels; spec E.1.4). */
+[data-dev] * {
+  text-transform: none !important;
+  letter-spacing: normal !important;
 }

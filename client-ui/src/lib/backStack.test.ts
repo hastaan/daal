@@ -228,10 +228,23 @@ describe('one mechanism', () => {
 
     it('every hand-made dialog answers Back (imports useBack) or is built on a primitive that does', () => {
         const dialogs = Object.entries(sources).filter(([, src]) => /role="dialog"/.test(src));
-        expect(dialogs.length).toBeGreaterThanOrEqual(7);
+        // The 2026-11 redesign moved most hand-made dialogs onto Sheet /
+        // MenuSheet; what is left by hand still has to answer Back.
+        expect(dialogs.length).toBeGreaterThanOrEqual(3);
         for (const [path, src] of dialogs) {
             expect(src, path).toMatch(/import \{ useBack \} from '[./]+(lib\/)?useBack'/);
         }
+        // The dialogs that moved are built on the primitives, so they answer
+        // Back through BottomSheet/Modal (checked below).
+        for (const p of [
+            '../components/CustodyPanel.tsx',
+            '../components/PanicWipeDialog.tsx',
+            '../components/RecoverySheet.tsx',
+            '../components/connection/ModePickerSheet.tsx',
+        ]) {
+            expect(sources[p], p).toMatch(/import \{[^}]*\b(Sheet|MenuSheet)\b[^}]*\} from '[./]+design\/primitives'/);
+        }
+        expect(sources['../design/primitives/MenuSheet.tsx']).toMatch(/\bSheet\b/);
         // The primitives every Sheet goes through.
         for (const p of ['../design/primitives/BottomSheet.tsx', '../design/primitives/Modal.tsx']) {
             expect(sources[p], p).toContain('useBack(true, onClose)');

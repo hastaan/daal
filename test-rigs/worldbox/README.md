@@ -7,8 +7,8 @@ middle. Every hop runs the **production binary or the production code path**
 and a rig that re-implements a seam cannot see them.
 
 ```
-../../daal e2e            # quick: 16 worlds, ~1450 checks, ~1 minute. The pre-push hook runs this.
-../../daal e2e full       # everything: 19 worlds, ~4450 checks, 4–5 minutes.
+../../daal e2e            # quick: 18 worlds, ~1450 checks, ~1 minute. The pre-push hook runs this.
+../../daal e2e full       # everything: 24 worlds, ~4450 checks, 4–5 minutes.
 ```
 
 That is the entry point (`./e2e.sh [quick|full] [-j N] [--only world,…] [--plan]`
@@ -36,8 +36,8 @@ No sudo, no network, no VPS, no phone.
 | **quick** (~1 min) | `clean` | no censor × all 7 families on the tree's mgmt daemon, plus the ops `switch` (a live route switch, TCP family ↔ QUIC family), `revoke`, `l1`, `mgmtauth`, `tamper` |
 | | `auto` | the **automatic connect** — the main screen's one button, no route named — on the four routes a default relay serves: op `auto` (see "Client-side ops") |
 | | `release` | the **pinned release artefacts** (what a relay provisioned today really downloads) × the default families, plus `revoke`, `mgmtauth` |
-| | one per censor scenario (14) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
-| **full** (4–5 min) | one per censor scenario (14) | every scenario × all 7 families |
+| | one per censor scenario (15) | the scenario's raw proofs, and its verdict for one TCP family (vless-reality) and one QUIC family (hysteria2) |
+| **full** (4–5 min) | one per censor scenario (15) | every scenario × all 7 families; under `sni-rst-stateless` and `sni-rst-first-two` also op `desync` (the engine's ClientHello split, see "Client-side op `desync`") |
 | | `clean.recipients`, `clean.rotation` | the whole lifecycle on the tree daemon × all 7 families: recipients, revoke, wrong credentials, tamper, mgmt-auth, repeated relay restarts; then L1, **L2 then L3** (the cover host moves, then the address — the order in which naive's certificate matters), freshness, capability honesty |
 | | `clean.switch` | one phone, many routes: `switch`, then `switch-all` — a live switch between **every ordered pair** of the 7 families (42) in one session |
 | | `clean.auto` | op `auto` with all 7 families' routes on the phone (three of them behind the experimental gate, which the op leaves off) |
@@ -47,6 +47,8 @@ No sudo, no network, no VPS, no phone.
 | | `udp-blackhole` (+ops) | recipients and the three rotation rungs (L1, L3, L2 — the other order) **under a censor** |
 | | `release.all-families` | the pinned artefacts × all 7 families — FINDINGS F-002, kept visible until the release. **Until the pin moves, every pinned world stops at `provision`: this tree's publisher will not pin a management fingerprint the pinned health binary cannot authenticate (FINDINGS BOOT-1), and could not authenticate to the pinned daemon if it did (REL-1)** |
 | | `narrow-relay` | a relay provisioned with `--families shadowsocks,anytls` only — FINDINGS FAM-4 |
+| **addons** (and in full) | `standby*`, `cdn-*`, `refresh-google-*`, `google-channel` | the add-ons on the tree daemon (see the e2e.sh header) |
+| | `standby.pinned`, `cdn-sni-block-ech.pinned` | the standby ops and one CDN world again on the **pinned release box**: the box side of both add-ons is the release's daemon (the standby bound `scope link`, the door at `POST /cdn`), which the tree daemon cannot speak for |
 
 Which daemon a world's box runs is in its plan line (`./e2e.sh quick
 --plan`) and in every check's `box` field. In quick, **every world except
@@ -140,8 +142,8 @@ your user (`/etc/subuid`, `newuidmap`), `/dev/net/tun`, nftables with
 conntrack and NFQUEUE usable inside a user namespace, and `go gcc ip nft tc
 ss python3(+PyYAML) openssl flock timeout`. `run.sh --preflight` checks all
 of it and says what is missing (exit 77). The release artefacts this
-tree PINS must be staged in `dist-release/relay-v1.5.1/` (`gh release
-download relay-v1.5.1 --dir dist-release/relay-v1.5.1`, as CI does). The
+tree PINS must be staged in `dist-release/relay-v1.6.0/` (`gh release
+download relay-v1.6.0 --dir dist-release/relay-v1.6.0`, as CI does). The
 release script builds a release FROM THIS TREE into its own tag's
 directory and, without `--upload`, publishes nothing;
 `tools/release/README.md` says how the "pinned" box is pointed at such a
@@ -260,6 +262,10 @@ driver/                the `wb` binary (stdlib + hcloud schema types)
   fakecloud_fip.go     floating IPs (the cloud half of L3)
   mgmtprobe.go         hand-built mgmt requests (`wb mgmtprobe`)
   storage.go           static hosting the insider reaches without a tunnel (`wb storage`)
+  addons_net.go        the add-ons' outside world (cdn / google / stranger namespaces) and Prereq (what waits on other lanes)
+  fakecf_api.go fakecdn.go ech_lab.go      Cloudflare's API, published ranges, DoH, and edge; the lab ECH key
+  fakegfe.go fakegas_api.go                Google's front, the deployed web apps, Apps Script API and OAuth
+  ops_standby.go ops_cdn.go ops_gfe.go     the add-on ops (see "The publisher add-ons")
   *_test.go            hermetic: isolation + declaration validation
 labclient/             `wb-client`: real engine + the lab's VpnService (switch.go: route switch, fd sentinels, store checks; auto.go: the one button — engine_connect_auto, cancel, disconnect and connect again in one process)
 box/init.py            cloud-init first boot
@@ -404,7 +410,7 @@ the module cache, beside the binary.
 
   | `when` | fires on | parameters |
   |---|---|---|
-  | `tls_sni` | a TLS ClientHello whose `server_name` is in `sni` | `reassemble`: follow the hello across TCP segments (false = first data packet only) |
+  | `tls_sni` | a TLS ClientHello whose `server_name` is in `sni` | `reassemble`: follow the hello across TCP segments (false = first data packet only); `packets`: N (≤ 8) — a box that does NOT reassemble but joins the first N data packets (2 is Iran's documented window); `partial`: read the name out of a hello that is not complete yet, as soon as the name is (else the whole record must be in what the box read) |
   | `first_data` | the first packet of a flow that carries payload | — |
   | `first_bytes_not` | a first payload that does not begin like `allow` | `allow`: `tls` (record 0x16) and/or `http` (a request verb) |
 
@@ -495,6 +501,7 @@ running side by side never relink what another is executing.
 | `sni-drop` | ClientHello with the cover SNI swallowed, flow blackholed, no RST | GFW ESNI / fully-encrypted-traffic style in-path drop | dpi |
 | `sni-rst` | same trigger, forged RST to both ends, reassembling | the GFW's classic SNI reset | dpi |
 | `sni-rst-stateless` | same trigger, RST+ACK to the client only, first data packet only | Iran's SNI filter (no stream reassembly) | dpi |
+| `sni-rst-first-two` | same trigger and reset, the first TWO data packets joined, the name read as soon as it is whole in them, nothing read after | Iran's SNI filter as measured: "inspects only the first two data-carrying packets", no reassembly; the multi-record blind spot | dpi |
 | `tcp-reset-mid-handshake` | any TCP flow to the relay reset on its first data packet | RST against a suspected proxy address | dpi |
 | `quic-drop` | QUIC v1 Initial datagrams dropped on every port | QUIC/HTTP3 blocking by protocol | nft (raw payload match) |
 | `heavy-loss` | 30% random loss on TCP only | protocol-selective shaping | nft |
@@ -570,7 +577,9 @@ shown to survive Iran or China. Specifically:
 * **A simpler parser than the adversary's — and a stricter one than
   Iran's.** The ClientHello parser reads one TLS record; a hello fragmented
   across records is not seen (the real blind spot too). `sni-rst-stateless`
-  reads only the first data packet (the real box reads two). No ECH, no
+  reads only the first data packet (the real box reads two);
+  `sni-rst-first-two` reads two, and reads the name out of an incomplete
+  hello — stricter than a box that waits for the whole record. No ECH, no
   QUIC Initial decryption (so no QUIC-SNI blocking), no certificate
   inspection, no HTTP Host matching, no DNS tampering at all.
 * **One address, one flow direction.** Rules look at client→world packets.
@@ -657,6 +666,7 @@ nothing).
 | `l2` | `rotate-tls`, `bind-and-sign`, `publish-freshness`, then Rebuild | cover host moved in the record and in both places on the box; no key, no user row changed; **old pack per family = `l2OldPackExpect`** (vless-reality blocked, the rest pass); **a phone holding a pre-rotation file polls the mirrors and connects on every family with no new file** (`no-new-file.cover-host-moved.*`); rebuilt pack connects everywhere | the pre-rotation session passed |
 | `mgmtauth` | (hand-built requests, `mgmtprobe.go`) | unsigned, wrong scheme, garbage, empty signature, stranger's key, wrong op, stale, future, signed for another body, signed for another relay, replayed address token, **replayed `users-revoke` token aimed at a second recipient** are all refused | a correctly signed request is honoured; afterwards the config is byte-identical and the targeted recipient still connects |
 | `freshness` | `bind-and-sign --freshness-mirror`, `publish-freshness`, `rotate-tls`; engine: `abi.SchedulerTick` | what the app publishes — the digest of the SIGNED, credential-less pack, with that file at the pack URL — is **merged** by a polling phone: with nothing changed it still connects and keeps every route; after an L2 it connects **with no new file** (nothing is minted for it); the published file holds no credential (`published.*.holds_no_credentials`) | no poll → still blocked; a document signed by another key → refused, no pack downloaded; a pack whose digest does not match → refused; the signed pack handed as a file to a phone that holds nothing → refused; the signed pack from BEFORE the rotation handed as a file to a phone that has already moved on → not merged, routes kept, still connects (`rotated.stale-signed-pack-by-file.*`) |
+| `blocked-while-connected` | `assign-fip`, `bind-and-sign --freshness-mirror`, `publish-freshness`, `floating-ip release`; engine: `engine_connect_auto`, then nothing from the host | blackout plan C0: a phone CONNECTED on a pre-move file; the relay moves (L3) and the censor null-routes the old address under it; the engine by itself stops the dead instance, walks the mirrors once, directly from the phone's own address, applies the re-signed pack and is connected again on the new address in the same TUN (`relay_recovery.state` updated, trigger failure); one walk only (document fetches ≤ mirrors, one pack); the same again under a block that RESETS TCP instead of swallowing it | a phone that cannot see the mirrors: the walk finds nothing, `relay_recovery.state` unreachable, the dead route's instance back (failed, running), a verdict, and no traffic around the tunnel |
 | `caps` | — (reads this run's results) | every token `/health` advertises was observed to work in this run, and nothing that worked is unadvertised; a token with no evidence is `skipped` with the op that would produce it; a token the rig has no proof for fails. **It judges the binary's claim against the binary's behaviour, not the box's privilege**: `bind-address` is advertised because the daemon holds `CAP_NET_ADMIN`, which in this world every process does. It does not show that the systemd unit grants it, nor that a relay with an older unit advertises nothing | — |
 | `restarts` | `users-provision`, `users-revoke` (N cycles, `WB_RESTART_CYCLES`, default 6) | the relay comes back serving **every** family after every restart of its data plane: each cycle restarts sing-box three times and then runs a bystander's session on each family | the bystander's pack is r1's, never touched by the verbs |
 
@@ -669,6 +679,49 @@ Any op that moves an endpoint must `rc.Resign` before it mints from
 describes the relay. `caps` must run last. The rotation rungs
 need a mgmt daemon that advertises them: the pinned release does for
 L1/L2/L3 on the four default families (FINDINGS LC-O4).
+
+#### Client-side op `desync` — the engine's own ClientHello split
+
+`desync` (`driver/ops_desync.go`) runs the PRODUCTION split (`core/desync`,
+plan T2 of `docs/blackout-tier-plan.md`) against the world's censor, where
+the scenario's `split: true` proof only runs a probe-harness one. For each
+family whose outbound the split can sit under (vless-reality,
+websocket-tls, anytls — not naive, whose Cronet dials the relay itself,
+nor the UDP families; shadowsocks below) and each preset the scenario lists in
+its `desync` map (preset → family → `pass`|`blocked`; `sni-cut` alone,
+expected as the scenario expects, when it lists none), one fresh phone
+connects with the preset turned on for its route — `wb-client --desync`
+→ `engine.SetRouteDesync`, which is all the selection ladder will do —
+and runs the ordinary session under `<preset>.`. `<preset>.first_segment`
+then reads the client's segment sizes off the flow tap at the censor
+(`flowtap.go`, the first 8 data packets of every flow are kept, with
+their bytes): every TCP flow to the family's endpoint must begin with a
+1-byte data packet for the presets that cut at 1, so a green tunnel is
+not a split that never happened. `<preset>.name_cut` reads where the
+cover host's name fell in those bytes: no single data packet may hold it
+whole (`sni-cut`, `chain`, `tlsrec-sni` — for the record split, the
+records' payloads joined must hold it and no packet contiguously), and
+for `sni-cut` not the first two packets joined either. `split1` does not
+claim it (recorded, not judged); a flow whose kept bytes never carry the
+name is not judged. uTLS's chrome fingerprint permutes its extensions, so
+the name moves from hello to hello (one run: byte ~140 in one flow, ~476
+in the next) — the check reads it, it does not assume it. What this rig
+cannot show: kernel autocorking on a slow link and merged
+retransmissions after loss (the veth links are lossless and the censor
+forwards out-of-order segments unread). Run by the full plan in `sni-rst-stateless` (every preset
+listed passes) and `sni-rst-first-two` (`split1` is caught — its first
+two packets hold the whole hello — and `sni-cut`, `chain`, `tlsrec-sni`
+pass).
+
+shadowsocks is asked for every preset too, and the engine must REFUSE
+the cut (`core/engine` `desyncApplicable`: `header_in_one_read`): its
+server reads the fixed request header with one Read and resets the
+connection when that Read is short (sing-shadowsocks `shadowaead_2022`),
+and every preset's first segment is 1 byte — before the refusal, `split1`,
+`sni-cut` and `chain` turned its working route into `tcp_reset` on 8446
+in both worlds, with no ClientHello to hide. The checks are its ordinary
+session (expected as without the cut) and `<preset>.not_cut`: no flow to
+8446 began with a 1-byte data packet.
 
 #### Client-side ops — one phone that stays up
 
@@ -820,6 +873,101 @@ for commands with the VPN off — `tick` calls the product's own
 `abi.SchedulerTick` once, `import <file>` hands the phone another file
 (the app's own `abi.ImportSBP`), `connect <family>` brings the VPN up.
 Nothing was added to the engine for it.
+
+#### The publisher add-ons — standby address, CDN front, Google channel
+
+`docs/optional-addons-plan.md` items B-8 and G7, the standby ops, and
+every add-on scenario. `./e2e.sh addons` runs them all (and `full`
+includes them); one world at a time:
+
+```
+./run.sh --mgmt=tree --ops standby,standby-promote,standby-sealed,standby-open,standby-stale clean vless-reality hysteria2
+./run.sh --mgmt=tree --ops standby-google clean vless-reality
+./run.sh --mgmt=tree --ops cdn-provision clean vless-reality
+./run.sh --mgmt=tree --ops google-channel clean vless-reality
+./run.sh --mgmt=tree --ops cdn cdn-grey-budget vless-reality hysteria2        # any cdn-*.json
+./run.sh --mgmt=tree --ops google-refresh refresh-google-only vless-reality   # any refresh-google-*.json
+```
+
+The outside world they need is brought up only when a scenario's
+`world` (or a probe's target) or an op asks for it (`driver/addons_net.go`):
+
+| part | where | stands in for | what it enforces |
+|---|---|---|---|
+| `wb fakecf` (`fakecf_api.go`) | 192.0.2.25 in the internet ns: `api.cloudflare.com`, `www.cloudflare.com/ips-v4`, `cloudflare-dns.com` + `dns.google` (DoH) | Cloudflare API v4, the published ranges, the publisher's ECH read | tokens with permissions and a zone scope (`cf-tokens.json`): a call the token may not make is 403, which is what the token check's verdicts rest on; a lab Origin CA signs the CSR; faults (`cf-faults.json`) for rollback; state in `cf-state.json` that the edge obeys |
+| `wb fakecdn` (`fakecdn.go`) | ns `cdn`, every address of 198.19.8.0/24 (four published /26s), behind the censor; pulls from 198.19.8.250 | Cloudflare's edge | SNI == Host (else 421, no fronting; with ECH the inner name); only proxied hosts (else 403); the origin rule's port; Full (strict) against the lab Origin CA; origin pull with the zone's uploaded client certificate; ECH with the world's lab key (outer name `cloudflare-ech.com`); idle WebSockets closed |
+| `wb fakegoogle` (`fakegfe.go`, `fakegas_api.go`) | ns `google`, 198.19.9.0/24 behind the censor and reachable from the publisher | Google's front, the deployed web apps, Apps Script API, OAuth | routes by AUTHORITY, not SNI; `/exec` answers with Apps Script's 302 to `script.googleusercontent.com`; the web app runs Code.gs's rules (MAC, seq, k) with the write key and token read out of the source actually deployed (API) or pasted (`google-paste/<id>.gs`, Path B); the API accepts exactly the sign-in's token and not after revocation; knobs `google-knobs.json` (API off, a failing stage, the previous container, a sign-in wall) |
+| the stranger (`wb elsewhere --listen`) | ns `stranger`, a released Floating IP routed there by the censor | whoever the provider gives a released address to | its own TLS certificate: a stale standby must fail closed against it |
+| the lab ECH key (`ech_lab.go`) | `lab-ech-*.bin` in the run directory | Cloudflare's shared ECH configuration | real ECH with Go's stack (`TestLabECHIsRealECH`) |
+
+New censor mechanisms (`censor_dpi.go`, unit-tested in `addons_test.go`):
+`budget` (a flow may send `packets` client packets, SYN and ACKs
+included, then it is cut — the "grey" addresses of net4people #676),
+`tls_sni_not` (an SNI allowlist), and `dst` as a CIDR prefix. New raw
+probes: `"ech": true` on `tls` (the inner name is `sni`; the wire shows
+the outer name) and `exchange` (twelve request/answer round trips over
+TLS: `ok` or `cut`). New targets: `edge-a`…`edge-d`, `gfe`, `gfe2`,
+`gscript`, `guser`, `storage`; variables `$EDGE_A…D`, `$EDGE_NET_A…D`,
+`$EDGE_NET`, `$CDN_HOST`, `$ECH_OUTER`, `$R2_SNI`, `$GH_SNI`, `$PACK_SNI`,
+`$GFE_IP`… A scenario may say what op `cdn` expects of the CDN route
+(`"cdn": {"expect": …, "via": [edge prefixes]}`) and how op
+`google-refresh`'s walk must end (`google_expect`, `google_knobs`).
+
+| scenario | censor | the CDN route / the walk must |
+|---|---|---|
+| `cdn-relay-ip-block` | relay address null-routed, edges open | carry (every direct family blocked) |
+| `cdn-sni-block-ech`, `cdn-sni-block-ech-stateless` | the zone's name reset by SNI — reassembling box / two-packet box | carry with ECH; the name never in a plain hello |
+| `cdn-ech-outer-block`, `cdn-ech-outer-block-stateless` | `cloudflare-ech.com` reset (zone name as a tripwire) — both boxes | be reported dead; no plain fallback (D-2) |
+| `cdn-grey-budget` | two of four /26s cut flows after 6 packets | carry, on an edge in a clean prefix |
+| `cdn-edge-allowlist` | three of four /26s dropped | carry, through the one open prefix |
+| `cdn-sni-allowlist` | on edge addresses only one name may open | be dead (not rescued, plan §2.1); no plain fallback |
+| `refresh-google-only` | R2, Pages, pack URL and `script.google.com` reset by SNI; `www.google.com` open | recover through the front |
+| `refresh-google-rst` | …and `www.google.com` reset too | end cleanly, ≤ 2 connections to Google |
+| `refresh-google-rollback` | as `-only`; the script serves the previous update | refuse it |
+
+Ops: `standby` (rent → bind without adopting → sign: every route but
+shadowsocks carries a sealed commitment that matches the printed key,
+the address in no byte of the pack, the box answers on both; a phone
+connects; remove leaves nothing billing), `standby-promote` (a CONNECTED
+phone; "Switch to standby" re-signs and publishes; the primary is
+null-routed under it: one walk, reconnected on the standby, no new
+file), `standby-sealed` (the primary dies and no key comes: the phone
+never dials the standby and names it nowhere; then a wrong key and a
+malformed one are refused and the typed key reconnects it on the
+standby), `standby-open` (the engine's address variant `a:standby`, zero
+fetches), `standby-stale` (the released address at a stranger's: the
+variant is tried and fails closed), `standby-google` (the switch and the
+key through the Google channel with the ordinary mirrors cut),
+`cdn-provision` (token verdicts ok / too_broad ×2 / missing_permission /
+invalid; a provision that fails at the origin rule leaves the zone as it
+was; the zone state, the relay firewall's door rule from the published
+ranges only, the ECH config read over DoH; the door opened by `cdn-door`,
+which opens the box firewall to the same ranges itself (provisioning
+fetches none); posture; a WebSocket through the edge with ECH and origin
+pull; the door refuses a client without the origin-pull certificate;
+removal, door first, leaves it closed at both firewalls; the token in no
+log), `cdn` (a phone
+with the CDN route, per scenario), `google-channel` (Path A: API off →
+`E_GOOGLE_API_NOT_ENABLED`, a failing stage → `E_GOOGLE_PARTIAL` and a
+resume into the same project, the token revoked every time and in no
+output; the update POSTed and fetched back through the front; a
+stranger's write key and an older update refused; Path B ends in the
+same state; a sign-in wall named), `google-refresh` (a phone connected
+when the relay moves and its address is null-routed: per scenario).
+
+**Waiting on other lanes.** Parts that need code still landing in this
+wave record ONE `skipped` check whose detail starts `WAITS ON <lane>
+<item>` (`Prereq` in `addons_net.go`, detected from the tree's non-test
+source). They run for real, with no rig change, once that code is in.
+wb-client's `standby-key` command is behind the build tag
+`wb_standby_key`, which run.sh sets when `core/abi` exports `StandbyKey`
+(`wb-client --features` says which it has).
+
+What none of this can show (plan §7): which Cloudflare prefixes and
+Google addresses pass per ISP today, real ECH on a free zone (C-2), the
+token keys (C-1), PropertiesService without authorisation (G-1), the
+front with the engine's hello against the real Google (G-2), the
+Floating IP limit (S-1).
 
 ### (d) Results
 

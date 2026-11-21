@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,10 @@ type Proof struct {
 	SNI   string `json:"sni,omitempty"`   // tls: server_name ("" = none); variables allowed
 	Split bool   `json:"split,omitempty"` // tls: ClientHello in two TCP segments
 	Shape string `json:"shape,omitempty"` // udp: plain | quic
+	// ECH: tls / exchange: offer the world's ECH configuration
+	// (ech_lab.go) with SNI as the inner name; the wire shows the outer
+	// name cloudflare-ech.com. TLS 1.3 only, as ECH is.
+	ECH bool `json:"ech,omitempty"`
 	// Expect: the observation. tcp: ok|connect_timeout|connect_reset|unreachable;
 	// tls: ok|reset_after_hello|timeout_after_hello|connect_*;
 	// bytes: answered|reset_after_data|silent|connect_*; udp: delivered|dropped.
@@ -73,6 +78,10 @@ var proofOutcomes = map[string][]string{
 	"udp":   {"delivered", "dropped"},
 	// statistical probes, for censors that degrade instead of block
 	"tcp_burst": {"all", "some", "none"},
+	// exchange: a TLS session (SNI, optionally ECH) carrying twelve
+	// request/answer round trips, each its own client packet — a flow
+	// longer than a "grey" address's packet budget (budget rule)
+	"exchange": {"ok", "cut", "reset_after_hello", "timeout_after_hello", "connect_timeout", "connect_reset", "unreachable"},
 	"bulk":      {"fast", "slow", "connect_timeout", "connect_reset", "unreachable"},
 }
 
@@ -151,9 +160,35 @@ func ValidateScenario(s Scenario, families []string, taxonomy map[string]bool) [
 	if strings.TrimSpace(s.Analogue) == "" {
 		bad("no \"analogue\": say which documented real-world behaviour this models")
 	}
+	for _, w := range s.World {
+		if w != "storage" && w != "cdn" && w != "google" {
+			bad("world %q, want storage|cdn|google", w)
+		}
+	}
+	if s.CDN != nil && s.CDN.Expect != Pass && s.CDN.Expect != Blocked {
+		bad("cdn.expect=%q, want pass|blocked", s.CDN.Expect)
+	}
+	switch s.GoogleExpect {
+	case "", "recovered", "unreachable", "refused":
+	default:
+		bad("google_expect=%q, want recovered|unreachable|refused", s.GoogleExpect)
+	}
 	for _, r := range s.Censor.DPI {
 		if err := r.validate(); err != nil {
 			bad("%v", err)
+		}
+	}
+	for preset, m := range s.Desync {
+		if !contains(desyncPresets, preset) {
+			bad("desync preset %q is not one of %v", preset, desyncPresets)
+		}
+		for f, v := range m {
+			if f != "*" && !contains(families, f) {
+				bad("desync[%q] for %q, which is not a declared family", preset, f)
+			}
+			if v != Pass && v != Blocked {
+				bad("desync[%q][%q]=%q, want pass|blocked", preset, f, v)
+			}
 		}
 	}
 	for f, c := range s.Category {
@@ -202,8 +237,11 @@ func ValidateScenario(s Scenario, families []string, taxonomy map[string]bool) [
 			bad("prove entries need unique names (%q)", pr.Name)
 		}
 		seen[pr.Name] = true
-		if pr.To != "relay" && pr.To != "elsewhere" && pr.To != "gateway" {
-			bad("prove %s: to=%q, want relay|elsewhere|gateway", pr.Name, pr.To)
+		if _, ok := proofTargets[pr.To]; !ok {
+			bad("prove %s: to=%q, want one of %s", pr.Name, pr.To, strings.Join(proofTargetNames(), "|"))
+		}
+		if pr.ECH && pr.Probe != "tls" && pr.Probe != "exchange" {
+			bad("prove %s: ech applies to tls and exchange probes only", pr.Name)
 		}
 		if !contains(proofOutcomes[pr.Probe], pr.Expect) {
 			bad("prove %s: probe %q cannot observe %q (want one of %v)", pr.Name, pr.Probe, pr.Expect, proofOutcomes[pr.Probe])
@@ -231,6 +269,7 @@ func ValidateScenario(s Scenario, families []string, taxonomy map[string]bool) [
 
 // scenarioVars is the complete substitution vocabulary for scenario files.
 func scenarioVars(coverSNI string) map[string]string {
+	host := func(u string) string { return strings.SplitN(strings.TrimPrefix(u, "https://"), "/", 2)[0] }
 	return map[string]string{
 		"CLIENT_IP":    ClientIP,
 		"RELAY_IP":     Relay1IP,
@@ -238,12 +277,51 @@ func scenarioVars(coverSNI string) map[string]string {
 		"DEV_CLIENT":   CensorDevClient,
 		"DEV_RELAY":    CensorDevRelay,
 		"COVER_SNI":    coverSNI,
+		// The add-ons' outside world (addons_net.go).
+		"EDGE_A": CDNEdgeA, "EDGE_B": CDNEdgeB, "EDGE_C": CDNEdgeC, "EDGE_D": CDNEdgeD,
+		"EDGE_NET_A": CDNPublishedV4[0], "EDGE_NET_B": CDNPublishedV4[1], "EDGE_NET_C": CDNPublishedV4[2], "EDGE_NET_D": CDNPublishedV4[3],
+		"EDGE_NET":   CDNEdgeNet,
+		"CDN_HOST":   CDNHost,
+		"ECH_OUTER":  ECHPublicName,
+		"STORAGE_IP": StorageIP,
+		"R2_SNI":     host(freshMirrorR2), "GH_SNI": host(freshMirrorGH), "PACK_SNI": host(freshPackURL),
+		"GFE_IP": GoogleFrontIP, "GFE2_IP": GoogleFront2IP, "GSCRIPT_IP": GoogleScriptIP, "GUSER_IP": GoogleUserCntIP,
+		"GOOGLE_NET": GoogleNet,
 	}
 }
 
+// proofTargets: where a scenario's raw probes may be aimed ("to"), and
+// which part of the world must be up for it (ApplyScenario brings it up).
+var proofTargets = map[string]struct{ addr, world string }{
+	"relay":     {Relay1IP, ""},
+	"elsewhere": {ElsewhereIP, ""},
+	"gateway":   {CensorClientIP, ""},
+	"storage":   {StorageIP, "storage"},
+	"edge-a":    {CDNEdgeA, "cdn"}, "edge-b": {CDNEdgeB, "cdn"}, "edge-c": {CDNEdgeC, "cdn"}, "edge-d": {CDNEdgeD, "cdn"},
+	"gfe":        {GoogleFrontIP, "google"},
+	"gfe2":       {GoogleFront2IP, "google"},
+	"gscript":    {GoogleScriptIP, "google"},
+	"guser":      {GoogleUserCntIP, "google"},
+}
+
+func proofTargetNames() []string {
+	var out []string
+	for k := range proofTargets {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func substVars(line string, vars map[string]string) string {
-	for k, v := range vars {
-		line = strings.ReplaceAll(line, "$"+k, v)
+	// Longest name first: $EDGE_NET must not eat the front of $EDGE_NET_A.
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) || len(keys[i]) == len(keys[j]) && keys[i] < keys[j] })
+	for _, k := range keys {
+		line = strings.ReplaceAll(line, "$"+k, vars[k])
 	}
 	return line
 }
@@ -373,6 +451,9 @@ func RawProbeRun(ctx context.Context, p Paths, q RawProbe) RawProbe {
 	if q.Split {
 		args = append(args, "--split")
 	}
+	if q.ECH {
+		args = append(args, "--ech-config", filepath.Join(p.Run, echConfigFile))
+	}
 	if rawPatience > 0 {
 		args = append(args, "--patience-ms", strconv.FormatInt(rawPatience.Milliseconds(), 10))
 	}
@@ -421,11 +502,8 @@ func RawProbeRun(ctx context.Context, p Paths, q RawProbe) RawProbe {
 }
 
 func (rc *RunCtx) proofAddr(to string) string {
-	switch to {
-	case "elsewhere":
-		return ElsewhereIP
-	case "gateway":
-		return CensorClientIP
+	if t, ok := proofTargets[to]; ok {
+		return t.addr
 	}
 	return Relay1IP
 }
@@ -448,10 +526,10 @@ func (rc *RunCtx) ProveCensor() {
 		}
 		t0 := time.Now()
 		obs := RawProbeRun(rc.Ctx, rc.P, RawProbe{Kind: pr.Probe, Addr: rc.proofAddr(pr.To), Port: pr.Port,
-			SNI: substVars(pr.SNI, vars), Split: pr.Split, Shape: pr.Shape})
+			SNI: substVars(pr.SNI, vars), Split: pr.Split, Shape: pr.Shape, ECH: pr.ECH})
 		r.Add("", "censor", "prove."+pr.Name, Pass, got(obs.Result == pr.Expect, Pass, Fail),
 			got(obs.Result == pr.Expect, "", fmt.Sprintf("the censor was declared to make this probe see %q; it saw %q (%s)", pr.Expect, obs.Result, obs.Error)),
-			map[string]any{"probe": pr.Probe, "to": pr.To, "addr": obs.Addr, "port": pr.Port, "sni": obs.SNI, "split": pr.Split, "shape": pr.Shape,
+			map[string]any{"probe": pr.Probe, "to": pr.To, "addr": obs.Addr, "port": pr.Port, "sni": obs.SNI, "split": pr.Split, "shape": pr.Shape, "ech": pr.ECH,
 				"declared": pr.Expect, "observed": obs.Result, "error": obs.Error, "probe_ms": obs.Ms}, t0)
 	}
 	for _, name := range rc.Want {

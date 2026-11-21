@@ -45,10 +45,39 @@
 //   - same subject, self-signed, the 90-day validity cloud-init uses
 //     (Chromium's ceiling for a locally trusted root: see v2.yaml.tmpl).
 //     Re-issuing therefore also renews.
+//   - EXCEPT a subject that names the app. Relays provisioned before
+//     2026-11-20 were minted with CN=daal-relay, and this certificate is
+//     served to anybody who completes a handshake on 8444, 8445 or
+//     443/udp: every such relay told every prober what it was. Such a
+//     subject is replaced, once, by the neutral one cloud-init now
+//     writes (neutralCommonName: the certificate's own first name). See
+//     "THE PRICE" below.
 //
-// A client that installed the OLD certificate as its root accepts the
-// new one: same subject, same key, so the old certificate is a valid
-// issuer for it. The end-to-end rig holds that (op:l2 old-pack, naive).
+// WHY THE SUBJECT IS OTHERWISE COPIED. A client that installed the OLD
+// certificate as its root accepts the new one only because the new
+// one's ISSUER is the old one's SUBJECT and it is signed by the same
+// key: Chromium (and so Cronet, and so naive) finds a trusted root for a
+// certificate by its issuer name, and a naive pack carries the
+// certificate it was minted with, not a pin. The signed endpoint cannot
+// deliver a new certificate (it commits to the key only). The
+// end-to-end rig holds that (op:l2 old-pack, naive). Nothing else reads
+// the name: the six other families pin the key, and Chromium matches
+// hostnames in the SAN only.
+//
+// THE PRICE of retiring CN=daal-relay: a naive pack minted before the
+// rename trusts a root whose name no longer issues anything, so it
+// stops connecting (it fails closed: the handshake is refused, nothing
+// is trusted that was not before). There is no way round it that keeps
+// the name off the wire: a bridge certificate would carry the old name
+// as its issuer, in the same handshake. The reply says so in
+// `warnings` and names "tls_certificate_subject" in `changed`, so the
+// publisher can tell the operator to send naive recipients a new link.
+// Every other family is untouched (same key). In practice this branch
+// is reached by no relay today: a relay's mgmt binary is fixed at first
+// boot (there is no in-place upgrade), and a relay provisioned from a
+// tree carrying this file was also given the neutral subject by
+// cloud-init. It is here so a future upgrade path cannot carry the old
+// name forward silently.
 //
 // FAILURE IS NOT FATAL TO THE ROTATION. L2 is the operator's answer to
 // "the cover host is being filtered", usually under pressure. If the
@@ -64,6 +93,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -115,11 +146,8 @@ func reissuedCertTemplate(old *x509.Certificate, coverHost string, serial *big.I
 			ips = append(ips, ip)
 		}
 	}
-	return &x509.Certificate{
-		SerialNumber: serial,
-		// The subject is copied byte for byte: a client that trusts the
-		// old certificate finds the new one's issuer by this name.
-		RawSubject:            old.RawSubject,
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.Add(dataPlaneCertValidity),
 		DNSNames:              names,
@@ -131,6 +159,63 @@ func reissuedCertTemplate(old *x509.Certificate, coverHost string, serial *big.I
 		SubjectKeyId:          old.SubjectKeyId,
 		AuthorityKeyId:        old.SubjectKeyId,
 	}
+	if subjectNamesTheApp(old) {
+		// Retired, once: see "THE PRICE" in the file comment. Self-signed,
+		// so the issuer is this same neutral name.
+		tmpl.Subject = pkix.Name{CommonName: neutralCommonName(names, ips)}
+	} else {
+		// Copied byte for byte: a client that trusts the old certificate
+		// finds the new one's issuer by this name.
+		tmpl.RawSubject = old.RawSubject
+	}
+	return tmpl
+}
+
+// maxCommonNameLen is X.509's upper bound on a CN (ub-common-name).
+// cloud-init applies the same bound (openssl refuses longer).
+const maxCommonNameLen = 64
+
+// legacyCommonName is the one subject any template ever wrote
+// (openssl req -subj "/CN=daal-relay", before v2.yaml.tmpl's neutral
+// CN).
+const legacyCommonName = "daal-relay"
+
+// subjectNamesTheApp reports whether a certificate carries the legacy
+// subject: exactly one attribute, a CN equal to "daal-relay". Exact, not
+// a substring test: the neutral CN is the cover host, and a cover host
+// that merely contains the letters (edaalat.example, a domain with
+// "daal" in it) must not be renamed, because every rename ends every
+// naive pack minted before it ("THE PRICE"). The parsed value is
+// compared rather than RawSubject, because openssl writes the CN as a
+// UTF8String and Go's encoder as a PrintableString.
+func subjectNamesTheApp(c *x509.Certificate) bool {
+	names := c.Subject.Names
+	if len(names) != 1 || !names[0].Type.Equal(oidCommonName) {
+		return false
+	}
+	v, ok := names[0].Value.(string)
+	return ok && v == legacyCommonName
+}
+
+var oidCommonName = asn1.ObjectIdentifier{2, 5, 4, 3}
+
+// neutralCommonName is the subject v2.yaml.tmpl writes: the
+// certificate's own first name — the cover host, or the address when
+// there is none. It is what the ordinary self-signed recipe produces,
+// differs per relay, and repeats a SAN, so it tells a prober nothing
+// the certificate does not already say.
+func neutralCommonName(dnsNames []string, ips []net.IP) string {
+	for _, n := range dnsNames {
+		if n != "" && len(n) <= maxCommonNameLen {
+			return n
+		}
+	}
+	for _, ip := range ips {
+		if ip != nil {
+			return ip.String()
+		}
+	}
+	return "localhost"
 }
 
 // parseDataPlaneKey reads the private key cloud-init wrote. OpenSSL 3
@@ -178,55 +263,57 @@ func samePublicKey(a, b crypto.PublicKey) bool {
 // a function that puts the old file back.
 //
 // changed=false with a nil error means the certificate already has
-// coverHost as its first name: nothing was written.
+// coverHost as its first name: nothing was written. renamed=true means
+// the re-issue also retired a subject that named the app, which ends
+// every naive pack minted before it (see "THE PRICE").
 //
 // It must be called with cfgMu held, BEFORE the sing-box reload that
 // applies the rotation, so one reload picks up the config and the
 // certificate together; the caller runs restore if that reload fails.
-func (s *server) reissueDataPlaneCert(coverHost string) (newPEM string, restore func(), changed bool, err error) {
+func (s *server) reissueDataPlaneCert(coverHost string) (newPEM string, restore func(), changed, renamed bool, err error) {
 	if s.tlsCertPath == "" || s.tlsKeyPath == "" {
-		return "", nil, false, errNoDataPlaneCert
+		return "", nil, false, false, errNoDataPlaneCert
 	}
 	oldPEM, err := os.ReadFile(s.tlsCertPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil, false, errNoDataPlaneCert
+			return "", nil, false, false, errNoDataPlaneCert
 		}
-		return "", nil, false, err
+		return "", nil, false, false, err
 	}
 	block, _ := pem.Decode(oldPEM)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return "", nil, false, errors.New("the data-plane certificate file holds no certificate")
+		return "", nil, false, false, errors.New("the data-plane certificate file holds no certificate")
 	}
 	old, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return "", nil, false, fmt.Errorf("parse the data-plane certificate: %w", err)
+		return "", nil, false, false, fmt.Errorf("parse the data-plane certificate: %w", err)
 	}
 	if len(old.DNSNames) > 0 && old.DNSNames[0] == coverHost {
-		return string(oldPEM), nil, false, nil
+		return string(oldPEM), nil, false, false, nil
 	}
 	keyPEM, err := os.ReadFile(s.tlsKeyPath)
 	if err != nil {
-		return "", nil, false, fmt.Errorf("read the data-plane key: %w", err)
+		return "", nil, false, false, fmt.Errorf("read the data-plane key: %w", err)
 	}
 	key, err := parseDataPlaneKey(keyPEM)
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, false, false, err
 	}
 	// The whole point is that the key does not move. If the key file is
 	// not the certificate's key, re-issuing would silently change every
 	// pin in the field: refuse.
 	if !samePublicKey(key.Public(), old.PublicKey) {
-		return "", nil, false, errors.New("the data-plane key file is not the key of the data-plane certificate; not re-issuing (it would change the pinned key)")
+		return "", nil, false, false, errors.New("the data-plane key file is not the key of the data-plane certificate; not re-issuing (it would change the pinned key)")
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, false, false, err
 	}
 	tmpl := reissuedCertTemplate(old, coverHost, serial, s.now())
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
-		return "", nil, false, fmt.Errorf("sign the re-issued certificate: %w", err)
+		return "", nil, false, false, fmt.Errorf("sign the re-issued certificate: %w", err)
 	}
 	out := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 
@@ -254,7 +341,7 @@ func (s *server) reissueDataPlaneCert(coverHost string) (newPEM string, restore 
 		return os.Rename(tmp.Name(), s.tlsCertPath)
 	}
 	if err := write(out); err != nil {
-		return "", nil, false, fmt.Errorf("write the re-issued certificate: %w", err)
+		return "", nil, false, false, fmt.Errorf("write the re-issued certificate: %w", err)
 	}
-	return string(out), func() { _ = write(oldPEM) }, true, nil
+	return string(out), func() { _ = write(oldPEM) }, true, subjectNamesTheApp(old), nil
 }

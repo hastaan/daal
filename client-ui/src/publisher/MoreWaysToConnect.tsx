@@ -7,6 +7,7 @@
 // (RELEASED_RELAY_SERVES_EXTRA_FAMILIES false — see extraFamilies.ts and
 // the pin in publisher/deploy/cloudinit/artifacts.go) the section stays
 // visible, every switch is disabled and unticked, and one line says why.
+import { Icon } from '../design/primitives';
 import {
     RELEASED_RELAY_SERVES_EXTRA_FAMILIES,
     extraFamilyOptions,
@@ -66,9 +67,9 @@ export function MoreWaysToConnect({
                 style={{
                     display: 'flex',
                     width: '100%',
-                    alignItems: 'baseline',
-                    justifyContent: 'space-between',
+                    alignItems: 'center',
                     gap: 12,
+                    minHeight: 44,
                     padding: '12px 14px',
                     background: 'transparent',
                     border: 'none',
@@ -78,11 +79,24 @@ export function MoreWaysToConnect({
                     font: 'inherit',
                 }}
             >
-                <span style={{ fontSize: 13, fontWeight: 600 }}>
-                    <span aria-hidden="true">{open ? '▾ ' : '▸ '}</span>
-                    {t('wiz.more.title')}
+                {/* Drawn like the app's Disclosure (spec C7.8): the title,
+                    the one-line state under it, a chevron that turns. */}
+                <span style={{ flex: 1, minWidth: 0, display: 'grid', gap: 2 }}>
+                    <span style={{ fontSize: 14, fontWeight: 600 }}>{t('wiz.more.title')}</span>
+                    <span style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 }}>{summary}</span>
                 </span>
-                <span style={{ fontSize: 11, color: 'var(--muted)' }}>{summary}</span>
+                <span
+                    aria-hidden="true"
+                    style={{
+                        display: 'inline-flex',
+                        flexShrink: 0,
+                        color: 'var(--gold-warm)',
+                        transition: 'transform var(--t-fast)',
+                        transform: open ? 'rotate(180deg)' : 'none',
+                    }}
+                >
+                    <Icon name="chevronDown" size={18} />
+                </span>
             </button>
             {open && (
                 <div id="more-ways-body" style={{ padding: '0 14px 12px' }}>

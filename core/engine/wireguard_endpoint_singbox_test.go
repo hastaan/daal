@@ -80,10 +80,15 @@ func TestPastedWireGuardConfigIsAcceptedBySingBox(t *testing.T) {
 		wantFamilyIs string
 	}{
 		{"plain-wireguard", wgConf, false, 0, "wireguard"},
-		// An AmneziaWG conf is imported as plain WireGuard: the family
-		// names what is on the wire, because the obfuscation cannot be
-		// expressed and the badge must not claim it.
-		{"amneziawg-degraded", awgConf, true, 9, "wireguard"},
+		// An AmneziaWG conf whose only Amnezia fields are junk packets
+		// is imported as plain WireGuard: the server still accepts the
+		// WireGuard handshake, and the family names what is on the wire.
+		{"amneziawg-junk-only", wgConf + "\n[Interface]\nJc = 4\nJmin = 40\nJmax = 70\n", true, 3, "wireguard"},
+		// Real S1/S2/H1..H4 values change the handshake the server
+		// accepts, so a plain-WireGuard downgrade could never connect:
+		// the route keeps its own (unsupported, unselectable) family.
+		// The endpoint must still pass the strict parse.
+		{"amneziawg-unsupported", awgConf, true, 9, "amneziawg"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prof, prov := parseOne(t, tc.conf)

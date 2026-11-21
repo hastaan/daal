@@ -1,14 +1,15 @@
 # Relay artefact releases
 
-`relay-v1.5.1.sh` builds the three binaries a relay downloads at first boot
+`relay-v1.6.0.sh` (the current release; `relay-v1.5.1.sh` is kept as the
+record of the one before) builds the three binaries a relay downloads at first boot
 (`sing-box`, `daal-relay-health`, `daal-relay-mgmt`), signs each with the
 release key (`release-keys/release.key`, never committed) and stages them
-under `dist-release/relay-v1.5.1/` together with `artifacts.snippet.go` —
+under `dist-release/relay-v1.6.0/` together with `artifacts.snippet.go` —
 the pins to paste into `publisher/deploy/cloudinit/artifacts.go`.
 
 ```
-bash tools/release/relay-v1.5.1.sh            # build + sign + stage. Nothing leaves the machine.
-bash tools/release/relay-v1.5.1.sh --upload   # …and create/upload the GitHub releases. See the order below.
+bash tools/release/relay-v1.6.0.sh            # build + sign + stage. Nothing leaves the machine.
+bash tools/release/relay-v1.6.0.sh --upload   # …and create/upload the GitHub releases. See the order below.
 ```
 
 `keygen.sh` makes a release key pair. Its public half is
@@ -23,8 +24,9 @@ signed.
   URLs) and let a cache answer a new pin with the old bytes — which the
   box refuses, on a server somebody is already paying for. A release that
   changes bytes gets a new tag (copy the script, bump `TAG`). That is why
-  the script is `relay-v1.5.1.sh` although the artefact file names still
-  say `0.1.0`; `relay-v1.5.0` and `relay-v1.5.0-mirror` stay published.
+  the script is `relay-v1.6.0.sh` although the artefact file names still
+  say `0.1.0`; `relay-v1.5.0`, `relay-v1.5.1` and their `-mirror` tags
+  stay published.
 * **The build is reproducible, for one toolchain.** `-trimpath
   -buildvcs=false -ldflags="-s -w"`, `CGO_ENABLED=0`: the same tree under
   the same `go version` gives the same bytes at any path, and Ed25519
@@ -117,6 +119,24 @@ uploads, commits and tests nothing); 5–9 are by hand.
    upgrade path, and a relay built from relay-v1.5.0 cannot be managed by
    a publisher built after this commit at all (management token format
    v2, `specs/daal-relay-mgmt-v1.md` §3).
+
+## What relay-v1.6.0 carries (since relay-v1.5.1)
+
+Built with go1.26.8, like relay-v1.5.1. `sing-box` is byte-identical to
+relay-v1.5.1's (same tarball, same signature). Not a protocol break: a
+publisher from this tree still manages a relay-v1.5.1 box (see RELEASE
+COUPLING in `artifacts.go` for what such a box lacks).
+
+| change | where | add-on / finding |
+|---|---|---|
+| the CDN door: `POST /cdn`, the `ws-cdn-in` inbound kept in step with provision and revoke, the `cdn` capability on `/health` | `cmd/daal-relay-mgmt` (`singbox_cdn.go`, `main.go`, `families.go`, `singbox_users.go`) | add-on 2 |
+| the door's port opened at the box firewall to Cloudflare's ranges only, and closed again on disable | `singbox_cdn_ufw.go` | add-on 2 |
+| a bound standby address is `scope link`: answered on, never a source | `address.go` | add-on 1 |
+| rotate-tls gives a `CN=daal-relay` certificate a neutral subject; the mgmt certificate is `CN=localhost`; a 401 names no scheme | `tlscert.go`, `main.go` | review C1 |
+| `daal-relay-health` rebuilt: it links `publisher/deploy/health`, which gained `ways.go` (bootstrap unchanged) | `publisher/deploy/health` | — |
+
+Template-only (fresh relays, whatever the pin): `hostname: ubuntu`, the
+data-plane certificate's subject, the optional `CDNUFWRules`.
 
 ## What relay-v1.5.1 carries (since relay-v1.5.0)
 

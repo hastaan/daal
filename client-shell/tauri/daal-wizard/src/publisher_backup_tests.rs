@@ -1900,3 +1900,220 @@ fn a_relay_only_person_is_removed_by_name_and_a_listed_one_never() {
     assert!(rows.iter().all(|x| x.name != "r4"), "no row is invented for them");
     assert!(rows.iter().filter(|x| x.revoked_at_unix == 0).count() == 2);
 }
+
+// ------------------------------------------------------ network test
+
+/// "Use as test relay": a report key made by the publisher library, the
+/// relay's pack signed again with its address, the key in the backup
+/// and back on a restored phone; "Stop" keeps the key (reports made
+/// before still open) and the next signature carries no address.
+#[test]
+fn a_test_relays_report_key_is_signed_in_backed_up_and_kept_when_stopped() {
+    use crate::report_key::{key_alias, retired_alias, set_test_relay, status};
+    let a = phone();
+    let pop = populate(&a);
+    let words = set_words(&a);
+    make(&a);
+    assert!(!status(&a.ctx, pop.live).unwrap().has_key);
+
+    // Maman and Bob connect with it (Carol was removed), and it has an
+    // everyone file: confirmed by the person with that count shown.
+    let on = set_test_relay(&a.ctx, pop.live, true, true).unwrap();
+    assert!(on.is_test_relay && on.key_made);
+    assert!(on.everyone_file_kept, "the everyone file is left as it was");
+    assert_eq!(on.people_to_send, 2, "Maman and Bob; Carol was removed");
+    assert_eq!(*a.mock.report_keygen_calls.lock().unwrap(), 1);
+    let addr = a.mock.bind_report_to.lock().unwrap().last().cloned().flatten();
+    let addr = addr.expect("the re-sign carried --report-to");
+    assert!(addr.starts_with("daal1"));
+    assert!(backup_status(&a.ctx).unwrap().stale, "the switch is a change to back up");
+
+    let file = make(&a);
+    let key = a.ctx.custody.get(&key_alias(pop.live)).unwrap();
+    let b = phone();
+    crate::recipient_identity::get_or_create(&b.ctx).unwrap();
+    let path = carry(&file, &b);
+    backup_restore(&b.ctx, &path, &words, None).unwrap();
+    assert_eq!(b.ctx.custody.get(&key_alias(pop.live)).unwrap(), key);
+    assert!(status(&b.ctx, pop.live).unwrap().is_test_relay);
+
+    let off = set_test_relay(&a.ctx, pop.live, false, false).unwrap();
+    assert!(!off.is_test_relay);
+    assert_eq!(a.mock.bind_report_to.lock().unwrap().last().cloned().flatten(), None);
+    assert_eq!(a.ctx.custody.get(&retired_alias(pop.live)).unwrap(), key);
+    let st = status(&a.ctx, pop.live).unwrap();
+    assert!(!st.is_test_relay && st.has_key);
+
+    let again = set_test_relay(&a.ctx, pop.live, true, true).unwrap();
+    assert!(!again.key_made, "the same key comes back");
+    assert_eq!(*a.mock.report_keygen_calls.lock().unwrap(), 1);
+    assert_eq!(a.mock.bind_report_to.lock().unwrap().last().cloned().flatten(), Some(addr));
+}
+
+/// A relay people connect with is not made the Test relay without the
+/// second confirmation, and neither switching on nor off touches anyone
+/// on the relay: no user is removed, added or given new keys, and no
+/// file anyone holds is made again. (Re-making the everyone file would
+/// re-key the shared user and cut off every phone holding the old one.)
+#[test]
+fn the_test_relay_switch_never_cuts_anyone_off() {
+    use crate::report_key::{set_test_relay, status, E_TEST_RELAY_IN_USE};
+    let a = phone();
+    let pop = populate(&a);
+    let st = status(&a.ctx, pop.live).unwrap();
+    assert_eq!(st.people_on_relay, 2);
+    assert!(st.everyone_file);
+
+    a.mock.users_revoke_calls.lock().unwrap().clear();
+    a.mock.users_provision_calls.lock().unwrap().clear();
+    let shared = a.ctx.staging_dir.join(format!("{}.shared.sbp", pop.live));
+    let everyone_before = std::fs::read(&shared).unwrap();
+    let binds_before = a.mock.bind_report_to.lock().unwrap().len();
+
+    let err = set_test_relay(&a.ctx, pop.live, true, false).unwrap_err();
+    assert!(code(err).starts_with(E_TEST_RELAY_IN_USE));
+    assert_eq!(*a.mock.report_keygen_calls.lock().unwrap(), 0, "refused before any key is made");
+    assert_eq!(a.mock.bind_report_to.lock().unwrap().len(), binds_before, "nothing was signed");
+    assert!(!status(&a.ctx, pop.live).unwrap().has_key);
+
+    let on = set_test_relay(&a.ctx, pop.live, true, true).unwrap();
+    assert!(on.is_test_relay && on.everyone_file_kept);
+    set_test_relay(&a.ctx, pop.live, false, false).unwrap();
+
+    assert!(a.mock.users_revoke_calls.lock().unwrap().is_empty(), "nobody was removed or re-keyed");
+    assert!(a.mock.users_provision_calls.lock().unwrap().is_empty(), "nobody was added");
+    assert_eq!(std::fs::read(&shared).unwrap(), everyone_before, "the everyone file is the one people hold");
+}
+
+/// A failed signature puts the switch back: the key's place says what
+/// the signed pack carries.
+#[test]
+fn a_failed_signature_leaves_the_relay_as_it_was() {
+    use crate::report_key::{set_test_relay, status};
+    let a = phone();
+    let pop = populate(&a);
+    *a.mock.bind_error.lock().unwrap() = Some("relay unreachable".into());
+    assert!(set_test_relay(&a.ctx, pop.live, true, true).is_err());
+    let st = status(&a.ctx, pop.live).unwrap();
+    assert!(!st.is_test_relay, "not the Test relay: its pack was not signed so");
+    assert!(st.has_key, "the key made is kept for the next try");
+    *a.mock.bind_error.lock().unwrap() = None;
+    let on = set_test_relay(&a.ctx, pop.live, true, true).unwrap();
+    assert!(on.is_test_relay && !on.key_made);
+    assert_eq!(*a.mock.report_keygen_calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn a_received_report_opens_with_a_key_on_this_phone_and_nothing_else() {
+    use crate::report_key::{open_report, set_test_relay, E_REPORT_NOT_A_REPORT, E_REPORT_NO_KEY, E_REPORT_NOT_OURS};
+    let a = phone();
+    let pop = populate(&a);
+    let dat = a.dir.path().join("net-abcdefgh.dat");
+    std::fs::write(&dat, b"DSBR\x00\x01sealed-bytes").unwrap();
+    assert!(code(open_report(&a.ctx, &dat).unwrap_err()).starts_with(E_REPORT_NO_KEY));
+
+    set_test_relay(&a.ctx, pop.live, true, true).unwrap();
+    assert!(code(open_report(&a.ctx, &dat).unwrap_err()).starts_with(E_REPORT_NOT_OURS));
+    *a.mock.report_open_result.lock().unwrap() = Some(r#"{"schema_version":2,"findings":[]}"#.into());
+    let json = open_report(&a.ctx, &dat).unwrap();
+    assert!(json.contains("\"schema_version\":2"));
+    let keys = a.mock.report_open_keys.lock().unwrap().clone();
+    assert!(keys.iter().all(|k| k.len() == 64));
+
+    let pack = a.dir.path().join("pack.dat");
+    std::fs::write(&pack, b"DSBP\x00\x01not-a-report").unwrap();
+    assert!(code(open_report(&a.ctx, &pack).unwrap_err()).starts_with(E_REPORT_NOT_A_REPORT));
+}
+
+// ------------------------------------------------------------ add-ons (V019)
+
+const ADDON_SECRET: &[u8] = b"cf-addon-token-in-the-backup-0001";
+
+/// A Cloudflare add-on on the live relay, its token in custody.
+fn with_addon(p: &Phone, live: i64) -> (i64, String) {
+    use crate::addons::{insert, secret_alias, set_secret_alias, AddonKind, AddonState, NewAddon};
+    let id = insert(
+        &p.ctx,
+        &NewAddon {
+            operator_id: live,
+            kind: Some(AddonKind::Cdn),
+            state: Some(AddonState::Ready),
+            provider_ids: BTreeMap::from([("zone_id".to_string(), "z-1".to_string())]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let alias = secret_alias(id, AddonKind::Cdn);
+    p.ctx.custody.put(&alias, ADDON_SECRET).unwrap();
+    set_secret_alias(&p.ctx, id, &alias).unwrap();
+    (id, alias)
+}
+
+#[test]
+fn an_addon_and_its_secret_travel_in_the_backup() {
+    let a = phone();
+    let pop = populate(&a);
+    let (id, alias) = with_addon(&a, pop.live);
+    let words = set_words(&a);
+    let file = make(&a);
+    assert!(!backup_status(&a.ctx).unwrap().stale);
+
+    let b = phone();
+    crate::recipient_identity::get_or_create(&b.ctx).unwrap();
+    let path = carry(&file, &b);
+    backup_restore(&b.ctx, &path, &words, None).unwrap();
+    let rows = crate::addons::list(&b.ctx, pop.live).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].provider_ids.get("zone_id").map(String::as_str), Some("z-1"));
+    assert!(rows[0].has_secret);
+    assert_eq!(b.ctx.custody.get(&alias).unwrap(), ADDON_SECRET);
+}
+
+#[test]
+fn an_empty_addon_ledger_leaves_the_digest_as_it_was_and_a_row_changes_it() {
+    let a = phone();
+    let pop = populate(&a);
+    let mut snap = collect_state(&a.ctx, SecretMode::Lenient).unwrap();
+    assert!(snap.tables.contains_key("relay_addons"));
+    let with_empty = digest_of(&snap);
+    snap.tables.remove("relay_addons");
+    assert_eq!(digest_of(&snap), with_empty, "a phone that never used an add-on keeps its digest");
+
+    with_addon(&a, pop.live);
+    assert_ne!(state_digest(&a.ctx).unwrap(), with_empty);
+}
+
+#[test]
+fn a_backup_made_before_the_addon_ledger_restores() {
+    let a = phone();
+    let pop = populate(&a);
+    let words = set_words(&a);
+    let file = std::fs::read(make(&a)).unwrap();
+    let e = entropy(&a);
+    // What a V018 build wrote: no relay_addons table, schema 18.
+    let h = parse_header(&file).unwrap();
+    let pt = decrypt_with(&file, &h, &e).unwrap();
+    let mut v: Value = serde_json::from_slice(&pt).unwrap();
+    v["tables"].as_object_mut().unwrap().remove("relay_addons");
+    v["db_schema_version"] = json!(18);
+    let old = seal(&e, &serde_json::to_vec(&v).unwrap(), make_params()).unwrap();
+
+    let b = phone();
+    crate::recipient_identity::get_or_create(&b.ctx).unwrap();
+    let path = b.dir.path().join("old.daalbackup");
+    std::fs::write(&path, &old).unwrap();
+    backup_restore(&b.ctx, &path, &words, None).unwrap();
+    assert!(crate::addons::list(&b.ctx, pop.live).unwrap().is_empty());
+    assert_eq!(list_operators(&b.ctx).unwrap().len(), 2);
+
+    // The same payload claiming the current schema is missing a table.
+    v["db_schema_version"] = json!(crate::operator_db::current_schema_version());
+    let lying = seal(&e, &serde_json::to_vec(&v).unwrap(), make_params()).unwrap();
+    let c = phone();
+    crate::recipient_identity::get_or_create(&c.ctx).unwrap();
+    let path = c.dir.path().join("lying.daalbackup");
+    std::fs::write(&path, &lying).unwrap();
+    let err = backup_restore(&c.ctx, &path, &words, None).map(|_| ()).unwrap_err();
+    assert_eq!(code(err), E_BACKUP_DAMAGED);
+}

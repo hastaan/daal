@@ -36,6 +36,12 @@ dependencies {
     implementation("androidx.core:core-ktx:1.9.0")
     implementation("androidx.appcompat:appcompat:1.6.0")
     implementation(project(":tauri-android"))
+    // Optional add-ons, Google update channel, Path A (GoogleAuth.kt):
+    // Play services' authorization client, which returns a one-shot
+    // access token with no client secret and no redirect. Owner
+    // decision D-4 (docs/optional-addons-plan.md §8). A phone without
+    // Play services uses the by-hand path.
+    implementation("com.google.android.gms:play-services-auth:21.2.0")
     // JVM unit tests for the pure decision logic (SwitchPolicy,
     // StartSequence): no Android classes, no emulator.
     //   ./gradlew :tauri-plugin-daal-platform:testDebugUnitTest

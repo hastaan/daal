@@ -37,7 +37,9 @@ import (
 	"time"
 
 	"daal/core/abi"
+	"daal/core/desync"
 	"daal/core/diagnostics"
+	"daal/core/engine"
 )
 
 var out = json.NewEncoder(os.Stdout)
@@ -88,8 +90,14 @@ func main() {
 	auto := flag.Bool("auto", false, "after import, wait for commands on stdin and connect the way the main screen's one button does: `auto` is engine_connect_auto, no route named (auto.go)")
 	livenessS := flag.Int("liveness-s", 0, "connection_check.liveness_interval_s in the engine's configuration file: how often the engine re-checks the connected route. 0 leaves the production default (180 s)")
 	recheckS := flag.Int("recheck-s", 0, "connection_check.recheck_interval_s in the engine's configuration file. 0 leaves the production default (30 s)")
+	desyncJSON := flag.String("desync", "", "a core/desync strategy (JSON, e.g. {\"preset\":\"sni-cut\"}) turned on for the route before it connects — what the selection ladder does for a network (engine.SetRouteDesync). Empty: off")
 	classify := flag.Bool("classify", false, "read error texts on stdin, one per line; print the product classifier's category for each (core/diagnostics.Classify) and exit")
+	features := flag.Bool("features", false, "print the build-tag-gated host calls this binary has (standby_key.go) and exit")
 	flag.Parse()
+	if *features {
+		fmt.Println(strings.Join(clientFeatures, " "))
+		return
+	}
 	if *classify {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
@@ -212,6 +220,23 @@ func main() {
 		fatal("set_tun_fd", err)
 	}
 
+	// The selection ladder's half of hello desync: a strategy for THIS
+	// route, set before it connects. The engine builds the route's
+	// config with the daal-desync detour from it (core/engine desync.go).
+	// A strategy the engine refuses is a refused route, not a blocked one.
+	if *desyncJSON != "" {
+		s, err := desync.ParseStrategy([]byte(*desyncJSON))
+		if err == nil {
+			err = engine.SetRouteDesync(id, s)
+		}
+		if err != nil {
+			_, _ = abi.ClearTunFD()
+			vpn.teardown()
+			fatal("set_route", fmt.Errorf("desync strategy refused: %w", err))
+		}
+		emit("desync", map[string]any{"route_id": id, "strategy": rawJSON(*desyncJSON)})
+	}
+
 	events := abi.Subscribe()
 	go func() {
 		for ev := range events {
@@ -320,6 +345,8 @@ func idleLoop(sc *bufio.Scanner) (family string, connect bool) {
 		case "routes":
 			routes, err := abi.AvailableRoutes()
 			emit("routes", map[string]any{"routes": rawJSON(routes), "error": errString(err)})
+		case "standby-key":
+			emit("standby-key", standbyKeyCmd(f[1:]))
 		case "import":
 			if len(f) < 2 {
 				emit("error", map[string]any{"stage": "idle", "error": "import needs a file"})

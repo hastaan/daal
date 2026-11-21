@@ -27,6 +27,14 @@ func seedPubRoute(t *testing.T, s *Store, pub, route string) {
 	if err := s.PutSecret("budget:bucket:"+route, []byte("2026-04-26T19:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
+	// The standby address as signed (open mode holds the address) and an
+	// accepted standby key: both are the route's and go with it.
+	if err := s.PutSecret("standby:"+route, []byte(`{"v":1,"mode":"open","server":"203.0.113.20"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutSecret("standby-key:"+route, make([]byte, 16)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDeleteRoute(t *testing.T) {
@@ -43,8 +51,10 @@ func TestDeleteRoute(t *testing.T) {
 	if _, err := s.GetRoute("r1"); err == nil {
 		t.Fatal("route still present after delete")
 	}
-	if _, err := s.GetSecret("budget:bucket:r1"); err == nil {
-		t.Fatal("per-route secret survived delete")
+	for _, k := range []string{"budget:bucket:r1", "standby:r1", "standby-key:r1"} {
+		if _, err := s.GetSecret(k); err == nil {
+			t.Fatalf("per-route secret %s survived delete", k)
+		}
 	}
 	// Deleting an absent route is a no-op.
 	if err := s.DeleteRoute("nope"); err != nil {

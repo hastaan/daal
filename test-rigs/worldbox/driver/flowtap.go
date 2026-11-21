@@ -59,7 +59,25 @@ type flowPacket struct {
 	Sport int    `json:"s"`
 	Dport int    `json:"d"`
 	Syn   bool   `json:"syn,omitempty"`
+	// Data: TCP payload bytes of this packet. The first flowDataKept
+	// data-carrying packets of a TCP flow are logged however close
+	// together they are (op desync reads the client's segment sizes off
+	// them: where the production split cut the ClientHello).
+	Data int `json:"n,omitempty"`
+	// Payload: the bytes of those first data packets (at most
+	// flowPayloadCap each), so op desync can say where the server_name
+	// fell — whole in one packet, or across several — rather than infer
+	// it from sizes. Lab traffic only; nothing else is logged with it.
+	Payload []byte `json:"b,omitempty"`
 }
+
+// flowDataKept is how many data packets per TCP flow escape thinning:
+// enough for every packet of the chain preset's hello (one byte, the
+// bytes before the name, a handful of 6-byte pieces, the rest).
+const flowDataKept = 8
+
+// flowPayloadCap bounds one logged payload: an MSS-sized segment.
+const flowPayloadCap = 2048
 
 const flowThin = 50 * time.Millisecond
 
@@ -111,6 +129,7 @@ func cmdFlows(args []string) int {
 		sport, dport int
 	}
 	last := map[key]int64{}
+	dataSeen := map[key]int{}
 	enc := json.NewEncoder(f)
 	buf := make([]byte, 1<<16)
 	for {
@@ -122,13 +141,21 @@ func cmdFlows(args []string) int {
 			fmt.Fprintln(os.Stderr, "flows: recv:", err)
 			return 1
 		}
-		pk, ok := parseFlowPacket(buf[:n], srcIP, dsts)
+		pk, payload, ok := parseFlowPacket(buf[:n], srcIP, dsts)
 		if !ok {
 			continue
 		}
 		pk.T = time.Now().UnixNano()
 		k := key{pk.Proto == "udp", pk.Sport, pk.Dport}
-		if t, seen := last[k]; seen && !pk.Syn && pk.T-t < int64(flowThin) {
+		if pk.Syn {
+			delete(dataSeen, k) // a new flow on a reused 4-tuple
+		}
+		keepData := pk.Data > 0 && dataSeen[k] < flowDataKept
+		if keepData {
+			dataSeen[k]++
+			pk.Payload = append([]byte(nil), payload[:min(len(payload), flowPayloadCap)]...)
+		}
+		if t, seen := last[k]; seen && !pk.Syn && !keepData && pk.T-t < int64(flowThin) {
 			continue
 		}
 		last[k] = pk.T
@@ -137,8 +164,21 @@ func cmdFlows(args []string) int {
 }
 
 // parseFlowPacket reads one IPv4 packet: the client's, to the relay, TCP
-// or UDP, first fragment.
-func parseFlowPacket(b []byte, src [4]byte, dsts map[[4]byte]bool) (flowPacket, bool) {
+// or UDP, first fragment. payload is the TCP payload (nil otherwise).
+func parseFlowPacket(b []byte, src [4]byte, dsts map[[4]byte]bool) (pk flowPacket, payload []byte, ok bool) {
+	pk, ok = parseFlowHeader(b, src, dsts)
+	if !ok || pk.Data == 0 {
+		return pk, nil, ok
+	}
+	ihl := int(b[0]&0x0f) * 4
+	doff := int(b[ihl+12]>>4) * 4
+	if end := ihl + doff + pk.Data; end <= len(b) {
+		payload = b[ihl+doff : end]
+	}
+	return pk, payload, true
+}
+
+func parseFlowHeader(b []byte, src [4]byte, dsts map[[4]byte]bool) (flowPacket, bool) {
 	if len(b) < 20 || b[0]>>4 != 4 {
 		return flowPacket{}, false
 	}
@@ -164,6 +204,9 @@ func parseFlowPacket(b []byte, src [4]byte, dsts map[[4]byte]bool) (flowPacket, 
 		}
 		pk.Proto = "tcp"
 		pk.Syn = l4[13]&0x12 == 0x02 // SYN without ACK
+		if total, doff := int(binary.BigEndian.Uint16(b[2:4])), int(l4[12]>>4)*4; doff >= 20 && total > ihl+doff {
+			pk.Data = total - ihl - doff
+		}
 	case syscall.IPPROTO_UDP:
 		pk.Proto = "udp"
 	default:
@@ -330,4 +373,57 @@ func flowText(uses []endpointUse, from time.Time) string {
 			(u.First-from.UnixNano())/1e6, (u.Last-from.UnixNano())/1e6, u.Flows))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// firstSegments returns, for every TCP flow to dport whose SYN falls in
+// [from, to], the payload sizes of its first data packets as the client
+// sent them (at most flowDataKept), in flow order.
+func firstSegments(pkts []flowPacket, dport int, from, to time.Time) [][]int {
+	var out [][]int
+	for _, fd := range firstData(pkts, dport, from, to) {
+		out = append(out, fd.Sizes)
+	}
+	return out
+}
+
+// flowData is one flow's first data packets: their sizes and the bytes
+// the tap kept of them.
+type flowData struct {
+	Sizes    []int
+	Payloads [][]byte
+}
+
+// firstData is firstSegments with the payloads.
+func firstData(pkts []flowPacket, dport int, from, to time.Time) []flowData {
+	type key struct{ sport int }
+	var order []key
+	sizes := map[key]*flowData{}
+	open := map[key]bool{}
+	for _, pk := range pkts {
+		if pk.Proto != "tcp" || pk.Dport != dport {
+			continue
+		}
+		k := key{pk.Sport}
+		if pk.Syn {
+			if pk.T < from.UnixNano() || pk.T > to.UnixNano() {
+				delete(open, k)
+				continue
+			}
+			if !open[k] {
+				open[k] = true
+				order = append(order, k)
+				sizes[k] = &flowData{}
+			}
+			continue
+		}
+		if fd := sizes[k]; open[k] && pk.Data > 0 && len(fd.Sizes) < flowDataKept {
+			fd.Sizes = append(fd.Sizes, pk.Data)
+			fd.Payloads = append(fd.Payloads, pk.Payload)
+		}
+	}
+	out := make([]flowData, 0, len(order))
+	for _, k := range order {
+		out = append(out, *sizes[k])
+	}
+	return out
 }

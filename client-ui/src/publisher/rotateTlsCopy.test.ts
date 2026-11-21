@@ -41,7 +41,7 @@ describe('rotate-tls result copy', () => {
     it('says "everyone needs a new file" in exactly one case', () => {
         for (const v of Object.keys(VERDICTS)) {
             const everyone = /everyone needs a new file/i.test(en[key(v)]);
-            const hameh = fa[key(v)].includes('همه فایل تازه لازم دارند');
+            const hameh = /همه (?:به )?فایل تازه (?:لازم|نیاز) دارند/.test(fa[key(v)]);
             expect(everyone, `en ${v}`).toBe(v === 'everyone');
             expect(hameh, `fa ${v}`).toBe(v === 'everyone');
         }

@@ -21,9 +21,17 @@ package relaypack
 //     handshake. That is the point of it; see the case below.
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
+	"embed"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 
 	"daal/bundle-go/bundle"
 )
@@ -112,6 +120,22 @@ type ClientConnParams struct {
 	// Empty means "pack minted before this field existed"; see
 	// legacyRealityCoverSNI.
 	CoverSNI string
+
+	// CDNWSPath is the WebSocket path of the relay's ws-cdn-in door
+	// (cloudflare.FrontRecord.OriginPath): one random value for every
+	// recipient of the way in through Cloudflare, rotated by re-signing.
+	// It is a credential and is not in the signed commitment; the
+	// minter writes it into each recipient's CDN outbound
+	// (CDNClientOutbound). Empty means the relay has no CDN door this
+	// minter knows of, and a cdn_fronted route is skipped and reported.
+	CDNWSPath string `json:",omitempty"`
+
+	// CDNRootPEMs replaces the app's shipped CDN roots (CDNShippedRoots)
+	// as the set the CDN outbound may trust, when the publisher signed
+	// other roots (bind-and-sign --cdn-roots-file; users-pack-sbp[x]
+	// --cdn-roots-file installs the same bundle). Only roots the signed
+	// commitment lists are installed either way. Empty: the shipped set.
+	CDNRootPEMs []string `json:",omitempty"`
 
 	// Multiplex is the per-family (in a Daal pack, per-route: one route
 	// per family) stream-multiplexing knob, sourced from the toolbox
@@ -552,4 +576,209 @@ func pinnedTLSOpts(server, certSHA256 string, withUTLS bool) map[string]any {
 		tls["certificate_public_key_sha256"] = certSHA256
 	}
 	return tls
+}
+
+// ---- the way in through Cloudflare (optional add-ons B-4) ----------
+
+// The roots the app ships for the CDN edge (docs/optional-addons-plan.md
+// §2.7 "Old phones may lack the roots Cloudflare's edge chains to"):
+// the roots of the authorities Cloudflare issues edge certificates from
+// — Let's Encrypt (ISRG Root X1, X2), Google Trust Services (GTS Root
+// R1, R4) and SSL.com (its two older and two 2022 roots). Eight, the
+// most a commitment may list (bundle.MaxTLSRoots). A CDN-fronted
+// outbound installs the ones its commitment lists as tls.certificate,
+// and sing-box then trusts those and nothing else, whatever the phone
+// holds. The binder signs their digests (CDNShippedRootDigests).
+//
+//go:embed cdnroots/*.pem
+var cdnRootFS embed.FS
+
+type cdnRoot struct {
+	pem    string
+	digest string // standard base64 SHA-256 of the SubjectPublicKeyInfo
+}
+
+var cdnRoots = sync.OnceValues(func() ([]cdnRoot, error) {
+	entries, err := cdnRootFS.ReadDir("cdnroots")
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	var out []cdnRoot
+	for _, n := range names {
+		b, err := cdnRootFS.ReadFile("cdnroots/" + n)
+		if err != nil {
+			return nil, err
+		}
+		block, rest := pem.Decode(b)
+		if block == nil || block.Type != "CERTIFICATE" || len(strings.TrimSpace(string(rest))) != 0 {
+			return nil, fmt.Errorf("cdnroots/%s: not one PEM certificate", n)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("cdnroots/%s: %w", n, err)
+		}
+		sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		out = append(out, cdnRoot{
+			pem:    strings.TrimSpace(string(pem.EncodeToMemory(block))),
+			digest: base64.StdEncoding.EncodeToString(sum[:]),
+		})
+	}
+	if len(out) == 0 || len(out) > bundle.MaxTLSRoots {
+		return nil, fmt.Errorf("cdnroots: %d roots (want 1..%d)", len(out), bundle.MaxTLSRoots)
+	}
+	return out, nil
+})
+
+// cdnRootsFromPEMs is cdnRoots for a bundle the publisher passed
+// (CDNRootPEMs): each entry one or more PEM CA certificates.
+func cdnRootsFromPEMs(pems []string) ([]cdnRoot, error) {
+	var out []cdnRoot
+	seen := map[string]bool{}
+	for _, p := range pems {
+		rest := []byte(p)
+		for {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type != "CERTIFICATE" {
+				return nil, fmt.Errorf("a %q block is not a certificate", block.Type)
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			if !cert.IsCA {
+				return nil, errors.New("a certificate in the bundle is not a CA")
+			}
+			sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+			d := base64.StdEncoding.EncodeToString(sum[:])
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			out = append(out, cdnRoot{pem: strings.TrimSpace(string(pem.EncodeToMemory(block))), digest: d})
+		}
+	}
+	if len(out) == 0 || len(out) > bundle.MaxTLSRoots {
+		return nil, fmt.Errorf("%d roots (want 1..%d)", len(out), bundle.MaxTLSRoots)
+	}
+	return out, nil
+}
+
+// CDNShippedRoots returns the shipped CDN roots as PEM, in a fixed order.
+func CDNShippedRoots() []string {
+	roots, _ := cdnRoots()
+	out := make([]string, len(roots))
+	for i, r := range roots {
+		out[i] = r.pem
+	}
+	return out
+}
+
+// CDNShippedRootDigests returns what a CDN commitment's
+// tls_roots_sha256 lists for the shipped roots: standard base64 of
+// SHA-256 over each root's SubjectPublicKeyInfo, in CDNShippedRoots'
+// order.
+func CDNShippedRootDigests() []string {
+	roots, _ := cdnRoots()
+	out := make([]string, len(roots))
+	for i, r := range roots {
+		out[i] = r.digest
+	}
+	return out
+}
+
+// ErrNoCDNPath: the relay's CDN door path is unknown to this minter.
+var ErrNoCDNPath = errors.New("the way in through Cloudflare has no WebSocket path here " +
+	"(the relay's door was not set up from this app, or its record is missing)")
+
+// CDNClientOutbound renders one recipient's outbound for a CDN-fronted
+// route (specs/relaypack-v1.md "The CDN-fronted endpoint"):
+//
+//   - vless with the recipient's uuid, to the first address of the
+//     first signed edge seed on the signed port (the engine's edge pick
+//     moves it to a clean address inside the seeds on the device);
+//   - a ws transport on the door's path with Host = the signed name;
+//   - TLS to the signed name, Chrome-shaped (uTLS), trusting exactly the
+//     shipped roots the commitment lists, inline as tls.certificate;
+//   - ECH on with the committed configuration, inline — never fetched
+//     by a DNS lookup, which would show the zone name. A commitment
+//     with no ECH configuration (signed only with plain_fallback)
+//     renders without it.
+//
+// The result is checked by bundle.CheckCDNOutbound before it is
+// returned, so what this returns is what the recipient's importer and
+// set-route guard accept. It is NOT wrapped; RewriteProfilesForRecipient
+// wraps it (bundle.WrapCDNOutbound).
+func CDNClientOutbound(ep *bundle.CDNEndpoint, p ClientConnParams) ([]byte, error) {
+	if ep == nil {
+		return nil, errors.New("client outbound: no CDN commitment")
+	}
+	if p.VLESSUUID == "" {
+		return nil, fmt.Errorf("the way in through Cloudflare needs the recipient's uuid")
+	}
+	path := strings.TrimSpace(p.CDNWSPath)
+	if path == "" {
+		return nil, ErrNoCDNPath
+	}
+	roots, err := cdnRoots()
+	if err != nil {
+		return nil, fmt.Errorf("client outbound: shipped CDN roots: %w", err)
+	}
+	if len(p.CDNRootPEMs) > 0 {
+		if roots, err = cdnRootsFromPEMs(p.CDNRootPEMs); err != nil {
+			return nil, fmt.Errorf("client outbound: CDN roots: %w", err)
+		}
+	}
+	listed := map[string]bool{}
+	for _, d := range ep.TLSRootsSHA256 {
+		listed[d] = true
+	}
+	var pems []string
+	for _, r := range roots {
+		if listed[r.digest] {
+			pems = append(pems, r.pem)
+		}
+	}
+	if len(pems) == 0 {
+		return nil, errors.New("none of the roots the signed pack lists for the way in " +
+			"through Cloudflare is shipped with this app")
+	}
+	tls := map[string]any{
+		"enabled":     true,
+		"server_name": ep.ServerName,
+		"utls":        map[string]any{"enabled": true, "fingerprint": "chrome"},
+		"certificate": pems,
+	}
+	if cfg := ep.ECHConfigPEM(); len(cfg) > 0 {
+		tls["ech"] = map[string]any{"enabled": true, "config": cfg}
+	}
+	ob := map[string]any{
+		"type":        "vless",
+		"tag":         "active",
+		"server":      ep.FirstEdgeAddress(),
+		"server_port": ep.Port,
+		"uuid":        p.VLESSUUID,
+		"transport": map[string]any{
+			"type":    "ws",
+			"path":    path,
+			"headers": map[string]any{"Host": ep.ServerName},
+		},
+		"tls": tls,
+	}
+	b, err := json.Marshal(ob)
+	if err != nil {
+		return nil, err
+	}
+	if err := bundle.CheckCDNOutbound(ep, b); err != nil {
+		return nil, fmt.Errorf("client outbound: the CDN outbound disagrees with its signed commitment: %w", err)
+	}
+	return b, nil
 }

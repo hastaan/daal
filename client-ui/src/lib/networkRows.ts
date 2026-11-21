@@ -335,3 +335,66 @@ export function pendingFailureKey(
     if (note?.routeId !== routeId) return undefined;
     return note.keptRouteId ? 'network.switch_failed_kept' : 'network.switch_failed_none';
 }
+
+// ---- the Files page (spec C4) ----------------------------------------
+//
+// One row per file (a publisher): a state icon, its name, "In use" on
+// the one in use, and when it was last updated. The ways inside are in
+// the file's own sheet.
+
+/** The minimum a file row needs from a publisher row. */
+export interface FileLike {
+    cells: ReadonlyArray<{ routes: ReadonlyArray<RouteDisplayRow> }>;
+    subscription?: { lastRefreshBucket: string };
+}
+
+function routesOf(p: FileLike): RouteDisplayRow[] {
+    return p.cells.flatMap((c) => [...c.routes]);
+}
+
+/** The state icon of a file: 'ok' when one of its ways is in use or has
+ *  worked, 'warn' when every way it has is resting, 'none' when none was
+ *  ever tried. */
+export function fileState(p: FileLike, activeRouteId: string | null, nowMs: number): 'ok' | 'warn' | 'none' {
+    const routes = routesOf(p);
+    if (activeRouteId && routes.some((r) => r.routeId === activeRouteId)) return 'ok';
+    if (routes.length > 0 && routes.every((r) => restingNow(r, nowMs))) return 'warn';
+    if (routes.some((r) => r.proven || r.measured?.grade === 'good' || r.measured?.grade === 'slow')) return 'ok';
+    return 'none';
+}
+
+/** A way is resting (in its cooldown) right now. */
+export function restingNow(r: RouteDisplayRow, nowMs: number): boolean {
+    if (!r.inCooldown) return false;
+    return r.cooldownUntilUnixMs === undefined || r.cooldownUntilUnixMs > nowMs;
+}
+
+/** This file holds the way in use. */
+export function fileInUse(p: FileLike, activeRouteId: string | null): boolean {
+    return !!activeRouteId && routesOf(p).some((r) => r.routeId === activeRouteId);
+}
+
+/** When the file was last updated, in ms since the epoch, from its
+ *  subscription's refresh bucket ("2026-11-20T09", an hour, UTC); or
+ *  undefined when nothing says. */
+export function fileUpdatedMs(p: FileLike): number | undefined {
+    const b = p.subscription?.lastRefreshBucket;
+    if (!b) return undefined;
+    const m = b.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}))?/);
+    if (!m) return undefined;
+    const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), m[4] ? Number(m[4]) : 0);
+    return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** The way "Connect with this file" connects: the one in use, else the
+ *  best of the ways not resting (worked here first, then proven, then
+ *  the file's own order); undefined when every way is resting. */
+export function bestRouteOf(p: FileLike, activeRouteId: string | null, nowMs: number): RouteDisplayRow | undefined {
+    const routes = routesOf(p);
+    const active = routes.find((r) => r.routeId === activeRouteId);
+    if (active) return active;
+    const free = routes.filter((r) => !restingNow(r, nowMs));
+    const score = (r: RouteDisplayRow) =>
+        r.measured?.grade === 'good' ? 0 : r.measured?.grade === 'slow' ? 1 : r.proven ? 2 : r.measured?.grade === 'failing' ? 4 : 3;
+    return [...free].sort((a, b) => score(a) - score(b))[0];
+}

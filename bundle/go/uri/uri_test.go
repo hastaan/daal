@@ -8,7 +8,7 @@ import (
 )
 
 func TestVLESSReality(t *testing.T) {
-	raw := "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.com:443?security=reality&flow=xtls-rprx-vision&pbk=KEY&sid=ABCD&spx=%2Fpath&fp=chrome#mytag"
+	raw := "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.com:443?security=reality&flow=xtls-rprx-vision&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=abcd&spx=%2Fpath&fp=chrome#mytag"
 	p, prov, err := ParseURI(raw)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -30,7 +30,7 @@ func TestVLESSReality(t *testing.T) {
 		// fine
 	}
 	r := tls["reality"].(map[string]any)
-	if r["public_key"] != "KEY" || r["short_id"] != "ABCD" {
+	if r["public_key"] != testRealityKey || r["short_id"] != "abcd" {
 		t.Errorf("reality fields: %v", r)
 	}
 }
@@ -121,7 +121,7 @@ func TestTUIC(t *testing.T) {
 
 func TestSubscriptionEnvelopeBase64(t *testing.T) {
 	inner := strings.Join([]string{
-		"vless://uuid-A@a.example.com:443?security=reality&pbk=K1&sid=S1#a",
+		"vless://uuid-A@a.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01#a",
 		"ss://aes-256-gcm:pw@b.example.com:8388#b",
 		"# a comment",
 		"hy2://pw@c.example.com:443#c",
@@ -161,8 +161,8 @@ proxies:
     uuid: uuid-1
     flow: xtls-rprx-vision
     network: reality
-    public-key: PBK
-    short-id: SID
+    public-key: AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA
+    short-id: 0123
 proxy-groups:
   - name: select
     type: select
@@ -292,6 +292,11 @@ Endpoint = vpn.example.com:51820
 	// was present is named, and there is a sentence an importer can show.
 	if prov.Scheme != "amneziawg" {
 		t.Errorf("provenance scheme: %s", prov.Scheme)
+	}
+	// S1=S2=0 and H1..H4=1..4 are WireGuard's own values, so only the
+	// junk packets differ: the downgrade is honest and stays wireguard.
+	if prov.Notice != NoticeAmneziaDowngraded {
+		t.Errorf("notice = %q", prov.Notice)
 	}
 	if len(prov.DroppedParams) != 9 {
 		t.Errorf("DroppedParams = %v, want all nine Amnezia knobs", prov.DroppedParams)

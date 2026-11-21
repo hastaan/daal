@@ -1,7 +1,6 @@
 {
   "active": "Active",
   "appname": "Daal",
-  "badge_off": "Off",
   "banner_label": "Pointer rotation",
   "banner_text": "Pointers rotated successfully. Valid for 14 more days.",
   "brand_sub": "v0.4.2",
@@ -38,7 +37,6 @@
   "skipped": "Skipped",
   "state_connected": "Connected · Routing",
   "state_connected_short": "● Connected · 02:14",
-  "status_line": "On Wi-Fi · using rotated pointers · valid 14 days",
   "tray_change_route": "Change route…",
   "tray_disconnect": "Disconnect",
   "tray_label": "System tray flyout",

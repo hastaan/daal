@@ -1,23 +1,52 @@
 // HealthPanel — "is my relay working?", answered as far as this phone
 // can answer it (D3). Logic and wording rules live in relayHealth.ts.
+//
+// One row (spec C7.2 §3): a badge, the time of the check and a "check
+// now" icon. Under it, always, the hedge (MUST KEEP 7): this phone
+// cannot see blocking inside Iran. Only the checks that FAILED are
+// listed on the card; the full checklist is behind "What was checked"
+// (not "Details": the relay page has a Details card of its own).
 
-import { Button, Card } from '../design/primitives';
+import { Badge, Card, Disclosure, IconButton, Icon, StateIcon } from '../design/primitives';
+import type { BadgeTone } from '../design/primitives';
+import { formatTime } from '../lib/format';
 import type { RelayHealth } from './wizardCommands';
 import type { Failure } from './failureText';
-import { WhatIsThis } from './Disclosure';
-import { healthIsFresh, healthLines, overallKey, renderLine } from './relayHealth';
+import { healthIsFresh, healthLines, renderLine } from './relayHealth';
+import type { HealthLine } from './relayHealth';
+import { useDeviceT, useLocale } from './ui';
 
-const SUB: React.CSSProperties = { fontSize: 12, color: 'var(--muted)', lineHeight: 1.55 };
+const SUB: React.CSSProperties = { fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 };
 
-function timeLabel(unix: number): string {
-    if (!unix) return '';
-    try {
-        // The phone's own time zone: a UTC time reads as hours off.
-        return new Date(unix * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-    } catch {
-        return '';
-    }
+const BADGE: Record<RelayHealth['overall'], { tone: BadgeTone; key: string }> = {
+    working: { tone: 'good', key: 'pub.relays.status.working' },
+    partly: { tone: 'warn', key: 'pub.relays.status.partly' },
+    not_working: { tone: 'bad', key: 'pub.relays.status.not_working' },
+    unknown: { tone: 'neutral', key: 'pub.relays.status.not_checked' },
+};
+
+/** At most this many failing lines on the card; the rest are in Details. */
+export const HEALTH_FAILING_MAX = 5;
+
+/** The lines a person must see without opening anything: only failures. */
+export function failingLines(lines: HealthLine[]): HealthLine[] {
+    return lines.filter((l) => l.tone === 'bad').slice(0, HEALTH_FAILING_MAX);
 }
+
+function LineRow({ t, l }: { t: (k: string) => string; l: HealthLine }) {
+    return (
+        <li style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}>
+            <span style={{ display: 'inline-flex', paddingBlockStart: 1, flexShrink: 0 }}>
+                <StateIcon state={l.tone === 'good' ? 'ok' : l.tone === 'bad' ? 'bad' : 'off'} size={16} />
+            </span>
+            <span style={{ color: l.tone === 'neutral' ? 'var(--muted)' : 'var(--fg)', fontWeight: l.serious ? 600 : 400 }}>
+                {renderLine(t, l)}
+            </span>
+        </li>
+    );
+}
+
+const LIST: React.CSSProperties = { listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 6 };
 
 export function HealthPanel({
     t,
@@ -39,97 +68,114 @@ export function HealthPanel({
     /** Present when people are missing on the server: go to D2. */
     onRenew?: () => void;
 }) {
-    const stale = health ? !healthIsFresh(health, now) : false;
+    const locale = useLocale();
+    const dt = useDeviceT(t);
     const lines = health ? healthLines(t, health) : [];
-    const overallColor =
-        health?.overall === 'working'
-            ? 'var(--green)'
-            : health?.overall === 'not_working'
-              ? 'var(--red)'
-              : 'var(--gold)';
+    const failing = health && health.overall !== 'working' ? failingLines(lines) : [];
+    const stale = health ? !healthIsFresh(health, now) : false;
+    const b = health ? BADGE[health.overall] : BADGE.unknown;
+    const showRenew = !!onRenew && !!health && ((health.people_missing ?? 0) > 0 || health.everyone_missing === true);
     return (
         <Card>
             <div style={{ display: 'grid', gap: 8 }} data-testid="health-panel">
-                <div
-                    style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: 10,
-                        flexWrap: 'wrap',
-                    }}
-                >
-                    <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>
-                        {t('pub.health.title')}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 44 }}>
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        {busy ? (
+                            <Badge tone="neutral" pulse>
+                                {t('pub.health.checking')}
+                            </Badge>
+                        ) : (
+                            <Badge tone={b.tone}>{t(b.key)}</Badge>
+                        )}
+                        {health && health.checked_at_unix > 0 && (
+                            <span style={{ ...SUB, color: stale ? 'var(--amber)' : 'var(--muted)' }} data-testid="health-time">
+                                {'· '}
+                                {formatTime(locale, health.checked_at_unix)}
+                            </span>
+                        )}
                     </div>
-                    <Button variant="secondary" size="sm" disabled={busy} onClick={onCheck}>
-                        {busy ? t('pub.health.checking') : t('pub.health.check_now')}
-                    </Button>
+                    <IconButton
+                        label={busy ? t('pub.health.checking') : t('pub.health.check_now')}
+                        dataButton="check-now"
+                        disabled={busy}
+                        onClick={onCheck}
+                    >
+                        <Icon name="refresh" size={20} />
+                    </IconButton>
                 </div>
 
-                {!health && !busy && !failed && <div style={SUB}>{t('pub.health.never')}</div>}
-                {!health && busy && <div style={SUB}>{t('pub.health.checking')}</div>}
-                {failed && (
-                    <div style={{ ...SUB, color: 'var(--red)' }}>{failed.message}</div>
-                )}
+                {/* MUST KEEP 7, always, under the badge. */}
+                <div style={SUB} data-testid="health-hedge">
+                    {dt('pub.health.hedge')}
+                </div>
 
-                {health && (
-                    <>
-                        <div style={{ fontSize: 14, color: overallColor, fontWeight: 600, lineHeight: 1.45 }}>
-                            {t(overallKey(health.overall))}
-                        </div>
-                        <div style={SUB}>
-                            {(stale ? t('pub.health.checked_stale') : t('pub.health.checked_at')).replace(
-                                '{time}',
-                                timeLabel(health.checked_at_unix),
-                            )}
-                        </div>
-                        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 4 }}>
-                            {lines.map((l, i) => (
-                                <li
-                                    key={i}
-                                    style={{
-                                        fontSize: 13,
-                                        lineHeight: 1.5,
-                                        fontWeight: l.serious ? 600 : 400,
-                                        color:
-                                            l.tone === 'bad'
-                                                ? 'var(--red)'
-                                                : l.tone === 'good'
-                                                  ? 'var(--fg)'
-                                                  : 'var(--muted)',
-                                    }}
-                                >
-                                    <span aria-hidden style={{ marginInlineEnd: 6 }}>
-                                        {l.tone === 'good' ? '✓' : l.tone === 'bad' ? '✗' : '·'}
-                                    </span>
-                                    {renderLine(t, l)}
-                                </li>
-                            ))}
-                        </ul>
-                        {onRenew && ((health.people_missing ?? 0) > 0 || health.everyone_missing === true) && (
-                            <div>
-                                <Button size="sm" onClick={onRenew}>
-                                    {t('pub.renew.action')}
-                                </Button>
-                            </div>
-                        )}
-                    </>
-                )}
+                {failed && <div style={{ ...SUB, color: 'var(--red)' }}>{failed.message}</div>}
 
-                {/* Said once, here, and nowhere else on the page. */}
-                <div style={{ ...SUB, fontStyle: 'italic' }}>{t('pub.health.limits')}</div>
-
-                {((failed && failed.detail) || (health?.details ?? []).length > 0) && (
-                    <WhatIsThis label={t('pub.fb.details')}>
-                        {failed && failed.detail && <div dir="ltr">{failed.detail}</div>}
-                        {(health?.details ?? []).map((d, i) => (
-                            <div key={i} dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                                {d}
-                            </div>
+                {failing.length > 0 && (
+                    <ul style={LIST} data-testid="health-failing">
+                        {failing.map((l, i) => (
+                            <LineRow key={i} t={t} l={l} />
                         ))}
-                    </WhatIsThis>
+                    </ul>
                 )}
+
+                {showRenew && (
+                    <div>
+                        <button
+                            type="button"
+                            onClick={onRenew}
+                            data-button="renew"
+                            style={{
+                                appearance: 'none',
+                                background: 'transparent',
+                                border: 0,
+                                padding: '10px 4px',
+                                minHeight: 44,
+                                color: 'var(--gold-warm)',
+                                font: 'inherit',
+                                fontSize: 14,
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                            }}
+                        >
+                            {t('pub.renew.action')}
+                        </button>
+                    </div>
+                )}
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: 16 }}>
+                    <Disclosure summary={t('pub.health.why')} icon="help" dataButton="health-why">
+                        <div style={SUB}>{t('pub.health.limits')}</div>
+                    </Disclosure>
+                    {(lines.length > 0 || (failed && failed.detail)) && (
+                        <Disclosure summary={t('pub.health.checked')} dataButton="health-details">
+                            <div style={{ display: 'grid', gap: 8 }}>
+                                {health && <div style={SUB}>{dt(`pub.health.overall.${health.overall}`)}</div>}
+                                {lines.length > 0 && (
+                                    <ul style={LIST}>
+                                        {lines.map((l, i) => (
+                                            <LineRow key={i} t={t} l={l} />
+                                        ))}
+                                    </ul>
+                                )}
+                                {failed && failed.detail && (
+                                    <div dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
+                                        {failed.detail}
+                                    </div>
+                                )}
+                                {(health?.details ?? []).map((d, i) => (
+                                    <div
+                                        key={i}
+                                        dir="ltr"
+                                        style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', wordBreak: 'break-word' }}
+                                    >
+                                        {d}
+                                    </div>
+                                ))}
+                            </div>
+                        </Disclosure>
+                    )}
+                </div>
             </div>
         </Card>
     );

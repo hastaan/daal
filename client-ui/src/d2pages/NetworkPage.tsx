@@ -1,27 +1,54 @@
-// NetworkPage.tsx — D-2 unified Connections page.
+// NetworkPage.tsx — the Files tab (spec C4).
 //
-// Replaces the old Routes + Sources split with one publisher-rooted
-// tree (Publisher → Cell → Family → Route) that mirrors what the
-// engine actually stores in core/routestore. M1 renders the static
-// tree built by buildPublisherTree() from existing engine projections;
-// later milestones wire connect-by-scope (M3), cooldown chips (M4),
-// and editable cell labels (M5).
+// What the recipient holds: one card per file (a publisher who sent
+// ways to connect) with its true state (in use / works here / not
+// working here / resting / not tried here…), how many ways it holds
+// and when it was updated, and the kinds of connection inside
+// ("VLESS Reality ×2", each with a dot for how it does here). A tap
+// opens the file: the one connect action, every way titled by its kind
+// with what Daal measured of it on this network, a tap on a way for
+// what the kind is and "Use only this way", and Check for updates /
+// Remove behind ⋯ (components/files/FileParts.tsx, lib/fileFacts.ts).
+// "+" adds a file; ⋯ has My Daal address. Route ids, cooldown and
+// data-cap controls are in developer mode only.
+//
+// The tree comes from listPublishers() (Publisher → Cell → Route, as
+// core/routestore stores it); the connect rules per route are
+// lib/networkRows.ts.
 
+import { checkForNewAddress, refreshMessage } from '../lib/relayRefresh';
+import { sep } from '../lib/format';
 import { useEffect, useRef, useState } from 'react';
 import AddSheet from '../components/AddSheet';
 import MyAddressSheet from '../components/MyAddressSheet';
-import ScanSheet from '../components/ScanSheet';
 import RouteBudgetModal from '../components/RouteBudgetModal';
 import { useContract } from '../contract/ContractProvider';
 import type {
     BurnpressureVerdict,
-    CellRow,
     ConnectionSummary,
     FamilyChip,
     PublisherTreeRow,
     RouteDisplayRow,
 } from '../contract/D2Contract';
-import { Button, Card } from '../design/primitives';
+import {
+    Badge,
+    Button,
+    Card,
+    EmptyState,
+    IconButton,
+    OverflowMenu,
+    PageHeader,
+    Sheet,
+    StateIcon,
+    useToast,
+} from '../design/primitives';
+import type { MenuItem } from '../design/primitives';
+import { useDensity } from '../design/DensityProvider';
+import { useDeveloperMode } from '../lib/devMode';
+import { formatAgo } from '../lib/format';
+import { useOpenedFileSheet } from '../recipient/openedFile';
+import type { AddStep } from '../components/AddSheet';
+import type { SectionId } from '../shell/Sidebar';
 import {
     connectFailedKey,
     connectRefusedKey,
@@ -33,7 +60,10 @@ import { runningRouteId, summaryExtras } from '../lib/activeRoute';
 import { errorText } from '../lib/errorText';
 import {
     acceptPending,
+    bestRouteOf,
     connectionsModeLine,
+    fileInUse,
+    fileUpdatedMs,
     modeLineTexts,
     rowMetaText,
     listView,
@@ -52,31 +82,31 @@ import {
     type RunningPhase,
 } from '../lib/networkRows';
 import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
-import { EngineStartNotice, FailureBox, StoreResetNotice } from './PageNotices';
+import { EngineStartNotice, FailureBox, NoticeRow, StoreResetNotice } from './PageNotices';
 import { useEngineStartProblem } from '../lib/engineStart';
-import { autoIsUsing, getPinnedRoute, setPinnedRoute } from '../lib/autoConnect';
-import { chipHereText, chipScoreText } from '../lib/measured';
+import { autoIsUsing, getPinnedRoute, setPinnedRoute, startConnect } from '../lib/autoConnect';
+import { chipHereText, chipScoreText, familyHere } from '../lib/measured';
 import { effectiveLocale } from '../lib/i18n';
-import { importOriginOf, sourceBadgeKey } from '../lib/importOrigin';
+import type { Locale } from '../lib/i18n';
+import { formatTime } from '../lib/format';
+import {
+    familyTags,
+    fileOrder,
+    fileState as fileStateOf,
+    restingUntilMs,
+    waysCountText,
+    wayState,
+    wayTitles,
+} from '../lib/fileFacts';
+import { FileCard, WayRow } from '../components/files/FileParts';
 
 interface Props {
     t: (k: string) => string;
+    /** Set by the shells: "Connect" after adding a file goes to Home. */
+    onNavigate?: (s: SectionId) => void;
 }
 
-// Where a publisher's routes came from. The lane the add sheet wrote
-// down wins over the guess from the trust class, whose fallback used to
-// call a file chosen with the file picker "pasted" (lib/importOrigin.ts).
-function sourceBadge(p: PublisherTreeRow, t: (k: string) => string): string {
-    return t(sourceBadgeKey(p.sourceKind, importOriginOf(p.publisherId)));
-}
-
-function trustGlyph(level: string): string {
-    if (level === 'trusted') return '🛡';
-    if (level === 'pinned') return '🤝';
-    return '·';
-}
-
-export default function NetworkPage({ t }: Props) {
+export default function NetworkPage({ t, onNavigate }: Props) {
     const contract = useContract();
     const [tree, setTree] = useState<PublisherTreeRow[] | null>(null);
     const [verdict, setVerdict] = useState<BurnpressureVerdict | null>(null);
@@ -88,10 +118,23 @@ export default function NetworkPage({ t }: Props) {
     // `routeId` is set when the sentence is about one route's connect, so
     // it can be taken down the moment that route is reported connected.
     const [failure, setFailure] = useState<{ key: string; detail?: string; routeId?: string } | null>(null);
-    const [expanded, setExpanded] = useState<Set<string>>(new Set());
-    const [addOpen, setAddOpen] = useState(false);
+    // The add sheet, and where it opens (null = closed).
+    const [addStep, setAddStep] = useState<AddStep | null>(null);
     const [addrOpen, setAddrOpen] = useState(false);
-    const [scanOpen, setScanOpen] = useState(false);
+    // The file whose sheet is open, by display name (unique in the tree).
+    const [openName, setOpenName] = useState<string | null>(null);
+    // A file Android handed to Daal while this page is open.
+    const [openedPath, setOpenedPath] = useState<string | undefined>(undefined);
+    const dev = useDeveloperMode();
+    const toast = useToast();
+    const [checking, setChecking] = useState(false);
+    const { density } = useDensity();
+    const [addNonce, setAddNonce] = useState(0);
+    const openedSheet = useOpenedFileSheet(addStep !== null, (path) => {
+        setOpenedPath(path);
+        setAddNonce((n) => n + 1);
+        setAddStep('choose');
+    });
     const [budgetFor, setBudgetFor] = useState<RouteDisplayRow | null>(null);
     // The route the user tapped Connect on, until the ENGINE has
     // answered for it — not until the connect call returns: on Android
@@ -368,115 +411,118 @@ export default function NetworkPage({ t }: Props) {
 
     const pendingId = pending?.routeId ?? null;
     const view = listView(tree, loadError !== null);
-
-    const toggle = (id: string) => {
-        setExpanded((prev) => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-        });
+    const nowMs = Date.now();
+    const locale = effectiveLocale();
+    const openFile = tree?.find((p) => p.displayName === openName) ?? null;
+    const stateOf = (routeId: string) => rowState(routeId, activeRouteId, pendingId, verifying);
+    // "Back to automatic": the choice goes, and a connection on the way
+    // that was chosen by hand is handed to the engine now (as the main
+    // screen does): engine_connect_auto on a connected engine starts
+    // nothing and takes charge of the route that is up.
+    const onBackToAuto = () => {
+        setPinnedRoute(null);
+        setPinnedId(null);
+        if (summaryNow?.state === 'connected' && summaryNow.auto?.mode !== true && pendingId === null) {
+            void contract.connectAuto().catch(() => {
+                /* the page keeps saying what is true */
+            });
+        }
     };
+
+    const onRefreshFile = async (p: PublisherTreeRow) => {
+        if (!p.subscription) return;
+        try {
+            await contract.subscriptionRefresh(p.subscription.subscriptionId, 5000);
+            await load();
+            toast.show('good', t('network.refreshed'));
+        } catch (e) {
+            setFailure({ key: 'network.action_failed', detail: errorText(e) });
+        }
+    };
+    const onRemoveFile = async (p: PublisherTreeRow) => {
+        try {
+            if (p.publisherId === '' && p.subscription) {
+                // A subscription whose first refresh has not landed has
+                // no publisher to remove: its subscription is the file.
+                await contract.subscriptionRemove(p.subscription.subscriptionId);
+            } else {
+                // Drop the tunnel ONLY if the live route belongs to this
+                // publisher: tidying up publisher B must not kill a
+                // working tunnel through publisher A.
+                const ownsActiveRoute =
+                    activeRouteId !== null && p.cells.some((c) => c.routes.some((r) => r.routeId === activeRouteId));
+                if (ownsActiveRoute) {
+                    await contract.disconnect().catch(() => {});
+                }
+                await contract.publisherDelete(p.publisherId);
+            }
+            setOpenName(null);
+            await load();
+        } catch (e) {
+            setFailure({ key: 'network.action_failed', detail: errorText(e) });
+        }
+    };
+
+    const onStopUpdates = async (p: PublisherTreeRow) => {
+        if (!p.subscription) return;
+        try {
+            await contract.subscriptionRemove(p.subscription.subscriptionId);
+            await load();
+        } catch (e) {
+            setFailure({ key: 'network.action_failed', detail: errorText(e) });
+        }
+    };
+
+    const onCheckNewAddress = async () => {
+        if (checking) return;
+        setChecking(true);
+        toast.show('neutral', t('files.refresh.looking'), 60000);
+        const a = await checkForNewAddress();
+        setChecking(false);
+        const m = refreshMessage(a);
+        toast.show(m.tone, t(m.key));
+        if (a.outcome === 'updated') await load().catch(() => {});
+    };
+
+    const moreItems: MenuItem[] = [
+        { id: 'my-address', label: t('conn.more.address'), icon: 'person', onSelect: () => setAddrOpen(true) },
+    ];
+    if (tree && tree.length > 0) {
+        moreItems.push({ id: 'check-address', label: t('files.refresh.action'), icon: 'refresh', onSelect: () => void onCheckNewAddress() });
+    }
+    if (dev) {
+        moreItems.push(
+            { id: 'dev-scan', label: t('add.choose.scan'), icon: 'camera', onSelect: () => setAddStep('scan') },
+            { id: 'dev-paste', label: t('add.choose.paste'), icon: 'paste', onSelect: () => setAddStep('paste') },
+        );
+    }
+
+    const isPhone = density === 'phone';
 
     return (
         <div
             style={{
-                padding: 'var(--gutter)',
+                padding: isPhone ? '4px var(--gutter) 24px' : '16px 32px 32px',
                 width: '100%',
-                maxWidth: 980,
-                margin: '0 auto',
+                maxWidth: 'calc(var(--content-max) + 64px)',
+                marginInline: isPhone ? 'auto' : undefined,
             }}
         >
-            <header
-                style={{
-                    display: 'flex',
-                    alignItems: 'baseline',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    marginBottom: 8,
-                    flexWrap: 'wrap',
-                }}
-            >
-                <h1
-                    style={{
-                        fontFamily: 'var(--font-display)',
-                        fontSize: 24,
-                        color: 'var(--fg)',
-                        margin: 0,
-                    }}
-                >
-                    {t('network.title')}
-                </h1>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    <Button
-                        variant="secondary"
-                        onClick={() => setAddrOpen(true)}
-                        size="md"
-                    >
-                        {t('network.my_address')}
-                    </Button>
-                    <Button
-                        variant="secondary"
-                        onClick={() => setScanOpen(true)}
-                        size="md"
-                    >
-                        {t('scan.open')}
-                    </Button>
-                    <Button onClick={() => setAddOpen(true)} size="md">
-                        + {t('network.add')}
-                    </Button>
-                </div>
-            </header>
-            <p
-                style={{
-                    color: 'var(--muted)',
-                    fontSize: 13,
-                    margin: '0 0 18px',
-                    maxInlineSize: '64ch',
-                }}
-            >
-                {t('network.lede')}
-            </p>
+            <PageHeader
+                title={t('network.title')}
+                actions={
+                    view === 'list' ? (
+                        <>
+                            <IconButton icon="plus" label={t('auto.add_file')} onClick={() => setAddStep('choose')} dataButton="add" />
+                            <OverflowMenu label={t('ui.more')} items={moreItems} dataButton="files-more" />
+                        </>
+                    ) : undefined
+                }
+            />
 
-            {verdict?.promote && (
-                <div
-                    style={{
-                        background: 'rgba(193,158,80,0.10)',
-                        border: '1px solid rgba(193,158,80,0.40)',
-                        color: 'var(--gold-warm)',
-                        padding: '10px 14px',
-                        borderRadius: 'var(--radius-md)',
-                        marginBottom: 16,
-                        fontSize: 13,
-                    }}
-                >
-                    {t('network.banner.autopromoted')}
-                </div>
-            )}
-
-            {noDataPlane && (
-                <div
-                    role="alert"
-                    style={{
-                        background: 'rgba(200,85,61,0.10)',
-                        border: '1px solid var(--danger, #c0392b)',
-                        color: 'var(--fg)',
-                        padding: 12,
-                        borderRadius: 'var(--radius-md)',
-                        marginBottom: 16,
-                        fontSize: 13,
-                    }}
-                >
-                    <strong style={{ display: 'block', marginBottom: 6 }}>
-                        {t('conn.no_data_plane.title')}
-                    </strong>
-                    <span style={{ opacity: 0.9 }}>
-                        {t('conn.no_data_plane.body')}
-                    </span>
-                </div>
-            )}
-
-            {storeReset && (
+            {noDataPlane ? (
+                <NoticeRow t={t} text={t('conn.no_data_plane.title')} more={t('conn.no_data_plane.body')} />
+            ) : storeReset ? (
                 <StoreResetNotice
                     t={t}
                     onDismiss={() => {
@@ -484,60 +530,31 @@ export default function NetworkPage({ t }: Props) {
                         setStoreReset(false);
                     }}
                 />
-            )}
+            ) : null}
 
-            {refusedShown && !failure && (
-                <div
-                    role="alert"
-                    style={{
-                        background: 'rgba(200,85,61,0.10)',
-                        border: '1px solid rgba(200,85,61,0.40)',
-                        color: 'var(--red)',
-                        padding: 12,
-                        borderRadius: 'var(--radius-md)',
-                        marginBottom: 16,
-                        fontSize: 13,
-                    }}
-                >
-                    {t(connectRefusedKey(refusedShown))}
-                </div>
-            )}
+            {refusedShown && !failure && <NoticeRow t={t} text={t(connectRefusedKey(refusedShown))} />}
 
-            {failure && (
-                <FailureBox t={t} text={t(failure.key)} detail={failure.detail} />
-            )}
+            {failure && <FailureBox t={t} text={t(failure.key)} detail={failure.detail} />}
 
             {startProblem && <EngineStartNotice t={t} detail={startProblem.detail} />}
 
             {loadError !== null && !startProblem && (
-                <FailureBox
-                    t={t}
-                    text={t('network.load_failed')}
-                    detail={loadError}
-                    onRetry={() => void load()}
-                />
+                <FailureBox t={t} text={t('network.load_failed')} detail={loadError} onRetry={() => void load()} />
             )}
 
-            {view === 'list' && (
-                <div
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 12,
-                        flexWrap: 'wrap',
-                        fontSize: 13,
-                        color: 'var(--muted)',
-                        marginBottom: 12,
-                    }}
-                >
-                    <span style={{ flex: 1, minWidth: 180 }}>
-                        {modeTexts.now}
-                        {modeTexts.next && (
-                            <span data-next style={{ display: 'block' }}>
-                                {modeTexts.next}
-                            </span>
-                        )}
-                    </span>
+            {dev && verdict?.promote && (
+                <div data-dev style={{ fontSize: 13, color: 'var(--muted)', marginBlockEnd: 12 }}>
+                    {t('network.banner.autopromoted')}
+                </div>
+            )}
+            {dev && view === 'list' && (
+                <div data-dev style={{ fontSize: 13, color: 'var(--muted)', marginBlockEnd: 12 }}>
+                    {modeTexts.now}
+                    {modeTexts.next && (
+                        <span data-next style={{ display: 'block' }}>
+                            {modeTexts.next}
+                        </span>
+                    )}
                     {pinnedId && (
                         <Button
                             size="sm"
@@ -554,127 +571,128 @@ export default function NetworkPage({ t }: Props) {
             )}
 
             {view === 'loading' ? (
-                <EmptyState text={t('common.loading')} />
+                <div role="status" style={{ display: 'flex', justifyContent: 'center', padding: 32 }}>
+                    <StateIcon state="busy" size={24} label={t('common.loading')} />
+                </div>
             ) : view === 'failed' ? null : view === 'empty' || tree === null ? (
-                <EmptyState text={t('network.empty')} />
+                <EmptyState
+                    icon="files"
+                    title={t('network.empty')}
+                    action={
+                        <Button size="lg" onClick={() => setAddStep('choose')} dataButton="add-my-file">
+                            {t('auto.add_file')}
+                        </Button>
+                    }
+                    secondary={
+                        <Button variant="link" onClick={() => setAddrOpen(true)} dataButton="my-address">
+                            {t('conn.more.address')}
+                        </Button>
+                    }
+                />
             ) : (
-                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                    {tree.map((p) => (
-                        <PublisherRowView
-                            // displayName, not publisherId: the tree is
-                            // grouped by display name (so it is unique by
-                            // construction) and publisherId is empty for a
-                            // subscription-only row whose first refresh
-                            // has not landed.
-                            key={p.displayName}
-                            t={t}
-                            p={p}
-                            open={expanded.has(p.displayName)}
-                            onToggle={() => toggle(p.displayName)}
-                            pendingId={pendingId}
-                            verifying={verifying}
-                            activeRouteId={activeRouteId}
-                            autoRouteId={autoRouteId}
-                            pinnedId={pinnedId}
-                            onDisconnect={onDisconnect}
-                            onConnectRoute={onConnectRoute}
-                            onCool={async (routeId) => {
-                                try {
-                                    await contract.applyCooldown(
-                                        routeId,
-                                        15 * 60 * 1000,
-                                        'manual',
-                                    );
-                                    await load();
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                            onBudget={(r) => setBudgetFor(r)}
-                            onRefresh={async () => {
-                                if (!p.subscription) return;
-                                try {
-                                    await contract.subscriptionRefresh(
-                                        p.subscription.subscriptionId,
-                                        5000,
-                                    );
-                                    await load();
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                            onRemoveSub={async () => {
-                                if (!p.subscription) return;
-                                try {
-                                    await contract.subscriptionRemove(
-                                        p.subscription.subscriptionId,
-                                    );
-                                    await load();
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                            onRemovePublisher={async () => {
-                                if (
-                                    !window.confirm(
-                                        t('network.remove_publisher_confirm'),
-                                    )
-                                )
-                                    return;
-                                try {
-                                    // Drop the tunnel ONLY if the live route
-                                    // belongs to this publisher. The bare
-                                    // disconnect that used to sit here fired
-                                    // on every removal, so tidying up
-                                    // publisher B killed a working tunnel
-                                    // through publisher A — on a censored
-                                    // network, with no warning and nothing in
-                                    // the confirm text to explain it.
-                                    const ownsActiveRoute =
-                                        activeRouteId !== null &&
-                                        p.cells.some((c) =>
-                                            c.routes.some(
-                                                (r) => r.routeId === activeRouteId,
-                                            ),
-                                        );
-                                    if (ownsActiveRoute) {
-                                        await contract.disconnect().catch(() => {});
-                                    }
-                                    await contract.publisherDelete(p.publisherId);
-                                    await load();
-                                } catch (e) {
-                                    setFailure({
-                                        key: 'network.action_failed',
-                                        detail: errorText(e),
-                                    });
-                                }
-                            }}
-                        />
-                    ))}
-                </ul>
+                // The rows sit inside the card's own padding: with none, the
+                // state disc of each row hung half outside its edge.
+                <Card style={{ paddingBlock: 0, paddingInline: 16 }}>
+                    {/* The file carrying traffic first, then the ones that
+                        work here, then the rest (fileOrder). */}
+                    {tree
+                        .map((p) => ({ p, state: fileStateOf(p, activeRouteId, stateOf, nowMs) }))
+                        .map((x, i) => ({ ...x, i }))
+                        .sort((a, b) => fileOrder(a.state) - fileOrder(b.state) || a.i - b.i)
+                        .map(({ p, state }, i) => {
+                        const routes = p.cells.flatMap((c) => c.routes);
+                        const updated = fileUpdatedMs(p);
+                        const until = state === 'resting' ? restingUntilMs(routes, nowMs) : undefined;
+                        const summary = [
+                            waysCountText(t, locale, routes.length),
+                            updated !== undefined
+                                ? t('network.updated').replace('{ago}', formatAgo(locale, nowMs - updated))
+                                : undefined,
+                        ]
+                            .filter(Boolean)
+                            .join(sep());
+                        return (
+                            <FileCard
+                                // displayName, not publisherId: the tree is
+                                // grouped by display name (unique by
+                                // construction) and publisherId is empty for
+                                // a subscription whose first refresh has not
+                                // landed.
+                                key={p.displayName}
+                                t={t}
+                                locale={locale}
+                                p={p}
+                                state={state}
+                                summary={summary}
+                                tags={familyTags(t, routes, activeRouteId, nowMs)}
+                                restingUntil={until !== undefined ? formatTime(locale, new Date(until)) : undefined}
+                                last={i === tree.length - 1}
+                                onOpen={() => setOpenName(p.displayName)}
+                            />
+                        );
+                    })}
+                </Card>
             )}
 
-            {addOpen && (
-                <AddSheet
+            {openFile && (
+                <FileSheet
                     t={t}
+                    p={openFile}
+                    dev={dev}
+                    nowMs={nowMs}
+                    pendingId={pendingId}
+                    verifying={verifying}
+                    activeRouteId={activeRouteId}
+                    autoRouteId={autoRouteId}
+                    pinnedId={pinnedId}
+                    locale={locale}
+                    onBackToAuto={onBackToAuto}
+                    onClose={() => setOpenName(null)}
+                    onConnectRoute={onConnectRoute}
+                    onDisconnect={onDisconnect}
+                    onRefresh={() => void onRefreshFile(openFile)}
+                    onStopUpdates={() => void onStopUpdates(openFile)}
+                    onRemove={() => void onRemoveFile(openFile)}
+                    onCool={async (routeId) => {
+                        try {
+                            await contract.applyCooldown(routeId, 15 * 60 * 1000, 'manual');
+                            await load();
+                        } catch (e) {
+                            setFailure({ key: 'network.action_failed', detail: errorText(e) });
+                        }
+                    }}
+                    onBudget={(r) => setBudgetFor(r)}
+                />
+            )}
+
+            {addStep && (
+                <AddSheet
+                    key={`${openedPath ?? addStep}#${addNonce}`}
+                    t={t}
+                    initialStep={addStep}
+                    openedPath={openedPath}
+                    onProgress={openedSheet.setInProgress}
                     onClose={() => {
-                        setAddOpen(false);
+                        setAddStep(null);
+                        setOpenedPath(undefined);
                         void load();
+                        openedSheet.closed();
                     }}
                     onImported={() => void load()}
+                    onConnect={
+                        summaryNow?.state === 'connected' || summaryNow?.state === 'connecting'
+                            ? undefined
+                            : () => {
+                                  void startConnect(contract, { kind: 'auto' }).catch(() => {
+                                      /* Home says how the connect went */
+                                  });
+                                  onNavigate?.('connection');
+                              }
+                    }
                 />
             )}
-            {addrOpen && (
-                <MyAddressSheet t={t} onClose={() => setAddrOpen(false)} />
-            )}
-            {scanOpen && (
-                <ScanSheet
-                    t={t}
-                    onClose={() => setScanOpen(false)}
-                    onImported={() => void load()}
-                />
-            )}
-            {budgetFor && (
+            {addrOpen && <MyAddressSheet t={t} onClose={() => setAddrOpen(false)} />}
+            {budgetFor && dev && (
                 <RouteBudgetModal
                     t={t}
                     route={budgetFor}
@@ -685,218 +703,224 @@ export default function NetworkPage({ t }: Props) {
                     }}
                 />
             )}
+            {toast.node}
         </div>
     );
 }
 
-interface PublisherRowProps {
+interface FileSheetProps {
     t: (k: string) => string;
     p: PublisherTreeRow;
-    open: boolean;
-    onToggle: () => void;
+    dev: boolean;
+    nowMs: number;
+    pendingId: string | null;
+    verifying: RunningPhase;
+    activeRouteId: string | null;
+    autoRouteId: string | null;
+    pinnedId: string | null;
+    locale: Locale;
+    /** Forget the way chosen by hand: Daal chooses again. */
+    onBackToAuto: () => void;
+    onClose: () => void;
     onConnectRoute: (routeId: string) => void | Promise<void>;
+    onDisconnect: () => void | Promise<void>;
+    onRefresh: () => void;
+    /** Keep the ways, stop checking the file's web address. */
+    onStopUpdates: () => void;
+    onRemove: () => void;
     onCool: (routeId: string) => void | Promise<void>;
     onBudget: (r: RouteDisplayRow) => void;
-    onRefresh: () => void | Promise<void>;
-    onRemoveSub: () => void | Promise<void>;
-    onRemovePublisher: () => void | Promise<void>;
-    /** Route id tapped here whose answer has not come back, or null. */
-    pendingId: string | null;
-    /** The engine is still proving the route it has running. */
-    verifying: RunningPhase;
-    /** Route id the engine currently has running, or null. */
-    activeRouteId: string | null;
-    /** Route id automatic connect has up, or null. */
-    autoRouteId: string | null;
-    /** Route id the person chose by hand, or null. */
-    pinnedId: string | null;
-    /** Tear down the active tunnel (also cancels a connection check). */
-    onDisconnect: () => void | Promise<void>;
 }
 
-function PublisherRowView({
+/** One file (spec C4.3): who it is from, the one connect action, the
+ *  ways inside in plain words, and the rest behind ⋯. */
+function FileSheet({
     t,
     p,
-    open,
-    onToggle,
-    onConnectRoute,
-    onCool,
-    onBudget,
-    onRefresh,
-    onRemoveSub,
-    onRemovePublisher,
+    dev,
+    nowMs,
     pendingId,
     verifying,
     activeRouteId,
     autoRouteId,
     pinnedId,
+    locale,
+    onBackToAuto,
+    onClose,
+    onConnectRoute,
     onDisconnect,
-}: PublisherRowProps) {
-    // The "trivial" case: one publisher with one cell and one route.
-    // We collapse the entire row to a single Connect button so a
-    // .sbpx recipient like Bahar never has to think about cells.
-    const allRoutes = p.cells.flatMap((c) => c.routes);
-    const trivial = p.cells.length <= 1 && allRoutes.length === 1;
-
-    const meta = (() => {
-        const sub = p.subscription;
-        if (sub) {
-            return `${sourceBadge(p, t)} · ${t('network.last_refresh')}: ${
-                sub.lastRefreshBucket || '—'
-            }${sub.lastRefreshOutcome ? ` · ${sub.lastRefreshOutcome}` : ''}`;
-        }
-        if (allRoutes.length === 0) return sourceBadge(p, t);
-        const fams = Array.from(new Set(allRoutes.map((r) => r.family))).join(', ');
-        return `${sourceBadge(p, t)} · ${fams}`;
-    })();
+    onRefresh,
+    onStopUpdates,
+    onRemove,
+    onCool,
+    onBudget,
+}: FileSheetProps) {
+    const [confirmRemove, setConfirmRemove] = useState(false);
+    // The way whose details are open (one at a time).
+    const [openWay, setOpenWay] = useState<string | null>(null);
+    const routes = p.cells.flatMap((c) => c.routes);
+    const titles = wayTitles(t, routes, locale);
+    const here = chipHereText(t, locale, familyHere(routes));
+    const verified = p.trustLevel === 'trusted' || p.trustLevel === 'pinned';
+    const inUse = fileInUse(p, activeRouteId);
+    const best = bestRouteOf(p, activeRouteId, nowMs);
+    const pendingHere = pendingId !== null && routes.some((r) => r.routeId === pendingId);
+    // The one action, through the same rules as the old per-route button:
+    // Connect, Cancel while it is being checked, Disconnect when in use.
+    const action = best
+        ? rowAction(rowState(best.routeId, activeRouteId, pendingId, verifying), switchingAwayFromRunning(best.routeId, activeRouteId, pendingId))
+        : 'connect';
+    const items: MenuItem[] = [];
+    if (p.subscription) items.push({ id: 'refresh', label: t('network.check_updates'), icon: 'refresh', onSelect: onRefresh });
+    if (p.subscription && p.publisherId !== '') {
+        items.push({ id: 'stop-updates', label: t('network.stop_updates'), icon: 'close', onSelect: onStopUpdates });
+    }
+    if (p.publisherId !== '' || p.subscription) {
+        items.push({ id: 'remove', label: t('network.remove_file'), icon: 'trash', tone: 'danger', onSelect: () => setConfirmRemove(true) });
+    }
 
     return (
-        <li style={{ marginBottom: 8 }}>
-            <Card style={{ padding: 0 }}>
-                <div
-                    role="button"
-                    aria-expanded={open}
-                    onClick={onToggle}
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 12,
-                        padding: '12px 14px',
-                        cursor: 'pointer',
-                    }}
-                >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
-                            style={{
-                                fontFamily: 'var(--font-display)',
-                                fontSize: 15,
-                                color: 'var(--fg)',
-                                fontWeight: 500,
-                            }}
-                        >
-                            {trustGlyph(p.trustLevel)} {p.displayName}
-                        </div>
-                        <div
-                            style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 11,
-                                color: 'var(--dim)',
-                                marginTop: 2,
-                            }}
-                        >
-                            {meta}
-                            {' · '}
-                            {p.routeCount === 1
-                                ? t('network.route_count_one')
-                                : t('network.route_count_other').replace(
-                                      '{n}',
-                                      String(p.routeCount),
-                                  )}
-                        </div>
-                    </div>
-                    {trivial && allRoutes[0] && (
-                        <RouteActionButton
-                            t={t}
-                            routeId={allRoutes[0].routeId}
-                            activeRouteId={activeRouteId}
-                            pendingId={pendingId}
-                            verifying={verifying}
-                            onConnectRoute={onConnectRoute}
-                            onDisconnect={onDisconnect}
-                        />
+        <Sheet
+            title={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <bdi>{p.displayName}</bdi>
+                    {verified && (
+                        <Badge tone="neutral" icon="lock" size="sm">
+                            {t('network.verified')}
+                        </Badge>
                     )}
-                    <span
-                        aria-hidden
-                        style={{
-                            color: 'var(--dim)',
-                            fontSize: 14,
-                            marginInlineStart: 8,
-                            transform: open ? 'rotate(180deg)' : 'none',
-                            transition: 'transform var(--t-fast)',
-                        }}
-                    >
-                        ⌄
-                    </span>
-                </div>
-                {open && (
-                    <div
-                        style={{
-                            borderTop: '1px solid var(--line-soft)',
-                            padding: '12px 14px',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: 10,
-                        }}
-                    >
-                        {p.cells.map((cell) => (
-                            <CellRowView
-                                key={cell.cellIdFpHex}
-                                t={t}
-                                cell={cell}
-                                onConnectRoute={onConnectRoute}
-                                onCool={onCool}
-                                onBudget={onBudget}
-                                pendingId={pendingId}
-                                verifying={verifying}
-                                activeRouteId={activeRouteId}
-                                autoRouteId={autoRouteId}
-                                pinnedId={pinnedId}
-                                onDisconnect={onDisconnect}
-                            />
-                        ))}
-                        {p.subscription && (
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    gap: 8,
-                                    flexWrap: 'wrap',
-                                    paddingTop: 6,
-                                    borderTop: '1px dashed var(--line-soft)',
-                                }}
-                            >
-                                <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    onClick={() => void onRefresh()}
-                                >
-                                    ↻ {t('network.refresh')}
-                                </Button>
-                                <Button
-                                    variant="danger"
-                                    size="sm"
-                                    onClick={() => void onRemoveSub()}
-                                >
-                                    {t('network.remove')}
-                                </Button>
-                            </div>
-                        )}
-                        {/* Only offered when there is an engine publisher
-                            to remove. A subscription-only row whose first
-                            refresh has not landed has no publisher_id, so
-                            this action could only ever no-op; its own
-                            "Remove" above (onRemoveSub) is the real one. */}
-                        {p.publisherId !== '' && (
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    justifyContent: 'flex-end',
-                                    paddingTop: 6,
-                                    borderTop: '1px dashed var(--line-soft)',
-                                }}
-                            >
-                                <Button
-                                    variant="danger"
-                                    size="sm"
-                                    onClick={() => void onRemovePublisher()}
-                                >
-                                    {t('network.remove_publisher')}
-                                </Button>
-                            </div>
-                        )}
+                </span>
+            }
+            onClose={onClose}
+            width={520}
+        >
+            {confirmRemove ? (
+                <div role="alert" style={{ display: 'grid', gap: 14 }}>
+                    <p style={{ margin: 0, fontSize: 15, color: 'var(--fg)' }}>
+                        <bdi>{t('network.remove_publisher_confirm').replace('{name}', p.displayName)}</bdi>
+                    </p>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <Button variant="danger" onClick={onRemove} dataButton="remove-confirm">
+                            {t('network.remove')}
+                        </Button>
+                        <Button variant="secondary" onClick={() => setConfirmRemove(false)} dataButton="remove-cancel">
+                            {t('common.cancel')}
+                        </Button>
                     </div>
-                )}
-            </Card>
-        </li>
+                </div>
+            ) : (
+                <div style={{ display: 'grid', gap: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ flex: 1 }}>
+                            {inUse || action !== 'connect' ? (
+                                <Button
+                                    block
+                                    variant="secondary"
+                                    disabled={rowActionDisabled(action, pendingId)}
+                                    onClick={() => void onDisconnect()}
+                                    dataButton="file-connect"
+                                >
+                                    {t(rowActionLabelKey(action === 'connect' ? 'disconnect' : action))}
+                                </Button>
+                            ) : (
+                                <Button
+                                    block
+                                    disabled={!best || pendingId !== null}
+                                    onClick={() => best && void onConnectRoute(best.routeId)}
+                                    dataButton="file-connect"
+                                >
+                                    {t('network.connect_file')}
+                                </Button>
+                            )}
+                        </div>
+                        <OverflowMenu label={t('ui.more')} items={items} dataButton="file-more" />
+                    </div>
+                    {pendingHere && <div style={{ fontSize: 13, color: 'var(--muted)' }}>{t('conn.headline_connecting')}</div>}
+                    <div>
+                        <div
+                            style={{
+                                display: 'flex',
+                                alignItems: 'baseline',
+                                justifyContent: 'space-between',
+                                gap: 12,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                color: 'var(--muted)',
+                                marginBlockEnd: 2,
+                            }}
+                        >
+                            <span>{t('files.sheet.ways')}</span>
+                            {here && <span style={{ fontWeight: 500 }}>{here}</span>}
+                        </div>
+                        <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                            {routes.map((r, i) => {
+                                const st = rowState(r.routeId, activeRouteId, pendingId, verifying);
+                                const ws = wayState(r, st, nowMs);
+                                return (
+                                    <WayRow
+                                        key={r.routeId}
+                                        t={t}
+                                        locale={locale}
+                                        r={r}
+                                        title={titles.get(r.routeId) ?? { title: r.routeId }}
+                                        state={ws}
+                                        open={openWay === r.routeId}
+                                        onToggle={() => setOpenWay((w) => (w === r.routeId ? null : r.routeId))}
+                                        pinned={r.routeId === pinnedId}
+                                        chosenByDaal={r.routeId === autoRouteId}
+                                        busy={pendingId !== null}
+                                        otherConnected={activeRouteId !== null && activeRouteId !== r.routeId}
+                                        // Connecting a way from this page IS
+                                        // choosing it: it is pinned once the
+                                        // engine reports it connected
+                                        // (pinAfterTap), as before.
+                                        onUseOnly={() => void onConnectRoute(r.routeId)}
+                                        onBackToAuto={onBackToAuto}
+                                        last={i === routes.length - 1}
+                                        dev={
+                                            dev ? (
+                                                <span data-dev style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingBlockEnd: 8 }}>
+                                                    <code dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', flexBasis: '100%' }}>
+                                                        {rowMetaText(t, r, {
+                                                            stateLabelKey: rowStateLabelKey(st),
+                                                            isAuto: r.routeId === autoRouteId,
+                                                            isPinned: r.routeId === pinnedId,
+                                                        })}{' '}
+                                                        · {r.routeId}
+                                                    </code>
+                                                    <RouteActionButton
+                                                        t={t}
+                                                        routeId={r.routeId}
+                                                        activeRouteId={activeRouteId}
+                                                        pendingId={pendingId}
+                                                        verifying={verifying}
+                                                        onConnectRoute={onConnectRoute}
+                                                        onDisconnect={onDisconnect}
+                                                    />
+                                                    <Button size="sm" variant="secondary" disabled={pendingId !== null} onClick={() => void onCool(r.routeId)}>
+                                                        {t('network.cool_15m')}
+                                                    </Button>
+                                                    <Button size="sm" variant="secondary" onClick={() => onBudget(r)}>
+                                                        {t('network.cap')}
+                                                    </Button>
+                                                </span>
+                                            ) : undefined
+                                        }
+                                    />
+                                );
+                            })}
+                        </ul>
+                    </div>
+                    {dev && (
+                        <div data-dev style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {p.cells.flatMap((c) => c.families).map((f) => (
+                                <FamilyChipView key={f.family} t={t} chip={f} />
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+        </Sheet>
     );
 }
 
@@ -937,162 +961,6 @@ function RouteActionButton({
         >
             {t(rowActionLabelKey(action))}
         </Button>
-    );
-}
-
-function CellRowView({
-    t,
-    cell,
-    onConnectRoute,
-    onCool,
-    onBudget,
-    pendingId,
-    verifying,
-    activeRouteId,
-    autoRouteId,
-    pinnedId,
-    onDisconnect,
-}: {
-    t: (k: string) => string;
-    cell: CellRow;
-    onConnectRoute: (routeId: string) => void | Promise<void>;
-    onCool: (routeId: string) => void | Promise<void>;
-    onBudget: (r: RouteDisplayRow) => void;
-    pendingId: string | null;
-    verifying: RunningPhase;
-    activeRouteId: string | null;
-    autoRouteId: string | null;
-    pinnedId: string | null;
-    onDisconnect: () => void | Promise<void>;
-}) {
-    return (
-        <div>
-            {/* M1: cell label is purely descriptive. M5 adds inline edit. */}
-            {cell.label && (
-                <div
-                    style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        color: 'var(--muted)',
-                        marginBottom: 4,
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.06em',
-                    }}
-                >
-                    {cell.label}
-                </div>
-            )}
-            {cell.families.length > 0 && (
-                <div
-                    style={{
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        gap: 6,
-                        marginBottom: 8,
-                    }}
-                >
-                    {cell.families.map((f) => (
-                        <FamilyChipView key={f.family} t={t} chip={f} />
-                    ))}
-                </div>
-            )}
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                {cell.routes.map((r) => {
-                    const state = rowState(
-                        r.routeId,
-                        activeRouteId,
-                        pendingId,
-                        verifying,
-                    );
-                    const isActive = state === 'connected';
-                    // A route that stopped carrying traffic is drawn like
-                    // one being checked: not green, and with its own words.
-                    const isChecking = state === 'checking' || state === 'lost';
-                    const stateLabel = rowStateLabelKey(state);
-                    return (
-                    <li
-                        key={r.routeId}
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 8,
-                            padding: '6px 8px',
-                            borderTop: '1px dashed var(--line-soft)',
-                            borderInlineStart: isActive
-                                ? '2px solid var(--green)'
-                                : isChecking
-                                ? '2px solid var(--gold-warm)'
-                                : '2px solid transparent',
-                            background: isActive
-                                ? 'rgba(80,200,120,0.08)'
-                                : isChecking
-                                ? 'rgba(193,158,80,0.08)'
-                                : 'transparent',
-                        }}
-                    >
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 12,
-                                    color: 'var(--fg)',
-                                }}
-                            >
-                                {r.routeNickname}
-                            </div>
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 10,
-                                    color: isActive
-                                        ? 'var(--green)'
-                                        : isChecking
-                                        ? 'var(--gold-warm)'
-                                        : 'var(--dim)',
-                                }}
-                            >
-                                {/* The whole line is lib/networkRows.ts
-                                    rowMetaText: the kind, the state,
-                                    who picked it, how it has done on
-                                    this network in plain words, resting. */}
-                                {rowMetaText(t, r, {
-                                    stateLabelKey: stateLabel,
-                                    isAuto: r.routeId === autoRouteId,
-                                    isPinned: r.routeId === pinnedId,
-                                })}
-                            </div>
-                        </div>
-                        <RouteActionButton
-                            t={t}
-                            routeId={r.routeId}
-                            activeRouteId={activeRouteId}
-                            pendingId={pendingId}
-                            verifying={verifying}
-                            onConnectRoute={onConnectRoute}
-                            onDisconnect={onDisconnect}
-                        />
-                        <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={pendingId !== null}
-                            onClick={() => void onCool(r.routeId)}
-                            title={t('network.cool_15m')}
-                        >
-                            ❄
-                        </Button>
-                        <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => onBudget(r)}
-                            title={t('network.cap')}
-                        >
-                            ⓘ
-                        </Button>
-                    </li>
-                    );
-                })}
-            </ul>
-        </div>
     );
 }
 
@@ -1208,7 +1076,6 @@ function FamilyChipView({
                 border,
                 padding: '2px 8px',
                 borderRadius: 999,
-                letterSpacing: '0.04em',
                 cursor: detail ? 'pointer' : 'default',
                 textAlign: 'start',
             }}
@@ -1240,20 +1107,3 @@ function FamilyChipView({
     );
 }
 
-function EmptyState({ text }: { text: string }) {
-    return (
-        <div
-            style={{
-                background: 'var(--surface)',
-                border: '1px dashed var(--line)',
-                borderRadius: 'var(--r-card)',
-                padding: 48,
-                textAlign: 'center',
-                color: 'var(--muted)',
-                fontSize: 14,
-            }}
-        >
-            {text}
-        </div>
-    );
-}

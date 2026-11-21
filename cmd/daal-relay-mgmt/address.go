@@ -775,15 +775,54 @@ func defaultAddrAdd(iface string, ip net.IP) error {
 	if !ifaceNameRe.MatchString(iface) {
 		return fmt.Errorf("refusing to use interface name %q", iface)
 	}
-	cidr := canonicalIP(ip) + "/" + strconv.Itoa(prefixLen(ip))
-	out, err := exec.Command("ip", "addr", "add", cidr, "dev", iface).CombinedOutput()
+	argv := addrAddArgv(iface, ip)
+	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
 	if err == nil {
 		return nil
 	}
 	if strings.Contains(strings.ToLower(string(out)), "file exists") {
 		return nil
 	}
-	return fmt.Errorf("ip addr add %s dev %s: %w (%s)", cidr, iface, err, strings.TrimSpace(string(out)))
+	return fmt.Errorf("%s: %w (%s)", strings.Join(argv, " "), err, strings.TrimSpace(string(out)))
+}
+
+// addrAddArgv is the argv defaultAddrAdd runs:
+//
+//	ip addr add <v4>/32  dev <iface> scope link
+//	ip addr add <v6>/128 dev <iface>
+//
+// BOUND, NOT ADOPTED (the standby address, docs/optional-addons-plan.md
+// §1.4). A bound address must make the box ANSWER on it and nothing
+// more. Without a scope, a second /32 on eth0 is a global address of
+// its own, and the kernel picks the source of traffic the box itself
+// starts (the relay's outbound connections for recipients, apt, the
+// clock) from the interface's address list in order. The DHCP primary
+// is normally first, but a lease lost and re-acquired puts it behind
+// the bound one, and from then on every site recipients visit sees the
+// bound address. For a sealed standby that is the address leaking to
+// exactly the destinations a censor can watch, before anyone was told
+// it; for an address an L3 swap moved off and is about to release, it
+// is the box sourcing traffic from an address that may be a stranger's.
+//
+// `scope link` takes it out of source selection for every off-link
+// destination, and changes nothing else: packets TO the address are
+// delivered by the local routing table, which ignores scope, and a
+// reply is sent from the address the request came to (TCP takes it
+// from the connection; QUIC sets it per packet), which the kernel
+// accepts for any local address whatever its scope. IPv4 only: IPv6
+// derives scope from the address itself, and no IPv6 address is bound
+// by any shipped path (Floating IPs here are IPv4).
+//
+// An address already live from an older binary keeps its old scope
+// until the next boot (the add answers "File exists"); the boot unit
+// re-applies every record through this same argv.
+func addrAddArgv(iface string, ip net.IP) []string {
+	cidr := canonicalIP(ip) + "/" + strconv.Itoa(prefixLen(ip))
+	argv := []string{"ip", "addr", "add", cidr, "dev", iface}
+	if ip.To4() != nil {
+		argv = append(argv, "scope", "link")
+	}
+	return argv
 }
 
 // defaultAddrDel runs `ip addr del`. Same argv discipline. "Cannot

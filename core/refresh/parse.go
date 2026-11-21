@@ -12,9 +12,12 @@ import (
 )
 
 // ParsedRoute is a transport-agnostic route as extracted from a
-// subscription body. Each ParsedRoute has a stable ID derived from the
-// hash of its outbound profile — so re-imports of the same subscription
-// don't churn the routestore.
+// subscription body. Its ID is POSITIONAL ("sub-<hint>-<n>", the n-th
+// entry of the body), not a hash of the outbound: a refresh that brings
+// the same entries in the same order overwrites the same rows. Entries
+// the importer refuses keep their slot (see the parsers below) so a
+// refusal does not renumber the rest. Reordering the subscription
+// still renumbers; nothing prunes an id the body no longer has.
 type ParsedRoute struct {
 	RouteID         string
 	DisplayName     string
@@ -73,10 +76,19 @@ func parseBase64OrURIList(body []byte, displayHint string) (ParsedSubscription, 
 		}
 		prof, _, err := uri.ParseURI(line)
 		if err != nil {
+			// A link the importer REFUSES still takes its slot. Route ids
+			// are positional, and health, cooldown and network memory
+			// are keyed by id: without the slot, a link refused since
+			// the last refresh (plaintext VLESS, xhttp) would hand every
+			// later id, and its history, to a different server.
+			if uri.RefusalCode(err) != "" {
+				idx++
+			}
 			continue
 		}
 		ob, err := uri.MarshalOutbound(prof)
 		if err != nil {
+			idx++
 			continue
 		}
 		idx++
@@ -117,6 +129,13 @@ func parseSIP008(body []byte, displayHint string) (ParsedSubscription, error) {
 	}
 	out := ParsedSubscription{Format: "sip008", ProfileTitle: choose(doc.Title, displayHint)}
 	for i, s := range doc.Servers {
+		// method none is a plaintext proxy; refused as ss:// is
+		// (bundle/go/uri ssPlaintextMethod). The id stays i+1 for the
+		// rest, so skipping it moves nobody else's history.
+		switch strings.ToLower(strings.TrimSpace(s.Method)) {
+		case "none", "plain", "dummy":
+			continue
+		}
 		ob := map[string]any{
 			"type":        "shadowsocks",
 			"tag":         choose(s.Remarks, fmt.Sprintf("ss-%d", i+1)),
@@ -146,28 +165,54 @@ func parseSIP008(body []byte, displayHint string) (ParsedSubscription, error) {
 // parseClash extracts the `proxies:` block from a Clash config. We do not
 // pull in a YAML library; the hand-rolled scanner here recognizes the
 // standard "- name: ..., type: ..., server: ..., port: ..." shape that
-// every well-known Clash subscription emits. Fields we don't recognize
-// are passed through as a JSON object.
+// every well-known Clash subscription emits, inline or block style.
+//
+// Each entry is converted by uri.ProfileFromClashEntry, the same Clash
+// mapping the URI importer uses. This used to store the Clash entry
+// itself as the route's "outbound" (name/port/cipher keys sing-box has
+// never heard of, rejected by the engine's strict parse at connect) and
+// to pick the family from `type:` alone: every vless entry became
+// vless-reality and every trojan entry websocket-tls — the stable badge
+// of Daal's own VLESS+WebSocket tier on a stranger's Trojan server. An
+// entry the importer refuses (plaintext, a transport the engine cannot
+// carry) is skipped, as an unrecognised one always was.
 func parseClash(body []byte, displayHint string) (ParsedSubscription, error) {
 	out := ParsedSubscription{Format: "clash", ProfileTitle: displayHint}
 	lines := strings.Split(string(body), "\n")
 	in := false
-	var current map[string]any
+	var current map[string]string
+	// Route ids are positional, and health, cooldown and network memory
+	// are keyed by id. slot counts every entry of a type this reader
+	// has always taken (clashSlotTypes), refused or not, so an entry
+	// refused now (plaintext VLESS, an h2 transport) does not hand the
+	// ids after it, and their history, to different servers. Types it
+	// used to drop (vmess) count separately under their own id form.
+	slot, extra := 0, 0
 	flush := func() {
-		if current == nil || current["server"] == nil {
+		if current == nil || current["server"] == "" {
 			return
 		}
-		family := transportFromClash(current)
-		if family == "" {
+		var id string
+		if clashSlotTypes[current["type"]] {
+			slot++
+			id = fmt.Sprintf("sub-%s-%d", abbrev(displayHint), slot)
+		} else {
+			extra++
+			id = fmt.Sprintf("sub-%s-x%d", abbrev(displayHint), extra)
+		}
+		prof, err := uri.ProfileFromClashEntry(current)
+		if err != nil {
 			return
 		}
-		raw, _ := json.Marshal(current)
-		nm, _ := current["name"].(string)
+		raw, err := uri.MarshalOutbound(prof)
+		if err != nil {
+			return
+		}
 		idx := len(out.Routes) + 1
 		out.Routes = append(out.Routes, ParsedRoute{
-			RouteID:         fmt.Sprintf("sub-%s-%d", abbrev(displayHint), idx),
-			DisplayName:     choose(nm, fmt.Sprintf("clash-%d", idx)),
-			TransportFamily: family,
+			RouteID:         id,
+			DisplayName:     choose(prof.Tag, fmt.Sprintf("clash-%d", idx)),
+			TransportFamily: prof.TransportFamily,
 			OutboundJSON:    raw,
 		})
 	}
@@ -183,7 +228,7 @@ func parseClash(body []byte, displayHint string) (ParsedSubscription, error) {
 		}
 		if strings.HasPrefix(trim, "- ") {
 			flush()
-			current = map[string]any{}
+			current = map[string]string{}
 			rest := strings.TrimPrefix(trim, "- ")
 			for _, kv := range splitClashInline(rest) {
 				k, v, ok := splitKV(kv)
@@ -212,23 +257,12 @@ func parseClash(body []byte, displayHint string) (ParsedSubscription, error) {
 	return out, nil
 }
 
-func transportFromClash(m map[string]any) string {
-	switch fmt.Sprintf("%v", m["type"]) {
-	case "vless":
-		return "vless-reality"
-	case "ss", "shadowsocks":
-		return "shadowsocks"
-	case "hysteria2":
-		return "hysteria2"
-	case "tuic":
-		return "tuic"
-	case "trojan":
-		return "websocket-tls"
-	case "wireguard":
-		return "wireguard"
-	default:
-		return ""
-	}
+// clashSlotTypes are the Clash types the reader took before it used
+// uri.ProfileFromClashEntry (its old transportFromClash), whose ids
+// existing installs already hold.
+var clashSlotTypes = map[string]bool{
+	"vless": true, "ss": true, "shadowsocks": true, "hysteria2": true,
+	"tuic": true, "trojan": true, "wireguard": true,
 }
 
 func splitClashInline(s string) []string {
@@ -267,7 +301,7 @@ func splitKV(s string) (string, string, bool) {
 	return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+1:]), true
 }
 
-func stripQuotes(s string) any {
+func stripQuotes(s string) string {
 	s = strings.TrimSpace(s)
 	if (strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)) ||
 		(strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'")) {

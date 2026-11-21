@@ -2,95 +2,148 @@ package cloudflare
 
 import "context"
 
-// CFClient is the narrow Cloudflare API surface FRP-8 exercises.
-// It exists so the publisher/deploy/cloudflare package can be
-// independently built, tested, and exercised against a mock. The
-// live impl lives at cf_client_live.go and talks to Cloudflare's
-// v4 API from the Helper machine only.
+// CFClient is the narrow Cloudflare API v4 surface the CDN add-on uses.
+// Every call it makes needs one of exactly five zone permissions
+// (docs/optional-addons-plan.md §2.5); nothing here touches an account
+// resource, a Worker, billing or the registrar.
 //
-// All methods take a context.Context and use it for cancellation.
-// Methods MUST NOT log, persist, or otherwise leak the API token;
-// the bytes flow through cfToken parameters only and are zeroized
-// by the caller after the operation completes.
+//	Zone — Zone — Read                 ListZones, LookupZone
+//	Zone — DNS — Edit                  ListDNSRecords, EnsureProxiedRecords, SetDNSRecordContent, DeleteDNSRecord
+//	Zone — SSL and Certificates — Edit IssueOriginCert, RevokeOriginCert, *AOP*
+//	Zone — Zone Settings — Edit        GetZoneSetting, SetZoneSetting
+//	Zone — Origin Rules — Edit         EnsureOriginRule, RemoveOriginRule, OriginRule
+//
+// VerifyToken and ProbeRead exist for the token scope check
+// (CheckToken): VerifyToken needs no permission at all, and ProbeRead
+// only ever issues GETs.
+//
+// The token travels in cfToken on every call. Implementations MUST NOT
+// log, persist or echo it, and must keep it out of returned errors.
 type CFClient interface {
-	// IssueOriginCert provisions a Cloudflare-issued Origin CA
-	// cert valid for `validityDays` (Cloudflare default = 5475
-	// days = 15 years). Returns PEM-encoded cert + PEM-encoded
-	// privkey. The caller writes them to disk at mode 0600.
-	IssueOriginCert(ctx context.Context, cfToken []byte, hostnames []string, validityDays int) (certPEM, privPEM []byte, fingerprintHex string, err error)
+	// VerifyToken is GET /user/tokens/verify: the token's own id and
+	// status ("active", "disabled", "expired").
+	VerifyToken(ctx context.Context, cfToken []byte) (TokenStatus, error)
 
-	// EnableAOP toggles Zone.Settings.AuthenticatedOriginPulls
-	// to true on the supplied zone. Idempotent.
-	EnableAOP(ctx context.Context, cfToken []byte, zoneID string) error
+	// ListZones lists every zone the token can see (all statuses).
+	ListZones(ctx context.Context, cfToken []byte) ([]Zone, error)
 
-	// FetchAOPClientCert returns the Cloudflare-signed client
-	// certificate (PEM) the origin must present back to
-	// Cloudflare's edge under AOP. The caller deploys it to
-	// the origin via cloud-init.
-	FetchAOPClientCert(ctx context.Context, cfToken []byte, zoneID string) (certPEM []byte, err error)
+	// LookupZone is GET /zones?name=<name>. found=false when the token
+	// sees no zone of exactly that name.
+	LookupZone(ctx context.Context, cfToken []byte, name string) (zone Zone, found bool, err error)
 
-	// EnsureProxiedRecords creates / updates proxied A + AAAA
-	// records pointing at originIPv4 (and originIPv6 if
-	// non-empty). If any non-proxied A or AAAA record already
-	// exists on the chosen hostname, returns
-	// ErrDNSOnlyRecordPresent — the caller (wizard) MUST
-	// refuse to proceed.
-	EnsureProxiedRecords(ctx context.Context, cfToken []byte, zoneID, hostname, originIPv4, originIPv6 string) error
+	// ProbeRead issues one GET and classifies the answer: 2xx is
+	// ProbeAllowed, 401/403 ProbeDenied, 404 ProbeNotFound. Anything
+	// else (5xx, network) is an error, never a verdict.
+	ProbeRead(ctx context.Context, cfToken []byte, path string) (ProbeResult, error)
 
-	// UploadWorkerScript uploads the FRP-8 path-rewrite Worker
-	// script bytes under the supplied scriptName. Returns the
-	// route ID for the binding the FRP can use to attach the
-	// script to a route pattern.
-	UploadWorkerScript(ctx context.Context, cfToken []byte, accountID, scriptName string, scriptBody []byte) (scriptID string, err error)
+	// IssueOriginCert is POST /certificates with a locally generated
+	// key and CSR. The private key never leaves this process except in
+	// the returned OriginCert.
+	IssueOriginCert(ctx context.Context, cfToken []byte, hostnames []string, validityDays int) (OriginCert, error)
 
-	// BindWorkerRoute binds the worker scriptID to the
-	// `pattern` (e.g. "frp.example.com/r/8c1f4a23"). Returns
-	// the route ID, idempotent on repeated calls.
-	BindWorkerRoute(ctx context.Context, cfToken []byte, zoneID, scriptName, pattern string) (routeID string, err error)
+	// RevokeOriginCert is DELETE /certificates/{id}.
+	RevokeOriginCert(ctx context.Context, cfToken []byte, certID string) error
 
-	// LookupZoneID resolves an FRP-supplied apex domain into
-	// a zone ID. Surfaced so the wizard can validate the
-	// FRP's CF token actually controls the chosen domain.
-	LookupZoneID(ctx context.Context, cfToken []byte, apexDomain string) (zoneID, accountID string, err error)
+	// UploadAOPCert is POST /zones/{id}/origin_tls_client_auth: the
+	// zone-level client certificate Cloudflare presents to the origin.
+	// Returns Cloudflare's id for it.
+	UploadAOPCert(ctx context.Context, cfToken []byte, zoneID string, certPEM, keyPEM []byte) (string, error)
 
-	// VerifyPosture re-reads the live Cloudflare state for
-	// the supplied FrontRecord and reports drift. The wizard
-	// "Verify CDN posture" button calls this. The CFClient
-	// is the ONLY place that talks to the Cloudflare API for
-	// posture re-verification — the validator never calls
-	// Cloudflare.
-	VerifyPosture(ctx context.Context, cfToken []byte, rec *FrontRecord) (PostureReport, error)
+	// DeleteAOPCert is DELETE /zones/{id}/origin_tls_client_auth/{cert}.
+	DeleteAOPCert(ctx context.Context, cfToken []byte, zoneID, certID string) error
 
-	// FRP-9 rotation surface. These methods implement the
-	// supplement §14.4 cdn_fronted-mode rotation table.
-	// Public-surface rotations (path / hostname) require the
-	// caller to re-sign the RelayPack and re-publish the
-	// freshness document afterwards. Origin-only rotation
-	// stays invisible to the family — the RelayPack is NOT
-	// re-signed; only the Cloudflare origin pointer + DNS
-	// content + (Helper-side) firewall + cert posture move.
+	// SetAOPEnabled / AOPEnabled are PUT / GET
+	// /zones/{id}/origin_tls_client_auth/settings.
+	SetAOPEnabled(ctx context.Context, cfToken []byte, zoneID string, enabled bool) error
+	AOPEnabled(ctx context.Context, cfToken []byte, zoneID string) (bool, error)
 
-	// RotatePublicPath updates the worker route binding so
-	// the visible random path becomes newPublicPath. The
-	// stable origin path is unchanged. Returns the (possibly
-	// new) routeID. Idempotent on retry.
-	RotatePublicPath(ctx context.Context, cfToken []byte, zoneID, oldRouteID, scriptName, hostname, newPublicPath, originPath string) (newRouteID string, err error)
+	// GetZoneSetting / SetZoneSetting are GET / PATCH
+	// /zones/{id}/settings/{name} with a string value ("ssl",
+	// "websockets", "ech").
+	GetZoneSetting(ctx context.Context, cfToken []byte, zoneID, name string) (string, error)
+	SetZoneSetting(ctx context.Context, cfToken []byte, zoneID, name, value string) error
 
-	// RotateHostname migrates the proxied DNS records to
-	// newHostname. The caller is responsible for re-uploading
-	// the rewrite Worker on the new hostname pattern (handled
-	// by Provider.RotateHostname). Returns the new
-	// FrontRecord shape (Hostname, ZoneID, WorkerRouteID
-	// updated). The validator's RP023 check still applies:
-	// if the new hostname has any DNS-only A/AAAA record
-	// EnsureProxiedRecords surfaces ErrDNSOnlyRecordPresent.
-	RotateHostname(ctx context.Context, cfToken []byte, oldRec *FrontRecord, newHostname, originIPv4, originIPv6 string) (newZoneID, newAccountID string, err error)
+	// ListDNSRecords lists every record named hostname.
+	ListDNSRecords(ctx context.Context, cfToken []byte, zoneID, hostname string) ([]DNSRecord, error)
 
-	// RotateOrigin re-points the proxied A / AAAA records at
-	// a new origin IP. Hostname and public path are unchanged
-	// — this is the supplement §14.4 origin-only path. The
-	// caller MUST NOT re-sign the RelayPack; from the
-	// censor's vantage the public surface is byte-identical.
-	// Returns nil on success.
-	RotateOrigin(ctx context.Context, cfToken []byte, zoneID, hostname, newOriginIPv4, newOriginIPv6 string) error
+	// EnsureProxiedRecords makes hostname a proxied A (and AAAA when
+	// originIPv6 is set) record. It refuses ErrDNSOnlyRecordPresent
+	// for an existing unproxied A/AAAA and ErrHostnameInUse for a
+	// proxied one with other content; an identical proxied record is
+	// reused. Returns the ids of the records it CREATED, so a rollback
+	// or a removal deletes only what Daal made.
+	EnsureProxiedRecords(ctx context.Context, cfToken []byte, zoneID, hostname, originIPv4, originIPv6 string) (createdIDs []string, err error)
+
+	// SetDNSRecordContent re-points one existing proxied record (the
+	// origin-only rotation). It never changes the name, type or proxy.
+	SetDNSRecordContent(ctx context.Context, cfToken []byte, zoneID, recordID, content string) error
+
+	// DeleteDNSRecord deletes one record. An absent record is success.
+	DeleteDNSRecord(ctx context.Context, cfToken []byte, zoneID, recordID string) error
+
+	// EnsureOriginRule puts one rule, identified by ref, into the
+	// zone's http_request_origin entrypoint: requests whose host is
+	// hostname go to the origin on port. Every rule with another ref is
+	// kept as it was.
+	EnsureOriginRule(ctx context.Context, cfToken []byte, zoneID, ref, hostname string, port int) error
+
+	// RemoveOriginRule takes the ref'd rule out and keeps every other.
+	// An absent rule or entrypoint is success.
+	RemoveOriginRule(ctx context.Context, cfToken []byte, zoneID, ref string) error
+
+	// OriginRule reads the ref'd rule back.
+	OriginRule(ctx context.Context, cfToken []byte, zoneID, ref string) (hostname string, port int, found bool, err error)
 }
+
+// TokenStatus is what /user/tokens/verify says about the token itself.
+type TokenStatus struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// Zone is one zone the token can see.
+type Zone struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	AccountID string `json:"account_id,omitempty"`
+}
+
+// ProbeResult classifies one read probe.
+type ProbeResult int
+
+const (
+	ProbeDenied ProbeResult = iota
+	ProbeAllowed
+	ProbeNotFound
+)
+
+func (p ProbeResult) String() string {
+	switch p {
+	case ProbeAllowed:
+		return "allowed"
+	case ProbeNotFound:
+		return "not_found"
+	default:
+		return "denied"
+	}
+}
+
+// OriginCert is one issued Origin CA certificate.
+type OriginCert struct {
+	ID             string
+	CertPEM        []byte
+	KeyPEM         []byte
+	FingerprintHex string
+}
+
+// DNSRecord is one DNS record as Cloudflare lists it.
+type DNSRecord struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Proxied *bool  `json:"proxied"`
+}
+
+func (r DNSRecord) proxied() bool { return r.Proxied != nil && *r.Proxied }

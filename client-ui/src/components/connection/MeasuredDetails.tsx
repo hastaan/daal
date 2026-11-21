@@ -52,7 +52,7 @@ export default function MeasuredDetails({ t, locale, routes, onOpen }: Props) {
                     return (
                         <li key={r.routeId} style={{ marginBlockEnd: 8 }}>
                             <div>
-                                <bdi>{routeLabel(r)}</bdi>
+                                <bdi>{routeLabel(t, r, routes)}</bdi>
                                 {' — '}
                                 {gradeText(t, r.measured)}
                             </div>

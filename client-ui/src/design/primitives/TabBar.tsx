@@ -9,8 +9,10 @@
 // .bottom-nav + .nav-item:
 //   * grid-template-columns: repeat(N, 1fr) so cells stay centred and
 //     evenly spaced regardless of how many tabs are rendered.
-//   * 22 × 22 icon stacked above 9.5px uppercase mono label.
-//   * 2-px gold tick on top of the active cell, centred horizontally.
+//   * 24 × 24 icon stacked above an 11px sentence-case label (body
+//     font, no tracking: Persian has no capitals and the mono face no
+//     Persian letters). Each cell is at least 56 px high.
+//   * the active cell: gold icon and label, and a 3-px gold bar on top.
 //   * bottom padding = `max(8px, env(safe-area-inset-bottom))` so the
 //     bar stays above the iOS home indicator + Android gesture inset
 //     instead of being eaten by it.
@@ -59,7 +61,9 @@ export function TabBar<Id extends string>({
                 return (
                     <button
                         key={it.id}
+                        type="button"
                         role="tab"
+                        data-button={`tab-${it.id}`}
                         aria-selected={on}
                         aria-label={it.label}
                         disabled={it.disabled}
@@ -80,14 +84,13 @@ export function TabBar<Id extends string>({
                             flexDirection: 'column',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            gap: 4,
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 9.5,
-                            letterSpacing: '0.06em',
-                            textTransform: 'uppercase',
-                            // Give every cell a minimum tap height so
-                            // the bar stays comfortable on phones.
-                            minBlockSize: 48,
+                            gap: 3,
+                            fontFamily: 'var(--font-body)',
+                            fontSize: 11,
+                            fontWeight: on ? 600 : 500,
+                            lineHeight: 1.2,
+                            // Every cell is a comfortable tap target.
+                            minBlockSize: 56,
                         }}
                     >
                         {on && (
@@ -95,11 +98,12 @@ export function TabBar<Id extends string>({
                                 aria-hidden
                                 style={{
                                     position: 'absolute',
-                                    insetBlockStart: 0,
+                                    // Sits on the bar's top edge.
+                                    insetBlockStart: -8,
                                     insetInlineStart: '50%',
-                                    transform: 'translateX(-50%)',
-                                    inlineSize: 22,
-                                    blockSize: 2,
+                                    marginInlineStart: -14,
+                                    inlineSize: 28,
+                                    blockSize: 3,
                                     background: 'var(--gold-warm)',
                                     borderRadius: 2,
                                 }}
@@ -107,8 +111,8 @@ export function TabBar<Id extends string>({
                         )}
                         <span
                             style={{
-                                inlineSize: 22,
-                                blockSize: 22,
+                                inlineSize: 24,
+                                blockSize: 24,
                                 display: 'inline-flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
@@ -116,7 +120,18 @@ export function TabBar<Id extends string>({
                         >
                             {it.icon}
                         </span>
-                        <span>{it.label}</span>
+                        <span
+                            style={{
+                                maxWidth: '100%',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                // Room for descenders (g, y, Persian ی).
+                                lineHeight: 1.45,
+                            }}
+                        >
+                            {it.label}
+                        </span>
                     </button>
                 );
             })}

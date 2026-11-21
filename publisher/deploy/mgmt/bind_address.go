@@ -94,6 +94,39 @@ import (
 // silently turns every L3 into a refusal.
 const CapBindAddress = "bind-address"
 
+// BindsStandbySafely reports whether the box binds an extra address the
+// way a STANDBY needs it bound: `scope link` (cmd/daal-relay-mgmt
+// address.go addrAddArgv), which takes the address out of the kernel's
+// source selection so the box's own traffic never leaves from it.
+//
+// Why it matters. relay-v1.5.1 binds the address as an ordinary global
+// one. After the DHCP lease is lost and re-acquired the primary lands
+// behind it in the interface's list, and from then on everything the box
+// itself starts — the relay's connections for recipients included —
+// leaves from the standby. For a sealed standby that is its address shown
+// to exactly the destinations a censor watches, before anyone was told
+// it. An assign-fip swap does not need this (it adopts the address it
+// binds); a standby does, so `standby add` asks this before renting.
+//
+// WHY THE TOKEN IS CapCDNDoor. No /health token names the scope: the
+// scope change shipped in the add-ons wave without one, and a new token
+// would exist only on binaries newer than the release that fixed the
+// bug, refusing every relay-v1.6.0 box that binds correctly. `cdn` is
+// the nearest exact signal: it names the BINARY (asserted
+// unconditionally, like the rotation tokens), the `scope link` bind
+// landed before it (add-ons wave 1, 04f481b; the token in wave 2,
+// 63849dd), and relay-v1.6.0 is the first release with either — so no
+// released binary advertises `cdn` and binds globally, and every one
+// without `cdn` (relay-v1.5.1 and older) is one this must refuse. A box
+// that cannot bind at all is CapBindAddress's refusal, asked first.
+//
+// If a later binary ever stops advertising `cdn` (the door retired), it
+// must grow a token that says this instead, and this function must read
+// it; TestBindsStandbySafely pins the pairing.
+func BindsStandbySafely(caps *BoxCapabilities) bool {
+	return caps.Has(CapBindAddress) && caps.Has(CapCDNDoor)
+}
+
 // MgmtAPIVersionAddressBinding is the /health `mgmt_api_version` at
 // which the two routes are part of the contract.
 //

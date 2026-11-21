@@ -36,6 +36,12 @@ class VpnStartArgs {
 }
 
 @InvokeArg
+class FieldProbeWatchArgs {
+  /** true when a network test is starting; false when it has ended. */
+  var on: Boolean = false
+}
+
+@InvokeArg
 class SecureScreenArgs {
   /** true while a screen showing the recovery words is mounted. */
   var on: Boolean = false
@@ -80,7 +86,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     keepClearOfSystemBars(webView)
+    // The page scrolls inside its own areas; the WebView's own bar only
+    // showed as a stray line at the screen's edge.
+    webView.isVerticalScrollBarEnabled = false
+    webView.isHorizontalScrollBarEnabled = false
+    webView.overScrollMode = View.OVER_SCROLL_NEVER
     DownloadsSaver.context = activity.applicationContext
+    ShareText.context = activity.applicationContext
+    ShareText.setActivity(activity)
+    // "Open with Daal" / "Share to Daal": the file or text Daal was
+    // started with is held for the page, which takes it with
+    // `take_opened_file` once it is up. No event here: the page is not
+    // listening yet.
+    OpenedFiles.context = activity.applicationContext
+    OpenedFiles.offer(activity, activity.intent)
     // A page that loads has asked for nothing yet (PB-20).
     applySecureFlag(synchronized(secure) { secure.atLoad() })
     val host = activity as? ComponentActivity ?: return
@@ -110,6 +129,18 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
     }
     host.onBackPressedDispatcher.addCallback(host, callback)
+  }
+
+  /**
+   * A file opened with Daal, or a file or text shared to it, while Daal
+   * runs (the activity is singleTask, so it comes here rather than
+   * starting a second Daal). Held, and Rust is told: it stages the file
+   * and fires `daal://opened-file` once the page has asked for files
+   * (src-tauri/src/opened.rs). Nothing is imported.
+   */
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    if (OpenedFiles.offer(activity, intent)) OpenedFiles.notifyArrived()
   }
 
   /**
@@ -177,6 +208,46 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (t: Throwable) {
       Logger.error("DaalPlatformPlugin.secureScreen failed: ${t.message}")
       invoke.reject(t.message ?: "secureScreen failed")
+    }
+  }
+
+  /**
+   * The network test (specs/field-probe-v2.md). Reached from the app's
+   * own field_probe_* commands in src-tauri, not from the page.
+   *
+   * on = true: answer what the engine's start needs from the phone (the
+   * network's DNS servers, Private DNS mode, VPN up, global IPv6,
+   * "blocked without VPN") and start watching for the length of the
+   * run: network facts to the engine, a cancel the moment a VPN
+   * appears or Daal's activity stops, and the screen kept on
+   * (FieldProbeWatch). on = false: stop watching; answers the same
+   * facts, read again.
+   *
+   * The DNS server addresses travel to Rust and on into the engine's
+   * memory; neither side logs them.
+   */
+  @Command
+  fun fieldProbeWatch(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(FieldProbeWatchArgs::class.java)
+      val ctx = activity.applicationContext
+      if (args.on) FieldProbeWatch.start(activity) else FieldProbeWatch.stop()
+      val f = FieldProbeWatch.hostFacts(ctx)
+      val dns = app.tauri.plugin.JSArray()
+      for (d in f.dnsServers) dns.put(d)
+      invoke.resolve(
+        JSObject().apply {
+          put("watching", args.on)
+          put("dns_servers", dns)
+          put("private_dns", f.privateDns)
+          put("vpn_active", f.vpnActive)
+          put("ipv6_global", f.ipv6Global)
+          put("blocked", f.blocked)
+        },
+      )
+    } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.fieldProbeWatch failed: ${t.javaClass.simpleName}")
+      invoke.reject(t.message ?: "fieldProbeWatch failed")
     }
   }
 
@@ -305,6 +376,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       activity.startService(intent)
     }
   }
+
+  // ---- Optional add-ons, Google update channel, Path A (GoogleAuth.kt)
+
+  private val googleAuth = GoogleAuth(activity) { invoke, request ->
+    startIntentSenderForResult(invoke, request, "googleAuthorizeResult")
+  }
+
+  @Command
+  fun googleAuthorize(invoke: Invoke) = googleAuth.authorize(invoke)
+
+  @ActivityCallback
+  fun googleAuthorizeResult(invoke: Invoke, result: ActivityResult) =
+    googleAuth.onResult(invoke, result)
+
 }
 
 /** The page's own background (client-ui tokens.css --bg-deep), shown behind the system bars. */

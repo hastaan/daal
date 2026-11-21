@@ -36,6 +36,16 @@ type DPIRule struct {
 	//   tls_sni          the server_name of a TLS ClientHello
 	//   first_data       the first packet that carries payload (whatever it is)
 	//   first_bytes_not  the first payload does NOT start like one of Allow
+	//   tls_sni_not      a TLS ClientHello whose server_name is NOT in sni
+	//                    (or that has none): an SNI ALLOWLIST, e.g. on
+	//                    Cloudflare's addresses (net4people #626: open for
+	//                    one name only). Same reading options as tls_sni
+	//   budget           the flow has sent more than Packets packets (SYN
+	//                    and bare ACKs included): a "grey" address whose
+	//                    flows are cut after a few packets, whatever they
+	//                    carry (net4people #676, Oct 2026: TCP to some
+	//                    Cloudflare and Google addresses cut after a few
+	//                    packets, right after the handshake)
 	When string `json:"when"`
 	// SNI: exact names (case-insensitive) a tls_sni rule matches.
 	SNI []string `json:"sni,omitempty"`
@@ -43,10 +53,26 @@ type DPIRule struct {
 	// segments (a GFW-like box). false = it reads the first data packet
 	// only and misses a name that lies beyond it (a stateless box).
 	Reassemble bool `json:"reassemble,omitempty"`
+	// Packets: a tls_sni rule that is not Reassemble reads the first
+	// Packets data packets of a flow JOINED (default 1: the first packet
+	// alone) and no more — "inspects only the first two data-carrying
+	// packets and does not perform full TCP stream reassembly" (Bock et
+	// al. 2020, IRBlock 2025) is Packets 2. A ClientHello whose name is
+	// whole within the first two packets is caught; one cut so that it
+	// is not passes. At most dpiMaxPkts.
+	Packets int `json:"packets,omitempty"`
+	// Partial: a tls_sni rule reads the server_name out of a ClientHello
+	// that is not complete yet, as soon as the name itself is (the record
+	// header says how long the hello is; the box does not wait for the
+	// rest). Without it a box needs the whole record in what it reads.
+	// With Packets 2 this is the strictest stateless box: any name whole
+	// within the first two packets is caught, whatever comes after.
+	Partial bool `json:"partial,omitempty"`
 	// Allow: for first_bytes_not — "tls" (record type 0x16, version 3.x)
 	// and/or "http" (a request verb).
 	Allow []string `json:"allow,omitempty"`
-	// Dst / Port narrow the rule to flows toward one address / port.
+	// Dst / Port narrow the rule to flows toward one address (or one
+	// CIDR prefix) / port.
 	Dst  string `json:"dst,omitempty"`
 	Port int    `json:"port,omitempty"`
 	// Action: "drop" — swallow this packet and every later client packet
@@ -59,11 +85,24 @@ type DPIRule struct {
 
 func (r DPIRule) validate() error {
 	switch r.When {
-	case "tls_sni":
+	case "tls_sni", "tls_sni_not":
 		if len(r.SNI) == 0 {
-			return fmt.Errorf("dpi rule tls_sni needs a non-empty sni list")
+			return fmt.Errorf("dpi rule %s needs a non-empty sni list", r.When)
+		}
+		if r.Packets < 0 || r.Packets > dpiMaxPkts {
+			return fmt.Errorf("dpi rule tls_sni: packets=%d, want 0..%d", r.Packets, dpiMaxPkts)
+		}
+		if r.Packets > 0 && r.Reassemble {
+			return fmt.Errorf("dpi rule tls_sni: packets is the window of a box that does NOT reassemble; drop one of packets/reassemble")
 		}
 	case "first_data":
+	case "budget":
+		if r.Packets < 1 || r.Packets > 1000 {
+			return fmt.Errorf("dpi rule budget: packets=%d, want 1..1000 (the client packets a flow may send)", r.Packets)
+		}
+		if len(r.SNI) > 0 || r.Reassemble || r.Partial {
+			return fmt.Errorf("dpi rule budget counts packets; sni/reassemble/partial do not apply")
+		}
 	case "first_bytes_not":
 		if len(r.Allow) == 0 {
 			return fmt.Errorf("dpi rule first_bytes_not needs allow")
@@ -74,7 +113,19 @@ func (r DPIRule) validate() error {
 			}
 		}
 	default:
-		return fmt.Errorf("dpi rule: when=%q, want tls_sni|first_data|first_bytes_not", r.When)
+		return fmt.Errorf("dpi rule: when=%q, want tls_sni|tls_sni_not|first_data|first_bytes_not|budget", r.When)
+	}
+	sniRule := r.When == "tls_sni" || r.When == "tls_sni_not"
+	if r.Packets != 0 && !sniRule && r.When != "budget" {
+		return fmt.Errorf("dpi rule %s: packets applies to tls_sni, tls_sni_not and budget only", r.When)
+	}
+	if r.Partial && !sniRule {
+		return fmt.Errorf("dpi rule %s: partial applies to tls_sni and tls_sni_not only", r.When)
+	}
+	if strings.Contains(r.Dst, "/") && !strings.Contains(r.Dst, "$") {
+		if _, _, err := net.ParseCIDR(r.Dst); err != nil {
+			return fmt.Errorf("dpi rule %s: dst %q is not an address or a CIDR prefix", r.When, r.Dst)
+		}
 	}
 	if r.Action != "drop" && r.Action != "rst" {
 		return fmt.Errorf("dpi rule %s: action=%q, want drop|rst", r.When, r.Action)
@@ -182,6 +233,25 @@ func parseClientHello(b []byte) (sni string, state int) {
 	return "", chNoSNI
 }
 
+// parseClientHelloPartial is parseClientHello for a box that does not
+// wait for the whole record: an incomplete hello is read as if the bytes
+// still to come were zeros. A name that lies wholly in what has arrived
+// comes out intact; one cut short comes out with NULs in it and matches
+// no rule (no real name has one); anything else is chNeedMore.
+func parseClientHelloPartial(b []byte) (sni string, state int) {
+	name, st := parseClientHello(b)
+	if st != chNeedMore || len(b) < 5 {
+		return name, st
+	}
+	recLen := int(binary.BigEndian.Uint16(b[3:5]))
+	padded := make([]byte, 5+recLen)
+	copy(padded, b)
+	if name, st := parseClientHello(padded); st == chSNI && !strings.ContainsRune(name, 0) {
+		return name, chSNI
+	}
+	return "", chNeedMore
+}
+
 func looksLikeHTTP(b []byte) bool {
 	for _, v := range []string{"GET ", "POST ", "HEAD ", "PUT ", "DELETE ", "OPTIONS ", "CONNECT "} {
 		if len(b) >= len(v) && string(b[:len(v)]) == v {
@@ -205,6 +275,7 @@ type flowState struct {
 	seen    int    // payload bytes seen in order
 	buf     []byte // in-order payload seen so far (bounded)
 	pkts    int    // data packets seen
+	total   int    // client packets of the flow, SYN and bare ACKs included (budget)
 	decided bool   // no rule can fire any more: forward untouched
 	blocked bool   // a rule fired: every later client packet is dropped
 }
@@ -288,7 +359,7 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 		if len(e.flows) > 1<<16 {
 			e.flows = map[flowKey]*flowState{}
 		}
-		e.flows[pk.key] = &flowState{next: pk.seq + 1}
+		e.flows[pk.key] = &flowState{next: pk.seq + 1, total: 1}
 		return true
 	}
 	fl := e.flows[pk.key]
@@ -296,6 +367,22 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 		return true // a flow that started before the box did
 	}
 	if fl.blocked {
+		return false
+	}
+	fl.total++
+	for i, r := range e.rules {
+		if r.When != "budget" || !dstMatches(r.Dst, pk.key.dst) || (r.Port != 0 && r.Port != int(pk.key.dport)) || fl.total <= r.Packets {
+			continue
+		}
+		fl.blocked = true
+		fl.buf = nil
+		if r.Action == "rst" && e.inject != nil {
+			e.inject(pk, true, r.RSTTo != "client")
+		}
+		if e.log != nil {
+			e.log(dpiEvent{T: time.Now().UTC().Format(time.RFC3339Nano), Rule: i, When: r.When, Action: r.Action, Packet: fl.pkts,
+				Bytes: fl.seen, Flow: fmt.Sprintf("%s:%d>%s:%d", net.IP(pk.key.src[:]), pk.key.sport, net.IP(pk.key.dst[:]), pk.key.dport)})
+		}
 		return false
 	}
 	if fl.decided || len(pk.payload) == 0 {
@@ -319,7 +406,7 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 
 	pending := false
 	for i, r := range e.rules {
-		if r.Dst != "" && r.Dst != net.IP(pk.key.dst[:]).String() {
+		if r.When == "budget" || !dstMatches(r.Dst, pk.key.dst) {
 			continue
 		}
 		if r.Port != 0 && r.Port != int(pk.key.dport) {
@@ -337,26 +424,49 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 				}
 				fire = !ok
 			}
-		case "tls_sni":
+		case "tls_sni", "tls_sni_not":
 			data := fl.buf
+			window := r.Packets
+			if window == 0 {
+				window = 1
+			}
 			if !r.Reassemble {
-				if fl.pkts != 1 {
+				if fl.pkts > window {
 					continue
 				}
-				data = pk.payload
+				if window == 1 {
+					data = pk.payload
+				}
 			}
-			name, st := parseClientHello(data)
+			parse := parseClientHello
+			if r.Partial {
+				parse = parseClientHelloPartial
+			}
+			name, st := parse(data)
 			switch st {
 			case chNeedMore:
 				if r.Reassemble && fl.pkts < dpiMaxPkts && len(fl.buf) < dpiBufCap {
 					pending = true
 				}
+				if !r.Reassemble && fl.pkts < window && len(fl.buf) < dpiBufCap {
+					pending = true // the window is not full yet
+				}
 			case chSNI:
+				listed := false
 				for _, want := range r.SNI {
 					if strings.EqualFold(want, name) {
-						fire, sni = true, name
+						listed = true
 					}
 				}
+				fire, sni = listed == (r.When == "tls_sni"), name
+			case chNoSNI:
+				fire = r.When == "tls_sni_not"
+			case chOpaque:
+				// An allowlist lets through only a name it has read: a
+				// hello it cannot read (split across records) is not on
+				// it. A blocklist cannot match one, which is the blind
+				// spot the split hello exists for (Niere et al. 2023).
+				fire = r.When == "tls_sni_not"
 			}
 		}
 		if !fire {
@@ -378,6 +488,20 @@ func (e *dpiEngine) verdict(raw []byte) bool {
 		fl.buf = nil
 	}
 	return true
+}
+
+// dstMatches: an empty dst matches every flow; otherwise one address or
+// one CIDR prefix.
+func dstMatches(dst string, ip [4]byte) bool {
+	if dst == "" {
+		return true
+	}
+	a := net.IP(ip[:])
+	if strings.Contains(dst, "/") {
+		_, n, err := net.ParseCIDR(dst)
+		return err == nil && n.Contains(a)
+	}
+	return dst == a.String()
 }
 
 // ---- forged RSTs -------------------------------------------------------

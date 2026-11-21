@@ -26,13 +26,15 @@ import { parseEngineStatus, publisherBootFailureKey } from '../lib/engineStart';
 import { FailureBox } from './PageNotices';
 import PublisherWizard from '../publisher/PublisherWizard';
 import PublisherRecipientsPage from '../publisher/PublisherRecipientsPage';
-import RelayListPage from '../publisher/RelayListPage';
+import RelayListPage, { relayTitle } from '../publisher/RelayListPage';
 import CustodyGate from '../publisher/CustodyGate';
 import BackupPage from '../publisher/BackupPage';
 import RestorePage from '../publisher/RestorePage';
+import AccountsPage from '../publisher/AccountsPage';
 import { Wizard } from '../publisher/wizardCommands';
 import type { OperatorSummary } from '../publisher/wizardCommands';
 import { useBack } from '../lib/useBack';
+import { relayUnfinished } from '../publisher/ui';
 
 export type View =
     | { k: 'loading' }
@@ -41,9 +43,12 @@ export type View =
      *  step returns there. Absent: the wizard is the root view (no
      *  relays yet), and Back at the first step leaves the app. */
     | { k: 'wizard'; operatorId?: number; from?: 'list' }
-    | { k: 'relay'; operatorId: number }
+    /** `addPerson`: open with "Add a person" showing (from the wizard). */
+    | { k: 'relay'; operatorId: number; addPerson?: boolean }
     | { k: 'backup' }
-    | { k: 'restore'; from: 'list' | 'wizard' };
+    | { k: 'restore'; from: 'list' | 'wizard' }
+    /** «حساب‌ها»: from the list, or from a relay page (Back returns there). */
+    | { k: 'accounts'; from: 'list' | number };
 
 /** Where a restore page goes back to. */
 export function restoreBackView(from: 'list' | 'wizard'): View {
@@ -55,6 +60,17 @@ export function restoreBackView(from: 'list' | 'wizard'): View {
  *  when they are busy). */
 export function pageBackTarget(view: View): View | null {
     return view.k === 'relay' ? { k: 'list' } : null;
+}
+
+/** Where the Publisher tab opens (spec C7.0): the relay itself when there
+ *  is exactly one and it is finished; otherwise the list, which is also
+ *  the "set up a relay" empty state when there are none. An unfinished
+ *  relay is never hidden behind a page: the list says it may cost money. */
+export function bootView(ops: OperatorSummary[] | null): View {
+    if (ops === null) return { k: 'list' };
+    const live = ops.filter((o) => o.status !== 'decommissioned');
+    if (live.length === 1 && !relayUnfinished(live[0])) return { k: 'relay', operatorId: live[0].id };
+    return { k: 'list' };
 }
 
 interface Props {
@@ -102,16 +118,11 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
 
     useEffect(() => {
         void (async () => {
-            const ops = await refreshOperators();
-            if (ops === null) {
-                // Never trap the user inside a setup wizard because of a
-                // transient IPC error — the list can show the error and
-                // still offer "+ New relay".
-                setView({ k: 'list' });
-                return;
-            }
-            const live = ops.filter((o) => o.status !== 'decommissioned');
-            setView(live.length === 0 ? { k: 'wizard' } : { k: 'list' });
+            // Never the wizard by itself: with no relays the list shows
+            // what a relay costs and one "Start" (C7.1). A read error
+            // also lands on the list, which shows it and still offers a
+            // new relay.
+            setView(bootView(await refreshOperators()));
         })();
     }, [refreshOperators]);
 
@@ -138,12 +149,13 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
             // right-hand buttons off screen.
             className="daal-publisher"
             style={{
-                // Cyan accent surface treatment per brief §10.1: a faint
-                // colored hairline + accent on links/CTAs marks
-                // "advanced" so users always know they're in the
-                // publisher surface.
-                borderTop: '2px solid var(--cyan)',
                 minHeight: '100%',
+                // The desktop <main> is a flex row: without a width the
+                // page shrinks to its content and looks like a phone card
+                // parked in a corner. Full width here; each page caps its
+                // own column at --content-max, like Settings and Files.
+                width: '100%',
+                flex: '1 1 auto',
                 maxWidth: '100%',
                 overflowX: 'hidden',
             }}
@@ -190,6 +202,26 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                         }
                         onBackup={() => setView({ k: 'backup' })}
                         onRestore={() => setView({ k: 'restore', from: 'list' })}
+                        onAccounts={() => setView({ k: 'accounts', from: 'list' })}
+                    />
+                )}
+
+                {view.k === 'accounts' && (
+                    <AccountsPage
+                        t={t}
+                        backLabel={
+                            view.from === 'list'
+                                ? t('pub.relays.title')
+                                : (() => {
+                                      const op = operators.find((o) => o.id === view.from);
+                                      return op ? relayTitle(op) : t('pub.relays.title');
+                                  })()
+                        }
+                        onBack={() => {
+                            if (view.from === 'list') toList();
+                            else setView({ k: 'relay', operatorId: view.from });
+                        }}
+                        onConnectHetzner={() => setView({ k: 'wizard', from: 'list' })}
                     />
                 )}
 
@@ -200,9 +232,9 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                         // The handoff that kills step 7: the wizard's last
                         // act is to name the relay it built and get out of
                         // the way.
-                        onDone={(id) => {
+                        onDone={(id, addPerson) => {
                             void refreshOperators();
-                            setView({ k: 'relay', operatorId: id });
+                            setView({ k: 'relay', operatorId: id, addPerson });
                         }}
                         onCancel={toList}
                         // Back at the first step: only when there is a
@@ -231,9 +263,12 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
 
                 {view.k === 'relay' && (
                     <PublisherRecipientsPage
+                        key={view.operatorId}
                         t={t}
                         operatorId={view.operatorId}
+                        openAdd={view.addPerson}
                         onBackup={() => setView({ k: 'backup' })}
+                        onAccounts={() => setView({ k: 'accounts', from: view.operatorId })}
                         onBack={() => {
                             void refreshOperators();
                             toList();

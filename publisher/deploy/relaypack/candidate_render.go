@@ -137,6 +137,27 @@ func renderCandidates(rec *provider.OperatorRecord, material EndpointMaterial, v
 	return out, nil
 }
 
+// setReportTo writes the network-test report address into every
+// route's family_specific_config (and the matching profile, which
+// starts as the same bytes), as `_report_to`. Kept out of
+// renderCandidates so a pack without it is rendered exactly as before.
+func (r *renderedCandidates) setReportTo(addr string) error {
+	for i := range r.routes {
+		fc := map[string]any{}
+		if err := json.Unmarshal(r.routes[i].FamilySpecificConfig, &fc); err != nil {
+			return fmt.Errorf("route %s: family_specific_config: %w", r.routes[i].ID, err)
+		}
+		fc[ReportToKey] = addr
+		b, err := json.Marshal(fc)
+		if err != nil {
+			return fmt.Errorf("route %s: marshal family_specific_config: %w", r.routes[i].ID, err)
+		}
+		r.routes[i].FamilySpecificConfig = b
+		r.profiles[r.routes[i].ConfigPath] = b
+	}
+	return nil
+}
+
 // normaliseFamily maps the FRP-4a profile family-name vocabulary to
 // the bundle TransportFamily enum vocabulary.
 func normaliseFamily(family string) string {

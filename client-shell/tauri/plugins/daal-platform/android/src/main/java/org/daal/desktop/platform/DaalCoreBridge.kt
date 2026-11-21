@@ -30,6 +30,7 @@ package org.daal.desktop.platform
  *                                         library without it)
  *   engine_export_diagnostics()        ← DaalCoreBridge.engineState
  *                                         (six fields of it)
+ *   engine_field_probe_cancel(reason)  ← DaalCoreBridge.fieldProbeCancel
  *
  * The Phase 45 spec requires these JNI methods to be wired before the
  * first upstream dial; the VpnService respects that ordering.
@@ -187,6 +188,20 @@ object DaalCoreBridge {
    * that was connected before is still up.
    */
   external fun engineState(): String?
+
+  /**
+   * `engine_field_probe_cancel`: stop a network test that is running
+   * (specs/field-probe-v2.md). [reason] is a closed code the result
+   * keeps as its `abort_reason`: "vpn_active" when a VPN came up (see
+   * FieldProbeWatch), "network_changed", "backgrounded", "connecting"
+   * or "". The partial result is kept by the engine.
+   *
+   * Returns 1 = a test was running and is stopping, 0 = none was
+   * running, -1 = the engine is not loaded, has no such call, or the
+   * call failed. Does not block on the test; safe from any thread (not
+   * needed on the main one).
+   */
+  external fun fieldProbeCancel(reason: String): Int
 
   /**
    * Host-side protect implementation. Stored as a property so the

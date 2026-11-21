@@ -74,7 +74,10 @@ const (
 	raceDelayMin = 150 * time.Millisecond
 	raceDelayMax = 450 * time.Millisecond
 	// sideProbesPerHour: side probes per network per hour, races and the
-	// speed check together. In memory; a restart forgets the count.
+	// speed check together — and the variants the connect ladder adds
+	// to a pass (connect_ladder.go), each of which counts as one. A
+	// route's remembered first variant is the route's own attempt and is
+	// not counted. In memory; a restart forgets the count.
 	sideProbesPerHour = 12
 	// sideProbeRouteGap: a route side-probed this recently is not
 	// side-probed again.
@@ -107,6 +110,16 @@ func (c *Core) sideBudgetLocked(n int, background bool) bool {
 		return false
 	}
 	if background && hostFacts().metered == 1 {
+		return false
+	}
+	return c.sideCountOKLocked(n)
+}
+
+// sideCountOKLocked: do n more side probes fit in this network's hourly
+// allowance? The count alone, without the metered rule — the survey
+// (survey.go) applies its own rule for metered networks.
+func (c *Core) sideCountOKLocked(n int) bool {
+	if c.sideProber() == nil || c.shuttingDown {
 		return false
 	}
 	net, now := activeNetworkID(), nowUTC()
@@ -156,7 +169,7 @@ func (c *Core) cancelRaceLocked() {
 // racePartnerLocked returns the index in queue of the candidate to
 // check beside queue[0], or -1 when queue[0] is to be tried alone.
 func (c *Core) racePartnerLocked(queue []autoCandidate, background bool) int {
-	if len(queue) < 2 || !queue[0].side || queue[0].relayHost == "" || c.sideRecentLocked(queue[0].routeID) {
+	if len(queue) < 2 || !queue[0].side || queue[0].relayHost == "" || !queue[0].variant.zero() || c.sideRecentLocked(queue[0].routeID) {
 		return -1
 	}
 	if !c.sideBudgetLocked(raceMaxInFlight, background) {
@@ -178,7 +191,15 @@ func pickRacePartner(queue []autoCandidate, recent func(string) bool) int {
 	best, bestScore, bestFailed := -1, -1, false
 	for j := 1; j < len(queue); j++ {
 		b := queue[j]
-		if !b.side || b.relayHost == "" || recent(b.routeID) {
+		if !b.side || b.relayHost == "" || !b.variant.zero() || b.repick || recent(b.routeID) {
+			// (A variant of a route — connect_ladder.go — shares its
+			// route's address and port, and is always tried alone. A
+			// fresh edge pick is tried alone.)
+			continue
+		}
+		if b.cdn && !a.cdn {
+			// The way in through Cloudflare goes after the direct routes
+			// (connect_cdn.go): never beside one.
 			continue
 		}
 		if b.relayHost == a.relayHost && b.relayPort == a.relayPort {
@@ -244,6 +265,9 @@ type autoPass struct {
 	// noRace: the driver refused a side probe; the rest of the pass is
 	// one route at a time.
 	noRace bool
+	// ladder: the connect ladder's state for this pass
+	// (connect_ladder.go); nil until a route needs it.
+	ladder *passLadder
 }
 
 func (p *autoPass) relayOf(cd autoCandidate) int {
@@ -262,14 +286,14 @@ func (p *autoPass) mine() bool { return p.c.auto.gen == p.gen && !p.c.shuttingDo
 
 // record adds one route's result to the pass and to the `auto` block.
 func (p *autoPass) record(cd autoCandidate, t AutoTried, o autoObs) {
-	t.RouteID, t.Family, t.Why, t.Relay = cd.routeID, cd.family, cd.why, p.relayOf(cd)
+	t.RouteID, t.Family, t.Why, t.Relay, t.Variant = cd.routeID, cd.family, cd.why, p.relayOf(cd), cd.variant.suffix()
 	o.result, o.udp, o.host, o.port, o.name = t.Result, cd.udp, cd.relayHost, cd.relayPort, cd.name
 	o.id, o.racedWith = cd.routeID, t.RacedWith
 	o.category = diagnostics.Category(t.Category)
 	p.tried = append(p.tried, t)
 	p.obs = append(p.obs, o)
-	engine.LogInfo(fmt.Sprintf("auto result route=%s result=%s category=%s setup_ms=%d",
-		engine.LogID(cd.routeID), t.Result, engine.LogID(t.Category), logMs(t.SetupMs)))
+	engine.LogInfo(fmt.Sprintf("auto result route=%s result=%s category=%s setup_ms=%d%s",
+		engine.LogID(cd.routeID), t.Result, engine.LogID(t.Category), logMs(t.SetupMs), cd.variant.logField()))
 	if !p.mine() {
 		return
 	}
@@ -284,7 +308,7 @@ func (p *autoPass) record(cd autoCandidate, t AutoTried, o autoObs) {
 func (p *autoPass) abandon(cds ...autoCandidate) {
 	for _, cd := range cds {
 		engine.LogInfo(fmt.Sprintf("auto result route=%s result=%s category=", engine.LogID(cd.routeID), AutoResultCancelled))
-		p.tried = append(p.tried, AutoTried{RouteID: cd.routeID, Family: cd.family, Result: AutoResultCancelled, Why: cd.why, Relay: p.relayOf(cd)})
+		p.tried = append(p.tried, AutoTried{RouteID: cd.routeID, Family: cd.family, Result: AutoResultCancelled, Why: cd.why, Relay: p.relayOf(cd), Variant: cd.variant.suffix()})
 		p.obs = append(p.obs, autoObs{result: AutoResultCancelled})
 	}
 	p.cancelled = true
@@ -301,7 +325,19 @@ func (p *autoPass) outcome(cd autoCandidate, out connectOutcome, racedWith strin
 	switch out.result {
 	case AutoResultCarried:
 		p.connected, p.connectedFamily, p.answered = cd.routeID, cd.family, true
+		p.ladderCarried(cd)
+		if cd.cdn {
+			// The edge it went through is this network's good one.
+			p.c.cdnEdgeCarriedLocked(cd.routeID)
+		}
 	case AutoResultNotCarrying, AutoResultStartFailed:
+		if !cd.variant.zero() {
+			// A variant's failure is the variant's alone: remembered
+			// under its own key when the pass settles, never charged to
+			// the route, its relay or its family (connect_ladder.go).
+			p.ladderFailed(cd, out)
+			break
+		}
 		p.pending = append(p.pending, autoCharge{routeID: cd.routeID, family: cd.family, cat: out.category})
 	}
 }
@@ -312,11 +348,14 @@ func (p *autoPass) seq(cd autoCandidate, index int) {
 	a.mu.Lock()
 	a.trying, a.index, a.racing = cd.routeID, index, nil
 	a.mu.Unlock()
-	engine.LogInfo(fmt.Sprintf("auto try route=%s family=%s index=%d total=%d",
-		engine.LogID(cd.routeID), engine.LogID(cd.family), index, p.total))
+	engine.LogInfo(fmt.Sprintf("auto try route=%s family=%s index=%d total=%d%s",
+		engine.LogID(cd.routeID), engine.LogID(cd.family), index, p.total, cd.variant.logField()))
 
 	// cd.proved: a side probe of this very pass has already measured it.
-	out := c.connectRouteLocked(cd.routeID, connectOpts{auto: true, noMemory: cd.proved})
+	// The variant is always explicit here (the zero one: the plain
+	// route), so what is tried is what the pass ordered.
+	v := cd.variant
+	out := c.connectRouteLocked(cd.routeID, connectOpts{auto: true, noMemory: cd.proved, variant: &v, ladder: cd.ladder})
 
 	if c.auto.gen != p.gen || out.result == AutoResultCancelled {
 		p.abandon(cd)
@@ -397,7 +436,8 @@ func (p *autoPass) race(a, b autoCandidate, index int) (requeue []autoCandidate)
 	var bodies [2][]byte
 	refused := false
 	for i, cd := range cds {
-		_, body, err := c.prepareRouteOpts(cd.routeID, false, false)
+		v := cd.variant
+		_, body, err := c.prepareRouteVariant(cd.routeID, false, false, &v)
 		if err != nil {
 			// A cooldown tripped since the listing (the family's, by an
 			// earlier candidate).
@@ -428,6 +468,9 @@ func (p *autoPass) race(a, b autoCandidate, index int) (requeue []autoCandidate)
 	if !lostRunning && c.activeRoute != "" {
 		c.stopForRaceLocked()
 	}
+	// The pass needs the side slots: a survey in flight ends here
+	// (survey.go).
+	c.survey.stop("pass")
 	c.sideNoteLocked(a.routeID, b.routeID)
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancelRaceLocked()
@@ -527,7 +570,8 @@ func (p *autoPass) race(a, b autoCandidate, index int) (requeue []autoCandidate)
 	engine.LogInfo(fmt.Sprintf("auto race winner=%s family=%s setup_ms=%d", engine.LogID(w.routeID), engine.LogID(w.family), logMs(ms)))
 	// The hand-over: the same attempt every connect makes, on the route
 	// that just proved. Its measurement is already kept.
-	out := c.connectRouteLocked(w.routeID, connectOpts{auto: true, noMemory: true})
+	wv := w.variant
+	out := c.connectRouteLocked(w.routeID, connectOpts{auto: true, noMemory: true, variant: &wv})
 	if c.auto.gen != p.gen || out.result == AutoResultCancelled {
 		p.abandon(w)
 		return nil

@@ -63,6 +63,8 @@ type Stub struct {
 	// startHook, when set, is called on every successful Start (tests:
 	// what a real driver does at that moment — publish a new inlet).
 	startHook func()
+	// lastConfig: the config of the last successful Start (LastConfig).
+	lastConfig []byte
 	// side / sideHook: the side probes in flight and, for the Stub
 	// itself, what answers them (side.go).
 	side     sideSet
@@ -75,6 +77,14 @@ func (s *Stub) SetStartHook(f func()) {
 	s.mu.Lock()
 	s.startHook = f
 	s.mu.Unlock()
+}
+
+// LastConfig returns the config the last successful Start was given
+// (tests: which variant of a route an attempt started).
+func (s *Stub) LastConfig() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.lastConfig...)
 }
 
 // NewStub returns a fresh Stub.
@@ -109,6 +119,7 @@ func (s *Stub) start(configJSON []byte) error {
 		return errors.New("engine: empty config")
 	}
 	s.connected = true
+	s.lastConfig = append([]byte(nil), configJSON...)
 	// "Verifying", not "Connected": the instance is up and nothing has
 	// been proved about the route yet. See proof.go.
 	s.publishLocked(Event{Type: "state", State: StateVerifying, Bucket: hourBucket(time.Now())})

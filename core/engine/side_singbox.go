@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"daal/core/desync"
 	"daal/core/diagnostics"
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/include"
 	boxoption "github.com/sagernet/sing-box/option"
 	tun "github.com/sagernet/sing-tun"
 	singjson "github.com/sagernet/sing/common/json"
@@ -70,9 +70,11 @@ import (
 // at once.
 //
 // WHICH ROUTES. Only the outbound types in sideProbeTypes (side.go),
-// where a second outbound is private and side-effect-free. Everything
-// else — naive, tor, wireguard, anything detoured — answers
-// CanSideProbe false and is tried alone through the tunnel's instance.
+// where a second outbound is private and side-effect-free — and naive
+// (cronetSideTypes) for a caller that asks (ProofConfig.SideCronet: the
+// survey). Everything else — tor, wireguard, anything detoured —
+// answers CanSideProbe / CanSurveyProbe false and is tried alone
+// through the tunnel's instance.
 
 // sidePlatform is the PlatformInterface of a side instance: socket
 // protection, and no TUN.
@@ -88,10 +90,29 @@ var _ adapter.PlatformInterface = (*sidePlatform)(nil)
 
 func (s *singBox) CanSideProbe(configJSON []byte) bool { return SideProbeable(configJSON) }
 
+// CanSurveyProbe: CanSideProbe, or a naive route — when this build can
+// load Cronet at all (the load is the one Start makes; once is enough).
+func (s *singBox) CanSurveyProbe(configJSON []byte) bool {
+	if SideProbeable(configJSON) {
+		return true
+	}
+	return cronetSide(configJSON) && cronetReady()
+}
+
+// cronetReady loads Cronet if nothing has yet (as Start does before a
+// naive outbound is built) and says whether it is there.
+func cronetReady() bool {
+	if attempted, _ := CronetStatus(); !attempted {
+		loadCronet()
+	}
+	_, ok := CronetStatus()
+	return ok
+}
+
 // SideProbe is the sing-box driver's side probe. See the top of this
 // file, and SideProber (side.go) for the contract.
 func (s *singBox) SideProbe(ctx context.Context, configJSON []byte, cfg ProofConfig) (ProofResult, error) {
-	if !SideProbeable(configJSON) {
+	if !sideAllowed(configJSON, cfg) || (cronetSide(configJSON) && !cronetReady()) {
 		return ProofResult{}, ErrSideProbeUnsupported
 	}
 	pctx, leave, err := s.Stub.side.enter(ctx)
@@ -170,7 +191,7 @@ func startSideInstance(ctx context.Context, configJSON []byte) (*box.Box, outbou
 func buildSideInstance(ictx context.Context, merged []byte, raw map[string]any) (*box.Box, error) {
 	boxBuildMu.Lock()
 	defer boxBuildMu.Unlock()
-	bctx := include.Context(ictx)
+	bctx := desync.BoxContext(ictx) // include.Context + daal-desync: see singBox.Start
 	bctx = service.ContextWith[adapter.PlatformInterface](bctx, &sidePlatform{newAndroidPlatform()})
 	options, err := singjson.UnmarshalExtendedContext[boxoption.Options](bctx, merged)
 	if err != nil {

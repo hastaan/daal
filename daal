@@ -55,7 +55,7 @@ cd "$REPO_ROOT"
 
 # --- Engine line constants. These MUST match the source of truth.
 EXPECTED_ENGINE_VERSION="daal-core 0.9.0+v3-share"
-EXPECTED_ABI=62
+EXPECTED_ABI=70
 EXPECTED_SPEC_VERSION=4
 
 # --- Tools. Override with env vars if your install paths differ.

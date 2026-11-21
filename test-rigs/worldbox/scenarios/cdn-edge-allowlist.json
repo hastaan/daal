@@ -1,0 +1,22 @@
+{
+  "name": "cdn-edge-allowlist",
+  "description": "Of Cloudflare's four published prefixes only one is reachable: the other three are dropped at the border. The relay is reachable too. Op cdn: the route carries, through an edge address in the one open prefix — the picker must find it among the signed seeds without downloading a range list.",
+  "analogue": "Per-ISP Cloudflare prefix health: during the 2025-2026 shutdowns some Cloudflare ranges stayed open on some ISPs while others were cut (research/intel-and-some-working-methods.md, 'Protocol status'; plan §2.7, 'which Cloudflare prefixes pass per ISP today'). Model: a static allowlist of one /26, silent drop of the rest. Not modelled: which prefixes, per ISP, today — no rig can say.",
+  "world": ["cdn"],
+  "censor": {
+    "nft": [
+      "ip daddr $EDGE_NET_A drop",
+      "ip daddr $EDGE_NET_B drop",
+      "ip daddr $EDGE_NET_D drop"
+    ]
+  },
+  "prove": [
+    {"name": "edge-a-dropped", "probe": "tcp", "to": "edge-a", "port": 443, "expect": "connect_timeout"},
+    {"name": "edge-b-dropped", "probe": "tcp", "to": "edge-b", "port": 443, "expect": "connect_timeout"},
+    {"name": "edge-d-dropped", "probe": "tcp", "to": "edge-d", "port": 443, "expect": "connect_timeout"},
+    {"name": "edge-c-open", "probe": "tls", "to": "edge-c", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "relay-spared", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "pass", "via": ["$EDGE_NET_C"]}
+}

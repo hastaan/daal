@@ -58,6 +58,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"text/template"
 
@@ -184,6 +185,42 @@ func ufwDataPlaneRules(ports []relayports.Endpoint) []string {
 		out = append(out, fmt.Sprintf("%d/%s", ep.Port, proto))
 	}
 	return out
+}
+
+// maxCDNEdgeRanges bounds the CDN rule list. Cloudflare publishes about
+// two dozen prefixes; a list far longer than that is not theirs.
+const maxCDNEdgeRanges = 64
+
+// cdnUFWRules renders the box-side rules for the CDN door: one
+// `ufw allow` argument string per range, "from <cidr> to any port <p>
+// proto tcp". Every entry is parsed as a CIDR and re-printed from the
+// parse, so nothing but an address and a prefix length reaches the
+// shell.
+func cdnUFWRules(ranges []string) ([]string, error) {
+	if len(ranges) == 0 {
+		return nil, nil
+	}
+	if len(ranges) > maxCDNEdgeRanges {
+		return nil, fmt.Errorf("RenderInputV2.CDNEdgeRanges: %d ranges, more than %d", len(ranges), maxCDNEdgeRanges)
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ranges))
+	for _, r := range ranges {
+		_, n, err := net.ParseCIDR(strings.TrimSpace(r))
+		if err != nil {
+			return nil, fmt.Errorf("RenderInputV2.CDNEdgeRanges: %q is not a CIDR", r)
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return nil, fmt.Errorf("RenderInputV2.CDNEdgeRanges: %q is everyone, not a Cloudflare range", r)
+		}
+		c := n.String()
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, fmt.Sprintf("from %s to any port %d proto tcp", c, relayports.CDNOrigin.Port))
+	}
+	return out, nil
 }
 
 // Render produces the rendered cloud-init YAML for the given input.
@@ -379,6 +416,21 @@ type RenderInputV2 struct {
 	// the file existed. Every provider adapter passes the resolved set;
 	// only fixtures leave it empty.
 	Families []string
+	// CDNEdgeRanges are Cloudflare's published ranges (v4 and v6 CIDRs),
+	// fetched by the publisher abroad at provision time. When set, the
+	// box-side ufw opens the CDN door's port (relayports.CDNOrigin, the
+	// ws-cdn-in inbound of add-on 2) to these sources and to nothing
+	// else. The relay firewall at Hetzner is the outer gate and opens
+	// the same port only when the add-on is built
+	// (hetzner.FirewallApplyCloudflareRule); this is the inner one, and
+	// it exists only on a relay provisioned with it, because ufw is
+	// written once at first boot. A relay provisioned without it needs a
+	// rebuild to gain the CDN way in.
+	//
+	// Empty writes no rule: the port stays closed at the box. Each entry
+	// must be a CIDR with a non-zero prefix; anything else is refused,
+	// since the value lands in a root shell script.
+	CDNEdgeRanges []string
 }
 
 // RenderV2 produces the V2 cloud-init YAML. Same determinism
@@ -418,12 +470,19 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cdnEnabled := in.OriginCACertPEM != "" || in.OriginCAPrivPEM != "" || in.AOPClientCertPEM != ""
-	if cdnEnabled {
-		if in.OriginCACertPEM == "" || in.OriginCAPrivPEM == "" || in.AOPClientCertPEM == "" {
-			return nil, fmt.Errorf("cdn_fronted: OriginCACertPEM + OriginCAPrivPEM + AOPClientCertPEM must be supplied together")
-		}
+	// The CDN door's certificate and key are installed by
+	// daal-relay-mgmt (POST /cdn) over the pinned management session,
+	// never through user-data: user-data is stored at the provider and
+	// readable from the box's metadata service by any local process, so
+	// an origin private key there outlives everything Daal does to it.
+	if in.OriginCACertPEM != "" || in.OriginCAPrivPEM != "" || in.AOPClientCertPEM != "" {
+		return nil, fmt.Errorf("cdn: certificates go to the relay through daal-relay-mgmt /cdn, not cloud-init user-data")
 	}
+	cdnRules, err := cdnUFWRules(in.CDNEdgeRanges)
+	if err != nil {
+		return nil, err
+	}
+	cdnEnabled := false
 	td := struct {
 		EphemeralSSHPublicKey  string
 		ProvisioningClientIP   string
@@ -441,6 +500,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		CoverSNI               string
 		Families               []string
 		UFWDataPlaneRules      []string
+		CDNUFWRules            []string
 	}{
 		EphemeralSSHPublicKey:  in.EphemeralSSHPublicKey,
 		ProvisioningClientIP:   in.ProvisioningClientIP,
@@ -458,6 +518,7 @@ func RenderV2(in RenderInputV2) ([]byte, error) {
 		CoverSNI:               declaredCoverSNI(in.CoverSNI, in.SingBoxConfigJSON),
 		Families:               in.Families,
 		UFWDataPlaneRules:      ufwDataPlaneRules(in.DataPlanePorts),
+		CDNUFWRules:            cdnRules,
 	}
 	tmpl, err := template.New("cloudinit-v2").Funcs(template.FuncMap{
 		"indent": indent,

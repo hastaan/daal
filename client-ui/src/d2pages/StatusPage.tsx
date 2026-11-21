@@ -1,61 +1,101 @@
-// StatusPage.tsx — health card on top + 3 accordions.
+// StatusPage.tsx — "Status" (spec C6), an inner page of Settings.
+//
+// What a person sees: a short summary (connection, the way in use, how
+// many ways work, no internet when that is so), one button that copies
+// a report for whoever helps them, and a closed fold "For someone
+// helping you" with the numbers that mean something. Everything raw
+// (bucket, throughput, network test, scheduler/stats/bootstrap JSON,
+// the whole diagnostics blob) is in a Developer tools card that renders
+// only in developer mode.
+//
+// A row whose value is unknown is not drawn. Nothing reads "not
+// measured yet", and no tile text can break inside a word.
 
-import { gradeText } from '../lib/measured';
+import { sep } from '../lib/format';
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import type {
     BootstrapStatus,
     ProbeResult,
+    RouteDisplayRow,
     SchedulerStatus,
     StatsRedacted,
     StatusPagePayload,
 } from '../contract/D2Contract';
-import {
-    MetricTile,
-    HealthBar,
-    Sparkline,
-    StatusLight,
-} from '../design/primitives';
-
+import type { Locale } from '../lib/i18n';
+import { toFaDigits } from '../lib/i18n';
 import { errorText } from '../lib/errorText';
-import { FailureBox } from './PageNotices';
+import { gradeText } from '../lib/measured';
+import { routeForDisplay } from '../lib/activeRoute';
+import { autoFailure, autoVerdictKey } from '../lib/autoConnect';
+import { useDeveloperMode } from '../lib/devMode';
+import {
+    Badge,
+    Button,
+    Card,
+    Disclosure,
+    HealthBar,
+    PageHeader,
+    Sparkline,
+    StateIcon,
+    useToast,
+} from '../design/primitives';
 
 interface Props {
     t: (k: string) => string;
+    locale?: Locale;
+    /** Back to Settings. Without it the page has no back control. */
+    onBack?: () => void;
 }
 
-export default function StatusPage({ t }: Props) {
+type Tone = 'good' | 'warn' | 'bad' | 'neutral';
+
+/** "Pars Relays · Rescue 03" — the way's name as a person reads it. */
+export function wayName(t: (k: string) => string, r: RouteDisplayRow | undefined): string | undefined {
+    const d = routeForDisplay(r, t);
+    if (!d) return undefined;
+    const parts = [d.publisherName, d.routeNickname].filter((s) => !!s && s.trim() !== '');
+    return parts.length ? parts.join(sep()) : undefined;
+}
+
+/** The summary's rollup of per-way health. Only MEASURED ways count:
+ *  a way nobody has tried is not a failure, and averaging it in would
+ *  turn silence into a verdict. */
+export function healthRollup(rows: StatusPagePayload['routeHealth'] | undefined) {
+    const all = rows ?? [];
+    const measured = all.filter((r) => typeof r.pct === 'number');
+    const ok = measured.filter((r) => r.severity === 'ok').length;
+    const warn = measured.filter((r) => r.severity === 'warn').length;
+    const bad = measured.filter((r) => r.severity === 'bad').length;
+    const avg =
+        measured.length > 0
+            ? Math.round(measured.reduce((s, r) => s + (r.pct ?? 0), 0) / measured.length)
+            : null;
+    return { total: all.length, measured: measured.length, ok, warn, bad, avg };
+}
+
+export default function StatusPage({ t, locale = 'en', onBack }: Props) {
     const contract = useContract();
+    const dev = useDeveloperMode();
+    const toast = useToast();
     const [payload, setPayload] = useState<StatusPagePayload | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [open, setOpen] = useState<{
-        b: boolean; r: boolean; d: boolean;
-        sched: boolean; stats: boolean; boot: boolean; net: boolean;
-    }>({
-        b: true, r: false, d: false,
-        sched: false, stats: false, boot: false, net: false,
+    const [online, setOnline] = useState<boolean>(() => {
+        try {
+            return navigator.onLine !== false;
+        } catch {
+            return true;
+        }
     });
-    const [sched, setSched] = useState<SchedulerStatus | null>(null);
-    const [stats, setStats] = useState<StatsRedacted | null>(null);
-    const [bootSt, setBootSt] = useState<BootstrapStatus | null>(null);
-    const [probes, setProbes] = useState<{ udp?: ProbeResult; dns?: ProbeResult; tcp?: ProbeResult }>({});
-    const [probing, setProbing] = useState(false);
 
     useEffect(() => {
         let cancelled = false;
         const tick = async () => {
             try {
-                const [p, s, st, bs] = await Promise.all([
-                    contract.statusPagePayload(),
-                    contract.schedulerStatus().catch(() => ({ json: '' })),
-                    contract.statsRedacted().catch(() => ({ json: '' })),
-                    contract.bootstrapStatus().catch(() => ({ json: '' })),
-                ]);
+                const p = await contract.statusPagePayload();
                 if (!cancelled) {
                     setPayload(p);
-                    setSched(s);
-                    setStats(st);
-                    setBootSt(bs);
                     setError(null);
                 }
             } catch (e) {
@@ -64,34 +104,283 @@ export default function StatusPage({ t }: Props) {
                 if (!cancelled) setError(errorText(e));
             }
         };
-        tick();
+        void tick();
         const id = setInterval(tick, 3000);
+        const on = () => setOnline(true);
+        const off = () => setOnline(false);
+        window.addEventListener('online', on);
+        window.addEventListener('offline', off);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+            window.removeEventListener('online', on);
+            window.removeEventListener('offline', off);
+        };
+    }, [contract]);
+
+    const conn = payload?.connection;
+    const connState = conn?.state;
+    const using = connState === 'connected' ? wayName(t, conn?.activeRoute) : undefined;
+    const h = healthRollup(payload?.routeHealth);
+    const failure = autoFailure(conn);
+    const noInternet = !online || failure?.verdict === 'network_down';
+    const num = (n: number) => (locale === 'fa' ? toFaDigits(String(n)) : String(n));
+    // Persian writes the percent sign after the digits as ٪.
+    const pct = (n: number) => (locale === 'fa' ? `${toFaDigits(String(n))}٪` : `${n}%`);
+
+    const onReport = async () => {
+        try {
+            const json = await contract.exportDiagnostics();
+            await navigator.clipboard.writeText(json);
+            toast.show('good', t('status.report.done'), 6000);
+        } catch {
+            toast.show('bad', t('status.report.failed'));
+        }
+    };
+
+    // While connected, a weak way elsewhere is a warning, not trouble.
+    const overall: Tone =
+        connState === 'connected'
+            ? h.bad === 0 && h.warn === 0
+                ? 'good'
+                : 'warn'
+            : h.bad > 0
+                ? 'bad'
+                : 'neutral';
+
+    const validDays = payload?.pointer?.validForDays ?? conn?.pointerValidDays;
+    // An empty fold is not drawn (nothing measured, no list, no failure).
+    const foldHasContent =
+        overall !== 'neutral' ||
+        h.avg !== null ||
+        typeof validDays === 'number' ||
+        !!failure ||
+        (payload?.routeHealth.length ?? 0) > 0;
+
+    return (
+        <div data-status-page style={{ width: '100%' }}>
+            <PageHeader
+                title={t('page.status.title')}
+                back={onBack ? { label: t('settings.title'), onClick: onBack } : undefined}
+            />
+
+            {error && (
+                <div role="alert" style={{ display: 'flex', gap: 8, color: 'var(--red)', fontSize: 13, lineHeight: 1.45, marginBlockEnd: 10 }}>
+                    <StateIcon state="bad" size={16} />
+                    <span>{t('status.load_failed')}</span>
+                </div>
+            )}
+
+            {/* Summary: at most four rows, none with an unknown value. */}
+            {/* The card clips the last row's line (overflow + -1 px). */}
+            <Card style={{ padding: '0 16px', marginBlockStart: 4, overflow: 'hidden' }}>
+                <div style={{ marginBlockEnd: -1 }}>
+                {connState && (
+                    <SumRow
+                        id="connection"
+                        icon={connState === 'connected' ? 'ok' : connState === 'connecting' ? 'busy' : connState === 'error' ? 'bad' : 'none'}
+                        label={t('status.sum.connection')}
+                        value={
+                            connState === 'connected' ? (
+                                <Badge tone="good" size="sm">{t('connection.connected')}</Badge>
+                            ) : connState === 'connecting' ? (
+                                <Badge tone="gold" size="sm" pulse>{t('status.badge.connecting')}</Badge>
+                            ) : connState === 'error' ? (
+                                <Badge tone="bad" size="sm">{t('status.badge.failed')}</Badge>
+                            ) : (
+                                <Badge tone="neutral" size="sm">{t('connection.disconnected')}</Badge>
+                            )
+                        }
+                    />
+                )}
+                {using && (
+                    <SumRow id="using" icon="ok" label={t('status.sum.using')} value={<bdi>{using}</bdi>} />
+                )}
+                {h.measured > 0 && (
+                    <SumRow
+                        id="ways"
+                        icon={h.ok === h.total ? 'ok' : h.ok > 0 ? 'warn' : 'bad'}
+                        label={t('status.sum.ways')}
+                        value={t('status.sum.ways.value').replace('{ok}', num(h.ok)).replace('{total}', num(h.total))}
+                    />
+                )}
+                {noInternet && (
+                    <SumRow
+                        id="internet"
+                        icon="bad"
+                        label={t('status.sum.internet')}
+                        value={<Badge tone="bad" size="sm">{t('status.sum.no_internet')}</Badge>}
+                    />
+                )}
+                </div>
+            </Card>
+
+            <div style={{ marginBlock: '16px' }}>
+                <Button variant="primary" dataButton="export" leading="copy" onClick={() => void onReport()}>
+                    {t('status.report')}
+                </Button>
+            </div>
+
+            {foldHasContent && (
+            <Disclosure variant="card" icon="help" summary={t('ui.helper_fold')} dataButton="helper-fold">
+                <div style={{ display: 'grid', gap: 0 }}>
+                    {overall !== 'neutral' && (
+                        <InfoRow
+                            label={t('status.tile.overall')}
+                            value={
+                                <Badge tone={overall} size="sm">
+                                    {t(overall === 'good' ? 'status.overall.good' : overall === 'warn' ? 'status.overall.mixed' : 'status.overall.bad')}
+                                </Badge>
+                            }
+                        />
+                    )}
+                    {h.avg !== null && (
+                        <InfoRow
+                            label={t('status.tile.avg_health')}
+                            value={
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                                    <span style={{ width: 80 }}>
+                                        <HealthBar pct={h.avg} tone={h.avg >= 70 ? 'good' : h.avg >= 40 ? 'warn' : 'bad'} />
+                                    </span>
+                                    <bdi>{pct(h.avg)}</bdi>
+                                </span>
+                            }
+                        />
+                    )}
+                    {typeof validDays === 'number' && (
+                        <InfoRow
+                            label={t('status.tile.pointers')}
+                            value={
+                                validDays < 0 ? (
+                                    <Badge tone="bad" size="sm">{t('status.tile.pointers.expired')}</Badge>
+                                ) : (
+                                    t('status.tile.pointers.valid').replace('{n}', num(validDays))
+                                )
+                            }
+                        />
+                    )}
+                    {failure && (
+                        <InfoRow label={t('status.last_failure')} value={null} below={t(autoVerdictKey(failure.verdict))} />
+                    )}
+                    {(payload?.routeHealth.length ?? 0) > 0 && (
+                        <div style={{ marginBlockStart: 12 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--muted)', marginBlockEnd: 4 }}>
+                                {t('status.acc.routes')}
+                            </div>
+                            {payload!.routeHealth.map((r) => {
+                                const st = r.severity === 'ok' ? 'ok' : r.severity === 'warn' ? 'warn' : r.severity === 'bad' ? 'bad' : 'none';
+                                const right =
+                                    typeof r.pct === 'number' ? pct(r.pct) : gradeText(t, r.measured);
+                                return (
+                                    <div
+                                        key={r.routeId}
+                                        data-way-row
+                                        style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 40, fontSize: 14 }}
+                                    >
+                                        <StateIcon state={st} size={18} />
+                                        <bdi style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {r.label || r.routeId}
+                                        </bdi>
+                                        {right && <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>{right}</span>}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            </Disclosure>
+            )}
+
+            {dev && (
+                <div style={{ marginBlockStart: 16 }}>
+                    <DevStatus t={t} payload={payload} />
+                </div>
+            )}
+            {toast.node}
+        </div>
+    );
+}
+
+function SumRow({ id, icon, label, value }: { id: string; icon: 'ok' | 'warn' | 'bad' | 'busy' | 'none'; label: string; value: ReactNode }) {
+    return (
+        <div
+            data-sum-row={id}
+            style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                minHeight: 52,
+                borderBottom: '1px solid var(--line-soft)',
+            }}
+        >
+            <StateIcon state={icon} size={20} />
+            <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)', flexShrink: 0 }}>{label}</span>
+            <span
+                style={{
+                    flex: 1,
+                    minWidth: 0,
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                    fontSize: 14,
+                    color: 'var(--muted)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                }}
+            >
+                {value}
+            </span>
+        </div>
+    );
+}
+
+function InfoRow({ label, value, below }: { label: string; value: ReactNode; below?: string }) {
+    return (
+        <div style={{ paddingBlock: 8, borderBottom: '1px solid var(--line-soft)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 28 }}>
+                <span style={{ flex: 1, fontSize: 14, color: 'var(--fg)' }}>{label}</span>
+                {value !== null && <span style={{ fontSize: 14, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{value}</span>}
+            </div>
+            {below && <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.45 }}>{below}</div>}
+        </div>
+    );
+}
+
+// ---- [dev] developer tools ------------------------------------------
+
+function DevStatus({ t, payload }: { t: (k: string) => string; payload: StatusPagePayload | null }) {
+    const contract = useContract();
+    const [sched, setSched] = useState<SchedulerStatus | null>(null);
+    const [stats, setStats] = useState<StatsRedacted | null>(null);
+    const [bootSt, setBootSt] = useState<BootstrapStatus | null>(null);
+    const [probes, setProbes] = useState<{ udp?: ProbeResult; dns?: ProbeResult; tcp?: ProbeResult }>({});
+    const [probing, setProbing] = useState(false);
+    const [probeErr, setProbeErr] = useState<string | null>(null);
+    const [bootResult, setBootResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+            const [s, st, bs] = await Promise.all([
+                contract.schedulerStatus().catch(() => ({ json: '' })),
+                contract.statsRedacted().catch(() => ({ json: '' })),
+                contract.bootstrapStatus().catch(() => ({ json: '' })),
+            ]);
+            if (cancelled) return;
+            setSched(s);
+            setStats(st);
+            setBootSt(bs);
+        };
+        void load();
+        const id = setInterval(load, 3000);
         return () => {
             cancelled = true;
             clearInterval(id);
         };
     }, [contract]);
 
-    const runProbes = async () => {
-        setProbing(true);
-        try {
-            const [udp, dns, tcp] = await Promise.all([
-                contract.probeUdp(2000),
-                contract.probeDns(2000),
-                contract.probeTcp443(2000),
-            ]);
-            setProbes({ udp, dns, tcp });
-        } finally {
-            setProbing(false);
-        }
-    };
-
-    const routeCount = payload?.routeHealth.length ?? 0;
-    const bucket = new Date().toISOString().slice(0, 13);
-    const posture = payload?.connection.mode ?? '—';
-    const connState = payload?.connection.state ?? 'disconnected';
-
-    // Throughput history for the sparkline, capped at 60 samples.
+    // Throughput: only while a number exists. null = this build counts
+    // no bytes, and a flat line would claim it measured nothing moving.
     const upHistory = useRef<number[]>([]);
     const downHistory = useRef<number[]>([]);
     const [, forceTick] = useState(0);
@@ -101,590 +390,164 @@ export default function StatusPage({ t }: Props) {
             try {
                 const tp = await contract.throughputSnapshot();
                 if (cancelled) return;
-                // null = this build counts no bytes. Pushing it as 0
-                // would draw a confident flat line through a sparkline
-                // that has measured nothing; drop the sample instead
-                // and let the tile say so.
-                if (tp.upBytesPerSec !== null) {
-                    upHistory.current = [
-                        ...upHistory.current.slice(-59),
-                        tp.upBytesPerSec,
-                    ];
-                }
-                if (tp.downBytesPerSec !== null) {
-                    downHistory.current = [
-                        ...downHistory.current.slice(-59),
-                        tp.downBytesPerSec,
-                    ];
-                }
+                if (tp.upBytesPerSec !== null) upHistory.current = [...upHistory.current.slice(-59), tp.upBytesPerSec];
+                if (tp.downBytesPerSec !== null) downHistory.current = [...downHistory.current.slice(-59), tp.downBytesPerSec];
                 forceTick((n) => (n + 1) % 1024);
             } catch {
-                /* ignore */
+                /* no sample: the row stays hidden */
             }
         };
-        tick();
+        void tick();
         const id = setInterval(tick, 1000);
         return () => {
             cancelled = true;
             clearInterval(id);
         };
     }, [contract]);
-
-    // Roll-up health metrics from per-route status.
-    //
-    // Only routes with a MEASURED percentage take part. A route the
-    // engine has never observed carries no severity and no pct, and
-    // averaging it in (or counting it as 'bad') would turn silence into
-    // a verdict — which is what this tile did before: every fresh
-    // install read "0% AVG HEALTH" on a red bar.
-    const measuredHealth = payload?.routeHealth.filter(
-        (r) => typeof r.pct === 'number',
-    ) ?? [];
-    const unmeasuredRoutes =
-        (payload?.routeHealth.length ?? 0) - measuredHealth.length;
-    const healthyRoutes = measuredHealth.filter((r) => r.severity === 'ok').length;
-    const warnRoutes = measuredHealth.filter((r) => r.severity === 'warn').length;
-    const badRoutes = measuredHealth.filter((r) => r.severity === 'bad').length;
-    // null, not 0 — "no route has ever been measured" is not a score.
-    const avgHealthPct =
-        measuredHealth.length > 0
-            ? Math.round(
-                  measuredHealth.reduce((s, r) => s + (r.pct ?? 0), 0) /
-                      measuredHealth.length,
-              )
-            : null;
-    const overallTone: 'good' | 'warn' | 'bad' | 'neutral' =
-        connState === 'connected' && badRoutes === 0 && warnRoutes === 0
-            ? 'good'
-            : connState === 'connected' && badRoutes === 0
-                ? 'warn'
-                : badRoutes > 0
-                    ? 'bad'
-                    : 'neutral';
-    // `null`, not 0, when no sample has ever landed — the history is
-    // empty exactly when the engine reported "unmeasured".
     const lastUp = upHistory.current[upHistory.current.length - 1] ?? null;
     const lastDown = downHistory.current[downHistory.current.length - 1] ?? null;
 
-    const onExport = async () => {
+    const runProbes = async () => {
+        setProbing(true);
+        setProbeErr(null);
         try {
-            const json = await contract.exportDiagnostics();
-            try {
-                await navigator.clipboard.writeText(json);
-            } catch {
-                /* ignore */
-            }
-        } catch {
-            /* ignore */
+            const [udp, dns, tcp] = await Promise.all([
+                contract.probeUdp(2000),
+                contract.probeDns(2000),
+                contract.probeTcp443(2000),
+            ]);
+            setProbes({ udp, dns, tcp });
+        } catch (e) {
+            setProbeErr(errorText(e));
+        } finally {
+            setProbing(false);
         }
     };
 
-    return (
-        <div
-            style={{
-                padding: 'var(--gutter)',
-                width: '100%',
-                maxWidth: 980,
-                margin: '0 auto',
-            }}
-        >
-            <header
-                style={{
-                    display: 'flex',
-                    alignItems: 'baseline',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    marginBottom: 8,
-                    flexWrap: 'wrap',
-                }}
-            >
-                <h1
-                    style={{
-                        fontFamily: 'var(--font-display)',
-                        fontSize: 24,
-                        color: 'var(--fg)',
-                        margin: 0,
-                    }}
-                >
-                    {t('page.status.title')}
-                </h1>
-                <button
-                    onClick={onExport}
-                    style={{
-                        background: 'var(--gold)',
-                        color: '#1A1208',
-                        border: 0,
-                        padding: '8px 14px',
-                        borderRadius: 'var(--radius-md)',
-                        fontWeight: 600,
-                        fontFamily: 'var(--font-body)',
-                        fontSize: 13,
-                        cursor: 'pointer',
-                    }}
-                >
-                    {t('page.status.export')}
-                </button>
-            </header>
-            <p
-                style={{
-                    color: 'var(--muted)',
-                    fontSize: 13,
-                    margin: '0 0 18px',
-                    maxInlineSize: '64ch',
-                }}
-            >
-                {t('page.status.lede')}
-            </p>
+    const boot = async (which: 'install' | 'refresh') => {
+        setBootResult(null);
+        try {
+            const out = which === 'install' ? await contract.bootstrapInstallSeeds() : await contract.bootstrapRefresh(8000);
+            setBootResult({ ok: true, text: out ? `${t('status.bootstrap.ok')} · ${out}` : t('status.bootstrap.ok') });
+        } catch (e) {
+            setBootResult({ ok: false, text: t('status.bootstrap.failed').replace('{error}', errorText(e)) });
+        }
+    };
 
-            {/* Our own sentence; the raw text is folded under Details.
-                The page re-reads by itself every 3 s, so no button. */}
-            {error && (
-                <FailureBox t={t} text={t('status.load_failed')} detail={error} />
+    const bucket = new Date().toISOString().slice(0, 13).replace('T', ' ') + 'h';
+    const rowStyle = { display: 'flex', alignItems: 'center', gap: 12, minHeight: 40, borderBottom: '1px solid var(--line-soft)' } as const;
+    const mono = { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' } as const;
+
+    return (
+        <Card>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 28 }}>
+                <h2 style={{ margin: 0, flex: 1, fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 500 }}>
+                    {t('settings.dev.title')}
+                </h2>
+            </div>
+            <div style={rowStyle}>
+                <span style={{ flex: 1, fontSize: 14 }}>{t('status.tile.bucket')}</span>
+                <span dir="ltr" style={mono}>{bucket}</span>
+            </div>
+            {lastUp !== null && lastDown !== null && (
+                <div style={rowStyle}>
+                    <span style={{ flex: 1, fontSize: 14 }}>{t('status.tile.throughput')}</span>
+                    <span dir="ltr" style={mono}>↑ {fmtBps(lastUp)} · ↓ {fmtBps(lastDown)}</span>
+                    <Sparkline values={downHistory.current} tone="gold" width={80} height={24} />
+                </div>
             )}
 
-            {/* DASHBOARD GRID */}
-            <div
-                style={{
-                    display: 'grid',
-                    gridTemplateColumns:
-                        'repeat(auto-fit, minmax(160px, 1fr))',
-                    gap: 12,
-                    marginBottom: 16,
-                }}
-            >
-                <MetricTile
-                    label={t('status.tile.overall')}
-                    tone={overallTone}
-                    pulse={connState === 'connecting'}
-                    value={connState.toUpperCase()}
-                    sub={posture}
-                />
-                <MetricTile
-                    label={t('status.tile.routes')}
-                    value={String(routeCount)}
-                    sub={
-                        <span
-                            style={{
-                                display: 'inline-flex',
-                                gap: 10,
-                                alignItems: 'center',
-                            }}
-                        >
-                            <span>
-                                <StatusLight tone="good" size={6} />{' '}
-                                {t('status.routes.ok').replace(
-                                    '{n}',
-                                    String(healthyRoutes),
-                                )}
-                            </span>
-                            <span>
-                                <StatusLight tone="warn" size={6} /> {warnRoutes}
-                            </span>
-                            <span>
-                                <StatusLight tone="bad" size={6} /> {badRoutes}
-                            </span>
-                            {unmeasuredRoutes > 0 && (
-                                <span style={{ color: 'var(--dim)' }}>
-                                    {t('status.routes.unmeasured').replace(
-                                        '{n}',
-                                        String(unmeasuredRoutes),
-                                    )}
-                                </span>
-                            )}
-                        </span>
-                    }
-                />
-                <div
-                    style={{
-                        background: 'var(--surface)',
-                        border: '1px solid var(--line-soft)',
-                        borderRadius: 'var(--r-card)',
-                        padding: '14px 16px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 8,
-                    }}
-                >
-                    <div
-                        style={{
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 10,
-                            letterSpacing: '0.18em',
-                            textTransform: 'uppercase',
-                            color: 'var(--dim)',
-                        }}
-                    >
-                        {t('status.tile.avg_health')}
+            <DevFold title={t('status.acc.network')} id="dev-network">
+                <Button variant="secondary" size="sm" dataButton="run-probes" disabled={probing} onClick={() => void runProbes()}>
+                    {probing ? t('status.probes.running') : `${t('status.probes.run')} ${t('status.probes.stub')}`}
+                </Button>
+                {probeErr && <div style={{ color: 'var(--red)', fontSize: 13, marginBlockStart: 6 }}>{probeErr}</div>}
+                {(probes.udp || probes.dns || probes.tcp) && (
+                    <div style={{ display: 'grid', gap: 4, marginBlockStart: 8 }}>
+                        <ProbeLine label={t('status.probes.udp')} probe={probes.udp} t={t} />
+                        <ProbeLine label={t('status.probes.dns')} probe={probes.dns} t={t} />
+                        <ProbeLine label={t('status.probes.tcp443')} probe={probes.tcp} t={t} />
                     </div>
-                    {avgHealthPct === null ? (
-                        // No bar at all: a 0-width bar is still a bar,
-                        // and reads as a measured floor.
-                        <div
-                            style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 13,
-                                color: 'var(--muted)',
-                                lineHeight: 1.4,
-                            }}
-                        >
-                            {t('status.tile.avg_health.unmeasured')}
-                        </div>
-                    ) : (
-                        <>
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-display)',
-                                    fontSize: 26,
-                                    color: 'var(--fg)',
-                                    lineHeight: 1.1,
-                                }}
-                            >
-                                {avgHealthPct}
-                                <span
-                                    style={{
-                                        fontFamily: 'var(--font-mono)',
-                                        fontSize: 13,
-                                        color: 'var(--muted)',
-                                        marginInlineStart: 4,
-                                    }}
-                                >
-                                    %
-                                </span>
-                            </div>
-                            <HealthBar
-                                pct={avgHealthPct}
-                                tone={
-                                    avgHealthPct >= 70
-                                        ? 'good'
-                                        : avgHealthPct >= 40
-                                            ? 'warn'
-                                            : 'bad'
-                                }
-                            />
-                        </>
-                    )}
-                </div>
-                <div
-                    style={{
-                        background: 'var(--surface)',
-                        border: '1px solid var(--line-soft)',
-                        borderRadius: 'var(--r-card)',
-                        padding: '14px 16px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 6,
-                    }}
-                >
-                    <div
-                        style={{
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 10,
-                            letterSpacing: '0.18em',
-                            textTransform: 'uppercase',
-                            color: 'var(--dim)',
-                        }}
-                    >
-                        {t('status.tile.throughput')}
-                    </div>
-                    <div
-                        style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            gap: 12,
-                        }}
-                    >
-                        <div
-                            style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 12,
-                                color: 'var(--paper)',
-                            }}
-                        >
-                            {lastUp === null || lastDown === null ? (
-                                t('network.unmeasured')
-                            ) : (
-                                <>
-                                    ↑ {fmtBps(lastUp)}
-                                    <br />↓ {fmtBps(lastDown)}
-                                </>
-                            )}
-                        </div>
-                        <Sparkline
-                            values={downHistory.current}
-                            tone="gold"
-                            width={120}
-                            height={36}
-                        />
-                    </div>
-                </div>
-                <MetricTile
-                    label={t('status.tile.bucket')}
-                    value={bucket.slice(-2)}
-                    unit="h"
-                    sub={bucket.slice(0, 10)}
-                />
-                <MetricTile
-                    label={t('status.tile.bootstrap')}
-                    tone={bootSt?.json ? 'good' : 'neutral'}
-                    value={
-                        bootSt?.json
-                            ? t('status.tile.bootstrap.ok')
-                            : t('status.tile.bootstrap.none')
-                    }
-                    sub={t('status.tile.bootstrap.sub')}
-                />
-            </div>
-
-            <Accordion
-                title={t('status.acc.routes')}
-                open={open.r}
-                onToggle={() => setOpen({ ...open, r: !open.r })}
-            >
-                {!payload?.routeHealth || payload.routeHealth.length === 0 ? (
-                    <div style={{ color: 'var(--paper-dim)' }}>
-                        {t('common.empty')}
-                    </div>
-                ) : (
-                    <ul
-                        style={{
-                            listStyle: 'none',
-                            padding: 0,
-                            margin: 0,
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: 8,
-                        }}
-                    >
-                        {payload.routeHealth.map((r) => {
-                            // 'neutral' for an unmeasured route — a green
-                            // light next to a route nobody has tried is
-                            // the same fabrication as a 0% bar.
-                            const tone =
-                                r.severity === undefined
-                                    ? 'neutral'
-                                    : r.severity === 'bad'
-                                        ? 'bad'
-                                        : r.severity === 'warn'
-                                            ? 'warn'
-                                            : 'good';
-                            return (
-                                <li
-                                    key={r.routeId}
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns:
-                                            'auto 1fr auto',
-                                        alignItems: 'center',
-                                        gap: 10,
-                                        padding: '8px 10px',
-                                        background: 'var(--surface-2)',
-                                        borderRadius: 'var(--r-tile)',
-                                        fontFamily: 'var(--font-mono)',
-                                        fontSize: 11,
-                                        color: 'var(--paper)',
-                                    }}
-                                >
-                                    <StatusLight tone={tone} size={8} />
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            gap: 4,
-                                            minWidth: 0,
-                                        }}
-                                    >
-                                        <span
-                                            style={{
-                                                overflow: 'hidden',
-                                                textOverflow: 'ellipsis',
-                                                whiteSpace: 'nowrap',
-                                            }}
-                                        >
-                                            {r.routeId}
-                                        </span>
-                                        {r.pct !== undefined && (
-                                            <HealthBar pct={r.pct} tone={tone} />
-                                        )}
-                                    </div>
-                                    <span style={{ color: 'var(--muted)' }}>
-                                        {r.pct === undefined
-                                            ? gradeText(t, r.measured) ?? t('network.unmeasured')
-                                            : `${r.pct}%`}
-                                    </span>
-                                </li>
-                            );
-                        })}
-                    </ul>
                 )}
-            </Accordion>
-
-            <Accordion
-                title={t('status.acc.budgets')}
-                open={open.b}
-                onToggle={() => setOpen({ ...open, b: !open.b })}
-            >
-                <div style={{ color: 'var(--paper-dim)', fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                    {payload?.rawDiagnosticsJson?.slice(0, 600) || t('common.empty')}
-                </div>
-            </Accordion>
-
-            <Accordion
-                title={t('status.acc.network')}
-                open={open.net}
-                onToggle={() => setOpen({ ...open, net: !open.net })}
-            >
-                <button
-                    disabled={probing}
-                    onClick={runProbes}
-                    style={smallBtn()}
-                >
-                    {probing ? t('status.probes.running') : t('status.probes.run')}
-                </button>
-                <div
-                    style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(3, 1fr)',
-                        gap: 8,
-                        marginTop: 10,
-                    }}
-                >
-                    <ProbeTile label={t('status.probes.udp')} probe={probes.udp} t={t} />
-                    <ProbeTile label={t('status.probes.dns')} probe={probes.dns} t={t} />
-                    <ProbeTile label={t('status.probes.tcp443')} probe={probes.tcp} t={t} />
-                </div>
-            </Accordion>
-
-            <Accordion
-                title={t('status.acc.scheduler')}
-                open={open.sched}
-                onToggle={() => setOpen({ ...open, sched: !open.sched })}
-            >
-                <pre style={preStyle()}>{prettyJson(sched?.json)}</pre>
-            </Accordion>
-
-            <Accordion
-                title={t('status.acc.stats')}
-                open={open.stats}
-                onToggle={() => setOpen({ ...open, stats: !open.stats })}
-            >
-                <pre style={preStyle()}>{prettyJson(stats?.json)}</pre>
-            </Accordion>
-
-            <Accordion
-                title={t('status.acc.bootstrap')}
-                open={open.boot}
-                onToggle={() => setOpen({ ...open, boot: !open.boot })}
-            >
-                <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                    <button
-                        onClick={async () => {
-                            try { await contract.bootstrapInstallSeeds(); }
-                            catch { /* ignore */ }
-                        }}
-                        style={smallBtn()}
-                    >
+            </DevFold>
+            <DevFold title={t('status.acc.scheduler')} id="dev-scheduler">
+                <pre style={preStyle}>{prettyJson(sched?.json)}</pre>
+            </DevFold>
+            <DevFold title={t('status.acc.stats')} id="dev-stats">
+                <pre style={preStyle}>{prettyJson(stats?.json)}</pre>
+            </DevFold>
+            <DevFold title={t('status.acc.bootstrap')} id="dev-bootstrap">
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBlockEnd: 8 }}>
+                    <Button variant="secondary" size="sm" dataButton="install-seeds" onClick={() => void boot('install')}>
                         {t('status.bootstrap.install')}
-                    </button>
-                    <button
-                        onClick={async () => {
-                            try { await contract.bootstrapRefresh(8000); }
-                            catch { /* ignore */ }
-                        }}
-                        style={smallBtn()}
-                    >
+                    </Button>
+                    <Button variant="secondary" size="sm" dataButton="bootstrap-refresh" onClick={() => void boot('refresh')}>
                         {t('status.bootstrap.refresh')}
-                    </button>
+                    </Button>
                 </div>
-                <pre style={preStyle()}>{prettyJson(bootSt?.json)}</pre>
-            </Accordion>
-
-        </div>
+                {bootResult && (
+                    <div role="status" style={{ fontSize: 13, color: bootResult.ok ? 'var(--green)' : 'var(--red)', marginBlockEnd: 8, overflowWrap: 'anywhere' }}>
+                        {bootResult.text}
+                    </div>
+                )}
+                <pre style={preStyle}>{prettyJson(bootSt?.json)}</pre>
+            </DevFold>
+            <DevFold title={t('status.acc.raw')} id="dev-raw">
+                <pre style={preStyle}>{prettyJson(payload?.rawDiagnosticsJson)}</pre>
+            </DevFold>
+        </Card>
     );
 }
 
-function Accordion({
-    title,
-    open,
-    onToggle,
-    children,
-}: {
-    title: string;
-    open: boolean;
-    onToggle: () => void;
-    children: React.ReactNode;
-}) {
+function DevFold({ title, id, children }: { title: string; id: string; children: ReactNode }) {
     return (
-        <div style={{ ...card(), marginTop: 12 }}>
-            <button
-                onClick={onToggle}
-                style={{
-                    width: '100%',
-                    background: 'transparent',
-                    border: 0,
-                    color: 'var(--paper)',
-                    fontFamily: 'var(--font-display)',
-                    fontSize: 16,
-                    textAlign: 'start',
-                    cursor: 'pointer',
-                    padding: 0,
-                    marginBottom: open ? 12 : 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                }}
-                aria-expanded={open}
-            >
-                <span>{title}</span>
-                <span style={{ color: 'var(--ink-mute)' }} aria-hidden>
-                    {open ? '−' : '+'}
-                </span>
-            </button>
-            {open && children}
+        <div style={{ borderBottom: '1px solid var(--line-soft)' }}>
+            <Disclosure summary={title} dataButton={id}>
+                {children}
+            </Disclosure>
         </div>
     );
 }
 
-function card() {
-    return {
-        background: 'var(--teal-surface)',
-        border: '1px solid var(--teal-hairline)',
-        borderRadius: 'var(--radius-lg)',
-        padding: 18,
-    } as const;
+function ProbeLine({ label, probe, t }: { label: string; probe: ProbeResult | undefined; t: (k: string) => string }) {
+    const st = !probe || probe.unavailable ? 'off' : probe.ok ? 'ok' : 'bad';
+    return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+            <StateIcon state={st} size={16} />
+            <span style={{ flex: 1 }}>{label}</span>
+            <span dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
+                {!probe ? '—' : probe.unavailable ? t('status.probes.unavailable') : `${probe.ok ? 'ok' : 'fail'} (${probe.raw})`}
+            </span>
+        </div>
+    );
 }
-function smallBtn() {
-    return {
-        background: 'var(--teal-raised)',
-        border: '1px solid var(--teal-border)',
-        color: 'var(--paper)',
-        padding: '6px 10px',
-        borderRadius: 'var(--radius-md)',
-        fontFamily: 'var(--font-body)',
-        fontSize: 12,
-        cursor: 'pointer',
-    } as const;
-}
-function preStyle() {
-    return {
-        background: 'var(--teal-deep)',
-        color: 'var(--paper-dim)',
-        padding: 10,
-        borderRadius: 'var(--radius-md)',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        margin: 0,
-        whiteSpace: 'pre-wrap' as const,
-        wordBreak: 'break-all' as const,
-        maxHeight: 240,
-        overflow: 'auto' as const,
-    };
-}
+
+const preStyle = {
+    background: 'var(--bg-deep)',
+    color: 'var(--muted)',
+    padding: 10,
+    borderRadius: 'var(--r-tile)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    margin: 0,
+    whiteSpace: 'pre-wrap' as const,
+    overflowWrap: 'anywhere' as const,
+    maxHeight: 320,
+    overflow: 'auto' as const,
+    direction: 'ltr' as const,
+    textAlign: 'start' as const,
+};
+
 function prettyJson(s: string | undefined): string {
     if (!s) return '—';
-    try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+    try {
+        return JSON.stringify(JSON.parse(s), null, 2);
+    } catch {
+        return s;
+    }
 }
-function fmtBps(bps: number): string {
+
+export function fmtBps(bps: number): string {
     if (!Number.isFinite(bps) || bps <= 0) return '0 B/s';
     const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
     let v = bps;
@@ -694,74 +557,4 @@ function fmtBps(bps: number): string {
         i++;
     }
     return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function ProbeTile({
-    label,
-    probe,
-    t,
-}: {
-    label: string;
-    probe: import('../contract/D2Contract').ProbeResult | undefined;
-    t: (k: string) => string;
-}) {
-    const tone: 'good' | 'bad' | 'neutral' =
-        !probe || probe.unavailable ? 'neutral' : probe.ok ? 'good' : 'bad';
-    return (
-        <div
-            style={{
-                background: 'var(--surface-2)',
-                borderRadius: 'var(--r-tile)',
-                padding: '10px 12px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 6,
-            }}
-        >
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    letterSpacing: '0.16em',
-                    textTransform: 'uppercase',
-                    color: 'var(--dim)',
-                }}
-            >
-                <StatusLight tone={tone} size={7} />
-                {label}
-            </div>
-            <div
-                style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 11,
-                    color: 'var(--paper)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                }}
-            >
-                {!probe
-                    ? '—'
-                    : probe.unavailable
-                        ? t('status.probes.unavailable')
-                        : probe.ok
-                            ? 'ok'
-                            : 'fail'}
-            </div>
-            {!probe?.unavailable && probe?.raw ? (
-                <div
-                    style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        color: 'var(--muted)',
-                    }}
-                >
-                    {probe.raw}
-                </div>
-            ) : null}
-        </div>
-    );
 }

@@ -117,12 +117,36 @@ func FetchRaw(ctx context.Context, url string, dialer Dialer, timeout time.Durat
 	if _, err := tlsConn.Write([]byte(req)); err != nil {
 		return nil, fmt.Errorf("fetcher: write: %w", err)
 	}
-	body, err := io.ReadAll(tlsConn)
+	// BOUNDED READ (blackout plan W3-2 / C1). This used to io.ReadAll
+	// the connection and leave every cap to the caller, which applied
+	// it by truncating AFTER the whole stream was in memory: a hostile
+	// or hijacked host could make the device buffer without limit.
+	// Now the read stops one byte past MaxRawResponse and fails.
+	body, err := readBounded(tlsConn, MaxRawResponse)
 	if err != nil {
-		return nil, fmt.Errorf("fetcher: read: %w", err)
+		return nil, err
 	}
 	return splitHTTPResponse(body)
 }
+
+// readBounded reads r to its end, failing once it passes max bytes.
+func readBounded(r io.Reader, max int) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, int64(max)+1))
+	if err != nil {
+		return nil, fmt.Errorf("fetcher: read: %w", err)
+	}
+	if len(body) > max {
+		return nil, ErrResponseTooLarge
+	}
+	return body, nil
+}
+
+// MaxRawResponse bounds the bytes FetchRaw reads from one connection,
+// headers and framing included. It sits above the largest thing any
+// caller fetches (a directory or relay pack .sbp; bundle.MaxArchive*
+// caps the decompressed archive at 32 MiB) so no legitimate fetch hits
+// it; its job is to make "read until the server stops" finite.
+const MaxRawResponse = 33 << 20
 
 // requestUserAgent is a common desktop-browser UA string.
 //

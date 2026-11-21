@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -16,6 +17,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -43,6 +45,8 @@ type RawProbe struct {
 	Port   int    `json:"port"`
 	SNI    string `json:"sni,omitempty"`
 	Split  bool   `json:"split,omitempty"`  // tls: send the ClientHello in two TCP segments
+	ECH    bool   `json:"ech,omitempty"`    // tls/exchange: offer the world's ECH config (SNI is the inner name)
+	echList []byte
 	Shape  string `json:"shape,omitempty"`  // udp: plain | quic
 	Sport  int    `json:"sport,omitempty"`  // udp: fixed source port (what the tap counts)
 	Local  string `json:"local,omitempty"`  // tcp: our end of the connection (ip:port), to find the flow in the censor's log
@@ -80,6 +84,7 @@ func cmdRawProbe(args []string) int {
 	fs.StringVar(&p.SNI, "sni", "", "tls: server_name to send (empty = none)")
 	fs.BoolVar(&p.Split, "split", false, "tls: split the ClientHello across two TCP segments")
 	fs.StringVar(&p.Shape, "shape", "plain", "udp: plain | quic")
+	echFile := fs.String("ech-config", "", "tls/exchange: an ECHConfigList file to offer")
 	patience := fs.Int("patience-ms", 0, "extra time to wait for a connect and for an answer (a scenario that delays)")
 	_ = fs.Parse(args)
 	if *patience > 0 {
@@ -87,9 +92,18 @@ func cmdRawProbe(args []string) int {
 		rawConnectTimeout += extra
 		rawAnswerTimeout += extra
 	}
+	if *echFile != "" {
+		b, err := os.ReadFile(*echFile)
+		if err != nil {
+			p.Result, p.Error = "error", err.Error()
+			_ = json.NewEncoder(os.Stdout).Encode(p)
+			return 0
+		}
+		p.ECH, p.echList = true, b
+	}
 	t0 := time.Now()
 	switch p.Kind {
-	case "tcp", "tls", "bytes":
+	case "tcp", "tls", "bytes", "exchange":
 		probeTCP(&p)
 	case "tcp_burst":
 		probeBurst(&p)
@@ -189,6 +203,15 @@ func probeTCP(p *RawProbe) {
 	// off on purpose: the question is "did the handshake's first flight
 	// get an answer through the censor", not "is this the right server".
 	cfg := &tls.Config{ServerName: p.SNI, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	if p.ECH {
+		// The inner hello names p.SNI; the outer one the configuration's
+		// public name. Verification stays off for the reason given above.
+		cfg.MinVersion, cfg.EncryptedClientHelloConfigList = tls.VersionTLS13, p.echList
+	}
+	if p.Kind == "exchange" {
+		probeExchange(p, cc, cfg)
+		return
+	}
 	if !p.Split {
 		// Classical key shares only: a ClientHello of a few hundred bytes
 		// that fits one TCP segment. With --split the default hello is
@@ -209,6 +232,49 @@ func probeTCP(p *RawProbe) {
 	default:
 		p.Result, p.Error = "timeout_after_hello", err.Error()
 	}
+}
+
+// probeExchange: a TLS session carrying twelve request/answer round
+// trips, the next request sent only once the answer to the last one is
+// in, so each is at least one more client packet. A censor that lets a
+// flow send only a few packets ("grey" addresses) lets the handshake
+// through and cuts it a few round trips later: "cut". Answers are
+// whatever the far end says (an edge's error page counts).
+func probeExchange(p *RawProbe, cc *countingConn, cfg *tls.Config) {
+	cfg.NextProtos = []string{"http/1.1"}
+	tc := tls.Client(cc, cfg)
+	err := tc.Handshake()
+	switch {
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
+		p.Result, p.Error = "reset_after_hello", err.Error()
+		return
+	case err != nil:
+		p.Result, p.Error = "timeout_after_hello", err.Error()
+		return
+	}
+	br := bufio.NewReader(tc)
+	host := p.SNI
+	if host == "" {
+		host = p.Addr
+	}
+	for i := 0; i < 12; i++ {
+		_ = tc.SetDeadline(time.Now().Add(rawAnswerTimeout))
+		if _, err = fmt.Fprintf(tc, "GET /wb-exchange/%d HTTP/1.1\r\nHost: %s\r\nUser-Agent: wb-rawprobe\r\n\r\n", i, host); err == nil {
+			var resp *http.Response
+			if resp, err = http.ReadResponse(br, nil); err == nil {
+				_, err = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if err == nil && resp.Close {
+					err = fmt.Errorf("the far end closed after round trip %d", i+1)
+				}
+			}
+		}
+		if err != nil {
+			p.Result, p.Error = "cut", fmt.Sprintf("round trip %d of 12: %v", i+1, err)
+			return
+		}
+	}
+	p.Result = "ok"
 }
 
 // probeBurst opens burstN connections at once, each given just under one

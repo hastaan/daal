@@ -46,6 +46,7 @@ function parseTried(v: unknown): AutoTried[] {
         const refined = str(r.refined);
         const setupMs = count(r.setup_ms);
         const racedWith = str(r.raced_with);
+        const why = str(r.why);
         out.push({
             routeId,
             family: str(r.family),
@@ -54,6 +55,7 @@ function parseTried(v: unknown): AutoTried[] {
             ...(refined ? { refined } : {}),
             ...(setupMs > 0 ? { setupMs } : {}),
             ...(racedWith ? { racedWith } : {}),
+            ...(why ? { why } : {}),
         });
     }
     return out;

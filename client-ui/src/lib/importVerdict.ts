@@ -134,6 +134,9 @@ const UNAVAILABLE_REASONS = new Set([
     'no_credentials',
     'needs_new_file',
     'older_than_device',
+    // A route whose add-on data (a CDN-fronted commitment) this build
+    // cannot read: that route only, never the pack (optional add-ons §8).
+    'needs_newer_app',
 ]);
 
 /** The transport families a route can name. The family in a verdict

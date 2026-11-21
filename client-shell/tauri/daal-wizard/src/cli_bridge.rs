@@ -925,6 +925,131 @@ pub trait CliRunner: Send + Sync {
         args: RotateTlsArgs<'_>,
         priv_key: &[u8],
     ) -> Result<RotateTlsResult>;
+
+    /// Network test: invoke `daal-deploy report-keygen --out -`. A
+    /// fresh X25519 report key: the `daal1…` address goes into the Test
+    /// relay's pack (`bind-and-sign --report-to`), the private half
+    /// comes back over the pipe and nowhere else — the caller seals it
+    /// into device custody. No network, no record, no signing key.
+    ///
+    /// The default answers "this helper has no such verb", which is
+    /// what a `daal-deploy` built before the network test says.
+    fn run_report_keygen(&self) -> Result<ReportKeygenResult> {
+        Err(BridgeError::SubprocessFailed {
+            rc: 2,
+            stderr: "unknown subcommand \"report-keygen\"\n".into(),
+        })
+    }
+
+    /// Network test: invoke `daal-deploy report-open --in <file>` with
+    /// the report private key (64 hex) on stdin. Returns the report as
+    /// the opener printed it: strictly validated v2 JSON. The report is
+    /// UNTRUSTED: anyone who holds the address can make one.
+    fn run_report_open(&self, in_path: &Path, priv_key_hex: &str) -> Result<String> {
+        let _ = (in_path, priv_key_hex);
+        Err(BridgeError::SubprocessFailed {
+            rc: 2,
+            stderr: "unknown subcommand \"report-open\"\n".into(),
+        })
+    }
+
+    /// Optional add-ons (specs/optional-addons-v1.md §6): run one
+    /// add-on verb of `daal-deploy`. Generic on purpose: each add-on's
+    /// module (`addon_standby`, `addon_cdn`, `addon_google`) builds its
+    /// own argv and reads its own JSON, so no add-on lane adds a method
+    /// here or a `SubprocessRunner` arm.
+    ///
+    /// Returns the child's stdout (wiped when dropped). The default is
+    /// what a `daal-deploy` without the verb says.
+    fn run_addon(
+        &self,
+        req: AddonCliRequest<'_>,
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let _ = on_progress;
+        Err(BridgeError::SubprocessFailed {
+            rc: 2,
+            stderr: format!(
+                "unknown subcommand {:?}\n",
+                req.args.first().map(String::as_str).unwrap_or("")
+            ),
+        })
+    }
+}
+
+/// The exit code of an add-on verb that refused or whose check failed,
+/// with the JSON that says why on stdout. [`CliRunner::run_addon`]
+/// keeps that stdout, at the head of `SubprocessFailed::stderr`.
+pub const ADDON_REFUSED_RC: i32 = 4;
+
+/// One add-on invocation of `daal-deploy` ([`CliRunner::run_addon`]).
+///
+/// No `Debug`: `stdin` and `secret_files` carry secrets.
+pub struct AddonCliRequest<'a> {
+    /// argv after the binary, verb first, e.g.
+    /// `["standby", "add", "--record-file", "<path>"]`. Never a secret:
+    /// a secret goes in `secret_files` or `stdin`.
+    pub args: Vec<String>,
+    /// Secrets handed over as 0600 temp files: each `(flag, value)`
+    /// becomes `<flag> <tempfile>`, and the file is removed when the
+    /// child exits.
+    pub secret_files: Vec<(&'a str, &'a str)>,
+    /// Written to the child's stdin, then the pipe closes. Empty: stdin
+    /// is null.
+    pub stdin: &'a [u8],
+    /// Add `--progress-json` and forward the JSON lines the child writes
+    /// on stderr; every other stderr line goes into the failure text.
+    pub progress: bool,
+}
+
+impl AddonCliRequest<'static> {
+    /// A request with only an argv.
+    pub fn args<I, S>(args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        AddonCliRequest {
+            args: args.into_iter().map(Into::into).collect(),
+            secret_files: Vec::new(),
+            stdin: &[],
+            progress: false,
+        }
+    }
+}
+
+/// What `daal-deploy report-keygen --out -` prints. The private half is
+/// held in a `Zeroizing` string and never logged; `Debug` leaves it out.
+#[derive(Clone)]
+pub struct ReportKeygenResult {
+    pub report_to: String,
+    pub private_key_hex: Zeroizing<String>,
+}
+
+/// The JSON as printed; moved into [`ReportKeygenResult`] at once.
+#[derive(Deserialize)]
+struct ReportKeygenWire {
+    report_to: String,
+    private_key_hex: String,
+}
+
+impl ReportKeygenResult {
+    /// Parse what `report-keygen --out -` printed.
+    pub fn from_json(stdout: &[u8]) -> Result<Self> {
+        let w: ReportKeygenWire = serde_json::from_slice(stdout)?;
+        Ok(Self {
+            report_to: w.report_to,
+            private_key_hex: Zeroizing::new(w.private_key_hex),
+        })
+    }
+}
+
+impl std::fmt::Debug for ReportKeygenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReportKeygenResult")
+            .field("report_to", &self.report_to)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Wave 3 Step 7: args for `daal-deploy rotate-credentials`.
@@ -1336,10 +1461,20 @@ pub struct ProvisionArgs<'a> {
 /// Static shape passed to `daal-deploy cdn-provision`.
 pub struct CdnProvisionArgs<'a> {
     pub hostname: &'a str,
+    /// The zone to put a random label in when `hostname` is empty.
+    pub zone: &'a str,
     pub origin_ip: &'a str,
     pub origin_ipv6: &'a str,
     pub origin_path: &'a str,
+    /// Must be empty or equal `origin_path`: there is no Worker any
+    /// more (D-5), so the helper refuses anything else.
     pub public_path: &'a str,
+    /// The relay door's port; 0 is the helper's default (8448).
+    pub origin_port: u16,
+    /// The relay's own Hetzner firewall id (`daal-relay-<server id>`'s
+    /// numeric id). Required: the Cloudflare-ranges rule goes on it,
+    /// and the helper refuses to create a firewall attached to nothing.
+    pub firewall_id: &'a str,
     pub out_dir: &'a Path,
     pub cf_token: &'a str,
     pub cloud_token: &'a str,
@@ -1477,6 +1612,16 @@ pub struct FreshnessUploadArgs {
     pub gh_branch: String,
     pub gh_public_url: String,
     pub gh_pat_file: Option<PathBuf>,
+    /// The Google update channel (add-on 3): the web-app `/exec` URL
+    /// with its `?k=`, and the write key (64 hex) in a 0600 file. Both
+    /// or neither; the CLI refuses one without the other.
+    pub appsscript_url: String,
+    pub appsscript_write_key_file: Option<PathBuf>,
+    /// The signed credential-less pack the document names, carried
+    /// inline in the container. Optional.
+    pub appsscript_pack_file: Option<PathBuf>,
+    /// A standby key to carry in the container. Optional.
+    pub appsscript_standby_key_file: Option<PathBuf>,
 }
 
 impl FreshnessUploadArgs {
@@ -1484,7 +1629,9 @@ impl FreshnessUploadArgs {
     /// refuses a partially-specified provider, so this only gates
     /// "should we pass any upload flags at all".
     pub fn has_any(&self) -> bool {
-        self.r2_secret_file.is_some() || self.gh_pat_file.is_some()
+        self.r2_secret_file.is_some()
+            || self.gh_pat_file.is_some()
+            || self.appsscript_write_key_file.is_some()
     }
 }
 
@@ -1738,6 +1885,10 @@ pub struct BindAndSignArgs<'a> {
     /// never answered a recipient request; the signer then has the
     /// record alone, which on some providers is not enough to sign.
     pub relay_identity_path: Option<&'a Path>,
+    /// Network test: the publisher's report address (`daal1…`) when this
+    /// relay is the Test relay (`--report-to`). Every route of the pack
+    /// then carries it as `_report_to`. `None` = an ordinary pack.
+    pub report_to: Option<&'a str>,
 }
 
 /// Extension trait so `.apply_env()` can be chained on `Command`.
@@ -1855,6 +2006,11 @@ impl SubprocessRunner {
         if args.dry_run {
             cmd.arg("--dry-run");
         }
+        // No `--cdn-edge-ranges`: building a relay contacts the hosting
+        // company and nobody else. The way in through Cloudflare opens
+        // its own box-firewall rule when it is turned on (`cdn-door`
+        // sends Cloudflare's ranges to daal-relay-mgmt /cdn), so a relay
+        // needs no Cloudflare list at first boot and no rebuild later.
         if let Some(j) = journal {
             cmd.arg("--journal").arg(j);
         }
@@ -1909,6 +2065,77 @@ impl SubprocessRunner {
 }
 
 impl CliRunner for SubprocessRunner {
+    fn run_addon(
+        &self,
+        req: AddonCliRequest<'_>,
+        on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        // Token files live until the child has exited (dropped below).
+        let mut secret_tmps = Vec::with_capacity(req.secret_files.len());
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(&req.args);
+        for (flag, value) in &req.secret_files {
+            let tmp = tempfile_with_secret(value)?;
+            cmd.arg(flag).arg(tmp.path());
+            secret_tmps.push(tmp);
+        }
+        if req.progress {
+            cmd.arg("--progress-json");
+        }
+        let mut child = cmd
+            .apply_env()
+            .stdin(if req.stdin.is_empty() { Stdio::null() } else { Stdio::piped() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        if !req.stdin.is_empty() {
+            let mut stdin = child.stdin.take().expect("piped");
+            stdin.write_all(req.stdin)?;
+            // dropping stdin closes the pipe.
+        }
+        // stdout on its own thread: a child blocked writing one pipe
+        // while the parent reads the other deadlocks.
+        let stdout_handle = child.stdout.take().expect("piped");
+        let stdout_join = std::thread::spawn(move || {
+            let mut buf = Zeroizing::new(Vec::new());
+            let mut r = BufReader::new(stdout_handle);
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let mut stderr_tail = String::new();
+        let r = BufReader::new(child.stderr.take().expect("piped"));
+        for line in r.lines().map_while(std::result::Result::ok) {
+            match serde_json::from_str::<ProgressEvent>(&line) {
+                Ok(ev) if req.progress => on_progress(ev),
+                _ => {
+                    stderr_tail.push_str(&line);
+                    stderr_tail.push('\n');
+                }
+            }
+        }
+        let status = child.wait().map_err(BridgeError::Io)?;
+        let stdout = stdout_join.join().unwrap_or_default();
+        drop(secret_tmps);
+        if !status.success() {
+            let rc = status.code().unwrap_or(-1);
+            // Exit 4 is an add-on refusal or a failed check, and its
+            // reason is the JSON on stdout (the add-on verbs never print
+            // a secret there). It goes first, so the caller's
+            // `addon_cdn::json_in` reads the answer before any prose.
+            let stderr = if rc == ADDON_REFUSED_RC && !stdout.is_empty() {
+                format!("{}\n{stderr_tail}", String::from_utf8_lossy(&stdout).trim())
+            } else {
+                stderr_tail
+            };
+            return Err(BridgeError::SubprocessFailed { rc, stderr });
+        }
+        Ok(stdout)
+    }
+
     fn run_list_servers(&self, provider: &str, token: &str) -> Result<Vec<ExistingServer>> {
         let tmp = tempfile_with_secret(token)?;
         let token_path = tmp.path().to_path_buf();
@@ -2272,8 +2499,6 @@ impl CliRunner for SubprocessRunner {
 
         let mut cmd = Command::new(&self.binary);
         cmd.arg("cdn-provision")
-            .arg("--hostname")
-            .arg(args.hostname)
             .arg("--origin-ip")
             .arg(args.origin_ip)
             .arg("--origin-path")
@@ -2287,8 +2512,21 @@ impl CliRunner for SubprocessRunner {
         if !args.origin_ipv6.is_empty() {
             cmd.arg("--origin-ipv6").arg(args.origin_ipv6);
         }
+        // Passed even when empty: the helper then refuses by name
+        // ("missing required flags: --firewall-id"), which is the
+        // message the publisher should see.
+        cmd.arg("--firewall-id").arg(args.firewall_id);
+        if !args.hostname.is_empty() {
+            cmd.arg("--hostname").arg(args.hostname);
+        }
+        if !args.zone.is_empty() {
+            cmd.arg("--zone").arg(args.zone);
+        }
         if !args.public_path.is_empty() {
             cmd.arg("--public-path").arg(args.public_path);
+        }
+        if args.origin_port != 0 {
+            cmd.arg("--origin-port").arg(args.origin_port.to_string());
         }
         let out = cmd
             .apply_env()
@@ -2513,6 +2751,19 @@ impl CliRunner for SubprocessRunner {
                 .arg(pat);
             if !up.gh_branch.is_empty() {
                 cmd.arg("--gh-branch").arg(&up.gh_branch);
+            }
+        }
+        if let Some(key) = up.appsscript_write_key_file.as_ref() {
+            cmd.arg("--appsscript-url")
+                .arg(&up.appsscript_url)
+                // The write key is a file, never an argument.
+                .arg("--appsscript-write-key-file")
+                .arg(key);
+            if let Some(p) = up.appsscript_pack_file.as_ref() {
+                cmd.arg("--appsscript-pack-file").arg(p);
+            }
+            if let Some(p) = up.appsscript_standby_key_file.as_ref() {
+                cmd.arg("--appsscript-standby-key-file").arg(p);
             }
         }
         let out = cmd
@@ -2862,6 +3113,9 @@ impl CliRunner for SubprocessRunner {
         }
         if let Some(path) = args.relay_identity_path {
             cmd.arg("--relay-identity").arg(path);
+        }
+        if let Some(addr) = args.report_to.map(str::trim).filter(|a| !a.is_empty()) {
+            cmd.arg("--report-to").arg(addr);
         }
         let mut child = cmd
             .apply_env()
@@ -3295,6 +3549,76 @@ impl CliRunner for SubprocessRunner {
         }
         Ok(serde_json::from_str(&stdout_text)?)
     }
+
+    fn run_report_keygen(&self) -> Result<ReportKeygenResult> {
+        let out = Command::new(&self.binary)
+            .arg("report-keygen")
+            .arg("--out")
+            .arg("-")
+            .apply_env()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        // The private key is in this buffer: wiped when it is dropped.
+        let stdout = Zeroizing::new(out.stdout);
+        if !out.status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        ReportKeygenResult::from_json(&stdout)
+    }
+
+    fn run_report_open(&self, in_path: &Path, priv_key_hex: &str) -> Result<String> {
+        let mut child = Command::new(&self.binary)
+            .arg("report-open")
+            .arg("--in")
+            .arg(in_path)
+            .apply_env()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => BridgeError::BinaryMissing,
+                _ => BridgeError::Io(e),
+            })?;
+        {
+            let mut stdin = child.stdin.take().expect("piped");
+            let buf = Zeroizing::new(format!("{priv_key_hex}\n"));
+            stdin.write_all(buf.as_bytes())?;
+            // dropping stdin closes the pipe.
+        }
+        // stderr on its own thread: a report fills stdout (~16 KB),
+        // and a child blocked on one pipe while the parent reads the
+        // other deadlocks.
+        let stderr = child.stderr.take().expect("piped");
+        let err_join = std::thread::spawn(move || {
+            let mut buf = String::new();
+            let mut r = BufReader::new(stderr);
+            let _ = r.read_to_string(&mut buf);
+            buf
+        });
+        let mut stdout_text = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut stdout_text);
+        }
+        let status = child.wait().map_err(BridgeError::Io)?;
+        let stderr_text = err_join.join().unwrap_or_default();
+        if !status.success() {
+            return Err(BridgeError::SubprocessFailed {
+                rc: status.code().unwrap_or(-1),
+                stderr: stderr_text,
+            });
+        }
+        Ok(stdout_text)
+    }
 }
 
 /// What [`run_with_piped_priv_key`] collected: the exit status plus both
@@ -3637,6 +3961,16 @@ pub struct MockRunner {
     /// thing that decides whether a rotation can heal itself, so a test
     /// has to be able to see exactly what was baked in.
     pub bind_freshness_mirrors: Mutex<Vec<Vec<String>>>,
+    /// Network test: the `--report-to` each bind-and-sign was handed,
+    /// newest last (`None` = an ordinary pack).
+    pub bind_report_to: Mutex<Vec<Option<String>>>,
+    /// Network test: how many report keys were made.
+    pub report_keygen_calls: Mutex<usize>,
+    /// Network test: what `run_report_open` prints; `None` = it fails
+    /// the way the opener does on a file that is not for this key.
+    pub report_open_result: Mutex<Option<String>>,
+    /// Network test: the key (hex) each `run_report_open` was handed.
+    pub report_open_keys: Mutex<Vec<String>>,
     /// Wave 4 Step 11: the `.sbp` path the last `run_qr_fountain` was
     /// pointed at. The QR sender can only be wrong in one way that
     /// nothing downstream notices — streaming the wrong file, flawlessly
@@ -3770,6 +4104,13 @@ pub struct MockRunner {
     /// How many `run_list_servers` calls were made (never the token).
     pub list_servers_calls: Mutex<usize>,
     pub relay_health_error: Mutex<Option<(i32, String)>>,
+    /// Optional add-ons: every `run_addon` argv, in order (secrets are
+    /// not recorded).
+    pub addon_calls: Mutex<Vec<Vec<String>>>,
+    /// Optional add-ons: answers `run_addon` with (argv, stdin). `None`:
+    /// the verb is unknown, as on a `daal-deploy` without it.
+    #[allow(clippy::type_complexity)]
+    pub addon_reply: Mutex<Option<Box<dyn FnMut(&[String], &[u8]) -> Result<Vec<u8>> + Send>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3816,6 +4157,12 @@ pub struct MockPublishFreshnessCall {
     /// accepted a higher one refuses the document as a rollback.
     pub sequence: u64,
     pub min_sequence: u64,
+    /// The Google update channel as handed to the helper: its URL
+    /// (empty when not a target), whether the write key reached it as
+    /// a file, and the inline pack's path when one was carried.
+    pub appsscript_url: String,
+    pub appsscript_key_staged: bool,
+    pub appsscript_pack: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3911,6 +4258,10 @@ impl MockRunner {
             last_subkey_cert_path: Mutex::new(None),
             bind_phases: Mutex::new(Vec::new()),
             bind_freshness_mirrors: Mutex::new(Vec::new()),
+            bind_report_to: Mutex::new(Vec::new()),
+            report_keygen_calls: Mutex::new(0),
+            report_open_result: Mutex::new(None),
+            report_open_keys: Mutex::new(Vec::new()),
             last_qr_fountain_path: Mutex::new(None),
             rotation_recommendation: Mutex::new(None),
             reprovision_calls: Mutex::new(Vec::new()),
@@ -3961,6 +4312,8 @@ impl MockRunner {
             list_servers_result: Mutex::new(None),
             list_servers_calls: Mutex::new(0),
             relay_health_error: Mutex::new(None),
+            addon_calls: Mutex::new(Vec::new()),
+            addon_reply: Mutex::new(None),
         }
     }
 
@@ -4130,6 +4483,25 @@ impl MockRunner {
 }
 
 impl CliRunner for MockRunner {
+    fn run_addon(
+        &self,
+        req: AddonCliRequest<'_>,
+        _on_progress: &mut dyn FnMut(ProgressEvent),
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.addon_calls.lock().unwrap().push(req.args.clone());
+        let mut reply = self.addon_reply.lock().unwrap();
+        match reply.as_mut() {
+            Some(f) => f(&req.args, req.stdin).map(Zeroizing::new),
+            None => Err(BridgeError::SubprocessFailed {
+                rc: 2,
+                stderr: format!(
+                    "unknown subcommand {:?}\n",
+                    req.args.first().map(String::as_str).unwrap_or("")
+                ),
+            }),
+        }
+    }
+
     fn run_list_servers(&self, _provider: &str, _token: &str) -> Result<Vec<ExistingServer>> {
         *self.list_servers_calls.lock().unwrap() += 1;
         match self.list_servers_result.lock().unwrap().clone() {
@@ -4559,6 +4931,13 @@ impl CliRunner for MockRunner {
                 used_subkey: args.subkey_priv_path.is_some(),
                 mirrors: args.mirrors.to_vec(),
                 uploaded: args.upload.has_any(),
+                appsscript_url: args.upload.appsscript_url.clone(),
+                appsscript_key_staged: args
+                    .upload
+                    .appsscript_write_key_file
+                    .as_ref()
+                    .is_some_and(|p| p.exists()),
+                appsscript_pack: args.upload.appsscript_pack_file.clone(),
                 supersedes: args.supersedes.to_vec(),
                 sequence: args.sequence,
                 min_sequence: args.min_sequence,
@@ -4818,6 +5197,10 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(args.freshness_mirrors.to_vec());
+        self.bind_report_to
+            .lock()
+            .unwrap()
+            .push(args.report_to.map(str::to_string));
         // What a real signer works from: the record, completed and
         // outranked by the relay's own identity when one is passed.
         let record_json = std::fs::read_to_string(args.operator_record_path).unwrap_or_default();
@@ -5237,6 +5620,33 @@ impl CliRunner for MockRunner {
             plaintext_size: plaintext.len() as i64,
             sbpx_size: cipher.len() as i64,
         })
+    }
+
+    fn run_report_keygen(&self) -> Result<ReportKeygenResult> {
+        // A real key, so the address the app derives from the stored
+        // half is the one "printed" here — as with the Go opener.
+        *self.report_keygen_calls.lock().unwrap() += 1;
+        let secret = x25519_dalek::StaticSecret::random_from_rng(&mut rand::rngs::OsRng);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        let priv_z = Zeroizing::new(secret.to_bytes());
+        Ok(ReportKeygenResult {
+            report_to: daal_recipient_addr::encode(&public.to_bytes()),
+            private_key_hex: Zeroizing::new(hex::encode(&priv_z[..])),
+        })
+    }
+
+    fn run_report_open(&self, _in_path: &Path, priv_key_hex: &str) -> Result<String> {
+        self.report_open_keys
+            .lock()
+            .unwrap()
+            .push(priv_key_hex.to_string());
+        match self.report_open_result.lock().unwrap().clone() {
+            Some(json) => Ok(json),
+            None => Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: "open: this report was not sealed to this key\n".into(),
+            }),
+        }
     }
 }
 
@@ -5764,6 +6174,36 @@ mod tests {
             }
         }
         p
+    }
+
+    /// An add-on refusal (exit 4) keeps its stdout: the JSON that says
+    /// why comes first in the failure text, the helper's stderr after.
+    #[cfg(unix)]
+    #[test]
+    fn run_addon_keeps_stdout_on_exit_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_deploy(
+            dir.path(),
+            r#"echo '{"verdict":"too_broad","extra":["workers_scripts"]}'
+echo 'cdn-token-check: {not json}' >&2
+exit 4"#,
+        );
+        let err = SubprocessRunner::new(Some(bin.clone()))
+            .run_addon(AddonCliRequest::args(["cdn-token-check"]), &mut |_| {})
+            .unwrap_err();
+        match err {
+            BridgeError::SubprocessFailed { rc: 4, stderr } => {
+                assert!(stderr.starts_with(r#"{"verdict":"too_broad""#), "{stderr}");
+                assert!(stderr.contains("cdn-token-check: {not json}"), "{stderr}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Any other failure keeps stderr only.
+        let bin = fake_deploy(dir.path(), "echo '{\"x\":1}'\necho boom >&2\nexit 1");
+        match SubprocessRunner::new(Some(bin)).run_addon(AddonCliRequest::args(["cdn-test"]), &mut |_| {}) {
+            Err(BridgeError::SubprocessFailed { rc: 1, stderr }) => assert_eq!(stderr.trim(), "boom"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[cfg(unix)]

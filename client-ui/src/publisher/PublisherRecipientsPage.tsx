@@ -44,6 +44,7 @@
 //   * The operator <select>. Relay choice happens on RelayListPage,
 //     explicitly. This page is told which relay it is.
 
+import { sep } from '../lib/format';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Wizard, classifyPublisherError, storedFileName } from './wizardCommands';
 import type {
@@ -55,13 +56,17 @@ import type {
     RotateTlsSummary,
 } from './wizardCommands';
 import {
-    Card,
     ListRow,
     Button,
     Sheet,
     Input,
-    StatusPill,
+    PageHeader,
+    OverflowMenu,
+    Disclosure,
+    StateIcon,
 } from '../design/primitives';
+import type { MenuItem } from '../design/primitives';
+import { formatDate } from '../lib/format';
 import {
     detectPublicIp,
     setHelperIpManually,
@@ -83,24 +88,28 @@ import { QrSendSheet } from './QrSendSheet';
 import { ActionButton, ActionToast, useAction } from './useAction';
 import { explainFailure, failureBlock } from './failureText';
 import type { Failure } from './failureText';
-import { Collapsible } from './Disclosure';
-import { PeopleSection, joinPeople, personLabel } from './PeopleSection';
-import { EveryoneFileSection } from './EveryoneFileSection';
-import { relayBadge } from './relayStatus';
+import { PeopleSection, joinPeople, personLabel, personStateOf } from './PeopleSection';
+import type { PersonRow } from './PeopleSection';
+import { EveryoneFileSheet } from './EveryoneFileSection';
+import { TestRelaySheet } from './TestRelaySheet';
+import { ReportViewer } from './ReportViewer';
+import { Notice, PageColumn, RelayBadge, SendSheet, relayLook, useConfirm, useLocale } from './ui';
+import { useBack } from '../lib/useBack';
 import { rotateTlsVerdict } from './rotateTlsVerdict';
 // Publisher-alone wave: health (D3), renew after a rebuild (D2), one
 // person's file as QR / text (D5).
 import { HealthPanel } from './HealthPanel';
-import { checkHealth, checkedWorking, healthFailure, nowUnix } from './relayHealth';
+import { checkHealth, healthFailure, nowUnix } from './relayHealth';
 import { RenewBanner, RenewSheet } from './RenewSheet';
 import { renewBannerText, renewBannerVisible } from './renew';
 import { recipientArtifact } from './wizardCommands';
 import type { BackupStatus, PackArtifact, RelayHealth } from './wizardCommands';
-import { BackupCard } from './BackupCard';
+import { backupCard } from './backup';
 // After a restore (PB-1 / PB-2).
 import {
     RelayOnlyRemoveSheet,
     RestoreQuestionCard,
+    settleCard,
     healthWithoutWaiting,
     relayOnlyRows,
     withoutRelayOnly,
@@ -111,6 +120,8 @@ import {
 import type { RestoreUnsettledPerson } from './wizardCommands';
 import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
+// Optional add-ons: standby address, Cloudflare, Google channel (X3).
+import { AddonsSection } from './addons/AddonsSection';
 
 interface Props {
     t: (k: string) => string;
@@ -118,27 +129,30 @@ interface Props {
     onBack: () => void;
     /** Open the backup page (the stale-backup card's button). */
     onBackup?: () => void;
+    /** Open «حساب‌ها». */
+    onAccounts?: () => void;
     backup?: BackupApi;
+    /** Open with the "Add a person" sheet showing (the wizard's
+     *  "Add the first person"). */
+    openAdd?: boolean;
+}
+
+/** An address as pasted from a chat: spaces, line breaks and capitals
+ *  gone (D-13). The address is shown grouped ("daal1 qm3n 8v2k …"), so a
+ *  copy of what the person sees has spaces in it. */
+export function normalizeDaalAddress(s: string): string {
+    return s.replace(/\s+/g, '').toLowerCase();
 }
 
 // daal1… bech32 lower bound; we don't decode the bech32 here (the
 // Rust side does), but we sanity-check the HRP and length so paste
 // errors fail fast rather than going to a 30 s mgmt round-trip.
-function looksLikeDaalAddress(s: string): boolean {
-    const trimmed = s.trim().toLowerCase();
+export function looksLikeDaalAddress(s: string): boolean {
+    const trimmed = normalizeDaalAddress(s);
     if (!trimmed.startsWith('daal1')) return false;
     if (trimmed.length < 20) return false;
     // bech32 character set
     return /^[a-z0-9]+$/.test(trimmed);
-}
-
-function tsLabel(unix: number): string {
-    if (!unix) return '';
-    try {
-        return new Date(unix * 1000).toISOString().slice(0, 16).replace('T', ' ');
-    } catch {
-        return '';
-    }
 }
 
 function baseName(path: string): string {
@@ -211,8 +225,12 @@ export default function PublisherRecipientsPage({
     operatorId,
     onBack,
     onBackup,
+    onAccounts,
     backup = backupApi(),
+    openAdd = false,
 }: Props) {
+    const locale = useLocale();
+    const confirm = useConfirm();
     const [operator, setOperator] = useState<OperatorSummary | null>(null);
     // D1: after adding, removing or renewing people the backup no longer
     // has the latest; asked after each of those, shown only when stale.
@@ -245,16 +263,26 @@ export default function PublisherRecipientsPage({
     const explain = useCallback((e: unknown) => explainFailure(t, e), [t]);
     const action = useAction(explain);
 
-    // Sections that are one line until tapped.
-    const [dangerOpen, setDangerOpen] = useState(false);
-    const [detailsOpen, setDetailsOpen] = useState(false);
+    // The send sheet (C7.2a): one person's file, or the everyone file.
+    const [sendFor, setSendFor] = useState<PersonRow | 'everyone' | null>(null);
+    // "File for everyone" (C7.4) and "Keep files working" (C7.5).
+    const [everyoneOpen, setEveryoneOpen] = useState(false);
+    // Network test: "Use as test relay" and the report opener.
+    const [testRelayOpen, setTestRelayOpen] = useState(false);
+    const [reportOpen, setReportOpen] = useState(false);
+    const [keepOpen, setKeepOpen] = useState(false);
+    // A refresh address is set up and its last publish failed.
+    const [keepFailing, setKeepFailing] = useState(false);
+    useBack(keepOpen, () => setKeepOpen(false), 'page');
 
     // Header rename
     const [renaming, setRenaming] = useState(false);
     const [draftName, setDraftName] = useState('');
 
     // Add-sheet state — address + display name only. No PIN, no helper IP.
-    const [showAdd, setShowAdd] = useState(false);
+    const [showAdd, setShowAdd] = useState(openAdd);
+    /** The person just added: the sheet then offers "Send their file". */
+    const [added, setAdded] = useState<RecipientSummary | null>(null);
     const [addAddress, setAddAddress] = useState('');
     const [addDisplayName, setAddDisplayName] = useState('');
     const [addBusy, setAddBusy] = useState(false);
@@ -276,7 +304,7 @@ export default function PublisherRecipientsPage({
      *  anyone already holding a shared pack — see onBuildShared. */
     const [confirmBuild, setConfirmBuild] = useState(false);
     /** Which file the QR sheet streams, and the line that says so. */
-    const [qrSend, setQrSend] = useState<{ artifact: PackArtifact; label?: string } | null>(null);
+    const [qrSend, setQrSend] = useState<{ artifact: PackArtifact; name?: string } | null>(null);
 
     // D3: the last health check of this relay.
     const [health, setHealth] = useState<RelayHealth | null>(null);
@@ -352,8 +380,10 @@ export default function PublisherRecipientsPage({
         try {
             const f = await Wizard.freshnessStatus(operatorId);
             setMirrorsInPack(f.mirrors_in_pack.length);
+            setKeepFailing(f.endpoints.some((e) => e.last_publish_at_unix > 0 && !e.last_publish_ok));
         } catch {
             setMirrorsInPack(0);
+            setKeepFailing(false);
         }
     }, [operatorId, t]);
 
@@ -578,7 +608,8 @@ export default function PublisherRecipientsPage({
         await action.run(
             'everyone:send',
             () => Wizard.shareInvite(operatorId, friendlyName),
-            { ok: t('pub.fb.send.ok'), fail: t('pub.fb.send.fail') },
+            // The share sheet itself is the answer: no toast on success.
+            { ok: null, fail: t('pub.fb.send.fail') },
         );
     }, [action.run, friendlyName, operatorId, t]);
 
@@ -675,7 +706,7 @@ export default function PublisherRecipientsPage({
             await action.run(
                 `send:${path}`,
                 () => Wizard.shareInviteSbpx(path, label),
-                { ok: t('pub.fb.send.ok'), fail: t('pub.fb.send.fail') },
+                { ok: null, fail: t('pub.fb.send.fail') },
             );
         },
         [action.run, t],
@@ -686,11 +717,11 @@ export default function PublisherRecipientsPage({
     /** D5: one person's own file as text. Only their phone can open it,
      *  and the note says so. */
     const onCopyPerson = useCallback(
-        async (r: RecipientSummary, label: string) => {
+        async (id: number, label: string) => {
             await action.run(
-                `copy:${r.id}`,
+                `copy:${id}`,
                 async () => {
-                    const text = await Wizard.copyPasteable(operatorId, recipientArtifact(r.id));
+                    const text = await Wizard.copyPasteable(operatorId, recipientArtifact(id));
                     await navigator.clipboard.writeText(text);
                 },
                 {
@@ -751,48 +782,52 @@ export default function PublisherRecipientsPage({
     // lacked was the other half: on success they simply closed. Each
     // one now says what it did.
 
+    const addName = addDisplayName.trim();
+    const addAddr = normalizeDaalAddress(addAddress);
+    const addReady = addName !== '' && looksLikeDaalAddress(addAddr);
+
     const onAddSubmit = useCallback(async () => {
-        if (!looksLikeDaalAddress(addAddress)) {
-            setAddError(t('pub.recipients.add.bad_address'));
+        if (!addReady) {
+            if (!looksLikeDaalAddress(addAddr)) setAddError(t('pub.recipients.add.bad_address'));
             return;
         }
         setAddBusy(true);
-        const added: { v: RecipientSummary | null } = { v: null };
+        const got: { v: RecipientSummary | null } = { v: null };
         const ok = await runMgmt(async () => {
-            const s = await Wizard.recipientProvision(
-                operatorId,
-                addAddress.trim(),
-                addDisplayName.trim(),
-            );
-            added.v = s;
+            const s = await Wizard.recipientProvision(operatorId, addAddr, addName);
+            got.v = s;
             setRecipients((prev) => [s, ...prev]);
         }, setAddError);
         setAddBusy(false);
         if (ok) {
             setAddAddress('');
             setAddDisplayName('');
-            setShowAdd(false);
+            // The sheet stays open on "{name} added" + "Send their file".
+            setAdded(got.v);
             await reloadArtifacts();
             void recheckBackup();
-            action.report(
-                'person:add',
-                'ok',
-                t('pub.fb.person_added').replace(
-                    '{name}',
-                    added.v ? personLabel(added.v) : '',
-                ),
-            );
         }
-    }, [
-        action.report,
-        addAddress,
-        addDisplayName,
-        operatorId,
-        recheckBackup,
-        reloadArtifacts,
-        runMgmt,
-        t,
-    ]);
+    }, [addAddr, addName, addReady, operatorId, recheckBackup, reloadArtifacts, runMgmt, t]);
+
+    /** "Paste" next to the address: the clipboard, else the field. */
+    const pasteAddress = useCallback(async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text && text.trim()) {
+                setAddAddress(normalizeDaalAddress(text));
+                setAddError(null);
+                return;
+            }
+        } catch {
+            /* the web view would not read the clipboard: the field below */
+        }
+        setAddError(t('pub.person.add.paste_failed'));
+        try {
+            (document.querySelector('[data-field="person-address"]') as HTMLInputElement | null)?.focus();
+        } catch {
+            /* focus is a nicety */
+        }
+    }, [t]);
 
     const onRevokeConfirm = useCallback(async () => {
         if (!confirmRevoke) return;
@@ -972,7 +1007,13 @@ export default function PublisherRecipientsPage({
         // relay this device publishes, and there is no escrow), but it
         // is not one to make on an unannounced single tap.
         if (action.busy !== null) return;
-        if (!window.confirm(t('pub.danger.recovery.confirm'))) return;
+        const yes = await confirm.ask({
+            title: t('pub.danger.recovery.confirm.title'),
+            body: t('pub.danger.recovery.confirm'),
+            confirmLabel: t('pub.danger.recovery.confirm.go'),
+            cancelLabel: t('common.cancel'),
+        });
+        if (!yes) return;
         await action.run(
             'danger:recovery',
             () =>
@@ -985,7 +1026,7 @@ export default function PublisherRecipientsPage({
                 fail: t('pub.fb.recovery.fail'),
             },
         );
-    }, [action.busy, action.run, friendlyName, operatorId, t]);
+    }, [action.busy, action.run, confirm, friendlyName, operatorId, t]);
 
     /** What the teardown sheet is about to destroy. Detail can be
      *  rendered before the summary lands, so fall back to the id — the
@@ -1005,7 +1046,10 @@ export default function PublisherRecipientsPage({
 
     // ---- render --------------------------------------------------------
 
-    const badge = operator ? relayBadge(operator.status, checkedWorking(health, nowUnix())) : null;
+    // One badge, from the last check, else from the recorded state.
+    const look = operator ? relayLook(operator, health) : null;
+    const headerLook =
+        look && !(provisioned && (!look.recordedOnly || look.labelKey === 'pub.relays.status.not_checked')) ? look : null;
     // People waiting for an answer after a restore are a question, not
     // "missing on the relay": neither the health line nor the banner may
     // invite a renew on their account.
@@ -1015,36 +1059,103 @@ export default function PublisherRecipientsPage({
         ? rotateTlsVerdict(rotateTlsDone, mirrorsInPack)
         : null;
     const relayGone = operator?.status === 'rebuild_failed';
+    const askRestore = provisioned && settleCard(settle.unsettled) !== 'hidden';
+    const backupState = backupCard(backupStatus);
+    const backupStale = backupState === 'stale' || backupState === 'words';
+
+    /** One notice at most (spec C7.2 §2), in this order. */
+    // The restore question outranks renew: until it is answered nobody
+    // gets a new file, and renewing would bring back someone the old
+    // phone may have removed (PB-1).
+    const notice: 'gone' | 'renew' | 'restore' | 'ip' | 'backup' | 'keep' | null = relayGone
+        ? 'gone'
+        : askRestore
+          ? 'restore'
+          : showRenew
+            ? 'renew'
+            : ipRepair
+              ? 'ip'
+              : backupStale && onBackup
+                ? 'backup'
+                : keepFailing
+                  ? 'keep'
+                  : null;
+
+    const everyoneExists = sharedArtifact?.exists === true;
+
+    const relayMenu: MenuItem[] = [
+        {
+            id: 'rename',
+            label: t('pub.more.rename'),
+            icon: 'edit',
+            disabled: action.busy !== null,
+            onSelect: () => {
+                setDraftName(operator?.nickname ?? '');
+                setRenaming(true);
+            },
+        },
+        { id: 'everyone', label: t('pub.more.everyone'), icon: 'people', onSelect: () => setEveryoneOpen(true) },
+        { id: 'keep', label: t('pub.more.keep'), icon: 'refresh', onSelect: () => setKeepOpen(true) },
+        ...(provisioned
+            ? [{ id: 'test-relay', label: t('pub.more.testRelay'), icon: 'signal' as const, onSelect: () => setTestRelayOpen(true) }]
+            : []),
+        ...(onBackup ? [{ id: 'backup', label: t('pub.more.backup'), icon: 'shield' as const, onSelect: onBackup }] : []),
+        ...(onAccounts ? [{ id: 'accounts', label: t('pub.accounts.title'), icon: 'key' as const, onSelect: onAccounts }] : []),
+    ];
+
+    const scrollToQuestion = () => {
+        try {
+            document.querySelector('[data-testid="restore-question"]')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+        } catch {
+            /* scrolling is a nicety */
+        }
+    };
+
+    /** The ways out for one person's file (send sheet). */
+    const personWays = (p: PersonRow) => {
+        const id = p.recipient?.id ?? p.file?.recipient_id ?? null;
+        const path = p.file?.path ?? '';
+        return {
+            share: () => void onResendSbpx(path, p.label),
+            qr: () => {
+                if (id != null) setQrSend({ artifact: recipientArtifact(id), name: p.label });
+            },
+            copy: () => {
+                if (id != null) void onCopyPerson(id, p.label);
+            },
+            save: () => void onSaveSbpx(path, p.label),
+        };
+    };
+    const everyoneWays = {
+        share: () => void onShareShared(),
+        qr: () => setQrSend({ artifact: 'shared' as PackArtifact }),
+        copy: () => void onCopyPasteable(),
+        save: () => void onSaveShared(),
+    };
+
+    // "Keep files working (advanced)": a sub-page of the relay (C7.5).
+    if (keepOpen) {
+        return (
+            <PageColumn>
+                <PageHeader title={t('pub.keep.title')} back={{ label: title, onClick: () => setKeepOpen(false) }} />
+                <FreshnessPanel t={t} operatorId={operatorId} reloadToken={freshTick} action={action} />
+                <ActionToast t={t} outcome={action.outcome} onDismiss={action.dismiss} />
+            </PageColumn>
+        );
+    }
 
     return (
-        <div style={{ padding: '12px 16px 24px 16px', display: 'grid', gap: 20 }}>
-            {/* D1: shown only after a change made the backup out of date. */}
-            <BackupCard t={t} status={backupStatus} onBackup={onBackup} onlyWhenStale />
-
+        <PageColumn gap={20}>
             {/* ---------------- Header ---------------- */}
             <div style={{ display: 'grid', gap: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {/* The system Back does the same (PublisherPage
-                        registers this page with lib/backStack.ts); the
-                        button stays because a gesture is not obvious. */}
-                    <Button variant="ghost" onClick={onBack}>
-                        {t('pub.relay.back')}
-                    </Button>
-                    {/* What the app last recorded about this relay, in
-                        words — never the raw state token, and never
-                        green: nothing here has checked that it answers. */}
-                    {badge && (
-                        <StatusPill tone={badge.tone}>{t(badge.labelKey)}</StatusPill>
-                    )}
-                </div>
-
                 {renaming ? (
-                    <div style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ display: 'grid', gap: 8, paddingBlockStart: 8 }}>
                         <Input
                             autoFocus
                             value={draftName}
                             onChange={(e) => setDraftName(e.target.value)}
                             placeholder={t('pub.relays.rename.placeholder')}
+                            aria-label={t('pub.more.rename')}
                             onKeyDown={(e) => {
                                 if (e.key === 'Enter') void commitRename();
                                 else if (e.key === 'Escape') setRenaming(false);
@@ -1056,6 +1167,7 @@ export default function PublisherRecipientsPage({
                                 k="rename"
                                 busyLabel={t('pub.fb.saving')}
                                 onClick={() => void commitRename()}
+                                dataButton="rename-save"
                             >
                                 {t('common.save')}
                             </ActionButton>
@@ -1069,96 +1181,113 @@ export default function PublisherRecipientsPage({
                         </div>
                     </div>
                 ) : (
-                    <div
-                        style={{
-                            display: 'flex',
-                            alignItems: 'baseline',
-                            gap: 10,
-                            flexWrap: 'wrap',
-                        }}
-                    >
-                        <h2
-                            style={{
-                                fontFamily: 'var(--font-display)',
-                                fontSize: 24,
-                                fontWeight: 500,
-                                margin: 0,
-                                color: 'var(--fg)',
-                            }}
-                        >
-                            {title}
-                        </h2>
-                        <Button
-                            variant="ghost"
-                            onClick={() => {
-                                setDraftName(operator?.nickname ?? '');
-                                setRenaming(true);
-                            }}
-                        >
-                            {t('pub.relays.rename')}
-                        </Button>
-                    </div>
+                    <PageHeader
+                        title={title}
+                        // The system Back does the same (PublisherPage
+                        // registers this page with lib/backStack.ts).
+                        back={{ label: t('pub.relays.title'), onClick: onBack }}
+                        // One badge per screen for one fact: while the health
+                        // card is on the page it carries "Working / Not
+                        // working / Not checked"; the header keeps only the
+                        // states the card does not show (Unfinished, Server
+                        // gone, Retired).
+                        badge={headerLook ? <RelayBadge t={t} look={headerLook} pulse={false} /> : undefined}
+                        actions={<OverflowMenu label={t('ui.more')} title={title} items={relayMenu} dataButton="relay-more" />}
+                    />
                 )}
 
                 {/* A page that could not load says so here, in plain
                     words with the relay's own words under them. Results
-                    of things the person DID are in the banner at the
-                    bottom of the screen, not here: this spot scrolls
-                    away. */}
+                    of things the person DID are in the toast. */}
                 {error && <div style={ERR_BLOCK}>{error}</div>}
+            </div>
 
-                {/* Last-resort helper-IP repair. Never a gate: by the time
-                    this renders, the action has already tried a fresh
-                    detection and one silent retry. */}
-                {ipRepair && (
-                    <Card>
-                        <div style={{ display: 'grid', gap: 8 }}>
-                            <div style={{ fontSize: 13, color: 'var(--fg)' }}>
-                                {t('pub.helper_ip.title')}
-                            </div>
-                            <div style={LABEL}>{t('pub.helper_ip.body')}</div>
+            {/* ---------------- One notice at most ---------------- */}
+
+            {/* THE RELAY IS GONE. Never folded away: every section below
+                offers an action against a server that no longer exists. */}
+            {notice === 'gone' && <RelayGonePanel t={t} operatorId={operatorId} />}
+
+            {/* D2: the server is new, so every file handed out stopped
+                working. One action renews them all. */}
+            {notice === 'renew' && (
+                <RenewBanner
+                    t={t}
+                    text={renewBannerText(operator, healthShown, justRebuilt)}
+                    onRenew={() => setRenewOpen(true)}
+                />
+            )}
+
+            {/* PB-1: restored from a backup, and the relay no longer knows
+                some people on the list. Asked by name, nothing chosen. */}
+            {notice === 'restore' && (
+                <RestoreQuestionCard
+                    t={t}
+                    unsettled={settle.unsettled}
+                    recipients={recipients}
+                    action={action}
+                    onAnswer={(p, keep) => void onSettleAnswer(p, keep)}
+                    onCheckAgain={() => void runHealth(true)}
+                />
+            )}
+
+            {/* Last-resort helper-IP repair. Never a gate: by the time
+                this renders, the action has already tried a fresh
+                detection and one silent retry. */}
+            {notice === 'ip' && ipRepair && (
+                <Notice
+                    tone="warn"
+                    testId="ip-repair"
+                    title={t('pub.helper_ip.title')}
+                    line={t('pub.helper_ip.body')}
+                    action={
+                        <div style={{ display: 'grid', gap: 8, width: '100%' }}>
                             <Input
                                 value={ipDraft}
                                 onChange={(e) => setIpDraft(e.target.value)}
                                 placeholder={t('pub.helper_ip.placeholder')}
                                 style={{ fontFamily: 'var(--font-mono)' }}
+                                dir="ltr"
                             />
                             <div style={{ display: 'flex', gap: 8 }}>
-                                <Button
-                                    onClick={() => void onIpRetry()}
-                                    disabled={ipBusy}
-                                >
-                                    {ipBusy
-                                        ? t('pub.helper_ip.retrying')
-                                        : t('pub.helper_ip.retry')}
+                                <Button onClick={() => void onIpRetry()} disabled={ipBusy} dataButton="ip-retry">
+                                    {ipBusy ? t('pub.helper_ip.retrying') : t('pub.helper_ip.retry')}
                                 </Button>
-                                <Button
-                                    variant="ghost"
-                                    onClick={() => setIpRepair(null)}
-                                    disabled={ipBusy}
-                                >
+                                <Button variant="ghost" onClick={() => setIpRepair(null)} disabled={ipBusy}>
                                     {t('common.cancel')}
                                 </Button>
                             </div>
                         </div>
-                    </Card>
-                )}
-            </div>
+                    }
+                />
+            )}
 
-            {/* THE RELAY IS GONE. Above everything, and never folded
-                away: every section below offers an action against a
-                server that no longer exists. Set by a rebuild whose
-                delete leg succeeded and whose build leg did not — the
-                one failure on this ladder with no way back. */}
-            {relayGone && <RelayGonePanel t={t} operatorId={operatorId} />}
+            {/* D1: a change here made the backup out of date. */}
+            {notice === 'backup' && onBackup && (
+                <Notice
+                    tone="warn"
+                    testId="backup-card"
+                    title={t(backupState === 'words' ? 'pub.backup.badge.stale' : 'pub.backup.badge.stale')}
+                    line={t(backupState === 'words' ? 'pub.backup.card.words' : 'pub.backup.card.stale')}
+                    action={
+                        <Button size="compact" variant="secondary" onClick={onBackup} dataButton="backup">
+                            {t('pub.more.backup')}
+                        </Button>
+                    }
+                />
+            )}
 
-            {/* D2: the server is new, so every file handed out stopped
-                working. One action renews them all. */}
-            {showRenew && (
-                <RenewBanner
-                    t={t}
-                    text={renewBannerText(operator, healthShown, justRebuilt)}
-                    onRenew={() => setRenewOpen(true)}
+            {/* C7.5: only when a refresh address IS set up and failed. */}
+            {notice === 'keep' && (
+                <Notice
+                    tone="warn"
+                    testId="keep-failing"
+                    title={t('pub.keep.failing')}
+                    action={
+                        <Button size="compact" variant="secondary" onClick={() => setKeepOpen(true)} dataButton="keep-open">
+                            {t('pub.keep.open')}
+                        </Button>
+                    }
                 />
             )}
 
@@ -1171,26 +1300,14 @@ export default function PublisherRecipientsPage({
                     failed={healthFailed}
                     now={nowUnix()}
                     onCheck={() => void runHealth(true)}
-                    onRenew={() => setRenewOpen(true)}
+                    onRenew={notice === 'renew' ? undefined : () => setRenewOpen(true)}
                 />
             )}
 
-            {/* PB-1: restored from a backup, and the relay no longer knows
-                some people on the list. Asked by name, nothing chosen. */}
-            {provisioned && (
-                <RestoreQuestionCard
-                    t={t}
-                    unsettled={settle.unsettled}
-                    recipients={recipients}
-                    action={action}
-                    onAnswer={(p, keep) => void onSettleAnswer(p, keep)}
-                    onCheckAgain={() => void runHealth(true)}
-                />
-            )}
-
-            {/* ---------------- 1. People ---------------- */}
+            {/* ---------------- People ---------------- */}
             <PeopleSection
                 waiting={waitingSet}
+                onWaitingTap={scrollToQuestion}
                 relayOnly={relayOnlyRows(health, recipients)}
                 onRemoveRelayOnly={(u) => {
                     setRelayOnlyError(null);
@@ -1202,22 +1319,13 @@ export default function PublisherRecipientsPage({
                 people={people}
                 onAdd={() => {
                     setAddError(null);
+                    setAdded(null);
                     setShowAdd(true);
                 }}
-                onSend={(path, label) => void onResendSbpx(path, label)}
-                onSave={(path, label) => void onSaveSbpx(path, label)}
-                onQr={(r, label) =>
-                    setQrSend({
-                        artifact: recipientArtifact(r.id),
-                        label: t('pub.person.qr.what').replace(/\{name\}/g, label),
-                    })
-                }
-                onCopy={(r, label) => void onCopyPerson(r, label)}
+                onSend={(p) => setSendFor(p)}
                 onRemake={(r) => void onRebuildSbpx(r)}
-                // Re-key this one person. It belongs on their row
-                // because that is its whole blast radius — one file
-                // dies, nobody else notices. The relay-wide change
-                // lives in the danger zone and is never offered here.
+                // Re-key this one person. Its whole blast radius is one
+                // file; the relay-wide change lives in the danger zone.
                 onReplace={(r) => {
                     setRotateCredsError(null);
                     setConfirmRotateCreds(r);
@@ -1227,56 +1335,148 @@ export default function PublisherRecipientsPage({
                     setConfirmRevoke({ recipient: r });
                 }}
                 // Once access is removed (the relay has forgotten them)
-                // the greyed-out row can be cleared from the list here.
+                // the row can be cleared from the list.
                 onRemoveFromList={(r) => {
                     setRemoveError(null);
                     setConfirmRemove({ recipient: r });
                 }}
+                everyone={
+                    everyoneExists
+                        ? { onSend: () => setSendFor('everyone'), onAbout: () => setEveryoneOpen(true) }
+                        : null
+                }
             />
 
-            {/* ---------------- 2. One file for everyone ---------------- */}
-            <EveryoneFileSection
-                t={t}
-                action={action}
-                file={sharedArtifact}
-                onSend={() => void onShareShared()}
-                onSave={() => void onSaveShared()}
-                // The offline lane: the same file, travelling as light
-                // instead of as a file, for the days when sending a
-                // file is the thing that cannot happen.
-                onQr={() => setQrSend({ artifact: 'shared' })}
-                onCopy={() => void onCopyPasteable()}
-                onMake={() => setConfirmBuild(true)}
-                onReplace={() => setConfirmRotate(true)}
-            />
+            {/* ---------------- More protection ----------------
+                Three switches that keep people connecting when the
+                relay is blocked. All off by default. */}
+            {provisioned && <AddonsSection t={t} operatorId={operatorId} />}
 
-            {/* ---------------- 3. Keep it working ---------------- */}
-            <FreshnessPanel
-                t={t}
-                operatorId={operatorId}
-                reloadToken={freshTick}
-                action={action}
-            />
+            {/* ---------------- Details ----------------
+                What a maintainer asks about and a family member never
+                does. */}
+            <Disclosure variant="card" summary={t('pub.details.title')} dataButton="relay-details">
+                <div>
+                    <ListRow
+                        title={t('pub.details.server')}
+                        subtitle={
+                            <span style={MONO} dir="ltr">
+                                {operator
+                                    ? [
+                                          operator.public_ip ||
+                                              operator.public_ipv6 ||
+                                              t('pub.relays.no_ip'),
+                                          [operator.provider, operator.server_type, operator.region]
+                                              .filter(Boolean)
+                                              .join(sep()),
+                                      ]
+                                          .filter(Boolean)
+                                          .join(' — ')
+                                    : ''}
+                            </span>
+                        }
+                        wrapSubtitle
+                    />
+                    {operator && (
+                        <ListRow
+                            title={t('pub.details.created')}
+                            subtitle={[
+                                formatDate(locale, operator.last_provisioned_at_unix || operator.created_at_unix),
+                                operator.has_signed_sbp && operator.signed_sbp_at_unix > 0
+                                    ? t('pub.details.built').replace('{date}', formatDate(locale, operator.signed_sbp_at_unix))
+                                    : '',
+                            ]
+                                .filter(Boolean)
+                                .join(sep())}
+                            wrapSubtitle
+                        />
+                    )}
+                    {operator && (
+                        <ListRow
+                            title={t('pub.details.people')}
+                            subtitle={t('pub.details.people.line')
+                                .replace('{live}', String(operator.live_recipient_count))
+                                .replace('{total}', String(operator.total_recipient_count))}
+                        />
+                    )}
+                    {/* The custody tier, stated plainly. device_custody.rs
+                        is explicit that these strings carry the security
+                        promise, so we never print the hardware line on a
+                        device that fell back to a weaker tier. */}
+                    {custody && (
+                        <ListRow
+                            title={t('pub.details.key')}
+                            subtitle={t(custodyLabelKey(custody.level))}
+                            wrapSubtitle
+                        />
+                    )}
+                    {operator?.publisher_pub_hex && (
+                        <ListRow
+                            title={t('pub.details.fingerprint')}
+                            subtitle={
+                                <span style={MONO} dir="ltr">
+                                    {operator.publisher_pub_hex}
+                                </span>
+                            }
+                            wrapSubtitle
+                        />
+                    )}
+                    {rawArtifact?.exists && (
+                        <ListRow
+                            title={t('pub.details.signed_file')}
+                            subtitle={
+                                <span style={{ display: 'grid', gap: 3 }}>
+                                    <span>{t('pub.details.signed_file.line')}</span>
+                                    <span>
+                                        <span style={MONO} dir="ltr">
+                                            {baseName(rawArtifact.path)}
+                                        </span>
+                                        {rawArtifact.modified_at_unix > 0 && (
+                                            <>
+                                                {sep()}
+                                                {formatDate(locale, rawArtifact.modified_at_unix, 'dayTime')}
+                                            </>
+                                        )}
+                                    </span>
+                                </span>
+                            }
+                            wrapSubtitle
+                        />
+                    )}
+                    <ListRow
+                        title={t('pub.details.compare')}
+                        subtitle={t('pub.details.compare.line')}
+                        stack
+                        trailing={
+                            <ActionButton
+                                action={action}
+                                k="details:compare"
+                                busyLabel={t('pub.fb.checking')}
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => void onSync()}
+                                dataButton="compare"
+                            >
+                                {t('pub.details.compare.action')}
+                            </ActionButton>
+                        }
+                        last
+                    />
+                </div>
+            </Disclosure>
 
-            {/* ---------------- 4. Danger zone ---------------- */}
-            <Collapsible
-                title={t('pub.danger.title')}
-                summary={t('pub.danger.line')}
-                open={dangerOpen}
-                onToggle={() => setDangerOpen((v) => !v)}
+            {/* ---------------- Danger zone ---------------- */}
+            <Disclosure
+                variant="card"
+                tone="danger"
+                icon="shieldAlert"
+                summary={t('pub.danger.title')}
+                dataButton="danger-zone"
             >
-                <Card>
-                    {/* Wave 6. The rotation recommender finally has a
-                        caller, and this is where it belongs: above the
-                        rungs, because it is the question you ask before
-                        you choose one, and inside the danger zone so it
-                        is read in the same breath as the warnings.
-
-                        It never rotates anything. Three of the six rungs
-                        destroy the server and rebuild it, and
-                        provisioning has no rollback — advice with an
-                        action attached is how a relay gets rebuilt by
-                        accident. */}
+                <div>
+                    {/* The rotation recommender: above the rungs, because it
+                        is the question you ask before you choose one. It
+                        never rotates anything. */}
                     <RotationAdvice
                         t={t}
                         operatorId={operatorId}
@@ -1285,6 +1485,8 @@ export default function PublisherRecipientsPage({
                     <ListRow
                         title={t('pub.danger.recovery.title')}
                         subtitle={t('pub.danger.recovery.body')}
+                        stack
+                        wrapSubtitle
                         trailing={
                             <ActionButton
                                 action={action}
@@ -1292,41 +1494,37 @@ export default function PublisherRecipientsPage({
                                 busyLabel={t('pub.fb.saving')}
                                 variant="secondary"
                                 onClick={() => void onSaveRecoveryKey()}
+                                dataButton="recovery-key"
                             >
                                 {t('pub.danger.recovery.action')}
                             </ActionButton>
                         }
                     />
-                    {/* Wave 3 Step 7 (L2). It is relay-wide, which is
-                        why it sits here and not next to the
-                        per-recipient re-key — but it does NOT invalidate
-                        every file: it costs the one route that carries
-                        the cover host, and the app signs the relay's
-                        file again and publishes the refresh note
-                        itself. The result panel says who, if anyone,
-                        needs a new file. */}
+                    {/* Relay-wide (L2). It does NOT invalidate every file:
+                        it costs the one route that carries the cover host. */}
                     <ListRow
                         title={t('pub.danger.rotate_tls.title')}
                         subtitle={t('pub.danger.rotate_tls.body')}
+                        stack
+                        wrapSubtitle
                         trailing={
                             <Button
                                 variant="danger"
+                                leading="refresh"
                                 onClick={(e) => {
                                     e.stopPropagation();
                                     setRotateTlsError(null);
                                     setConfirmRotateTls(true);
                                 }}
                                 disabled={dangerBusy || rotateTlsBusy}
+                                dataButton="rotate-tls"
                             >
                                 {t('pub.danger.rotate_tls.action')}
                             </Button>
                         }
                     />
-                    {/* Wave 3 Step 9 (L3). Placed ABOVE decommission and
-                        below the disguise change, which is the order of
-                        increasing blast radius: this one keeps the
-                        server, its keys and everyone's credentials —
-                        only the address people dial moves. */}
+                    {/* L3: keeps the server, its keys and everyone's
+                        credentials — only the address people dial moves. */}
                     <AddressSwap
                         t={t}
                         operatorId={operatorId}
@@ -1336,12 +1534,6 @@ export default function PublisherRecipientsPage({
                         mirrorsInPack={mirrorsInPack}
                         liveRecipients={operator?.live_recipient_count ?? 0}
                         disabled={dangerBusy || rotateTlsBusy}
-                        // L3 is a mgmt-plane call now (it tells the
-                        // relay to configure the new address on its
-                        // interface), so it goes through the same
-                        // wrapper as every other box-touching action:
-                        // helper-IP repair on a stale allowlist, and
-                        // translated copy for a relay too old to bind.
                         runMgmt={runMgmt}
                         onDone={() => {
                             void reloadOperator();
@@ -1349,21 +1541,8 @@ export default function PublisherRecipientsPage({
                             setFreshTick((n) => n + 1);
                         }}
                     />
-                    {/* Wave 6 (L4, L5, L6). Below the address swap and
-                        above decommission, which keeps the whole card
-                        in one order: increasing blast radius. L3 keeps
-                        the server and everyone's keys; these three
-                        delete the server, so every file ever handed out
-                        dies and only the operator can repair it. Below
-                        them sits the one action that ends the relay for
-                        good.
-
-                        L5 is offered only where there is somewhere to
-                        go: the sheet's own destination list is the
-                        providers with a live adapter minus the one this
-                        relay is already on, and the row is shown
-                        disabled with a reason when that list is empty
-                        (rebuildPlan.ts, REBUILD_PROVIDERS). */}
+                    {/* L4–L6 delete the server; below them, the one action
+                        that ends the relay for good. */}
                     <RelayRebuild
                         t={t}
                         operatorId={operatorId}
@@ -1392,6 +1571,8 @@ export default function PublisherRecipientsPage({
                     <ListRow
                         title={t('pub.danger.decommission.title')}
                         subtitle={t('pub.danger.decommission.body')}
+                        stack
+                        wrapSubtitle
                         trailing={
                             <Button
                                 variant="danger"
@@ -1400,97 +1581,15 @@ export default function PublisherRecipientsPage({
                                     setConfirmDestroy(true);
                                 }}
                                 disabled={dangerBusy}
+                                dataButton="relay-remove"
                             >
                                 {t('pub.relays.decommission')}
                             </Button>
                         }
                         last
                     />
-                </Card>
-            </Collapsible>
-
-            {/* ---------------- Details ----------------
-                What a maintainer asks about and a family member never
-                does. The signed bundle with nobody's access in it used
-                to sit in the files list between the everyone file and
-                the first person's, labelled "not connectable — internal
-                build artifact": true, and of no use to the person
-                reading it. */}
-            <Collapsible
-                title={t('pub.details.title')}
-                summary={t('pub.details.line')}
-                open={detailsOpen}
-                onToggle={() => setDetailsOpen((v) => !v)}
-            >
-                <Card>
-                    <ListRow
-                        title={t('pub.details.server')}
-                        subtitle={
-                            <span style={MONO} dir="ltr">
-                                {operator
-                                    ? [
-                                          operator.public_ip ||
-                                              operator.public_ipv6 ||
-                                              t('pub.relays.no_ip'),
-                                          operator.server_type,
-                                          operator.region,
-                                      ]
-                                          .filter(Boolean)
-                                          .join(' · ')
-                                    : ''}
-                            </span>
-                        }
-                    />
-                    {/* The custody tier, stated plainly. device_custody.rs
-                        is explicit that these strings carry the security
-                        promise, so we never print the hardware line on a
-                        device that fell back to a weaker tier. */}
-                    {custody && (
-                        <ListRow
-                            title={t('pub.details.key')}
-                            subtitle={t(custodyLabelKey(custody.level))}
-                            stack
-                        />
-                    )}
-                    {rawArtifact?.exists && (
-                        <ListRow
-                            title={t('pub.details.signed_file')}
-                            subtitle={
-                                <span style={{ display: 'grid', gap: 3 }}>
-                                    <span>{t('pub.details.signed_file.line')}</span>
-                                    <span style={MONO} dir="ltr">
-                                        {baseName(rawArtifact.path)}
-                                        {rawArtifact.modified_at_unix > 0 && (
-                                            <>
-                                                {' · '}
-                                                {tsLabel(rawArtifact.modified_at_unix)}
-                                            </>
-                                        )}
-                                    </span>
-                                </span>
-                            }
-                            stack
-                        />
-                    )}
-                    <ListRow
-                        title={t('pub.details.compare')}
-                        subtitle={t('pub.details.compare.line')}
-                        trailing={
-                            <ActionButton
-                                action={action}
-                                k="details:compare"
-                                busyLabel={t('pub.fb.checking')}
-                                variant="secondary"
-                                size="sm"
-                                onClick={() => void onSync()}
-                            >
-                                {t('pub.details.compare.action')}
-                            </ActionButton>
-                        }
-                        last
-                    />
-                </Card>
-            </Collapsible>
+                </div>
+            </Disclosure>
 
             {/* The answer to every tap. Pinned to the screen, above any
                 open sheet, so it is seen wherever the page is scrolled. */}
@@ -1500,71 +1599,164 @@ export default function PublisherRecipientsPage({
 
             {showAdd && (
                 <Sheet
-                    title={t('pub.recipients.add.title')}
+                    title={added ? undefined : t('pub.recipients.add.title')}
                     onClose={() => {
-                        if (!addBusy) setShowAdd(false);
+                        if (!addBusy) {
+                            setShowAdd(false);
+                            setAdded(null);
+                        }
                     }}
-                    width={520}
+                    width={480}
                     footer={
-                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                        added ? undefined : (
                             <Button
-                                variant="ghost"
-                                onClick={() => setShowAdd(false)}
-                                disabled={addBusy}
+                                onClick={() => void onAddSubmit()}
+                                disabled={addBusy || !addReady}
+                                dataButton="add-submit"
                             >
-                                {t('common.cancel')}
-                            </Button>
-                            <Button onClick={() => void onAddSubmit()} disabled={addBusy}>
                                 {addBusy
                                     ? `${t('pub.recipients.adding')} (${addElapsed}s)`
                                     : t('pub.recipients.add.submit')}
                             </Button>
-                        </span>
+                        )
                     }
                 >
-                    <div style={{ display: 'grid', gap: 10 }}>
-                        <label style={LABEL}>
-                            {t('pub.recipients.add.address')}
-                        </label>
-                        <Input
-                            value={addAddress}
-                            onChange={(e) => setAddAddress(e.target.value)}
-                            placeholder="daal1…"
-                            style={{ fontFamily: 'var(--font-mono)' }}
-                        />
-                        <label style={LABEL}>
-                            {t('pub.recipients.add.display_name')}
-                        </label>
-                        <Input
-                            value={addDisplayName}
-                            onChange={(e) => setAddDisplayName(e.target.value)}
-                        />
-                        {/* While the add is in flight, spell out the stages
-                            so the user knows the app is alive and roughly
-                            how long the ~30 s round-trip has to go. */}
-                        {addBusy && (
-                            <div
-                                style={{
-                                    fontSize: 11,
-                                    color: 'var(--muted)',
-                                    fontFamily: 'var(--font-mono)',
-                                    lineHeight: 1.5,
-                                }}
-                            >
-                                {t('pub.recipients.adding_detail')}
+                    {added ? (
+                        <div
+                            data-testid="person-added"
+                            style={{ display: 'grid', gap: 12, justifyItems: 'center', textAlign: 'center', padding: '8px 0' }}
+                        >
+                            <StateIcon state="ok" size={48} />
+                            <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, color: 'var(--fg)' }}>
+                                {t('pub.person.added').replace('{name}', personLabel(added))}
                             </div>
-                        )}
-                        {addError && (
-                            <>
-                                <div style={ERR_BLOCK}>{addError}</div>
-                            </>
-                        )}
-                        <div style={MONO}>
-                            {t('pub.artifacts.for').replace('{relay}', title)}
+                            <div style={{ display: 'grid', gap: 4, justifyItems: 'center' }}>
+                                <Button
+                                    leading="share"
+                                    dataButton="send-their-file"
+                                    onClick={() => {
+                                        const p = people.find((x) => x.recipient?.id === added.id) ?? null;
+                                        setShowAdd(false);
+                                        setAdded(null);
+                                        if (p && personStateOf(p) === 'ready') setSendFor(p);
+                                        else if (p?.recipient) void onRebuildSbpx(p.recipient);
+                                    }}
+                                >
+                                    {t('pub.person.send_their')}
+                                </Button>
+                                <Button
+                                    variant="link"
+                                    dataButton="add-later"
+                                    onClick={() => {
+                                        setShowAdd(false);
+                                        setAdded(null);
+                                    }}
+                                >
+                                    {t('pub.person.later')}
+                                </Button>
+                            </div>
                         </div>
-                    </div>
+                    ) : (
+                        <div style={{ display: 'grid', gap: 12 }}>
+                            <label style={{ display: 'grid', gap: 6 }}>
+                                <span style={LABEL}>{t('pub.person.add.name')}</span>
+                                <Input
+                                    autoFocus
+                                    data-field="person-name"
+                                    dir="auto"
+                                    value={addDisplayName}
+                                    onChange={(e) => setAddDisplayName(e.target.value)}
+                                    disabled={addBusy}
+                                />
+                            </label>
+                            <label style={{ display: 'grid', gap: 6 }}>
+                                <span style={LABEL}>{t('pub.recipients.add.address')}</span>
+                                <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                    <Input
+                                        data-field="person-address"
+                                        value={addAddress}
+                                        onChange={(e) => {
+                                            setAddAddress(e.target.value);
+                                            setAddError(null);
+                                        }}
+                                        onBlur={() => setAddAddress((a) => normalizeDaalAddress(a))}
+                                        placeholder="daal1…"
+                                        dir="ltr"
+                                        disabled={addBusy}
+                                        autoCapitalize="off"
+                                        autoCorrect="off"
+                                        spellCheck={false}
+                                        style={{ fontFamily: 'var(--font-mono)', flex: 1, minWidth: 0 }}
+                                    />
+                                    <Button
+                                        variant="secondary"
+                                        leading="paste"
+                                        onClick={(e) => {
+                                            e.preventDefault();
+                                            void pasteAddress();
+                                        }}
+                                        disabled={addBusy}
+                                        dataButton="paste-address"
+                                    >
+                                        {t('ui.paste')}
+                                    </Button>
+                                </span>
+                            </label>
+                            <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+                                {t('pub.person.add.where')}
+                            </div>
+                            {addAddress.trim() !== '' && !looksLikeDaalAddress(addAddress) && !addBusy && (
+                                <div style={{ fontSize: 13, color: 'var(--amber)', lineHeight: 1.5 }} data-testid="bad-address">
+                                    {t('pub.recipients.add.bad_address')}
+                                </div>
+                            )}
+                            {/* While the add is in flight, say that the app
+                                is alive: the round-trip takes ~30 s. */}
+                            {addBusy && (
+                                <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+                                    {t('pub.recipients.adding_detail')}
+                                </div>
+                            )}
+                            {addError && <div style={ERR_BLOCK}>{addError}</div>}
+                        </div>
+                    )}
                 </Sheet>
             )}
+
+            {testRelayOpen && (
+                <TestRelaySheet
+                    t={t}
+                    operatorId={operatorId}
+                    onClose={() => setTestRelayOpen(false)}
+                    onOpenReport={() => {
+                        setTestRelayOpen(false);
+                        setReportOpen(true);
+                    }}
+                    onChanged={() => {
+                        void reloadArtifacts();
+                        void recheckBackup();
+                    }}
+                />
+            )}
+
+            {reportOpen && <ReportViewer t={t} onClose={() => setReportOpen(false)} />}
+
+            {everyoneOpen && (
+                <EveryoneFileSheet
+                    t={t}
+                    action={action}
+                    file={sharedArtifact}
+                    onSend={() => {
+                        setEveryoneOpen(false);
+                        setSendFor('everyone');
+                    }}
+                    onMake={() => setConfirmBuild(true)}
+                    onReplace={() => setConfirmRotate(true)}
+                    onClose={() => setEveryoneOpen(false)}
+                />
+            )}
+
+            {confirm.node}
 
             {confirmRotate && (
                 <Sheet
@@ -1572,7 +1764,7 @@ export default function PublisherRecipientsPage({
                     onClose={() => {
                         if (action.busy === null) setConfirmRotate(false);
                     }}
-                    width={520}
+                    width={480}
                     footer={
                         <span style={{ display: 'inline-flex', gap: 8 }}>
                             <Button
@@ -1594,13 +1786,9 @@ export default function PublisherRecipientsPage({
                         </span>
                     }
                 >
-                    {/* Sharing the existing pack and rotating it are
-                        different acts with different blast radii; the old
-                        UI conflated them under one "Re-share relay"
-                        button. Rotating best-effort revokes and re-mints
-                        the shared r0 user, so every copy already handed
-                        out stops working. */}
-                    <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                    {/* Replacing re-mints the shared r0 user, so every copy
+                        already handed out stops working. */}
+                    <div style={{ fontSize: 14, color: 'var(--fg)', lineHeight: 1.55 }}>
                         {t('pub.artifacts.rotate.body')}
                     </div>
                 </Sheet>
@@ -1612,7 +1800,7 @@ export default function PublisherRecipientsPage({
                     onClose={() => {
                         if (action.busy === null) setConfirmBuild(false);
                     }}
-                    width={520}
+                    width={480}
                     footer={
                         <span style={{ display: 'inline-flex', gap: 8 }}>
                             <Button
@@ -1634,11 +1822,9 @@ export default function PublisherRecipientsPage({
                     }
                 >
                     {/* "The file is missing" and "nothing has been handed
-                        out" are not the same statement — the staging dir
-                        can be wiped while the family still holds working
-                        copies. Building re-mints r0 either way, so say
-                        what that costs before doing it. */}
-                    <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
+                        out" are not the same statement. Building re-mints
+                        r0 either way, so say what that costs first. */}
+                    <div style={{ fontSize: 14, color: 'var(--fg)', lineHeight: 1.55 }}>
                         {t('pub.artifacts.shared.build.body')}
                     </div>
                 </Sheet>
@@ -1646,11 +1832,11 @@ export default function PublisherRecipientsPage({
 
             {confirmRevoke && (
                 <Sheet
-                    title={t('pub.recipients.revoke.title')}
+                    title={t('pub.recipients.revoke.title').replace('{name}', personLabel(confirmRevoke.recipient))}
                     onClose={() => {
                         if (!revokeBusy) setConfirmRevoke(null);
                     }}
-                    width={520}
+                    width={480}
                     footer={
                         <span style={{ display: 'inline-flex', gap: 8 }}>
                             <Button
@@ -1664,6 +1850,7 @@ export default function PublisherRecipientsPage({
                                 variant="danger"
                                 onClick={() => void onRevokeConfirm()}
                                 disabled={revokeBusy}
+                                dataButton="revoke-confirm"
                             >
                                 {revokeBusy
                                     ? t('pub.recipients.revoking')
@@ -1673,14 +1860,12 @@ export default function PublisherRecipientsPage({
                     }
                 >
                     <div style={{ display: 'grid', gap: 10 }}>
-                        <div style={{ fontSize: 13, color: 'var(--fg)' }}>
+                        {/* MUST KEEP 8. */}
+                        <div style={{ fontSize: 14, color: 'var(--fg)', lineHeight: 1.55 }}>
                             {t('pub.recipients.revoke.body').replace(
                                 '{name}',
                                 personLabel(confirmRevoke.recipient),
                             )}
-                        </div>
-                        <div style={MONO}>
-                            {confirmRevoke.recipient.address_str}
                         </div>
                         {revokeError && (
                             <div style={ERR_BLOCK}>{revokeError}</div>
@@ -1695,7 +1880,7 @@ export default function PublisherRecipientsPage({
                     onClose={() => {
                         if (!removeBusy) setConfirmRemove(null);
                     }}
-                    width={520}
+                    width={480}
                     footer={
                         <span style={{ display: 'inline-flex', gap: 8 }}>
                             <Button
@@ -1718,14 +1903,11 @@ export default function PublisherRecipientsPage({
                     }
                 >
                     <div style={{ display: 'grid', gap: 10 }}>
-                        <div style={{ fontSize: 13, color: 'var(--fg)' }}>
+                        <div style={{ fontSize: 14, color: 'var(--fg)', lineHeight: 1.55 }}>
                             {t('pub.recipients.remove.body').replace(
                                 '{name}',
                                 personLabel(confirmRemove.recipient),
                             )}
-                        </div>
-                        <div style={MONO}>
-                            {confirmRemove.recipient.address_str}
                         </div>
                         {removeError && (
                             <div style={ERR_BLOCK}>{removeError}</div>
@@ -1785,9 +1967,6 @@ export default function PublisherRecipientsPage({
                                 /\{name\}/g,
                                 personLabel(confirmRotateCreds),
                             )}
-                        </div>
-                        <div style={MONO}>
-                            {confirmRotateCreds.address_str}
                         </div>
                         {rotateCredsError && (
                             <div
@@ -2127,17 +2306,22 @@ export default function PublisherRecipientsPage({
                     hasEveryoneFile={sharedArtifact?.exists === true}
                     renew={viaMgmt(() => Wizard.renewEveryone(operatorId))}
                     send={{
-                        onSend: (path, label) => void onResendSbpx(path, label),
-                        onSave: (path, label) => void onSaveSbpx(path, label),
-                        onQr: (id, label) =>
-                            setQrSend({
-                                artifact: recipientArtifact(id),
-                                label: t('pub.person.qr.what').replace(/\{name\}/g, label),
+                        onOpen: (id, path, label) =>
+                            setSendFor({
+                                key: `renew${id}`,
+                                label,
+                                recipient: recipients.find((x) => x.id === id) ?? null,
+                                file: {
+                                    kind: 'sbpx',
+                                    path,
+                                    exists: true,
+                                    size_bytes: 0,
+                                    modified_at_unix: 0,
+                                    recipient_id: id,
+                                    recipient_label: label,
+                                },
+                                revoked: false,
                             }),
-                        onCopy: (id, label) => {
-                            const r = recipients.find((x) => x.id === id);
-                            if (r) void onCopyPerson(r, label);
-                        },
                     }}
                     onClose={(changed) => {
                         setRenewOpen(false);
@@ -2153,13 +2337,23 @@ export default function PublisherRecipientsPage({
                 />
             )}
 
+            {sendFor && (
+                <SendSheet
+                    t={t}
+                    name={sendFor === 'everyone' ? '' : sendFor.label}
+                    everyone={sendFor === 'everyone'}
+                    ways={sendFor === 'everyone' ? everyoneWays : personWays(sendFor)}
+                    onClose={() => setSendFor(null)}
+                />
+            )}
+
             {qrSend && (
                 <QrSendSheet
                     t={t}
                     operatorId={operatorId}
                     relayName={title}
                     artifact={qrSend.artifact}
-                    label={qrSend.label}
+                    name={qrSend.name}
                     onClose={() => setQrSend(null)}
                 />
             )}
@@ -2179,6 +2373,6 @@ export default function PublisherRecipientsPage({
                     }}
                 />
             )}
-        </div>
+        </PageColumn>
     );
 }

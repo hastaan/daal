@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"time"
 
+	"daal/bundle-go/bundle"
 	"daal/bundle-go/importer"
 	"daal/core/internal/selection"
 	"daal/core/routestore"
@@ -231,6 +232,11 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 			ModesAllowed:    r.ModesAllowed,
 			ExpiresAt:       r.ExpiresAt,
 			ImportedAt:      r.ImportedAt,
+			// The engine's part of the signed family_specific_config
+			// (importer RouteInput.EngineConfig; "" stores "{}"). Written
+			// on every save, so a refreshed pack that drops its cover
+			// names or its desync offer drops them here too.
+			FamilySpecificConfigJSON: r.EngineConfig,
 		}
 		// FRP-2: copy parsed-and-validated RelayPack metadata onto
 		// the routestore row when present. nil RelayPack leaves all
@@ -294,6 +300,13 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 		// was refused at the top of this function), and that one must
 		// not stay behind to veto the new route.
 		if len(r.Endpoint) > 0 {
+			// The standby travels with the commitment it stands beside
+			// (saveStandby): what this device held there is removed
+			// FIRST, so every state a failure can leave behind is
+			// narrower than either the old or the new one.
+			if err := a.forgetStandby(r.RouteID, len(r.Standby) == 0); err != nil {
+				return fmt.Errorf("save standby %s: %w", r.RouteID, err)
+			}
 			if err := a.S.PutSecret(RouteEndpointKey(r.RouteID), r.Endpoint); err != nil {
 				return fmt.Errorf("save endpoint %s: %w", r.RouteID, err)
 			}
@@ -307,10 +320,53 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 			} else if err := a.S.PutSecret(RouteEndpointSignedAtKey(r.RouteID), []byte(r.SignedAt)); err != nil {
 				return fmt.Errorf("save endpoint date %s: %w", r.RouteID, err)
 			}
+			if len(r.Standby) > 0 {
+				if err := a.S.PutSecret(bundle.StandbyStoreKey(r.RouteID), append([]byte(nil), r.Standby...)); err != nil {
+					return fmt.Errorf("save standby %s: %w", r.RouteID, err)
+				}
+			}
 		} else {
+			// No commitment: no standby either. Removed before the
+			// commitment, for the same reason as above.
+			if err := a.forgetStandby(r.RouteID, true); err != nil {
+				return fmt.Errorf("save standby %s: %w", r.RouteID, err)
+			}
 			_ = a.S.DeleteSecret(RouteEndpointKey(r.RouteID))
 			_ = a.S.DeleteSecret(RouteEndpointSignedAtKey(r.RouteID))
 		}
+	}
+	return nil
+}
+
+// forgetStandby removes the route's stored `_standby`
+// (bundle.StandbyStoreKey) and, when withKey, any standby key accepted
+// for it (bundle.StandbyKeyStoreKey: 16 raw bytes).
+//
+// THE STANDBY AND ITS COMMITMENT (specs/relaypack-v1.md "`_standby`
+// key", "On the device"). `_standby` names a second address of the
+// relay; the set-route guard (core/abi routeEndpointGuard) lets an
+// outbound sit there only while it is stored. The store has no
+// transaction across secrets, so SaveImport orders the writes instead:
+// the old standby goes first, then the commitment is written, then the
+// new standby. A failure at any step leaves the route with NO standby
+// beside whichever commitment it holds — never an old address beside a
+// new commitment (a publisher may have released that address), and
+// never a new one beside an old commitment. Every step that fails
+// fails the import, as a commitment that cannot be stored does.
+//
+// The key is kept when the new pack still carries a `_standby`: a key
+// only ever opens the commitment it hashes to (bundle Standby.Matches,
+// checked at every connect), so one that does not match the new
+// commitment is inert, and one that does was accepted for exactly this
+// address. A pack WITHOUT `_standby` removes it: the publisher has
+// withdrawn the standby, and the address inside the key may already be
+// someone else's.
+func (a *StoreAdapter) forgetStandby(routeID string, withKey bool) error {
+	if err := a.S.DeleteSecret(bundle.StandbyStoreKey(routeID)); err != nil {
+		return err
+	}
+	if withKey {
+		return a.S.DeleteSecret(bundle.StandbyKeyStoreKey(routeID))
 	}
 	return nil
 }

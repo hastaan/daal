@@ -172,3 +172,26 @@ func TestClassifyObservation_RelayNoEgress(t *testing.T) {
 		t.Fatal("relay_no_egress is the relay's problem, not the network's: it must never trigger a cooldown")
 	}
 }
+
+// The timing hints: nothing is said unless both halves were measured
+// and comparable.
+func TestObservation_TimingHints(t *testing.T) {
+	for _, c := range []struct {
+		name                 string
+		o                    Observation
+		measured, fast, slow bool
+	}{
+		{"not measured", Observation{Reset: true}, false, false, false},
+		{"dial only", Observation{Reset: true, DialMs: 40}, false, false, false},
+		{"dial shorter than the connect", Observation{Reset: true, DialMs: 50, ConnectMs: 100}, false, false, false},
+		{"a round trip too short to read", Observation{Reset: true, DialMs: 9, ConnectMs: 4}, false, false, false},
+		{"injected: back well inside a round trip", Observation{Reset: true, DialMs: 120, ConnectMs: 100}, true, true, false},
+		{"the relay's own reset", Observation{Reset: true, DialMs: 210, ConnectMs: 100}, true, false, true},
+		{"the relay's own close", Observation{Closed: true, DialMs: 210, ConnectMs: 100}, true, false, true},
+	} {
+		_, measured := c.o.HelloToFailMs()
+		if measured != c.measured || c.o.FastReset() != c.fast || c.o.ServerStop() != c.slow {
+			t.Errorf("%s: measured=%v fast=%v server=%v", c.name, measured, c.o.FastReset(), c.o.ServerStop())
+		}
+	}
+}

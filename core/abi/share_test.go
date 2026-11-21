@@ -170,7 +170,7 @@ func TestURIDetectAndImport(t *testing.T) {
 	if strings.Contains(extractField(hits, "Preview"), "secret") {
 		t.Errorf("preview leaked secret: %s", hits)
 	}
-	verdictJSON, err := URIImport("vless://uuid@example.com:443?security=reality&pbk=K&sid=S#paste")
+	verdictJSON, err := URIImport("vless://uuid@example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01#paste")
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSharingDoesNotBypassTrustPath(t *testing.T) {
 	}
 	t.Cleanup(func() { Shutdown() })
 
-	first, err := URIImport("vless://uuid@example.com:443?security=reality&pbk=K&sid=S#x")
+	first, err := URIImport("vless://uuid@example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01#x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestSharingDoesNotBypassTrustPath(t *testing.T) {
 	if fp != "" {
 		ResolveTrustPrompt(fp, 0)
 	}
-	second, err := URIImport("vless://uuid2@example.com:443?security=reality&pbk=K&sid=S#y")
+	second, err := URIImport("vless://uuid2@example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01#y")
 	if err != nil {
 		t.Fatal(err)
 	}

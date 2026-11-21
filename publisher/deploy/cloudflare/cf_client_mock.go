@@ -2,177 +2,455 @@ package cloudflare
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 )
 
-// MockCFClient is a deterministic test implementation of CFClient.
-// Every call appends to Calls under a Mutex so concurrent tests
-// observe a stable order; behaviour overrides plug in via the
-// per-method *Override fields.
+// MockCFClient is an in-memory Cloudflare: zones, settings, DNS records,
+// origin rules, Origin CA and origin-pull certificates. Tests drive the
+// real Provider against it and then read its state back, so a rollback
+// test can assert that the zone looks exactly as it did before.
+//
+// It never stores the token. Calls records method names and non-secret
+// arguments in order.
 type MockCFClient struct {
 	mu sync.Mutex
 
 	Calls []string
 
-	// Per-method behaviour. Nil means "happy path".
-	IssueErr                error
-	IssueCertPEM            []byte
-	IssuePrivPEM            []byte
-	IssueFingerprint        string
-	EnableAOPErr            error
-	FetchAOPClientErr       error
-	FetchAOPClientPEM       []byte
-	EnsureRecordsErr        error
-	UploadWorkerErr         error
-	UploadWorkerScriptID    string
-	BindRouteErr            error
-	BindRouteID             string
-	LookupZoneErr           error
-	LookupZoneIDOverride    string
-	LookupAccountIDOverride string
-	PostureErr              error
-	Posture                 PostureReport
+	// Token
+	TokenID     string // default "tok-1"
+	TokenState  string // default "active"
+	VerifyErr   error
+	ProbeAnswer map[string]ProbeResult // path → answer; absent paths are ProbeDenied
+	ProbeErr    map[string]error
 
-	// FRP-9 rotation surface mocks.
-	RotatePathErr           error
-	RotatePathRouteID       string
-	RotateHostnameErr       error
-	RotateHostnameZoneID    string
-	RotateHostnameAccountID string
-	RotateOriginErr         error
+	// Zones the token can see.
+	Zones []Zone
+
+	// Live state, keyed by zone id.
+	Settings    map[string]map[string]string
+	AOPOn       map[string]bool
+	AOPCerts    map[string]map[string]string // zone → cert id → cert PEM
+	Records     map[string][]DNSRecord
+	OriginRules map[string][]MockOriginRule
+	OriginCerts map[string][]string // cert id → hostnames
+
+	// FailOn makes the named method return the error (e.g.
+	// "EnsureOriginRule"). FailSetting fails SetZoneSetting for one
+	// setting name.
+	FailOn      map[string]error
+	FailSetting map[string]error
+
+	// IssueCertPEM overrides the certificate the mock issues.
+	IssueCertPEM []byte
+
+	next int
 }
 
-func (m *MockCFClient) record(name string) {
+// MockOriginRule is one rule in a zone's http_request_origin entrypoint.
+type MockOriginRule struct {
+	Ref      string
+	Hostname string
+	Port     int
+}
+
+// NewMockCFClient returns a mock whose token sees exactly one active
+// zone and holds exactly the five permissions: every probe CheckToken
+// needs answers allowed, every probe of something more answers denied.
+func NewMockCFClient(zoneName string) *MockCFClient {
+	m := &MockCFClient{}
+	z := Zone{ID: "zone-" + zoneName, Name: zoneName, Status: "active", AccountID: "acct-1"}
+	m.Zones = []Zone{z}
+	m.ProbeAnswer = map[string]ProbeResult{}
+	for _, p := range requiredProbes(z) {
+		m.ProbeAnswer[p.Path] = ProbeAllowed
+	}
+	// No origin ruleset yet on a fresh zone.
+	m.ProbeAnswer[originEntrypointPath(z.ID)] = ProbeNotFound
+	m.Settings = map[string]map[string]string{z.ID: {"ssl": "flexible", "websockets": "off", "ech": "on"}}
+	return m
+}
+
+func (m *MockCFClient) record(format string, args ...any) {
+	m.Calls = append(m.Calls, fmt.Sprintf(format, args...))
+}
+
+func (m *MockCFClient) fail(name string) error {
+	if m.FailOn == nil {
+		return nil
+	}
+	return m.FailOn[name]
+}
+
+func (m *MockCFClient) id(prefix string) string {
+	m.next++
+	return fmt.Sprintf("%s-%d", prefix, m.next)
+}
+
+func (m *MockCFClient) init() {
+	if m.Settings == nil {
+		m.Settings = map[string]map[string]string{}
+	}
+	if m.AOPOn == nil {
+		m.AOPOn = map[string]bool{}
+	}
+	if m.AOPCerts == nil {
+		m.AOPCerts = map[string]map[string]string{}
+	}
+	if m.Records == nil {
+		m.Records = map[string][]DNSRecord{}
+	}
+	if m.OriginRules == nil {
+		m.OriginRules = map[string][]MockOriginRule{}
+	}
+	if m.OriginCerts == nil {
+		m.OriginCerts = map[string][]string{}
+	}
+}
+
+func (m *MockCFClient) VerifyToken(_ context.Context, _ []byte) (TokenStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, name)
+	m.record("VerifyToken")
+	if m.VerifyErr != nil {
+		return TokenStatus{}, m.VerifyErr
+	}
+	st := TokenStatus{ID: m.TokenID, Status: m.TokenState}
+	if st.ID == "" {
+		st.ID = "tok-1"
+	}
+	if st.Status == "" {
+		st.Status = "active"
+	}
+	return st, nil
 }
 
-func (m *MockCFClient) IssueOriginCert(_ context.Context, _ []byte, hostnames []string, _ int) ([]byte, []byte, string, error) {
-	m.record(fmt.Sprintf("IssueOriginCert(%v)", hostnames))
-	if m.IssueErr != nil {
-		return nil, nil, "", m.IssueErr
+func (m *MockCFClient) ListZones(_ context.Context, _ []byte) ([]Zone, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("ListZones")
+	if err := m.fail("ListZones"); err != nil {
+		return nil, err
 	}
+	return append([]Zone(nil), m.Zones...), nil
+}
+
+func (m *MockCFClient) LookupZone(_ context.Context, _ []byte, name string) (Zone, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("LookupZone(%s)", name)
+	if err := m.fail("LookupZone"); err != nil {
+		return Zone{}, false, err
+	}
+	for _, z := range m.Zones {
+		if z.Name == name {
+			return z, true, nil
+		}
+	}
+	return Zone{}, false, nil
+}
+
+func (m *MockCFClient) ProbeRead(_ context.Context, _ []byte, path string) (ProbeResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("ProbeRead(%s)", path)
+	if err := m.ProbeErr[path]; err != nil {
+		return ProbeDenied, err
+	}
+	if r, ok := m.ProbeAnswer[path]; ok {
+		return r, nil
+	}
+	return ProbeDenied, nil
+}
+
+func (m *MockCFClient) IssueOriginCert(_ context.Context, _ []byte, hostnames []string, days int) (OriginCert, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("IssueOriginCert(%s,%d)", strings.Join(hostnames, " "), days)
+	if err := m.fail("IssueOriginCert"); err != nil {
+		return OriginCert{}, err
+	}
+	id := m.id("ocert")
+	m.OriginCerts[id] = append([]string(nil), hostnames...)
 	cert := m.IssueCertPEM
 	if cert == nil {
-		cert = []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n")
+		cert = []byte("-----BEGIN CERTIFICATE-----\nMOCK " + id + "\n-----END CERTIFICATE-----\n")
 	}
-	priv := m.IssuePrivPEM
-	if priv == nil {
-		priv = []byte("-----BEGIN PRIVATE KEY-----\nMOCK\n-----END PRIVATE KEY-----\n")
-	}
-	fp := m.IssueFingerprint
-	if fp == "" {
-		fp = "ababababababababababababababababababababababababababababababab"
-	}
-	return cert, priv, fp, nil
-}
-
-func (m *MockCFClient) EnableAOP(_ context.Context, _ []byte, zoneID string) error {
-	m.record(fmt.Sprintf("EnableAOP(%s)", zoneID))
-	return m.EnableAOPErr
-}
-
-func (m *MockCFClient) FetchAOPClientCert(_ context.Context, _ []byte, zoneID string) ([]byte, error) {
-	m.record(fmt.Sprintf("FetchAOPClientCert(%s)", zoneID))
-	if m.FetchAOPClientErr != nil {
-		return nil, m.FetchAOPClientErr
-	}
-	cert := m.FetchAOPClientPEM
-	if cert == nil {
-		cert = []byte("-----BEGIN CERTIFICATE-----\nMOCK-AOP-CLIENT\n-----END CERTIFICATE-----\n")
-	}
-	return cert, nil
-}
-
-func (m *MockCFClient) EnsureProxiedRecords(_ context.Context, _ []byte, zoneID, hostname, ipv4, ipv6 string) error {
-	m.record(fmt.Sprintf("EnsureProxiedRecords(%s,%s,%s,%s)", zoneID, hostname, ipv4, ipv6))
-	return m.EnsureRecordsErr
-}
-
-func (m *MockCFClient) UploadWorkerScript(_ context.Context, _ []byte, accountID, scriptName string, body []byte) (string, error) {
-	m.record(fmt.Sprintf("UploadWorkerScript(%s,%s,len=%d)", accountID, scriptName, len(body)))
-	if m.UploadWorkerErr != nil {
-		return "", m.UploadWorkerErr
-	}
-	if m.UploadWorkerScriptID != "" {
-		return m.UploadWorkerScriptID, nil
-	}
-	return scriptName, nil
-}
-
-func (m *MockCFClient) BindWorkerRoute(_ context.Context, _ []byte, zoneID, scriptName, pattern string) (string, error) {
-	m.record(fmt.Sprintf("BindWorkerRoute(%s,%s,%s)", zoneID, scriptName, pattern))
-	if m.BindRouteErr != nil {
-		return "", m.BindRouteErr
-	}
-	if m.BindRouteID != "" {
-		return m.BindRouteID, nil
-	}
-	return "route-" + zoneID + "-" + scriptName, nil
-}
-
-func (m *MockCFClient) LookupZoneID(_ context.Context, _ []byte, apex string) (string, string, error) {
-	m.record(fmt.Sprintf("LookupZoneID(%s)", apex))
-	if m.LookupZoneErr != nil {
-		return "", "", m.LookupZoneErr
-	}
-	zone := m.LookupZoneIDOverride
-	if zone == "" {
-		zone = "zone-" + apex
-	}
-	acc := m.LookupAccountIDOverride
-	if acc == "" {
-		acc = "account-" + apex
-	}
-	return zone, acc, nil
-}
-
-func (m *MockCFClient) RotatePublicPath(_ context.Context, _ []byte, zoneID, oldRouteID, scriptName, hostname, newPublicPath, originPath string) (string, error) {
-	m.record(fmt.Sprintf("RotatePublicPath(%s,%s,%s,%s,%s,%s)", zoneID, oldRouteID, scriptName, hostname, newPublicPath, originPath))
-	if m.RotatePathErr != nil {
-		return "", m.RotatePathErr
-	}
-	if m.RotatePathRouteID != "" {
-		return m.RotatePathRouteID, nil
-	}
-	return "route-" + zoneID + "-rotated", nil
-}
-
-func (m *MockCFClient) RotateHostname(_ context.Context, _ []byte, oldRec *FrontRecord, newHostname, ipv4, ipv6 string) (string, string, error) {
-	m.record(fmt.Sprintf("RotateHostname(%s->%s,%s,%s)", oldRec.Hostname, newHostname, ipv4, ipv6))
-	if m.RotateHostnameErr != nil {
-		return "", "", m.RotateHostnameErr
-	}
-	zone := m.RotateHostnameZoneID
-	if zone == "" {
-		zone = "zone-" + newHostname
-	}
-	acc := m.RotateHostnameAccountID
-	if acc == "" {
-		acc = "account-" + newHostname
-	}
-	return zone, acc, nil
-}
-
-func (m *MockCFClient) RotateOrigin(_ context.Context, _ []byte, zoneID, hostname, ipv4, ipv6 string) error {
-	m.record(fmt.Sprintf("RotateOrigin(%s,%s,%s,%s)", zoneID, hostname, ipv4, ipv6))
-	return m.RotateOriginErr
-}
-
-func (m *MockCFClient) VerifyPosture(_ context.Context, _ []byte, rec *FrontRecord) (PostureReport, error) {
-	m.record(fmt.Sprintf("VerifyPosture(%s)", rec.Hostname))
-	if m.PostureErr != nil {
-		return PostureReport{}, m.PostureErr
-	}
-	if (m.Posture != PostureReport{}) {
-		return m.Posture, nil
-	}
-	return PostureReport{
-		OriginCAFingerprintMatch: true,
-		AOPEnabled:               true,
-		FirewallEdgeRangesFresh:  true,
-		DNSProxiedOnly:           true,
+	sum := sha256.Sum256(cert)
+	return OriginCert{
+		ID:             id,
+		CertPEM:        cert,
+		KeyPEM:         []byte("-----BEGIN EC PRIVATE KEY-----\nMOCK\n-----END EC PRIVATE KEY-----\n"),
+		FingerprintHex: hex.EncodeToString(sum[:]),
 	}, nil
+}
+
+func (m *MockCFClient) RevokeOriginCert(_ context.Context, _ []byte, certID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("RevokeOriginCert(%s)", certID)
+	if err := m.fail("RevokeOriginCert"); err != nil {
+		return err
+	}
+	delete(m.OriginCerts, certID)
+	return nil
+}
+
+func (m *MockCFClient) UploadAOPCert(_ context.Context, _ []byte, zoneID string, certPEM, keyPEM []byte) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("UploadAOPCert(%s)", zoneID)
+	if err := m.fail("UploadAOPCert"); err != nil {
+		return "", err
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return "", fmt.Errorf("mock: empty certificate or key")
+	}
+	id := m.id("aop")
+	if m.AOPCerts[zoneID] == nil {
+		m.AOPCerts[zoneID] = map[string]string{}
+	}
+	m.AOPCerts[zoneID][id] = string(certPEM)
+	return id, nil
+}
+
+func (m *MockCFClient) DeleteAOPCert(_ context.Context, _ []byte, zoneID, certID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("DeleteAOPCert(%s,%s)", zoneID, certID)
+	if err := m.fail("DeleteAOPCert"); err != nil {
+		return err
+	}
+	delete(m.AOPCerts[zoneID], certID)
+	return nil
+}
+
+func (m *MockCFClient) SetAOPEnabled(_ context.Context, _ []byte, zoneID string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("SetAOPEnabled(%s,%v)", zoneID, enabled)
+	if err := m.fail("SetAOPEnabled"); err != nil {
+		return err
+	}
+	m.AOPOn[zoneID] = enabled
+	return nil
+}
+
+func (m *MockCFClient) AOPEnabled(_ context.Context, _ []byte, zoneID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("AOPEnabled(%s)", zoneID)
+	if err := m.fail("AOPEnabled"); err != nil {
+		return false, err
+	}
+	return m.AOPOn[zoneID], nil
+}
+
+func (m *MockCFClient) GetZoneSetting(_ context.Context, _ []byte, zoneID, name string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("GetZoneSetting(%s,%s)", zoneID, name)
+	if err := m.fail("GetZoneSetting"); err != nil {
+		return "", err
+	}
+	return m.Settings[zoneID][name], nil
+}
+
+func (m *MockCFClient) SetZoneSetting(_ context.Context, _ []byte, zoneID, name, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("SetZoneSetting(%s,%s,%s)", zoneID, name, value)
+	if err := m.fail("SetZoneSetting"); err != nil {
+		return err
+	}
+	if err := m.FailSetting[name]; err != nil {
+		return err
+	}
+	if m.Settings[zoneID] == nil {
+		m.Settings[zoneID] = map[string]string{}
+	}
+	m.Settings[zoneID][name] = value
+	return nil
+}
+
+func (m *MockCFClient) ListDNSRecords(_ context.Context, _ []byte, zoneID, hostname string) ([]DNSRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("ListDNSRecords(%s,%s)", zoneID, hostname)
+	if err := m.fail("ListDNSRecords"); err != nil {
+		return nil, err
+	}
+	var out []DNSRecord
+	for _, r := range m.Records[zoneID] {
+		if r.Name == hostname {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (m *MockCFClient) EnsureProxiedRecords(_ context.Context, _ []byte, zoneID, hostname, v4, v6 string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("EnsureProxiedRecords(%s,%s,%s,%s)", zoneID, hostname, v4, v6)
+	if err := m.fail("EnsureProxiedRecords"); err != nil {
+		return nil, err
+	}
+	want := map[string]string{"A": v4}
+	if v6 != "" {
+		want["AAAA"] = v6
+	}
+	for _, r := range m.Records[zoneID] {
+		if r.Name != hostname || (r.Type != "A" && r.Type != "AAAA") {
+			continue
+		}
+		if !r.proxied() {
+			return nil, ErrDNSOnlyRecordPresent
+		}
+		if c, ok := want[r.Type]; ok && c != r.Content {
+			return nil, ErrHostnameInUse
+		}
+	}
+	var created []string
+	for _, typ := range []string{"A", "AAAA"} {
+		content, ok := want[typ]
+		if !ok {
+			continue
+		}
+		exists := false
+		for _, r := range m.Records[zoneID] {
+			if r.Name == hostname && r.Type == typ {
+				exists = true
+			}
+		}
+		if exists {
+			continue
+		}
+		t := true
+		id := m.id("rec")
+		m.Records[zoneID] = append(m.Records[zoneID], DNSRecord{ID: id, Type: typ, Name: hostname, Content: content, Proxied: &t})
+		created = append(created, id)
+	}
+	return created, nil
+}
+
+func (m *MockCFClient) SetDNSRecordContent(_ context.Context, _ []byte, zoneID, recordID, content string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("SetDNSRecordContent(%s,%s,%s)", zoneID, recordID, content)
+	if err := m.fail("SetDNSRecordContent"); err != nil {
+		return err
+	}
+	for i, r := range m.Records[zoneID] {
+		if r.ID == recordID {
+			m.Records[zoneID][i].Content = content
+			return nil
+		}
+	}
+	return fmt.Errorf("mock: no record %s", recordID)
+}
+
+func (m *MockCFClient) DeleteDNSRecord(_ context.Context, _ []byte, zoneID, recordID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("DeleteDNSRecord(%s,%s)", zoneID, recordID)
+	if err := m.fail("DeleteDNSRecord"); err != nil {
+		return err
+	}
+	kept := m.Records[zoneID][:0]
+	for _, r := range m.Records[zoneID] {
+		if r.ID != recordID {
+			kept = append(kept, r)
+		}
+	}
+	m.Records[zoneID] = kept
+	return nil
+}
+
+func (m *MockCFClient) EnsureOriginRule(_ context.Context, _ []byte, zoneID, ref, hostname string, port int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("EnsureOriginRule(%s,%s,%s,%d)", zoneID, ref, hostname, port)
+	if err := m.fail("EnsureOriginRule"); err != nil {
+		return err
+	}
+	var next []MockOriginRule
+	for _, r := range m.OriginRules[zoneID] {
+		if r.Ref != ref {
+			next = append(next, r)
+		}
+	}
+	m.OriginRules[zoneID] = append(next, MockOriginRule{Ref: ref, Hostname: hostname, Port: port})
+	return nil
+}
+
+func (m *MockCFClient) RemoveOriginRule(_ context.Context, _ []byte, zoneID, ref string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("RemoveOriginRule(%s,%s)", zoneID, ref)
+	if err := m.fail("RemoveOriginRule"); err != nil {
+		return err
+	}
+	var next []MockOriginRule
+	for _, r := range m.OriginRules[zoneID] {
+		if r.Ref != ref {
+			next = append(next, r)
+		}
+	}
+	m.OriginRules[zoneID] = next
+	return nil
+}
+
+func (m *MockCFClient) OriginRule(_ context.Context, _ []byte, zoneID, ref string) (string, int, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.init()
+	m.record("OriginRule(%s,%s)", zoneID, ref)
+	if err := m.fail("OriginRule"); err != nil {
+		return "", 0, false, err
+	}
+	for _, r := range m.OriginRules[zoneID] {
+		if r.Ref == ref {
+			return r.Hostname, r.Port, true, nil
+		}
+	}
+	return "", 0, false, nil
+}
+
+// MockECHFetcher answers FetchECH from fixed values.
+type MockECHFetcher struct {
+	ConfigList []byte
+	Resolver   string
+	Err        error
+	Calls      []string
+}
+
+func (f *MockECHFetcher) FetchECH(_ context.Context, hostname string) ([]byte, string, error) {
+	f.Calls = append(f.Calls, hostname)
+	if f.Err != nil {
+		return nil, "", f.Err
+	}
+	r := f.Resolver
+	if r == "" {
+		r = "mock-doh"
+	}
+	return f.ConfigList, r, nil
 }

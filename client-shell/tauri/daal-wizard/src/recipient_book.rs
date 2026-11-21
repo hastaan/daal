@@ -389,6 +389,8 @@ pub fn produce_shared_sbp(
     let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
 
     let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
+    // D-1, before the shared user is re-keyed on the box.
+    refuse_everyone_with_open_standby(&row.operator_record_json)?;
 
     // The signed .sbp from Step 6 must exist before we can rewrite it.
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
@@ -457,6 +459,7 @@ pub(crate) fn rewrite_shared_sbp(
     creds: &crate::cli_bridge::UserCredsResult,
     record_json: &str,
 ) -> Result<SharedSbpSummary, WizardError> {
+    refuse_everyone_with_open_standby(record_json)?;
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
     if !in_sbp_path.exists() {
         return Err(WizardError::Pricing(
@@ -502,6 +505,31 @@ pub(crate) fn rewrite_shared_sbp(
         sbp_path: out_path.to_string_lossy().to_string(),
         server: relay_server_ip,
     })
+}
+
+/// Owner decision D-1, the other way round from `addon_standby::add`: an
+/// OPEN standby puts the second address in every pack, so a file meant
+/// for anyone (which may reach a censor) would burn both addresses on
+/// day one. While the record names an open standby, no Everyone file is
+/// made or renewed. A sealed standby carries only a commitment and is
+/// no reason to refuse.
+fn refuse_everyone_with_open_standby(record_json: &str) -> Result<(), WizardError> {
+    let open = serde_json::from_str::<serde_json::Value>(record_json)
+        .ok()
+        .and_then(|v| {
+            v.get("standby")
+                .and_then(|s| s.get("mode"))
+                .and_then(|m| m.as_str())
+                .map(|m| m == "open")
+        })
+        .unwrap_or(false);
+    if open {
+        return Err(crate::commands::coded(
+            crate::addon_standby::E_STANDBY_OPEN_REFUSED,
+            "this relay's standby address is open, so it cannot have an Everyone file: anyone holding that file would learn both addresses. Share files for named people, or remove the standby",
+        ));
+    }
+    Ok(())
 }
 
 /// `recipient_revoke` revokes the recipient on the box (sing-box
@@ -800,6 +828,18 @@ fn fill_box_material_from_record(creds: &mut serde_json::Value, record: &serde_j
             }
         }
     }
+    // The way in through Cloudflare: the door's WebSocket path is the
+    // front record's (`cdn_front.origin_path`, live while the route is
+    // signed), not the box's, and the minter needs it for the CDN route
+    // (`users-pack-sbp[x]` reads `cdn_ws_path`).
+    if let Some(p) = record
+        .get(crate::addon_cdn::RECORD_MEMBER)
+        .and_then(|f| f.get("origin_path"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        obj.insert("cdn_ws_path".into(), p.into());
+    }
 }
 
 pub(crate) fn write_record_staging(
@@ -1069,5 +1109,33 @@ mod tests {
 
         let err = recipient_repack_sbpx(&ctx, op_id, r.id).unwrap_err();
         assert!(format!("{err:?}").contains("revoked"), "got: {err:?}");
+    }
+
+    /// D-1: no Everyone file while the record names an OPEN standby, and
+    /// nothing is touched on the box before the refusal. A sealed
+    /// standby is no reason to refuse.
+    #[test]
+    fn an_open_standby_refuses_the_everyone_file() {
+        let (ctx, mock, op_id) = mk_ctx();
+        std::fs::write(ctx.staging_dir.join(format!("{op_id}.sbp")), b"signed").unwrap();
+        let rec = |mode: &str| {
+            format!(
+                r#"{{"region":"fsn1","server_type":"cpx12","public_ip":"1.2.3.4","mgmt_port":42424,"standby":{{"floating_ip_id":"7","ip":"203.0.113.20","mode":"{mode}","salt":"AAAAAAAAAAAAAAAA"}}}}"#
+            )
+        };
+        ctx.db.update_record_json(op_id, &rec("open")).unwrap();
+        let err = produce_shared_sbp(&ctx, op_id).unwrap_err();
+        assert!(
+            err.to_string().contains(crate::addon_standby::E_STANDBY_OPEN_REFUSED),
+            "{err}"
+        );
+        assert!(mock.users_provision_calls.lock().unwrap().is_empty());
+        assert!(mock.users_revoke_calls.lock().unwrap().is_empty());
+        // Renew's half refuses too.
+        let creds = crate::cli_bridge::UserCredsResult::default();
+        assert!(rewrite_shared_sbp(&ctx, op_id, &creds, &rec("open")).is_err());
+
+        assert!(refuse_everyone_with_open_standby(&rec("sealed")).is_ok());
+        assert!(refuse_everyone_with_open_standby(r#"{"region":"fsn1"}"#).is_ok());
     }
 }

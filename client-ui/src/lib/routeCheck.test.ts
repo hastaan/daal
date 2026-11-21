@@ -116,7 +116,7 @@ describe('copy', () => {
             expect(dict[failedHead]).not.toBe(dict[lostHead]);
         }
         expect(e[failedHead]).toBe('Could not connect on this route. Try another one.');
-        expect(e[lostHead]).toBe('Connection lost. Trying again…');
+        expect(e[lostHead]).toBe('Reconnecting…');
     });
     it('has every key in English and Persian', () => {
         const keys = [

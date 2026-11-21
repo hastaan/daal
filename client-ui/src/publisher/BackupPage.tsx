@@ -17,7 +17,10 @@
 // person writes words down once.
 
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Section, Sheet, Textarea } from '../design/primitives';
+import { Badge, Button, Disclosure, OverflowMenu, PageHeader, Sheet, StateIcon, Textarea } from '../design/primitives';
+import type { MenuItem } from '../design/primitives';
+import { formatDate } from '../lib/format';
+import { PageColumn, useLocale } from './ui';
 import type { BackupStatus, MadeBackup } from './wizardCommands';
 import { useBack } from '../lib/useBack';
 import { useSecureScreen } from './useSecureScreen';
@@ -144,11 +147,12 @@ export function SharedAsk({
     waitingSince?: number;
     onAnswer: (arrived: boolean) => void;
 }) {
+    const locale = useLocale();
     return (
         <div style={{ display: 'grid', gap: 8 }} data-testid="shared-ask">
             {waitingSince ? (
                 <div style={{ ...BODY, color: 'var(--gold)' }}>
-                    {fill(t('pub.backup.share.waiting'), { date: dayLabel(waitingSince) })}
+                    {fill(t('pub.backup.share.waiting'), { date: dayLabel(waitingSince, locale) })}
                 </div>
             ) : (
                 <div style={BODY}>{t('pub.backup.done.share')}</div>
@@ -174,8 +178,6 @@ export function BackupReady({
     savedWords,
     onCreateWords,
     onMake,
-    onCheckWords,
-    onNewWords,
     onSharedAnswer,
 }: {
     t: (k: string) => string;
@@ -185,10 +187,12 @@ export function BackupReady({
     savedWords: boolean;
     onCreateWords: () => void;
     onMake: (d: 'downloads' | 'share') => void;
-    onCheckWords: () => void;
-    onNewWords: () => void;
+    /** Kept for callers; both live in the page's ⋯ now (backupMenu). */
+    onCheckWords?: () => void;
+    onNewWords?: () => void;
     onSharedAnswer?: (arrived: boolean) => void;
 }) {
+    const locale = useLocale();
     const blocked = blockedKey(status.blocked);
     if (blocked) {
         return (
@@ -212,40 +216,59 @@ export function BackupReady({
         );
     }
     const c = status.contents;
+    const first = !status.words_set;
+    // MUST KEEP 5, unchanged, where the decision is made.
+    const warning = (
+        <div
+            data-testid="backup-warning"
+            style={{
+                ...BODY,
+                border: '1px solid var(--red)',
+                borderRadius: 'var(--radius-md)',
+                padding: '10px 12px',
+            }}
+        >
+            {t('pub.backup.warning')}
+        </div>
+    );
+    const contents = (
+        <Disclosure summary={t('pub.backup.whats_in')} dataButton="backup-contents">
+            <div style={{ display: 'grid', gap: 6 }}>
+                <div style={SUB}>{backupHasText(t, c)}</div>
+                {c.unfinished_setups > 0 && <div style={SUB}>{unfinishedText(t, c.unfinished_setups)}</div>}
+                <div style={SUB}>{t('pub.backup.hasnot')}</div>
+            </div>
+        </Disclosure>
+    );
     return (
-        <div style={{ display: 'grid', gap: 10 }} data-state="ready">
-            <div style={BODY}>{backupHasText(t, c)}</div>
-            {c.unfinished_setups > 0 && (
-                <div style={SUB}>{unfinishedText(t, c.unfinished_setups)}</div>
+        <div style={{ display: 'grid', gap: 12 }} data-state="ready">
+            {first ? (
+                <div style={{ ...BODY, fontSize: 15 }}>{t('pub.backup.lead')}</div>
+            ) : (
+                <div>
+                    {status.last_backup_at_unix > 0 && !status.stale && !status.words_changed ? (
+                        <Badge tone="good">
+                            {fill(t('pub.backup.badge.done'), { date: formatDate(locale, status.last_backup_at_unix) })}
+                        </Badge>
+                    ) : (
+                        <Badge tone="warn">
+                            {t(status.last_backup_at_unix > 0 ? 'pub.backup.badge.out_of_date' : 'pub.backup.badge.never')}
+                        </Badge>
+                    )}
+                </div>
             )}
-            <div style={SUB}>{t('pub.backup.hasnot')}</div>
-            <div
-                style={{
-                    ...BODY,
-                    border: '1px solid var(--red)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: '10px 12px',
-                }}
-            >
-                {t('pub.backup.warning')}
-            </div>
-            <div style={SUB}>
-                {status.last_backup_at_unix > 0
-                    ? fill(t('pub.backup.last'), { date: dayLabel(status.last_backup_at_unix) })
-                    : t('pub.backup.last.never')}
-            </div>
             {status.words_changed ? (
-                <div style={{ ...BODY, color: 'var(--gold)' }} data-testid="words-changed">
+                <div style={{ ...BODY, color: 'var(--amber)' }} data-testid="words-changed">
                     {t('pub.backup.words.changed')}
                 </div>
-            ) : (
-                status.stale && <div style={{ ...SUB, color: 'var(--gold)' }}>{t('pub.backup.card.stale')}</div>
-            )}
+            ) : null}
             {status.words_set && status.words_pending && !savedWords && (
-                <div style={{ ...BODY, color: 'var(--gold)' }} data-testid="words-pending">
+                <div style={{ ...BODY, color: 'var(--amber)' }} data-testid="words-pending">
                     {t('pub.backup.words.pending')}
                 </div>
             )}
+            {warning}
+            {contents}
             {(status.share_unconfirmed_at_unix ?? 0) > 0 && onSharedAnswer && (
                 <SharedAsk
                     t={t}
@@ -255,39 +278,39 @@ export function BackupReady({
                 />
             )}
             {savedWords && <div style={{ ...BODY, color: 'var(--green)' }}>{t('pub.backup.words.saved')}</div>}
-            {!status.words_set ? (
+            {first ? (
                 <div>
                     <Button disabled={busy} onClick={onCreateWords} data-button="create-words">
                         {t('pub.backup.words.create')}
                     </Button>
                 </div>
             ) : (
-                <>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <Button disabled={busy} onClick={() => onMake('downloads')} data-button="save-downloads">
-                            {t('pub.backup.save.downloads')}
-                        </Button>
-                        <Button
-                            variant="secondary"
-                            disabled={busy}
-                            onClick={() => onMake('share')}
-                            data-button="save-share"
-                        >
-                            {t('pub.backup.save.share')}
-                        </Button>
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <Button variant="ghost" size="sm" disabled={busy} onClick={onCheckWords} data-button="check-words">
-                            {t('pub.backup.words.check')}
-                        </Button>
-                        <Button variant="ghost" size="sm" disabled={busy} onClick={onNewWords} data-button="new-words">
-                            {t('pub.backup.words.renew')}
-                        </Button>
-                    </div>
-                </>
+                <div style={{ display: 'grid', gap: 4, justifyItems: 'start' }}>
+                    <Button disabled={busy} leading="download" onClick={() => onMake('downloads')} data-button="save-downloads">
+                        {t('pub.backup.save.downloads')}
+                    </Button>
+                    <Button variant="link" disabled={busy} onClick={() => onMake('share')} data-button="save-share">
+                        {t('pub.backup.save.share')}
+                    </Button>
+                </div>
             )}
         </div>
     );
+}
+
+/** The ⋯ on the backup page once words exist (C7.6). */
+export function backupMenu(
+    t: (k: string) => string,
+    status: BackupStatus | null,
+    busy: boolean,
+    onCheckWords: () => void,
+    onNewWords: () => void,
+): MenuItem[] {
+    if (!status || !status.words_set || blockedKey(status.blocked) || !status.has_publisher_data) return [];
+    return [
+        { id: 'check-words', label: t('pub.backup.words.check'), icon: 'check', disabled: busy, onSelect: onCheckWords },
+        { id: 'new-words', label: t('pub.backup.words.renew'), icon: 'refresh', disabled: busy, onSelect: onNewWords },
+    ];
 }
 
 /** B2: the words, once. */
@@ -385,12 +408,14 @@ export function BackupConfirm({
 /** B5. */
 export function BackupDone({ t, made, onDone }: { t: (k: string) => string; made: MadeBackup; onDone: () => void }) {
     return (
-        <div style={{ display: 'grid', gap: 10 }} data-state="done">
-            <div style={BODY}>
+        <div style={{ display: 'grid', gap: 12, justifyItems: 'center', textAlign: 'center', padding: '8px 0' }} data-state="done">
+            <StateIcon state="ok" size={48} />
+            <div style={{ ...BODY, fontSize: 16, fontWeight: 600 }}>
                 {made.destination === 'downloads'
-                    ? fill(t('pub.backup.done.downloads'), { file: made.file_name })
+                    ? fill(t('pub.backup.saved_as'), { file: made.file_name })
                     : t('pub.backup.done.share.ok')}
             </div>
+            {made.destination === 'downloads' && <div style={SUB}>{t('pub.backup.saved_line')}</div>}
             <div>
                 <Button onClick={onDone} data-button="done">
                     {t('pub.backup.done')}
@@ -604,19 +629,25 @@ export default function BackupPage({
     };
 
     return (
-        <div style={{ padding: '12px 16px 24px 16px', display: 'grid', gap: 12 }}>
-            <div>
-                <Button
-                    variant="ghost"
-                    disabled={backupBackRefused(state, busy)}
-                    onClick={goBack}
-                    data-button="page-back"
-                >
-                    {t('pub.relay.back')}
-                </Button>
-            </div>
-            <Section eyebrow={t('pub.backup.eyebrow')} title={t('pub.backup.title')}>
-                <Card>
+        <PageColumn gap={12}>
+            <PageHeader
+                title={t('pub.backup.title')}
+                back={{ label: t('pub.relays.title'), onClick: goBack }}
+                actions={
+                    <OverflowMenu
+                        label={t('ui.more')}
+                        title={t('pub.backup.title')}
+                        dataButton="backup-more"
+                        items={backupMenu(
+                            t,
+                            state.k === 'ready' ? state.status : null,
+                            busy,
+                            () => setChecking(true),
+                            () => setRenewAsk(true),
+                        )}
+                    />
+                }
+            />
                     <div style={{ display: 'grid', gap: 12 }}>
                         {state.k === 'loading' && !failure && <div style={SUB}>{t('common.loading')}</div>}
                         {state.k === 'ready' && (
@@ -668,8 +699,6 @@ export default function BackupPage({
                         )}
                         {failure && <FailureLine t={t} failure={failure} />}
                     </div>
-                </Card>
-            </Section>
 
             {checking && <CheckWordsSheet t={t} api={api} onClose={() => setChecking(false)} />}
             {leaveAsk && (
@@ -724,6 +753,6 @@ export default function BackupPage({
                     <div style={BODY}>{t('pub.backup.words.renew.confirm')}</div>
                 </Sheet>
             )}
-        </div>
+        </PageColumn>
     );
 }

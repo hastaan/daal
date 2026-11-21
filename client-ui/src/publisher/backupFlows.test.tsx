@@ -76,7 +76,7 @@ describe('the backup page, start to end', () => {
         await rig.click(button(m.container, 'save-downloads'));
         expect(make).toHaveBeenCalledWith('downloads', undefined, t('pub.backup.share.title'));
         expect(state(m.container)).toBe('done');
-        expect(text(m.container)).toContain('Saved to Downloads as daal-backup-2026-11-19-1030.daalbackup.');
+        expect(text(m.container)).toContain('Saved as daal-backup-2026-11-19-1030.daalbackup');
         expect(left).toBe(0);
         await rig.back();
         expect(left).toBe(1);
@@ -277,7 +277,9 @@ describe('PA-7 rendered: the list delete of a setup on the person\'s own server'
         const m = await rig.mount(
             <RelayListPage t={t} onOpen={() => {}} onNew={() => {}} onResume={() => {}} backup={harnessBackupApi()} />,
         );
-        await rig.click(byText(m.container, t('pub.relays.decommission')));
+        // Behind the unfinished row's ⋯ (no Remove button on the row).
+        await rig.click(button(m.container, 'relay-row-more'));
+        await rig.click(button(m.container, 'remove'));
         expect(button(m.container, 'keep')).not.toBeNull();
         expect(button(m.container, 'delete')).not.toBeNull();
         await rig.click(button(m.container, 'keep'));
@@ -303,7 +305,9 @@ describe('PA-7 rendered: the list delete of a setup on the person\'s own server'
         const m = await rig.mount(
             <RelayListPage t={t} onOpen={() => {}} onNew={() => {}} onResume={() => {}} backup={harnessBackupApi()} />,
         );
-        await rig.click(byText(m.container, t('pub.relays.decommission')));
+        // Behind the unfinished row's ⋯ (no Remove button on the row).
+        await rig.click(button(m.container, 'relay-row-more'));
+        await rig.click(button(m.container, 'remove'));
         await rig.click(button(m.container, 'delete'));
         expect(invoked.filter((c) => c[0] === 'wizard_relay_destroy').map((c) => c[1])).toEqual([
             { operatorId: 6, deleteServer: true, deleteOwnServer: true },
@@ -324,7 +328,9 @@ describe('PA-7 rendered: the list delete of a setup on the person\'s own server'
         const m = await rig.mount(
             <RelayListPage t={t} onOpen={() => {}} onNew={() => {}} onResume={() => {}} backup={harnessBackupApi()} />,
         );
-        await rig.click(byText(m.container, t('pub.relays.decommission')));
+        // Behind the unfinished row's ⋯ (no Remove button on the row).
+        await rig.click(button(m.container, 'relay-row-more'));
+        await rig.click(button(m.container, 'remove'));
         expect(byAttr(m.container, 'data-plan', 'wait')).not.toBeNull();
         expect(button(m.container, 'delete')).toBeNull();
         expect(button(m.container, 'keep')).toBeNull();
@@ -372,6 +378,8 @@ describe('D1 rendered: the relay list card', () => {
         expect(byAttr(m.container, 'data-card', 'never')).not.toBeNull();
         await rig.click(button(m.container, 'backup'));
         expect(opened).toBe(1);
+        // Restore is in the header's ⋯ once relays exist.
+        await rig.click(button(m.container, 'relays-more'));
         await rig.click(button(m.container, 'restore-link'));
         expect(restore).toBe(1);
     });
@@ -422,6 +430,7 @@ describe('repair wave: the backup page and the restore page answer what really h
         await api.wordsConfirm([0, 1, 2].map((i) => ({ index: i, word: ['legal', 'winner', 'thank'][i] })));
         let left = 0;
         const m = await rig.mount(<BackupPage t={t} api={api} onBack={() => (left += 1)} rand={() => 0} />);
+        await rig.click(button(m.container, 'backup-more'));
         await rig.click(button(m.container, 'new-words'));
         await rig.click(byText(m.container, t('pub.backup.words.renew.go')));
         expect(state(m.container)).toBe('words');
@@ -447,15 +456,19 @@ describe('repair wave: the backup page and the restore page answer what really h
         const { backupStatusFixture, backupCard, backupCardKey } = await import('./backup');
         const { renderToStaticMarkup } = await import('react-dom/server');
         const base = { words_set: true, last_backup_at_unix: 1_763_460_000 };
+        const { DensityProvider } = await import('../design/DensityProvider');
         const pending = renderToStaticMarkup(
-            <BackupReady t={t} status={backupStatusFixture({ ...base, words_pending: true })} busy={false} savedWords={false}
-                onCreateWords={() => {}} onMake={() => {}} onCheckWords={() => {}} onNewWords={() => {}} />,
+            <DensityProvider>
+                <BackupReady t={t} status={backupStatusFixture({ ...base, words_pending: true })} busy={false} savedWords={false}
+                    onCreateWords={() => {}} onMake={() => {}} />
+            </DensityProvider>,
         );
         expect(pending).toContain(t('pub.backup.words.pending'));
         const changed = backupStatusFixture({ ...base, words_changed: true, stale: true });
         const html = renderToStaticMarkup(
-            <BackupReady t={t} status={changed} busy={false} savedWords={false}
-                onCreateWords={() => {}} onMake={() => {}} onCheckWords={() => {}} onNewWords={() => {}} />,
+            <DensityProvider>
+                <BackupReady t={t} status={changed} busy={false} savedWords={false} onCreateWords={() => {}} onMake={() => {}} />
+            </DensityProvider>,
         );
         expect(html).toContain(t('pub.backup.words.changed'));
         expect(backupCard(changed)).toBe('words');

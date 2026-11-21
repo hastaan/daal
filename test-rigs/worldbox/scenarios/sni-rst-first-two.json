@@ -1,0 +1,26 @@
+{
+  "name": "sni-rst-first-two",
+  "description": "A TLS ClientHello naming the relay's cover host draws a single forged RST+ACK toward the CLIENT. The box joins the first TWO data packets of a flow and reads the server_name out of them as soon as the name is whole in what it has — and reads nothing after packet two: no reassembly beyond that window. A hello cut in two halves is caught (the name is whole within them); one cut so that the first two packets end inside the name, or one split across TLS records, passes. Daal's stock REALITY hello is one segment and is caught; op desync's presets are told apart here.",
+  "analogue": "Iran's SNI filter as measured by Bock et al. (FOCI 2020), IRBlock (USENIX Sec 2025) and Niere et al. (2025): 'inspects only the first two data-carrying packets of a flow and does not perform full TCP stream reassembly' (research/intel-and-some-working-methods.md:77), 'injects RST+ACK toward the client — single-middlebox enforcement'; the blind spot for a ClientHello fragmented across TLS records is Niere et al. 2023. Model: the first two data packets joined, exact name match, a name read from an incomplete hello (stricter than a box that needs the whole record — sni-rst-stateless is that box, on one packet), one reset toward the client. Not modelled: the 2026 report that :443 is now reassembled and clean-SNI fragmented hellos are themselves classified (pooribitwise); a box with that reassembly is sni-rst, against which no split helps.",
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$COVER_SNI"], "packets": 2, "partial": true, "action": "rst", "rst_to": "client"}
+    ]
+  },
+  "prove": [
+    {"name": "cover-sni-blocked", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "split-in-two-is-caught", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "split": true, "expect": "reset_after_hello"},
+    {"name": "cover-sni-blocked-on-any-address", "probe": "tls", "to": "elsewhere", "port": 443, "sni": "$COVER_SNI", "expect": "reset_after_hello"},
+    {"name": "other-sni-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "www.wb-control.example", "expect": "ok"},
+    {"name": "no-sni-spared", "probe": "tls", "to": "elsewhere", "port": 443, "expect": "ok"},
+    {"name": "tcp-handshake-spared", "probe": "tcp", "to": "relay", "port": 443, "expect": "ok"}
+  ],
+  "expect": {"*": "pass", "vless-reality": "blocked"},
+  "category": {"vless-reality": "tls_sni_or_cert_block_suspected"},
+  "desync": {
+    "split1":     {"*": "pass", "vless-reality": "blocked"},
+    "sni-cut":    {"*": "pass"},
+    "chain":      {"*": "pass"},
+    "tlsrec-sni": {"*": "pass"}
+  }
+}

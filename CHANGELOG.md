@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions in this file refer to the user-visible app version recorded in
 `VERSION`. The engine ABI version (`daal-core 0.9.0+v3-share`), SBP
-spec version (`4`), and ABI symbol count (`58`) are independent — see
+spec version (`4`), and ABI symbol count (`63`) are independent — see
 `docs/build-and-release.md` for the versioning matrix.
 
 ## [0.2.0] — unreleased
@@ -26,8 +26,31 @@ that is already true.
   vless-reality, websocket-tls, naive (Cronet) and hysteria2.
 - `addDisallowedApplication(self)` keeps the engine's own sockets out of the
   tunnel, fixing "no available network interface" on every outbound dial.
-- ABI grew 48 → 58 exported `engine_` symbols (append-only; see
-  `specs/engine-abi-v1.md`).
+- ABI grew 48 → 70 exported `engine_` symbols (append-only; see
+  `specs/engine-abi-v1.md`, whose ledger is the authoritative count).
+  `engine_relaypack_refresh` looks for a newer signed pack on request; the
+  latest, `engine_standby_key`, takes a standby key a person was sent.
+- A route that stays "connected" while its relay's address is null-routed
+  is no longer a trap (blackout plan C0): with nothing else carrying, the
+  engine pauses the dead instance, walks the pack's freshness mirrors once,
+  directly, and comes back on the publisher's new address when it finds one.
+  Every other fetch stays refused while it does; rate-limited per pack and per
+  network, with an hourly and daily ceiling; not in lifeline-strict.
+- The automatic connect has a connect ladder: when a route's TLS hello is
+  reset at the hello, the same route is tried again with its hello cut (pack
+  offer, sni-cut, tlsrec-sni, chain) or with a name from its signed
+  `_cover_names` list — at most two per route and three per pass, within the
+  hourly probe allowance and three names per relay per network ever. A hello
+  that is only left unanswered gets one cut and no name; two names stopped
+  alike (`address_blocked`) stop the names; a stop measured as the relay's own
+  gets nothing. Names only for a signed, key-proved route from a trusted
+  publisher, never CDN names, never on an unreported network; the engine's own
+  passes and lifeline-strict use only what carried before. What carries is
+  remembered for that network and tried first there next time; a variant that
+  is stopped at its hello never cools the route, its family or its relay, and
+  only such a stop marks it. The importer now keeps a route's signed `_desync`
+  offer and `_cover_names` on the device (without the endpoint), so both reach
+  the engine. Reported as closed words only (`variant`, `n:<signed id>`).
 
 ### Relay
 

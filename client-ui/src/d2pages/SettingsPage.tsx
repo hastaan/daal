@@ -1,31 +1,50 @@
-// SettingsPage.tsx — v0.3 refresh. Eight groups per D-2 §7.6, rebuilt
-// on the v0.3 primitives (Card, ListRow, Segmented, Toggle, GroupLabel)
-// with oklch tokens. The legacy table-row aesthetic is gone — every
-// section reads like the rest of the app.
+// SettingsPage.tsx — one short list (spec C5).
 //
-// Layout: one centered column. A sticky chip rail at the top jumps to
-// any group. Each group is a `GroupLabel` + a `Card` of `ListRow`s.
-// Enums are `Segmented`; booleans are inline `Toggle`s; readouts use
-// mono meta on the row's right side.
+//   main      Status · Language · Theme · Help family connect · Advanced,
+//             then Erase on its own, then the version line.
+//   advanced  Connection mode, My Daal address (CustodyPanel), Automatic
+//             updates (only when there are any), Network test (only when a
+//             held file carries a test relay, or a report is kept), and
+//             [dev] Developer tools.
+//   nettest   The network test (components/NetTestPage), back to Advanced.
+//   status    The Status page (StatusPage), with a back control.
+//
+// The sub-page can be driven by the shell (`subPage` + `onSubPageChange`,
+// so Home's "Status" lands here) or kept here when the shell passes
+// nothing. Back returns from a sub-page to the main list.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { Locale } from '../lib/i18n';
 import { Prefs } from '../lib/prefs';
-import PanicWipeDialog from '../components/PanicWipeDialog';
+import { useBack } from '../lib/useBack';
+import { errorText } from '../lib/errorText';
+import { isDeveloperMode, setDeveloperMode, useDeveloperMode } from '../lib/devMode';
+import PanicWipeDialog, { useEraseWording } from '../components/PanicWipeDialog';
 import CustodyPanel from '../components/CustodyPanel';
 import SubscriptionsPanel from '../components/SubscriptionsPanel';
+import StatusPage from './StatusPage';
+import NetTestPage from '../components/NetTestPage';
+import { NetTest } from '../lib/netTestCommands';
+import { rowShown } from '../lib/netTest';
+import type { NetStatus } from '../lib/netTest';
 import { useContract } from '../contract/ContractProvider';
-import type { ConnMode, VersionInfo } from '../contract/D2Contract';
+import type { ConnMode, ConnState, VersionInfo } from '../contract/D2Contract';
 import {
+    Badge,
+    Button,
     Card,
-    GroupLabel,
+    Icon,
     ListRow,
+    PageHeader,
     Segmented,
-    StatusPill,
-    DaalGlyph,
+    StateIcon,
+    Toggle,
+    useToast,
 } from '../design/primitives';
 import { useDensity } from '../design/DensityProvider';
-import { mix } from '../design/mix';
+
+export type SettingsSubPage = 'main' | 'advanced' | 'status' | 'nettest';
 
 interface Props {
     t: (k: string) => string;
@@ -33,20 +52,20 @@ interface Props {
     onLocaleChange: (l: Locale) => void;
     publisherEnabled: boolean;
     onPublisherEnabledChange: (v: boolean) => void;
-    /** Shown in the About card. Threaded from the shell that owns the
-     *  authoritative app version string. */
+    /** The version line at the bottom. Threaded from the shell that owns
+     *  the authoritative app version string. */
     appVersion?: string;
-    /** Phone-only: when present, settings shows a "Diagnostics" row
-     *  at the top that the host shell uses to swap in the diagnostics
-     *  view. Desktop/Tablet keep Diagnostics in the side nav so they
-     *  never pass this. */
+    /** Kept for older callers: when given, the Status row calls it
+     *  instead of opening the Status sub-page here. */
     onOpenDiagnostics?: () => void;
+    /** The open sub-page, when the shell drives it. */
+    subPage?: SettingsSubPage;
+    onSubPageChange?: (p: SettingsSubPage) => void;
 }
 
-interface GroupDef {
-    id: string;
-    label: string;
-}
+/** Seven taps on the version line within this window switch developer tools. */
+export const DEV_TAPS = 7;
+export const DEV_TAP_WINDOW_MS = 3000;
 
 export default function SettingsPage({
     t,
@@ -56,790 +75,640 @@ export default function SettingsPage({
     onPublisherEnabledChange,
     appVersion,
     onOpenDiagnostics,
+    subPage,
+    onSubPageChange,
 }: Props) {
     const contract = useContract();
     const { density } = useDensity();
     const isPhone = density === 'phone';
+    const toast = useToast();
 
-    const [theme, setThemeLocal] = useState(Prefs.theme());
-    const [detailedNotif, setDetailedNotif] = useState(true);
-    const [showPanic, setShowPanic] = useState(false);
-    const [mode, setMode] = useState<ConnMode>('normal');
+    const [ownPage, setOwnPage] = useState<SettingsSubPage>('main');
+    const page = subPage ?? ownPage;
+    const go = (p: SettingsSubPage) => {
+        if (onSubPageChange) onSubPageChange(p);
+        else setOwnPage(p);
+    };
+    useBack(page !== 'main', () => go(page === 'nettest' ? 'advanced' : 'main'), 'page');
+
     const [version, setVersion] = useState<VersionInfo | null>(null);
-    const [wasm, setWasm] = useState<{
-        modules: string[];
-        killPub: string;
-    } | null>(null);
-    const [allowBulk, setAllowBulk] = useState(false);
-    const [autoPromote, setAutoPromote] = useState(true);
-    const [pushRendez, setPushRendez] = useState(true);
-    const [expFamilies, setExpFamilies] = useState(false);
-    const [masqueOverride, setMasqueOverride] = useState<'' | 'h3' | 'h2' | 'h1'>(
-        '',
-    );
+    const [connState, setConnState] = useState<ConnState | null>(null);
+    const [mode, setMode] = useState<ConnMode>('normal');
 
     useEffect(() => {
-        (async () => {
+        let cancelled = false;
+        contract
+            .versionInfo()
+            .then((v) => {
+                if (!cancelled) setVersion(v);
+            })
+            .catch(() => {
+                /* the version line falls back to the shell's string */
+            });
+        const tick = async () => {
             try {
-                const [c, v, modules, killPub] = await Promise.all([
-                    contract.connectionSummary(),
-                    contract.versionInfo(),
-                    contract.loadedWasmModules().catch(() => [] as string[]),
-                    contract.wasmKillSwitchPubkey().catch(() => ''),
-                ]);
+                const c = await contract.connectionSummary();
+                if (cancelled) return;
+                setConnState(c.state);
                 setMode(c.mode);
-                setVersion(v);
-                setWasm({ modules, killPub });
             } catch {
-                /* ignore */
+                // No answer: the Status row shows no badge rather than a guess.
+                if (!cancelled) setConnState(null);
             }
-        })();
+        };
+        void tick();
+        const id = setInterval(tick, 3000);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
     }, [contract]);
 
-    // Group definitions used for the sticky chip rail.
-    const groups: GroupDef[] = useMemo(() => {
-        const base: GroupDef[] = [
-            { id: 'general', label: t('settings.group.general') },
-            { id: 'appearance', label: t('settings.group.appearance') },
-            { id: 'network', label: t('settings.group.network') },
-            { id: 'notifications', label: t('settings.group.notifications') },
-            { id: 'privacy', label: t('settings.group.privacy') },
-            { id: 'advanced', label: t('settings.group.advanced') },
-            { id: 'about', label: t('settings.group.about') },
-            { id: 'emergency', label: t('settings.group.emergency') },
-        ];
-        if (onOpenDiagnostics) {
-            base.unshift({
-                id: 'diagnostics',
-                label: t('settings.diagnostics'),
-            });
-        }
-        return base;
-    }, [onOpenDiagnostics, t]);
+    const versionText = appVersion ?? version?.guiVersion ?? '';
 
-    // Track active group while scrolling. Updates the chip rail
-    // highlight so the user always knows where they are.
-    const [activeGroup, setActiveGroup] = useState<string>(
-        groups[0]?.id ?? 'general',
-    );
-    const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
-    useEffect(() => {
-        const observer = new IntersectionObserver(
-            (entries) => {
-                const visible = entries
-                    .filter((e) => e.isIntersecting)
-                    .sort(
-                        (a, b) =>
-                            b.intersectionRatio - a.intersectionRatio ||
-                            a.boundingClientRect.top - b.boundingClientRect.top,
-                    );
-                if (visible[0]) {
-                    setActiveGroup(visible[0].target.id);
-                }
-            },
-            { rootMargin: '-30% 0px -50% 0px', threshold: [0, 0.25, 0.5] },
-        );
-        for (const g of groups) {
-            const el = sectionRefs.current[g.id];
-            if (el) observer.observe(el);
-        }
-        return () => observer.disconnect();
-    }, [groups]);
-
-    const jumpTo = (id: string) => {
-        const el = sectionRefs.current[id];
-        if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            setActiveGroup(id);
-        }
+    // ---- the version line: 7 taps within 3 s switch developer tools ----
+    const taps = useRef<number[]>([]);
+    const onVersionTap = () => {
+        const now = Date.now();
+        taps.current = [...taps.current.filter((at) => now - at < DEV_TAP_WINDOW_MS), now];
+        if (taps.current.length < DEV_TAPS) return;
+        taps.current = [];
+        const next = !isDeveloperMode();
+        setDeveloperMode(next);
+        toast.show('neutral', t(next ? 'ui.dev.on' : 'ui.dev.off'));
     };
 
-    const themeOptions = [
-        { value: 'system', label: t('settings.theme.system') },
-        { value: 'light', label: t('settings.theme.light') },
-        { value: 'dark', label: t('settings.theme.dark') },
-    ] as const;
-
-    const modeOptions = [
-        { value: 'normal', label: t('settings.mode.normal') },
-        { value: 'lifeline', label: t('settings.mode.lifeline') },
-        { value: 'lifeline-strict', label: t('settings.mode.lifeline_strict') },
-        { value: 'bulk', label: t('settings.mode.bulk') },
-    ] as const;
-
-    const localeOptions = [
-        { value: 'en', label: t('lang.en') },
-        { value: 'fa', label: t('lang.fa') },
-    ] as const;
-
-    const masqueOptions = [
-        { value: '', label: t('settings.masque.auto') },
-        { value: 'h3', label: 'h3' },
-        { value: 'h2', label: 'h2' },
-        { value: 'h1', label: 'h1' },
-    ] as const;
-
-    const pageMaxWidth = isPhone ? '100%' : 720;
-
-    return (
+    const wrap = (children: ReactNode) => (
         <div
+            data-settings-page={page}
             style={{
                 width: '100%',
-                maxWidth: pageMaxWidth,
-                margin: '0 auto',
-                // On phones the outer shell (MobileShell <main>) already
-                // owns the horizontal gutter + safe-area-inset-top. We
-                // only add vertical breathing room here.
-                padding: isPhone
-                    ? '4px 0 16px'
-                    : 'calc(var(--gutter) * 1.5)',
+                maxWidth: isPhone ? '100%' : 'calc(var(--content-max) + 64px)',
+                // Phone and tablet shells already give the gutter.
+                padding: isPhone ? '0 0 24px' : density === 'tablet' ? '0 0 24px' : '24px 32px 32px',
                 color: 'var(--fg)',
             }}
         >
-            {/* Page head */}
-            <header style={{ marginBottom: 16 }}>
-                {/* No small label above the title here: it was the
-                    hardcoded English word "Settings" over the same word
-                    as the title, in every language. */}
-                <h1
-                    style={{
-                        fontFamily: 'var(--font-display)',
-                        fontSize: isPhone ? 22 : 28,
-                        margin: '4px 0 0',
-                    }}
-                >
-                    {t('settings.title')}
-                </h1>
-            </header>
+            {children}
+            {toast.node}
+        </div>
+    );
 
-            {/* Sticky chip rail */}
-            <div
-                style={{
-                    position: 'sticky',
-                    top: 0,
-                    zIndex: 5,
-                    margin: '0 calc(var(--gutter) * -0.5) 14px',
-                    padding: '6px calc(var(--gutter) * 0.5)',
-                    background:
-                        'linear-gradient(var(--bg) 70%, transparent)',
-                    overflowX: 'auto',
-                    WebkitOverflowScrolling: 'touch',
-                    scrollbarWidth: 'none',
+    if (page === 'status') {
+        return wrap(<StatusPage t={t} locale={locale} onBack={() => go('main')} />);
+    }
+    if (page === 'nettest') {
+        return wrap(
+            <NetTestPage
+                t={t}
+                connState={connState}
+                backLabel={t('settings.advanced.title')}
+                onBack={() => go('advanced')}
+            />,
+        );
+    }
+    if (page === 'advanced') {
+        return wrap(
+            <AdvancedPage
+                t={t}
+                locale={locale}
+                mode={mode}
+                onModeChanged={setMode}
+                version={version}
+                onOpenNetTest={() => go('nettest')}
+                onBack={() => go('main')}
+                onDevOff={() => {
+                    setDeveloperMode(false);
+                    toast.show('neutral', t('ui.dev.off'));
                 }}
-            >
-                <div
-                    style={{
-                        display: 'flex',
-                        gap: 6,
-                        whiteSpace: 'nowrap',
-                        paddingBlock: 4,
-                    }}
-                >
-                    {groups.map((g) => {
-                        const on = activeGroup === g.id;
-                        return (
-                            <button
-                                key={g.id}
-                                onClick={() => jumpTo(g.id)}
-                                style={{
-                                    appearance: 'none',
-                                    background: on
-                                        ? 'rgba(201,162,58,0.14)'
-                                        : 'var(--surface-2)',
-                                    color: on ? 'var(--fg)' : 'var(--muted)',
-                                    border: `1px solid ${
-                                        on
-                                            ? 'var(--gold)'
-                                            : 'var(--line-soft)'
-                                    }`,
-                                    padding: '5px 12px',
-                                    borderRadius: 'var(--r-pill)',
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 10,
-                                    letterSpacing: '0.10em',
-                                    textTransform: 'uppercase',
-                                    cursor: 'pointer',
-                                }}
-                            >
-                                {g.label}
-                            </button>
-                        );
-                    })}
-                </div>
-            </div>
+            />,
+        );
+    }
 
-            {/* Diagnostics shortcut (phone-only host injects) */}
-            {onOpenDiagnostics && (
-                <Section
-                    id="diagnostics"
-                    label={t('settings.diagnostics')}
-                    refMap={sectionRefs.current}
-                >
-                    <Card style={{ padding: 0 }}>
-                        <div style={{ padding: '0 16px' }}>
-                            <ListRow
-                                leading={<Dot tone="good" />}
-                                title={t('settings.diagnostics')}
-                                subtitle={t('settings.diagnostics.subtitle')}
-                                trailing={<Chevron />}
-                                onClick={onOpenDiagnostics}
-                                last
-                            />
-                        </div>
-                    </Card>
-                </Section>
-            )}
+    return wrap(
+        <MainList
+            t={t}
+            locale={locale}
+            onLocaleChange={onLocaleChange}
+            publisherEnabled={publisherEnabled}
+            onPublisherEnabledChange={onPublisherEnabledChange}
+            connState={connState}
+            onOpenStatus={onOpenDiagnostics ?? (() => go('status'))}
+            onOpenAdvanced={() => go('advanced')}
+            versionText={versionText}
+            onVersionTap={onVersionTap}
+        />,
+    );
+}
 
-            {/* General */}
-            <Section
-                id="general"
-                label={t('settings.group.general')}
-                refMap={sectionRefs.current}
-            >
-                <Card style={{ padding: 0 }}>
-                    <div style={{ padding: '0 16px' }}>
-                        <ListRow
-                            title={t('settings.language.label')}
-                            subtitle={t('settings.language.help')}
-                            trailing={
-                                <Segmented
-                                    value={locale}
-                                    items={[...localeOptions]}
-                                    onChange={(v) =>
-                                        onLocaleChange(v as Locale)
-                                    }
-                                />
-                            }
-                            last
+// ---- main list -------------------------------------------------------
+
+/** The Status row's leading icon for a connection state. */
+export function connStateIcon(s: ConnState | null): 'ok' | 'busy' | 'none' | 'bad' {
+    return s === 'connected' ? 'ok' : s === 'connecting' ? 'busy' : s === 'error' ? 'bad' : 'none';
+}
+
+/** The one Badge for a connection state, shared with StatusPage. */
+export function ConnBadge({ t, state, size = 'sm' }: { t: (k: string) => string; state: ConnState; size?: 'sm' | 'md' }) {
+    if (state === 'connected') return <Badge tone="good" size={size}>{t('connection.connected')}</Badge>;
+    if (state === 'connecting') return <Badge tone="gold" size={size} pulse>{t('status.badge.connecting')}</Badge>;
+    if (state === 'error') return <Badge tone="bad" size={size}>{t('status.badge.failed')}</Badge>;
+    return <Badge tone="neutral" size={size}>{t('connection.disconnected')}</Badge>;
+}
+
+function MainList({
+    t,
+    locale,
+    onLocaleChange,
+    publisherEnabled,
+    onPublisherEnabledChange,
+    connState,
+    onOpenStatus,
+    onOpenAdvanced,
+    versionText,
+    onVersionTap,
+}: {
+    t: (k: string) => string;
+    locale: Locale;
+    onLocaleChange: (l: Locale) => void;
+    publisherEnabled: boolean;
+    onPublisherEnabledChange: (v: boolean) => void;
+    connState: ConnState | null;
+    onOpenStatus: () => void;
+    onOpenAdvanced: () => void;
+    versionText: string;
+    onVersionTap: () => void;
+}) {
+    const { density } = useDensity();
+    const onPhone = useEraseWording();
+    const [theme, setThemeLocal] = useState<'system' | 'light' | 'dark'>(() => {
+        try {
+            return Prefs.theme();
+        } catch {
+            return 'system';
+        }
+    });
+    const [showErase, setShowErase] = useState(false);
+
+    const setTheme = (v: 'system' | 'light' | 'dark') => {
+        try {
+            Prefs.setTheme(v);
+        } catch {
+            /* storage refused: the theme still changes for this session */
+        }
+        setThemeLocal(v);
+        document.documentElement.setAttribute('data-theme', v === 'system' ? '' : v);
+    };
+
+    return (
+        <>
+            <PageHeader title={t('settings.title')} />
+
+            <Card style={{ padding: '0 16px', marginBlockStart: 4 }}>
+                <ListRow
+                    dataButton="status-row"
+                    leading={<StateIcon state={connStateIcon(connState)} size={22} />}
+                    title={t('page.status.title')}
+                    badge={connState ? <ConnBadge t={t} state={connState} /> : undefined}
+                    chevron
+                    onClick={onOpenStatus}
+                />
+                <ListRow
+                    title={t('settings.language.label')}
+                    stack={false}
+                    trailing={
+                        <Segmented<Locale>
+                            dataButton="language"
+                            value={locale}
+                            items={[
+                                { value: 'en', label: t('settings.language_en') },
+                                { value: 'fa', label: t('settings.language_fa') },
+                            ]}
+                            onChange={(v) => onLocaleChange(v)}
                         />
-                    </div>
-                </Card>
-            </Section>
-
-            {/* Appearance */}
-            <Section
-                id="appearance"
-                label={t('settings.group.appearance')}
-                refMap={sectionRefs.current}
-            >
-                <Card style={{ padding: 0 }}>
-                    <div style={{ padding: '0 16px' }}>
-                        <ListRow
-                            title={t('settings.theme.label')}
-                            subtitle={t('settings.theme.help')}
-                            trailing={
-                                <Segmented
-                                    value={theme}
-                                    items={[...themeOptions]}
-                                    onChange={(v) => {
-                                        Prefs.setTheme(v);
-                                        setThemeLocal(v);
-                                        document.documentElement.setAttribute(
-                                            'data-theme',
-                                            v === 'system' ? '' : v,
-                                        );
-                                    }}
-                                />
-                            }
-                            last
+                    }
+                />
+                <ListRow
+                    title={t('settings.theme.label')}
+                    stack={false}
+                    trailing={
+                        <Segmented<'system' | 'light' | 'dark'>
+                            dataButton="theme"
+                            iconOnly
+                            value={theme}
+                            items={[
+                                {
+                                    value: 'system',
+                                    icon: 'auto',
+                                    label: t(density === 'phone' ? 'settings.theme.system_phone' : 'settings.theme.system'),
+                                },
+                                { value: 'light', icon: 'sun', label: t('settings.theme.light') },
+                                { value: 'dark', icon: 'moon', label: t('settings.theme.dark') },
+                            ]}
+                            onChange={setTheme}
                         />
-                    </div>
-                </Card>
-            </Section>
-
-            {/* Network */}
-            <Section
-                id="network"
-                label={t('settings.group.network')}
-                refMap={sectionRefs.current}
-                rightAdornment={
-                    <StatusPill tone="gold" dotless>
-                        {t('settings.network.modepill').replace(
-                            '{mode}',
-                            t(modeI18nKey(mode)),
-                        )}
-                    </StatusPill>
-                }
-            >
-                <Card style={{ padding: 0 }}>
-                    <div style={{ padding: '0 16px' }}>
-                        <ListRow
-                            title={t('settings.network.mode')}
-                            subtitle={t('settings.network.mode.help')}
-                            trailing={
-                                <Segmented
-                                    value={mode}
-                                    items={[...modeOptions]}
-                                    onChange={async (v) => {
-                                        setMode(v as ConnMode);
-                                        try {
-                                            await contract.setMode(
-                                                v as ConnMode,
-                                            );
-                                        } catch {
-                                            /* ignore */
-                                        }
-                                    }}
-                                />
-                            }
-                        />
-                        <ToggleRow
-                            title={t('settings.network.bulk')}
-                            subtitle={t('settings.network.bulk.help')}
-                            checked={allowBulk}
-                            onChange={async (v) => {
-                                setAllowBulk(v);
-                                try {
-                                    await contract.setAllowBulkCapable(v);
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                            last
-                        />
-                    </div>
-                </Card>
-
-                {/* Subscriptions (Gap 4-recipient). The engine's
-                    scheduler.Plan governs the actual refresh cadence;
-                    this card shows the current state and exposes
-                    manual ↻/remove. */}
-                <div style={{ marginTop: 12 }}>
-                    <div
-                        style={{
-                            fontSize: 12,
-                            color: 'var(--muted)',
-                            letterSpacing: '0.04em',
-                            textTransform: 'uppercase',
-                            padding: '0 4px 6px 4px',
-                        }}
-                    >
-                        {t('subs.section_title')}
-                    </div>
-                    <SubscriptionsPanel t={t} />
-                </div>
-            </Section>
-
-            {/* Notifications */}
-            <Section
-                id="notifications"
-                label={t('settings.group.notifications')}
-                refMap={sectionRefs.current}
-            >
-                <Card style={{ padding: 0 }}>
-                    <div style={{ padding: '0 16px' }}>
-                        <ToggleRow
-                            title={t('settings.notifications.detailed')}
-                            subtitle={t('settings.notifications.detailed.help')}
-                            checked={detailedNotif}
-                            onChange={setDetailedNotif}
-                            last
-                        />
-                    </div>
-                </Card>
-            </Section>
-
-            {/* Privacy — Device Custody + Panic wipe */}
-            <Section
-                id="privacy"
-                label={t('settings.group.privacy')}
-                refMap={sectionRefs.current}
-            >
-                <div style={{ display: 'grid', gap: 10 }}>
-                    <CustodyPanel t={t} />
-                    <Card
-                        style={{
-                            padding: 0,
-                            borderColor:
-                                mix('var(--red)', 35, 'var(--line-soft)'),
-                        }}
-                    >
-                        <div style={{ padding: '0 16px' }}>
-                            <ListRow
-                                leading={<Dot tone="bad" />}
-                                title={t('settings.panic_wipe')}
-                                subtitle={t('settings.privacy.panic.help')}
-                                trailing={
-                                    <button
-                                        onClick={() => setShowPanic(true)}
-                                        style={{
-                                            background: 'transparent',
-                                            border:
-                                                `1px solid ${mix('var(--red)', 60, 'transparent')}`,
-                                            color: 'var(--red)',
-                                            padding: '6px 14px',
-                                            borderRadius: 'var(--r-pill)',
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 11,
-                                            letterSpacing: '0.06em',
-                                            textTransform: 'uppercase',
-                                            cursor: 'pointer',
-                                        }}
-                                    >
-                                        {t('settings.panic_wipe.erase')}
-                                    </button>
-                                }
-                                last
-                            />
-                        </div>
-                    </Card>
-                </div>
-            </Section>
-
-            {/* Advanced */}
-            <Section
-                id="advanced"
-                label={t('settings.group.advanced')}
-                refMap={sectionRefs.current}
-            >
-                <Card style={{ padding: 0 }}>
-                    <div style={{ padding: '0 16px' }}>
-                        <ToggleRow
-                            title={t('settings.publisher.toggle')}
-                            subtitle={t('settings.publisher.help')}
+                    }
+                />
+                <ListRow
+                    title={t('settings.publisher.toggle')}
+                    stack={false}
+                    onClick={() => onPublisherEnabledChange(!publisherEnabled)}
+                    trailing={
+                        <Toggle
                             checked={publisherEnabled}
                             onChange={onPublisherEnabledChange}
+                            ariaLabel={t('settings.publisher.toggle')}
+                            dataButton="publisher-toggle"
                         />
-                        <ToggleRow
-                            title={t('settings.advanced.autopromote')}
-                            subtitle={t('settings.advanced.autopromote.help')}
-                            checked={autoPromote}
-                            onChange={async (v) => {
-                                setAutoPromote(v);
-                                try {
-                                    await contract.setAutoPromotion(v);
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                        />
-                        <ToggleRow
-                            title={t('settings.advanced.push')}
-                            subtitle={t('settings.advanced.push.help')}
-                            checked={pushRendez}
-                            onChange={async (v) => {
-                                setPushRendez(v);
-                                try {
-                                    await contract.setPushRendezvousEnabled(v);
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                        />
-                        {/* The subtitle deliberately says this records a
-                            preference and nothing else. The 3A gate it
-                            was written for is unwired: nothing outside
-                            pathmanager's own tests calls
-                            ExperimentalFilter / RankWithExperimentalGate,
-                            so flipping this changes no route's
-                            selectability (see core/abi/abi.go's note on
-                            experimentalFamiliesEnabled). The demotion of
-                            tuic/shadowsocks to experimental made the ⚡
-                            badge appear on routes a user can actually
-                            connect on, which is what would send them
-                            here expecting the old promise to be true. */}
-                        <ToggleRow
-                            title={t('settings.advanced.experimental')}
-                            subtitle={t('settings.advanced.experimental.help')}
-                            checked={expFamilies}
-                            onChange={async (v) => {
-                                setExpFamilies(v);
-                                try {
-                                    await contract.setExperimentalFamiliesEnabled(
-                                        v,
-                                    );
-                                } catch {
-                                    /* ignore */
-                                }
-                            }}
-                        />
-                        <ListRow
-                            title={t('settings.advanced.masque')}
-                            subtitle={t('settings.advanced.masque.help')}
-                            trailing={
-                                <Segmented
-                                    value={masqueOverride}
-                                    items={[...masqueOptions]}
-                                    onChange={async (v) => {
-                                        setMasqueOverride(
-                                            v as typeof masqueOverride,
-                                        );
-                                        try {
-                                            await contract.setMasqueSubmodeOverride(
-                                                v,
-                                            );
-                                        } catch {
-                                            /* ignore */
-                                        }
-                                    }}
-                                />
-                            }
-                            last
-                        />
-                    </div>
-                </Card>
-            </Section>
+                    }
+                />
+                <ListRow
+                    dataButton="advanced-row"
+                    title={t('settings.advanced.title')}
+                    chevron
+                    onClick={onOpenAdvanced}
+                    last
+                />
+            </Card>
 
-            {/* About */}
-            <Section
-                id="about"
-                label={t('settings.group.about')}
-                refMap={sectionRefs.current}
-            >
-                {/* Brand card — the app's identity now lives here,
-                 * not in the chrome. */}
-                <Card style={{ marginBottom: 10 }}>
-                    <div
+            <Card style={{ padding: '0 16px', marginBlockStart: 16 }}>
+                <ListRow
+                    dataButton="erase"
+                    leading={
+                        <span style={{ color: 'var(--red)', display: 'inline-flex' }}>
+                            <Icon name="erase" size={22} />
+                        </span>
+                    }
+                    title={t(onPhone ? 'settings.erase.row' : 'settings.erase.row_desktop')}
+                    danger
+                    chevron
+                    onClick={() => setShowErase(true)}
+                    last
+                />
+            </Card>
+
+            {versionText && (
+                <div style={{ display: 'flex', justifyContent: 'center', marginBlockStart: 12 }}>
+                    <button
+                        type="button"
+                        data-button="version"
+                        onClick={onVersionTap}
                         style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 14,
-                        }}
-                    >
-                        <DaalGlyph size={44} />
-                        <div style={{ minWidth: 0 }}>
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-display)',
-                                    fontSize: 22,
-                                    color: 'var(--fg)',
-                                    lineHeight: 1.1,
-                                }}
-                            >
-                                {locale === 'fa' ? 'دال' : 'Daal'}
-                            </div>
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 10,
-                                    color: 'var(--dim)',
-                                    letterSpacing: '0.18em',
-                                    textTransform: 'uppercase',
-                                    marginTop: 4,
-                                }}
-                            >
-                                v{appVersion ?? version?.guiVersion ?? '—'}
-                                {version?.engineVersion
-                                    ? ` · engine ${version.engineVersion}`
-                                    : ''}
-                            </div>
-                        </div>
-                    </div>
-                </Card>
-
-                <Card style={{ padding: 0 }}>
-                    <div style={{ padding: '0 16px' }}>
-                        <ListRow
-                            title={t('settings.about.wasm')}
-                            meta={
-                                wasm?.modules.length
-                                    ? wasm.modules.join(', ')
-                                    : '—'
-                            }
-                        />
-                        <ListRow
-                            title={t('settings.about.killswitch')}
-                            subtitle={
-                                wasm?.killPub ? (
-                                    <span
-                                        style={{
-                                            fontFamily: 'var(--font-mono)',
-                                            wordBreak: 'break-all',
-                                        }}
-                                    >
-                                        {wasm.killPub}
-                                    </span>
-                                ) : (
-                                    '—'
-                                )
-                            }
-                            last
-                        />
-                    </div>
-                </Card>
-            </Section>
-
-            {/* Emergency */}
-            <Section
-                id="emergency"
-                label={t('settings.group.emergency')}
-                refMap={sectionRefs.current}
-            >
-                <Card>
-                    <div
-                        style={{
+                            appearance: 'none',
+                            minHeight: 44,
+                            minWidth: 44,
+                            paddingInline: 12,
+                            background: 'transparent',
+                            border: 0,
                             color: 'var(--muted)',
-                            fontSize: 13,
-                            lineHeight: 1.45,
+                            fontFamily: 'var(--font-body)',
+                            fontSize: 12,
+                            cursor: 'default',
+                            // No text selection or tap flash on the hidden switch.
+                            userSelect: 'none',
                         }}
                     >
-                        {t('settings.emergency.body')}
-                    </div>
-                </Card>
-            </Section>
-
-            {showPanic && (
-                <PanicWipeDialog t={t} onClose={() => setShowPanic(false)} />
+                        <VersionText t={t} version={versionText} />
+                    </button>
+                </div>
             )}
-        </div>
+
+            {showErase && <PanicWipeDialog t={t} onClose={() => setShowErase(false)} />}
+        </>
     );
 }
 
-// ---- Local helpers ----
-
-function Section({
-    id,
-    label,
-    refMap,
-    rightAdornment,
-    children,
-}: {
-    id: string;
-    label: string;
-    refMap: Record<string, HTMLDivElement | null>;
-    rightAdornment?: React.ReactNode;
-    children: React.ReactNode;
-}) {
+/** "Daal 0.9.0", with the version kept left-to-right inside Persian. */
+export function VersionText({ t, version }: { t: (k: string) => string; version: string }) {
+    const [before, after] = t('settings.version').split('{version}');
+    // dir=auto: the first word ("Daal" / «دال») sets the order, even
+    // inside a button that an old WebView lays out left to right.
     return (
-        <div
-            ref={(el) => {
-                refMap[id] = el;
-            }}
-            id={id}
-            style={{ scrollMarginTop: 80, marginBottom: 16 }}
-        >
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'baseline',
-                    justifyContent: 'space-between',
-                }}
-            >
-                <GroupLabel>{label}</GroupLabel>
-                {rightAdornment}
-            </div>
-            {children}
-        </div>
-    );
-}
-
-function ToggleRow({
-    title,
-    subtitle,
-    checked,
-    onChange,
-    last,
-}: {
-    title: string;
-    subtitle?: string;
-    checked: boolean;
-    onChange: (v: boolean) => void;
-    last?: boolean;
-}) {
-    return (
-        <ListRow
-            title={title}
-            subtitle={subtitle}
-            trailing={
-                <SwitchInline checked={checked} onChange={onChange} />
-            }
-            last={last}
-        />
-    );
-}
-
-function SwitchInline({
-    checked,
-    onChange,
-}: {
-    checked: boolean;
-    onChange: (v: boolean) => void;
-}) {
-    return (
-        <button
-            role="switch"
-            aria-checked={checked}
-            type="button"
-            onClick={() => onChange(!checked)}
-            style={{
-                flexShrink: 0,
-                width: 36,
-                height: 20,
-                borderRadius: 10,
-                background: checked ? 'var(--gold)' : 'var(--surface-3)',
-                border: 0,
-                position: 'relative',
-                cursor: 'pointer',
-                transition: 'background var(--t-fast)',
-            }}
-        >
-            <span
-                aria-hidden
-                style={{
-                    position: 'absolute',
-                    top: 2,
-                    left: checked ? 18 : 2,
-                    width: 16,
-                    height: 16,
-                    background: checked ? '#1f1401' : 'var(--fg)',
-                    borderRadius: '50%',
-                    transition: 'left var(--t-fast)',
-                }}
-            />
-        </button>
-    );
-}
-
-function Dot({ tone }: { tone: 'good' | 'warn' | 'bad' | 'neutral' }) {
-    const color =
-        tone === 'good'
-            ? 'var(--green)'
-            : tone === 'warn'
-                ? 'var(--amber)'
-                : tone === 'bad'
-                    ? 'var(--red)'
-                    : 'var(--muted)';
-    return (
-        <span
-            aria-hidden
-            style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: color,
-                display: 'inline-block',
-                boxShadow: `0 0 6px ${mix(color, 60, 'transparent')}`,
-            }}
-        />
-    );
-}
-
-function Chevron() {
-    return (
-        <span
-            aria-hidden
-            style={{
-                color: 'var(--dim)',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 14,
-            }}
-        >
-            ›
+        <span dir="auto">
+            {before}
+            <bdi dir="ltr">{version}</bdi>
+            {after ?? ''}
         </span>
     );
 }
 
-function modeI18nKey(mode: ConnMode): string {
-    switch (mode) {
-        case 'normal':
-            return 'settings.mode.normal';
-        case 'lifeline':
-            return 'settings.mode.lifeline';
-        case 'lifeline-strict':
-            return 'settings.mode.lifeline_strict';
-        case 'bulk':
-            return 'settings.mode.bulk';
-        default:
-            return 'settings.mode.normal';
-    }
+// ---- advanced --------------------------------------------------------
+
+function AdvancedPage({
+    t,
+    locale,
+    mode,
+    onModeChanged,
+    version,
+    onOpenNetTest,
+    onBack,
+    onDevOff,
+}: {
+    t: (k: string) => string;
+    locale: Locale;
+    mode: ConnMode;
+    onModeChanged: (m: ConnMode) => void;
+    version: VersionInfo | null;
+    onOpenNetTest: () => void;
+    onBack: () => void;
+    onDevOff: () => void;
+}) {
+    const contract = useContract();
+    const dev = useDeveloperMode();
+    const [modeFailed, setModeFailed] = useState(false);
+    // The network test row: asked once; hidden until the engine says a
+    // held file carries a test relay (or a report is kept).
+    const [netTest, setNetTest] = useState<NetStatus | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        void NetTest.status().then((s) => {
+            if (!cancelled) setNetTest(s);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const changeMode = async (next: ConnMode) => {
+        const before = mode;
+        onModeChanged(next);
+        setModeFailed(false);
+        try {
+            await contract.setMode(next);
+        } catch {
+            // The engine refused: put the old value back and say so.
+            onModeChanged(before);
+            setModeFailed(true);
+        }
+    };
+
+    return (
+        <>
+            <PageHeader
+                title={t('settings.advanced.title')}
+                back={{ label: t('settings.title'), onClick: onBack }}
+            />
+            <div style={{ display: 'grid', gap: 16, marginBlockStart: 4 }}>
+                <Card>
+                    <CardTitle>{t('settings.network.mode')}</CardTitle>
+                    <div style={{ marginBlockStart: 10 }}>
+                        <Segmented<ConnMode>
+                            dataButton="mode"
+                            value={mode}
+                            items={[
+                                { value: 'normal', label: t('settings.mode.normal') },
+                                { value: 'lifeline', label: t('settings.mode.lifeline') },
+                                { value: 'lifeline-strict', label: t('settings.mode.lifeline_strict') },
+                                { value: 'bulk', label: t('settings.mode.bulk') },
+                            ]}
+                            onChange={(v) => void changeMode(v)}
+                        />
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--muted)', marginBlockStart: 8, lineHeight: 1.45 }}>
+                        {t('settings.network.mode.help')}
+                    </div>
+                    {modeFailed && <FailLine text={t('settings.failed')} />}
+                </Card>
+
+                <CustodyPanel t={t} locale={locale} />
+
+                <SubscriptionsPanel t={t} locale={locale} />
+
+                {netTest && rowShown(netTest) && (
+                    <Card style={{ padding: '0 16px' }}>
+                        <ListRow
+                            dataButton="nettest-row"
+                            leading={
+                                <span style={{ color: 'var(--muted)', display: 'inline-flex' }}>
+                                    <Icon name="signal" size={22} />
+                                </span>
+                            }
+                            title={t('netTest.title')}
+                            subtitle={t(
+                                netTest.kind === 'result'
+                                    ? 'netTest.row.ready'
+                                    : netTest.kind === 'running'
+                                      ? 'netTest.row.running'
+                                      : 'netTest.row.sub',
+                            )}
+                            wrapSubtitle
+                            badge={
+                                netTest.kind === 'result' ? (
+                                    <Badge tone="gold" size="sm">
+                                        {t('netTest.row.badge')}
+                                    </Badge>
+                                ) : undefined
+                            }
+                            chevron
+                            onClick={onOpenNetTest}
+                            last
+                        />
+                    </Card>
+                )}
+
+                {dev && <DevTools t={t} version={version} onDevOff={onDevOff} />}
+            </div>
+        </>
+    );
+}
+
+export function CardTitle({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
+    return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 28, flexWrap: 'wrap' }}>
+            <h2
+                style={{
+                    margin: 0,
+                    flex: '1 1 auto',
+                    minWidth: 0,
+                    fontFamily: 'var(--font-display)',
+                    fontSize: 17,
+                    fontWeight: 500,
+                    color: 'var(--fg)',
+                }}
+            >
+                {children}
+            </h2>
+            {trailing}
+        </div>
+    );
+}
+
+export function FailLine({ text, detail, t }: { text: string; detail?: string; t?: (k: string) => string }) {
+    return (
+        <div role="alert" style={{ marginBlockStart: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', color: 'var(--red)', fontSize: 13, lineHeight: 1.45 }}>
+                <span style={{ paddingBlockStart: 1 }}>
+                    <StateIcon state="bad" size={16} />
+                </span>
+                <span>{text}</span>
+            </div>
+            {detail && t && <DetailFold t={t} detail={detail} />}
+        </div>
+    );
+}
+
+function DetailFold({ t, detail }: { t: (k: string) => string; detail: string }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <div>
+            <button
+                type="button"
+                aria-expanded={open}
+                onClick={() => setOpen((v) => !v)}
+                style={{
+                    appearance: 'none',
+                    minHeight: 44,
+                    background: 'transparent',
+                    border: 0,
+                    padding: 0,
+                    color: 'var(--gold-warm)',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                }}
+            >
+                {t('ui.details')}
+            </button>
+            {open && (
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)', overflowWrap: 'anywhere' }}>
+                    {detail}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ---- [dev] developer tools ------------------------------------------
+
+type DevKey = 'bulk' | 'autopromote' | 'push' | 'experimental' | 'masque';
+
+function DevTools({
+    t,
+    version,
+    onDevOff,
+}: {
+    t: (k: string) => string;
+    version: VersionInfo | null;
+    onDevOff: () => void;
+}) {
+    const contract = useContract();
+    // No engine getter exists for these (spec 0.2): they start from the
+    // defaults this page always assumed and show a line when refused.
+    const [allowBulk, setAllowBulk] = useState(false);
+    const [autoPromote, setAutoPromote] = useState(true);
+    const [pushRendez, setPushRendez] = useState(true);
+    const [expFamilies, setExpFamilies] = useState(false);
+    const [detailedNotif, setDetailedNotif] = useState(true);
+    const [masque, setMasque] = useState<'' | 'h3' | 'h2' | 'h1'>('');
+    const [failed, setFailed] = useState<Partial<Record<DevKey, string>>>({});
+    const [wasm, setWasm] = useState<{ modules: string[]; killPub: string } | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        Promise.all([
+            contract.loadedWasmModules().catch(() => [] as string[]),
+            contract.wasmKillSwitchPubkey().catch(() => ''),
+        ]).then(([modules, killPub]) => {
+            if (!cancelled) setWasm({ modules, killPub });
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [contract]);
+
+    const apply = async <V,>(key: DevKey, next: V, prev: V, set: (v: V) => void, call: (v: V) => Promise<void>) => {
+        set(next);
+        setFailed((f) => ({ ...f, [key]: undefined }));
+        try {
+            await call(next);
+        } catch (e) {
+            set(prev);
+            setFailed((f) => ({ ...f, [key]: errorText(e) }));
+        }
+    };
+
+    const fail = (k: DevKey) =>
+        failed[k] !== undefined ? <FailLine t={t} text={t('settings.failed')} detail={failed[k] || undefined} /> : null;
+
+    const toggleRow = (
+        key: DevKey | 'notif',
+        title: string,
+        help: string,
+        checked: boolean,
+        onChange: (v: boolean) => void,
+        last?: boolean,
+    ) => (
+        <div key={key} style={{ borderBottom: last ? 'none' : '1px solid var(--line-soft)', paddingBlockEnd: key !== 'notif' && failed[key as DevKey] !== undefined ? 8 : 0 }}>
+            <ListRow
+                title={title}
+                subtitle={help}
+                wrapSubtitle
+                stack={false}
+                last
+                trailing={<Toggle checked={checked} onChange={onChange} ariaLabel={title} dataButton={`dev-${key}`} />}
+            />
+            {key !== 'notif' && fail(key as DevKey)}
+        </div>
+    );
+
+    const mono = { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)', overflowWrap: 'anywhere' as const };
+
+    return (
+        <Card>
+            <CardTitle>{t('settings.dev.title')}</CardTitle>
+            <div style={{ marginBlockStart: 4 }}>
+                {toggleRow('bulk', t('settings.network.bulk'), t('settings.network.bulk.help'), allowBulk, (v) =>
+                    void apply('bulk', v, allowBulk, setAllowBulk, (x) => contract.setAllowBulkCapable(x)),
+                )}
+                {toggleRow('autopromote', t('settings.advanced.autopromote'), t('settings.advanced.autopromote.help'), autoPromote, (v) =>
+                    void apply('autopromote', v, autoPromote, setAutoPromote, (x) => contract.setAutoPromotion(x)),
+                )}
+                {toggleRow('push', t('settings.advanced.push'), t('settings.advanced.push.help'), pushRendez, (v) =>
+                    void apply('push', v, pushRendez, setPushRendez, (x) => contract.setPushRendezvousEnabled(x)),
+                )}
+                {/* Records a preference and nothing else: the 3A gate it was
+                    written for is unwired (see core/abi/abi.go's note on
+                    experimentalFamiliesEnabled); the help text says so. */}
+                {toggleRow('experimental', t('settings.advanced.experimental'), t('settings.advanced.experimental.help'), expFamilies, (v) =>
+                    void apply('experimental', v, expFamilies, setExpFamilies, (x) => contract.setExperimentalFamiliesEnabled(x)),
+                )}
+                <div style={{ borderBottom: '1px solid var(--line-soft)', paddingBlock: '11px' }}>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{t('settings.advanced.masque')}</div>
+                    <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.4, marginBlock: '2px 8px' }}>
+                        {t('settings.advanced.masque.help')}
+                    </div>
+                    <Segmented<'' | 'h3' | 'h2' | 'h1'>
+                        dataButton="dev-masque"
+                        value={masque}
+                        items={[
+                            { value: '', label: t('settings.masque.auto') },
+                            { value: 'h3', label: 'h3' },
+                            { value: 'h2', label: 'h2' },
+                            { value: 'h1', label: 'h1' },
+                        ]}
+                        onChange={(v) => void apply('masque', v, masque, setMasque, (x) => contract.setMasqueSubmodeOverride(x))}
+                    />
+                    {fail('masque')}
+                </div>
+                {toggleRow('notif', t('settings.notifications.detailed'), t('settings.notifications.detailed.help'), detailedNotif, setDetailedNotif)}
+                <ListRow title={t('settings.engine_version')} subtitle={<span style={mono}>{version?.engineVersion || '—'}</span>} />
+                <ListRow
+                    title={t('settings.about.wasm')}
+                    subtitle={<span style={mono}>{wasm?.modules.length ? wasm.modules.join(', ') : '—'}</span>}
+                    wrapSubtitle
+                />
+                <ListRow
+                    title={t('settings.about.killswitch')}
+                    subtitle={<span style={mono}>{wasm?.killPub || '—'}</span>}
+                    wrapSubtitle
+                    last
+                />
+            </div>
+            <div style={{ marginBlockStart: 12 }}>
+                <Button variant="secondary" dataButton="dev-off" onClick={onDevOff}>
+                    {t('settings.dev.off')}
+                </Button>
+            </div>
+        </Card>
+    );
 }

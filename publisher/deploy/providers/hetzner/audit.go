@@ -199,6 +199,14 @@ func claimsFrom(records []*provider.OperatorRecord) recordClaims {
 		if rec.FloatingIPID != "" {
 			c.floatingIPs[rec.FloatingIPID] = relay
 		}
+		// The standby address (add-on 1) is a second Floating IP the
+		// record names. Rule 3 holds for it as much as for the primary,
+		// and more: while any pack carries its commitment, releasing it
+		// would let a stranger's server inherit an address recipients
+		// may be told to dial.
+		if rec.Standby != nil && rec.Standby.FloatingIPID != "" {
+			c.floatingIPs[rec.Standby.FloatingIPID] = relay
+		}
 	}
 	return c
 }

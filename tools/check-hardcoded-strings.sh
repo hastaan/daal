@@ -63,6 +63,10 @@ SCAN_PATHS=(
     "client-ui/src/publisher/RotationAdvice.tsx"
     "client-ui/src/publisher/RelayGonePanel.tsx"
     "client-ui/src/publisher/AddressSwap.tsx"
+    # Optional add-ons (docs/optional-addons-plan.md): the cards state a
+    # cost and what an add-on ties to the publisher, so an untranslated
+    # line there is a cost a Farsi reader cannot read.
+    "client-ui/src/publisher/addons"
 )
 # Pattern: a string literal of >= 12 ASCII letters (with spaces),
 # wrapped in double or single quotes. The search is conservative

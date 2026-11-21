@@ -91,7 +91,9 @@ const NEW_KEYS = Object.keys(EN).filter(
 
 describe('strings', () => {
     it('every new sentence is in English and Persian, translated, with the same placeholders', () => {
-        expect(NEW_KEYS.length).toBe(29);
+        // 29 before the redesign; the relay-only row's two sentences gave
+        // way to "Unknown person" + the relay name (C7.2).
+        expect(NEW_KEYS.length).toBe(27);
         for (const k of NEW_KEYS) {
             expect(FA[k], k).toBeTruthy();
             expect(FA[k], k).not.toBe(EN[k]);
@@ -115,12 +117,11 @@ describe('strings', () => {
     });
 
     it('the sentences the owner asked for, word for word', () => {
-        expect(EN['pub.restore_settle.why']).toBe(
-            'This phone was restored from a backup. Since that backup was made, these people are no longer on the relay. Were they removed, or should they still have access?',
-        );
-        expect(EN['pub.people.relay_only.row']).toBe(
-            'Someone added from your other phone; this phone does not have their name',
-        );
+        // Shortened to the one question (C7.2c).
+        expect(EN['pub.restore_settle.why']).toBe('Were these people removed after your backup?');
+        expect(EN['pub.restore_settle.until']).toBe('Until you answer, nobody here gets a new file.');
+        // The relay-only row is "Unknown person" with the relay's name (C7.2).
+        expect(EN['pub.people.unknown']).toBe('Unknown person');
         // The result after "keep" names the renew button by its label.
         expect(EN['pub.restore_settle.done.keep']).toContain(EN['pub.renew.action']);
         expect(FA['pub.restore_settle.done.keep']).toContain(FA['pub.renew.action']);
@@ -231,7 +232,6 @@ describe('the People list while someone waits', () => {
                 people={people}
                 onAdd={noop}
                 onSend={noop}
-                onSave={noop}
                 onRemake={noop}
                 onReplace={noop}
                 onRemoveAccess={noop}
@@ -241,10 +241,12 @@ describe('the People list while someone waits', () => {
         );
         const sara = html.slice(html.indexOf('>Sara<'));
         const maman = html.slice(html.indexOf('>Maman<'), html.indexOf('>Sara<'));
-        expect(maman).toContain(`>${EN['pub.people.remove_access']}<`);
-        expect(sara).toContain(EN['pub.people.state.needs_answer']);
-        expect(sara).not.toContain(`>${EN['pub.people.remove_access']}<`);
-        expect(sara).not.toContain(`>${EN['pub.people.remake']}<`);
+        expect(maman).toContain('data-button="person-more"');
+        expect(maman).toContain('data-button="person-remake"');
+        expect(sara).toContain(`>${EN['pub.people.badge.needs_answer']}<`);
+        expect(sara).not.toContain('data-button="person-more"');
+        expect(sara).not.toContain('data-button="person-remake"');
+        expect(sara).not.toContain('data-button="person-send"');
     });
 });
 
@@ -381,7 +383,7 @@ describe('the sentences on the screen, in both languages', () => {
                 recipients={recipients}
                 hasEveryoneFile={false}
                 renew={() => new Promise(() => {})}
-                send={{ onSend: noop, onSave: noop, onQr: noop, onCopy: noop }}
+                send={{ onOpen: noop }}
                 onClose={noop}
                 waiting={SARA.people}
             />,
@@ -396,7 +398,7 @@ describe('the sentences on the screen, in both languages', () => {
                 recipients={recipients}
                 hasEveryoneFile={false}
                 renew={() => new Promise(() => {})}
-                send={{ onSend: noop, onSave: noop, onQr: noop, onCopy: noop }}
+                send={{ onOpen: noop }}
                 onClose={noop}
                 waiting={SARA.people}
                 initialReport={renewFixture({ items: [renewFixture().items[0]], everyone_file: null, all_done: true })}
@@ -405,8 +407,8 @@ describe('the sentences on the screen, in both languages', () => {
         expect(result).toContain(cat['pub.renew.result.waiting']);
         expect(result).not.toContain(cat['pub.renew.result.all_done']);
         expect(result).toContain(cat['pub.renew.reason.needs_answer']);
-        // Sara has no file to send: only Maman's row has the send buttons.
-        expect(result.split(`>${cat['pub.people.send']}<`).length - 1).toBe(1);
+        // Sara has no file to send: only Maman's row has "Send…".
+        expect(result.split('data-button="renew-send"').length - 1).toBe(1);
     });
 });
 
@@ -550,7 +552,7 @@ describe('the relay page after a restore, mounted', () => {
         // Sara is the only one missing and she is a question: no banner
         // inviting the renew that would bring her back.
         expect(byAttr(m.container, 'data-testid', 'renew-banner') == null).toBe(true);
-        expect(text(m.container)).toContain(EN['pub.people.state.needs_answer']);
+        expect(text(m.container)).toContain(EN['pub.people.badge.needs_answer']);
 
         await rig.click(button(m.container, 'settle-keep-2'));
         await rig.settle(6);
@@ -570,7 +572,8 @@ describe('the relay page after a restore, mounted', () => {
         await rig.settle(8);
         expect(calls('wizard_restore_answer')).toEqual([{ operatorId: 7, recipientId: 2, keep: false }]);
         expect(calls('wizard_relay_health').length).toBeGreaterThan(before);
-        expect(text(m.container)).toContain(EN['pub.people.state.removed']);
+        // Folded under "Removed (1)" at the end of People.
+        expect(text(m.container)).toContain(EN['pub.people.removed'].replace('{n}', '1'));
         expect(byAttr(m.container, 'data-testid', 'renew-banner') == null).toBe(true);
         expect(calls('wizard_renew_everyone')).toEqual([]);
     });
@@ -589,11 +592,12 @@ describe('the relay page after a restore, mounted', () => {
         restoredRelay();
         const m = await mountPage();
         const list = byAttr(m.container, 'data-testid', 'relay-only');
-        expect(text(list)).toContain(EN['pub.people.relay_only.row']);
+        expect(text(list)).toContain(EN['pub.people.unknown']);
         expect(byAttr(list!, 'data-relay-user', 'r9') != null).toBe(true);
         // r1 is Maman, in this phone's list: never offered here.
         expect(byAttr(list!, 'data-relay-user', 'r1') == null).toBe(true);
 
+        await rig.click(button(m.container, 'relay-only-more-r9'));
         await rig.click(button(m.container, 'relay-only-remove-r9'));
         const sheet = byAttr(m.container, 'data-testid', 'relay-only-sheet');
         expect(text(sheet)).toContain(EN['pub.people.relay_only.confirm.body'].replace('{user}', 'r9'));
@@ -602,6 +606,7 @@ describe('the relay page after a restore, mounted', () => {
         expect(byAttr(m.container, 'data-testid', 'relay-only-sheet') == null).toBe(true);
         expect(calls('wizard_relay_only_revoke')).toEqual([]);
 
+        await rig.click(button(m.container, 'relay-only-more-r9'));
         await rig.click(button(m.container, 'relay-only-remove-r9'));
         const before = calls('wizard_relay_health').length;
         await rig.click(button(m.container, 'relay-only-confirm'));
@@ -627,6 +632,7 @@ describe('the relay page after a restore, mounted', () => {
         };
         const m = await mountPage();
         expect(byAttr(m.container, 'data-relay-user', 'r9') != null).toBe(true);
+        await rig.click(button(m.container, 'relay-only-more-r9'));
         await rig.click(button(m.container, 'relay-only-remove-r9'));
         await rig.click(button(m.container, 'relay-only-confirm'));
         await rig.settle(6);
@@ -639,6 +645,7 @@ describe('the relay page after a restore, mounted', () => {
         const base = answer.fn;
         answer.fn = (cmd, args) => (cmd === 'wizard_relay_only_revoke' ? Promise.reject('E_RELAY_UNREACHABLE: timeout') : base(cmd, args));
         const m = await mountPage();
+        await rig.click(button(m.container, 'relay-only-more-r9'));
         await rig.click(button(m.container, 'relay-only-remove-r9'));
         await rig.click(button(m.container, 'relay-only-confirm'));
         await rig.settle(6);
@@ -654,9 +661,11 @@ describe('the relay page after a restore, mounted', () => {
         answer.fn = (cmd, args) =>
             cmd === 'save_sbpx_to_downloads' ? Promise.resolve('Maman (1).sbpx') : base(cmd, args);
         const m = await mountPage();
-        const save = all(m.container, (n) => n.nodeName === 'BUTTON' && n.textContent === EN['pub.people.save'])[0];
-        expect(save != null).toBe(true);
-        await rig.click(save);
+        // The person's send button opens the send sheet; "Save to phone" is in it.
+        const send = all(m.container, (n) => n.getAttribute?.('data-button') === 'person-send')[0];
+        expect(send != null).toBe(true);
+        await rig.click(send);
+        await rig.click(button(m.container, 'save'));
         await rig.settle(4);
         expect(calls('save_sbpx_to_downloads')).toEqual([{ sbpxPath: '/stage/1.sbpx', fileName: 'Maman.sbpx' }]);
         expect(text(m.container)).toContain(EN['pub.fb.save.ok'].replace('{name}', 'Maman (1).sbpx'));

@@ -273,6 +273,7 @@ fn d1_a_killed_setup_is_finished_on_the_server_that_already_exists() {
 
     let st = w.state();
     assert_eq!(st["servers_created"], 1, "exactly one server was ever rented: {st:#}");
+    assert_eq!(st["cloudflare_fetches"], 0, "building a relay contacts nobody but the hosting company: {st:#}");
     assert_eq!(st["rebuilds"], 1, "it was re-imaged in place");
     assert_eq!(len(&st, "servers"), 1);
     assert_eq!(st["servers"][0]["id"].as_i64().unwrap().to_string(), server_id);
@@ -413,6 +414,7 @@ fn d2_after_a_rebuild_one_press_renews_everyone_and_a_second_press_changes_nothi
     }
     let st = w.state();
     assert_eq!(server_of(&st)["mgmt_writes"], writes_after_first, "a second press wrote nothing to the box");
+    assert_eq!(st["cloudflare_fetches"], 0, "a rebuild contacts nobody but the hosting company: {st:#}");
     assert_eq!(len(&st, "unmodelled"), 0, "{st:#}");
 }
 

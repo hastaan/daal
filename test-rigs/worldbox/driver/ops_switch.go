@@ -198,6 +198,11 @@ type switchSession struct {
 	// tunsHeld: TUN interfaces a switch replaced that were still there
 	// half a second after the engine closed the instance that read them.
 	tunsHeld []string
+	// viaEdge: the session rides the way in through Cloudflare, so the
+	// client's bytes go to an edge address, never to a relay endpoint
+	// the tap watches. Its wire check is that the relay's endpoints saw
+	// nothing from the client (the edge's own log proves the carry).
+	viaEdge bool
 }
 
 // add records one check of this session: ids are "<label>.<step>.<id>".
@@ -248,7 +253,19 @@ func (s *switchSession) carries(step string, f Family, t0 time.Time) bool {
 		// already been said; the tap has nothing to add to it.)
 		saved := rc.R.prefix
 		rc.R.prefix = saved + s.label + "." + step + "."
-		rc.wireCheck(f, s.phase, Pass, wire, werr, int64(pr.BlobBytes), true, t0)
+		if s.viaEdge {
+			verdict, detail := Fail, ""
+			if werr != nil {
+				detail = werr.Error()
+			} else if v, d := wire.Verdict(f.Name, int64(pr.BlobBytes)); v == "silent" {
+				verdict = Pass
+			} else {
+				detail = "the client reached the relay's own endpoint: " + d
+			}
+			rc.R.Add(f.Name, s.phase, "wire_via_edge_only", Pass, verdict, detail, nil, t0)
+		} else {
+			rc.wireCheck(f, s.phase, Pass, wire, werr, int64(pr.BlobBytes), true, t0)
+		}
 		rc.R.prefix = saved
 	}
 	return ok

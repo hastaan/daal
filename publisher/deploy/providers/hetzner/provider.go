@@ -302,6 +302,11 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		// The box's own copy of the family set its inbounds and both
 		// firewalls were derived from; daal-relay-mgmt obeys it.
 		Families: served,
+		// Add-on 2: the box-side half of "only Cloudflare reaches the
+		// CDN door", at first boot, only when the caller fetched the
+		// ranges (provision --cdn-edge-ranges). The app does not: the
+		// door opens this rule itself when it is turned on.
+		CDNEdgeRanges: opts.CDNEdgeRanges,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hetzner: render cloud-init: %w", err)
@@ -430,18 +435,26 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	// box-side UFW rule is not enough; open the provisioning
 	// health endpoint from this helper IP while cloud-init runs.
 	// Servers without an attached firewall don't need this.
-	var healthRuleID string
-	if id, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 9876, p.clock().Add(10*time.Minute)); err == nil {
-		healthRuleID = id
+	//
+	// Removal is deferred on ANY returned rule id, error or not: an
+	// add that fails after its write landed (read-back failure,
+	// concurrent change) returns the id with the error, and without the
+	// defer the hole would stay open to the helper until the expiry
+	// sweep.
+	healthRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 9876, p.clock().Add(10*time.Minute))
+	if healthRuleID != "" {
 		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), healthRuleID) }()
+	}
+	if err == nil {
 		progress("provision_cloud_firewall", "Opened temporary cloud firewall window for server health")
 	} else if !strings.Contains(err.Error(), "no attached firewall") {
 		return fmt.Errorf("hetzner: open temporary health firewall: %w", err)
 	}
-	var sshRuleID string
-	if id, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 22, p.clock().Add(10*time.Minute)); err == nil {
-		sshRuleID = id
+	sshRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 22, p.clock().Add(10*time.Minute))
+	if sshRuleID != "" {
 		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), sshRuleID) }()
+	}
+	if err == nil {
 		progress("provision_cloud_firewall", "Opened temporary cloud firewall window for SSH log streaming")
 	} else if !strings.Contains(err.Error(), "no attached firewall") {
 		return fmt.Errorf("hetzner: open temporary ssh firewall: %w", err)
@@ -1426,6 +1439,12 @@ func (p *Provider) SetEphemeralFirewallRule(ctx context.Context, serverID, calle
 		id, err = p.c.FirewallAddEphemeralRule(ctx, serverID, callerIP, port, expiresAt)
 	}
 	if err != nil {
+		// The write may have landed before the failure: close it now
+		// rather than leave it to the expiry sweep. Removal is
+		// idempotent.
+		if id != "" {
+			_ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), id)
+		}
 		return nil, fmt.Errorf("hetzner: add ephemeral rule: %w", err)
 	}
 	return &provider.EphemeralFirewallRule{

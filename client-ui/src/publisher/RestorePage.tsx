@@ -11,7 +11,8 @@
 
 import { useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { Button, Card, Section, Textarea } from '../design/primitives';
+import { Badge, Button, PageHeader, Textarea } from '../design/primitives';
+import { PageColumn, useLocale } from './ui';
 import type { BackupPreview, RestoreNotice } from './wizardCommands';
 import { PickedFile } from '../recipient/recipientCommands';
 import { useBack } from '../lib/useBack';
@@ -68,8 +69,7 @@ export function restoreBack(step: RestoreStep, busy: boolean): 'refuse' | 'to_re
     return 'back';
 }
 
-const BODY: React.CSSProperties = { fontSize: 13, lineHeight: 1.6, color: 'var(--fg)' };
-const SUB: React.CSSProperties = { fontSize: 12, lineHeight: 1.55, color: 'var(--muted)' };
+const BODY: React.CSSProperties = { fontSize: 14, lineHeight: 1.6, color: 'var(--fg)' };
 
 export function RestorePreview({
     t,
@@ -85,9 +85,10 @@ export function RestorePreview({
     onCancel: () => void;
 }) {
     const rep = preview.replace;
+    const locale = useLocale();
     return (
         <div style={{ display: 'grid', gap: 10 }} data-state="preview">
-            <div style={BODY}>{previewText(t, preview.made_at_unix, preview.contents)}</div>
+            <div style={BODY}>{previewText(t, preview.made_at_unix, preview.contents, locale)}</div>
             {rep && (
                 <div
                     data-testid="restore-replace"
@@ -160,6 +161,13 @@ export default function RestorePage({
     const [keySheet, setKeySheet] = useState(false);
 
     const goBack = () => {
+        // H-43: at the words, Back is "choose another file".
+        if (flow.step === 'words' && !busy) {
+            setFailure(null);
+            setWords('');
+            setFlow({ step: 'pick', path: null, preview: null, notice: null });
+            return;
+        }
         const a = restoreBack(flow.step, busy);
         if (a === 'to_relays') onDone();
         else if (a === 'back') onBack();
@@ -252,19 +260,8 @@ export default function RestorePage({
     const n = wordCount(words);
 
     return (
-        <div style={{ padding: '12px 16px 24px 16px', display: 'grid', gap: 12 }}>
-            <div>
-                <Button
-                    variant="ghost"
-                    disabled={restoreBackRefused(flow.step, busy)}
-                    onClick={goBack}
-                    data-button="page-back"
-                >
-                    {t('pub.relay.back')}
-                </Button>
-            </div>
-            <Section title={t('pub.restore.title')}>
-                <Card>
+        <PageColumn gap={12}>
+            <PageHeader title={t('pub.restore.title')} back={{ label: t('ui.back'), onClick: goBack }} />
                     <div style={{ display: 'grid', gap: 12 }}>
                         {flow.step === 'pick' && (
                             <div style={{ display: 'grid', gap: 10 }} data-state="pick">
@@ -278,27 +275,21 @@ export default function RestorePage({
                         )}
                         {flow.step === 'words' && (
                             <div style={{ display: 'grid', gap: 10 }} data-state="words">
-                                <div style={BODY}>{t('pub.restore.words')}</div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                    <span style={BODY}>{t('pub.restore.words')}</span>
+                                    <Badge tone={n === WORD_COUNT ? 'good' : 'neutral'} size="sm" icon={false}>
+                                        {fill(t('pub.restore.words.count'), { n, total: WORD_COUNT })}
+                                    </Badge>
+                                </div>
                                 <Textarea
                                     {...WORD_INPUT}
                                     rows={4}
                                     value={words}
                                     onChange={(e) => setWords(e.target.value)}
                                 />
-                                <div style={SUB}>{fill(t('pub.restore.words.count'), { n, total: WORD_COUNT })}</div>
-                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                <div>
                                     <Button disabled={busy || n === 0} onClick={() => void openIt()} data-button="open">
                                         {busy ? t('pub.restore.opening') : t('pub.restore.open')}
-                                    </Button>
-                                    <Button
-                                        variant="ghost"
-                                        disabled={busy}
-                                        onClick={() => {
-                                            setFailure(null);
-                                            setFlow({ step: 'pick', path: null, preview: null, notice: null });
-                                        }}
-                                    >
-                                        {t('pub.restore.pick.other')}
                                     </Button>
                                 </div>
                             </div>
@@ -336,8 +327,6 @@ export default function RestorePage({
                             </div>
                         )}
                     </div>
-                </Card>
-            </Section>
             {flow.step === 'done' && flow.notice && (
                 <RestoreNoticeCard
                     t={t}
@@ -357,6 +346,6 @@ export default function RestorePage({
             {keySheet && flow.notice && (
                 <NewHostingKeySheet t={t} notice={flow.notice} onClose={() => setKeySheet(false)} />
             )}
-        </div>
+        </PageColumn>
     );
 }

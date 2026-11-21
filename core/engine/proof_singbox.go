@@ -101,6 +101,9 @@ func kindOfActive(raw map[string]any) outboundKind {
 			k.SlowStart = k.Type == "tor"
 			k.Lazy = k.Type == "naive"
 			_, detoured := ob["detour"]
+			if detoured && key == "outbounds" && ownDesyncDetour(ob, objects(list)) {
+				detoured = false // the engine's own desync detour: a twin shares it harmlessly
+			}
 			k.Twin = key == "outbounds" && twinTypes[k.Type] && !detoured
 			k.HandshakeAtDial = handshakeAtDialTypes[k.Type] && (k.TLS || k.UDP) && k.Type != "wireguard"
 			k.Server, _ = ob["server"].(string)
@@ -170,6 +173,20 @@ func (p proofSubject) prove(ctx context.Context, cfg ProofConfig) ProofResult {
 	var reach *reachCheck
 	attempt := func(actx context.Context, host string, port uint16) (diagnostics.Observation, error) {
 		obs, _, err := proveOnce(actx, ob, kind, host, port, sign)
+		if err != nil && reach == nil && cfg.TimeHelloStop && !kind.UDP && kind.TLS && (obs.Reset || obs.Closed) &&
+			obs.Phase == diagnostics.PhaseHandshake && obs.DialMs > 0 {
+			// A TLS first flight reset or closed on an open connection,
+			// in a connect-time proof that asked for it (the automatic
+			// connect's: its connect ladder reads the answer): one bare
+			// connect to the same address and port times a round trip
+			// (Observation.ConnectMs), so a stop that came back sooner
+			// than the relay could have sent it (FastReset), or no sooner
+			// (ServerStop), can be told. After a failure only, once per
+			// proof, nothing written after the handshake, and on a short
+			// budget: a SYN the censor now drops must not hold the proof
+			// for a whole attempt. Never on a liveness check.
+			reach = startReachCheck(ctx, inst, kind, min(helloTimingBudget, cfg.AttemptTimeout))
+		}
 		if err != nil && reach == nil && timeoutPhaseIsUnknown(obs, kind) {
 			// Only where the answer is needed: a timeout whose phase
 			// the error does give (the carry phase of a family that
@@ -311,7 +328,9 @@ func proveOnce(ctx context.Context, ob N.Dialer, kind outboundKind, host string,
 	dialStart := time.Now()
 	raw, err := ob.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort(host, port))
 	if err != nil {
-		return diagnostics.Observe(err, diagnostics.PhaseHandshake, kind.UDP, kind.TLS), false, err
+		obs := diagnostics.Observe(err, diagnostics.PhaseHandshake, kind.UDP, kind.TLS)
+		obs.DialMs = int(time.Since(dialStart) / time.Millisecond)
+		return obs, false, err
 	}
 	dialTook := time.Since(dialStart)
 	relayAnswered = kind.HandshakeAtDial
@@ -402,6 +421,10 @@ type reachCheck struct {
 	took time.Duration
 }
 
+// helloTimingBudget bounds the bare connect that times a stopped hello
+// (ProofConfig.TimeHelloStop).
+const helloTimingBudget = 2 * time.Second
+
 func startReachCheck(ctx context.Context, inst *box.Box, kind outboundKind, budget time.Duration) *reachCheck {
 	r := &reachCheck{done: make(chan struct{})}
 	direct, ok := inst.Outbound().Outbound("direct")
@@ -442,6 +465,12 @@ func (r *reachCheck) settle(ctx context.Context, o *diagnostics.Observation, kin
 	case <-r.done:
 	case <-ctx.Done():
 		return
+	}
+	if r.ran && r.err == nil {
+		o.ConnectMs = int(r.took / time.Millisecond)
+		if o.ConnectMs == 0 {
+			o.ConnectMs = 1
+		}
 	}
 	if !r.ran || !o.Timeout {
 		return

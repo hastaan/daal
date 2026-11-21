@@ -104,6 +104,7 @@ function afterAttempt(m: Measured, carried: boolean, setupMs: number): Measured 
         carried: m.carried + (carried ? 1 : 0),
         failed: m.failed + (carried ? 0 : 1),
         last: lastBucketText(Math.floor(Date.now() / 3600_000) * 3600),
+        lastUnix: Math.floor(Date.now() / 3600_000) * 3600,
     };
     if (carried && m.setupMs === undefined) next.setupMs = setupMs;
     if (m.grade === 'unknown') next.grade = carried ? 'ok' : 'failing';

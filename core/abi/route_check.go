@@ -84,7 +84,10 @@ type routeCheck struct {
 	cancelProof context.CancelFunc
 	// cancelLive stops the liveness loop of the connected route.
 	cancelLive context.CancelFunc
-	kick       chan struct{}
+	// cancelSurvey stops a survey the person asked for (survey.go): it
+	// ends with whatever the engine was running when it began.
+	cancelSurvey context.CancelFunc
+	kick         chan struct{}
 	// checkMu serialises proofs of the connected route (timer, network
 	// change, an explicit CheckActiveRoute).
 	checkMu sync.Mutex
@@ -150,6 +153,11 @@ const (
 	// The route's publisher revoked it, or it expired.
 	ConnectRefusedRevoked = "revoked"
 	ConnectRefusedExpired = "expired"
+	// The route's family is one this build cannot dial (amneziawg: an
+	// AmneziaWG config whose obfuscation sing-box's WireGuard cannot
+	// reproduce). Trying would send a plain WireGuard handshake to a
+	// server that drops it.
+	ConnectRefusedFamilyUnsupported = "family_unsupported"
 	// Anything else (unknown route, unreadable profile, an outbound
 	// that does not match what was signed).
 	ConnectRefusedOther = "other"
@@ -178,6 +186,8 @@ func refusedCode(err error) string {
 		return ConnectRefusedRevoked
 	case errors.Is(err, errRouteExpired):
 		return ConnectRefusedExpired
+	case errors.Is(err, errRouteFamilyUnsupported):
+		return ConnectRefusedFamilyUnsupported
 	}
 	return ConnectRefusedOther
 }
@@ -236,6 +246,16 @@ func (c *Core) prepareRouteLocked(routeID string) (routestore.RouteRow, []byte, 
 //     already running. Revocation, expiry and the endpoint guard are
 //     never skipped.
 func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (routestore.RouteRow, []byte, error) {
+	return c.prepareRouteVariant(routeID, record, ignoreCooldown, nil)
+}
+
+// prepareRouteVariant is prepareRouteOpts for one VARIANT of the route
+// (connect_ladder.go): v nil is the variant in use for the route on this
+// network, or the plain route; v non-nil is exactly that one (the zero
+// variant: the plain route). Every check above runs on the route's own
+// stored profile — the endpoint guard included — before a variant
+// changes its first flight.
+func (c *Core) prepareRouteVariant(routeID string, record, ignoreCooldown bool, v *routeVariant) (routestore.RouteRow, []byte, error) {
 	refuse := func(err error) (routestore.RouteRow, []byte, error) {
 		code := refusedCode(err)
 		if record {
@@ -253,6 +273,17 @@ func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (ro
 	case "expired":
 		return refuse(fmt.Errorf("abi: route %s is %s and cannot be activated%.0w", routeID, row.TrustState, errRouteExpired))
 	}
+	// Refused even on an explicit pick: an `amneziawg` route is an
+	// AmneziaWG config this build's WireGuard cannot speak
+	// (bundle/go/uri/wireguard.go amneziaWireCompatible), so every
+	// attempt is a plain WireGuard handshake, from the person's own
+	// address, to a server that drops it. Other unselectable families
+	// (`other`, tor-bridge on a desktop with tor installed) stay
+	// dialable by hand; the automatic connect leaves them all out
+	// (connect_auto.go autoCandidatesLocked).
+	if row.TransportFamily == "amneziawg" {
+		return refuse(fmt.Errorf("abi: route %s: %w", routeID, errRouteFamilyUnsupported))
+	}
 	if ok, reason := c.pm.CanAttempt(routeID, row.TransportFamily); !ok && !ignoreCooldown {
 		return refuse(fmt.Errorf("abi: %s%.0w", reason, errRouteCooling))
 	}
@@ -267,11 +298,7 @@ func (c *Core) prepareRouteOpts(routeID string, record, ignoreCooldown bool) (ro
 	if err := routeEndpointGuard(c.store, row, profile); err != nil {
 		return refuse(err)
 	}
-	cfg, err := engine.BuildSingBoxConfig(row, profile)
-	if err != nil {
-		return refuse(err)
-	}
-	body, err := engine.MarshalSingBox(cfg)
+	body, err := c.variantBodyLocked(row, profile, v)
 	if err != nil {
 		return refuse(err)
 	}
@@ -349,6 +376,9 @@ var (
 	errRouteCooling = errors.New("abi: route is cooling down")
 	errRouteRevoked = errors.New("abi: route is revoked")
 	errRouteExpired = errors.New("abi: route is expired")
+	// A family this build knows it cannot dial, where trying anyway
+	// sends something identifiable from the person's own address.
+	errRouteFamilyUnsupported = errors.New("abi: route family cannot be dialled by this build")
 )
 
 // expireFailedConnect clears the error a failed connect left behind
@@ -428,14 +458,17 @@ func (rc *routeCheck) snapshot() (state string, cat diagnostics.Category, runnin
 // loop. Safe to call with or without Core.mu held; it takes neither.
 func (rc *routeCheck) abandon() {
 	rc.mu.Lock()
-	cp, cl := rc.cancelProof, rc.cancelLive
-	rc.cancelProof, rc.cancelLive = nil, nil
+	cp, cl, cs := rc.cancelProof, rc.cancelLive, rc.cancelSurvey
+	rc.cancelProof, rc.cancelLive, rc.cancelSurvey = nil, nil, nil
 	rc.mu.Unlock()
 	if cp != nil {
 		cp()
 	}
 	if cl != nil {
 		cl()
+	}
+	if cs != nil {
+		cs()
 	}
 }
 
@@ -658,8 +691,11 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 	c.mu.Lock()
 	epoch, routeID, family, cfg := c.routeEpoch, c.activeRoute, c.activeFamily, c.proofCfg
 	state, _ := c.check.get()
+	down := c.shuttingDown
 	c.mu.Unlock()
-	if routeID == "" || state == RouteCheckVerifying || state == RouteCheckNone {
+	if routeID == "" || state == RouteCheckVerifying || state == RouteCheckNone || down || ctx.Err() != nil {
+		// (A loop whose kick and cancellation arrived together must not
+		// check a route after Shutdown has closed the store.)
 		return CheckResult{}
 	}
 
@@ -667,7 +703,7 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.routeEpoch != epoch || res.Cancelled {
+	if c.routeEpoch != epoch || res.Cancelled || c.shuttingDown || ctx.Err() != nil {
 		return CheckResult{RouteID: routeID}
 	}
 	prev, prevCat := c.check.get()
@@ -681,13 +717,13 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 			// still fine (one store write every three minutes, for
 			// nothing). No setup time: this was a round trip on a route
 			// that was already up.
-			c.rememberOutcome(routeID, netmem.RouteOutcome{Carried: true, Slow: res.Slow})
+			c.rememberOutcome(c.runningMemKeyLocked(routeID), netmem.RouteOutcome{Carried: true, Slow: res.Slow})
 		}
 		if prev == RouteCheckFailed {
 			// Back after an outage: the automatic connect is connected
 			// again.
 			c.auto.recovered(routeID, family)
-			c.auto.fallPasses, c.auto.nextFallAt = 0, time.Time{}
+			c.auto.resetFallLocked()
 		}
 	case prev == RouteCheckFailed && (autoFallsOverFor(prevCat) || !autoFallsOverFor(res.Category())):
 		// Still down. Keep the first classification of this outage.
@@ -697,8 +733,10 @@ func (c *Core) checkActiveRoute(ctx context.Context) CheckResult {
 		// was only slow (or whose relay had no way out, or whose device
 		// had no network) and now gets no answer at all is a different
 		// outage, and the one the automatic connect moves away from.
-		c.routeDownLocked(routeID, family, res.Category(), proofFailureText(res), false)
-		c.rememberRoute(routeID, false, res.Category())
+		if !c.liveVariantDownLocked(routeID, family, res.Category(), proofFailureText(res)) {
+			c.routeDownLocked(routeID, family, res.Category(), proofFailureText(res), false)
+			c.rememberRoute(routeID, false, res.Category())
+		}
 	}
 	st, cat := c.check.get()
 	return CheckResult{RouteID: routeID, State: st, Category: string(cat), Checked: true}
@@ -751,6 +789,10 @@ func (c *Core) startLivenessLocked() {
 	c.check.cancelLive, c.check.kick = cancel, kick
 	c.check.mu.Unlock()
 	cfg := c.proofCfg
+	// Connected: the other routes of the file are checked beside the
+	// tunnel, one at a time, on this loop's context — it ends with the
+	// tunnel (survey.go).
+	c.startSurveyLocked(ctx, false)
 	go func() {
 		// failedInARow / slowInARow: consecutive failed, and consecutive
 		// slow, checks seen by THIS loop.

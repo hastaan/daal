@@ -82,6 +82,12 @@ const (
 	// busy or damaged). Nothing was tried and nothing is known about
 	// what the person holds — in particular NOT that they hold nothing.
 	AutoVerdictStoreUnreadable = "store_unreadable"
+	// Nothing else carried and the engine has paused the dead route for
+	// one direct walk of its pack's freshness mirrors, looking for the
+	// publisher's new address (relaypack_recover.go). `auto.state` is
+	// "trying" for as long as it says this; when the walk ends empty the
+	// verdict of the pass comes back.
+	AutoVerdictLookingForAddress = "looking_for_address"
 )
 
 // `refined` on one route: what a second observation added.

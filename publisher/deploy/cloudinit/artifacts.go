@@ -5,7 +5,7 @@ package cloudinit
 // verifies SHA-256 against `Sha256`, then verifies the Ed25519
 // signature in `SigHex` against the embedded /etc/daal/release.pub.
 //
-// Updated from the snippet tools/release/relay-v1.5.1.sh stages, on
+// Updated from the snippet tools/release/relay-v1.6.0.sh stages, on
 // each Daal relay release — as ONE commit with everything
 // tools/release/README.md ("The pin bump") lists. The signing key for SigHex is the Daal release Ed25519
 // key whose public half is embedded as DaalReleasePubKeyPEM.
@@ -18,7 +18,7 @@ package cloudinit
 // feature whose two halves live on opposite sides of that line is live
 // on one side and absent on the other for as long as the pin is stale,
 // and nothing in the build detects it. The couplings so far (none is
-// outstanding since the 2026-11-19 pin, relay-v1.5.1):
+// outstanding since the 2026-11-21 pin, relay-v1.6.0):
 //
 //   - COVER SNI (Wave 2 Step 4). RESOLVED 2026-08-17: the pin below was
 //     bumped to an artefact built from this tree, so a freshly provisioned
@@ -97,10 +97,60 @@ package cloudinit
 //     cannot manage a relay-v1.5.0 box, and that is deliberate: there
 //     is no upgrade path and no downgrade — provision a new one.
 //
-// When re-releasing, bump BOTH Sha256 and SigHex for
-// daal-relay-mgmt-* AND daal-relay-health-*, flip PinnedMgmtServesOptInFamilies (and its TS
-// mirror) in the same commit, and re-run the provisioner-vs-client
-// cross-check
+//   - CDN DOOR (add-on 2, the way in through Cloudflare). RESOLVED
+//     2026-11-21 by relay-v1.6.0, FAILS CLOSED. The publisher half
+//     (mgmt.CDNDoorEnable, the add-ons screen) lives in this tree; the
+//     box half is daal-relay-mgmt's POST /cdn, the ws-cdn-in inbound
+//     kept in step with every provision and revoke, and the ufw rules
+//     that open the door's port to Cloudflare's ranges only
+//     (singbox_cdn.go, singbox_cdn_ufw.go). The daemon advertises it as
+//     the `cdn` capability on /health; the publisher probes first and
+//     refuses with ErrCDNDoorUnsupported before sending the origin key
+//     to a box that lacks it — which every relay-v1.5.1 box does. Such
+//     a relay cannot gain the door in place: provision a new one. The
+//     cloud-init half (CDNUFWRules) is only the CLI opt-in that fetches
+//     the ranges at provision time; without it /cdn writes the same
+//     rules, so the binary alone is enough on a relay provisioned from
+//     this tree.
+//
+//   - STANDBY ADDRESS BIND (add-on 1). RESOLVED 2026-11-21 by
+//     relay-v1.6.0. A bound IPv4 address is added `scope link`
+//     (address.go, addrAddArgv), so the box ANSWERS on a sealed standby
+//     but never SOURCES traffic from it. A relay-v1.5.1 box binds it as
+//     a global address: it still answers on it, so nothing fails, but
+//     after a lost-and-regained DHCP lease its own outbound traffic
+//     (recipients' sites included) can leave from the standby — the
+//     sealed address shown to exactly the destinations a censor
+//     watches. Does NOT fail safe and nothing detects it: put a standby
+//     only on a relay provisioned from relay-v1.6.0. (The bind still
+//     needs CAP_NET_ADMIN from the cloud-init unit — ADDRESS BINDING
+//     above.)
+//
+//   - RELAYS STOP NAMING THE APP (review C1). Template AND binary, so
+//     fresh relays only. cloud-init: `hostname: ubuntu`, the data-plane
+//     certificate's subject is its own first name (the cover host, or
+//     the address) instead of CN=daal-relay. daal-relay-mgmt: the mgmt
+//     certificate is CN=localhost (was daal-relay-mgmt), a 401 names no
+//     scheme, and rotate-tls re-issues a CN=daal-relay certificate with
+//     a neutral subject (reported as `tls_certificate_subject`; naive
+//     files handed out before it stop connecting). A relay-v1.5.1 box
+//     keeps every one of the old names for its life.
+//
+//   - RELAY-V1.6.0. 2026-11-21: the pin below moved to relay-v1.6.0,
+//     built from this tree (go1.26.8, as relay-v1.5.1). sing-box is the
+//     same bytes as relay-v1.5.1; daal-relay-mgmt carries the three
+//     entries above; daal-relay-health is rebuilt because it links
+//     publisher/deploy/health, which gained ways.go (the publisher's
+//     relay health check) — no change to the bootstrap it answers.
+//     Unlike relay-v1.5.1 this is NOT a protocol break: token v2 and
+//     the authenticated bootstrap are unchanged, so a publisher from
+//     this tree still manages a relay-v1.5.1 box; what that box lacks
+//     is refused (CDN) or silently weaker (standby), as said above.
+//
+// When re-releasing, bump BOTH Sha256 and SigHex for daal-relay-mgmt-*
+// AND daal-relay-health-* (the snippet does), keep
+// PinnedMgmtServesOptInFamilies (and its TS mirror) true — it has been
+// since relay-v1.5.1 — and re-run the provisioner-vs-client cross-check
 // (publisher/deploy/providers/hetzner/cover_sni_singbox_test.go).
 
 // Artifact is one pinned binary the box fetches and installs.
@@ -127,18 +177,18 @@ var V15Artifacts = ArtifactManifest{
 			Sha256:    "989e848637725005fdac7f1d3fa3d6eeb16992c5e0a68789da96b6b3fde06ea2",
 			SigHex:    "ff5ba04d6dddee1bd3350cccb828f366efc6f95d5b73ea98f49679001a45be543810fbfeb3c9d0737b12e0dd3fb050c48b7d629278d74bd0f9e4a4a1630eb10a",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/sing-box-1.13.12-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0-mirror/sing-box-1.13.12-linux-amd64",
 			},
 		},
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "407581d6b583d5d55f477b473087ed6e6cab65e6b9b88a0ba8eb1b196a76d055",
-			SigHex:    "deb98a9a8f855a0e3975544923586a7952f822fb6999d679d08fc9da8f08998355e56d8023827b6986d91df6ad2a561dfb034eab375d97190da63b1ec4bd1300",
+			Sha256:    "9c480da22a7a6c343f47a579001154859a7c511c2c1e437657b9b279c308301f",
+			SigHex:    "eb62d3bbf5f4239647a2c3fc251b9beb0847a7a7c0348a57d5b74b67e6fdc8a69b586e61d15b6c9e9306e2ed44f014869189c5454376d91dc0e0756ce073c70e",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/daal-relay-health-0.1.0-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0-mirror/daal-relay-health-0.1.0-linux-amd64",
 			},
 		},
 	},
@@ -153,28 +203,28 @@ var V2Artifacts = ArtifactManifest{
 			Sha256:    "989e848637725005fdac7f1d3fa3d6eeb16992c5e0a68789da96b6b3fde06ea2",
 			SigHex:    "ff5ba04d6dddee1bd3350cccb828f366efc6f95d5b73ea98f49679001a45be543810fbfeb3c9d0737b12e0dd3fb050c48b7d629278d74bd0f9e4a4a1630eb10a",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/sing-box-1.13.12-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0/sing-box-1.13.12-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0-mirror/sing-box-1.13.12-linux-amd64",
 			},
 		},
 		{
 			Name:      "daal-relay-health-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-health",
-			Sha256:    "407581d6b583d5d55f477b473087ed6e6cab65e6b9b88a0ba8eb1b196a76d055",
-			SigHex:    "deb98a9a8f855a0e3975544923586a7952f822fb6999d679d08fc9da8f08998355e56d8023827b6986d91df6ad2a561dfb034eab375d97190da63b1ec4bd1300",
+			Sha256:    "9c480da22a7a6c343f47a579001154859a7c511c2c1e437657b9b279c308301f",
+			SigHex:    "eb62d3bbf5f4239647a2c3fc251b9beb0847a7a7c0348a57d5b74b67e6fdc8a69b586e61d15b6c9e9306e2ed44f014869189c5454376d91dc0e0756ce073c70e",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/daal-relay-health-0.1.0-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0/daal-relay-health-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0-mirror/daal-relay-health-0.1.0-linux-amd64",
 			},
 		},
 		{
 			Name:      "daal-relay-mgmt-0.1.0-linux-amd64",
 			InstallAs: "daal-relay-mgmt",
-			Sha256:    "4f13e4538e5299c35ecd648c48754790d3859fac6b03695aecda42354e61f9de",
-			SigHex:    "884b0d52f9b91a14920b7e6b0138b04926ab4087b98441bba33a72555bf2b47562c6969896dc857af4ba544bed747a07346b5c1ee8689bcfa0a8a6c1baceab09",
+			Sha256:    "73f84c2668c396bbcb9eb656454327e17ce11d1ab7b42a265cc211f20669bee1",
+			SigHex:    "90a6b6a074f5ec0b3b0b6c0a3a43c861a71c6891e764870cbebe9b9075a98180c75ab6226150301b0881c1c955b355f83d5bfb5258fb6149e8e99d7440a69d04",
 			Mirrors: []string{
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1/daal-relay-mgmt-0.1.0-linux-amd64",
-				"https://github.com/hastaan/daal/releases/download/relay-v1.5.1-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0/daal-relay-mgmt-0.1.0-linux-amd64",
+				"https://github.com/hastaan/daal/releases/download/relay-v1.6.0-mirror/daal-relay-mgmt-0.1.0-linux-amd64",
 			},
 		},
 	},
@@ -185,7 +235,8 @@ var V2Artifacts = ArtifactManifest{
 // relay ever downloads — serves the opt-in families in
 // OptInFamiliesOfMgmt (finding F-002).
 //
-// It is false today. The pinned 0.1.0 artefact (Sha256 e8cb16e8…) was
+// It is true since relay-v1.5.1 (2026-11-19). It was false while the
+// pinned 0.1.0 artefact was Sha256 e8cb16e8…, which was
 // built before those families landed in cmd/daal-relay-mgmt: it creates
 // no `ss-in` / `anytls-in`, returns no `ss_password` / `anytls_password`
 // / `tuic_uuid`, and so a relay asked for one of them gets no such

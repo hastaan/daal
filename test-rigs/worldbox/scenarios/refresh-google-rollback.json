@@ -1,0 +1,18 @@
+{
+  "name": "refresh-google-rollback",
+  "description": "refresh-google-only, and the script serves the update it held BEFORE the last one (an older sequence): what a vandal with the write key, or a stale Google replica, would hand out. Op google-refresh: the engine refuses it — the signed document's sequence is not newer — keeps its routes, and does not claim to be connected.",
+  "analogue": "Plan §3.8, test refresh-google-rollback; the freshness rollback rule (specs/relaypack-v1.md: a document's sequence must exceed the last applied). The script is trusted with nothing; recipients trust only the publisher's signature and its monotonic counter. Model: the previous container served verbatim.",
+  "world": ["storage", "google"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$R2_SNI", "$GH_SNI", "$PACK_SNI", "script.google.com"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "r2-blocked", "probe": "tls", "to": "storage", "port": 443, "sni": "$R2_SNI", "expect": "reset_after_hello"},
+    {"name": "front-open", "probe": "tls", "to": "gfe", "port": 443, "sni": "www.google.com", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "google_knobs": {"serve_previous": true},
+  "google_expect": "refused"
+}

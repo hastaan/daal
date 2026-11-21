@@ -1,54 +1,25 @@
-// StatusPill — mono-letterspacing badge with a colored dot. Used for
-// connection state, trust badges, route health.
+// StatusPill — the older name for a state badge, kept so every existing
+// call site works. It is a `Badge` now (body font, sentence case), so the
+// mono capitals that broke words in two are gone everywhere at once.
 
 import type { ReactNode } from 'react';
+import { Badge } from './Badge';
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral' | 'gold';
 
 interface Props {
     tone: Tone;
     children: ReactNode;
+    /** A breathing dot (connecting). */
     glow?: boolean;
+    /** No icon at all. */
     dotless?: boolean;
 }
 
-const TONE_COLOR: Record<Tone, string> = {
-    good: 'var(--green)',
-    warn: 'var(--amber)',
-    bad: 'var(--red)',
-    neutral: 'var(--muted)',
-    gold: 'var(--gold-warm)',
-};
-
 export function StatusPill({ tone, children, glow, dotless }: Props) {
-    const color = TONE_COLOR[tone];
     return (
-        <span
-            style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 7,
-                fontFamily: 'var(--font-mono)',
-                fontSize: 9.5,
-                fontWeight: 600,
-                letterSpacing: '0.18em',
-                textTransform: 'uppercase',
-                color,
-            }}
-        >
-            {!dotless && (
-                <span
-                    aria-hidden
-                    style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: '50%',
-                        background: color,
-                        boxShadow: glow ? `0 0 8px ${color}` : 'none',
-                    }}
-                />
-            )}
+        <Badge tone={tone} icon={dotless ? false : undefined} pulse={glow}>
             {children}
-        </span>
+        </Badge>
     );
 }

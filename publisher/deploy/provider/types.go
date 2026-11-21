@@ -108,7 +108,45 @@ type OperatorRecord struct {
 	// Empty on records minted before Wave 2, and ONLY then: every
 	// post-Wave-2 path either writes a chosen host or fails.
 	CoverSNI string `json:"cover_sni,omitempty"`
+
+	// Standby is the standby-address add-on (docs/optional-addons-plan.md
+	// §1, specs/optional-addons-v1.md §3): a second Floating IPv4 that is
+	// assigned to this server and bound on the box, but is NOT the
+	// address recipients dial. PublicIP and the candidates' public_ip:*
+	// tags never name it; the binder writes it into every route as
+	// `_standby` (relaypack/endpoint.go). Nil when the relay has none.
+	//
+	// Promotion ("switch to standby") moves it into PublicIP and
+	// FloatingIPID and clears this field, so a record never names one
+	// address in both places.
+	Standby *StandbyAddress `json:"standby,omitempty"`
 }
+
+// StandbyAddress is the publisher-side state of a standby address.
+// Nothing here is a credential, but Salt and IP together are the
+// standby key, which in sealed mode is the only thing keeping the
+// address out of the hands of whoever holds a pack: the record stays on
+// the publisher's device and is never put into a pack.
+type StandbyAddress struct {
+	// FloatingIPID is the provider's id of the Floating IP.
+	FloatingIPID string `json:"floating_ip_id"`
+	// IP is the standby IPv4 address.
+	IP net.IP `json:"ip"`
+	// Mode is "sealed" (the pack carries only a commitment) or "open"
+	// (the pack carries the address).
+	Mode string `json:"mode"`
+	// Salt is the 12 random bytes of the commitment, standard base64.
+	// Chosen once when the standby is rented and kept for its life:
+	// every pack signed while it lives must carry the same commitment,
+	// or a key sent later would match none of the packs already out.
+	Salt string `json:"salt"`
+}
+
+// Standby modes.
+const (
+	StandbySealed = "sealed"
+	StandbyOpen   = "open"
+)
 
 // CandidateMeta is one candidate entry on an OperatorRecord. It is
 // the unsigned shape FRP-4b will fold into the per-route
@@ -172,6 +210,15 @@ type ProvisionOpts struct {
 	// the box comes back advertising a different name than the
 	// packs already in recipients' hands expect.
 	CoverSNI string `json:"cover_sni,omitempty"`
+	// CDNEdgeRanges are Cloudflare's published ranges (v4 and v6
+	// CIDRs), fetched by the caller abroad just before provisioning
+	// (provision --cdn-edge-ranges, a CLI opt-in). They go into
+	// cloud-init (cloudinit.RenderInputV2.CDNEdgeRanges), where the
+	// box-side ufw opens the CDN door's port to them from first boot.
+	// The app leaves this empty: daal-relay-mgmt /cdn opens the same
+	// rule when the door is turned on (add-on 2), so building a relay
+	// never contacts Cloudflare. Empty opens nothing.
+	CDNEdgeRanges []string `json:"cdn_edge_ranges,omitempty"`
 	// WaitForHealth asks a provider's live Provision path to poll
 	// the bootstrap health endpoint and capture
 	// MgmtTLSFingerprint before returning. Tests and dry-runs leave

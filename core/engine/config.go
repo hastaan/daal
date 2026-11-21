@@ -6,6 +6,7 @@ package engine
 
 import (
 	"daal/bundle-go/bundle"
+	"daal/core/desync"
 	"daal/core/routestore"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,23 @@ var endpointTypes = map[string]bool{
 // represented as-is; the path manager controls whether the route is
 // activated based on the UDP probe.
 func BuildSingBoxConfig(route routestore.RouteRow, profile []byte) (*SingBoxConfig, error) {
+	return buildSingBoxConfig(route, profile, nil)
+}
+
+// BuildSingBoxConfigWithDesync is BuildSingBoxConfig with the hello
+// desync strategy for THIS build given explicitly (desync.Off: off),
+// whatever is remembered for the route: what a side probe or a single
+// ladder attempt uses, so trying a strategy never changes the main
+// tunnel's next reconnect. See desync.go.
+func BuildSingBoxConfigWithDesync(route routestore.RouteRow, profile []byte, s desync.Strategy) (*SingBoxConfig, error) {
+	n, err := s.Normalized()
+	if err != nil {
+		return nil, err
+	}
+	return buildSingBoxConfig(route, profile, &n)
+}
+
+func buildSingBoxConfig(route routestore.RouteRow, profile []byte, desyncStrategy *desync.Strategy) (*SingBoxConfig, error) {
 	if len(profile) == 0 {
 		return nil, errors.New("engine: empty profile")
 	}
@@ -75,6 +93,12 @@ func BuildSingBoxConfig(route routestore.RouteRow, profile []byte) (*SingBoxConf
 	}
 	if _, ok := outbound["tag"]; !ok {
 		outbound["tag"] = "active"
+	}
+	// The desync outbound is the engine's own, added by applyDesync and
+	// nowhere else: a profile (bytes outside the pack signature) may not
+	// be one, nor take its tag.
+	if outbound["type"] == desync.Type || outbound["tag"] == desync.Tag {
+		return nil, errors.New("engine: profile is the engine's own desync outbound")
 	}
 	// The `tor` family is the one outbound whose config is incomplete
 	// until it meets a device: the tor executable lives in a directory
@@ -114,6 +138,11 @@ func BuildSingBoxConfig(route routestore.RouteRow, profile []byte) (*SingBoxConf
 	} else {
 		cfg.Outbounds = append([]map[string]any{outbound}, cfg.Outbounds...)
 	}
+	// Hello desync, when something turned it on for this build or this
+	// route on this network (the ladder): the outbound dials through the
+	// daal-desync detour. Otherwise nothing here changes (a stray
+	// daal-desync detour in the profile is removed). See desync.go.
+	applyDesync(cfg, route, outbound, desyncStrategy)
 	// An outbound that cannot carry UDP leaves every app without names.
 	// See outboundCarriesUDP.
 	if !outboundCarriesUDP(outbound) {

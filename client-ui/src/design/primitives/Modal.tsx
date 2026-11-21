@@ -4,6 +4,8 @@
 import type { ReactNode } from 'react';
 import { useEffect } from 'react';
 import { useBack } from '../../lib/useBack';
+import { effectiveLocale, translate } from '../../lib/i18n';
+import { IconButton } from './IconButton';
 
 interface Props {
     title?: ReactNode;
@@ -34,7 +36,7 @@ export function Modal({ title, children, onClose, width = 540, footer }: Props) 
             style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'rgba(0,0,0,0.55)',
+                background: 'var(--scrim)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -54,20 +56,30 @@ export function Modal({ title, children, onClose, width = 540, footer }: Props) 
                     borderRadius: 'var(--r-card)',
                     padding: 22,
                     color: 'var(--fg)',
-                    boxShadow: '0 30px 60px rgba(0,0,0,0.45)',
+                    boxShadow: 'var(--shadow-lg)',
                 }}
             >
                 {title && (
-                    <h2
-                        style={{
-                            marginTop: 0,
-                            fontFamily: 'var(--font-display)',
-                            fontSize: 20,
-                            fontWeight: 500,
-                        }}
-                    >
-                        {title}
-                    </h2>
+                    // A visible way out on a computer, beside the title: a
+                    // tap outside and Escape are not things everyone knows.
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBlockEnd: 16 }}>
+                        <h2
+                            style={{
+                                margin: 0,
+                                paddingBlockStart: 8,
+                                flex: 1,
+                                minWidth: 0,
+                                fontFamily: 'var(--font-display)',
+                                fontSize: 20,
+                                fontWeight: 500,
+                            }}
+                        >
+                            {title}
+                        </h2>
+                        <span style={{ marginBlockStart: -6, marginInlineEnd: -10, flexShrink: 0 }}>
+                            <IconButton icon="close" label={translate(effectiveLocale(), 'ui.close')} onClick={onClose} dataButton="modal-close" />
+                        </span>
+                    </div>
                 )}
                 {children}
                 {footer && (

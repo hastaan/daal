@@ -40,13 +40,15 @@
 // has actually done (frames shown, passes completed) and says plainly
 // that the other phone is the only thing that knows when to stop.
 
+import { sep } from '../lib/format';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { Wizard, onQrFrame } from './wizardCommands';
 import type { PackArtifact } from './wizardCommands';
 import { failureKey } from './failureText';
 import { WhatIsThis } from './Disclosure';
-import { Button, Card, Sheet, Segmented } from '../design/primitives';
+import { Button, Card, Sheet } from '../design/primitives';
+import { useDeveloperMode } from '../lib/devMode';
 import { modulePxFor, paintFrame, paintedModules } from '../qr/paint';
 import {
     BATCH_FRAMES,
@@ -65,10 +67,13 @@ interface Props {
     relayName: string;
     /** Which file to stream. No default — see qrRender. */
     artifact: PackArtifact;
-    /** Replaces the "what am I sending" line, e.g. for one person's file. */
-    label?: string;
+    /** The person whose file this is; absent for the everyone file. */
+    name?: string;
     onClose: () => void;
 }
+
+/** After this long without the other phone finishing, offer "Slower". */
+export const QR_SLOWER_AFTER_S = 20;
 
 /** Longest side of the symbol on screen, in CSS pixels, before it is
  *  snapped down to a whole number of device pixels per module. */
@@ -119,7 +124,8 @@ export function QrErrorBlock({
     );
 }
 
-export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose }: Props) {
+export function QrSendSheet({ t, operatorId, relayName, artifact, name, onClose }: Props) {
+    const dev = useDeveloperMode();
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const streamRef = useRef(new FrameStream());
     const inFlightRef = useRef(false);
@@ -173,6 +179,10 @@ export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose
     useEffect(() => {
         let unlisten: UnlistenFn | null = null;
         let dead = false;
+        // H-39: under React StrictMode the effect runs, cleans up and runs
+        // again; the cleanup's "exhausted" must not outlive it, or the
+        // second run never asks for a frame and the sheet waits forever.
+        exhaustedRef.current = false;
         const stream = streamRef.current;
         (async () => {
             unlisten = await onQrFrame((f) => stream.push(f));
@@ -285,22 +295,20 @@ export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose
 
     const pct = perPass > 0 ? Math.min(100, (inPass / perPass) * 100) : 0;
 
+    const title = name ? t('qr.send.title').replace(/\{name\}/g, name) : t('qr.send.title.everyone');
+
     return (
         <Sheet
-            title={t('qr.send.title')}
+            title={title}
             onClose={onClose}
-            width={520}
+            width={480}
             footer={
-                <Button variant="secondary" onClick={onClose} block>
+                <Button onClick={onClose} block dataButton="qr-done">
                     {t('qr.send.done')}
                 </Button>
             }
         >
-            <div style={{ display: 'grid', gap: 12 }}>
-                <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-                    {label ?? t('qr.send.what').replace('{relay}', relayName)}
-                </div>
-
+            <div style={{ display: 'grid', gap: 12 }} data-testid="qr-send">
                 {/* The symbol. White surround always: a QR is not a
                     themed element, and a dark-mode card behind a light
                     quiet zone is a scan failure waiting to happen. */}
@@ -311,30 +319,66 @@ export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose
                         background: '#ffffff',
                         borderRadius: 'var(--r-card)',
                         padding: 8,
+                        maxWidth: 376,
+                        width: '100%',
+                        marginInline: 'auto',
                     }}
                 >
                     <canvas
                         ref={canvasRef}
                         role="img"
                         aria-label={t('qr.send.canvas.alt')}
-                        style={{ display: 'block', imageRendering: 'pixelated' }}
+                        style={{ display: 'block', imageRendering: 'pixelated', maxWidth: '100%', height: 'auto' }}
                     />
                 </div>
 
-                <div style={{ display: 'grid', gap: 6 }}>
-                    {/* Translated prose ("قاب {n} از {total}"), so no
-                        font-mono: an inline fontFamily overrides the
-                        RTL --font-fa rule and Persian has no glyphs in
-                        the monospace stack. tabular-nums keeps the
-                        counter from jittering without costing shaping. */}
+                {/* One thin bar that fills once per pass: no counters
+                    (they are for a developer, below). */}
+                <div
+                    role="progressbar"
+                    aria-label={t(stateKey)}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(pct)}
+                    style={{
+                        height: 4,
+                        borderRadius: 2,
+                        background: 'var(--surface-2)',
+                        overflow: 'hidden',
+                    }}
+                >
                     <div
                         style={{
-                            fontSize: 12,
-                            fontVariantNumeric: 'tabular-nums',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            gap: 8,
+                            width: `${pct}%`,
+                            height: '100%',
+                            background: passComplete ? 'var(--green)' : 'var(--gold)',
+                            transition: 'width 120ms linear',
                         }}
+                    />
+                </div>
+
+                <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--fg)', textAlign: 'center' }}>
+                    {t('qr.send.how')}
+                </div>
+
+                {/* A camera that struggles: offered after a while, never
+                    as a control to set up front. */}
+                {(elapsed >= QR_SLOWER_AFTER_S || speed === 'slow') && (
+                    <div style={{ textAlign: 'center' }}>
+                        <Button
+                            variant="link"
+                            onClick={() => setSpeed((s) => (s === 'steady' ? 'slow' : 'steady'))}
+                            dataButton="qr-speed"
+                        >
+                            {speed === 'steady' ? t('qr.send.speed.slow') : t('qr.send.speed.fast')}
+                        </Button>
+                    </div>
+                )}
+
+                {dev && (
+                    <div
+                        data-testid="qr-dev"
+                        style={{ fontSize: 12, color: 'var(--muted)', fontVariantNumeric: 'tabular-nums', display: 'grid', gap: 2 }}
                     >
                         <span>
                             {perPass > 0
@@ -343,66 +387,15 @@ export function QrSendSheet({ t, operatorId, relayName, artifact, label, onClose
                                       .replace('{total}', String(perPass))
                                 : t('qr.send.progress.starting')}
                         </span>
-                        <span style={{ color: 'var(--dim)' }}>
+                        <span>
                             {t('qr.send.pass').replace('{n}', String(pass))}
-                            {' · '}
+                            {sep()}
                             {t('qr.send.elapsed').replace('{s}', String(elapsed))}
                         </span>
+                        <span>{t(stateKey)}</span>
+                        <span dir="ltr">{relayName}</span>
                     </div>
-                    {/* A bar that fills once per pass. The tick mark is
-                        where most receivers are already finished. */}
-                    <div
-                        style={{
-                            position: 'relative',
-                            height: 6,
-                            borderRadius: 3,
-                            background: 'var(--surface-2)',
-                            overflow: 'hidden',
-                        }}
-                    >
-                        <div
-                            style={{
-                                width: `${pct}%`,
-                                height: '100%',
-                                background: passComplete
-                                    ? 'var(--green)'
-                                    : 'var(--gold)',
-                                transition: 'width 120ms linear',
-                            }}
-                        />
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                        {t(stateKey)}
-                    </div>
-                </div>
-
-                <Card raised>
-                    <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-                        {t('qr.send.how')}
-                    </div>
-                </Card>
-
-                <div
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                        flexWrap: 'wrap',
-                    }}
-                >
-                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                        {t('qr.send.speed.label')}
-                    </span>
-                    <Segmented<Speed>
-                        value={speed}
-                        onChange={setSpeed}
-                        items={[
-                            { value: 'steady', label: t('qr.send.speed.steady') },
-                            { value: 'slow', label: t('qr.send.speed.slow') },
-                        ]}
-                    />
-                </div>
+                )}
 
                 {error && <QrErrorBlock t={t} artifact={artifact} error={error} />}
             </div>

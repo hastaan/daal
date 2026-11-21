@@ -24,7 +24,8 @@
 //! Also reached from the app's own commands (not invoked from the page
 //! as plugin commands): `PlatformHandle::secure_screen(on)` (PB-20,
 //! FLAG_SECURE while the recovery words are on screen; a no-op on
-//! desktop).
+//! desktop) and `PlatformHandle::field_probe_watch(on)` (the network
+//! test's start facts and its watch; `None` on desktop).
 
 use tauri::{
     plugin::{Builder, TauriPlugin},
@@ -89,6 +90,23 @@ impl<R: Runtime> PlatformHandle<R> {
     pub fn secure_screen(&self, on: bool) -> Result<()> {
         self.inner.secure_screen(on).map(|_| ())
     }
+    /// Network test: what the start needs from the phone, and the watch
+    /// for the length of the run (`on`) or its end. `None` = nothing to
+    /// tell (desktop).
+    pub fn field_probe_watch(&self, on: bool) -> Result<Option<models::FieldProbeHost>> {
+        self.inner.field_probe_watch(on).map(Some)
+    }
+    /// Optional add-ons, Google update channel, Path A
+    /// (docs/optional-addons-plan.md §3.3, item G3): a one-shot OAuth
+    /// access token for `scopes` from Play services' authorization
+    /// client (`GoogleAuth.kt`). The caller uses it for the Apps Script
+    /// API calls and drops it; nothing is stored. Errors start with an
+    /// `E_GOOGLE_*` code (`E_GOOGLE_NOT_CONFIGURED` in a build without
+    /// the Android OAuth client, `E_GOOGLE_SIGN_IN_CANCELLED`,
+    /// `E_GOOGLE_NO_PLAY_SERVICES`, `E_GOOGLE_UNAUTHORIZED`).
+    pub fn google_authorize(&self, scopes: &[&str]) -> Result<Option<String>> {
+        self.inner.google_authorize(scopes)
+    }
 }
 
 #[cfg(not(mobile))]
@@ -117,6 +135,17 @@ impl<R: Runtime> PlatformHandle<R> {
     /// PB-20: the desktop window has no capture flag; nothing to do.
     pub fn secure_screen(&self, _on: bool) -> Result<()> {
         Ok(())
+    }
+    /// Network test: the desktop shell has no network watch; the engine
+    /// is told nothing extra.
+    pub fn field_probe_watch(&self, _on: bool) -> Result<Option<models::FieldProbeHost>> {
+        Ok(None)
+    }
+    /// Optional add-ons, Google Path A: desktop has no platform sign-in;
+    /// `None` tells `daal_wizard::addon_google::sign_in` to sign in
+    /// through the system browser (loopback + PKCE) itself.
+    pub fn google_authorize(&self, _scopes: &[&str]) -> Result<Option<String>> {
+        Ok(None)
     }
 }
 

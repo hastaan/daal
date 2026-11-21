@@ -110,3 +110,66 @@ func TestForgive_LiftsTheCooldownAndKeepsTheReason(t *testing.T) {
 		t.Fatalf("health: %+v", h)
 	}
 }
+
+// ForgiveFamily lifts the family's cooldown on the active network only,
+// and leaves route cooldowns alone.
+func TestForgiveFamily_LiftsTheFamilyOnThisNetworkOnly(t *testing.T) {
+	m := New()
+	m.SetActiveNetwork("net-b")
+	m.FailedCandidate("rb", "vless-reality", diagnostics.TLSSNIOrCertBlockSuspected)
+	m.SetActiveNetwork("net-a")
+	m.FailedCandidate("r1", "vless-reality", diagnostics.TLSSNIOrCertBlockSuspected)
+	if ok, _ := m.CanAttempt("r2", "vless-reality"); ok {
+		t.Fatal("precondition: a hello block cools the family")
+	}
+	m.ForgiveFamily("vless-reality")
+	if ok, why := m.CanAttempt("r2", "vless-reality"); !ok {
+		t.Fatalf("family still cooling: %s", why)
+	}
+	if ok, _ := m.CanAttempt("r1", "vless-reality"); ok {
+		t.Fatal("the route's own cooldown must stay")
+	}
+	m.SetActiveNetwork("net-b")
+	if ok, _ := m.CanAttempt("r2", "vless-reality"); ok {
+		t.Fatal("another network's family cooldown was lifted")
+	}
+}
+
+// ForgiveFamily takes back one step: an escalation the family earned
+// before stays.
+func TestForgiveFamily_TakesBackOneStep(t *testing.T) {
+	m := New()
+	m.SetActiveNetwork("net-a")
+	m.FailedCandidate("r1", "vless-reality", diagnostics.TLSSNIOrCertBlockSuspected)
+	m.FailedCandidate("r2", "vless-reality", diagnostics.TLSSNIOrCertBlockSuspected)
+	m.ForgiveFamily("vless-reality")
+	if ok, _ := m.CanAttempt("r9", "vless-reality"); !ok {
+		t.Fatal("the family is still cooling")
+	}
+	if got := m.familyEscalation[familyEscKey("vless-reality", "net-a")]; got != 1 {
+		t.Fatalf("escalation %d, want 1 (one step taken back)", got)
+	}
+}
+
+// EndAttempt closes the attempt in flight without charging the route.
+func TestEndAttempt_NoCooldownNoHealth(t *testing.T) {
+	m := New()
+	m.Attempt("r1", "vless-reality")
+	m.Verifying()
+	m.EndAttempt("r2", "x")
+	if m.State() != StateVerifying {
+		t.Fatal("ended another route's attempt")
+	}
+	m.EndAttempt("r1", "a changed first flight of r1 did not carry")
+	if m.State() != StateFailed || m.LastReason() != "a changed first flight of r1 did not carry" {
+		t.Fatalf("state %v reason %q", m.State(), m.LastReason())
+	}
+	if ok, _ := m.CanAttempt("r1", "vless-reality"); !ok {
+		t.Fatal("the route was cooled")
+	}
+	for _, h := range m.RouteHealth() {
+		if h.RouteID == "r1" {
+			t.Fatalf("a health entry was written: %+v", h)
+		}
+	}
+}

@@ -74,6 +74,11 @@ type fakeClient struct {
 	// was handed. cover_sni_test.go parses it to prove the per-relay
 	// REALITY cover host actually reaches the box's sing-box config.
 	lastUserData string
+
+	// ephemeralLandsThenFails: the add records the rule and returns
+	// its id WITH an error, as the live client does when set_rules
+	// landed and the read-back failed.
+	ephemeralLandsThenFails bool
 }
 
 // fakeSSHKey mirrors what Hetzner stores for an SSH key. Name is
@@ -370,6 +375,9 @@ func (f *fakeClient) FirewallAddEphemeralRule(_ context.Context, serverID, calle
 	f.idCount++
 	id := "daal-eph-" + serverID + "-" + callerIP + "-" + strconv.Itoa(port) + "-" + strconv.FormatInt(expiresAt.Unix(), 10)
 	f.ephemeralRules[id] = ephemeralRuleEntry{ServerID: serverID, CallerIP: callerIP, Port: port, ExpiresAt: expiresAt}
+	if f.ephemeralLandsThenFails {
+		return id, errors.New("hetzner firewall: read failed")
+	}
 	return id, nil
 }
 
@@ -870,6 +878,21 @@ func TestSetEphemeralFirewallRule_OpensCorrectTuple(t *testing.T) {
 		if e.Port != 12345 || e.CallerIP != "2.3.4.5" {
 			t.Errorf("(port, IP) tuple wrong: %+v", e)
 		}
+	}
+}
+
+// An add that landed and then failed (read-back error) must not leave
+// the hole open until the expiry sweep: the id comes back with the
+// error and the caller removes it.
+func TestSetEphemeralFirewallRule_ClosesAHoleThatLandedBeforeTheError(t *testing.T) {
+	f := newFake()
+	f.ephemeralLandsThenFails = true
+	p := New(f)
+	if _, err := p.SetEphemeralFirewallRule(context.Background(), "1", "2.3.4.5", 12345, 300); err == nil {
+		t.Fatal("want the add's error")
+	}
+	if len(f.ephemeralRules) != 0 {
+		t.Errorf("rule left open after a failed add: %v", f.ephemeralRules)
 	}
 }
 

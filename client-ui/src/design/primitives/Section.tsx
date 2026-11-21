@@ -1,5 +1,6 @@
-// Section — vertical block with optional eyebrow + title + content.
-// Used at the top of screens and inside Cards.
+// Section — vertical block with optional title + content. `eyebrow` is
+// still accepted but is a quiet 12 px label now (no capitals, no
+// tracking); new screens start with PageHeader and pass none.
 
 import type { ReactNode } from 'react';
 
@@ -26,11 +27,10 @@ export function Section({ eyebrow, title, action, children }: Props) {
                         {eyebrow && (
                             <div
                                 style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 10,
-                                    letterSpacing: '0.18em',
-                                    textTransform: 'uppercase',
-                                    color: 'var(--gold-warm)',
+                                    fontFamily: 'var(--font-body)',
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    color: 'var(--muted)',
                                 }}
                             >
                                 {eyebrow}

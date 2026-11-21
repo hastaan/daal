@@ -139,6 +139,21 @@ const (
 	// specs/relaypack-v1.md briefly double-assigned RP024 to
 	// that error; renumbered 2026-08-14. Do not reuse RP025.
 
+	// CodeRP026 (signing only, ValidateForSigning): a CDN-fronted
+	// candidate's `_cdn_endpoint` is missing or unusable, sits beside an
+	// `_endpoint`, is on a family other than websocket-tls, or commits
+	// a route that could never be dialled (no ech_config and
+	// plain_fallback off); or a candidate that is not cdn_fronted
+	// carries one. Never run on a recipient: a newer publisher's shape
+	// must cost a recipient one route, not the pack.
+	CodeRP026 Code = "RP026"
+
+	// CodeRP027 (signing only, ValidateForSigning): a `_standby` is
+	// malformed, sits on a shadowsocks route or one without a direct
+	// `_endpoint`, names the endpoint's own server, or differs between
+	// routes of the same relay address.
+	CodeRP027 Code = "RP027"
+
 	// Warnings (surfaced in LintReport; never block import).
 
 	// CodeRP019: all candidates share every public_risk_tag

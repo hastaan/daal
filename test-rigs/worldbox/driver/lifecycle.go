@@ -208,14 +208,21 @@ func (rc *RunCtx) liveFamilies(phase string) []Family {
 
 // Rebuild re-issues one recipient's file the way the app's Rebuild button
 // does (recipient_book.rs recipient_repack_sbpx): best-effort revoke of
-// the name, provision the same name again, pack against the current
-// record. It returns the new pack. base is the signed base pack to
-// rewrite ("base.sbp" unless the op re-signed one).
+// the name, provision the same name again, sign `base` again if the
+// reply says the relay moved (heal_after_reply: on a relay whose only
+// recipient this is, the revoke dropped the shadowsocks server key and
+// the provision minted another), pack against the current record. It
+// returns the new pack. base is the signed base pack to rewrite
+// ("base.sbp" unless the op re-signed one); every caller signs it with
+// no extra flags, which is how the heal signs it again.
 func (rc *RunCtx) Rebuild(name, phase, base, tag string) (string, bool) {
 	t0 := time.Now()
 	_ = rc.Pub.UsersRevoke(rc.Ctx, name) // best effort, as in the app
 	v := rc.Pub.UsersProvision(rc.Ctx, name)
 	if !rc.R.Add("", phase, "rebuild."+name+".users-provision", Pass, got(v.OK(), Pass, Fail), v.Tail(), nil, t0) {
+		return "", false
+	}
+	if !rc.healAfterReply(phase, name, base) {
 		return "", false
 	}
 	out := "pack-" + name + "-" + tag + ".sbp"
