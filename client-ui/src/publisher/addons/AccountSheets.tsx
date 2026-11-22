@@ -4,6 +4,10 @@
 // or one button. Opened from the Accounts page, and from a relay's
 // «More protection» switch when its account is not connected yet.
 //
+//   HetznerSheet — account, project, access key with Read & Write (the
+//     wizard's own guide); paste → one read-only check → "✓ Connected".
+//     The key is kept by hosting_account::connect, for every new relay;
+//     Disconnect forgets it and the relays keep their own copies.
 //   CloudflareSheet — account, domain, access key (the pre-filled token
 //     page); paste → check → the one domain it sees → "✓ Connected".
 //     The key is kept by addon_cdn::connect, for every relay.
@@ -15,12 +19,17 @@
 
 import { useState } from 'react';
 import { Button, Input, Sheet, Textarea } from '../../design/primitives';
+import { useDeviceT } from '../ui';
 import { useSecureScreen } from '../useSecureScreen';
-import { Addons } from '../wizardCommands';
+import { Addons, Wizard } from '../wizardCommands';
 import type { AddonRow, CdnTokenCheck } from './addonTypes';
 import type { GoogleChoice } from './accounts';
 import { BODY, ErrorNote, MONO, MUTED, NumberedSteps, copyText, useRun } from './addonUi';
 
+/** The wizard's sign-up link (PublisherWizard CLOUD_PROVIDERS). */
+export const HETZNER_SIGNUP_URL = 'https://console.hetzner.cloud/register';
+/** The console's project list: make a project, then its API token. */
+export const HETZNER_CONSOLE_URL = 'https://console.hetzner.cloud/projects';
 export const CLOUDFLARE_SIGNUP_URL = 'https://dash.cloudflare.com/sign-up';
 export const CLOUDFLARE_REGISTRAR_URL = 'https://dash.cloudflare.com/?to=/:account/domains/register';
 export const GOOGLE_SIGNUP_URL = 'https://accounts.google.com/signup';
@@ -57,6 +66,181 @@ function Connected({ text, testId }: { text: string; testId: string }) {
         <p data-testid={testId} style={{ ...BODY, color: 'var(--green)', fontWeight: 600 }}>
             {text}
         </p>
+    );
+}
+
+/** True when the hosting company itself refused the key (as opposed to
+ *  the phone being offline or the store locked). The same words
+ *  setup_recovery.rs classifies as `token_rejected`. */
+export function hostingKeyRefused(e: unknown): boolean {
+    const s = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e ?? '');
+    return /\b(401|403)\b|unauthori[sz]ed|forbidden/i.test(s);
+}
+
+export function HetznerSheet({
+    t,
+    connected,
+    account,
+    onClose,
+    onConnected,
+    onDisconnected,
+}: {
+    t: (k: string) => string;
+    /** A key Daal can use is on this phone (the account's or a relay's). */
+    connected: boolean;
+    /** That key is the account's own: Disconnect can forget it. */
+    account: boolean;
+    onClose: () => void;
+    onConnected: () => void;
+    onDisconnected?: () => void;
+}) {
+    const [token, setToken] = useState('');
+    const [done, setDone] = useState(false);
+    const [refused, setRefused] = useState(false);
+    const [pasteFailed, setPasteFailed] = useState(false);
+    const { busy, error, setError, run } = useRun();
+    const dt = useDeviceT(t);
+
+    const connect = async () => {
+        const typed = token;
+        setRefused(false);
+        let rejected: unknown = null;
+        const r = await run(() =>
+            Wizard.hostingAccountConnect('hetzner', typed).catch((e: unknown) => {
+                rejected = e;
+                throw e;
+            }),
+        );
+        // The key leaves the page once it is checked, kept or not.
+        setToken('');
+        if (r) {
+            setDone(true);
+            onConnected();
+        } else if (rejected != null && hostingKeyRefused(rejected)) {
+            setRefused(true);
+            setError(null);
+        }
+    };
+    const paste = async () => {
+        try {
+            const s = await navigator.clipboard.readText();
+            if (s && s.trim()) {
+                setToken(s.trim());
+                setPasteFailed(false);
+                return;
+            }
+        } catch {
+            /* the web view would not read it */
+        }
+        setPasteFailed(true);
+    };
+    const disconnect = async () => {
+        const r = await run(async () => {
+            await Wizard.hostingAccountDisconnect('hetzner');
+            return true;
+        });
+        if (r) onDisconnected?.();
+    };
+
+    const label = t('wiz.provider.hetzner.label');
+    return (
+        <Sheet title={label} onClose={onClose} width={480}>
+            <div data-testid="hetzner-sheet" style={{ display: 'grid', gap: 14 }}>
+                {done || connected ? (
+                    <>
+                        <Connected testId="hetzner-connected" text={t('pub.accounts.connected')} />
+                        <p style={MUTED}>
+                            {t(done || account ? 'pub.accounts.hz.kept' : 'pub.accounts.hz.relay_only')}
+                        </p>
+                        {!done && account && onDisconnected && (
+                            <p data-testid="hetzner-disconnect-line" style={MUTED}>
+                                {t('pub.accounts.hz.disconnect.line')}
+                            </p>
+                        )}
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                            {!done && account && onDisconnected ? (
+                                <Button variant="ghost" onClick={() => void disconnect()} disabled={busy} dataButton="hetzner-disconnect">
+                                    {t('pub.accounts.disconnect')}
+                                </Button>
+                            ) : (
+                                <span />
+                            )}
+                            <Button onClick={onClose} dataButton="hetzner-done">
+                                {t('pub.accounts.done')}
+                            </Button>
+                        </div>
+                        {error != null && <ErrorNote t={t} error={error} />}
+                    </>
+                ) : (
+                    <>
+                        <NumberedSteps
+                            testId="hetzner-steps"
+                            items={[
+                                {
+                                    text: t('wiz.guide.1'),
+                                    action: {
+                                        label: t('wiz.provider.signup'),
+                                        url: HETZNER_SIGNUP_URL,
+                                        dataButton: 'hetzner-signup',
+                                    },
+                                },
+                                {
+                                    text: t('pub.accounts.hz.step.2'),
+                                    action: {
+                                        label: t('pub.accounts.hz.console'),
+                                        url: HETZNER_CONSOLE_URL,
+                                        dataButton: 'hetzner-project',
+                                    },
+                                },
+                                {
+                                    text: t('wiz.guide.2'),
+                                    action: {
+                                        label: t('pub.accounts.hz.console'),
+                                        url: HETZNER_CONSOLE_URL,
+                                        dataButton: 'hetzner-token-page',
+                                    },
+                                },
+                            ]}
+                        />
+                        <div style={{ display: 'grid', gap: 6 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg)' }}>{t('wiz.provider.token')}</div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <Input
+                                    type="password"
+                                    autoComplete="off"
+                                    autoCapitalize="off"
+                                    autoCorrect="off"
+                                    spellCheck={false}
+                                    dir="ltr"
+                                    value={token}
+                                    onChange={(e) => setToken(e.target.value)}
+                                    placeholder={t('wiz.provider.token.placeholder')}
+                                    aria-label={t('wiz.provider.token')}
+                                    data-button="hetzner-token"
+                                    style={{ flex: 1, minWidth: 0 }}
+                                />
+                                <Button variant="secondary" leading="paste" onClick={() => void paste()} dataButton="hetzner-paste">
+                                    {t('ui.paste')}
+                                </Button>
+                            </div>
+                            {pasteFailed && <p style={{ ...MUTED, color: 'var(--red)' }}>{t('wiz.provider.token.paste_failed')}</p>}
+                            <p style={MUTED}>{dt('wiz.provider.token.kept')}</p>
+                        </div>
+                        {refused && (
+                            <p data-testid="hetzner-refused" style={{ ...MUTED, color: 'var(--red)' }}>
+                                {t('pub.accounts.hz.refused')}
+                            </p>
+                        )}
+                        {error != null && <ErrorNote t={t} error={error} />}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                            <Button onClick={() => void connect()} disabled={busy || token.trim() === ''} dataButton="hetzner-connect">
+                                {busy ? t('pub.accounts.checking') : t('pub.accounts.connect')}
+                            </Button>
+                        </div>
+                    </>
+                )}
+            </div>
+        </Sheet>
     );
 }
 

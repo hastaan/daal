@@ -367,6 +367,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
     };
     let addons: FakeAddon[] = [];
     let cfAccount = { connected: false, zone: '' };
+    let hostingAccount = false;
     const STANDBY_KEY = '000G40 R40M3 0E209 185WP 03H2G';
     const addonOp = (a: Args) => Number((a?.input as { operator_id?: number })?.operator_id ?? LIVE_RELAY_ID);
     const addonStep = async (operator_id: number, kind: FakeAddon['kind'], step: string) => {
@@ -509,7 +510,21 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
             details: [`relay ${op(a)}: journal open since 2 days`],
         }),
         wizard_account_check: () => accountCheck(),
-        wizard_saved_cloud_token: () => null,
+        wizard_saved_cloud_token: () => (hostingAccount ? { operator_id: 0, nickname: '', account: true } : null),
+        // The hosting account (Accounts page): kept for every new relay.
+        wizard_hosting_account_status: () => ({
+            hetzner: { connected: hostingAccount || operators(f).length > 0, account: hostingAccount },
+        }),
+        wizard_hosting_account_connect: (a) => {
+            const tok = String((a?.input as { token?: string })?.token ?? '');
+            if (tok.includes('wrong')) throw 'pricing: list-server-types: hetzner: 401 unauthorized';
+            hostingAccount = true;
+            return { connected: true, account: true };
+        },
+        wizard_hosting_account_disconnect: () => {
+            hostingAccount = false;
+            return null;
+        },
         wizard_get_sbp_path: () => '/data/daal/relay-1/1.sbp',
         // ---- publisher: handing files out
         share_invite: (a) => `/cache/share/${String(a?.friendlyName ?? 'relay')}.sbp`,

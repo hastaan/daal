@@ -62,6 +62,10 @@ export function addonKeys(): string[] {
     const keys = new Set<string>([
         'pub.addons.title',
         'pub.addons.wizard.intro',
+        'pub.addons.wizard.standby.cost',
+        'pub.addons.wizard.waiting',
+        'pub.addons.wizard.failed',
+        'pub.addons.wizard.by_hand',
         'pub.addons.needs.cloudflare',
         'pub.addons.needs.google',
         'pub.addons.state.running',
@@ -147,4 +151,10 @@ export const ACCOUNT_KEYS = [
     'pub.accounts.google.chosen.signin',
     'pub.accounts.google.chosen.manual',
     'pub.accounts.google.later',
+    'pub.accounts.hz.step.2',
+    'pub.accounts.hz.console',
+    'pub.accounts.hz.kept',
+    'pub.accounts.hz.relay_only',
+    'pub.accounts.hz.disconnect.line',
+    'pub.accounts.hz.refused',
 ] as const;

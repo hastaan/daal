@@ -1,8 +1,10 @@
 // accounts.ts — the outside accounts Daal works with (the Accounts page)
 // and whether each one is connected on this phone.
 //
-//   hetzner    — the hosting key a relay was built with (saved per relay
-//                by the wizard; connected when any relay holds one).
+//   hetzner    — the hosting account key (hosting_account::connect),
+//                kept without a relay; a new relay takes a copy. Also
+//                connected when a relay holds a key (phones set up
+//                before the account existed).
 //   cloudflare — a key checked and kept without a relay
 //                (addon_cdn::connect); a relay takes a copy the first
 //                time it turns "Hide behind Cloudflare" on.
@@ -49,13 +51,18 @@ export function setGoogleChoice(v: GoogleChoice | null): void {
 }
 
 export interface AccountsState {
+    /** A Hetzner key Daal can use is on this phone. */
     hetzner: boolean;
+    /** That key is the account's own (Disconnect forgets it); false when
+     *  only relays hold one. */
+    hetznerAccount: boolean;
     cloudflare: { connected: boolean; zone: string };
     google: GoogleChoice | null;
 }
 
 export const NO_ACCOUNTS: AccountsState = {
     hetzner: false,
+    hetznerAccount: false,
     cloudflare: { connected: false, zone: '' },
     google: null,
 };
@@ -63,17 +70,24 @@ export const NO_ACCOUNTS: AccountsState = {
 /** What this phone has connected. A shell that cannot say (an older
  *  build, a browser) reads as "not connected", never as an error. */
 export async function readAccounts(): Promise<AccountsState> {
-    const [ops, cf] = await Promise.all([
-        Wizard.listOperators().catch(() => []),
+    const [hosting, cf] = await Promise.all([
+        Wizard.hostingAccountStatus().catch(() => null),
         Addons.cdnAccount().catch(() => null),
     ]);
-    const live = (Array.isArray(ops) ? ops : []).filter((o) => o.status !== 'decommissioned');
-    let hetzner = live.some((o) => o.has_cloud_token === true);
-    if (!hetzner) {
-        hetzner = (await Wizard.savedCloudToken('hetzner').catch(() => null)) != null;
+    let hetzner = !!hosting?.hetzner?.connected;
+    const hetznerAccount = !!hosting?.hetzner?.account;
+    if (hosting == null) {
+        // A shell older than the account: a relay's key is the account.
+        const ops = await Wizard.listOperators().catch(() => []);
+        const live = (Array.isArray(ops) ? ops : []).filter((o) => o.status !== 'decommissioned');
+        hetzner = live.some((o) => o.has_cloud_token === true);
+        if (!hetzner) {
+            hetzner = (await Wizard.savedCloudToken('hetzner').catch(() => null)) != null;
+        }
     }
     return {
         hetzner,
+        hetznerAccount,
         cloudflare: { connected: !!cf?.connected, zone: cf?.zone ?? '' },
         google: googleChoice(),
     };

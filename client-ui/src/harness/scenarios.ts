@@ -478,6 +478,14 @@ const WIZARD_TO_2: DriveStep[] = [
     { click: 'key:wiz.nav.next' },
 ];
 
+/** Name and size chosen, on to «More protection (optional)». */
+const WIZARD_TO_EXTRAS: DriveStep[] = [
+    ...WIZARD_TO_2,
+    { sleep: 600 },
+    { click: 'key:common.continue' },
+    { waitFor: 'key:wiz.step.extras.title' },
+];
+
 /** Something that reads as a pasted connection file (`UEsDB…`). */
 const PASTED_FILE =
     'UEsDBBQAAAAIAA' + 'Kx3mQ9vT2bN8pLr4Wc7Zy1Hd6Fg0Js5Ae9Ui2Ok8Tn3Bv7Mq4Xw1Cs6Dp0Ga5Hf9Ej2Il8Ro'.repeat(9);
@@ -1204,7 +1212,7 @@ export const SCENARIOS: Scenario[] = [
         {
             id: 'publisher-wizard-step-7',
             title: 'wizard 3 done (check words, add the first person)',
-        }, { relays: 'none', steps: [...WIZARD_TO_2, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }] }),
+        }, { relays: 'none', steps: [...WIZARD_TO_EXTRAS, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }] }),
 
     // --- Recipient QR (Phase D) ---
     // Scanning is a step of "Add my file" now (C3.4).
@@ -1441,6 +1449,11 @@ export const SCENARIOS: Scenario[] = [
             id: 'pub-accounts',
             title: 'Accounts (Hetzner, Cloudflare, Google)',
         }, { steps: relaysMenu('accounts') }),
+    ...pub(
+        {
+            id: 'pub-accounts-hetzner',
+            title: 'Accounts · connect Hetzner',
+        }, { steps: [...relaysMenu('accounts'), { click: 'btn:account-hetzner' }] }),
     ...pub(
         {
             id: 'pub-accounts-cloudflare',
@@ -1726,11 +1739,19 @@ export const SCENARIOS: Scenario[] = [
     }),
     ...pub(
         {
+            id: 'pub-wizard-extras',
+            title: 'Wizard · 3 more protection (optional)',
+        }, {
+        relays: 'none',
+        steps: WIZARD_TO_EXTRAS,
+    }),
+    ...pub(
+        {
             id: 'pub-wizard-3-building',
             title: 'Wizard · 3 building',
         }, {
         relays: 'none',
-        steps: [...WIZARD_TO_2, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.hint' }, { sleep: 700 }, { freeze: true }],
+        steps: [...WIZARD_TO_EXTRAS, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.hint' }, { sleep: 700 }, { freeze: true }],
     }),
     ...pub(
         {
@@ -1739,7 +1760,7 @@ export const SCENARIOS: Scenario[] = [
         }, {
         relays: 'none',
         // The done screen waits for "Add the first person" (no hand-off).
-        steps: [...WIZARD_TO_2, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }],
+        steps: [...WIZARD_TO_EXTRAS, { click: 'key:wiz.plan.next' }, { waitFor: 'key:wiz.build.done.eyebrow' }],
     }),
     ...pub(
         {
@@ -1748,7 +1769,7 @@ export const SCENARIOS: Scenario[] = [
         }, {
         relays: 'none',
         steps: [
-            ...WIZARD_TO_2,
+            ...WIZARD_TO_EXTRAS,
             { click: 'key:wiz.plan.next' },
             { waitFor: 'key:wiz.build.done.eyebrow' },
             { click: 'btn:add-first-person' },

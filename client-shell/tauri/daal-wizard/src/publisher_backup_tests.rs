@@ -2117,3 +2117,89 @@ fn a_backup_made_before_the_addon_ledger_restores() {
     let err = backup_restore(&c.ctx, &path, &words, None).map(|_| ()).unwrap_err();
     assert_eq!(code(err), E_BACKUP_DAMAGED);
 }
+
+// ------------------------------------------------------------ accounts
+
+const HZ_ACCOUNT: &str = "hcloud_ACCOUNT_do_not_leak_0003";
+const CF_ACCOUNT: &str = "cf_ACCOUNT_do_not_leak_0004";
+
+#[test]
+fn the_account_keys_travel_with_the_backup() {
+    let a = phone();
+    populate(&a);
+    crate::hosting_account::connect(&a.ctx, "hetzner", HZ_ACCOUNT).unwrap();
+    // The Cloudflare account key as addon_cdn::connect keeps it.
+    a.ctx
+        .custody
+        .put(crate::addon_cdn::ACCOUNT_ALIAS, CF_ACCOUNT.as_bytes())
+        .unwrap();
+    a.ctx
+        .custody
+        .put(crate::addon_cdn::ACCOUNT_ZONE_ALIAS, b"example.com")
+        .unwrap();
+    let words = set_words(&a);
+    let file = make(&a);
+
+    let b = phone();
+    crate::recipient_identity::get_or_create(&b.ctx).unwrap();
+    let path = carry(&file, &b);
+    let prev = backup_open(&b.ctx, &path, &words).unwrap();
+    assert!(prev.contents.includes_hosting_key);
+    backup_restore(&b.ctx, &path, &words, None).unwrap();
+
+    let hz = crate::hosting_account::account_alias("hetzner");
+    assert_eq!(b.ctx.custody.get(&hz).unwrap(), HZ_ACCOUNT.as_bytes());
+    assert_eq!(
+        b.ctx.custody.get(crate::addon_cdn::ACCOUNT_ALIAS).unwrap(),
+        CF_ACCOUNT.as_bytes()
+    );
+    assert_eq!(
+        crate::addon_cdn::account(&b.ctx).unwrap(),
+        crate::addon_cdn::CdnAccount { connected: true, zone: "example.com".into() }
+    );
+    let st = crate::hosting_account::status(&b.ctx).unwrap();
+    assert!(st["hetzner"].account && st["hetzner"].connected);
+    // A restored phone is not stale against the backup it came from.
+    assert!(!backup_status(&b.ctx).unwrap().stale);
+}
+
+#[test]
+fn a_backup_made_before_accounts_existed_still_restores_and_keeps_the_phones_account() {
+    // The backup has no account key (its phone never connected one):
+    // the shape every backup made before this change has.
+    let (a, b, path, words) = restore_rig();
+    let a_snap = collect_state(&a.ctx, SecretMode::Strict).unwrap();
+    assert!(!a_snap
+        .secrets
+        .iter()
+        .any(|(al, _)| al.starts_with("daal.hosting.") || al == crate::addon_cdn::ACCOUNT_ALIAS));
+    // The new phone connected its hosting account first, no relay yet.
+    crate::hosting_account::connect(&b.ctx, "hetzner", HZ_ACCOUNT).unwrap();
+    let insp = backup_inspect(&b.ctx, &path).unwrap();
+    assert!(insp.existing.is_none(), "an account alone is nothing to replace");
+    backup_restore(&b.ctx, &path, &words, None).unwrap();
+    assert_eq!(list_operators(&b.ctx).unwrap().len(), 2);
+    // Its own account key is not forgotten by a backup that had none.
+    assert_eq!(
+        b.ctx
+            .custody
+            .get(&crate::hosting_account::account_alias("hetzner"))
+            .unwrap(),
+        HZ_ACCOUNT.as_bytes()
+    );
+}
+
+#[test]
+fn connecting_an_account_makes_the_last_backup_out_of_date() {
+    let a = phone();
+    populate(&a);
+    set_words(&a);
+    make(&a);
+    assert!(!backup_status(&a.ctx).unwrap().stale);
+    crate::hosting_account::connect(&a.ctx, "hetzner", HZ_ACCOUNT).unwrap();
+    assert!(backup_status(&a.ctx).unwrap().stale, "the account key is not in it");
+    make(&a);
+    assert!(!backup_status(&a.ctx).unwrap().stale);
+    crate::hosting_account::disconnect(&a.ctx, "hetzner").unwrap();
+    assert!(backup_status(&a.ctx).unwrap().stale, "forgotten since");
+}

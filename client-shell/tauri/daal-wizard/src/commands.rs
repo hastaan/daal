@@ -427,7 +427,7 @@ pub(crate) fn custody_get(ctx: &WizardCtx, alias: &str) -> Result<Zeroizing<Vec<
 /// every alias — so a naive `custody.get(a).is_ok()` would copy every
 /// relay's Ed25519 signing key into freed heap on each mount of the
 /// publisher surface, in a crate that otherwise zeroizes carefully.
-fn custody_has(ctx: &WizardCtx, alias: &str) -> bool {
+pub(crate) fn custody_has(ctx: &WizardCtx, alias: &str) -> bool {
     ctx.custody.get(alias).map(Zeroizing::new).is_ok()
 }
 
@@ -791,20 +791,34 @@ pub fn store_cloud_token(
     Ok(id)
 }
 
-/// A relay that already holds a readable hosting key for `provider`,
-/// so a new relay can be started without pasting the key again.
+/// A hosting key a new relay at `provider` can start with, so the key
+/// is not pasted again: the connected account's (Accounts page), or
+/// else one another relay already holds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SavedCloudToken {
+    /// The relay whose key it is; 0 when it is the account's.
     pub operator_id: i64,
-    /// The person's name for that relay; empty when they gave none.
+    /// The person's name for that relay; empty when they gave none, and
+    /// for the account's key.
     pub nickname: String,
+    /// True: the connected account's key (`hosting_account`).
+    #[serde(default)]
+    pub account: bool,
 }
 
-/// Which relay's saved hosting key a new relay at `provider` could
-/// reuse: the newest relay at that company that is not deleted and
-/// whose key custody can read right now. `None` when there is none.
+/// Which saved hosting key a new relay at `provider` would use: the
+/// account key when the Accounts page connected one and custody can read
+/// it; otherwise the newest relay at that company that is not deleted
+/// and whose key custody can read right now. `None` when there is none.
 /// Reads no secret into the result.
 pub fn saved_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<Option<SavedCloudToken>> {
+    if crate::hosting_account::has_account_key(ctx, provider) {
+        return Ok(Some(SavedCloudToken {
+            operator_id: 0,
+            nickname: String::new(),
+            account: true,
+        }));
+    }
     let mut rows = ctx.db.list()?;
     rows.sort_by_key(|r| std::cmp::Reverse(r.id));
     Ok(rows
@@ -817,17 +831,23 @@ pub fn saved_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<Option<Saved
         .map(|r| SavedCloudToken {
             operator_id: r.id,
             nickname: r.nickname,
+            account: false,
         }))
 }
 
-/// Start a new relay at `provider` with the hosting key another relay
-/// already holds. The key is copied inside custody under the new
-/// relay's own alias, so deleting either relay leaves the other's key
+/// Start a new relay at `provider` with the saved hosting key (the
+/// account's first, see [`saved_cloud_token`]). The key is copied
+/// inside custody under the new relay's own alias, so forgetting the
+/// account key or deleting either relay leaves the new relay's key
 /// alone, and it never passes through the UI.
 pub fn reuse_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<i64> {
     let src = saved_cloud_token(ctx, provider)?.ok_or(WizardError::EmptyToken)?;
-    let row = ctx.db.get(src.operator_id)?;
-    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
+    let alias = if src.account {
+        crate::hosting_account::account_alias(provider)
+    } else {
+        ctx.db.get(src.operator_id)?.cloud_token_keystore_alias
+    };
+    let token = custody_get_string(ctx, &alias)?;
     store_cloud_token(ctx, provider, &token, None)
 }
 

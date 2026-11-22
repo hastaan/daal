@@ -7,7 +7,8 @@
 //! Everything a publisher needs to keep serving their family lives in
 //! this app's private storage on one phone: the relays, each relay's
 //! signing key and hosting key, the people, their files and the setup
-//! journals. The keys are wrapped under the phone's own key store
+//! journals; and the account keys kept apart from any relay (the
+//! Accounts page's hosting key and Cloudflare key), when there are any. The keys are wrapped under the phone's own key store
 //! (`device_custody`), so they cannot leave the phone as they are. A
 //! backup re-wraps them under a secret the person holds, and a restore
 //! wraps them again under the new phone's key store.
@@ -1011,6 +1012,18 @@ fn report_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<String> {
         .collect()
 }
 
+/// The account keys a phone may hold apart from any relay (the Accounts
+/// page): each hosting company's key, and the Cloudflare key with the
+/// zone it sees. Not columns, so carried only when present: a phone
+/// with no account keeps the same digest (and the same backup) as
+/// before they existed, and a backup made before them restores as is.
+fn account_aliases() -> Vec<String> {
+    let mut out = crate::hosting_account::all_account_aliases();
+    out.push(crate::addon_cdn::ACCOUNT_ALIAS.to_string());
+    out.push(crate::addon_cdn::ACCOUNT_ZONE_ALIAS.to_string());
+    out
+}
+
 fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
     let staging = ctx.staging_dir.clone();
     let (tables, path_files) = ctx
@@ -1049,29 +1062,33 @@ fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
             }
         }
     }
-    // Network-test report keys: in the backup when they exist, and
-    // only then, so a publisher who never made one keeps the same
-    // digest (and the same backup) as before they existed.
-    for id in snap.operator_ids() {
-        for alias in crate::report_key::optional_aliases(id) {
-            if snap.secrets.iter().any(|(a, _)| *a == alias) {
-                continue;
+    // Network-test report keys and the account keys: in the backup
+    // when they exist, and only then, so a publisher who never made one
+    // keeps the same digest (and the same backup) as before they existed.
+    let optional = snap
+        .operator_ids()
+        .into_iter()
+        .flat_map(crate::report_key::optional_aliases)
+        .chain(account_aliases())
+        .collect::<Vec<_>>();
+    for alias in optional {
+        if snap.secrets.iter().any(|(a, _)| *a == alias) {
+            continue;
+        }
+        match ctx.custody.get(&alias) {
+            Ok(v) => snap.secrets.push((alias, Zeroizing::new(v))),
+            Err(CustodyError::NotFound(_)) => {}
+            Err(CustodyError::Locked) => {
+                return Err(coded(
+                    E_CUSTODY_LOCKED,
+                    "unlock this device's key store to continue",
+                ))
             }
-            match ctx.custody.get(&alias) {
-                Ok(v) => snap.secrets.push((alias, Zeroizing::new(v))),
-                Err(CustodyError::NotFound(_)) => {}
-                Err(CustodyError::Locked) => {
-                    return Err(coded(
-                        E_CUSTODY_LOCKED,
-                        "unlock this device's key store to continue",
-                    ))
-                }
-                Err(e) => {
-                    if mode == SecretMode::Lenient {
-                        snap.missing.push(alias);
-                    } else {
-                        return Err(coded(E_CUSTODY_BACKEND, e));
-                    }
+            Err(e) => {
+                if mode == SecretMode::Lenient {
+                    snap.missing.push(alias);
+                } else {
+                    return Err(coded(E_CUSTODY_BACKEND, e));
                 }
             }
         }
@@ -1419,8 +1436,11 @@ fn parse_payload(ctx: &WizardCtx, pt: &[u8]) -> Result<Parsed> {
     // alias, and every secret must be referenced by the rows.
     let referenced = referenced_aliases(&tables);
     // A relay's network-test report keys may be there too (only when
-    // they were made; see collect_state).
-    let optional: Vec<String> = report_aliases(&tables);
+    // they were made; see collect_state). So may the account keys (only when this phone had them).
+    let optional: Vec<String> = report_aliases(&tables)
+        .into_iter()
+        .chain(account_aliases())
+        .collect();
     let mut referenced_set: BTreeSet<&str> = referenced.iter().map(|(a, _)| a.as_str()).collect();
     referenced_set.extend(optional.iter().map(String::as_str));
     for (a, _) in &referenced {
@@ -1874,7 +1894,10 @@ fn contents_of(s: &Snapshot) -> BackupContents {
         .count() as i64;
     BackupContents {
         people_total: relays.iter().map(|r| r.people).sum(),
-        includes_hosting_key: relays.iter().any(|r| r.has_hosting_key),
+        includes_hosting_key: relays.iter().any(|r| r.has_hosting_key)
+            || crate::hosting_account::all_account_aliases()
+                .iter()
+                .any(|a| s.secret(a).is_some()),
         files: s.files.len() as i64,
         unfinished_setups: unfinished,
         relays,

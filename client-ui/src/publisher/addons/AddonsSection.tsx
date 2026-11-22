@@ -1,5 +1,6 @@
-// AddonsSection — «More protection» on the relay page and at the end of
-// the build wizard (docs/optional-addons-plan.md, X3; owner review
+// AddonsSection — «More protection» on the relay page (the build wizard
+// asks the same three on its own step: WizardAddons.tsx)
+// (docs/optional-addons-plan.md, X3; owner review
 // 2026-11-21: "Hetzner setup is very straightforward", make these so).
 //
 // Three rows: a title, ONE short line, the cost, a switch. Daal decides
@@ -30,14 +31,14 @@ import { CloudflareSheet, GoogleByHandSheet, GoogleSheet, APPS_SCRIPT_SETTINGS_U
 import { setGoogleChoice, useAccounts } from './accounts';
 import type { AccountsState, GoogleChoice } from './accounts';
 import { BODY, ErrorNote, MONO, MUTED, copyText, openExternal, useRun } from './addonUi';
+import { addonNeed, clearAddonFailure, failedAddons, runAddon } from './wizardAddons';
 
 export interface AddonsSectionProps {
     t: (key: string) => string;
     /** The relay; absent while it does not exist yet. */
     operatorId?: number | null;
-    /** `relay`: the relay page. `wizard`: the end of the build wizard,
-     *  which adds that the relay works without them. */
-    variant?: 'relay' | 'wizard';
+    /** `relay`: the relay page (the only place it is shown). */
+    variant?: 'relay';
     /** The accounts, for tests; read from the shell otherwise. */
     accounts?: AccountsState;
 }
@@ -67,6 +68,20 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
     const confirm = useConfirm();
     const code = useRun();
 
+    // An extra chosen in the build wizard that did not turn on: one line
+    // with «Try again» here, never a failed relay (wizardAddons.ts).
+    useEffect(() => {
+        if (operatorId == null) return;
+        const failed = failedAddons(operatorId);
+        const kinds = Object.keys(failed) as AddonKind[];
+        if (kinds.length === 0) return;
+        setPhases((all) => {
+            const next = { ...all };
+            for (const k of kinds) if (next[k] == null) next[k] = { k: 'failed', op: 'on', error: failed[k] };
+            return next;
+        });
+    }, [operatorId]);
+
     useEffect(() => {
         let gone = false;
         if (operatorId == null) {
@@ -93,23 +108,23 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
      *  have just connected the account). */
     const turnOn = async (kind: AddonKind, acc: AccountsState = accounts) => {
         if (operatorId == null) return;
-        if (kind === 'cdn' && (!acc.cloudflare.connected || !acc.cloudflare.zone)) {
+        const need = addonNeed(kind, acc);
+        if (need === 'cloudflare') {
             setOpen({ k: 'cloudflare', then: 'cdn' });
             return;
         }
-        if (kind === 'google' && !acc.google) {
+        if (need === 'google') {
             setOpen({ k: 'google', then: 'google' });
             return;
         }
-        if (kind === 'google' && acc.google === 'manual') {
+        if (need === 'by_hand') {
             setOpen({ k: 'google-hand' });
             return;
         }
         setPhase(kind, { k: 'running' });
+        clearAddonFailure(operatorId, kind);
         try {
-            if (kind === 'standby') await Addons.standbyAdd({ operator_id: operatorId, mode: 'sealed' });
-            else if (kind === 'cdn') await Addons.cdnBuild({ operator_id: operatorId, zone: acc.cloudflare.zone });
-            else await Addons.googleSignIn({ operator_id: operatorId });
+            await runAddon(kind, operatorId, acc);
             setPhase(kind, { k: 'idle' });
         } catch (e) {
             setPhase(kind, { k: 'failed', op: 'on', error: e });
@@ -189,7 +204,6 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
     return (
         <section data-testid={`addons-${variant}`} style={{ width: '100%', textAlign: 'start', display: 'grid', gap: 8 }}>
             <h2 style={H2}>{t('pub.addons.title')}</h2>
-            {variant === 'wizard' && <p style={MUTED}>{t('pub.addons.wizard.intro')}</p>}
             <div
                 style={{
                     background: 'var(--surface)',
@@ -276,6 +290,7 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
                     onClose={() => setOpen(null)}
                     onDone={() => {
                         setOpen(null);
+                        clearAddonFailure(operatorId, 'google');
                         setPhase('google', { k: 'idle' });
                         reload();
                     }}

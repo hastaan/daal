@@ -17,6 +17,8 @@ import type { AccountsState } from './accounts';
 import srcSection from './AddonsSection.tsx?raw';
 import srcSheets from './AccountSheets.tsx?raw';
 import srcPage from '../AccountsPage.tsx?raw';
+import srcWizardAddons from './wizardAddons.ts?raw';
+import srcWizardRows from './WizardAddons.tsx?raw';
 
 type Handler = (args: Record<string, unknown> | undefined) => unknown;
 let handlers: Record<string, Handler> = {};
@@ -62,7 +64,7 @@ afterEach(async () => {
 const { translate } = await import('../../lib/i18n');
 const { AddonsSection } = await import('./AddonsSection');
 const { default: AccountsPage } = await import('../AccountsPage');
-const { Addons, classifyPublisherError } = await import('../wizardCommands');
+const { Addons, Wizard, classifyPublisherError } = await import('../wizardCommands');
 const en = (k: string) => translate('en', k);
 const fa = (k: string) => translate('fa', k);
 const tid = (root: FakeNode, id: string) => byAttr(root, 'data-testid', id);
@@ -70,8 +72,8 @@ const btn = (root: FakeNode, id: string) => byAttr(root, 'data-button', id);
 const cmds = () => calls.map((c) => c.cmd);
 const inputOf = (cmd: string) => (calls.find((c) => c.cmd === cmd)?.args as { input: Record<string, unknown> }).input;
 
-const NONE: AccountsState = { hetzner: true, cloudflare: { connected: false, zone: '' }, google: null };
-const ALL: AccountsState = { hetzner: true, cloudflare: { connected: true, zone: 'example.com' }, google: 'signin' };
+const NONE: AccountsState = { hetzner: true, hetznerAccount: true, cloudflare: { connected: false, zone: '' }, google: null };
+const ALL: AccountsState = { hetzner: true, hetznerAccount: true, cloudflare: { connected: true, zone: 'example.com' }, google: 'signin' };
 
 function row(kind: AddonRow['kind'], state: AddonRow['state'], detail: Record<string, unknown> = {}): AddonRow {
     return {
@@ -311,10 +313,12 @@ describe('Daal decides: no open standby, no plain fallback', () => {
         // Only the three row switches are switches.
         expect(all(m.container, (n) => n.getAttribute?.('role') === 'switch')).toHaveLength(3);
         expect(cmds()).not.toContain('wizard_addon_cdn_set_plain_fallback');
-        for (const src of [srcSection, srcSheets, srcPage]) {
+        for (const src of [srcSection, srcSheets, srcPage, srcWizardAddons, srcWizardRows]) {
             expect(src).not.toMatch(/cdnSetPlainFallback|plain_fallback\s*:|mode:\s*'open'|E_STANDBY_OPEN_REFUSED/);
         }
-        expect(srcSection).toMatch(/mode: 'sealed'/);
+        // The one call a switch (relay page or build wizard) makes.
+        expect(srcWizardAddons).toMatch(/mode: 'sealed'/);
+        expect(srcSection).toMatch(/runAddon\(/);
     });
 });
 
@@ -382,6 +386,94 @@ describe('the Accounts page', () => {
         expect(tid(m.container, 'account-google-state')?.textContent).toBe(en('pub.accounts.google.chosen.signin'));
     });
 
+    function hosting(st: { connected: boolean; account: boolean }) {
+        handlers.wizard_hosting_account_status = () => ({ hetzner: st, vultr: { connected: false, account: false } });
+    }
+
+    it('Hetzner: connected with no relay, from three numbered steps and one paste', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_list_operators = () => [];
+        hosting({ connected: false, account: false });
+        handlers.wizard_hosting_account_connect = () => ({ connected: true, account: true });
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        const row = byAttr(m.container, 'data-account', 'hetzner')!;
+        expect(row.getAttribute('data-connected')).toBe('false');
+        // Connecting no longer starts a relay: it opens the sheet.
+        await rig.click(btn(m.container, 'account-hetzner-connect'));
+        const steps = tid(m.container, 'hetzner-steps')!;
+        expect(all(steps, (n) => n.nodeName === 'LI')).toHaveLength(3);
+        // The wizard's own words for the account and the key.
+        expect(steps.textContent).toContain(en('wiz.guide.1'));
+        expect(steps.textContent).toContain(en('wiz.guide.2'));
+        expect(steps.textContent).toContain('Read & Write');
+        for (const b of ['hetzner-signup', 'hetzner-project', 'hetzner-token-page']) expect(btn(steps, b), b).toBeTruthy();
+        expect(btn(m.container, 'hetzner-connect')?.getAttribute('disabled')).not.toBeNull();
+        await rig.type(btn(m.container, 'hetzner-token'), '  hcloud-key ');
+        hosting({ connected: true, account: true });
+        await rig.click(btn(m.container, 'hetzner-connect'));
+        const call = calls.find((c) => c.cmd === 'wizard_hosting_account_connect');
+        expect(call?.args).toEqual({ input: { provider: 'hetzner', token: '  hcloud-key ' } });
+        expect(tid(m.container, 'hetzner-connected')?.textContent).toBe('✓ Connected');
+        expect(btn(m.container, 'hetzner-token')).toBeNull();
+        // No relay was started.
+        expect(cmds()).not.toContain('wizard_store_cloud_token');
+        expect(cmds()).not.toContain('wizard_reuse_cloud_token');
+        await rig.click(btn(m.container, 'hetzner-done'));
+        expect(tid(m.container, 'account-hetzner-state')?.textContent).toBe('✓ Connected');
+    });
+
+    it('Hetzner: a refused key is one line, and nothing is connected', async () => {
+        shellWith({ connected: false, zone: '' });
+        hosting({ connected: false, account: false });
+        handlers.wizard_hosting_account_connect = () => {
+            throw 'pricing: list-server-types: hetzner: 401 unauthorized';
+        };
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        await rig.click(btn(m.container, 'account-hetzner-connect'));
+        await rig.type(btn(m.container, 'hetzner-token'), 'wrong');
+        await rig.click(btn(m.container, 'hetzner-connect'));
+        expect(tid(m.container, 'hetzner-refused')?.textContent).toBe(en('pub.accounts.hz.refused'));
+        expect(tid(m.container, 'hetzner-connected')).toBeNull();
+        expect(tid(m.container, 'addon-error')).toBeNull();
+    });
+
+    it('Hetzner: Disconnect says the relays keep working, and forgets only the account key', async () => {
+        shellWith({ connected: false, zone: '' });
+        hosting({ connected: true, account: true });
+        handlers.wizard_hosting_account_disconnect = () => null;
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        expect(tid(m.container, 'account-hetzner-state')?.textContent).toBe('✓ Connected');
+        await rig.click(btn(m.container, 'account-hetzner'));
+        expect(tid(m.container, 'hetzner-disconnect-line')?.textContent).toBe(en('pub.accounts.hz.disconnect.line'));
+        expect(en('pub.accounts.hz.disconnect.line')).toMatch(/does not stop your relays/);
+        hosting({ connected: true, account: false });
+        await rig.click(btn(m.container, 'hetzner-disconnect'));
+        expect(calls.find((c) => c.cmd === 'wizard_hosting_account_disconnect')?.args).toEqual({ provider: 'hetzner' });
+        expect(tid(m.container, 'hetzner-sheet')).toBeNull();
+    });
+
+    it('Hetzner held only by relays (an older phone): connected, nothing to disconnect', async () => {
+        shellWith({ connected: false, zone: '' });
+        hosting({ connected: true, account: false });
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        await rig.click(btn(m.container, 'account-hetzner'));
+        expect(tid(m.container, 'hetzner-connected')).not.toBeNull();
+        expect(m.container.textContent).toContain(en('pub.accounts.hz.relay_only'));
+        expect(btn(m.container, 'hetzner-disconnect')).toBeNull();
+    });
+
+    it('Hetzner in Persian: «اتصال», then «✓ وصل است»', async () => {
+        shellWith({ connected: false, zone: '' });
+        hosting({ connected: false, account: false });
+        handlers.wizard_hosting_account_connect = () => ({ connected: true, account: true });
+        const m = await rig.mount(<AccountsPage t={fa} onBack={() => {}} backLabel="رله‌ها" />);
+        await rig.click(btn(m.container, 'account-hetzner-connect'));
+        expect(btn(m.container, 'hetzner-connect')?.textContent).toBe('اتصال');
+        await rig.type(btn(m.container, 'hetzner-token'), 'k');
+        await rig.click(btn(m.container, 'hetzner-connect'));
+        expect(tid(m.container, 'hetzner-connected')?.textContent).toBe('✓ وصل است');
+    });
+
     it('in Persian it is «حساب‌ها»', async () => {
         shellWith({ connected: true, zone: 'example.com' });
         const m = await rig.mount(<AccountsPage t={fa} onBack={() => {}} backLabel="رله‌ها" />);
@@ -396,6 +488,9 @@ describe('the command surface', () => {
             [Addons.cdnConnect({ token: 'x' }), 'wizard_addon_cdn_connect'],
             [Addons.cdnAccount(), 'wizard_addon_cdn_account'],
             [Addons.cdnDisconnect(), 'wizard_addon_cdn_disconnect'],
+            [Wizard.hostingAccountConnect('hetzner', 'k'), 'wizard_hosting_account_connect'],
+            [Wizard.hostingAccountStatus(), 'wizard_hosting_account_status'],
+            [Wizard.hostingAccountDisconnect('hetzner'), 'wizard_hosting_account_disconnect'],
         ];
         for (const [p, name] of cases) {
             const e = await p.then(() => 'resolved', (err: unknown) => err);

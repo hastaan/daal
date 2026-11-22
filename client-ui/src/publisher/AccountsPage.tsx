@@ -1,8 +1,10 @@
 // AccountsPage — «حساب‌ها»: the outside services Daal works with, each
 // connected once from here, the way the wizard connects Hetzner.
 //
-//   Hetzner    — connected when a relay holds a hosting key. Connecting
-//                is the wizard's first screen (a new relay).
+//   Hetzner    — HetznerSheet: the wizard's three steps, paste the key,
+//                "✓ Connected". Kept for every new relay, with no relay
+//                needed (accounts come before relays). Also connected
+//                when a relay already holds a key (older phones).
 //   Cloudflare — CloudflareSheet: three steps, paste the key, "✓ Connected".
 //   Google     — GoogleSheet: one step, "Sign in with Google".
 //   The other hosting companies the wizard lists as «در دست ساخت».
@@ -15,7 +17,7 @@ import { Badge, Button, Card, GroupLabel, Icon, ListRow, PageHeader } from '../d
 import type { IconName } from '../design/primitives/icons';
 import { useBack } from '../lib/useBack';
 import { PageColumn } from './ui';
-import { CloudflareSheet, GoogleSheet } from './addons/AccountSheets';
+import { CloudflareSheet, GoogleSheet, HetznerSheet } from './addons/AccountSheets';
 import { setGoogleChoice, useAccounts } from './addons/accounts';
 import type { ServiceId } from './addons/accounts';
 
@@ -36,17 +38,14 @@ export default function AccountsPage({
     t,
     onBack,
     backLabel,
-    onConnectHetzner,
 }: {
     t: (k: string) => string;
     onBack: () => void;
     /** The page Back returns to ("Relays", the relay's name). */
     backLabel: string;
-    /** Hetzner connects in the wizard: a new relay. */
-    onConnectHetzner?: () => void;
 }) {
     const { accounts, loaded, reload } = useAccounts();
-    const [open, setOpen] = useState<'cloudflare' | 'google' | null>(null);
+    const [open, setOpen] = useState<ServiceId | null>(null);
     useBack(true, onBack, 'page');
 
     const connected: Record<ServiceId, boolean> = {
@@ -64,13 +63,7 @@ export default function AccountsPage({
         }
         return t('pub.accounts.connected');
     };
-    const onRow = (s: ServiceId) => {
-        if (s === 'hetzner') {
-            if (!connected.hetzner) onConnectHetzner?.();
-            return;
-        }
-        setOpen(s);
-    };
+    const onRow = (s: ServiceId) => setOpen(s);
 
     const labelOf: Record<ServiceId, string> = {
         hetzner: t('wiz.provider.hetzner.label'),
@@ -82,7 +75,6 @@ export default function AccountsPage({
                     // Google is only a chosen way until a relay's switch signs in
                     // (or the script is added by hand): never shown green here.
                     const green = on && s.id !== 'google';
-                    const tappable = s.id !== 'hetzner' || (!on && !!onConnectHetzner);
                     return (
                         <div key={s.id} data-account={s.id} data-connected={loaded ? String(on) : 'unknown'}>
                             <ListRow
@@ -109,14 +101,14 @@ export default function AccountsPage({
                                     </span>
                                 }
                                 trailing={
-                                    !on && tappable ? (
+                                    !on ? (
                                         <Button size="compact" variant="secondary" onClick={() => onRow(s.id)} dataButton={`account-${s.id}-connect`}>
                                             {t('pub.accounts.connect')}
                                         </Button>
                                     ) : undefined
                                 }
-                                chevron={on && s.id !== 'hetzner'}
-                                onClick={tappable ? () => onRow(s.id) : undefined}
+                                chevron={on}
+                                onClick={() => onRow(s.id)}
                                 stack={false}
                                 dataButton={`account-${s.id}`}
                                 last={last}
@@ -160,6 +152,22 @@ export default function AccountsPage({
                 {serviceRow({ id: 'google', label: labelOf.google }, true)}
             </Card>
 
+            {open === 'hetzner' && (
+                <HetznerSheet
+                    t={t}
+                    connected={accounts.hetzner}
+                    account={accounts.hetznerAccount}
+                    onClose={() => {
+                        setOpen(null);
+                        reload();
+                    }}
+                    onConnected={() => reload()}
+                    onDisconnected={() => {
+                        setOpen(null);
+                        reload();
+                    }}
+                />
+            )}
             {open === 'cloudflare' && (
                 <CloudflareSheet
                     t={t}

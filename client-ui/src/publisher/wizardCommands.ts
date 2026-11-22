@@ -1065,6 +1065,17 @@ export interface AccountItem extends ResourceRef {
     cost_currency?: string;
 }
 
+/** One hosting company on this phone (`hosting_account.rs`). */
+export interface HostingAccountState {
+    /** A key Daal can use is here: the account's, or a live relay's. */
+    connected: boolean;
+    /** The account key itself is here (what Disconnect forgets). */
+    account: boolean;
+}
+
+/** Per hosting company id ("hetzner", …). */
+export type HostingAccountStatus = Record<string, HostingAccountState>;
+
 export interface AccountCheckAccount {
     account_key: string;
     provider: string;
@@ -1313,7 +1324,7 @@ export const Wizard = {
      * (null when none). Carries no secret.
      */
     savedCloudToken: (provider: string) =>
-        invoke<{ operator_id: number; nickname: string } | null>(
+        invoke<{ operator_id: number; nickname: string; account?: boolean } | null>(
             'wizard_saved_cloud_token',
             { provider },
         ),
@@ -1324,6 +1335,25 @@ export const Wizard = {
      */
     reuseCloudToken: (provider: string) =>
         invoke<number>('wizard_reuse_cloud_token', { provider }),
+
+    /**
+     * The Accounts page: check a pasted hosting key with one read-only
+     * call to the hosting company and keep it for every new relay. An
+     * empty key rejects with "cloud token must not be empty"; a refused
+     * one with the company's words. Nothing is kept on a refusal.
+     */
+    hostingAccountConnect: (provider: string, token: string) =>
+        invoke<HostingAccountState>('wizard_hosting_account_connect', {
+            input: { provider, token },
+        }),
+
+    /** Per hosting company: whether a key is on this phone. Local. */
+    hostingAccountStatus: () =>
+        invoke<HostingAccountStatus>('wizard_hosting_account_status'),
+
+    /** Forget the account key. Relays keep their own copies. */
+    hostingAccountDisconnect: (provider: string) =>
+        invoke<void>('wizard_hosting_account_disconnect', { provider }),
 
     listExistingServers: (operator_id: number) =>
         invoke<ExistingServer[]>('wizard_list_existing_servers', {

@@ -1280,6 +1280,48 @@ fn wizard_reuse_cloud_token(
     })
 }
 
+/// The Accounts page: check a pasted hosting key with one read-only
+/// call and keep it for every new relay. The token crosses here once,
+/// inbound. On the blocking pool: the check reaches the hosting company.
+#[tauri::command]
+async fn wizard_hosting_account_connect(
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::hosting_account::HostingConnectInput,
+) -> Result<daal_wizard::hosting_account::HostingAccountState, String> {
+    cmdlog::result(
+        "wizard_hosting_account_connect",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::hosting_account::connect(ctx, &input.provider, &input.token)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// Per hosting company: whether a key is on this phone. Local.
+#[tauri::command]
+fn wizard_hosting_account_status(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<
+    std::collections::BTreeMap<String, daal_wizard::hosting_account::HostingAccountState>,
+    String,
+> {
+    cmdlog::logged("wizard_hosting_account_status", || {
+        daal_wizard::hosting_account::status(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
+/// Forget the hosting account key; relays keep their own copies.
+#[tauri::command]
+fn wizard_hosting_account_disconnect(
+    wstate: State<'_, WizardStateMgr>,
+    provider: String,
+) -> Result<(), String> {
+    cmdlog::logged("wizard_hosting_account_disconnect", || {
+        daal_wizard::hosting_account::disconnect(&wstate.0, &provider).map_err(|e| e.to_string())
+    })
+}
+
 #[tauri::command]
 fn wizard_list_existing_servers(
     wstate: State<'_, WizardStateMgr>,
@@ -4134,6 +4176,9 @@ pub fn run() {
             wizard_store_cloud_token,
             wizard_saved_cloud_token,
             wizard_reuse_cloud_token,
+            wizard_hosting_account_connect,
+            wizard_hosting_account_status,
+            wizard_hosting_account_disconnect,
             wizard_list_existing_servers,
             wizard_list_server_types,
             wizard_list_server_types_for,

@@ -218,7 +218,6 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
                             if (view.from === 'list') toList();
                             else setView({ k: 'relay', operatorId: view.from });
                         }}
-                        onConnectHetzner={() => setView({ k: 'wizard', from: 'list' })}
                     />
                 )}
 

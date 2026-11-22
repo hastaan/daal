@@ -56,7 +56,16 @@ import { explainFailure } from './failureText';
 import { RelayDestroySheet } from './RelayListPage';
 import { RELAYPACK_PHASE } from './phase';
 import { MoreWaysToConnect } from './MoreWaysToConnect';
-import { AddonsSection } from './addons/AddonsSection';
+import { WizardAddonsProgress, WizardAddonsStep } from './addons/WizardAddons';
+import {
+    applyAddonChoices,
+    clearAddonFailure,
+    recallAddonChoices,
+    rememberAddonChoices,
+} from './addons/wizardAddons';
+import type { ApplyState } from './addons/wizardAddons';
+import type { AddonKind } from './addons/addonTypes';
+import { readAccounts } from './addons/accounts';
 import {
     enabledFamiliesFor,
     recallExtraFamilies,
@@ -142,7 +151,7 @@ export function wizardBack(o: {
 
 // ---- Step model ----
 
-type StepId = 'cloud' | 'plan' | 'build';
+type StepId = 'cloud' | 'plan' | 'extras' | 'build';
 
 interface StepDef {
     id: StepId;
@@ -163,6 +172,13 @@ const STEPS: StepDef[] = [
         blurbKey: 'wiz.step.plan.blurb',
     },
     {
+        // «More protection (optional)»: each relay picks its own extras
+        // before it is built; they are turned on once it works.
+        id: 'extras',
+        titleKey: 'wiz.step.extras.title',
+        blurbKey: 'pub.addons.wizard.intro',
+    },
+    {
         id: 'build',
         titleKey: 'wiz.step.build.title',
         blurbKey: 'wiz.step.build.blurb',
@@ -172,12 +188,17 @@ const STEPS: StepDef[] = [
 const NO_MARKS: Record<StepId, boolean> = {
     cloud: false,
     plan: false,
+    extras: false,
     build: false,
 };
 
+/** The build screen's index (the extras step comes before it). */
+const BUILD_IDX = STEPS.findIndex((s) => s.id === 'build');
+const EXTRAS_IDX = STEPS.findIndex((s) => s.id === 'extras');
+
 /** Rust derives `wizard_step` from DB state and still speaks the old
  *  seven-step vocabulary ("provider" | "pricing" | "keys" | "provision"
- *  | "sign" | "distribute"). Map it onto the three screens here — this
+ *  | "sign" | "distribute"). Map it onto the four screens here — this
  *  is the ONLY place in the app that knows both vocabularies, and the
  *  Rust strings must not be renamed to match. */
 function stepIdToIdx(rustStep: string): number {
@@ -186,11 +207,11 @@ function stepIdToIdx(rustStep: string): number {
         case 'pricing': return 1;    // plan
         case 'keys':
         case 'provision':
-        case 'sign': return 2;       // build
+        case 'sign': return BUILD_IDX; // build
         // PublisherPage never mounts the wizard for a provisioned relay,
         // so "distribute" should be unreachable. Land on the build
         // screen in its already-complete state rather than screen 1.
-        case 'distribute': return 2;
+        case 'distribute': return BUILD_IDX;
         default: return 0;
     }
 }
@@ -421,6 +442,24 @@ export default function PublisherWizard({
     const [savedElsewhere, setSavedElsewhere] = useState<
         { operator_id: number; nickname: string } | null
     >(null);
+    // The hosting account connected on the Accounts page (or, on older
+    // phones, a relay's key): the key step is skipped and the new relay
+    // takes a copy. `null` while unknown or when the shell cannot say.
+    const [accountConnected, setAccountConnected] = useState<boolean | null>(null);
+    const [useOtherKey, setUseOtherKey] = useState(false);
+    useEffect(() => {
+        let dead = false;
+        if (!live || operatorId != null) {
+            setAccountConnected(null);
+            return;
+        }
+        Wizard.hostingAccountStatus()
+            .then((st) => !dead && setAccountConnected(!!st?.[provider]?.connected))
+            .catch(() => !dead && setAccountConnected(null));
+        return () => {
+            dead = true;
+        };
+    }, [live, provider, operatorId]);
     useEffect(() => {
         let dead = false;
         if (!live || operatorId != null) {
@@ -459,6 +498,10 @@ export default function PublisherWizard({
     // starts collapsed.
     const [extraFamilies, setExtraFamilies] = useState<string[]>([]);
     const [moreWaysOpen, setMoreWaysOpen] = useState(false);
+    // «More protection (optional)»: the extras chosen for THIS relay, and
+    // how each is doing once the build is done.
+    const [addonChoices, setAddonChoices] = useState<AddonKind[]>([]);
+    const [addonProgress, setAddonProgress] = useState<Partial<Record<AddonKind, ApplyState>>>({});
     // Empty array = use the profile's DefaultEnabled candidates
     // (vless-reality, websocket-tls, naive, hysteria2). Otherwise the
     // defaults PLUS the ticked extras — the list replaces the defaults,
@@ -570,6 +613,7 @@ export default function PublisherWizard({
                 // The ticked extras are chosen on screen 2 and used by
                 // the build; a relaunch in between must not silently
                 // fall back to the defaults.
+                setAddonChoices(recallAddonChoices(resumeOperatorId));
                 const recalled = recallExtraFamilies(resumeOperatorId, toolboxProfile);
                 setExtraFamilies(recalled);
                 if (recalled.length > 0) setMoreWaysOpen(true);
@@ -595,7 +639,7 @@ export default function PublisherWizard({
                 // Resuming straight into a build that would create (and
                 // start billing for) a server. See the auto-start effect.
                 setAwaitingBuildConsent(
-                    idx === 2 && !state.is_provisioned,
+                    idx === BUILD_IDX && !state.is_provisioned,
                 );
                 // Defensive: a fully-finished relay should have been
                 // routed to relay detail, not here. Render the build
@@ -603,7 +647,7 @@ export default function PublisherWizard({
                 // a chain that would re-mint the shared pack.
                 if (state.wizard_step === 'distribute') {
                     setStage('done');
-                    setCompleted({ cloud: true, plan: true, build: true });
+                    setCompleted({ cloud: true, plan: true, extras: true, build: true });
                 }
             })
             .catch((e) => setError(String(e)));
@@ -782,6 +826,9 @@ export default function PublisherWizard({
         setAlreadyProvisioned(false);
         setAlreadySigned(false);
         setHasStoredToken(false);
+        setUseOtherKey(false);
+        setAddonChoices([]);
+        setAddonProgress({});
         setCancelRec(null);
         setCancelDestroyOpen(false);
         setRecoveryLeaving(false);
@@ -1126,9 +1173,28 @@ export default function PublisherWizard({
         if (live) return;
         if (!harnessRecoverState()) return;
         setOperatorId((id) => id ?? 1);
-        setStepIdx(2);
+        setStepIdx(BUILD_IDX);
         setAwaitingBuildConsent(true);
     }, [live]);
+
+    // The extras chosen before the build, once the relay is built: the
+    // share stage has just had the relay's management answer, so it
+    // works. Applied once per relay; each is taken out of the stored
+    // choice before it runs (wizardAddons.ts), and a failure is kept for
+    // the relay page, never a failed build.
+    const addonsAppliedFor = useRef<number | null>(null);
+    useEffect(() => {
+        if (stage !== 'done' || !operatorId) return;
+        if (addonsAppliedFor.current === operatorId) return;
+        const kinds = addonChoices;
+        if (kinds.length === 0) return;
+        addonsAppliedFor.current = operatorId;
+        void applyAddonChoices(operatorId, kinds, {
+            accounts: readAccounts,
+            onState: (kind, st) => setAddonProgress((p) => ({ ...p, [kind]: st })),
+            run: live ? undefined : () => new Promise<void>((r) => setTimeout(r, 220)),
+        });
+    }, [stage, operatorId, addonChoices, live]);
 
     const runBuildRef = useRef(runBuild);
     runBuildRef.current = runBuild;
@@ -1199,6 +1265,11 @@ export default function PublisherWizard({
     const stageIdx = BUILD_STAGES.findIndex(
         (s) => s.id === (stage === 'failed' ? failedAt : stage),
     );
+
+    /** The hosting account is connected: no key to paste (the person
+     *  can still choose a different one). */
+    const skipKey =
+        accountConnected === true && !useOtherKey && !hasStoredToken && operatorId == null;
 
     // ---- Render ----
 
@@ -1312,6 +1383,26 @@ export default function PublisherWizard({
                                 stays; only the "Coming soon" tiles went.
                                 The token path appears once, here, as a
                                 numbered guide (H-47). */}
+                            {skipKey ? (
+                                <div data-testid="wizard-account-connected" style={{ display: 'grid', gap: 6, justifyItems: 'start', marginBottom: 14 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <StateIcon state="ok" size={20} />
+                                        <span style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--fg)', fontWeight: 600 }}>
+                                            {fmt(t('wiz.provider.account.using'), { name: t(providerDef.labelKey) })}
+                                        </span>
+                                    </div>
+                                    <Button
+                                        variant="link"
+                                        size="sm"
+                                        onClick={() => setUseOtherKey(true)}
+                                        dataButton="use-other-key"
+                                        style={{ paddingInline: 0 }}
+                                    >
+                                        {t('wiz.provider.account.other')}
+                                    </Button>
+                                </div>
+                            ) : (
+                            <>
                             <ol
                                 data-testid="wizard-guide"
                                 style={{
@@ -1405,10 +1496,27 @@ export default function PublisherWizard({
                             >
                                 {hasStoredToken
                                     ? t('wiz.provider.token.stored')
-                                    : canReuseSaved(savedElsewhere, token, hasStoredToken)
+                                    : !useOtherKey && canReuseSaved(savedElsewhere, token, hasStoredToken)
                                     ? savedKeyLine(t, savedElsewhere!.nickname)
                                     : dt('wiz.provider.token.kept')}
                             </div>
+
+                            {useOtherKey && accountConnected && (
+                                <Button
+                                    variant="link"
+                                    size="sm"
+                                    onClick={() => {
+                                        setUseOtherKey(false);
+                                        setToken('');
+                                    }}
+                                    dataButton="use-account-key"
+                                    style={{ paddingInline: 0, marginBottom: 8 }}
+                                >
+                                    {t('wiz.provider.account.back')}
+                                </Button>
+                            )}
+                            </>
+                            )}
 
                             <NavRow
                                 t={t}
@@ -1416,9 +1524,10 @@ export default function PublisherWizard({
                                 onBack={canPickHost ? () => setHostChosen(false) : onCancel}
                                 nextDisabled={
                                     busy ||
-                                    (!token.trim() &&
+                                    (!skipKey &&
+                                        !token.trim() &&
                                         !hasStoredToken &&
-                                        !savedElsewhere)
+                                        (!savedElsewhere || useOtherKey))
                                 }
                                 onNext={async () => {
                                     if (!live) {
@@ -1438,7 +1547,8 @@ export default function PublisherWizard({
                                         return;
                                     }
                                     const dbId = await run(() =>
-                                        canReuseSaved(savedElsewhere, token, hasStoredToken)
+                                        skipKey ||
+                                        (!useOtherKey && canReuseSaved(savedElsewhere, token, hasStoredToken))
                                             ? Wizard.reuseCloudToken(provider)
                                             : Wizard.storeCloudToken(
                                                   provider,
@@ -1735,7 +1845,7 @@ export default function PublisherWizard({
                                     ) &&
                                         !useExisting)
                                 }
-                                nextLabel={t('wiz.plan.next')}
+                                nextLabel={t('common.continue')}
                                 onNext={async () => {
                                     if (!operatorId) return;
                                     if (live) {
@@ -1752,13 +1862,42 @@ export default function PublisherWizard({
                                         extraFamilies,
                                     );
                                     mark('plan');
-                                    setStepIdx(2);
+                                    setStepIdx(EXTRAS_IDX);
                                 }}
                             />
                         </div>
                     )}
 
-                    {/* ===== SCREEN 3: BUILD ===== */}
+                    {/* ===== SCREEN 3: MORE PROTECTION (OPTIONAL) =====
+                        Only the choice: nothing is rented or set up until
+                        the relay is built and works. */}
+                    {step.id === 'extras' && (
+                        <div>
+                            <WizardAddonsStep
+                                t={t}
+                                chosen={addonChoices}
+                                onChange={(next) => {
+                                    setAddonChoices(next);
+                                    if (operatorId) rememberAddonChoices(operatorId, next);
+                                }}
+                            />
+                            <NavRow
+                                t={t}
+                                backLabel={t('wiz.nav.back')}
+                                onBack={() => setStepIdx(EXTRAS_IDX - 1)}
+                                nextDisabled={busy || !operatorId}
+                                nextLabel={t('wiz.plan.next')}
+                                onNext={() => {
+                                    if (!operatorId) return;
+                                    rememberAddonChoices(operatorId, addonChoices);
+                                    mark('extras');
+                                    setStepIdx(BUILD_IDX);
+                                }}
+                            />
+                        </div>
+                    )}
+
+                    {/* ===== SCREEN 4: BUILD ===== */}
                     {step.id === 'build' && (
                         <div>
                             {/* Resumed straight into a build that would
@@ -2093,9 +2232,20 @@ export default function PublisherWizard({
                                             </Button>
                                         </div>
                                     )}
-                                    {/* Optional add-ons (X3): after the relay works,
-                                        never before it; all off. */}
-                                    {operatorId && <AddonsSection t={t} operatorId={operatorId} variant="wizard" />}
+                                    {/* The extras chosen before the build, turned
+                                        on now that the relay works. A failure
+                                        here never fails the relay. */}
+                                    {operatorId && (
+                                        <WizardAddonsProgress
+                                            t={t}
+                                            operatorId={operatorId}
+                                            progress={addonProgress}
+                                            onByHandDone={() => {
+                                                clearAddonFailure(operatorId, 'google');
+                                                setAddonProgress((p) => ({ ...p, google: { k: 'on' } }));
+                                            }}
+                                        />
+                                    )}
                                 </div>
                             )}
                         </div>
