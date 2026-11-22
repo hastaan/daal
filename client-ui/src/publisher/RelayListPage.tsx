@@ -54,6 +54,7 @@ import { ActionToast, useAction } from './useAction';
 import { PageColumn, RelayBadge, num, relayLook, relayUnfinished, useLocale } from './ui';
 import { explainFailure, failureBlock } from './failureText';
 import { WhatIsThis } from './Disclosure';
+import { useAccounts } from './addons/accounts';
 import { AddressLines, UnreleasedAddresses, retryNeeded, stillBills } from './DestroyAddresses';
 import {
     releaseLiveAddresses,
@@ -983,13 +984,35 @@ export default function RelayListPage({
     );
 
     const live = operators.filter((o) => o.status !== 'decommissioned');
+    // Accounts come first: connecting a hosting company is step one.
+    const { accounts: acc } = useAccounts(!!onAccounts);
+    const accNames = [
+        ...(acc.hetzner ? [t('wiz.provider.hetzner.label')] : []),
+        ...(acc.cloudflare.connected ? ['Cloudflare'] : []),
+    ];
+    const accLine = acc.hetzner
+        ? t('pub.accounts.summary.on').replace('{names}', accNames.join(sep()))
+        : t('pub.accounts.summary.start');
+    const accountsCard = onAccounts ? (
+        <Card>
+            <ListRow
+                leading={<Icon name="key" size={20} />}
+                title={t('pub.accounts.title')}
+                subtitle={<span style={{ color: acc.hetzner ? undefined : 'var(--gold)' }}>{accLine}</span>}
+                wrapSubtitle
+                chevron
+                last
+                onClick={onAccounts}
+                dataButton="accounts"
+            />
+        </Card>
+    ) : null;
     const retired = operators.filter((o) => o.status === 'decommissioned');
 
     // The publisher's tools, shown on the page instead of behind ⋯: the
     // owner did not find Accounts, backup or the report there (2026-11-22).
     const tools: { id: string; icon: IconName; title: string; line: string; onSelect: () => void }[] = [
-        ...(onAccounts ? [{ id: 'accounts', icon: 'key' as const, title: t('pub.accounts.title'), line: t('pub.tools.accounts.line'), onSelect: onAccounts }] : []),
-        ...(onBackup ? [{ id: 'backup', icon: 'shield' as const, title: t('pub.more.backup'), line: t('pub.tools.backup.line'), onSelect: onBackup }] : []),
+        ...(onBackup && operators.length > 0 ? [{ id: 'backup', icon: 'shield' as const, title: t('pub.more.backup'), line: t('pub.tools.backup.line'), onSelect: onBackup }] : []),
         ...(anyToken
             ? [{ id: 'check-account', icon: 'server' as const, title: t('pub.account.open'), line: t('pub.tools.account.line'), onSelect: () => setAccountOpen(true) }]
             : []),
@@ -1089,11 +1112,13 @@ export default function RelayListPage({
                     title={t('pub.relays.title')}
                     badge={<BackupBadge t={t} status={backupStatus} onBackup={onBackup} />}
                     actions={
-                        <>
+                        // The header pulls its actions 6px outward for an
+                        // icon's padding; a bordered button would be clipped.
+                        <span style={{ marginInlineEnd: 6, display: 'inline-flex' }}>
                             <Button size="compact" variant="secondary" leading="plus" onClick={onNew} dataButton="new-relay">
                                 {t('pub.relays.new')}
                             </Button>
-                        </>
+                        </span>
                     }
                 />
             )}
@@ -1132,6 +1157,8 @@ export default function RelayListPage({
 
             {loading && operators.length === 0 && <div style={LINE}>{t('common.loading')}</div>}
 
+            {accountsCard}
+
             {empty && (
                 <EmptyState
                     icon="server"
@@ -1143,13 +1170,6 @@ export default function RelayListPage({
                             {t('pub.relays.empty.start')}
                         </Button>
                     }
-                    secondary={
-                        onRestore ? (
-                            <Button variant="link" onClick={onRestore} dataButton="restore-link">
-                                {t('pub.restore.link')}
-                            </Button>
-                        ) : undefined
-                    }
                 />
             )}
 
@@ -1157,7 +1177,7 @@ export default function RelayListPage({
 
             {retired.length > 0 && <Card>{retired.map((op, i) => row(op, i === retired.length - 1))}</Card>}
 
-            {!empty && tools.length > 0 && (
+            {!loading && tools.length > 0 && (
                 <>
                     <GroupLabel>{t('pub.tools.title')}</GroupLabel>
                     <Card>

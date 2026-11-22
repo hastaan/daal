@@ -28,6 +28,8 @@ export const SOON_SERVICES = [
     { id: 'custom', labelKey: 'wiz.host.own' },
 ] as const;
 
+const GROUP_LINE = { margin: '-4px 0 0', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 } as const;
+
 const ICON: Record<ServiceId, IconName> = { hetzner: 'server', cloudflare: 'shield', google: 'refresh' };
 
 export default function AccountsPage({
@@ -70,18 +72,16 @@ export default function AccountsPage({
         setOpen(s);
     };
 
-    const services: { id: ServiceId; label: string }[] = [
-        { id: 'hetzner', label: t('wiz.provider.hetzner.label') },
-        { id: 'cloudflare', label: 'Cloudflare' },
-        { id: 'google', label: 'Google' },
-    ];
-
-    return (
-        <PageColumn gap={12}>
-            <PageHeader title={t('pub.accounts.title')} back={{ label: backLabel, onClick: onBack }} />
-            <Card style={{ padding: '0 16px' }}>
-                {services.map((s, i) => {
+    const labelOf: Record<ServiceId, string> = {
+        hetzner: t('wiz.provider.hetzner.label'),
+        cloudflare: 'Cloudflare',
+        google: 'Google',
+    };
+    const serviceRow = (s: { id: ServiceId; label: string }, last: boolean) => {
                     const on = connected[s.id];
+                    // Google is only a chosen way until a relay's switch signs in
+                    // (or the script is added by hand): never shown green here.
+                    const green = on && s.id !== 'google';
                     const tappable = s.id !== 'hetzner' || (!on && !!onConnectHetzner);
                     return (
                         <div key={s.id} data-account={s.id} data-connected={loaded ? String(on) : 'unknown'}>
@@ -96,7 +96,7 @@ export default function AccountsPage({
                                             display: 'grid',
                                             placeItems: 'center',
                                             background: 'var(--surface-3)',
-                                            color: on ? 'var(--green)' : 'var(--muted)',
+                                            color: green ? 'var(--green)' : 'var(--muted)',
                                         }}
                                     >
                                         <Icon name={ICON[s.id]} size={18} />
@@ -104,7 +104,7 @@ export default function AccountsPage({
                                 }
                                 title={<span dir="auto">{s.label}</span>}
                                 subtitle={
-                                    <span style={{ color: on ? 'var(--green)' : undefined }} data-testid={`account-${s.id}-state`}>
+                                    <span style={{ color: green ? 'var(--green)' : undefined }} data-testid={`account-${s.id}-state`}>
                                         {subtitle(s.id)}
                                     </span>
                                 }
@@ -119,15 +119,22 @@ export default function AccountsPage({
                                 onClick={tappable ? () => onRow(s.id) : undefined}
                                 stack={false}
                                 dataButton={`account-${s.id}`}
-                                last={i === services.length - 1}
+                                last={last}
                             />
                         </div>
                     );
-                })}
-            </Card>
+    };
 
-            <GroupLabel>{t('pub.accounts.others')}</GroupLabel>
+    return (
+        <PageColumn gap={12}>
+            <PageHeader title={t('pub.accounts.title')} back={{ label: backLabel, onClick: onBack }} />
+
+            {/* The hosting company: needed, and one is enough. The others
+                are the same kind of thing, still being built. */}
+            <GroupLabel>{t('pub.accounts.group.hosting')}</GroupLabel>
+            <p style={GROUP_LINE}>{t('pub.accounts.group.hosting.line')}</p>
             <Card style={{ padding: '0 16px' }}>
+                {serviceRow({ id: 'hetzner', label: labelOf.hetzner }, false)}
                 {SOON_SERVICES.map((s, i) => (
                     <div key={s.id} data-account={s.id} data-connected="soon" style={{ opacity: 0.6 }}>
                         <ListRow
@@ -142,6 +149,15 @@ export default function AccountsPage({
                         />
                     </div>
                 ))}
+            </Card>
+
+
+            {/* Extras: not needed to run a relay. */}
+            <GroupLabel>{t('pub.accounts.group.extra')}</GroupLabel>
+            <p style={GROUP_LINE}>{t('pub.accounts.group.extra.line')}</p>
+            <Card style={{ padding: '0 16px' }}>
+                {serviceRow({ id: 'cloudflare', label: labelOf.cloudflare }, false)}
+                {serviceRow({ id: 'google', label: labelOf.google }, true)}
             </Card>
 
             {open === 'cloudflare' && (
