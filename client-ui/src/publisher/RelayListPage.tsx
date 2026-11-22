@@ -1010,15 +1010,15 @@ export default function RelayListPage({
 
     // The publisher's tools, shown on the page instead of behind ⋯: the
     // owner did not find Accounts, backup or the report there (2026-11-22).
-    const tools: { id: string; icon: IconName; title: string; line: string; onSelect: () => void }[] = [
-        ...(onBackup && operators.length > 0 ? [{ id: 'backup', icon: 'shield' as const, title: t('pub.more.backup'), line: t('pub.tools.backup.line'), onSelect: onBackup }] : []),
+    const tools: { id: string; icon: IconName; title: string; onSelect: () => void }[] = [
+        ...(onBackup && operators.length > 0 ? [{ id: 'backup', icon: 'shield' as const, title: t('pub.more.backup'), onSelect: onBackup }] : []),
         ...(anyToken
-            ? [{ id: 'check-account', icon: 'server' as const, title: t('pub.account.open'), line: t('pub.tools.account.line'), onSelect: () => setAccountOpen(true) }]
+            ? [{ id: 'check-account', icon: 'server' as const, title: t('pub.account.open'), onSelect: () => setAccountOpen(true) }]
             : []),
         ...(live.length > 0
-            ? [{ id: 'open-report', icon: 'file' as const, title: t('pub.report.open'), line: t('pub.tools.report.line'), onSelect: () => setReportOpen(true) }]
+            ? [{ id: 'open-report', icon: 'file' as const, title: t('pub.report.open'), onSelect: () => setReportOpen(true) }]
             : []),
-        ...(onRestore ? [{ id: 'restore-link', icon: 'download' as const, title: t('pub.restore.link'), line: t('pub.tools.restore.line'), onSelect: onRestore }] : []),
+        ...(onRestore ? [{ id: 'restore-link', icon: 'download' as const, title: t('pub.restore.link'), onSelect: onRestore }] : []),
     ];
 
     const row = (op: OperatorSummary, last: boolean) => {
@@ -1111,6 +1111,16 @@ export default function RelayListPage({
             <PageHeader
                 title={t('title.publisher')}
                 badge={empty ? undefined : <BackupBadge t={t} status={backupStatus} onBackup={onBackup} />}
+                actions={
+                    !empty && !loading && tools.length > 0 ? (
+                        <OverflowMenu
+                            label={t('ui.more')}
+                            title={t('title.publisher')}
+                            items={tools.map((x) => ({ id: x.id, label: x.title, icon: x.icon, onSelect: x.onSelect }))}
+                            dataButton="more-tools"
+                        />
+                    ) : undefined
+                }
             />
 
             {/* D2: a restore committed here; the truth about the old
@@ -1194,25 +1204,6 @@ export default function RelayListPage({
                 </div>
             </Section>
 
-            {!empty && !loading && tools.length > 0 && (
-                <Disclosure variant="card" icon="more" summary={t('pub.tools.title')} dataButton="more-tools">
-                    <div style={{ margin: '0 -16px' }}>
-                        {tools.map((x, i) => (
-                            <ListRow
-                                key={x.id}
-                                leading={<Icon name={x.icon} size={20} />}
-                                title={x.title}
-                                subtitle={x.line}
-                                wrapSubtitle
-                                chevron
-                                last={i === tools.length - 1}
-                                onClick={x.onSelect}
-                                dataButton={x.id}
-                            />
-                        ))}
-                    </div>
-                </Disclosure>
-            )}
 
             {destroying && (
                 <RelayDestroySheet

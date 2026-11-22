@@ -459,8 +459,9 @@ const OPEN_RELAY: DriveStep[] = [
 /** Publisher: the relay page's ⋯, then one of its items. */
 const relayMenu = (item: string): DriveStep[] => [{ click: 'btn:relay-more' }, { click: `btn:${item}` }];
 /** Publisher: the relay list's ⋯, then one of its items. */
-// The publisher page shows its tools as rows (no ⋯ menu any more).
-const relaysMenu = (item: string): DriveStep[] => [{ click: `btn:${item}` }];
+// Accounts is a card on the publisher page; the other tools sit in its ⋯.
+const relaysMenu = (item: string): DriveStep[] =>
+    item === 'accounts' ? [{ click: 'btn:accounts' }] : [{ click: 'btn:more-tools' }, { click: `btn:${item}` }];
 /** Publisher: the first person's send button, then a way out. */
 const sendPerson = (item: string): DriveStep[] => [{ click: 'btn:person-send', nth: 0 }, { click: `btn:${item}` }];
 /** Publisher: the everyone row's send button, then a way out. */
@@ -1421,8 +1422,8 @@ export const SCENARIOS: Scenario[] = [
     ...pub(
         {
             id: 'pub-relays-more',
-            title: 'Relay list · the tools',
-        }, { steps: [{ scroll: 'btn:accounts' }] }),
+            title: 'Publisher page · the ⋯ menu',
+        }, { steps: [{ click: 'btn:more-tools' }] }),
     ...pub(
         {
             id: 'pub-relay-remove',
