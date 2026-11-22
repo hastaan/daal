@@ -294,6 +294,17 @@ bash tools/check-engine-so-manifest.sh
 bash tools/check-deploy-so-manifest.sh
 ```
 
+This is not optional for a release that changes a helper verb or the
+creds JSON the app writes. Wave 1 (2026-11-22) needs all three rebuilt
+together: `users-share-links` ("Links for other apps") exists only in a
+rebuilt `daal-deploy` / `libdaal_deploy.so`, and an older helper answers
+it as an unknown verb (the person sees only "Couldn't make the links");
+`users-pack-sbp[x]` must report `"update_secret"`, or no person is
+recorded as holding the update secret and the standby code stays plain;
+and the engine library must carry the wrapped-code check of
+`engine_standby_key`. On the desktop the same holds for the `daal-deploy`
+binary beside the app.
+
 Pass: both checks end without an error. `check-deploy-so-manifest.sh`
 fails if the library does not contain every hash and signature of
 `artifacts.go` — the thing that goes wrong when this step is skipped. To

@@ -219,17 +219,22 @@ function cellsFor(
     labelLookup: (cellIdFpHex: string) => string,
 ): CellRow[] {
     if (routes.length === 0) return [];
+    // A route through Cloudflare is a websocket-tls route by family, but
+    // not the same way in: it gets a chip of its own (viaCdn), after the
+    // direct one, so the page can name it "WebSocket TLS · Cloudflare".
     const families = new Map<string, RouteDisplayRow[]>();
     for (const r of routes) {
-        const list = families.get(r.family) ?? [];
+        const key = r.viaCdn ? `${r.family}\u0000cdn` : r.family;
+        const list = families.get(key) ?? [];
         list.push(r);
-        families.set(r.family, list);
+        families.set(key, list);
     }
     const chips: FamilyChip[] = [];
-    for (const [family, list] of families) {
-        chips.push(chipFor(family, list, skipped));
+    for (const list of families.values()) {
+        const chip = chipFor(list[0].family, list, skipped);
+        chips.push(list[0].viaCdn ? { ...chip, viaCdn: true } : chip);
     }
-    chips.sort((a, b) => a.family.localeCompare(b.family));
+    chips.sort((a, b) => a.family.localeCompare(b.family) || Number(!!a.viaCdn) - Number(!!b.viaCdn));
     return [
         {
             cellIdFpHex: 'default',

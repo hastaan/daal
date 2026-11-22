@@ -135,6 +135,8 @@ interface Props {
     onRemoveRelayOnly?: (relayUser: string) => void;
     /** The file for everyone, when this relay has one: one more row. */
     everyone?: { onSend: () => void; onAbout: () => void } | null;
+    /** "Links for other apps" for this person (their ⋯ menu). */
+    onLinks?: (r: RecipientSummary) => void;
 }
 
 export function PeopleSection({
@@ -153,6 +155,7 @@ export function PeopleSection({
     relayOnly = [],
     onRemoveRelayOnly,
     everyone,
+    onLinks,
 }: Props) {
     const locale = useLocale();
     const busy = action.busy !== null;
@@ -187,6 +190,15 @@ export function PeopleSection({
                 disabled: busy,
                 onSelect: () => onReplace(r),
             });
+            if (onLinks) {
+                items.push({
+                    id: 'links',
+                    label: t('pub.links.menu'),
+                    icon: 'link',
+                    disabled: busy,
+                    onSelect: () => onLinks(r),
+                });
+            }
             items.push({
                 id: 'remove',
                 label: t('pub.people.remove_access'),

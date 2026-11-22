@@ -85,7 +85,10 @@ Every outbound the importer emits must pass the engine's strict option
 parse (`singjson.UnmarshalExtendedContext[option.Options]`, unknown
 fields rejected). `core/engine` `TestEveryImportedOutboundParses`
 (`-tags singbox`) runs every accepted vector in
-`bundle/go/uri/testdata/import_vectors.json` through it. The rules:
+`bundle/go/uri/testdata/import_vectors.json` through it, and
+`TestEverySubscriptionRouteParses` does the same for what
+`core/refresh` stores from a subscription body (base64, URI list,
+Clash, SIP008) built from the same vectors. The rules:
 
 - REALITY: `spx` (spiderX) is dropped (`OutboundRealityOptions` has no
   such field; the server never checks it). `fp` defaults to `chrome`
@@ -140,28 +143,50 @@ fields rejected). `core/engine` `TestEveryImportedOutboundParses`
   certificate checking off lets anyone on the path be the server.
   `pinSHA256` is not mapped: Hysteria pins the whole certificate,
   sing-box's `certificate_public_key_sha256` the key. Clash
-  `skip-cert-verify` is ignored (the check stays on).
+  `skip-cert-verify: true` on a `hysteria2` or `tuic` entry is refused
+  the same way.
+- TUIC `allow_insecure=1` / `insecure=1` (or `true`) is refused
+  (`insecure_refused`) for the same reason. TUIC and Clash
+  hysteria2/tuic `alpn` is split like every other ALPN list.
+- VLESS/Trojan `allowInsecure` and Clash `skip-cert-verify` on
+  vless/trojan/vmess are ignored: the check stays on, so a link to a
+  self-signed server fails its check instead of importing unverified.
 
 ## Refusals
 
 A refused link returns an error wrapping one of the `uri.Err*`
-sentinels; `uri.RefusalCode(err)` gives its stable token:
+sentinels; `uri.RefusalCode(err)` gives its stable token. The token is
+also in the error TEXT as `uri: <token>` (for example
+`vless: type=xhttp: uri: transport_unsupported`), so a host that only
+sees the error string (`engine_uri_import`) can read it by matching
+`uri: ([a-z_]+)$`. The tokens are stable: renaming one breaks every
+host that shows it (`TestRefusalCodesAreStable`). An input that is not
+a link of any known kind is not a refusal: it is `uri.ErrNoMatch`
+("not understood"), with no token.
 
-| Token                     | Meaning |
-|---------------------------|---------|
-| `transport_unsupported`   | this build cannot dial the link's transport |
-| `header_type_unsupported` | TCP HTTP-header camouflage |
-| `flow_unsupported`        | a VLESS flow other than `xtls-rprx-vision` |
-| `encryption_unsupported`  | VLESS encryption other than `none` |
-| `plaintext_refused`       | no TLS (or a cipher that encrypts nothing): every destination would cross the network in clear |
-| `insecure_refused`        | the link turns certificate checking off |
-| `link_malformed`          | missing or unusable key, port or port list |
+| Token                     | Meaning | Raised for |
+|---------------------------|---------|------------|
+| `transport_unsupported`   | This build cannot dial the link's transport. | `type=` xhttp, splithttp, h2, http, quic, kcp or any unknown value; Trojan `type=grpc`; Trojan `security=reality`; VLESS `security=xtls` or any unknown security; VMess `tls` other than tls; a Clash `ss` plugin |
+| `header_type_unsupported` | The link disguises TCP as HTTP (`headerType=http`), which this build cannot do. | `headerType=` anything but `none` on raw TCP |
+| `flow_unsupported`        | The link uses a VLESS flow this build cannot dial. | any flow other than `xtls-rprx-vision`, including `xtls-rprx-vision-udp443`; Vision over ws/grpc/httpupgrade |
+| `encryption_unsupported`  | The link uses an encryption mode this build does not have. | VLESS `encryption` other than `none`; an unknown VMess cipher |
+| `plaintext_refused`       | The link has no encryption: every site you visit would cross the network in clear. | VLESS or Trojan `security=none` (or absent for VLESS); VMess `none`/`zero` without TLS; Shadowsocks `none`/`plain`/`dummy` |
+| `insecure_refused`        | The link turns off the server's certificate check, so anyone on the path could pose as the server. | hy2 `insecure=1`; TUIC `allow_insecure=1`; Clash hysteria2/tuic `skip-cert-verify: true` |
+| `link_malformed`          | The link is incomplete or damaged (a key, port or port list is missing or unusable). | bad URL, missing credential, bad port, bad REALITY key or short id, bad hy2 port list or hop interval |
+| `manual_only`             | The route may be dialled only when the person picks it, and this build has nowhere to keep that. | `core/abi` URIImport, for a profile with `ManualOnly` set or the `amneziawg_unsupported` notice (none reaches it through `ParseURI` today; it holds the line for a WireGuard conf through `ParseAny`) |
+
+`ParseURI` lower-cases the scheme before dispatch (`VLESS://…` is
+`vless://…`; RFC 3986 §3.1): messengers and phone keyboards capitalise
+the first letter of a pasted line. Only the scheme changes.
 
 Error text never quotes the link, a credential or a host: every scheme
 parses through `parseLink`, which reduces `url.Parse` errors to their
 class, and link values that reach an error (a `type=`, `headerType=`,
 `flow=` value) pass through `safeToken`. In a multi-line subscription a
-refused line is counted in `Provenance.WarningCount` and skipped.
+refused line is counted in `Provenance.WarningCount` and skipped. A
+subscription read by `core/refresh` lists one token per refused entry,
+in body order, in `ParsedSubscription.Refusals`; the refused entry
+keeps its positional route id so the ids after it do not move.
 
 ## AmneziaWG
 
@@ -171,10 +196,13 @@ WireGuard handshake only when the conf's Amnezia fields are junk-only:
 (WireGuard's own values). Such a conf is imported as `wireguard` with
 `Provenance.Notice = "amneziawg_downgraded"`. It connects only where
 WireGuard is not blocked, and every attempt sends a WireGuard
-handshake, so it must not be tried automatically; this build has no
-per-route "only when the person picks it" flag (today the only thing
-keeping it out of automatic connects is that `wireguard` is
-experimental). Every other conf (non-neutral `S`/`H`, or any 2.0 field)
+handshake, so it must not be tried automatically: the profile carries
+`Profile.ManualOnly = true` ("dial only when the person picks it"). The
+family stays `wireguard` because that is what goes on the wire. A host
+that stores the route must keep the bit and the path manager must skip
+the route in an automatic connect even with experimental routes on; a
+host that cannot store it must not import a ManualOnly profile as an
+ordinary route. Every other conf (non-neutral `S`/`H`, or any 2.0 field)
 is imported as `amneziawg`, which this build labels unsupported, with
 `Provenance.Notice = "amneziawg_unsupported"`. Both carry
 `DroppedParams` and an English `Downgrade` sentence.

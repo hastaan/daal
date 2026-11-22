@@ -57,6 +57,8 @@ func main() {
 		os.Exit(cmdFakeCF(os.Args[2:]))
 	case "fakecdn": // Cloudflare's edge (fakecdn.go)
 		os.Exit(cmdFakeCDN(os.Args[2:]))
+	case "tlsface": // a stranger's TLS handshake to relay ports (prober.go)
+		os.Exit(cmdTLSFace(os.Args[2:]))
 	case "fakegoogle": // Google's front, web apps and Apps Script API (fakegfe.go, fakegas_api.go)
 		os.Exit(cmdFakeGoogle(os.Args[2:]))
 	default:

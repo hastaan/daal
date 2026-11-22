@@ -1864,6 +1864,10 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     // the list, and an id used again must not inherit a live key (its
     // pack would silently be signed as a Test relay).
     aliases.extend(crate::report_key::optional_aliases(operator_id));
+    // The relay's update state (generation, holders): its secrets mean
+    // nothing once the relay is gone, and an id used again must start
+    // fresh.
+    aliases.push(crate::addon_standby::update_state_alias(operator_id));
     // V019: each add-on's own secret. Read now: the add-on rows go with
     // the relay row (ON DELETE CASCADE).
     aliases.extend(crate::addons::secret_aliases(ctx, operator_id));

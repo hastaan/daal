@@ -127,6 +127,7 @@ else
   done
   addon_worlds
   plan+=("release.all-families"$'\t'"clean")
+  plan+=("clean.prober"$'\t'"--mgmt=tree --ops prober clean vless-reality websocket-tls")   # W1-E, docs/prober-audit.md: the engine's ClientHello and its JA4 against Chrome's, and what a stranger's handshake to every relay port shows
   plan+=("narrow-relay"$'\t'"--mgmt=tree --relay-families=shadowsocks,anytls clean shadowsocks anytls")   # FINDINGS FAM-4
 fi
 if [[ -n "$only" ]]; then

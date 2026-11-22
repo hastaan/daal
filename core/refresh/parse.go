@@ -32,6 +32,12 @@ type ParsedSubscription struct {
 	ProfileTitle string
 	SupportURL   string
 	Routes       []ParsedRoute
+
+	// Refusals holds one importer refusal code (uri.RefusalCode, for
+	// example "transport_unsupported") per entry the importer refused,
+	// in body order, so a host can say how many links it skipped and
+	// why instead of dropping them silently. Never a link or a host.
+	Refusals []string
 }
 
 // ParseSubscriptionBody auto-detects the body format and returns its
@@ -81,7 +87,8 @@ func parseBase64OrURIList(body []byte, displayHint string) (ParsedSubscription, 
 			// are keyed by id: without the slot, a link refused since
 			// the last refresh (plaintext VLESS, xhttp) would hand every
 			// later id, and its history, to a different server.
-			if uri.RefusalCode(err) != "" {
+			if code := uri.RefusalCode(err); code != "" {
+				out.Refusals = append(out.Refusals, code)
 				idx++
 			}
 			continue
@@ -134,6 +141,7 @@ func parseSIP008(body []byte, displayHint string) (ParsedSubscription, error) {
 		// rest, so skipping it moves nobody else's history.
 		switch strings.ToLower(strings.TrimSpace(s.Method)) {
 		case "none", "plain", "dummy":
+			out.Refusals = append(out.Refusals, uri.RefusalCode(uri.ErrPlaintext))
 			continue
 		}
 		ob := map[string]any{
@@ -202,6 +210,9 @@ func parseClash(body []byte, displayHint string) (ParsedSubscription, error) {
 		}
 		prof, err := uri.ProfileFromClashEntry(current)
 		if err != nil {
+			if code := uri.RefusalCode(err); code != "" {
+				out.Refusals = append(out.Refusals, code)
+			}
 			return
 		}
 		raw, err := uri.MarshalOutbound(prof)

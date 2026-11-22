@@ -9,6 +9,10 @@
 // family token, result, category, time) — the only place those words
 // are printed, left-to-right and in a fixed-width face, for the person
 // helping from the other end.
+//
+// Under the fold, once Daal's own ways have run out (handoffShown), the
+// hand-off card names other organisations' apps that may work right now
+// (HandoffCard.tsx). It is outside the fold so it is seen without a tap.
 import { sep } from '../../lib/format';
 import type { AutoTried } from '../../contract/D2Contract';
 import { Disclosure } from '../../design/primitives';
@@ -16,6 +20,7 @@ import { autoResultKey } from '../../lib/autoConnect';
 import { toFaDigits } from '../../lib/i18n';
 import type { TriedRow } from '../../lib/homeFacts';
 import { TriedList } from './HomeFacts';
+import HandoffCard, { handoffShown } from './HandoffCard';
 
 interface Props {
     t: (k: string) => string;
@@ -30,6 +35,12 @@ interface Props {
     /** Each try by kind of connection, with its reason in plain words
      *  (lib/homeFacts.ts triedRows). Shown to everyone. */
     rows?: readonly TriedRow[];
+    /** The "Other apps that may work right now" card. Shown by default
+     *  after a verdict that means Daal's ways ran out; `false` hides it
+     *  (a page that draws it elsewhere). */
+    handoff?: boolean;
+    /** Tor bridge lines this build cannot dial, to pass to Orbot. */
+    bridgeLines?: readonly string[];
 }
 
 /** One tried route as the engine names it: id, kind, result, category,
@@ -55,8 +66,9 @@ export function triedSummary(t: (k: string) => string, locale: string | undefine
     return t(n === 1 ? 'auto.details.tried_one' : 'auto.details.tried_n').replace('{n}', num);
 }
 
-export default function AutoFailure({ t, locale, tried, verdict, dev, defaultOpen, rows }: Props) {
+export default function AutoFailure({ t, locale, tried, verdict, dev, defaultOpen, rows, handoff = true, bridgeLines }: Props) {
     return (
+        <>
         <Disclosure summary={t('ui.details')} dataButton="failure-details" defaultOpen={defaultOpen}>
             <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'start' }}>
                 <div>{triedSummary(t, locale, tried.length)}</div>
@@ -102,5 +114,7 @@ export default function AutoFailure({ t, locale, tried, verdict, dev, defaultOpe
                 )}
             </div>
         </Disclosure>
+        {handoff && handoffShown(verdict) && <HandoffCard t={t} bridgeLines={bridgeLines} />}
+        </>
     );
 }

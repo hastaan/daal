@@ -1604,6 +1604,19 @@ export const SCENARIOS: Scenario[] = [
     }),
     ...pub(
         {
+            id: 'pub-person-links',
+            title: 'Person · links for other apps (one link, the rest folded)',
+        }, {
+        steps: [
+            ...OPEN_RELAY,
+            { click: 'btn:person-more', nth: 0 },
+            { click: 'btn:links' },
+            { waitFor: 'css:[data-testid="share-links-sheet"]' },
+            { sleep: 300 },
+        ],
+    }),
+    ...pub(
+        {
             id: 'pub-person-remove',
             title: 'Person · remove access, confirm',
         }, {
@@ -1806,6 +1819,28 @@ export const SCENARIOS: Scenario[] = [
         // would carry it on never fires.
         { freeze: true },
         { type: 'css:textarea', text: PASTED_FILE },
+        { sleep: 300 },
+    ]),
+    ...rcp(
+        {
+            // Several items in one paste: the list, before "Add all".
+            id: 'rcp-paste-multi',
+            title: 'Add a file · a paste with several items',
+        }, 'connection', [
+        { click: 'btn:add-my-file' },
+        { click: 'btn:add-paste' },
+        { waitFor: 'css:textarea' },
+        { freeze: true },
+        {
+            type: 'css:textarea',
+            text:
+                'Fresh servers, send to friends:\n' +
+                'vless://00000000-0000-4000-8000-000000000001@a.example.org:443?security=reality&pbk=AAAA&sid=01#Server%201\n' +
+                'trojan://pass@b.example.org:443?sni=b.example.org#Server%202\n' +
+                'wg://key@c.example.org:51820#Server%203\n' +
+                'tg://proxy?server=p.example.org&port=443&secret=ee00ff\n' +
+                'https://sub.example.org/list',
+        },
         { sleep: 300 },
     ]),
     ...rcp(

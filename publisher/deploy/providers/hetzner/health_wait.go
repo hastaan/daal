@@ -50,6 +50,32 @@ var (
 	}
 )
 
+// healthTryCeiling is the most one try of the health wait spends
+// besides its interval: the SSH observer (3 s dial plus the log read),
+// the health poll (health.Poller's 5 s default), the 3 s port-443
+// probe, with room for a slow handshake.
+const healthTryCeiling = 30 * time.Second
+
+// healthWindowMargin keeps the temporary windows open a little past
+// the slowest wait, for the reads that follow it (reality.pub, the
+// TLS pin over the same SSH window).
+const healthWindowMargin = 5 * time.Minute
+
+// healthWaitBudget is the longest the health wait can run: every try
+// at its slowest. With the defaults (60 tries, 5 s apart) it is 35
+// minutes; a real wait that never answers runs about 20.
+func healthWaitBudget() time.Duration {
+	return time.Duration(healthMaxAttempts) * (healthInterval + healthTryCeiling)
+}
+
+// healthWindowTTL is the expiry the temporary health and SSH firewall
+// windows are opened with. It is sized to the wait so the window
+// outlives it; the old 10 minutes ran out half way through a slow
+// wait. The windows are still removed as soon as the wait returns.
+func healthWindowTTL() time.Duration {
+	return healthWaitBudget() + healthWindowMargin
+}
+
 // detailedProgress is where milestones with machine-readable detail go:
 // the caller's OnProgressData when it set one, else the plain progress
 // callback with the detail dropped.

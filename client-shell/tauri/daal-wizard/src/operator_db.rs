@@ -2538,7 +2538,12 @@ impl OperatorDb {
             // a non-existent alias as a no-op, so emitting it
             // unconditionally is safe.
             push(format!("daal.cloudflare.{id}.token"));
+            // The relay's update state (addon_standby::update_state_alias).
+            // No column; carried by migration, erased by panic_wipe.
+            push(format!("update_people_{id}"));
         }
+        // The publisher's update root (addon_standby::UPDATE_ROOT_ALIAS).
+        push("update_root".to_string());
         // V019: an add-on's own secret (a Cloudflare token, a script
         // write key). Listed so panic_wipe erases it too.
         if let Ok(mut stmt) = conn.prepare("SELECT secret_alias FROM relay_addons") {

@@ -62,7 +62,7 @@ interface Props {
 function wayTitle(t: (k: string) => string, r: RouteDisplayRow, routes?: readonly RouteDisplayRow[]) {
     const peers = (routes ?? []).filter((x) => x.publisherId === r.publisherId);
     if (!peers.some((x) => x.routeId === r.routeId)) peers.push(r);
-    return wayTitles(t, peers, effectiveLocale()).get(r.routeId) ?? { title: familyName(t, r.family) };
+    return wayTitles(t, peers, effectiveLocale()).get(r.routeId) ?? { title: familyName(t, r) };
 }
 
 /** "Pars Relays · VLESS Reality": the file, then the kind of connection
@@ -71,7 +71,7 @@ export function routeLabel(t: (k: string) => string, r: RouteDisplayRow, routes?
     const w = wayTitle(t, r, routes);
     // A kind this app cannot name adds nothing to a label that has the
     // file's name ("Current connection · name not available" stays as is).
-    const kind = familyLabel(t, r.family) ? w.title : undefined;
+    const kind = familyLabel(t, r) ? w.title : undefined;
     const label = [r.publisherName, kind, w.nickname].filter(Boolean).join(sep());
     return label || w.title;
 }

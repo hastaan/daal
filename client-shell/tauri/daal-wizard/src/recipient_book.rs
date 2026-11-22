@@ -174,7 +174,6 @@ pub fn recipient_provision(
     let relay_server_ip = field("public_ip");
     let mut creds_val = serde_json::to_value(&creds).unwrap_or(serde_json::Value::Null);
     fill_box_material_from_record(&mut creds_val, &rec_val);
-    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
     // The record's cover host, handed to the pack step as the fallback
     // for a box whose mgmt binary is too old to echo its own. See
     // UsersPackSbpxArgs::cover_sni.
@@ -191,7 +190,7 @@ pub fn recipient_provision(
         display_name: display_name.to_string(),
         address_str: address_canonical,
         pubkey_x25519_hex: pub_hex.clone(),
-        fingerprint_hex: fp_hex,
+        fingerprint_hex: fp_hex.clone(),
         vless_uuid: creds.vless_uuid,
         reality_short_id: creds.reality_short_id,
         hy2_password: creds.hy2_password,
@@ -250,6 +249,15 @@ pub fn recipient_provision(
             .is_ok();
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
     if pack_is_current && in_sbp_path.exists() {
+        // The person's update secret (specs/update-ladder-v2.md §3). Any
+        // doubt makes the file without one; never fails the add.
+        let grant = crate::addon_standby::people_secret_for_file(ctx, operator_id, &fp_hex)
+            .ok()
+            .flatten();
+        if let Some(g) = &grant {
+            g.add_to_creds(&mut creds_val);
+        }
+        let creds_json = zeroize::Zeroizing::new(serde_json::to_string(&creds_val).unwrap_or_default());
         let out_path = ctx
             .staging_dir
             .join(format!("{operator_id}.{}.sbpx", summary.name));
@@ -263,7 +271,7 @@ pub fn recipient_provision(
             } else {
                 (None, None)
             };
-        if let Ok(_res) = ctx.cli.run_users_pack_sbpx(
+        if let Ok(res) = ctx.cli.run_users_pack_sbpx(
             crate::cli_bridge::UsersPackSbpxArgs {
                 in_sbp_path: &in_sbp_path,
                 recipient_pub_hex: &recipient_pub_hex,
@@ -274,6 +282,10 @@ pub fn recipient_provision(
             },
         ) {
             summary.sbpx_path = out_path.to_string_lossy().to_string();
+            // Recorded only once the helper says the file carries it.
+            if let (Some(g), true) = (&grant, res.update_secret) {
+                let _ = crate::addon_standby::record_holder(ctx, operator_id, &fp_hex, g.gen);
+            }
         }
         let _ = std::fs::remove_file(&creds_path);
     }
@@ -533,7 +545,12 @@ pub(crate) fn rewrite_shared_sbp(
     }
     let mut creds_val = serde_json::to_value(creds).unwrap_or(serde_json::Value::Null);
     fill_box_material_from_record(&mut creds_val, &rec_val);
-    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+    // The Everyone audience's secret (public by construction; it never
+    // wraps a code). Any doubt makes the file without one.
+    if let Ok(Some(g)) = crate::addon_standby::everyone_secret_for_file(ctx, operator_id) {
+        g.add_to_creds(&mut creds_val);
+    }
+    let creds_json = zeroize::Zeroizing::new(serde_json::to_string(&creds_val).unwrap_or_default());
     let record_cover_sni = field("cover_sni");
 
     // Rewrite the .sbp's profiles with the shared creds → shared .sbp.
@@ -795,7 +812,20 @@ pub(crate) fn merge_and_pack_sbpx<C: Serialize>(
     }
     let mut creds_val = serde_json::to_value(creds).unwrap_or(serde_json::Value::Null);
     fill_box_material_from_record(&mut creds_val, &rec_val);
-    let creds_json = serde_json::to_string(&creds_val).unwrap_or_default();
+    // The person's update secret, as in `recipient_provision`.
+    let fp_hex = hex::decode(recipient_pub_hex)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .map(|k| recipaddr::fingerprint(&k));
+    let grant = fp_hex.as_deref().and_then(|fp| {
+        crate::addon_standby::people_secret_for_file(ctx, operator_id, fp)
+            .ok()
+            .flatten()
+    });
+    if let Some(g) = &grant {
+        g.add_to_creds(&mut creds_val);
+    }
+    let creds_json = zeroize::Zeroizing::new(serde_json::to_string(&creds_val).unwrap_or_default());
     let record_cover_sni = field("cover_sni");
 
     let out_path = ctx.staging_dir.join(format!("{operator_id}.{name}.sbpx"));
@@ -813,7 +843,10 @@ pub(crate) fn merge_and_pack_sbpx<C: Serialize>(
         cover_sni: Some(record_cover_sni.as_str()),
     });
     let _ = std::fs::remove_file(&creds_path);
-    res.map_err(map_bridge_err)?;
+    let res = res.map_err(map_bridge_err)?;
+    if let (Some(g), Some(fp), true) = (&grant, fp_hex.as_deref(), res.update_secret) {
+        let _ = crate::addon_standby::record_holder(ctx, operator_id, fp, g.gen);
+    }
     Ok(out_path)
 }
 
@@ -859,7 +892,7 @@ impl RelaySaid {
 /// answer is the live one, and it is also what the pack was signed
 /// from (`relay_identity`): letting an older recorded value win would
 /// build an outbound the signed endpoint then refuses.
-fn fill_box_material_from_record(creds: &mut serde_json::Value, record: &serde_json::Value) {
+pub(crate) fn fill_box_material_from_record(creds: &mut serde_json::Value, record: &serde_json::Value) {
     let Some(obj) = creds.as_object_mut() else {
         return;
     };

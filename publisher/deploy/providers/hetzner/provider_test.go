@@ -27,6 +27,7 @@ type fakeClient struct {
 	floating         map[string]string                    // fipID -> serverID
 	firewalls        map[string]struct{ V4, V6 []string } // firewallID -> rule sources
 	ephemeralRules   map[string]ephemeralRuleEntry        // ruleID -> entry (FRP-10)
+	ephemeralAdded   []ephemeralRuleEntry                 // every add, kept after removal
 	ensuredFirewalls map[string]string                    // serverID -> firewallID (FRP-14)
 	fwAppliedTo      map[string][]string                  // firewallID -> server IDs behind it
 	// fwExtraPorts records the per-relay data-plane port set the
@@ -375,6 +376,7 @@ func (f *fakeClient) FirewallAddEphemeralRule(_ context.Context, serverID, calle
 	f.idCount++
 	id := "daal-eph-" + serverID + "-" + callerIP + "-" + strconv.Itoa(port) + "-" + strconv.FormatInt(expiresAt.Unix(), 10)
 	f.ephemeralRules[id] = ephemeralRuleEntry{ServerID: serverID, CallerIP: callerIP, Port: port, ExpiresAt: expiresAt}
+	f.ephemeralAdded = append(f.ephemeralAdded, f.ephemeralRules[id])
 	if f.ephemeralLandsThenFails {
 		return id, errors.New("hetzner firewall: read failed")
 	}

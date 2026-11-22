@@ -41,20 +41,46 @@ export function familyKey(family: string | undefined): string | undefined {
     return `network.family.${f.replace(/-/g, '_')}`;
 }
 
-/** The family's readable name, or `undefined` (say nothing). */
-export function familyLabel(t: (k: string) => string, family: string | undefined): string | undefined {
+/** A route, or just its family token: what a name is made from. A
+ *  route that reaches its relay through Cloudflare (`viaCdn`) is a
+ *  websocket-tls route by family and a different way in, so it reads
+ *  "WebSocket TLS · Cloudflare" instead of a second plain
+ *  "WebSocket TLS". */
+export type KindOf = string | { family: string; viaCdn?: boolean } | undefined;
+
+function parts(kind: KindOf): { family: string | undefined; viaCdn: boolean } {
+    if (kind === undefined || typeof kind === 'string') return { family: kind, viaCdn: false };
+    return { family: kind.family, viaCdn: kind.viaCdn === true };
+}
+
+/** i18n key of the route's name: the family's, or the Cloudflare one. */
+export function kindKey(kind: KindOf): string | undefined {
+    const { family, viaCdn } = parts(kind);
     const k = familyKey(family);
     if (!k) return undefined;
+    return viaCdn && k === 'network.family.websocket_tls' ? 'route.label.ws_cdn' : k;
+}
+
+/** The family's readable name, or `undefined` (say nothing). Pass the
+ *  route itself where there is one, so a route through Cloudflare is
+ *  named as one. */
+export function familyLabel(t: (k: string) => string, kind: KindOf): string | undefined {
+    const k = kindKey(kind);
+    if (!k) return undefined;
     const v = t(k);
-    return v && v !== k ? v : undefined;
+    if (v && v !== k) return v;
+    // A catalog without the Cloudflare name still names the family.
+    const f = familyKey(parts(kind).family);
+    const w = f && f !== k ? t(f) : undefined;
+    return w && w !== f ? w : undefined;
 }
 
 /** The family's readable name for a list or a chip, where a row must
  *  say something: a token this app does not know reads "Other kind"
  *  (never the raw string). Home and Files both use this one, so a kind
  *  of connection is named the same on every screen. */
-export function familyName(t: (k: string) => string, family: string | undefined): string {
-    return familyLabel(t, family) ?? t('files.fam.unknown');
+export function familyName(t: (k: string) => string, kind: KindOf): string {
+    return familyLabel(t, kind) ?? t('files.fam.unknown');
 }
 
 function squash(s: string): string {

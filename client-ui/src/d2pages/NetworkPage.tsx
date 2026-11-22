@@ -85,7 +85,7 @@ import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotic
 import { EngineStartNotice, FailureBox, NoticeRow, StoreResetNotice } from './PageNotices';
 import { useEngineStartProblem } from '../lib/engineStart';
 import { autoIsUsing, getPinnedRoute, setPinnedRoute, startConnect } from '../lib/autoConnect';
-import { chipHereText, chipScoreText, familyHere } from '../lib/measured';
+import { chipHereText, chipScoreText, familyHere, localDigits } from '../lib/measured';
 import { effectiveLocale } from '../lib/i18n';
 import type { Locale } from '../lib/i18n';
 import { formatTime } from '../lib/format';
@@ -99,6 +99,7 @@ import {
     wayTitles,
 } from '../lib/fileFacts';
 import { FileCard, WayRow } from '../components/files/FileParts';
+import { failingHere, isPastedRoute, readSurvey, type SurveyRead } from '../components/pasteSurvey';
 
 interface Props {
     t: (k: string) => string;
@@ -473,6 +474,24 @@ export default function NetworkPage({ t, onNavigate }: Props) {
         }
     };
 
+    // The pasted links' file: remove the ways that were checked here and
+    // did not answer (components/pasteSurvey.ts failingHere). Never the
+    // way in use; a way that was not checked stays.
+    const onRemoveFailing = async (ids: string[]) => {
+        let n = 0;
+        for (const id of ids) {
+            if (id === activeRouteId) continue;
+            try {
+                await contract.routeDelete(id);
+                n++;
+            } catch {
+                /* it stays; the count says how many went */
+            }
+        }
+        await load().catch(() => {});
+        toast.show(n > 0 ? 'good' : 'bad', n > 0 ? (n === 1 ? t('files.bulk.removed_one') : t('files.bulk.removed')).replace('{n}', localDigits(n, effectiveLocale())) : t('network.action_failed'));
+    };
+
     const onCheckNewAddress = async () => {
         if (checking) return;
         setChecking(true);
@@ -653,6 +672,7 @@ export default function NetworkPage({ t, onNavigate }: Props) {
                     onRefresh={() => void onRefreshFile(openFile)}
                     onStopUpdates={() => void onStopUpdates(openFile)}
                     onRemove={() => void onRemoveFile(openFile)}
+                    onRemoveFailing={(ids) => void onRemoveFailing(ids)}
                     onCool={async (routeId) => {
                         try {
                             await contract.applyCooldown(routeId, 15 * 60 * 1000, 'manual');
@@ -728,6 +748,9 @@ interface FileSheetProps {
     /** Keep the ways, stop checking the file's web address. */
     onStopUpdates: () => void;
     onRemove: () => void;
+    /** The pasted links' file only: remove these ways (checked here,
+     *  did not answer). */
+    onRemoveFailing?: (routeIds: string[]) => void;
     onCool: (routeId: string) => void | Promise<void>;
     onBudget: (r: RouteDisplayRow) => void;
 }
@@ -752,13 +775,30 @@ function FileSheet({
     onRefresh,
     onStopUpdates,
     onRemove,
+    onRemoveFailing,
     onCool,
     onBudget,
 }: FileSheetProps) {
     const [confirmRemove, setConfirmRemove] = useState(false);
+    const [confirmBulk, setConfirmBulk] = useState<string[] | null>(null);
     // The way whose details are open (one at a time).
     const [openWay, setOpenWay] = useState<string | null>(null);
     const routes = p.cells.flatMap((c) => c.routes);
+    // The file of pasted links (route ids "pasted-…"): the last check's
+    // results, read once when the sheet opens.
+    const pastedFile = routes.length >= 2 && routes.some((r) => isPastedRoute(r.routeId));
+    const [survey, setSurvey] = useState<SurveyRead | null>(null);
+    useEffect(() => {
+        if (!pastedFile) return;
+        let alive = true;
+        void readSurvey().then((r) => {
+            if (alive) setSurvey(r);
+        });
+        return () => {
+            alive = false;
+        };
+    }, [pastedFile]);
+    const failing = pastedFile ? failingHere(routes, survey, activeRouteId) : [];
     const titles = wayTitles(t, routes, locale);
     const here = chipHereText(t, locale, familyHere(routes));
     const verified = p.trustLevel === 'trusted' || p.trustLevel === 'pinned';
@@ -774,6 +814,17 @@ function FileSheet({
     if (p.subscription) items.push({ id: 'refresh', label: t('network.check_updates'), icon: 'refresh', onSelect: onRefresh });
     if (p.subscription && p.publisherId !== '') {
         items.push({ id: 'stop-updates', label: t('network.stop_updates'), icon: 'close', onSelect: onStopUpdates });
+    }
+    if (pastedFile && onRemoveFailing) {
+        items.push({
+            id: 'remove-failing',
+            label: t('files.bulk.remove_failed'),
+            icon: 'trash',
+            tone: 'danger',
+            disabled: failing.length === 0,
+            hint: failing.length === 0 ? t('files.bulk.none') : undefined,
+            onSelect: () => setConfirmBulk(failing),
+        });
     }
     if (p.publisherId !== '' || p.subscription) {
         items.push({ id: 'remove', label: t('network.remove_file'), icon: 'trash', tone: 'danger', onSelect: () => setConfirmRemove(true) });
@@ -794,7 +845,29 @@ function FileSheet({
             onClose={onClose}
             width={520}
         >
-            {confirmRemove ? (
+            {confirmBulk ? (
+                <div role="alert" style={{ display: 'grid', gap: 14 }}>
+                    <p style={{ margin: 0, fontSize: 15, color: 'var(--fg)' }}>
+                        {(confirmBulk.length === 1 ? t('files.bulk.confirm_one') : t('files.bulk.confirm')).replace('{n}', localDigits(confirmBulk.length, locale))}
+                    </p>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <Button
+                            variant="danger"
+                            onClick={() => {
+                                const ids = confirmBulk;
+                                setConfirmBulk(null);
+                                onRemoveFailing?.(ids);
+                            }}
+                            dataButton="bulk-remove-confirm"
+                        >
+                            {t('network.remove')}
+                        </Button>
+                        <Button variant="secondary" onClick={() => setConfirmBulk(null)} dataButton="bulk-remove-cancel">
+                            {t('common.cancel')}
+                        </Button>
+                    </div>
+                </div>
+            ) : confirmRemove ? (
                 <div role="alert" style={{ display: 'grid', gap: 14 }}>
                     <p style={{ margin: 0, fontSize: 15, color: 'var(--fg)' }}>
                         <bdi>{t('network.remove_publisher_confirm').replace('{name}', p.displayName)}</bdi>
@@ -914,7 +987,7 @@ function FileSheet({
                     {dev && (
                         <div data-dev style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                             {p.cells.flatMap((c) => c.families).map((f) => (
-                                <FamilyChipView key={f.family} t={t} chip={f} />
+                                <FamilyChipView key={f.viaCdn ? `${f.family}#cdn` : f.family} t={t} chip={f} />
                             ))}
                         </div>
                     )}
@@ -999,9 +1072,21 @@ function FamilyChipView({
     // its own. "Experimental transport — unproven in the field" is true
     // and tells the user neither half. translate() returns the key
     // unchanged when there is no string, which is the miss signal.
-    const famHelpKey = `network.family.${chip.family.replace(/-/g, '_')}.help`;
-    const famHelpRaw = t(famHelpKey);
-    const famHelp = famHelpRaw === famHelpKey ? '' : famHelpRaw;
+    // The Cloudflare route's chip is named and explained as that route;
+    // a family without a Network help line falls back to its own
+    // `family.<k>.about` (Hysteria 2's dated Iran caveat).
+    const famK = chip.family.replace(/-/g, '_');
+    const pick = (...keys: string[]) => {
+        for (const k of keys) {
+            const v = t(k);
+            if (v !== k) return v;
+        }
+        return '';
+    };
+    const famHelp = chip.viaCdn
+        ? pick('route.label.ws_cdn.help', `network.family.${famK}.help`, `family.${famK}.about`)
+        : pick(`network.family.${famK}.help`, `family.${famK}.about`);
+    const chipName = chip.viaCdn ? pick('route.label.ws_cdn') || chip.family : chip.family;
     const bg = cooled
         ? 'rgba(200,85,61,0.10)'
         : unsupported
@@ -1064,7 +1149,7 @@ function FamilyChipView({
             type="button"
             onClick={detail ? () => setOpen((v) => !v) : undefined}
             aria-expanded={detail ? open : undefined}
-            title={detail ? `${chip.family} · ${detail}` : chip.family}
+            title={detail ? `${chipName} · ${detail}` : chipName}
             style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -1083,7 +1168,7 @@ function FamilyChipView({
             {cooled && '🚨 '}
             {unsupported && !cooled && '⛔ '}
             {exp && !cooled && '⚡ '}
-            {chip.family} · {chip.count}
+            {chipName} · {chip.count}
             {unsupported ? ` · ${t('network.family.unsupported')}` : here ? ` · ${here}` : ''}
             {detail && (open ? ' ▴' : ' ▾')}
         </button>

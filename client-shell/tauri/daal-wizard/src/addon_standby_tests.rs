@@ -376,7 +376,8 @@ fn a_relay_that_binds_the_standby_unsafely_is_its_own_code() {
     )
     .unwrap_err();
     assert!(
-        e.to_string().starts_with(&format!("{E_STANDBY_NEEDS_REBUILD}:")),
+        e.to_string()
+            .starts_with(&format!("{E_STANDBY_NEEDS_REBUILD}:")),
         "{e}"
     );
     // Nothing rented, so nothing to give back and no row that bills.
@@ -583,4 +584,228 @@ fn the_account_check_lists_the_standby_as_a_billed_addon() {
     assert_eq!(items[0].cost_currency, "EUR");
     assert!(items[1].addon.is_empty() && items[2].addon.is_empty());
     assert!(!items[0].can_delete, "display only");
+}
+
+// ---------------------------------------------------------------------
+// The wrapped code (specs/update-ladder-v2.md §3)
+// ---------------------------------------------------------------------
+
+/// The vectors bundle/go/bundle/standby_wrap_test.go pins (computed in
+/// Python, outside Go and Rust).
+#[test]
+fn the_wrapped_code_matches_the_shared_vector() {
+    let root: Vec<u8> = (0u8..32).collect();
+    let pack = "rp-0123456789abcdef0123456789abcdef";
+    let u = derive_update_secret(&root, pack, "people");
+    assert_eq!(
+        hex::encode(&u[..]),
+        "92b41abddf99cd530b5f2603f924f47059d1614d763b9aa012b71e39870ca072"
+    );
+    assert_eq!(
+        hex::encode(&derive_update_secret(&root, pack, "everyone")[..]),
+        "0021e1088f401278348c56d9c449d97557de9106dd9ad0d2b0986655abdf34e2"
+    );
+    assert_eq!(
+        hex::encode(&derive_update_secret(&root, pack, &people_audience(2))[..]),
+        "042011ad414559d3ba0b4d4c60725a0d261de2161222d8f800f64529f0ab9659"
+    );
+    let k = bytes_of_text(KEY).unwrap();
+    assert_eq!(text_of(&k), KEY);
+    assert_eq!(text_of(&wrap_key(&k, &u)), "DW08XN Z6SE1 KJD95 57SAY MT9M8");
+    // Typed the way people type.
+    assert_eq!(bytes_of_text("000g40-r40m3-0e2o9 185wp 03h2g"), Some(k));
+    assert_eq!(bytes_of_text("000G40"), None);
+    assert_eq!(
+        bytes_of_text("ZZZZZZ ZZZZZ ZZZZZ ZZZZZ ZZZZZ"),
+        None,
+        "trailing bits"
+    );
+}
+
+fn person(f: &Fx, op: i64, n: u8) -> String {
+    let fp = format!("{:064x}", n);
+    f.ctx
+        .db
+        .insert_recipient(crate::operator_db::NewRecipientRow {
+            operator_id: op,
+            name: format!("r{n}"),
+            display_name: format!("Person {n}"),
+            address_str: String::new(),
+            pubkey_x25519_hex: fp.clone(),
+            fingerprint_hex: fp.clone(),
+            vless_uuid: String::new(),
+            reality_short_id: String::new(),
+            hy2_password: String::new(),
+            naive_password: String::new(),
+            ws_path: String::new(),
+            provisioned_at_unix: 1_800_000_000 + n as i64,
+        })
+        .unwrap();
+    fp
+}
+
+fn code(f: &Fx, op: i64) -> StandbyKey {
+    key(&f.ctx, StandbyKeyInput { operator_id: op }, &mut noop()).unwrap()
+}
+
+fn wrapped_under(f: &Fx, op: i64, audience: &str) -> String {
+    let root = f.ctx.custody.get(UPDATE_ROOT_ALIAS).unwrap();
+    let pack = f.ctx.db.get(op).unwrap().signed_sbp_relay_pack_id.unwrap();
+    let u = derive_update_secret(&root, &pack, audience);
+    text_of(&wrap_key(&bytes_of_text(KEY).unwrap(), &u))
+}
+
+#[test]
+fn the_code_is_wrapped_only_when_every_person_holds_the_secret() {
+    let f = fx();
+    let op = provisioned(&f);
+    f.ctx
+        .db
+        .record_signed_sbp(op, "00", "rp-wrap-test", 1)
+        .unwrap();
+    added(&f, op);
+    let a = person(&f, op, 1);
+    let b = person(&f, op, 2);
+
+    // Nobody's file carries a secret yet: the plain key, as before.
+    assert_eq!(
+        code(&f, op),
+        StandbyKey {
+            key: KEY.into(),
+            form: KEY_FORM_PLAIN.into(),
+            plain_key: None,
+        }
+    );
+    assert!(
+        !crate::commands::custody_has(&f.ctx, UPDATE_ROOT_ALIAS),
+        "asking for the code makes no root"
+    );
+
+    let sa = people_secret_for_file(&f.ctx, op, &a).unwrap().unwrap();
+    assert_eq!(sa.audience, "people");
+    assert_eq!(code(&f, op).form, KEY_FORM_PLAIN, "a's file is not made yet");
+    record_holder(&f.ctx, op, &a, sa.gen).unwrap();
+    assert_eq!(
+        code(&f, op).form,
+        KEY_FORM_PLAIN,
+        "b's file has no secret yet"
+    );
+    let sb = people_secret_for_file(&f.ctx, op, &b).unwrap().unwrap();
+    assert_eq!(*sa.secret_b64, *sb.secret_b64, "one secret for the family");
+    record_holder(&f.ctx, op, &b, sb.gen).unwrap();
+    let c = code(&f, op);
+    assert_eq!(c.form, KEY_FORM_WRAPPED);
+    assert_eq!(c.plain_key.as_deref(), Some(KEY), "a wrapped code always carries the plain one");
+    assert_eq!(c.key, wrapped_under(&f, op, "people"));
+    assert_ne!(c.key, KEY);
+
+    // The Everyone file's secret is another one, and an Everyone file
+    // means the plain form.
+    let e = everyone_secret_for_file(&f.ctx, op).unwrap().unwrap();
+    assert_eq!(e.audience, "everyone");
+    assert_ne!(*e.secret_b64, *sa.secret_b64);
+    std::fs::write(f.ctx.staging_dir.join(format!("{op}.shared.sbp")), b"x").unwrap();
+    assert_eq!(code(&f, op).form, KEY_FORM_PLAIN);
+    std::fs::remove_file(f.ctx.staging_dir.join(format!("{op}.shared.sbp"))).unwrap();
+    assert_eq!(code(&f, op).form, KEY_FORM_WRAPPED);
+
+    // Removing b: b could unwrap every later code, so the relay moves to
+    // a new generation and the code is plain until a has a new file.
+    let b_row = f
+        .ctx
+        .db
+        .list_recipients(op)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.fingerprint_hex == b)
+        .unwrap();
+    f.ctx
+        .db
+        .mark_recipient_revoked(b_row.id, 1_800_000_100)
+        .unwrap();
+    assert_eq!(code(&f, op).form, KEY_FORM_PLAIN);
+    let sa2 = people_secret_for_file(&f.ctx, op, &a).unwrap().unwrap();
+    assert_eq!(sa2.audience, "people/2");
+    assert_ne!(*sa2.secret_b64, *sa.secret_b64);
+    record_holder(&f.ctx, op, &a, sa2.gen).unwrap();
+    let c = code(&f, op);
+    assert_eq!(c.form, KEY_FORM_WRAPPED);
+    assert_eq!(c.key, wrapped_under(&f, op, "people/2"));
+    assert_ne!(
+        c.key,
+        wrapped_under(&f, op, "people"),
+        "b's secret opens nothing new"
+    );
+
+    // A switch shows the code to send; the row keeps the plain key.
+    let res = promote(&f.ctx, StandbyPromoteInput { operator_id: op }, &mut noop()).unwrap();
+    assert_eq!(res.key_form, KEY_FORM_WRAPPED);
+    assert_eq!(res.plain_key.as_deref(), Some(KEY));
+    assert_eq!(res.key, wrapped_under(&f, op, "people/2"));
+    assert_eq!(res.addon.detail["key"], KEY);
+    assert_eq!(code(&f, op).key, res.key);
+}
+
+/// A file the helper did not confirm (a failed pack, or a helper too old
+/// to read `update_secret`) records no holder, so the code stays plain.
+#[test]
+fn a_file_without_a_confirmed_secret_records_no_holder() {
+    let f = fx();
+    let op = provisioned(&f);
+    f.ctx
+        .db
+        .record_signed_sbp(op, "00", "rp-wrap-test", 1)
+        .unwrap();
+    added(&f, op);
+    let a = person(&f, op, 1);
+    for _ in 0..3 {
+        assert!(people_secret_for_file(&f.ctx, op, &a).unwrap().is_some());
+    }
+    let c = code(&f, op);
+    assert_eq!(c.form, KEY_FORM_PLAIN);
+    assert_eq!(c.key, KEY);
+    assert_eq!(c.plain_key, None);
+}
+
+/// A damaged relay state is an error, not a fresh generation 1: the
+/// code goes plain and no file is given a generation-1 secret.
+#[test]
+fn a_damaged_update_state_means_the_plain_code_and_no_secret() {
+    let f = fx();
+    let op = provisioned(&f);
+    f.ctx
+        .db
+        .record_signed_sbp(op, "00", "rp-wrap-test", 1)
+        .unwrap();
+    added(&f, op);
+    let a = person(&f, op, 1);
+    let s = people_secret_for_file(&f.ctx, op, &a).unwrap().unwrap();
+    record_holder(&f.ctx, op, &a, s.gen).unwrap();
+    assert_eq!(code(&f, op).form, KEY_FORM_WRAPPED);
+    crate::commands::custody_put(&f.ctx, &format!("update_people_{op}"), b"{not json").unwrap();
+    let c = code(&f, op);
+    assert_eq!((c.form.as_str(), c.key.as_str()), (KEY_FORM_PLAIN, KEY));
+    assert!(people_secret_for_file(&f.ctx, op, &a).is_err());
+    assert!(everyone_secret_for_file(&f.ctx, op).is_err());
+}
+
+/// The database's stamp of an Everyone file counts even when the staged
+/// copy is gone (a restore or a cleanup).
+#[test]
+fn an_everyone_file_stamped_in_the_database_keeps_the_code_plain() {
+    let f = fx();
+    let op = provisioned(&f);
+    f.ctx
+        .db
+        .record_signed_sbp(op, "00", "rp-wrap-test", 1)
+        .unwrap();
+    added(&f, op);
+    let a = person(&f, op, 1);
+    let s = people_secret_for_file(&f.ctx, op, &a).unwrap().unwrap();
+    record_holder(&f.ctx, op, &a, s.gen).unwrap();
+    assert_eq!(code(&f, op).form, KEY_FORM_WRAPPED);
+    f.ctx.db.stamp_shared_box_fp(op).unwrap();
+    if !f.ctx.db.shared_box_fp(op).unwrap().is_empty() {
+        assert_eq!(code(&f, op).form, KEY_FORM_PLAIN);
+    }
 }

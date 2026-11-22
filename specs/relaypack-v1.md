@@ -508,6 +508,25 @@ manifest signature. Two shapes:
   address is released, so no current commitment names an address that
   may be handed to someone else.
 
+### `_update`: the update secret (additive, no `spec_version` bump)
+
+Added 2026-11-22 (`specs/update-ladder-v2.md` §2). This is **not** a
+member of `family_specific_config` and not in the manifest. It is the
+archive member `update/secret.json`, beside `profiles/`:
+`{"v":1,"audience":"people"|"people/<g>"|"everyone","secret":"<base64 of 32 bytes>"}`.
+
+- It is unsigned and per recipient, like the profiles. In a `.sbpx` it is
+  inside the envelope. A plain Everyone `.sbp` carries only the
+  `everyone` audience.
+- A malformed member is absent. Builds that predate it skip it, as they
+  skip every archive member they do not know by name.
+- The device keeps it at `update-secret:<route_id>`
+  (`bundle.UpdateSecretStoreKey`) beside the endpoint commitment and
+  `_standby`. A refresh never removes it.
+- Its one use so far: a sealed `_standby` also accepts the key wrapped
+  under a `people` secret (`specs/update-ladder-v2.md` §3). The signed
+  `commit` still decides, so the endpoint rule above is unchanged.
+
 ### Freshness JSON shape (sub-key-aware) — `daal/freshness-v2`
 
 Per FRP-8 §6: a publisher's freshness document is **either** root-

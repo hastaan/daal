@@ -467,6 +467,8 @@ export interface RouteSummaryRow {
     last_failure_bucket: string;
     consecutive_failures: number;
     expires_bucket: string;
+    /** The route reaches its relay through Cloudflare (cdn_fronted). */
+    via_cdn?: boolean;
 }
 
 /** Returns a display projection for a single route. JSON returned

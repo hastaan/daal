@@ -109,6 +109,15 @@ type RouteSummaryDisplay struct {
 	// never fills its score by itself. Always present; false also when
 	// the route's outbound could not be read (nothing is claimed).
 	CheckedWhenUsed bool `json:"checked_when_used"`
+	// ViaCDN: the route reaches its relay through a CDN (Cloudflare)
+	// rather than straight at the relay's address — a `cdn_fronted`
+	// websocket-tls route, the one that carries `_cdn_endpoint`
+	// (bundle/go/bundle/cdn_endpoint.go). Without it the UI shows a
+	// second, indistinguishable "WebSocket TLS". Taken from the route's
+	// signed exposure mode (the minter refuses a `_cdn_endpoint` route
+	// that is not cdn_fronted, relaypack/client_pack.go), never guessed
+	// from the family. Always present; false for every legacy row.
+	ViaCDN bool `json:"via_cdn"`
 }
 
 // routeObservations is everything the engine has actually MEASURED
@@ -259,7 +268,15 @@ func rowToDisplay(r routestore.RouteRow, obs routeObservations) RouteSummaryDisp
 		BudgetExhausted:     obs.BudgetExhausted,
 		HealthPct:           obs.HealthPct,
 		Proven:              strings.TrimSpace(r.LastSuccessBucket) != "",
+		ViaCDN:              routeViaCDN(r),
 	}
+}
+
+// routeViaCDN reports whether the route reaches its relay through a CDN.
+// The exposure mode is copied from the signed pack (core/trust/state.go)
+// and the minter only writes `_cdn_endpoint` on a cdn_fronted route.
+func routeViaCDN(r routestore.RouteRow) bool {
+	return strings.EqualFold(strings.TrimSpace(r.ExposureMode), "cdn_fronted")
 }
 
 // mapTrustClass collapses engine trust_state + source_type to the four

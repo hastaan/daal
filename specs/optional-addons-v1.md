@@ -179,7 +179,10 @@ held key that matches the commitment; `routeStandbyAddress` in
 int engine_standby_key(const char* relay_pack_id, const char* key, void* out, int out_len);
 ```
 
-`relay_pack_id` `""` means every held file. Checks `key` (the text
+`relay_pack_id` `""` means every held file. `key` may also be the
+WRAPPED form (specs/update-ladder-v2.md §3): it is tried as typed, then
+unwrapped with each update secret held for the route; the signed
+commitment decides. Checks `key` (the text
 form, `bundle.ParseStandbyKeyText`) against the `_standby.commit` of the
 held routes (`Standby.Matches`) and keeps it on every route it matches,
 as 16 raw bytes at `bundle.StandbyKeyStoreKey(route)`. Writes JSON to `out` via `copyOut`:

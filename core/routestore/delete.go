@@ -9,13 +9,17 @@ import "fmt"
 // and the standby address (add-on 1): the route's `_standby` as signed
 // (bundle.StandbyStoreKey, written by core/trust SaveImport; in open
 // mode it holds the address) and a standby key the device accepted
-// (bundle.StandbyKeyStoreKey, written by core/abi acceptStandbyKey).
+// (bundle.StandbyKeyStoreKey, written by core/abi acceptStandbyKey), and
+// the update secrets of the route's files (bundle.UpdateSecretStoreKey,
+// written by core/trust SaveImport): a person who removes a relay's file
+// must not keep that relay's audience secret on the phone.
 func perRouteSecretKeys(routeID string) []string {
 	return []string{
 		"delegate_share_counter:" + routeID,
 		"budget:bucket:" + routeID,
 		"standby:" + routeID,
 		"standby-key:" + routeID,
+		"update-secret:" + routeID,
 	}
 }
 

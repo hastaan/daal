@@ -22,6 +22,24 @@ type Profile struct {
 	TransportFamily string         // e.g. "vless-reality", "shadowsocks", "wireguard"
 	Outbound        map[string]any // sing-box outbound JSON
 	Tag             string         // human label parsed from the URI's # fragment
+
+	// ManualOnly means "dial this route only when the person picks it;
+	// never race it in an automatic connect", whatever its family's
+	// maturity. The family stays truthful about what goes on the wire
+	// (a downgraded AmneziaWG conf IS WireGuard), so this cannot be
+	// carried by the family alone. Today only the AmneziaWG junk-only
+	// downgrade sets it (NoticeAmneziaDowngraded): one automatic attempt
+	// sends the exact WireGuard handshake Iran's operators throttle and
+	// then block, from the person's SIM-linked address.
+	//
+	// The importer that stores the route must keep this bit and the
+	// path manager must honour it; a host that cannot store it must not
+	// import a ManualOnly profile as an ordinary route. NO HOST STORES
+	// IT YET: MarshalOutbound drops it, the route row has no column for
+	// it, and the automatic connect refuses by family only. So
+	// core/abi URIImport refuses a ManualOnly profile (ErrManualOnly)
+	// until the flag is persisted and honoured.
+	ManualOnly bool
 }
 
 // Provenance records what was parsed and any vendor extensions detected.
@@ -56,8 +74,8 @@ const (
 	// An AmneziaWG conf with junk-packet fields only, imported as plain
 	// WireGuard. It connects only where WireGuard is not blocked, and
 	// an attempt sends a WireGuard handshake: it must not be tried
-	// automatically. This build has no per-route "only when the person
-	// picks it" flag; see parseWireGuard.
+	// automatically, so the Profile carries ManualOnly; see
+	// parseWireGuard.
 	NoticeAmneziaDowngraded = "amneziawg_downgraded"
 	// An AmneziaWG conf whose server would ignore plain WireGuard,
 	// imported under the unsupported "amneziawg" family.
@@ -70,7 +88,7 @@ var ErrNoMatch = errors.New("uri: no matching parser")
 // ParseURI dispatches to a single-URI parser based on the scheme prefix.
 // Multi-line / file inputs go through ParseAny.
 func ParseURI(s string) (Profile, Provenance, error) {
-	s = strings.TrimSpace(s)
+	s = lowerScheme(strings.TrimSpace(s))
 	if s == "" {
 		return Profile{}, Provenance{}, ErrNoMatch
 	}
@@ -89,6 +107,23 @@ func ParseURI(s string) (Profile, Provenance, error) {
 		return parseTUIC(s)
 	}
 	return Profile{}, Provenance{}, ErrNoMatch
+}
+
+// lowerScheme lower-cases a link's scheme ("VLESS://…" → "vless://…"):
+// schemes are case-insensitive (RFC 3986 §3.1), and messengers and
+// phone keyboards capitalise the first letter of a pasted line. Only
+// the scheme: the rest (a password, a base64 body) keeps its case.
+func lowerScheme(s string) string {
+	i := strings.Index(s, "://")
+	if i <= 0 {
+		return s
+	}
+	for _, c := range s[:i] {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.') {
+			return s
+		}
+	}
+	return strings.ToLower(s[:i]) + s[i:]
 }
 
 // ParseAny tries every known format. For multi-profile inputs (subscription

@@ -35,6 +35,10 @@ func seedPubRoute(t *testing.T, s *Store, pub, route string) {
 	if err := s.PutSecret("standby-key:"+route, make([]byte, 16)); err != nil {
 		t.Fatal(err)
 	}
+	// The update secrets of the route's files (bundle.UpdateSecretStoreKey).
+	if err := s.PutSecret("update-secret:"+route, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDeleteRoute(t *testing.T) {
@@ -51,7 +55,7 @@ func TestDeleteRoute(t *testing.T) {
 	if _, err := s.GetRoute("r1"); err == nil {
 		t.Fatal("route still present after delete")
 	}
-	for _, k := range []string{"budget:bucket:r1", "standby:r1", "standby-key:r1"} {
+	for _, k := range []string{"budget:bucket:r1", "standby:r1", "standby-key:r1", "update-secret:r1"} {
 		if _, err := s.GetSecret(k); err == nil {
 			t.Fatalf("per-route secret %s survived delete", k)
 		}

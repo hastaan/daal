@@ -237,6 +237,11 @@ func profileFromClashEntry(e map[string]string) (Profile, error) {
 		}
 		return Profile{TransportFamily: family, Outbound: out, Tag: tag}, nil
 	case "hysteria2":
+		// skip-cert-verify is refused for the reason hy2.go refuses
+		// insecure=1: kept, anyone on the path can be the server.
+		if linkInsecure(e["skip-cert-verify"]) {
+			return Profile{}, fmt.Errorf("clash hysteria2: skip-cert-verify: %w", ErrInsecure)
+		}
 		out := map[string]any{
 			"type":        "hysteria2",
 			"server":      host,
@@ -259,6 +264,9 @@ func profileFromClashEntry(e map[string]string) (Profile, error) {
 		if sni := e["sni"]; sni != "" {
 			tls["server_name"] = sni
 		}
+		if alpn := clashALPN(e["alpn"]); len(alpn) > 0 {
+			tls["alpn"] = alpn
+		}
 		out["tls"] = tls
 		if obfs := e["obfs"]; obfs != "" && obfs != "none" {
 			o := map[string]any{"type": obfs}
@@ -269,6 +277,9 @@ func profileFromClashEntry(e map[string]string) (Profile, error) {
 		}
 		return Profile{TransportFamily: "hysteria2", Outbound: out, Tag: tag}, nil
 	case "tuic":
+		if linkInsecure(e["skip-cert-verify"]) {
+			return Profile{}, fmt.Errorf("clash tuic: skip-cert-verify: %w", ErrInsecure)
+		}
 		out := map[string]any{
 			"type":        "tuic",
 			"server":      host,
@@ -282,6 +293,9 @@ func profileFromClashEntry(e map[string]string) (Profile, error) {
 		tls := map[string]any{"enabled": true}
 		if sni := e["sni"]; sni != "" {
 			tls["server_name"] = sni
+		}
+		if alpn := clashALPN(e["alpn"]); len(alpn) > 0 {
+			tls["alpn"] = alpn
 		}
 		out["tls"] = tls
 		return Profile{TransportFamily: "tuic", Outbound: out, Tag: tag}, nil
@@ -297,16 +311,23 @@ func clashTLS(e map[string]string) map[string]any {
 	if sni := firstNonEmpty(e["servername"], e["sni"]); sni != "" {
 		tls["server_name"] = sni
 	}
-	if alpn := splitALPN(strings.Trim(e["alpn"], "[]")); len(alpn) > 0 {
-		for i := range alpn {
-			alpn[i] = strings.Trim(alpn[i], "\"'")
-		}
+	if alpn := clashALPN(e["alpn"]); len(alpn) > 0 {
 		tls["alpn"] = alpn
 	}
 	if fp, ok := utlsFingerprint(e["client-fingerprint"]); ok {
 		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 	}
 	return tls
+}
+
+// clashALPN reads Clash's alpn, inline "[h2, http/1.1]" or
+// "h2,http/1.1", into a real list.
+func clashALPN(v string) []string {
+	alpn := splitALPN(strings.Trim(v, "[]"))
+	for i := range alpn {
+		alpn[i] = strings.Trim(alpn[i], "\"'")
+	}
+	return alpn
 }
 
 // clashTransport maps Clash's network: (with ws-opts path/headers.Host

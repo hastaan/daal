@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -394,7 +395,15 @@ func lockFirewall(id int64) func() {
 //     firewallWriteAttempts.
 //   - A writer elsewhere that writes BETWEEN our read and our write:
 //     its change is overwritten and cannot be detected — Hetzner
-//     offers no conditional write. The window is one round trip.
+//     offers no conditional write (no version, no If-Match) and no
+//     per-rule add or delete action; set_rules is the only verb. The
+//     window is one round trip (our GET's reply to our set_rules
+//     landing), typically well under a second. Neither side can see
+//     the loss: the other writer's read-back may already have passed.
+//     Two publisher processes on one relay at the same moment is the
+//     only Daal case; an ephemeral window lost that way fails that
+//     verb's mgmt call (retryable), and a lost Cloudflare rule shows
+//     in cdn-posture. Verified 2026-11-22 (W1-D).
 //
 // edit returning changed=false makes the call a no-op (no write).
 // A read failure is returned wrapped in errFirewallRead.
@@ -704,8 +713,11 @@ func countByDescription(rules []hcloud.FirewallRule, desc string) int {
 // FirewallAddEphemeralRule appends a single inbound (callerIP/32,
 // port, tcp) rule to the server's firewall. Hetzner's API does not
 // enforce server-side TTL, so the adapter encodes expiresAt into a
-// description-tagged rule key and the calling Provider runs a
-// defensive expiry sweep. The Helper is still expected to call
+// description-tagged rule key, and THE EXPIRY SWEEP is here: every add
+// and every remove also drops each daal-eph- window already past its
+// expiry (sweepExpiredWindows), in the same write. A window left by a
+// killed process therefore closes at the next window opened or closed
+// on that firewall. The Helper is still expected to call
 // FirewallRemoveEphemeralRule explicitly on completion.
 //
 // Strategy: read-modify-write through modifyFirewallRules (append,
@@ -753,11 +765,11 @@ func (l *liveClient) FirewallAddEphemeralRule(ctx context.Context, serverID, cal
 	}
 	err = l.modifyFirewallRules(ctx, fwID,
 		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
-			if _, ok := findRuleByDescription(cur, ruleID); ok {
-				return nil, false
+			next, swept := sweepExpiredWindows(cur, time.Now(), ruleID)
+			if _, ok := findRuleByDescription(next, ruleID); ok {
+				return next, swept
 			}
-			next := append(append(make([]hcloud.FirewallRule, 0, len(cur)+1), cur...), rule)
-			return next, true
+			return append(next, rule), true
 		},
 		func(after []hcloud.FirewallRule) bool {
 			_, ok := findRuleByDescription(after, ruleID)
@@ -769,7 +781,7 @@ func (l *liveClient) FirewallAddEphemeralRule(ctx context.Context, serverID, cal
 		// succeeded before the read-back failed or the three attempts
 		// ran out, so the hole may be open. Removal is idempotent; a
 		// caller that removes on any non-empty id closes it now instead
-		// of at the expiry sweep.
+		// of at the next sweep.
 		return ruleID, err
 	}
 	return ruleID, nil
@@ -778,8 +790,10 @@ func (l *liveClient) FirewallAddEphemeralRule(ctx context.Context, serverID, cal
 // FirewallRemoveEphemeralRule strips the rule whose Description
 // matches ruleID from the server's firewall. Idempotent: a
 // missing rule (already expired or never present) returns nil, and
-// so does a server or firewall that cannot be read (the Provider's
-// expiry sweep is the backstop for a rule left behind that way).
+// so does a server or firewall that cannot be read (the expiry sweep
+// of the next add or remove on that firewall is the backstop for a rule
+// left behind that way). The same write also drops every window past
+// its expiry (sweepExpiredWindows).
 func (l *liveClient) FirewallRemoveEphemeralRule(ctx context.Context, ruleID string) error {
 	if ruleID == "" {
 		return nil
@@ -816,16 +830,16 @@ func (l *liveClient) FirewallRemoveEphemeralRule(ctx context.Context, ruleID str
 	fwID := srv.PublicNet.Firewalls[0].Firewall.ID
 	err = l.modifyFirewallRules(ctx, fwID,
 		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
-			filtered := make([]hcloud.FirewallRule, 0, len(cur))
-			dropped := false
-			for _, r := range cur {
+			swept, changed := sweepExpiredWindows(cur, time.Now(), ruleID)
+			filtered := make([]hcloud.FirewallRule, 0, len(swept))
+			for _, r := range swept {
 				if ruleHasDescription(r, ruleID) {
-					dropped = true
+					changed = true
 					continue
 				}
 				filtered = append(filtered, r)
 			}
-			return filtered, dropped
+			return filtered, changed
 		},
 		func(after []hcloud.FirewallRule) bool {
 			_, ok := findRuleByDescription(after, ruleID)
@@ -839,6 +853,108 @@ func (l *liveClient) FirewallRemoveEphemeralRule(ctx context.Context, ruleID str
 }
 
 func stringPtr(s string) *string { return &s }
+
+// ephemeralRulePrefix starts every FirewallAddEphemeralRule
+// description: daal-eph-<serverID>-<callerIP>-<port>-<expiresAtUnix>.
+const ephemeralRulePrefix = "daal-eph-"
+
+// ephemeralRuleExpiry reads the expiry a daal-eph- description
+// carries. ok is false for any other description.
+func ephemeralRuleExpiry(desc string) (time.Time, bool) {
+	if !strings.HasPrefix(desc, ephemeralRulePrefix) {
+		return time.Time{}, false
+	}
+	i := strings.LastIndexByte(desc, '-')
+	sec, err := strconv.ParseInt(desc[i+1:], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
+}
+
+// sweepExpiredWindows drops every daal-eph- window whose expiry is not
+// after now, except the one named keep (the window being added or
+// removed, handled by the caller). Every other rule (the Cloudflare
+// rule, the baseline, a window still in date, anything a person added)
+// stays. changed reports whether anything was dropped. It costs no API
+// call: it runs inside the read-modify-write the add or remove makes.
+func sweepExpiredWindows(cur []hcloud.FirewallRule, now time.Time, keep string) ([]hcloud.FirewallRule, bool) {
+	out := make([]hcloud.FirewallRule, 0, len(cur)+1)
+	changed := false
+	for _, r := range cur {
+		if r.Description != nil && *r.Description != keep {
+			if exp, ok := ephemeralRuleExpiry(*r.Description); ok && !exp.After(now) {
+				changed = true
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return out, changed
+}
+
+// keepDaalRule reports whether a rule already on a firewall is one of
+// Daal's own tagged rules that a baseline reset must keep: the
+// Cloudflare rule, or a mgmt window not yet past its expiry.
+func keepDaalRule(r hcloud.FirewallRule, now time.Time) bool {
+	if r.Description == nil {
+		return false
+	}
+	if *r.Description == cdnRuleDescription {
+		return true
+	}
+	exp, ok := ephemeralRuleExpiry(*r.Description)
+	return ok && now.Before(exp)
+}
+
+// baselineKeepingDaalRules is the rule set FirewallEnsureForServer
+// writes on a firewall it reuses: the baseline, then every rule of
+// cur that keepDaalRule keeps, in cur's order. Pure.
+func baselineKeepingDaalRules(cur, baseline []hcloud.FirewallRule, now time.Time) []hcloud.FirewallRule {
+	next := append(make([]hcloud.FirewallRule, 0, len(baseline)+len(cur)), baseline...)
+	for _, r := range cur {
+		if keepDaalRule(r, now) {
+			next = append(next, r)
+		}
+	}
+	return next
+}
+
+// ruleKey is a rule's identity for set comparison.
+func ruleKey(r hcloud.FirewallRule) string {
+	src := make([]string, 0, len(r.SourceIPs))
+	for _, n := range r.SourceIPs {
+		src = append(src, n.String())
+	}
+	sort.Strings(src)
+	port, desc := "", ""
+	if r.Port != nil {
+		port = *r.Port
+	}
+	if r.Description != nil {
+		desc = *r.Description
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s", r.Direction, r.Protocol, port, strings.Join(src, ","), desc)
+}
+
+// sameRuleSet compares two rule lists as multisets.
+func sameRuleSet(a, b []hcloud.FirewallRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	n := make(map[string]int, len(a))
+	for _, r := range a {
+		n[ruleKey(r)]++
+	}
+	for _, r := range b {
+		k := ruleKey(r)
+		if n[k] == 0 {
+			return false
+		}
+		n[k]--
+	}
+	return true
+}
 
 // FirewallEnsureForServer creates a per-server Hetzner Cloud Firewall
 // with the daal baseline ruleset and attaches it to the server. Safe
@@ -931,15 +1047,26 @@ func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID strin
 		}
 		return strconv.FormatInt(res.Firewall.ID, 10), nil
 	}
-	// Existing firewall: re-apply rules in case they drifted, and
-	// attach to the server.
-	// This one is a deliberate full replace (the firewall is ours by
-	// name and not attached to the server yet), but it still takes the
-	// per-firewall lock so it cannot interleave with a read-modify-write.
+	// Existing firewall: re-apply the baseline in case it drifted, and
+	// attach to the server. This used to be a bare set_rules with the
+	// baseline alone, which also deleted Daal's own tagged rules on it:
+	// the Cloudflare rule (cdn-apply finds this firewall BY NAME, so it
+	// can sit on a detached one, and SetEphemeralFirewallRule's
+	// self-heal lands here exactly when the firewall was detached) and
+	// any mgmt window still in date. Now it goes through
+	// modifyFirewallRules like every other edit: untagged rules are
+	// reset to the baseline, Daal's tagged rules are kept.
 	fwRef := &hcloud.Firewall{ID: fwID}
-	unlock := lockFirewall(fwID)
-	_, _, err = l.c.Firewall.SetRules(ctx, fwRef, hcloud.FirewallSetRulesOpts{Rules: baseRules})
-	unlock()
+	now := time.Now()
+	err = l.modifyFirewallRules(ctx, fwID,
+		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			next := baselineKeepingDaalRules(cur, baseRules, now)
+			return next, !sameRuleSet(cur, next)
+		},
+		func(after []hcloud.FirewallRule) bool {
+			return sameRuleSet(after, baselineKeepingDaalRules(after, baseRules, now))
+		},
+	)
 	if err != nil {
 		return "", fmt.Errorf("hetzner firewall set rules: %w", err)
 	}

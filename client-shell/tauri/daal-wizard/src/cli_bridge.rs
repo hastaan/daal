@@ -1373,6 +1373,10 @@ pub struct UsersPackSbpxResult {
     pub sbpx_path: String,
     pub plaintext_size: i64,
     pub sbpx_size: i64,
+    /// The file carries the update secret the creds JSON offered. False
+    /// from a helper too old to know the field (it ignores the secret).
+    #[serde(default)]
+    pub update_secret: bool,
 }
 
 /// Shared-.sbp path: args for `daal-deploy users-pack-sbp`. Rewrites a
@@ -1393,6 +1397,9 @@ pub struct UsersPackSbpResult {
     pub sbp_path: String,
     pub sbp_size: i64,
     pub shared: bool,
+    /// See `UsersPackSbpxResult::update_secret`.
+    #[serde(default)]
+    pub update_secret: bool,
 }
 
 /// FRP-14 Layer 3d: args for `daal-deploy users-unpack-sbpx`.
@@ -5695,10 +5702,19 @@ impl CliRunner for MockRunner {
         out.extend_from_slice(&[b'D', b'S', b'B', b'P', 0x00, 0x01]);
         out.extend_from_slice(&in_bytes);
         std::fs::write(args.out_sbpx_path, &out).ok();
+        // Like the real helper: the file carries the secret the creds
+        // JSON offered.
+        let update_secret = args
+            .creds_file_path
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .map(|v| v.get("update_secret").and_then(|s| s.as_str()).is_some())
+            .unwrap_or(false);
         Ok(UsersPackSbpxResult {
             sbpx_path: args.out_sbpx_path.to_string_lossy().to_string(),
             plaintext_size: in_bytes.len() as i64,
             sbpx_size: out.len() as i64,
+            update_secret,
         })
     }
     fn run_users_pack_sbp(&self, args: UsersPackSbpArgs<'_>) -> Result<UsersPackSbpResult> {
@@ -5710,6 +5726,7 @@ impl CliRunner for MockRunner {
             sbp_path: args.out_sbp_path.to_string_lossy().to_string(),
             sbp_size: in_bytes.len() as i64,
             shared: true,
+            ..Default::default()
         })
     }
 

@@ -2779,6 +2779,21 @@ fn wizard_recipient_repack_sbpx(
     })
 }
 
+/// "Links for other apps": standard share links for one person on a
+/// relay. Made from what this device keeps; never logs a link (only the
+/// error, which carries none, goes through `cmdlog`).
+#[tauri::command]
+fn wizard_recipient_share_links(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+    recipient_id: i64,
+) -> Result<daal_wizard::share_links::ShareLinksResult, String> {
+    cmdlog::logged("wizard_recipient_share_links", || {
+    daal_wizard::share_links::recipient_share_links(&wstate.0, operator_id, recipient_id)
+        .map_err(|e| e.to_string())
+    })
+}
+
 #[tauri::command]
 fn wizard_recipient_revoke(
     wstate: State<'_, WizardStateMgr>,
@@ -4114,7 +4129,13 @@ fn share_invite_sbpx(
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     cmdlog::logged("open_external_url", || {
     use tauri::Url;
-    let _parsed = Url::parse(&url).map_err(|e| format!("invalid URL: {e}"))?;
+    let parsed = Url::parse(&url).map_err(|e| format!("invalid URL: {e}"))?;
+    // Web pages only: every caller hands over an https address (store
+    // pages, t.me/... links, account sites). Anything else (file:,
+    // a custom scheme that starts a program) is refused here.
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err("only web addresses can be opened".into());
+    }
 
     #[cfg(target_os = "android")]
     {
@@ -4131,17 +4152,22 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
+        // Windows: never `cmd /c start <url>`. cmd parses the line again,
+        // so a `&` in a URL (every t.me/proxy?server=…&port=…) splits it
+        // into a second command. url.dll takes the URL as one argument.
+        // The URL handed on is the parsed one, re-serialised.
+        let url = parsed.as_str();
         std::process::Command::new(if cfg!(target_os = "macos") {
             "open"
         } else if cfg!(target_os = "windows") {
-            "cmd"
+            "rundll32"
         } else {
             "xdg-open"
         })
         .args(if cfg!(target_os = "windows") {
-            vec!["/c", "start", url.as_str()]
+            vec!["url.dll,FileProtocolHandler", url]
         } else {
-            vec![url.as_str()]
+            vec![url]
         })
         .spawn()
         .map_err(|e| format!("open failed: {e}"))?;
@@ -4350,6 +4376,7 @@ pub fn run() {
             // FRP-14 per-recipient surface
             wizard_recipient_provision,
             wizard_recipient_repack_sbpx,
+            wizard_recipient_share_links,
             wizard_recipient_revoke,
             wizard_recipient_list,
             wizard_recipient_list_remote,

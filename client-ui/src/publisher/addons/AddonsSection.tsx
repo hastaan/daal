@@ -57,7 +57,7 @@ type Phase =
 type Open =
     | { k: 'cloudflare'; then?: AddonKind }
     | { k: 'google'; then?: AddonKind }
-    | { k: 'code'; code: string };
+    | { k: 'code'; code: string; wrapped: boolean; plain?: string };
 
 export function AddonsSection({ t, operatorId, variant = 'relay', accounts: given }: AddonsSectionProps) {
     const [rows, setRows] = useState<AddonRow[]>([]);
@@ -191,7 +191,7 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
     const showCode = async () => {
         if (operatorId == null) return;
         const r = await code.run(() => Addons.standbyKey({ operator_id: operatorId }));
-        if (r) setOpen({ k: 'code', code: r.key });
+        if (r) setOpen({ k: 'code', code: r.key, wrapped: r.form === 'wrapped', plain: r.plain_key });
     };
     const switchToStandby = async () => {
         if (operatorId == null) return;
@@ -204,7 +204,7 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
         if (!yes) return;
         const r = await code.run(() => Addons.standbyPromote({ operator_id: operatorId }));
         reload();
-        if (r) setOpen({ k: 'code', code: r.key });
+        if (r) setOpen({ k: 'code', code: r.key, wrapped: r.key_form === 'wrapped', plain: r.plain_key });
     };
 
     const standby = liveRow(rows, 'standby');
@@ -293,7 +293,9 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
                     onConnected={() => afterConnect(open.then, { ...accounts, google: { ...accounts.google, connected: true } })}
                 />
             )}
-            {open?.k === 'code' && <CodeSheet t={t} code={open.code} onClose={() => setOpen(null)} />}
+            {open?.k === 'code' && (
+                <CodeSheet t={t} code={open.code} wrapped={open.wrapped} plain={open.plain} onClose={() => setOpen(null)} />
+            )}
             {confirm.node}
         </section>
     );
@@ -422,9 +424,30 @@ function Failed({
     );
 }
 
-/** The standby code: after a switch, or from Details. */
-function CodeSheet({ t, code, onClose }: { t: (k: string) => string; code: string; onClose: () => void }) {
+/** The standby code: after a switch, or from Details. A wrapped code
+ *  opens only with the person's own file, so the sheet says it may go by
+ *  SMS, a call or a messenger; a plain one keeps the earlier wording.
+ *  Beside a wrapped code, one quiet action shows the plain one, with the
+ *  plain code's caution: for a person whose phone cannot open the
+ *  wrapped form (an older build, or a file not imported yet). */
+function CodeSheet({
+    t,
+    code: shown,
+    wrapped: shownWrapped,
+    plain,
+    onClose,
+}: {
+    t: (k: string) => string;
+    code: string;
+    wrapped: boolean;
+    plain?: string;
+    onClose: () => void;
+}) {
     const [copied, setCopied] = useState(false);
+    const [showPlain, setShowPlain] = useState(false);
+    const usePlain = showPlain && shownWrapped && !!plain;
+    const code = usePlain ? plain! : shown;
+    const wrapped = shownWrapped && !usePlain;
     const share = async () => {
         const nav = navigator as Navigator & { share?: (d: { text: string }) => Promise<void> };
         if (typeof nav.share === 'function') {
@@ -455,7 +478,24 @@ function CodeSheet({ t, code, onClose }: { t: (k: string) => string; code: strin
                         {t('pub.addons.share')}
                     </Button>
                 </div>
-                <p style={BODY}>{t('pub.addons.standby.key.body')}</p>
+                <p style={BODY} data-form={wrapped ? 'wrapped' : 'plain'}>
+                    {t(wrapped ? 'standby.wrap.body' : 'pub.addons.standby.key.body')}
+                </p>
+                {wrapped && plain && (
+                    <div>
+                        <Button
+                            size="sm"
+                            variant="link"
+                            onClick={() => {
+                                setCopied(false);
+                                setShowPlain(true);
+                            }}
+                            dataButton="standby-key-plain"
+                        >
+                            {t('standby.wrap.fallback')}
+                        </Button>
+                    </div>
+                )}
                 <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                     <Button onClick={onClose} dataButton="standby-key-close">
                         {t('pub.addons.close')}

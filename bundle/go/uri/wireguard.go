@@ -114,7 +114,9 @@ func amneziaWireCompatible(set map[string]string) bool {
 //     value): the server accepts WireGuard, so the route is imported as
 //     "wireguard" — never "amneziawg", because WireGuard is what goes
 //     on the wire and the badge, the maturity label and the selector
-//     all key off the family. Notice = NoticeAmneziaDowngraded.
+//     all key off the family. Notice = NoticeAmneziaDowngraded, and
+//     Profile.ManualOnly is set: an automatic attempt would send the
+//     WireGuard handshake the censor blocks on sight.
 //   - Anything else (non-neutral S1..S4 / H1..H4, or any 2.0 field):
 //     the server discards a WireGuard initiation, so the downgraded
 //     route could never connect anywhere. It is imported under the
@@ -236,6 +238,7 @@ func parseWireGuard(body []byte) (Profile, Provenance, error) {
 		}
 	}
 	family := "wireguard"
+	manualOnly := false
 	if len(set) > 0 {
 		dropped := make([]string, 0, len(set))
 		for k := range set {
@@ -252,11 +255,14 @@ func parseWireGuard(body []byte) (Profile, Provenance, error) {
 			// there. AUTO-CONNECT MUST NOT RACE IT: an attempt sends the
 			// exact WireGuard handshake Iran's operators throttle and
 			// then block within minutes, from the person's SIM-linked
-			// address. Nothing in this build can mark one route
-			// "connect only when the person picks it"; today the only
-			// thing keeping it out of automatic connects is that
-			// `wireguard` is experimental (off unless the person turns
-			// experimental routes on). See NoticeAmneziaDowngraded.
+			// address. The family stays "wireguard" (that is what goes
+			// on the wire) and the profile is marked ManualOnly. That
+			// mark protects nothing by itself: the host must persist it
+			// and refuse such a route in an automatic connect, and NO
+			// HOST DOES YET (core/abi URIImport refuses a ManualOnly
+			// profile with ErrManualOnly instead). See
+			// NoticeAmneziaDowngraded.
+			manualOnly = true
 			prov.Notice = NoticeAmneziaDowngraded
 			prov.Downgrade = "This is an AmneziaWG configuration. The engine in this build " +
 				"(sing-box 1.13.12) has no AmneziaWG support, so its junk-packet parameters (" +
@@ -291,6 +297,7 @@ func parseWireGuard(body []byte) (Profile, Provenance, error) {
 		TransportFamily: family,
 		Outbound:        out,
 		Tag:             "",
+		ManualOnly:      manualOnly,
 	}, prov, nil
 }
 
