@@ -18,7 +18,7 @@
 import type { MeasuredGrade, PublisherTreeRow, RouteDisplayRow } from '../contract/D2Contract';
 import type { RowState } from './networkRows';
 import { restingNow } from './networkRows';
-import { familyName, meaningfulNickname } from './familyName';
+import { familyName, meaningfulNickname, type KindOf } from './familyName';
 
 // Shared with Home and the way chooser: one name per kind everywhere.
 export { familyName, meaningfulNickname };
@@ -35,12 +35,25 @@ function lookup(t: T, key: string): string | undefined {
     return v && v !== key ? v : undefined;
 }
 
-/** One plain paragraph about the kind: the long help line the Files tab
- *  already had for the less usual ones (network.family.*.help), else a
- *  short one of our own (files.fam.*.about). `undefined` when neither. */
-export function familyAbout(t: T, family: string): string | undefined {
+/** One plain paragraph about the kind: the dated Iran caveat where one
+ *  is owed (family.*.about: Hysteria 2), else the long help line the
+ *  Files tab already had for the less usual ones (network.family.*.help),
+ *  else a short one of our own (files.fam.*.about). `undefined` when
+ *  none. A route through Cloudflare says so first, in one line
+ *  (route.label.ws_cdn.help); pass the route to get it. */
+export function familyAbout(t: T, kind: KindOf): string | undefined {
+    const family = typeof kind === 'string' ? kind : kind?.family;
+    if (!family) return undefined;
     const k = famKey(family);
-    return lookup(t, `files.fam.${k}.about`) ?? lookup(t, `network.family.${k}.help`);
+    const about = lookup(t, `family.${k}.about`) ?? lookup(t, `files.fam.${k}.about`) ?? lookup(t, `network.family.${k}.help`);
+    const cdn = typeof kind === 'object' && kind.viaCdn === true && k === 'websocket_tls' ? lookup(t, 'route.label.ws_cdn.help') : undefined;
+    return cdn ?? about;
+}
+
+/** Ways of one kind are counted together; a route through Cloudflare is
+ *  its own kind for that ("WebSocket TLS · Cloudflare", not "· 2"). */
+function kindGroup(r: RouteDisplayRow): string {
+    return r.viaCdn ? `${famKey(r.family)}#cdn` : famKey(r.family);
 }
 
 export interface WayTitle {
@@ -54,12 +67,12 @@ export interface WayTitle {
  *  are told apart by their place among that kind: "· 1", "· 2". */
 export function wayTitles(t: T, routes: readonly RouteDisplayRow[], locale = 'en'): Map<string, WayTitle> {
     const total = new Map<string, number>();
-    for (const r of routes) total.set(famKey(r.family), (total.get(famKey(r.family)) ?? 0) + 1);
+    for (const r of routes) total.set(kindGroup(r), (total.get(kindGroup(r)) ?? 0) + 1);
     const seen = new Map<string, number>();
     const out = new Map<string, WayTitle>();
     for (const r of routes) {
-        const k = famKey(r.family);
-        const name = familyName(t, r.family);
+        const k = kindGroup(r);
+        const name = familyName(t, r);
         const n = (seen.get(k) ?? 0) + 1;
         seen.set(k, n);
         const title = (total.get(k) ?? 1) > 1 ? `${name} · ${digits(n, locale)}` : name;
@@ -321,7 +334,7 @@ export function familyTags(
     const order: string[] = [];
     const by = new Map<string, RouteDisplayRow[]>();
     for (const r of routes) {
-        const k = famKey(r.family);
+        const k = kindGroup(r);
         if (!by.has(k)) {
             by.set(k, []);
             order.push(k);
@@ -341,7 +354,7 @@ export function familyTags(
         } else if (list.every((r) => r.measured?.grade === 'failing')) {
             mark = 'bad';
         }
-        return { family: list[0].family, name: familyName(t, list[0].family), count: list.length, mark };
+        return { family: list[0].family, name: familyName(t, list[0]), count: list.length, mark };
     });
 }
 

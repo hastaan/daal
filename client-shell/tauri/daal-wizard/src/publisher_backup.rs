@@ -1008,7 +1008,12 @@ fn report_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<String> {
     let ops = tables.get("operators").unwrap_or(&empty);
     ops.rows
         .iter()
-        .flat_map(|r| crate::report_key::optional_aliases(ops.get(r, "id").as_i64()))
+        .flat_map(|r| {
+            let id = ops.get(r, "id").as_i64();
+            crate::report_key::optional_aliases(id)
+                .into_iter()
+                .chain([crate::addon_standby::update_state_alias(id)])
+        })
         .collect()
 }
 
@@ -1024,6 +1029,9 @@ fn account_aliases() -> Vec<String> {
     out.push(crate::addon_cdn::ACCOUNT_ZONE_ALIAS.to_string());
     out.push(crate::addon_cdn::ACCOUNT_EXTRA_ALIAS.to_string());
     out.extend(crate::addon_google::ACCOUNT_ALIASES.iter().map(|a| a.to_string()));
+    // The update root the people's secrets derive from (no relay of its
+    // own). Without it a restore makes a new root and codes go plain.
+    out.push(crate::addon_standby::UPDATE_ROOT_ALIAS.to_string());
     out
 }
 
@@ -1071,7 +1079,11 @@ fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
     let optional = snap
         .operator_ids()
         .into_iter()
-        .flat_map(crate::report_key::optional_aliases)
+        .flat_map(|id| {
+            crate::report_key::optional_aliases(id)
+                .into_iter()
+                .chain([crate::addon_standby::update_state_alias(id)])
+        })
         .chain(account_aliases())
         .collect::<Vec<_>>();
     for alias in optional {

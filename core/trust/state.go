@@ -363,6 +363,7 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 					return fmt.Errorf("save standby %s: %w", r.RouteID, err)
 				}
 			}
+			a.saveUpdateSecret(r.RouteID, r.UpdateSecret)
 		} else {
 			// No commitment: no standby either. Removed before the
 			// commitment, for the same reason as above.
@@ -371,9 +372,41 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 			}
 			_ = a.S.DeleteSecret(RouteEndpointKey(r.RouteID))
 			_ = a.S.DeleteSecret(RouteEndpointSignedAtKey(r.RouteID))
+			_ = a.S.DeleteSecret(bundle.UpdateSecretStoreKey(r.RouteID))
 		}
 	}
 	return nil
+}
+
+// saveUpdateSecret keeps the update secrets of the files a route came in
+// (bundle.UpdateSecretStoreKey: a short list of members, newest first)
+// beside its commitment (specs/update-ladder-v2.md §2, "On the device").
+//
+// THE RULES (bundle.MergeHeldUpdateSecrets). Nothing arriving costs the
+// phone a secret it holds: a refresh carries only the signed skeleton,
+// an older file has no secret or an older one, and the member is not
+// signed, so a re-imported old copy of one's own file or a planted
+// member must not replace the secret that opens the next code. A person's
+// secret goes first in the list (up to bundle.MaxHeldUpdateSecrets
+// distinct ones; extra ones are harmless, the signed commitment decides).
+// An Everyone secret is written only where no person's secret is held,
+// so importing the family's Everyone file after one's own does not turn
+// the wrapped code one is sent back into "not for any file on this
+// phone".
+//
+// A failure here does NOT fail the import: the routes are what the user
+// asked for, and without the secret the standby code still works in the
+// plain form. The secret is never logged.
+func (a *StoreAdapter) saveUpdateSecret(routeID string, raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	held, _ := a.S.GetSecret(bundle.UpdateSecretStoreKey(routeID))
+	next, ok := bundle.MergeHeldUpdateSecrets(held, raw)
+	if !ok {
+		return
+	}
+	_ = a.S.PutSecret(bundle.UpdateSecretStoreKey(routeID), next)
 }
 
 // forgetStandby removes the route's stored `_standby`

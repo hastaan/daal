@@ -78,7 +78,7 @@ func parseHy2(raw string) (Profile, Provenance, error) {
 	// that server. pinSHA256 is no way out either: Hysteria's pin is a
 	// hash of the whole certificate, sing-box's
 	// certificate_public_key_sha256 a hash of its key.
-	if v := strings.ToLower(q.Get("insecure")); v == "1" || v == "true" {
+	if linkInsecure(q.Get("insecure")) {
 		return Profile{}, Provenance{}, fmt.Errorf("hy2: insecure: %w", ErrInsecure)
 	}
 	if alpn := splitALPN(q.Get("alpn")); len(alpn) > 0 {

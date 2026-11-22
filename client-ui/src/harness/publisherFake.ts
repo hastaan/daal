@@ -409,6 +409,18 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         publisher_custody_status: () => CUSTODY,
         wizard_freshness_status: () => FRESHNESS,
         wizard_recipient_list: (a) => (op(a) === LIVE_RELAY_ID ? people() : []),
+        // "Links for other apps": one link (made-up values, a
+        // documentation address) and the ways left out.
+        wizard_recipient_share_links: () => ({
+            links: [
+                {
+                    way: 'vless-reality',
+                    label: 'Home · VLESS Reality',
+                    link: 'vless://00000000-0000-4000-8000-000000000000@203.0.113.10:443?encryption=none&security=reality&sni=cover.example.org&fp=chrome&pbk=AAAA&sid=00&type=tcp#Home',
+                },
+            ],
+            left_out: ['hysteria2', 'websocket-tls', 'naive', 'tuic'].map((way) => ({ way, reason: 'needs_insecure' })),
+        }),
         wizard_list_artifacts: (a) => (op(a) === LIVE_RELAY_ID ? artifacts() : []),
         wizard_relay_health: (a) => health(f, op(a)),
         // Optional add-ons: none on any relay until a sheet turns one on.

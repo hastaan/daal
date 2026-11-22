@@ -301,7 +301,7 @@ export function WayRow({
         <bdi>{locale === 'fa' ? `«${title.nickname}»` : `“${title.nickname}”`}</bdi>
     ) : undefined;
     const sub: ReactNode[] = [lead, quoted].filter(Boolean);
-    const about = familyAbout(t, r.family);
+    const about = familyAbout(t, r);
     const usable = state !== 'unsupported' && state !== 'resting' && state !== 'in_use' && state !== 'checking';
     // Only a name that tells the person something ("Rescue 03"): never
     // "r1", a date or a short code (lib/familyName.ts).

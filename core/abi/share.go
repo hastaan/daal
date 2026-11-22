@@ -1,7 +1,9 @@
 package abi
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -352,17 +354,30 @@ func URIImport(rawURI string) (string, error) {
 	if err := initShare(c); err != nil {
 		return "", err
 	}
-	prof, _, err := uri.ParseURI(strings.TrimSpace(rawURI))
+	prof, prov, err := uri.ParseURI(strings.TrimSpace(rawURI))
 	if err != nil {
 		return "", err
+	}
+	// A route to dial only when the person picks it cannot be kept as
+	// such yet (no route flag; connect_auto refuses by family only), so
+	// it is refused, never stored as an ordinary route that an automatic
+	// connect would race. Today ParseURI makes none; this holds the line
+	// for the day a WireGuard conf comes through here (uri.ParseAny).
+	if prof.ManualOnly || prov.Notice == uri.NoticeAmneziaUnsupported {
+		return "", uri.ErrManualOnly
 	}
 	body, err := uri.MarshalOutbound(prof)
 	if err != nil {
 		return "", err
 	}
 	now := time.Now().UTC()
+	// The id is unique per link: two different links pasted in the same
+	// second must not share a route id (routes.route_id is the primary
+	// key, and the second would replace the first). The same link
+	// twice in one second gets the same id, so it dedupes.
+	sum := sha256.Sum256(body)
 	bundleBytes, err := bundleshare.BuildShareBundle([]bundleshare.ExportInput{{
-		RouteID:           "pasted-" + now.Format("20060102T150405Z"),
+		RouteID:           "pasted-" + now.Format("20060102T150405Z") + "-" + hex.EncodeToString(sum[:4]),
 		TransportFamily:   prof.TransportFamily,
 		ScarcityClass:     "normal",
 		ProfileBytes:      body,

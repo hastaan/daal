@@ -44,8 +44,13 @@ func parseTUIC(raw string) (Profile, Provenance, error) {
 	if sni := q.Get("sni"); sni != "" {
 		tls["server_name"] = sni
 	}
-	if alpn := q.Get("alpn"); alpn != "" {
-		tls["alpn"] = splitALPN(alpn)
+	// allow_insecure=1 (sing-box's spelling) or insecure=1 turns
+	// certificate checking off: refused, as for hy2 (hy2.go).
+	if linkInsecure(q.Get("allow_insecure"), q.Get("insecure"), q.Get("allowInsecure")) {
+		return Profile{}, Provenance{}, fmt.Errorf("tuic: insecure: %w", ErrInsecure)
+	}
+	if alpn := splitALPN(q.Get("alpn")); len(alpn) > 0 {
+		tls["alpn"] = alpn
 	}
 	out["tls"] = tls
 	return Profile{

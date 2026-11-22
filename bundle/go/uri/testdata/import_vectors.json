@@ -168,6 +168,12 @@
    "input": "proxies:\n  - name: vm-ws\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    alterId: 0\n    cipher: zero\n    tls: true\n    servername: vm.example.com\n    network: ws\n    ws-opts:\n      path: /x\n      headers:\n        Host: cdn.example.com\n  - name: vm-grpc\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    cipher: auto\n    tls: true\n    network: grpc\n    grpc-opts:\n      grpc-service-name: svc\n",
    "hint": "clash",
    "family": "other"
+  },
+  {
+   "name": "clash-hy2-tuic-alpn",
+   "input": "proxies:\n  - name: h\n    type: hysteria2\n    server: h.example.com\n    port: 443\n    password: pw\n    ports: 20000-30000\n    alpn: [h3]\n    sni: h.example.com\n  - name: t\n    type: tuic\n    server: t.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    password: pw\n    alpn: [h3, h3-29]\n",
+   "hint": "clash",
+   "family": ""
   }
  ],
  "refused": [
@@ -340,6 +346,26 @@
    "name": "vless-headertype-garbage",
    "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&headerType=%3Cx%3Aaaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
    "code": "header_type_unsupported"
+  },
+  {
+   "name": "vless-unknown-type",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@x.example.com:443?security=tls&type=meek&sni=x.example.com",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "trojan-unknown-type",
+   "input": "trojan://pw@x.example.com:443?type=somethingnew&sni=x.example.com",
+   "code": "transport_unsupported"
+  },
+  {
+   "name": "tuic-allow-insecure",
+   "input": "tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:pw@t.example.com:443?sni=t.example.com&allow_insecure=1",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "tuic-insecure-true",
+   "input": "tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:pw@t.example.com:443?insecure=true",
+   "code": "insecure_refused"
   }
  ]
 }

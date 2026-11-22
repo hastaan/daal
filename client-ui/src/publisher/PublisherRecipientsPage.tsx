@@ -122,6 +122,7 @@ import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
 // Optional add-ons: standby address, Cloudflare, Google channel (X3).
 import { AddonsSection } from './addons/AddonsSection';
+import { ShareLinksSheet } from './links/ShareLinksSheet';
 import { readClipboardText, writeClipboardText } from '../lib/clipboard';
 
 interface Props {
@@ -306,6 +307,8 @@ export default function PublisherRecipientsPage({
     const [confirmBuild, setConfirmBuild] = useState(false);
     /** Which file the QR sheet streams, and the line that says so. */
     const [qrSend, setQrSend] = useState<{ artifact: PackArtifact; name?: string } | null>(null);
+    /** "Links for other apps": the person whose links are open. */
+    const [linksFor, setLinksFor] = useState<RecipientSummary | null>(null);
 
     // D3: the last health check of this relay.
     const [health, setHealth] = useState<RelayHealth | null>(null);
@@ -1346,6 +1349,8 @@ export default function PublisherRecipientsPage({
                         ? { onSend: () => setSendFor('everyone'), onAbout: () => setEveryoneOpen(true) }
                         : null
                 }
+                // "Links for other apps" on the person's ⋯.
+                onLinks={(r) => setLinksFor(r)}
             />
 
             {/* ---------------- More protection ----------------
@@ -2356,6 +2361,16 @@ export default function PublisherRecipientsPage({
                     artifact={qrSend.artifact}
                     name={qrSend.name}
                     onClose={() => setQrSend(null)}
+                />
+            )}
+
+            {linksFor && linksFor.revoked_at_unix === 0 && (
+                <ShareLinksSheet
+                    t={t}
+                    operatorId={operatorId}
+                    recipientId={linksFor.id}
+                    name={personLabel(linksFor)}
+                    onClose={() => setLinksFor(null)}
                 />
             )}
 

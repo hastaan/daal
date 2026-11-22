@@ -115,6 +115,11 @@ export interface RouteDisplayRow {
    *  (`checked_when_used`: tor, wireguard, …): it is checked only when it
    *  is used, so no score appears for it by itself. */
   checkedWhenUsed?: boolean;
+  /** The route reaches its relay through Cloudflare (`via_cdn`: a
+   *  cdn_fronted websocket-tls route). Named "WebSocket TLS · Cloudflare"
+   *  wherever a route's name is shown (lib/familyName.ts kindLabel).
+   *  Absent = straight at the relay. */
+  viaCdn?: boolean;
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
   sourceName?: string;
@@ -418,6 +423,9 @@ export type SourceKind = 'sbpx' | 'sbp' | 'subscription' | 'pasted' | 'mixed';
  *  count of those routes currently on the family cooldown ladder. */
 export interface FamilyChip {
   family: string;            // engine family token, e.g. "vless-reality"
+  /** Every route of this chip reaches its relay through Cloudflare
+   *  (RouteDisplayRow.viaCdn): such routes get a chip of their own. */
+  viaCdn?: boolean;
   count: number;
   /** MEASURED, averaged across the family's routes that have a score.
    *  `undefined` = no route in this family has ever been measured. */

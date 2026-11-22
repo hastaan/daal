@@ -47,6 +47,10 @@ import { syntheticSubscriptionFingerprint, subscriptionDisplayName } from '../li
 import { friendlyError, parseVerdict, type ImportVerdict, type TrustResolution } from '../lib/importVerdict';
 import { StandbyCodeEntry } from './StandbyCodeEntry';
 import { readClipboardText } from '../lib/clipboard';
+import { errorText } from '../lib/errorText';
+import { pasteItems, type PasteItem } from '../lib/pasteItems';
+import PasteList, { openWithSystem, refusalText, type PastePhase } from './PasteList';
+import { importLink } from '../lib/pasteImport';
 
 /** Kept for callers of the old two-tab sheet. */
 export type Tab = 'paste' | 'file';
@@ -96,7 +100,7 @@ export function classifyPaste(s: string): PasteKind {
 export const PASTE_SETTLE_MS = 400;
 
 /** Only a Daal file (base64 .sbp/.sbpx) goes on by itself after a paste. */
-export function autoAdvances(k: PasteKind): boolean {
+export function autoAdvances(k: PasteKind | 'messenger'): boolean {
     return k === 'sbp-b64' || k === 'sbpx-b64';
 }
 
@@ -116,7 +120,7 @@ type Stage =
     | { at: 'working' }
     | { at: 'unlock'; path: string }
     | { at: 'trust'; preview: PreviewedBundle; origin: Origin }
-    | { at: 'result'; outcome: Exclude<ImportOutcome, { kind: 'trust' }>; name?: string };
+    | { at: 'result'; outcome: Exclude<ImportOutcome, { kind: 'trust' }>; name?: string; title?: string };
 
 type Origin = 'paste' | 'file' | 'sealed_file' | 'scan';
 
@@ -144,7 +148,19 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
         };
     }, []);
 
-    const kind = useMemo(() => classifyPaste(pasted), [pasted]);
+    // What the paste holds, item by item (lib/pasteItems.ts). Two or
+    // more items go to the list (PasteList); one keeps the single flow.
+    const parsed = useMemo(() => pasteItems(pasted), [pasted]);
+    const single: PasteItem | undefined = parsed.items.length === 1 ? parsed.items[0] : undefined;
+    const kind = useMemo(() => (single ? singleKind(single) : parsed.items.length > 1 ? 'unknown' : classifyPaste(pasted)), [pasted, single, parsed]);
+    const multi = parsed.items.length > 1;
+    // A pasted link of a kind the engine cannot import yet: no tick, no
+    // Add, the plain line at once.
+    const cannot = single?.kind === 'route' && !single.importable;
+    // While the list adds or checks (and after), the box is read-only:
+    // one stray key would start a new list and stop the add part way.
+    const [listPhase, setListPhase] = useState<PastePhase>('review');
+    const boxLocked = multi && listPhase !== 'review';
 
     /** The publisher's name for "From {name}": the preview's, else the
      *  list's entry for that fingerprint. Never blocks the result. */
@@ -278,7 +294,7 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
             if (k === 'http') {
                 // The engine rejects an empty publisher fingerprint: a
                 // stable per-address id, and the host as the name.
-                const url = text.trim();
+                const url = single?.kind === 'web' ? single.text : text.trim();
                 await contract.subscriptionAdd({
                     publisherFingerprint: await syntheticSubscriptionFingerprint(url),
                     url,
@@ -296,11 +312,26 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                 await settle(v, null, 'paste');
                 return;
             }
-            const res = await contract.uriImport(text.trim());
-            if (res.error) throw new Error(res.error);
+            // One link: the same reading as the list (lib/pasteImport.ts):
+            // the first paste ever answers this phone's own trust prompt,
+            // and a rejected verdict is a refusal, never "added".
+            const r = await importLink(contract, t, single?.kind === 'route' ? single.text : text.trim());
+            if (!r.ok) {
+                setError(r.text);
+                setStage(back);
+                return;
+            }
             onImported?.();
-            setStage({ at: 'result', outcome: { kind: 'done', verdict: null } });
+            setStage({ at: 'result', outcome: { kind: 'done', verdict: null }, title: t('add.multi.link_added') });
         } catch (e) {
+            if (k === 'uri') {
+                // A link the importer refused: its plain reason, on the
+                // paste step (the link may simply be a kind this build
+                // cannot dial).
+                setError(refusalText(t, errorText(e)));
+                setStage(back);
+                return;
+            }
             fail(e, back);
         }
     };
@@ -310,7 +341,7 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
     // question. A web address or a link waits for "Add" (`add-pasted`).
     useEffect(() => {
         if (stage.at !== 'paste') return;
-        if (!autoAdvances(kind)) return;
+        if (multi || kind === 'messenger' || !autoAdvances(kind)) return;
         const text = pasted;
         if (text === lastHanded.current) return;
         const id = setTimeout(() => {
@@ -408,11 +439,13 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                 <div style={{ display: 'grid', gap: 10 }}>
                     <textarea
                         value={pasted}
+                        readOnly={boxLocked}
                         onChange={(e) => {
+                            if (boxLocked) return;
                             setError(null);
                             setPasted(e.target.value);
                         }}
-                        placeholder={t('add.paste_placeholder')}
+                        placeholder={t('add.multi.placeholder')}
                         rows={density === 'phone' ? 4 : 5}
                         autoFocus
                         aria-label={t('add.choose.paste')}
@@ -427,22 +460,42 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                             variant="secondary"
                             leading="paste"
                             onClick={() => void readClipboard()}
+                            disabled={boxLocked}
                             dataButton="paste-again"
                         >
                             {t('ui.paste')}
                         </Button>
-                        <DetectBadge t={t} kind={kind} />
+                        {!multi && <DetectBadge t={t} kind={kind} single={single} />}
                     </div>
-                    {(kind === 'http' || kind === 'uri') && (
+                    {multi && (
+                        <PasteList
+                            // A new paste is a new list.
+                            key={pasted}
+                            t={t}
+                            items={parsed.items}
+                            truncated={parsed.truncated}
+                            onImported={onImported}
+                            onConnect={onConnect}
+                            onClose={onClose}
+                            onPhase={setListPhase}
+                        />
+                    )}
+                    {single?.kind === 'messenger' && <MessengerRow t={t} item={single} />}
+                    {!multi && cannot && (
+                        <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }} data-testid="paste-cannot-add">
+                            {t('add.multi.refused.no_match')}
+                        </div>
+                    )}
+                    {!multi && !cannot && (kind === 'http' || kind === 'uri') && (
                         <div>
                             <Button onClick={() => void importPasted(pasted, kind)} dataButton="add-pasted">
                                 {t('add.pasted.add')}
                             </Button>
                         </div>
                     )}
-                    {kind === 'unknown' && <ErrorLine text={t('add.detect.unknown')} />}
+                    {!multi && kind === 'unknown' && <ErrorLine text={t('add.multi.unknown_single')} />}
                     {error && <ErrorLine text={error} />}
-                    <PasteHelp t={t} />
+                    {!multi && <PasteHelp t={t} />}
                 </div>
             )}
 
@@ -536,6 +589,7 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                     t={t}
                     outcome={stage.outcome}
                     name={stage.name}
+                    title={stage.title}
                     onConnect={stage.outcome.kind === 'done' ? connect : undefined}
                     onClose={onClose}
                 />
@@ -605,13 +659,50 @@ function PasteHelp({ t }: { t: (k: string) => string }) {
     // behind a question the person chooses to ask.
     return (
         <Disclosure summary={t('add.paste_help.title')} icon="help" dataButton="paste-help">
-            <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>{t('add.paste_help.body')}</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>{t('add.multi.help.body')}</div>
         </Disclosure>
     );
 }
 
-function DetectBadge({ t, kind }: { t: (k: string) => string; kind: PasteKind }) {
+/** One item of the paste, as the single flow reads it. A messenger
+ *  proxy is not added: it is handed to its own app (MessengerRow). */
+function singleKind(it: PasteItem): PasteKind | 'messenger' {
+    switch (it.kind) {
+        case 'route':
+            return 'uri';
+        case 'web':
+            return 'http';
+        case 'file':
+            return it.container === 'sbpx' ? 'sbpx-b64' : 'sbp-b64';
+        case 'messenger':
+            return 'messenger';
+        case 'unknown':
+            return 'unknown';
+    }
+}
+
+function MessengerRow({ t, item }: { t: (k: string) => string; item: Extract<PasteItem, { kind: 'messenger' }> }) {
+    return (
+        <div style={{ display: 'grid', gap: 10 }} data-item="messenger">
+            <div style={{ fontSize: 14, color: 'var(--muted)', lineHeight: 1.5 }}>{t(`add.multi.${item.app}.note`)}</div>
+            <div>
+                <Button leading="external" onClick={() => void openWithSystem(item.open)} dataButton={`paste-open-${item.app}`}>
+                    {t(`add.multi.${item.app}.open`)}
+                </Button>
+            </div>
+        </div>
+    );
+}
+
+function DetectBadge({ t, kind, single }: { t: (k: string) => string; kind: PasteKind | 'messenger'; single?: PasteItem }) {
     if (kind === 'empty' || kind === 'unknown') return null;
+    if (single?.kind === 'route' && !single.importable) return null;
+    if (kind === 'messenger' && single?.kind === 'messenger')
+        return (
+            <Badge tone="info" icon={false}>
+                {t(`add.multi.kind.${single.app}`)}
+            </Badge>
+        );
     const key = kind === 'http' ? 'add.detect.subscription' : kind === 'uri' ? 'add.detect.uri' : 'add.detect.ok';
     return (
         <Badge tone="good" icon="check">

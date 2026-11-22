@@ -76,6 +76,8 @@ pub mod relay_rotation;
 pub mod renew;
 pub mod restore_settle;
 pub mod setup_recovery;
+// "Links for other apps": share links for one person.
+pub mod share_links;
 #[cfg(test)]
 mod publisher_alone_tests;
 pub mod staging;

@@ -27,7 +27,7 @@ import type {
     ThroughputSnapshot,
     WhyThisRouteSummary,
 } from '../contract/D2Contract';
-import { familyLabel, familyName, meaningfulNickname } from './familyName';
+import { familyLabel, familyName, meaningfulNickname, type KindOf } from './familyName';
 import { autoResultKey } from './autoConnect';
 import { gradeText, localDigits } from './measured';
 import { isolate } from './format';
@@ -78,7 +78,7 @@ export function wayFact(t: T, conn: ConnectionSummary | null): WayFact | undefin
     if (!conn || conn.state !== 'connected' || !conn.activeRoute) return undefined;
     const r = conn.activeRoute;
     const out: WayFact = {
-        family: familyLabel(t, r.family),
+        family: familyLabel(t, r),
         maturity: r.familyMaturity,
         routeName: meaningfulNickname(r),
         publisher: r.publisherName || undefined,
@@ -142,7 +142,7 @@ export function whyFact(
     const left = failed.find((x) => x.why === 'was_connected');
     if (left) {
         const from = familyLabel(t, left.family);
-        const to = familyLabel(t, active?.family ?? mine?.family);
+        const to = familyLabel(t, active ?? mine?.family);
         if (from && to && from !== to) {
             return { token: 'switched', text: fill(t('home.why.switched'), { from, to }) };
         }
@@ -297,7 +297,7 @@ export function connectedFacts(input: {
 export function usingLine(t: T, name: string | undefined, conn: ConnectionSummary | null): string | undefined {
     // Names are isolated: a Latin name inside a Persian sentence keeps
     // its own direction and does not drag the "·" along with it.
-    const fam = conn?.state === 'connected' ? familyLabel(t, conn.activeRoute?.family) : undefined;
+    const fam = conn?.state === 'connected' ? familyLabel(t, conn.activeRoute) : undefined;
     if (!name) return fam ? t('conn.using').replace('{name}', isolate(fam)) : undefined;
     const using = t('conn.using').replace('{name}', isolate(name));
     return fam ? `${using} · ${isolate(fam)}` : using;
@@ -336,7 +336,7 @@ export function readyLine(t: T, locale: string, routes: readonly RouteDisplayRow
     if (usable.length === 0) return undefined;
     const count = t(usable.length === 1 ? 'home.ready.one' : 'home.ready.n').replace('{n}', localDigits(usable.length, locale));
     const best = bestHere(usable);
-    const fam = best ? familyLabel(t, best.family) : undefined;
+    const fam = best ? familyLabel(t, best) : undefined;
     return fam ? `${count} · ${t('home.ready.worked').replace('{family}', fam)}` : count;
 }
 
@@ -371,7 +371,7 @@ export function readyKinds(
     const order: string[] = [];
     for (const r of routes ?? []) {
         if (r.familyMaturity === 'unsupported') continue;
-        const n = familyLabel(t, r.family);
+        const n = familyLabel(t, r);
         if (!n) continue;
         if (!by.has(n)) {
             by.set(n, []);
@@ -420,9 +420,9 @@ export interface TryingFact {
     racing?: boolean;
 }
 
-function familyOf(id: string, auto: AutoStatus, conn: ConnectionSummary | null, routes: readonly RouteDisplayRow[] | undefined): string | undefined {
+function familyOf(id: string, auto: AutoStatus, conn: ConnectionSummary | null, routes: readonly RouteDisplayRow[] | undefined): KindOf {
     const r = routes?.find((x) => x.routeId === id) ?? (conn?.activeRoute?.routeId === id ? conn.activeRoute : undefined);
-    return r?.family ?? auto.tried.find((x) => x.routeId === id)?.family;
+    return r ?? auto.tried.find((x) => x.routeId === id)?.family;
 }
 
 /** What automatic connect is trying right now, by kind of connection.
@@ -532,7 +532,7 @@ export function triedRows(
         const r = routes?.find((y) => y.routeId === x.routeId);
         return {
             key: `${x.routeId}-${i}`,
-            family: familyName(t, x.family || r?.family),
+            family: familyName(t, x.family ? { family: x.family, viaCdn: r?.family === x.family && r.viaCdn === true } : r),
             ...(r && meaningfulNickname(r) ? { name: meaningfulNickname(r) } : {}),
             glyph: triedGlyph(x.result),
             reason: triedReason(t, x),
@@ -638,7 +638,7 @@ export function wayRows(input: {
         const nick = meaningfulNickname(r);
         return {
             routeId: r.routeId,
-            family: familyName(t, r.family),
+            family: familyName(t, r),
             ...(nick ? { name: nick } : {}),
             ...(status ? { status } : {}),
             state,

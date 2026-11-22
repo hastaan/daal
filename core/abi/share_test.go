@@ -212,6 +212,63 @@ func TestSharingDoesNotBypassTrustPath(t *testing.T) {
 	_ = base64.StdEncoding // referenced by sibling tests
 }
 
+// Two different links pasted back to back (the same second) are two
+// routes: the pasted route id carries a hash of the link's outbound, so
+// the second no longer replaces the first. The same link twice is one.
+func TestURIImport_TwoLinksInOneSecondAreTwoRoutes(t *testing.T) {
+	dir := t.TempDir()
+	if err := Init(dir, "warn"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { Shutdown() })
+	const pbk = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA"
+	first, err := URIImport("vless://uuid@example.com:443?security=reality&pbk=" + pbk + "&sid=01#a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp := extractField(first, "Fingerprint"); fp != "" {
+		ResolveTrustPrompt(fp, 0)
+	}
+	pasted := func() map[string]bool {
+		rows, err := mustCore().store.ListRoutes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, r := range rows {
+			if strings.HasPrefix(r.RouteID, "pasted-") {
+				out[r.RouteID] = true
+			}
+		}
+		return out
+	}
+	before := len(pasted())
+	for _, l := range []string{
+		"vless://uuid-b@example.com:443?security=reality&pbk=" + pbk + "&sid=01#b",
+		"vless://uuid-c@example.com:443?security=reality&pbk=" + pbk + "&sid=01#c",
+		"vless://uuid-c@example.com:443?security=reality&pbk=" + pbk + "&sid=01#c",
+	} {
+		if _, err := URIImport(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(pasted()); got != before+2 {
+		t.Fatalf("pasted routes = %d, want %d (two new, the repeat deduped): %v", got, before+2, pasted())
+	}
+}
+
+// A capitalised scheme (a phone keyboard, a messenger) is the same link.
+func TestURIImport_SchemeIsCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	if err := Init(dir, "warn"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { Shutdown() })
+	if _, err := URIImport("VLESS://uuid@example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01#x"); err != nil {
+		t.Fatalf("upper-case scheme refused: %v", err)
+	}
+}
+
 // splitHostPort, extractField, indexOf, contains live in abi_test.go;
 // re-export here as small helpers if the link is missing.
 

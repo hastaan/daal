@@ -460,9 +460,12 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	// Removal is deferred on ANY returned rule id, error or not: an
 	// add that fails after its write landed (read-back failure,
 	// concurrent change) returns the id with the error, and without the
-	// defer the hole would stay open to the helper until the expiry
-	// sweep.
-	healthRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, helper, healthPort, p.clock().Add(10*time.Minute))
+	// defer the hole would stay open to the helper until its expiry
+	// passed and the next add or remove on the firewall swept it
+	// (live_client.go sweepExpiredWindows). The windows are opened for
+	// healthWindowTTL, sized to outlive the whole wait, so another
+	// add's sweep cannot close them while the wait still needs them.
+	healthRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, helper, healthPort, p.clock().Add(healthWindowTTL()))
 	if healthRuleID != "" {
 		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), healthRuleID) }()
 	}
@@ -478,7 +481,7 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	} else if !strings.Contains(err.Error(), "no attached firewall") {
 		return fmt.Errorf("hetzner: open temporary health firewall: %w", err)
 	}
-	sshRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, helper, 22, p.clock().Add(10*time.Minute))
+	sshRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, helper, 22, p.clock().Add(healthWindowTTL()))
 	if sshRuleID != "" {
 		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), sshRuleID) }()
 	}
@@ -1523,7 +1526,7 @@ func (p *Provider) SetEphemeralFirewallRule(ctx context.Context, serverID, calle
 	}
 	if err != nil {
 		// The write may have landed before the failure: close it now
-		// rather than leave it to the expiry sweep. Removal is
+		// rather than leave it to the next expiry sweep. Removal is
 		// idempotent.
 		if id != "" {
 			_ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), id)

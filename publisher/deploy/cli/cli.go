@@ -152,6 +152,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runUsersPackSbp(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-pack-sbpx":
 		return runUsersPackSbpx(ctx, rest, os.Stdin, stdout, stderr)
+	case "users-share-links":
+		return runUsersShareLinks(ctx, rest, os.Stdin, stdout, stderr)
 	case "users-unpack-sbpx":
 		return runUsersUnpackSbpx(ctx, rest, os.Stdin, stdout, stderr)
 	case "report-keygen":

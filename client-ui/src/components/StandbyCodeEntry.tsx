@@ -7,7 +7,9 @@
 // engine checks it against the signed commitment in the held files and
 // keeps it only where it matches (lib/standbyKey.ts). A wrong code
 // cannot steer anyone anywhere, so the field says what happened and no
-// more. The code is never logged or echoed back.
+// more. The code is never logged or echoed back. The code may be the
+// plain key or the key wrapped for this person's own file
+// (specs/update-ladder-v2.md §3); the person cannot tell and need not.
 
 import { useState } from 'react';
 import { Button, Input } from '../design/primitives';
@@ -60,6 +62,11 @@ export function StandbyCodeEntry({
             style={{ display: 'grid', gap: 10 }}
         >
             <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)', lineHeight: 1.55 }}>{t('add.code.help')}</p>
+            {/* Either form of the code works here (plain, or wrapped
+                for the person's own file); the engine tries both. */}
+            <p data-testid="standby-code-file-note" style={{ margin: 0, fontSize: 13, color: 'var(--muted)', lineHeight: 1.55 }}>
+                {t('standby.wrap.entry_note')}
+            </p>
             <Input
                 value={code}
                 onChange={(e) => {

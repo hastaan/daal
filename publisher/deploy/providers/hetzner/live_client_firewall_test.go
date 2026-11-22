@@ -48,6 +48,11 @@ type fakeHcloudAPI struct {
 	// getDelay widens the read-modify-write window so a
 	// missing lock shows up as a lost update.
 	getDelay time.Duration
+	// detached: the server lists no firewall, while the firewall
+	// named daal-relay-4242 still exists (FirewallEnsureForServer's
+	// reuse path).
+	detached bool
+	applied  int
 }
 
 func ruleDesc(r schema.FirewallRule) string {
@@ -79,13 +84,25 @@ func (f *fakeHcloudAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/servers/%d", fakeServerID):
+		fws := []map[string]any{{"id": fakeFirewallID, "status": "applied"}}
+		if f.detached {
+			fws = []map[string]any{}
+		}
 		write(map[string]any{"server": map[string]any{
-			"id":   fakeServerID,
-			"name": "relay",
-			"public_net": map[string]any{
-				"firewalls": []map[string]any{{"id": fakeFirewallID, "status": "applied"}},
-			},
+			"id":         fakeServerID,
+			"name":       "relay",
+			"public_net": map[string]any{"firewalls": fws},
 		}})
+	case r.Method == http.MethodGet && r.URL.Path == "/firewalls":
+		write(map[string]any{
+			"firewalls": []map[string]any{{"id": fakeFirewallID, "name": "daal-relay-4242"}},
+			"meta":      map[string]any{"pagination": map[string]any{"page": 1, "per_page": 50, "total_entries": 1}},
+		})
+	case r.Method == http.MethodPost && r.URL.Path == fmt.Sprintf("/firewalls/%d/actions/apply_to_resources", fakeFirewallID):
+		f.mu.Lock()
+		f.applied++
+		f.mu.Unlock()
+		write(map[string]any{"actions": []any{}})
 	case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/firewalls/%d", fakeFirewallID):
 		if f.getDelay > 0 {
 			time.Sleep(f.getDelay)
@@ -149,7 +166,56 @@ func relayBaseline() []schema.FirewallRule {
 		{Direction: "in", Protocol: "udp", Port: p("443"), SourceIPs: srcAny},
 		{Direction: "in", Protocol: "tcp", Port: p("8444"), SourceIPs: srcAny},
 		{Direction: "in", Protocol: "tcp", Port: p("8445"), SourceIPs: srcAny},
-		{Direction: "in", Protocol: "tcp", Port: p("31337"), SourceIPs: []string{"192.0.2.10/32"}, Description: p("daal-eph-4242-192.0.2.10-31337-1")},
+		// Still in date (2096): an expired one would be swept by the
+		// next add or remove (TestLiveFirewall_EveryAddSweepsExpiredWindows).
+		{Direction: "in", Protocol: "tcp", Port: p("31337"), SourceIPs: []string{"192.0.2.10/32"}, Description: p("daal-eph-4242-192.0.2.10-31337-4000000000")},
+	}
+}
+
+// THE EXPIRY SWEEP: a window left by a process that was killed before
+// its defer ran (port 22 or the health port open to the helper's
+// address, which on mobile can be a carrier NAT shared by many) is
+// dropped by the next add or remove on that firewall, in the same
+// write. A window still in date, the Cloudflare rule and the baseline
+// stay.
+func TestLiveFirewall_EveryAddSweepsExpiredWindows(t *testing.T) {
+	p := func(s string) *string { return &s }
+	expired := "daal-eph-4242-192.0.2.11-22-1700000000"
+	inDate := fmt.Sprintf("daal-eph-4242-192.0.2.12-9876-%d", time.Now().Add(time.Hour).Unix())
+	f := &fakeHcloudAPI{rules: append(relayBaseline(),
+		schema.FirewallRule{Direction: "in", Protocol: "tcp", Port: p("22"), SourceIPs: []string{"192.0.2.11/32"}, Description: p(expired)},
+		schema.FirewallRule{Direction: "in", Protocol: "tcp", Port: p("9876"), SourceIPs: []string{"192.0.2.12/32"}, Description: p(inDate)},
+		schema.FirewallRule{Direction: "in", Protocol: "tcp", Port: p(cdnOriginPort), SourceIPs: []string{"173.245.48.0/20"}, Description: p(cdnRuleDescription)},
+	)}
+	l := newFakeLive(t, f)
+	ctx := context.Background()
+	id, err := l.FirewallAddEphemeralRule(ctx, strconv.Itoa(fakeServerID), "198.51.100.7", 40001, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.descriptions(), " ")
+	if strings.Contains(got, expired) {
+		t.Errorf("an expired window survived an unrelated add: %s", got)
+	}
+	for _, want := range []string{inDate, cdnRuleDescription, id, "daal-eph-4242-192.0.2.10-31337-4000000000", "tcp/80/"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q after the sweep: %s", want, got)
+		}
+	}
+	if f.setCalls != 1 {
+		t.Errorf("the sweep cost an extra write: %d set_rules", f.setCalls)
+	}
+
+	// A remove sweeps too, and an add of a rule already there that
+	// finds an expired window writes once to drop it.
+	f.mu.Lock()
+	f.rules = append(f.rules, schema.FirewallRule{Direction: "in", Protocol: "tcp", Port: p("22"), SourceIPs: []string{"192.0.2.11/32"}, Description: p(expired)})
+	f.mu.Unlock()
+	if err := l.FirewallRemoveEphemeralRule(ctx, "daal-eph-4242-203.0.113.1-1-4000000000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.descriptions(), " "); strings.Contains(got, expired) || !strings.Contains(got, id) {
+		t.Errorf("remove did not sweep, or swept too much: %s", got)
 	}
 }
 
@@ -166,7 +232,7 @@ func TestLiveFirewallApplyCloudflareRule_KeepsEveryOtherRule(t *testing.T) {
 	}
 	got := f.descriptions()
 	want := []string{"tcp/80/", "tcp/443/", "udp/443/", "tcp/8444/", "tcp/8445/",
-		"tcp/31337/daal-eph-4242-192.0.2.10-31337-1", "tcp/" + cdnOriginPort + "/" + cdnRuleDescription}
+		"tcp/31337/daal-eph-4242-192.0.2.10-31337-4000000000", "tcp/" + cdnOriginPort + "/" + cdnRuleDescription}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("rules after apply:\n got  %v\n want %v", got, want)
 	}
@@ -440,5 +506,73 @@ func TestLiveFirewallAddEphemeralRule_ReturnsTheIDWithAPostWriteError(t *testing
 	// Before any write (bad server id) there is nothing to close.
 	if id, err := l.FirewallAddEphemeralRule(context.Background(), "x", "198.51.100.7", 40001, time.Unix(1_900_000_000, 0)); err == nil || id != "" {
 		t.Errorf("pre-write failure: id=%q err=%v", id, err)
+	}
+}
+
+// W1-D: FirewallEnsureForServer reusing a detached firewall used to
+// call set_rules with the baseline alone, deleting Daal's Cloudflare
+// rule and any mgmt window still in date. It now resets only the
+// untagged rules.
+func TestLiveFirewallEnsureForServer_ReuseKeepsDaalRules(t *testing.T) {
+	p := func(s string) *string { return &s }
+	future := time.Now().Add(time.Hour).Unix()
+	live := fmt.Sprintf("daal-eph-4242-192.0.2.10-31337-%d", future)
+	stale := "daal-eph-4242-192.0.2.11-31338-1"
+	f := &fakeHcloudAPI{detached: true, rules: []schema.FirewallRule{
+		{Direction: "in", Protocol: "tcp", Port: p("80"), SourceIPs: []string{"0.0.0.0/0", "::/0"}},
+		// drift: someone opened 3389 to the world in the console
+		{Direction: "in", Protocol: "tcp", Port: p("3389"), SourceIPs: []string{"0.0.0.0/0"}},
+		{Direction: "in", Protocol: "tcp", Port: p(cdnOriginPort), SourceIPs: []string{"173.245.48.0/20"}, Description: p(cdnRuleDescription)},
+		{Direction: "in", Protocol: "tcp", Port: p("31337"), SourceIPs: []string{"192.0.2.10/32"}, Description: p(live)},
+		{Direction: "in", Protocol: "tcp", Port: p("31338"), SourceIPs: []string{"192.0.2.11/32"}, Description: p(stale)},
+	}}
+	l := newFakeLive(t, f)
+	ports := []relayports.Endpoint{{Port: 443}, {Port: 443, UDP: true}}
+	id, err := l.FirewallEnsureForServer(context.Background(), strconv.Itoa(fakeServerID), ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != strconv.Itoa(fakeFirewallID) || f.applied != 1 {
+		t.Fatalf("id=%q applied=%d", id, f.applied)
+	}
+	got := strings.Join(f.descriptions(), " ")
+	for _, want := range []string{"tcp/80/", "tcp/443/", "udp/443/", "tcp/" + cdnOriginPort + "/" + cdnRuleDescription, "tcp/31337/" + live} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %s", want, got)
+		}
+	}
+	for _, gone := range []string{"tcp/3389/", stale} {
+		if strings.Contains(got, gone) {
+			t.Errorf("kept %q: %s", gone, got)
+		}
+	}
+	if len(f.rules) != 5 {
+		t.Errorf("rules = %s, want 5", got)
+	}
+
+	// Already right: a second ensure writes nothing.
+	before := f.setCalls
+	if _, err := l.FirewallEnsureForServer(context.Background(), strconv.Itoa(fakeServerID), ports); err != nil {
+		t.Fatal(err)
+	}
+	if f.setCalls != before {
+		t.Errorf("an unchanged firewall was rewritten (%d -> %d)", before, f.setCalls)
+	}
+}
+
+func TestEphemeralRuleExpiry(t *testing.T) {
+	for desc, want := range map[string]int64{
+		"daal-eph-4242-192.0.2.10-31337-1900000000": 1_900_000_000,
+		"daal-eph-4242-2001:db8::1-22-1900000000":   1_900_000_000,
+	} {
+		got, ok := ephemeralRuleExpiry(desc)
+		if !ok || got.Unix() != want {
+			t.Errorf("%s: %v %v", desc, got, ok)
+		}
+	}
+	for _, desc := range []string{"", cdnRuleDescription, "daal-eph-x-y-z-notanumber"} {
+		if _, ok := ephemeralRuleExpiry(desc); ok {
+			t.Errorf("%q parsed as ephemeral", desc)
+		}
 	}
 }

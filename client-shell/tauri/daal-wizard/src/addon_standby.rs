@@ -97,9 +97,19 @@ pub struct StandbyPromoteInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StandbyPromoteResult {
     pub addon: AddonRow,
-    /// The 26-character standby key, grouped for reading aloud
-    /// (specs/relaypack-v1.md `_standby`). Not a secret once sent.
+    /// The 26-character standby code to send, grouped for reading aloud:
+    /// wrapped when every person on the relay holds the secret it is
+    /// wrapped under, else the plain key (`key_form` says which;
+    /// specs/update-ladder-v2.md §3).
     pub key: String,
+    /// `KEY_FORM_WRAPPED` | `KEY_FORM_PLAIN`.
+    #[serde(default = "plain_form")]
+    pub key_form: String,
+    /// The plain key, set only when `key` is wrapped: the quiet fallback
+    /// for a person whose phone cannot open the wrapped form (an older
+    /// build, or a file not imported yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_key: Option<String>,
     /// The pack signed with the standby as its address reached enough
     /// refresh addresses.
     pub refresh_note_published: bool,
@@ -116,7 +126,26 @@ pub struct StandbyKeyInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StandbyKey {
+    /// The code to send (see `StandbyPromoteResult::key`).
     pub key: String,
+    /// `KEY_FORM_WRAPPED`: useless without the person's own file, so it
+    /// may go by SMS, a call or a messenger. `KEY_FORM_PLAIN`: the
+    /// address in readable form (an Everyone file, or not every person
+    /// holds the secret yet).
+    #[serde(default = "plain_form")]
+    pub form: String,
+    /// See `StandbyPromoteResult::plain_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_key: Option<String>,
+}
+
+/// The code is the standby key wrapped under the people's update secret.
+pub const KEY_FORM_WRAPPED: &str = "wrapped";
+/// The code is the standby key itself.
+pub const KEY_FORM_PLAIN: &str = "plain";
+
+fn plain_form() -> String {
+    KEY_FORM_PLAIN.to_string()
 }
 
 // ---------------------------------------------------------------------
@@ -299,8 +328,13 @@ fn live_row(ctx: &WizardCtx, op: i64) -> Result<Option<AddonRow>> {
         .find(|r| r.kind == AddonKind::Standby && r.state != AddonState::Promoted))
 }
 
+/// Whether the relay has (or had) an Everyone file. The staged copy can
+/// be gone after a restore or a cleanup while the file is still in use,
+/// so the database's stamp counts too. Any doubt is "yes": the plain
+/// code is the safe answer.
 fn everyone_file(ctx: &WizardCtx, op: i64) -> bool {
     ctx.staging_dir.join(format!("{op}.shared.sbp")).exists()
+        || ctx.db.shared_box_fp(op).map(|f| !f.is_empty()).unwrap_or(true)
 }
 
 fn require_hetzner(rec: &Value) -> Result<()> {
@@ -337,8 +371,18 @@ pub fn key_text(salt_b64: &str, ipv4: &str) -> Option<String> {
     if salt.len() != 12 {
         return None;
     }
-    let mut k = salt;
-    k.extend_from_slice(&ip.octets());
+    let mut k = [0u8; 16];
+    k[..12].copy_from_slice(&salt);
+    k[12..].copy_from_slice(&ip.octets());
+    Some(text_of(&k))
+}
+
+fn key_of(standby: &Value) -> Option<String> {
+    key_text(standby.get("salt")?.as_str()?, standby.get("ip")?.as_str()?)
+}
+
+/// The text form of any 16 bytes (a key or a wrapped key).
+fn text_of(k: &[u8; 16]) -> String {
     let bit = |i: usize| -> u8 {
         if i >= 128 {
             0
@@ -357,11 +401,354 @@ pub fn key_text(salt_b64: &str, ipv4: &str) -> Option<String> {
         }
         s.push(CROCKFORD[v] as char);
     }
-    Some(s)
+    s
 }
 
-fn key_of(standby: &Value) -> Option<String> {
-    key_text(standby.get("salt")?.as_str()?, standby.get("ip")?.as_str()?)
+/// The 16 bytes of a code in text form (`bundle.ParseStandbyKeyText`:
+/// case, spaces and `-` ignored, O→0, I/L→1, trailing bits zero).
+fn bytes_of_text(s: &str) -> Option<[u8; 16]> {
+    let mut vals = Vec::with_capacity(26);
+    for c in s.chars() {
+        let c = match c.to_ascii_uppercase() {
+            ' ' | '-' => continue,
+            'O' => '0',
+            'I' | 'L' => '1',
+            c => c,
+        };
+        vals.push(CROCKFORD.iter().position(|&x| x as char == c)? as u8);
+        if vals.len() > 26 {
+            return None;
+        }
+    }
+    if vals.len() != 26 {
+        return None;
+    }
+    let mut k = [0u8; 16];
+    for (sym, v) in vals.iter().enumerate() {
+        for b in 0..5 {
+            let bit = sym * 5 + b;
+            let on = v & (0x10 >> b) != 0;
+            if bit >= 128 {
+                if on {
+                    return None;
+                }
+            } else if on {
+                k[bit / 8] |= 0x80 >> (bit % 8);
+            }
+        }
+    }
+    Some(k)
+}
+
+// ---------------------------------------------------------------------
+// The update secret and the wrapped code (specs/update-ladder-v2.md)
+// ---------------------------------------------------------------------
+//
+// The publisher keeps ONE update root (custody, `UPDATE_ROOT_ALIAS`) and
+// derives each relay's audience secret from it:
+//
+//   u = HKDF-SHA256(ikm = root, salt = "daal/update-v2",
+//                   info = relay_pack_id ‖ 0x0A ‖ audience)
+//
+// `relay_pack_id` is the one the relay had when its first secret was
+// made, kept for the relay's life in the relay's update state (a
+// rotation that renames the pack must not change what phones hold).
+// The person's file carries `u` (never the root) in its sealed half; the
+// helper gets it in the 0600 creds file it already reads, never as an
+// argument (`people_secret_for_file`, `everyone_secret_for_file`).
+//
+// The code to send is wrapped (`wrap_key`) only when it opens for every
+// person: no Everyone file, and every current person's newest file
+// carries the current generation. REMOVAL: a person removed while
+// holding the current generation could unwrap every later code, so the
+// next file made (or the next time the code is asked for) moves the
+// relay to a new generation (`people/<g>`). Until every remaining person
+// has a file of it, the plain code is the one that works for everyone,
+// and `key` says so. The secret is never logged or returned.
+
+/// Custody alias of the publisher's update root (32 random bytes).
+pub const UPDATE_ROOT_ALIAS: &str = "update_root";
+const UPDATE_SALT: &[u8] = b"daal/update-v2";
+
+pub(crate) fn update_state_alias(op: i64) -> String {
+    format!("update_people_{op}")
+}
+
+/// One relay's update state (custody, `update_people_<op>`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+struct UpdateState {
+    /// The relay_pack_id the secret is derived with.
+    pack_id: String,
+    /// The people generation (1 = "people").
+    gen: u32,
+    /// Recipient fingerprint → the generation of the newest file made
+    /// for them.
+    holders: BTreeMap<String, u32>,
+    /// A tag of the root the state was made under: a root that is not
+    /// that one (a restore that did not carry it) resets the state.
+    root_tag: String,
+}
+
+/// The secret a file carries, for the creds JSON the helper reads
+/// (`update_secret`, `update_audience`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateSecretForFile {
+    pub secret_b64: zeroize::Zeroizing<String>,
+    pub audience: String,
+    /// The people generation the secret is of (0 for the Everyone
+    /// audience). Handed back to `record_holder` once the file is made.
+    pub gen: u32,
+}
+
+impl UpdateSecretForFile {
+    /// Adds the secret to the creds JSON the helper reads
+    /// (`update_secret`, `update_audience`).
+    pub fn add_to_creds(&self, creds: &mut Value) {
+        if let Some(obj) = creds.as_object_mut() {
+            obj.insert("update_secret".into(), Value::String(self.secret_b64.to_string()));
+            obj.insert("update_audience".into(), Value::String(self.audience.clone()));
+        }
+    }
+}
+
+fn people_audience(gen: u32) -> String {
+    if gen <= 1 {
+        "people".into()
+    } else {
+        format!("people/{gen}")
+    }
+}
+
+/// u for (root, pack id, audience).
+pub fn derive_update_secret(
+    root: &[u8],
+    pack_id: &str,
+    audience: &str,
+) -> zeroize::Zeroizing<[u8; 32]> {
+    let mut info = Vec::with_capacity(pack_id.len() + 1 + audience.len());
+    info.extend_from_slice(pack_id.as_bytes());
+    info.push(0x0A);
+    info.extend_from_slice(audience.as_bytes());
+    let mut u = zeroize::Zeroizing::new([0u8; 32]);
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(UPDATE_SALT), root)
+        .expand(&info, &mut u[..])
+        .expect("32 bytes is a valid HKDF length");
+    u
+}
+
+/// The wrapped form of a standby key: key XOR HKDF(u, "wrap" ‖ commit)
+/// [0:16], commit = SHA-256("daal/standby-v1" ‖ key) as 32 raw bytes.
+pub fn wrap_key(key: &[u8; 16], u: &[u8; 32]) -> [u8; 16] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"daal/standby-v1");
+    h.update(key);
+    let commit = h.finalize();
+    let mut info = Vec::with_capacity(4 + 32);
+    info.extend_from_slice(b"wrap");
+    info.extend_from_slice(&commit);
+    let mut pad = [0u8; 16];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(UPDATE_SALT), u)
+        .expand(&info, &mut pad)
+        .expect("16 bytes is a valid HKDF length");
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        out[i] = key[i] ^ pad[i];
+    }
+    out
+}
+
+/// The publisher's update root, made on first use. A custody that is
+/// locked or broken is an error, never a reason to make a new root (that
+/// would silently change every relay's secret).
+fn update_root(ctx: &WizardCtx) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    match ctx.custody.get(UPDATE_ROOT_ALIAS) {
+        Ok(b) if b.len() == 32 => Ok(zeroize::Zeroizing::new(b)),
+        Ok(_) => Err(coded(
+            crate::commands::E_CUSTODY_BACKEND,
+            "the update root in this device's key store is damaged",
+        )),
+        Err(crate::device_custody::CustodyError::NotFound(_)) => {
+            use rand::RngCore;
+            let mut r = zeroize::Zeroizing::new(vec![0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(&mut r[..]);
+            crate::commands::custody_put(ctx, UPDATE_ROOT_ALIAS, &r)?;
+            Ok(r)
+        }
+        Err(e) => Err(crate::commands::map_custody_err(ctx, UPDATE_ROOT_ALIAS, e)),
+    }
+}
+
+fn root_tag(root: &[u8]) -> String {
+    let u = derive_update_secret(root, "", "root-tag");
+    hex::encode(&u[..8])
+}
+
+/// The people the relay's files are for now: fingerprints of recipients
+/// not removed.
+fn current_people(ctx: &WizardCtx, op: i64) -> Result<std::collections::BTreeSet<String>> {
+    Ok(ctx
+        .db
+        .list_recipients(op)?
+        .into_iter()
+        .filter(|r| r.revoked_at_unix == 0)
+        .map(|r| r.fingerprint_hex)
+        .collect())
+}
+
+/// Loads the relay's state under `root`, applying the removal rule: a
+/// holder of the current generation who is no longer a person on the
+/// relay moves it to the next one. Saved when anything changed. None
+/// when the relay has no signed pack yet (no id to derive with) and no
+/// state.
+fn load_update_state(ctx: &WizardCtx, op: i64, root: &[u8]) -> Result<Option<UpdateState>> {
+    let tag = root_tag(root);
+    let mut st: UpdateState = match ctx.custody.get(&update_state_alias(op)) {
+        // Damage is an error, never a fresh start: a fresh state would
+        // restart at generation 1, the secret every person removed in
+        // generation 1 still holds.
+        Ok(b) => serde_json::from_slice(&b).map_err(|_| {
+            coded(
+                crate::commands::E_CUSTODY_BACKEND,
+                "this relay's update state in this device's key store is damaged",
+            )
+        })?,
+        Err(crate::device_custody::CustodyError::NotFound(_)) => UpdateState::default(),
+        Err(e) => {
+            return Err(crate::commands::map_custody_err(
+                ctx,
+                &update_state_alias(op),
+                e,
+            ))
+        }
+    };
+    let before = st.clone();
+    if st.root_tag != tag {
+        st = UpdateState {
+            root_tag: tag,
+            ..UpdateState::default()
+        };
+    }
+    if st.pack_id.is_empty() {
+        match ctx
+            .db
+            .get(op)?
+            .signed_sbp_relay_pack_id
+            .filter(|p| !p.is_empty())
+        {
+            Some(p) => st.pack_id = p,
+            None => return Ok(None),
+        }
+    }
+    st.gen = st.gen.max(1);
+    let people = current_people(ctx, op)?;
+    if st
+        .holders
+        .iter()
+        .any(|(fp, g)| *g == st.gen && !people.contains(fp))
+    {
+        st.gen += 1;
+    }
+    st.holders.retain(|fp, _| people.contains(fp));
+    if st != before {
+        save_update_state(ctx, op, &st)?;
+    }
+    Ok(Some(st))
+}
+
+fn save_update_state(ctx: &WizardCtx, op: i64, st: &UpdateState) -> Result<()> {
+    let body = serde_json::to_vec(st).map_err(|e| WizardError::Validation(e.to_string()))?;
+    crate::commands::custody_put(ctx, &update_state_alias(op), &body)
+}
+
+/// The secret to write into the file being made for one person
+/// (`_recipient_fp_hex`, already a recipient of the relay). Nothing is
+/// recorded here: the caller calls `record_holder` only once the helper
+/// said the file carries the secret (`"update_secret": true`) and the
+/// file was written. An older helper ignores the secret, and a person
+/// recorded as holding a secret their file lacks would make every
+/// wrapped code fail for them. None when the relay has no signed pack
+/// yet: that file simply carries no secret, and its codes work in the
+/// plain form.
+pub fn people_secret_for_file(
+    ctx: &WizardCtx,
+    op: i64,
+    _recipient_fp_hex: &str,
+) -> Result<Option<UpdateSecretForFile>> {
+    let root = update_root(ctx)?;
+    let Some(st) = load_update_state(ctx, op, &root)? else {
+        return Ok(None);
+    };
+    let audience = people_audience(st.gen);
+    let u = derive_update_secret(&root, &st.pack_id, &audience);
+    Ok(Some(UpdateSecretForFile {
+        secret_b64: zeroize::Zeroizing::new(B64.encode(&u[..])),
+        audience,
+        gen: st.gen,
+    }))
+}
+
+/// Records that the file just made for `recipient_fp_hex` carries the
+/// secret of generation `gen` (from `people_secret_for_file`). Call it
+/// only after the helper reported `"update_secret": true` and the file
+/// was written.
+pub fn record_holder(ctx: &WizardCtx, op: i64, recipient_fp_hex: &str, gen: u32) -> Result<()> {
+    let root = update_root(ctx)?;
+    let Some(mut st) = load_update_state(ctx, op, &root)? else {
+        return Ok(());
+    };
+    st.holders.insert(recipient_fp_hex.to_string(), gen);
+    save_update_state(ctx, op, &st)
+}
+
+/// The secret to write into the relay's Everyone file. Public by
+/// construction; it never wraps a code.
+pub fn everyone_secret_for_file(ctx: &WizardCtx, op: i64) -> Result<Option<UpdateSecretForFile>> {
+    let root = update_root(ctx)?;
+    let Some(st) = load_update_state(ctx, op, &root)? else {
+        return Ok(None);
+    };
+    let u = derive_update_secret(&root, &st.pack_id, "everyone");
+    Ok(Some(UpdateSecretForFile {
+        secret_b64: zeroize::Zeroizing::new(B64.encode(&u[..])),
+        audience: "everyone".into(),
+        gen: 0,
+    }))
+}
+
+/// The code to send for a plain key: wrapped when it opens for every
+/// person on the relay, else the plain key. Never fails the caller: any
+/// doubt is the plain form, which is what the relay sent before.
+fn code_to_send(ctx: &WizardCtx, op: i64, plain: &str) -> (String, String, Option<String>) {
+    let plain_out = (plain.to_string(), KEY_FORM_PLAIN.to_string(), None);
+    if everyone_file(ctx, op) {
+        return plain_out;
+    }
+    let Some(key) = bytes_of_text(plain) else {
+        return plain_out;
+    };
+    // Only read the root here: asking for a code must not make one.
+    if !crate::commands::custody_has(ctx, UPDATE_ROOT_ALIAS) {
+        return plain_out;
+    }
+    let Ok(root) = update_root(ctx) else {
+        return plain_out;
+    };
+    let Ok(Some(st)) = load_update_state(ctx, op, &root) else {
+        return plain_out;
+    };
+    let Ok(people) = current_people(ctx, op) else {
+        return plain_out;
+    };
+    if people.is_empty() || !people.iter().all(|fp| st.holders.get(fp) == Some(&st.gen)) {
+        return plain_out;
+    }
+    let u = derive_update_secret(&root, &st.pack_id, &people_audience(st.gen));
+    (
+        text_of(&wrap_key(&key, &u)),
+        KEY_FORM_WRAPPED.to_string(),
+        Some(plain.to_string()),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -645,9 +1032,13 @@ pub fn promote(
         }),
     )?;
     addons::set_state(ctx, row.id, AddonState::Promoted)?;
+    // The row keeps the plain key; what is shown is the code to send.
+    let (key, key_form, plain_key) = code_to_send(ctx, op, &key);
     Ok(StandbyPromoteResult {
         addon: addons::get(ctx, row.id)?,
         key,
+        key_form,
+        plain_key,
         refresh_note_published: resigned.refresh_note_published,
         warnings,
     })
@@ -667,7 +1058,8 @@ pub fn key(
     if rows.iter().any(|r| r.state == AddonState::Ready) {
         let (_, rec) = record(ctx, op)?;
         if let Some(k) = record_standby(&rec).and_then(key_of) {
-            return Ok(StandbyKey { key: k });
+            let (key, form, plain_key) = code_to_send(ctx, op, &k);
+            return Ok(StandbyKey { key, form, plain_key });
         }
     }
     // Else the most recent switch.
@@ -683,7 +1075,8 @@ pub fn key(
         })
         .filter(|k| !k.is_empty())
     {
-        return Ok(StandbyKey { key: k });
+        let (key, form, plain_key) = code_to_send(ctx, op, &k);
+        return Ok(StandbyKey { key, form, plain_key });
     }
     Err(WizardError::Validation(
         "this relay has no standby key".into(),

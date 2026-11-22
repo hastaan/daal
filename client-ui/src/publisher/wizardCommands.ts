@@ -52,6 +52,27 @@ import type {
 
 export type { QrFountainFrame };
 
+/** "Links for other apps": one importable link. `way` is
+ *  `vless-reality`, `hysteria2`, `shadowsocks` or `cdn`. `link` is a
+ *  credential: never log it. */
+export interface ShareLink {
+    way: string;
+    label: string;
+    link: string;
+}
+
+/** A way in with no link. `reason`: `needs_insecure`,
+ *  `missing_material`, `not_signed`, `shows_cdn_name`, `no_link_format`. */
+export interface ShareLeftOut {
+    way: string;
+    reason: string;
+}
+
+export interface ShareLinksResult {
+    links: ShareLink[];
+    left_out: ShareLeftOut[];
+}
+
 export interface RecipientSummary {
     id: number;
     name: string;
@@ -1787,6 +1808,13 @@ export const Wizard = {
      */
     recipientRepackSbpx: (operator_id: number, recipient_id: number) =>
         invoke<RecipientSummary>('wizard_recipient_repack_sbpx', {
+            operatorId: operator_id,
+            recipientId: recipient_id,
+        }),
+    /** Share links for other apps, for one live person. No relay round
+     *  trip; refused for a removed person. */
+    recipientShareLinks: (operator_id: number, recipient_id: number) =>
+        invoke<ShareLinksResult>('wizard_recipient_share_links', {
             operatorId: operator_id,
             recipientId: recipient_id,
         }),

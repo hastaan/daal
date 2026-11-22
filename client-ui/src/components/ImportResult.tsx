@@ -68,6 +68,8 @@ interface Props {
     outcome: Exclude<ImportOutcome, { kind: 'trust' }>;
     /** The publisher's name, when known: "From {name}". */
     name?: string;
+    /** The heading when something else than a file was added (a link). */
+    title?: string;
     /** Present when "Connect" can start a connection from here. */
     onConnect?: () => void;
     onClose: () => void;
@@ -92,7 +94,7 @@ function Heading({ state, title }: { state: 'ok' | 'bad'; title: string }) {
     );
 }
 
-export default function ImportResult({ t, outcome, name, onConnect, onClose }: Props) {
+export default function ImportResult({ t, outcome, name, title, onConnect, onClose }: Props) {
     const dev = useDeveloperMode();
     if (outcome.kind === 'refused') {
         return (
@@ -110,7 +112,7 @@ export default function ImportResult({ t, outcome, name, onConnect, onClose }: P
     const lines = unavailableLines(t, outcome.verdict);
     return (
         <div data-testid="import-done" style={{ display: 'grid', gap: 14, padding: '8px 0 4px' }}>
-            <Heading state="ok" title={t('add.done')} />
+            <Heading state="ok" title={title ?? t('add.done')} />
             {name && (
                 <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)', textAlign: 'center' }}>
                     <bdi>{t('add.done.from').replace('{name}', name)}</bdi>

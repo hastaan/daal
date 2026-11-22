@@ -164,7 +164,9 @@ describe('the add sheet: one sheet, three ways in', () => {
         await React.act(async () => {
             await wait(PASTE_SETTLE_MS + 60);
         });
-        expect(m.container.textContent).toContain("This isn't a Daal file.");
+        // The box takes anything now: the line does not say "file".
+        expect(m.container.textContent).toContain('Daal found nothing it can use in this text.');
+        expect(m.container.textContent).not.toContain("This isn't a Daal file.");
         expect(calls).not.toContain('importSbpBytes');
     });
 

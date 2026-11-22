@@ -113,6 +113,7 @@ interface RawRouteSummary {
     health_pct: number | null;
     proven?: boolean;
     checked_when_used?: boolean;
+    via_cdn?: boolean;
     // What the engine measured for this route on the CURRENT network:
     // {grade, setup_ms, samples, carried, failed, last}. Untyped on
     // purpose — lib/measured.ts parseMeasured is the one reading, and
@@ -238,6 +239,7 @@ function rawToRowAll(r: RawRouteSummary): RouteDisplayRow {
         measured: parseMeasured(r.measured),
         proven: !!r.proven,
         ...(r.checked_when_used === true ? { checkedWhenUsed: true } : {}),
+        ...(r.via_cdn === true ? { viaCdn: true } : {}),
     };
 }
 

@@ -17,6 +17,12 @@ package abi
 //     by the refresh walk (core/refresh, lane L-fetch:
 //     AcceptStandbyKeyBytes / StandbyKeySink).
 //
+// Either form of the code is accepted (specs/update-ladder-v2.md §3):
+// the plain key, or the key wrapped under the update secret of the
+// person's file (bundle/go/bundle/standby_wrap.go). Each held route
+// tries the code as typed, then unwrapped with its own file's secret;
+// the signed commitment decides.
+//
 // An accepted key is kept on every held route whose commitment it
 // opens, as its 16 raw bytes under bundle.StandbyKeyStoreKey (encrypted
 // secrets_kv). Nothing else is written: the set-route guard
@@ -127,7 +133,6 @@ func (c *Core) acceptStandbyKey(relayPackID string, k bundle.StandbyKeyBytes) (S
 	if err != nil {
 		return StandbyKeyResult{}, fmt.Errorf("abi: list routes: %w", err)
 	}
-	usable := bundle.StandbyAddressOK(k.Address())
 	sealed, n := 0, 0
 	for _, row := range rows {
 		if row.RelayPackID == "" || (relayPackID != "" && row.RelayPackID != relayPackID) {
@@ -145,10 +150,28 @@ func (c *Core) acceptStandbyKey(relayPackID string, k bundle.StandbyKeyBytes) (S
 			continue
 		}
 		sealed++
-		if !usable || !sb.Matches(k) {
+		// Try the code as typed, then unwrapped with the update secret
+		// of this route's file (bundle Standby.MatchStandbyCode): the
+		// signed commitment decides which, if either, is the key. An
+		// Everyone secret, or none (an older file), means the plain
+		// form only.
+		// Every secret held for the route is tried (newest first); with
+		// none, the plain form only.
+		secrets := c.routeUpdateSecrets(row.RouteID)
+		if len(secrets) == 0 {
+			secrets = []*bundle.UpdateSecret{nil}
+		}
+		var key bundle.StandbyKeyBytes
+		ok := false
+		for _, s := range secrets {
+			if key, ok = sb.MatchStandbyCode(k, s); ok {
+				break
+			}
+		}
+		if !ok || !bundle.StandbyAddressOK(key.Address()) {
 			continue
 		}
-		kb := k // PutSecret wipes what it is handed
+		kb := key // PutSecret wipes what it is handed
 		if err := c.store.PutSecret(bundle.StandbyKeyStoreKey(row.RouteID), kb[:]); err != nil {
 			return StandbyKeyResult{}, fmt.Errorf("abi: keep standby key: %w", err)
 		}
@@ -163,4 +186,15 @@ func (c *Core) acceptStandbyKey(relayPackID string, k bundle.StandbyKeyBytes) (S
 	}
 	engine.LogInfo(fmt.Sprintf("standby key outcome=%s routes=%d", res.Outcome, res.Routes))
 	return res, nil
+}
+
+// routeUpdateSecrets are the update secrets held for a route's files
+// (bundle.UpdateSecretStoreKey, written by core/trust SaveImport),
+// newest first, or none. Never logged.
+func (c *Core) routeUpdateSecrets(routeID string) []*bundle.UpdateSecret {
+	raw, err := c.store.GetSecret(bundle.UpdateSecretStoreKey(routeID))
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	return bundle.ParseHeldUpdateSecrets(raw)
 }

@@ -86,8 +86,13 @@ export interface StandbyPromoteInput {
 }
 export interface StandbyPromoteResult {
     addon: AddonRow;
-    /** The 26-character standby key, grouped. */
+    /** The 26-character code to send, grouped: wrapped or plain. */
     key: string;
+    /** Which form `key` is in (addon_standby.rs). Absent = plain. */
+    key_form?: 'wrapped' | 'plain';
+    /** The plain key, only when `key` is wrapped: the fallback for a
+     *  phone that cannot open the wrapped form. */
+    plain_key?: string;
     refresh_note_published: boolean;
     warnings: string[];
 }
@@ -96,6 +101,10 @@ export interface StandbyKeyInput {
 }
 export interface StandbyKey {
     key: string;
+    /** See StandbyPromoteResult.key_form. */
+    form?: 'wrapped' | 'plain';
+    /** See StandbyPromoteResult.plain_key. */
+    plain_key?: string;
 }
 
 // ---- way in through Cloudflare (addon_cdn.rs) ----

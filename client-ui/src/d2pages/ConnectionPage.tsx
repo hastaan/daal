@@ -38,6 +38,7 @@ import { useDensity } from '../design/DensityProvider';
 import DaalButton from '../components/DaalButton';
 import WayChooser, { routeLabel } from '../components/connection/WayChooser';
 import AutoFailure from '../components/connection/AutoFailure';
+import HandoffCard, { handoffShown } from '../components/connection/HandoffCard';
 import MeasuredDetails from '../components/connection/MeasuredDetails';
 import { anyMeasured, localDigits } from '../lib/measured';
 import { checkAllRoutes, surveyLine, surveyRefusedKey, surveyRunning } from '../lib/routeSurvey';
@@ -865,7 +866,14 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 )}
                 {dev && failure && (
                     <div style={{ marginBlockStart: 8 }}>
-                        <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev />
+                        <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev handoff={false} />
+                    </div>
+                )}
+                {/* For everyone, not only developer mode: other apps that
+                    may work right now, once Daal's own ways ran out. */}
+                {failure && handoffShown(failure.verdict) && (
+                    <div style={{ marginBlockStart: 12 }}>
+                        <HandoffCard t={t} />
                     </div>
                 )}
             </aside>

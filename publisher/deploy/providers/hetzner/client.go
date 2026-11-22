@@ -130,9 +130,10 @@ type hcloudClient interface {
 	// server's firewall. Returns a stable rule identifier the
 	// caller persists in EphemeralFirewallRule.ID. Hetzner's
 	// Cloud Firewalls API does not enforce server-side TTL, so
-	// the adapter spawns a defensive expiry sweep; the Helper
-	// is still expected to call FirewallRemoveEphemeralRule on
-	// completion. FRP-10 §9.5.2.
+	// every add and remove also drops the windows already past
+	// their expiry (live_client.go sweepExpiredWindows); the
+	// Helper is still expected to call FirewallRemoveEphemeralRule
+	// on completion. FRP-10 §9.5.2.
 	//
 	// An error may come WITH a non-empty ruleID: the write may have
 	// landed before the failure (read-back failed, concurrent change).

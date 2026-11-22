@@ -281,3 +281,57 @@ func TestProvisionCancelledDuringHealthWaitRollsBack(t *testing.T) {
 		t.Errorf("%d server(s) left billing after a cancel", len(f.servers))
 	}
 }
+
+// W1-D: the temporary windows were opened for 10 minutes while the
+// wait (60 tries) can run about 20. The window must outlive the
+// slowest wait, and grow with it.
+func TestHealthWindowTTL_OutlivesTheWait(t *testing.T) {
+	// One try at its slowest, from the timeouts the loop really uses:
+	// SSH dial 3 s, health poll 5 s, port-443 probe 3 s, plus interval.
+	slowTry := healthInterval + 3*time.Second + 5*time.Second + 3*time.Second
+	if worst := time.Duration(healthMaxAttempts) * slowTry; healthWindowTTL() <= worst {
+		t.Fatalf("window %s does not outlive a %s wait", healthWindowTTL(), worst)
+	}
+	if healthWindowTTL() <= 20*time.Minute {
+		t.Fatalf("window %s is not longer than the ~20 minute wait seen in the field", healthWindowTTL())
+	}
+	if healthWindowTTL() < healthWaitBudget() {
+		t.Fatal("window shorter than the wait budget")
+	}
+	old := healthMaxAttempts
+	t.Cleanup(func() { healthMaxAttempts = old })
+	base := healthWindowTTL()
+	healthMaxAttempts *= 2
+	if healthWindowTTL() <= base {
+		t.Fatal("the window does not grow with the number of tries")
+	}
+}
+
+// Both temporary windows of the health wait are opened for
+// healthWindowTTL (sized to outlive the whole wait), not the old 10
+// minutes that ran out half way through a slow wait: another add's
+// expiry sweep would otherwise close them while the wait still needed
+// them.
+func TestWaitForHealthyOpensItsWindowsForTheWholeWait(t *testing.T) {
+	fastHealthWait(t, closedPort(t), 2, false)
+	f := newFake()
+	p := New(f)
+	now := time.Unix(1_800_000_000, 0)
+	p.SetClock(func() time.Time { return now })
+	rec, srv := waitRec()
+	opts := provider.ProvisionOpts{HelperIP: net.ParseIP("90.1.2.3")}
+	_ = p.waitForHealthy(context.Background(), rec, srv, "tok", opts, func(string, string) {})
+	ports := map[int]bool{}
+	for _, e := range f.ephemeralAdded {
+		ports[e.Port] = true
+		if want := now.Add(healthWindowTTL()); !e.ExpiresAt.Equal(want) {
+			t.Errorf("port %d window expires %v, want %v", e.Port, e.ExpiresAt, want)
+		}
+	}
+	if !ports[healthPort] || !ports[22] {
+		t.Errorf("windows opened on %v, want %d and 22", ports, healthPort)
+	}
+	if len(f.ephemeralRules) != 0 {
+		t.Errorf("windows left open after the wait: %v", f.ephemeralRules)
+	}
+}

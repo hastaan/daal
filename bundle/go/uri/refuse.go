@@ -56,13 +56,19 @@ var (
 	// The link is missing something the engine needs or carries a
 	// value it cannot use (REALITY key, port list).
 	ErrMalformed = errors.New("uri: link_malformed")
+
+	// The profile may be dialled only when the person picks it
+	// (Profile.ManualOnly), and the host has nowhere to keep that yet,
+	// so it is refused rather than stored as an ordinary route that an
+	// automatic connect would race.
+	ErrManualOnly = errors.New("uri: manual_only")
 )
 
 // RefusalCode returns the stable token for an importer refusal (for
 // example "transport_unsupported"), or "" when err is not one.
 func RefusalCode(err error) string {
 	for _, s := range []error{ErrTransportUnsupported, ErrHeaderTypeUnsupported, ErrFlowUnsupported,
-		ErrEncryptionUnsupported, ErrPlaintext, ErrInsecure, ErrMalformed} {
+		ErrEncryptionUnsupported, ErrPlaintext, ErrInsecure, ErrMalformed, ErrManualOnly} {
 		if errors.Is(err, s) {
 			return strings.TrimPrefix(s.Error(), "uri: ")
 		}
@@ -284,3 +290,16 @@ func ssPlaintextMethod(method string) bool {
 // Shorter values make sing-quic rebind its UDP socket on a near-busy
 // ticker, which on a phone is battery and CPU for nothing.
 const MinHopInterval = 5 * time.Second
+
+// linkInsecure reports whether any of a link's certificate-check
+// switches (insecure=1, allow_insecure=true, Clash skip-cert-verify:
+// true) is on.
+func linkInsecure(vals ...string) bool {
+	for _, v := range vals {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes":
+			return true
+		}
+	}
+	return false
+}

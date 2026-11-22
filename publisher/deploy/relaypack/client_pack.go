@@ -87,6 +87,23 @@ const unavailableMarkerKey = bundle.UnavailableMarkerKey
 // one they think they shipped, which is the same silent-shrink failure
 // this wave spent a lane removing elsewhere.
 func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, []SkippedRoute, error) {
+	return RewriteProfilesForRecipientWithSecret(sbp, params, nil)
+}
+
+// RewriteProfilesForRecipientWithSecret is RewriteProfilesForRecipient
+// that also writes the audience's update secret (specs/update-ladder-v2.md
+// §2) as the archive member bundle.UpdateSecretPath: beside the
+// per-recipient profiles, outside the signed manifest. For a person's
+// file the caller then seals the whole archive to them (`.sbpx`), so the
+// secret is in the encrypted half; the Everyone file carries only the
+// Everyone audience's secret (the CLI refuses anything else for it).
+//
+// secret nil: no member. Either way any member of that name already in
+// the INPUT is dropped, so a secret can never ride from one file into
+// another through a reused input pack. (users-pack-sbpx without
+// --creds-file does not come through here; it refuses an input that
+// carries the member instead.)
+func RewriteProfilesForRecipientWithSecret(sbp []byte, params ClientConnParams, secret *bundle.UpdateSecret) ([]byte, []SkippedRoute, error) {
 	b, err := bundle.ParseSBP(bytes.NewReader(sbp), int64(len(sbp)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("rewrite: parse sbp: %w", err)
@@ -101,6 +118,14 @@ func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, [
 		return nil, nil, fmt.Errorf("rewrite: read archive: %w", err)
 	}
 	delete(files, "manifest.json")
+	delete(files, bundle.UpdateSecretPath)
+	if secret != nil {
+		member, err := bundle.MarshalUpdateSecret(*secret)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rewrite: update secret: %w", err)
+		}
+		files[bundle.UpdateSecretPath] = member
+	}
 
 	var skipped []SkippedRoute
 	rendered := 0

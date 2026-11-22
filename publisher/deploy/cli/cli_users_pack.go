@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 
+	"daal/bundle-go/bundle"
 	"daal/bundle-go/envelope"
 	"daal/publisher/deploy/profiles"
 	"daal/publisher/deploy/relaypack"
@@ -334,13 +335,24 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "users-pack-sbp: %v\n", err)
 		return 2
 	}
+	// The Everyone file is public: it carries the Everyone audience's
+	// update secret or none, never a person's (cli_users_pack_secret.go).
+	secret, err := updateSecretFromCredsFile(*credsFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "creds-file: %v\n", err)
+		return 2
+	}
+	if secret != nil && secret.Audience != bundle.AudienceEveryone {
+		fmt.Fprintf(stderr, "users-pack-sbp: %v\n", errEveryoneFileSecret)
+		return 2
+	}
 	// Degrades per route and fails only when NOTHING renders. A route
 	// whose credential the relay did not report is dropped from the
 	// usable set and reported here; the tiers that do work still ship.
 	// The old behaviour — first error kills the pack — meant a stale
 	// daal-relay-mgmt artifact pin cost the recipient every family,
 	// including the four that were fine.
-	rewritten, skipped, err := relaypack.RewriteProfilesForRecipient(plaintext, params)
+	rewritten, skipped, err := relaypack.RewriteProfilesForRecipientWithSecret(plaintext, params, secret)
 	if err != nil {
 		fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
 		return 1
@@ -354,6 +366,8 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		"sbp_path": *outPath,
 		"sbp_size": len(rewritten),
 		"shared":   true,
+		// Whether the file carries an update secret; never its value.
+		"update_secret": secret != nil,
 		// Always present (possibly empty) so a caller that reads it
 		// cannot mistake "no field" for "nothing was dropped".
 		"skipped_families": skippedFamilyNames(skipped),
@@ -414,6 +428,7 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 	// outbounds for this recipient before enveloping. Fails closed if a
 	// route can't be made connectable — a pack must not ship a dead route.
 	skippedFamilies := []string{}
+	hasSecret := false
 	if *credsFile != "" {
 		if *server == "" {
 			fmt.Fprintln(stderr, "--server is required with --creds-file")
@@ -428,14 +443,25 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 			fmt.Fprintf(stderr, "users-pack-sbpx: %v\n", err)
 			return 2
 		}
+		// The person's audience secret, sealed with the rest of the
+		// archive to this recipient below (cli_users_pack_secret.go).
+		secret, err := updateSecretFromCredsFile(*credsFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "creds-file: %v\n", err)
+			return 2
+		}
+		hasSecret = secret != nil
 		var skipped []relaypack.SkippedRoute
-		plaintext, skipped, err = relaypack.RewriteProfilesForRecipient(plaintext, params)
+		plaintext, skipped, err = relaypack.RewriteProfilesForRecipientWithSecret(plaintext, params, secret)
 		if err != nil {
 			fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
 			return 1
 		}
 		warnSkippedRoutes(stderr, skipped)
 		skippedFamilies = skippedFamilyNames(skipped)
+	} else if archiveHasUpdateSecret(plaintext) {
+		fmt.Fprintf(stderr, "users-pack-sbpx: %v\n", errInputCarriesSecret)
+		return 2
 	}
 
 	if len(plaintext) > envelope.MaxCiphertextBytes {
@@ -462,6 +488,8 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 		"sbpx_size":      len(wrapped),
 		// See runUsersPackSbp: always present, possibly empty.
 		"skipped_families": skippedFamilies,
+		// Whether the file carries an update secret; never its value.
+		"update_secret": hasSecret,
 	}); err != nil {
 		fmt.Fprintf(stderr, "encode: %v\n", err)
 		return 1

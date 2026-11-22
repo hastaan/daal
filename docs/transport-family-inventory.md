@@ -104,6 +104,20 @@ overrides that plan's wording.
   an SNI, which today's ws-tls hello does not.
   `specs/modifiers/tls_fragment.md` stays PENDING with the detail.
 
+**In the app (2026-11-22, W1-B/W1-C).** The hysteria2 caveat is now
+the kind's own help line (`family.hysteria2.about`, dated "as of
+November 2026"; the Files card reads it first, `lib/fileFacts.ts`
+familyAbout); the name stays "Hysteria 2". A `cdn_fronted`
+websocket-tls route (the `_cdn_endpoint` carrier) is no longer a second
+plain "WebSocket TLS": the route summary carries `via_cdn`
+(`core/abi/d2_summaries.go`) and every name helper says «WebSocket TLS ·
+Cloudflare», with a one-line help that it goes through Cloudflare and is
+a little slower. After a failed connect the hand-off card
+(`components/connection/HandoffCard.tsx`) names Psiphon, Lantern and
+Orbot/Tor Browser as other organisations' networks, with no counts and
+no promise, and hands any Tor bridge lines to Orbot by share sheet or
+QR only. The profile order was already right and was not changed.
+
 ### How each relay port answers a stranger, and what each family carries (2026-11-18)
 
 Two properties of the seven families a Daal relay serves that the
