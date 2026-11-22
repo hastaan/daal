@@ -577,6 +577,13 @@ func (p *autoPass) race(a, b autoCandidate, index int) (requeue []autoCandidate)
 		return nil
 	}
 	p.outcome(w, out, other.routeID, ms)
+	if out.result == AutoResultCarried {
+		// The running route's latest proof is the race's: a side
+		// instance, timed the way the survey times the others — the
+		// hand-over's own time includes starting the tunnel's instance,
+		// which no other route is charged with (connect_best.go).
+		c.speed.lastCheck = time.Duration(ms) * time.Millisecond
+	}
 	if p.connected == "" {
 		// Proved beside the tunnel and not through it. The route is
 		// charged with that failure; a probe that was stopped for its

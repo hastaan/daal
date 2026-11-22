@@ -323,6 +323,7 @@ func Init(stateDir, logLevel string) error {
 		subs:                 make(chan engine.Event, 32),
 	}
 	core.pm.SetNow(nowUTC)
+	core.adapter.OnRouteRebound = core.routeRebound
 	core.driver.Subscribe(core.subs)
 	// From what this Init just did, not only from the marker on disk:
 	// the marker is written best-effort (a nearly full disk can take the
@@ -708,6 +709,9 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 			err: &routeFailure{routeID: routeID, category: cat, reason: reason}}
 	}
 	setupMs := setupOf(time.Since(started), res)
+	// The running route's latest proof, until its first liveness check
+	// (the move to the best route compares against it: connect_best.go).
+	c.speed.lastCheck = time.Duration(setupMs) * time.Millisecond
 	c.routeUpLocked(routeID, family, res)
 	c.startLivenessLocked()
 	if !o.noMemory {

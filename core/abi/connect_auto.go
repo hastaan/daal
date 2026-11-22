@@ -979,15 +979,27 @@ func (c *Core) resumeFailedRouteLocked(routeID string, cat diagnostics.Category)
 // charged to the route: the detour was the engine's own. Called with
 // Core.mu held.
 func (c *Core) resumeSlowRouteLocked(routeID string) bool {
+	return c.resumeCarryingRouteLocked(routeID, true)
+}
+
+// resumeCarryingRouteLocked is resumeSlowRouteLocked for a route that was
+// carrying either way: slow false puts it back in the state "ok" (the
+// move to the best route, connect_best.go, leaves routes that are not
+// slow). One liveness check is asked for at once either way.
+func (c *Core) resumeCarryingRouteLocked(routeID string, slow bool) bool {
 	family, ok := c.restartInstanceLocked(routeID)
 	if !ok {
 		return false
 	}
-	c.routeUpLocked(routeID, family, engine.ProofResult{OK: true, Slow: true})
+	c.routeUpLocked(routeID, family, engine.ProofResult{OK: true, Slow: slow})
 	c.startLivenessLocked()
 	rearmTunnelRefresh()
 	c.kickLiveness()
-	engine.LogInfo(fmt.Sprintf("auto resume route=%s family=%s result=running state=degraded", engine.LogID(routeID), engine.LogID(family)))
+	state := RouteCheckOK
+	if slow {
+		state = RouteCheckDegraded
+	}
+	engine.LogInfo(fmt.Sprintf("auto resume route=%s family=%s result=running state=%s", engine.LogID(routeID), engine.LogID(family), state))
 	return true
 }
 
@@ -1009,10 +1021,15 @@ func (c *Core) resumeSlowRouteLocked(routeID string) bool {
 //  2. This network's memory (core/netmem RouteMemory, keyed by the
 //     hashed network id the host last reported; one shared bucket when
 //     it has reported none): routes whose last outcome HERE was a round
-//     trip come first, most recent first; routes that failed here within
-//     autoFailureMemory and have not carried since go last. Both keep
-//     the ranking's order among themselves where the memory does not
-//     decide.
+//     trip come first, the BEST first — the best grade here
+//     (netmem.GradeRank: good, ok, slow), then a route timed here before
+//     one never timed, then the shortest remembered setup time, then the
+//     most recent — so the next connect on a network starts with the
+//     route the survey and the move to the best route (connect_best.go)
+//     found best, not with whichever was checked last; routes that
+//     failed here within autoFailureMemory and have not carried since go
+//     last. Both keep the ranking's order among themselves where the
+//     memory does not decide.
 func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left []AutoTried, routes int, err error) {
 	rows, err := c.store.ListRoutes()
 	if err != nil {
@@ -1136,8 +1153,18 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 		}
 	}
 	sort.SliceStable(first, func(i, j int) bool {
-		ki := netmem.VariantKey(first[i].cd.routeID, first[i].cd.variant.suffix())
-		kj := netmem.VariantKey(first[j].cd.routeID, first[j].cd.variant.suffix())
+		a, b := first[i].cd, first[j].cd
+		if ra, rb := netmem.GradeRank(a.grade), netmem.GradeRank(b.grade); ra != rb {
+			return ra > rb
+		}
+		if ta, tb := a.samples > 0, b.samples > 0; ta != tb {
+			return ta
+		}
+		if a.samples > 0 && a.measuredMs != b.measuredMs {
+			return a.measuredMs < b.measuredMs
+		}
+		ki := netmem.VariantKey(a.routeID, a.variant.suffix())
+		kj := netmem.VariantKey(b.routeID, b.variant.suffix())
 		return mem[ki].CarriedSeq > mem[kj].CarriedSeq
 	})
 	for _, group := range [][]placed{first, middle, last} {

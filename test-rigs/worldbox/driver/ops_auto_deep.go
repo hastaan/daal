@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -38,11 +39,16 @@ func init() {
 //	          on the new endpoint, never more than two endpoints in use.
 //	          Then the censor delays the NEW route and frees the old: the
 //	          engine stays where it is and opens no connection to any
-//	          other endpoint for as long as the rig watches (the hold).
+//	          other endpoint for as long as the rig watches (the hold) —
+//	          bar the survey's own checks of the other routes, which the
+//	          engine's `survey` block names (they move nothing).
 //	metered   The same start on a network the host calls metered. The
 //	          engine stays on the slow route and the censor sees no new
-//	          connection to any other endpoint: no probe is started by
-//	          the engine itself on a network the person pays for.
+//	          connection to any other endpoint: no probe for a move is
+//	          started by the engine itself on a network the person pays
+//	          for. (The survey's one check of each route per day there is
+//	          by design — core/abi survey.go METERED — and is told apart
+//	          by its `survey` block.)
 //	networks  engine_network_facts, as the Android service's callback
 //	          calls it. A route that carried on network X is checked
 //	          alone on X, is "unknown" on network Y and is NOT pulled
@@ -211,6 +217,56 @@ func (p *autoPhone) watch(step string, limit time.Duration, t0 time.Time, done f
 }
 
 func endpointOf(f Family) string { return fmt.Sprintf("%s/%d", f.Endpoint.Proto, f.Endpoint.Port) }
+
+// surveyedEndpoints: the endpoints of the routes the engine's survey
+// (core/abi survey.go: the other routes checked one at a time beside the
+// tunnel, 10–20 s after a connect and 10–25 s apart) says it checked or
+// is checking, read from the diagnostics blob's `survey` block. Those
+// connections are the survey's — which checks a route once a day on a
+// metered network too, by design — not a probe for a move: the hold and
+// the metered phone judge everything else.
+func (a *autoOp) surveyedEndpoints(diag map[string]any, routes []autoRoute) map[string]bool {
+	out := map[string]bool{}
+	sv, _ := diag["survey"].(map[string]any)
+	if sv == nil {
+		return out
+	}
+	add := func(family string) {
+		if f, ok := a.rc.Fams[family]; ok {
+			out[endpointOf(f)] = true
+		}
+	}
+	results, _ := sv["results"].([]any)
+	for _, x := range results {
+		m, _ := x.(map[string]any)
+		switch m["result"] {
+		case "carried", "not_carrying", "start_failed", "cancelled":
+			fam, _ := m["family"].(string)
+			add(fam)
+		}
+	}
+	if checking, _ := sv["checking"].([]any); len(checking) > 0 {
+		// Only ids: the family is in the results once filed; a route in
+		// flight at the last poll is matched by the phone's route list.
+		for _, id := range checking {
+			for _, r := range routes {
+				if r.ID == id {
+					add(r.Family)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func surveyedText(m map[string]bool) string {
+	var out []string
+	for e := range m {
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
+}
 
 // ---- slow: a route the censor delays is graded slow -----------------------
 
@@ -446,8 +502,10 @@ func (a *autoOp) speedMove(metered bool) {
 		if pkts, err := ReadFlowTap(rc.P); err == nil {
 			uses := flowUses(pkts, holdFrom, time.Now())
 			ev["censor_saw"] = flowText(uses, holdFrom)
+			surveyed := a.surveyedEndpoints(diag, p.routes)
+			ev["surveyed"] = surveyedText(surveyed)
 			for _, u := range uses {
-				if u.Endpoint != endpointOf(nf) {
+				if u.Endpoint != endpointOf(nf) && !surveyed[u.Endpoint] {
 					wrong = append(wrong, "the censor saw a new connection to "+u.Endpoint+" during the hold: something was probed")
 				}
 			}
@@ -490,8 +548,10 @@ func (a *autoOp) staysOnMetered(p *autoPhone, first autoRoute, ff Family, slowFr
 		if pkts, err := ReadFlowTap(rc.P); err == nil {
 			uses := flowUses(pkts, slowFrom, time.Now())
 			ev["censor_saw"] = flowText(uses, slowFrom)
+			surveyed := a.surveyedEndpoints(diag, p.routes)
+			ev["surveyed"] = surveyedText(surveyed)
 			for _, u := range uses {
-				if u.Endpoint != endpointOf(ff) {
+				if u.Endpoint != endpointOf(ff) && !surveyed[u.Endpoint] {
 					wrong = append(wrong, "the censor saw a new connection to "+u.Endpoint+": the engine probed on a metered network")
 				}
 			}

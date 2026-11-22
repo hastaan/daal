@@ -1,6 +1,11 @@
 package abi
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"daal/core/engine"
+)
 
 // RouteDelete is engine_route_delete: hard-remove a single imported route
 // (and its per-route secrets) from the device store. Distinct from a
@@ -45,4 +50,20 @@ func PublisherDelete(publisherID string) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// routeRebound is core/trust StoreAdapter.OnRouteRebound: an import has
+// saved a route whose id now names another server (a new relay under a
+// reused id, a new address, a new relay key — core/trust
+// route_identity.go) and has reset the route row's history. What the
+// engine keeps beside the row goes too: every network's memory of the
+// route and its variants (the grade, the setup time, the order of the
+// next connect), and the path manager's cooldown. Takes no Core lock —
+// an import may run under it.
+func (c *Core) routeRebound(routeID string) {
+	if st := netmemStore(); st != nil {
+		_ = st.ForgetRoute(routeID)
+	}
+	c.pm.Forgive(routeID)
+	engine.LogInfo(fmt.Sprintf("route history reset route=%s reason=another_server", engine.LogID(routeID)))
 }

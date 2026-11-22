@@ -30,6 +30,14 @@ type StoreAdapter struct {
 	// (linux/darwin/windows), false for android/ios.
 	ModifierRuntimeGOOS string
 	ModifierDesktopHint bool
+
+	// OnRouteRebound, when set, is called after SaveImport has saved a
+	// route whose id now names another server than before (route
+	// identity: route_identity.go) and has reset the row's history: the
+	// engine drops what it keeps beside the row (core/abi). Called
+	// without any lock of the store's, once per such route, right after
+	// its row is saved.
+	OnRouteRebound func(routeID string)
 }
 
 // ModifierPlatformPolicy is the trust-package view of the FRP-12
@@ -216,6 +224,23 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 		"import via Phase 1B importer", time.Now().UTC()); err != nil {
 		return err
 	}
+	// A route id that now names another server (route_identity.go):
+	// read before anything of the route is overwritten, reset as soon as
+	// its row is.
+	reboundSet := map[string]bool{}
+	for _, r := range routes {
+		held, err := a.heldIdentity(r.RouteID)
+		if err != nil || !held.ok {
+			continue
+		}
+		var heldProfile []byte
+		if len(r.Profile) == 0 {
+			heldProfile, _ = a.S.GetSecret("route:" + r.RouteID)
+		}
+		if held.otherServer(savedIdentity(r, heldProfile)) {
+			reboundSet[r.RouteID] = true
+		}
+	}
 	// One pack's mirror set is denormalised onto every one of its
 	// candidates; write it once.
 	mirrorsSaved := map[string]bool{}
@@ -255,6 +280,19 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 		}
 		if err := a.S.UpsertRoute(row); err != nil {
 			return fmt.Errorf("save route %s: %w", r.RouteID, err)
+		}
+		// The history of a route whose id now names another server is
+		// about the server it replaced. A failure to clear it fails the
+		// import: a fresh relay shown as "worked before" is the bug this
+		// closes, and the person can import the file again.
+		if reboundSet[r.RouteID] {
+			delete(reboundSet, r.RouteID)
+			if err := a.S.ResetRouteHistory(r.RouteID); err != nil {
+				return fmt.Errorf("reset history %s: %w", r.RouteID, err)
+			}
+			if a.OnRouteRebound != nil {
+				a.OnRouteRebound(r.RouteID)
+			}
 		}
 		// FRP-8: park the pack's signed freshness mirror set where the
 		// refresher can find it.

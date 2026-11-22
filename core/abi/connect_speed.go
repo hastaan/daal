@@ -39,8 +39,10 @@ import (
 //     included — is at most speedMoveFactorPct percent of the time the
 //     running route's last check took. Otherwise the engine stays.
 //  6. After a probe that did not lead to a move: no further speed probe
-//     for speedProbeBackoff. After a move: none for speedMoveHold, so a
-//     network on which everything is slow cannot make the engine flap.
+//     for speedProbeBackoff. After a move — this one or the move to the
+//     best route (connect_best.go), which shares the hold and the
+//     hand-over (moveLocked) — none for speedMoveHold, so a network on
+//     which everything is slow cannot make the engine flap.
 //
 // A move is reported as the verdict "moved_faster" on the connected
 // `auto` block. A candidate that fails its side probe is not cooled
@@ -65,15 +67,22 @@ const (
 
 // AutoVerdictMovedFaster: connected, on a route the engine moved to by
 // itself because the one before had become slow and this one proved
-// clearly faster.
+// clearly faster — or, when the survey ended, because this one proved
+// clearly better than the one the connect had kept (connect_best.go).
 const AutoVerdictMovedFaster = "moved_faster"
 
 // speedState is the hold and the back-off. Guarded by Core.mu.
 type speedState struct {
 	nextProbeAt time.Time
 	holdUntil   time.Time
-	// lastCheck: how long the last check of the connected route took.
+	// lastCheck: how long the latest proof of the connected route took —
+	// its connect's setup time (connectRouteLocked; for a race's winner,
+	// its side probe's: connect_race.go), then each liveness check's.
 	lastCheck time.Duration
+	// bestGen: the automatic pass (autoState.gen) whose connect the move
+	// to the best route has already been tried for (connect_best.go):
+	// once per connect.
+	bestGen uint64
 }
 
 // speedLimitMs is the setup time a candidate must not exceed to be
@@ -180,10 +189,29 @@ func (c *Core) autoSpeedMove(ctx context.Context) {
 		return
 	}
 
-	// The move. From here the tunnel's instance is replaced.
-	out := c.connectRouteLocked(cd.routeID, connectOpts{auto: true, noMemory: true})
+	c.moveLocked(gen, moveFrom{routeID: current, family: currentFamily, slow: true}, cd, nil, ms, "speed")
+}
+
+// moveFrom is the route a move leaves: slow when it was moved off for
+// being slow (connect_speed.go), not when it was left for a clearly
+// better one (connect_best.go).
+type moveFrom struct {
+	routeID, family string
+	slow            bool
+}
+
+// moveLocked is the move itself, the same for both moves: the tunnel's
+// instance is replaced by cd's (variant: the one to start, nil for the
+// route's variant in use), and the hold starts. A hand-over that fails
+// is charged to cd and the route left is put back as a fall-over puts a
+// route back (resumeCarryingRouteLocked), never charged for the detour.
+// ms: cd's setup time as just proved. why: the log word. Called with
+// Core.mu held; returns with it held. True when the tunnel runs on cd.
+func (c *Core) moveLocked(gen uint64, from moveFrom, cd autoCandidate, variant *routeVariant, ms int, why string) bool {
+	// From here the tunnel's instance is replaced.
+	out := c.connectRouteLocked(cd.routeID, connectOpts{auto: true, noMemory: true, variant: variant})
 	if c.auto.gen != gen || out.result == AutoResultCancelled {
-		return
+		return false
 	}
 	if out.result != AutoResultCarried {
 		// It proved beside the tunnel and not through it. Charge it,
@@ -191,31 +219,37 @@ func (c *Core) autoSpeedMove(ctx context.Context) {
 		if out.result == AutoResultNotCarrying || out.result == AutoResultStartFailed {
 			c.autoSettleLocked([]autoCharge{{routeID: cd.routeID, family: cd.family, cat: out.category}}, true, nil, false)
 		}
-		engine.LogInfo(fmt.Sprintf("auto speed back route=%s reason=move_failed category=%s", engine.LogID(current), engine.LogID(string(out.category))))
+		engine.LogInfo(fmt.Sprintf("auto %s back route=%s reason=move_failed category=%s", why, engine.LogID(from.routeID), engine.LogID(string(out.category))))
 		// The way back is the way a fall-over takes: the instance is
 		// started again with no pass/fail check in front of it. A fresh
 		// connection check of a route KNOWN to be slow can run out its
 		// budget, and that used to charge the route the person was
 		// connected on with a failure the engine's own detour caused —
 		// and leave nothing behind the tunnel at all.
-		if c.resumeSlowRouteLocked(current) {
-			return
+		if c.resumeCarryingRouteLocked(from.routeID, from.slow) {
+			return false
 		}
 		// Its instance would not even start. The other routes are tried
 		// with this one as the route to put back when nothing carries.
-		c.autoPassLocked(&autoLost{routeID: current, family: currentFamily, cat: diagnostics.PathTooSlow}, false)
-		return
+		cat := diagnostics.PathTooSlow
+		if !from.slow {
+			cat = out.category
+		}
+		c.autoPassLocked(&autoLost{routeID: from.routeID, family: from.family, cat: cat}, false)
+		return false
 	}
 	c.speed.holdUntil = nowUTC().Add(speedMoveHold)
+	left := AutoTried{RouteID: from.routeID, Family: from.family, Result: AutoResultCarried, Why: AutoWhyWasConnected}
+	if from.slow {
+		left.Category = string(diagnostics.PathTooSlow)
+	}
 	a := &c.auto
 	a.mu.Lock()
 	a.state, a.mode = AutoStateConnected, true
 	a.trying, a.index, a.racing = "", 0, nil
 	a.routeID, a.family, a.verdict = cd.routeID, cd.family, AutoVerdictMovedFaster
-	a.tried = []AutoTried{
-		{RouteID: current, Family: currentFamily, Result: AutoResultCarried, Category: string(diagnostics.PathTooSlow), Why: AutoWhyWasConnected},
-		{RouteID: cd.routeID, Family: cd.family, Result: AutoResultCarried, Why: cd.why, SetupMs: ms},
-	}
+	a.tried = []AutoTried{left, {RouteID: cd.routeID, Family: cd.family, Result: AutoResultCarried, Why: cd.why, SetupMs: ms}}
 	a.mu.Unlock()
-	engine.LogInfo(fmt.Sprintf("auto moved_faster from=%s to=%s family=%s setup_ms=%d", engine.LogID(current), engine.LogID(cd.routeID), engine.LogID(cd.family), logMs(ms)))
+	engine.LogInfo(fmt.Sprintf("auto moved_faster from=%s to=%s family=%s setup_ms=%d why=%s", engine.LogID(from.routeID), engine.LogID(cd.routeID), engine.LogID(cd.family), logMs(ms), why))
+	return true
 }

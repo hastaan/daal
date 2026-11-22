@@ -29,10 +29,14 @@ import (
 // engine proves, one at a time, the routes of the file that have no
 // fresh result on this network — each in a side instance
 // (connect_race.go, engine.SideProber), exactly the connection check a
-// connect makes. The running tunnel is not touched: no Start, no Stop,
-// no route switch, ever. Moving for speed stays the job of the speed
-// rules (connect_speed.go); what the survey writes into this network's
-// memory is what those rules read, and that is the whole of the link.
+// connect makes. While it runs the tunnel is not touched: no Start, no
+// Stop, no route switch. What it writes into this network's memory is
+// what the moves read: when a survey of the network the device is on
+// ENDS (state done, not stopped) and the automatic connect is in charge,
+// the engine compares what it now knows and moves ONCE to a route that
+// is clearly better than the one carrying (connect_best.go); a route
+// that turns slow later is the speed rules' (connect_speed.go). A route
+// picked by hand is never left.
 //
 // THE PACING IS THE POINT (see WHY ONLY TWO in connect_race.go). A
 // phone opening every route of its file in one second is a burst a
@@ -44,6 +48,26 @@ import (
 // (sideProbesPerHour) and the per-route gap (sideProbeRouteGap), and a
 // background survey leaves surveyReserve of the allowance untouched for
 // the passes that need it to fall over.
+//
+// WHY THESE WAITS (2026-11-22). They were 20–40 s, then 30–90 s apart:
+// a file of four routes took two to five minutes to be known, and
+// the move to the best route (connect_best.go) waits for the survey to
+// end — a person who connected and looked at the page a minute later
+// was still on whichever route proved first ("it did not try all the
+// ways to pick the best; it just took the first one"). Now the first
+// check comes 10–20 s after the connect (the tunnel has carried the
+// person's first page loads; the connect's own probes are behind it)
+// and the next ones 10–25 s apart, so three other routes are known in
+// about 40–95 s and the survey is over within one to two minutes.
+// What makes the survey quiet is not a long wait but the shape: one
+// side connection at a time, beside a tunnel that is already carrying,
+// at an irregular interval — each check is the same handshake and one
+// round trip a connect makes, and ten to twenty-five seconds apart is
+// already slower than a browser opening tabs. The other limits are
+// unchanged and still bound it: the hourly allowance (a background
+// survey stops at sideProbesPerHour − surveyReserve), the per-route
+// gap, the once-a-day rule on a metered network, and the result kept
+// for surveyFresh — a reconnect within the hour checks nothing again.
 //
 // WHAT IS SKIPPED. The route the tunnel runs on; a route whose result
 // on this network is newer than surveyFresh (it already shows a score);
@@ -118,10 +142,10 @@ import (
 // connected route is failing its own check, while a pass is in flight,
 // and while the host says there is no network.
 const (
-	surveyFirstMin = 20 * time.Second
-	surveyFirstMax = 40 * time.Second
-	surveyGapMin   = 30 * time.Second
-	surveyGapMax   = 90 * time.Second
+	surveyFirstMin = 10 * time.Second
+	surveyFirstMax = 20 * time.Second
+	surveyGapMin   = 10 * time.Second
+	surveyGapMax   = 25 * time.Second
 	// surveyUserGapMin / Max: between two pairs of a survey the person
 	// asked for.
 	surveyUserGapMin = 1500 * time.Millisecond
@@ -220,6 +244,24 @@ type surveyRun struct {
 
 	queue   []autoCandidate
 	planned bool
+
+	// parent: the context the survey was started on (the liveness
+	// loop's, or the person's survey's own): it outlives the survey and
+	// ends with the tunnel, and the move to the best route that follows
+	// the survey's end runs on it (connect_best.go).
+	parent context.Context
+	// proved: what this survey's checks that carried measured, by route
+	// — the "proved now" the move to the best route reads. Guarded by
+	// Core.mu.
+	proved map[string]surveyProof
+}
+
+// surveyProof is one carried survey check: its setup time, the variant
+// it was made with, and when it was filed.
+type surveyProof struct {
+	ms      int
+	variant string
+	at      time.Time
 }
 
 func (r *surveyRun) trigger() string {
@@ -325,7 +367,7 @@ func (c *Core) startSurveyLocked(ctx context.Context, user bool) *surveyRun {
 	s := &c.survey
 	s.mu.Lock()
 	s.ids++
-	r := &surveyRun{id: s.ids, user: user, net: activeNetworkID(), cancel: cancel, state: SurveyWaiting}
+	r := &surveyRun{id: s.ids, user: user, net: activeNetworkID(), cancel: cancel, state: SurveyWaiting, parent: ctx}
 	old := s.run
 	if old != nil && old.stopReason == "" {
 		old.stopReason = "replaced"
@@ -359,9 +401,18 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// runSurvey is one survey's goroutine.
+// runSurvey is one survey's goroutine. A survey that ran to its end
+// (not one that was stopped) is followed, on the same goroutine, by the
+// move to the best route (connect_best.go), which decides for itself
+// whether one is due.
 func (c *Core) runSurvey(ctx context.Context, r *surveyRun) {
-	defer c.finishSurvey(ctx, r)
+	c.surveyLoop(ctx, r)
+	if c.finishSurvey(ctx, r) {
+		c.autoBestMove(r.parent, r)
+	}
+}
+
+func (c *Core) surveyLoop(ctx context.Context, r *surveyRun) {
 	wait := time.Duration(0)
 	if !r.user {
 		wait = surveyFirstDelay()
@@ -393,7 +444,8 @@ func (c *Core) runSurvey(ctx context.Context, r *surveyRun) {
 	}
 }
 
-func (c *Core) finishSurvey(ctx context.Context, r *surveyRun) {
+// finishSurvey files the survey's end; true when it ran to its end.
+func (c *Core) finishSurvey(ctx context.Context, r *surveyRun) bool {
 	s := &c.survey
 	s.mu.Lock()
 	if s.run == r {
@@ -416,6 +468,7 @@ func (c *Core) finishSurvey(ctx context.Context, r *surveyRun) {
 	}
 	s.mu.Unlock()
 	r.cancel()
+	return !stopped
 }
 
 func orDash(s string) string {
@@ -675,6 +728,12 @@ func (c *Core) surveyFile(ctx context.Context, r *surveyRun, batch []surveyItem,
 				_ = c.store.RecordSuccess(cd.routeID, now)
 			}
 			sr.Result, sr.SetupMs, counts = SurveyResultCarried, ms, true
+			if mine && !d.res.Slow {
+				if r.proved == nil {
+					r.proved = map[string]surveyProof{}
+				}
+				r.proved[cd.routeID] = surveyProof{ms: ms, variant: cd.variant.suffix(), at: now}
+			}
 		default:
 			cat := d.res.Category()
 			if !autoSilent(cat) {

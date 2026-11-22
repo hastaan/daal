@@ -858,6 +858,32 @@ WHERE route_id = ?`, HourBucket(now), category, maxConsecutiveFailures, cd, rout
 	return err
 }
 
+// ResetRouteHistory clears everything routeID's row says about how the
+// route did: the success, failure and degraded hours and category, the
+// failure count, the cooldown, and the rendezvous channel that last won
+// for it. For a route id that now names ANOTHER server (core/trust
+// SaveImport: a new relay under a reused id, a new address, a new key):
+// "worked before" and the score were about the server it replaced.
+// The byte counters stay — they are the person's use this hour and
+// session, not the server's record. A route that is absent is a no-op.
+func (s *Store) ResetRouteHistory(routeID string) error {
+	if routeID == "" {
+		return errors.New("routestore: empty routeID")
+	}
+	_, err := s.db.Exec(`
+UPDATE routes SET
+  last_success_bucket             = NULL,
+  last_failure_bucket             = NULL,
+  last_failure_category           = NULL,
+  consecutive_failures            = 0,
+  cooldown_until                  = NULL,
+  last_degraded_bucket            = '',
+  last_degraded_category          = '',
+  last_winning_rendezvous_channel = ''
+WHERE route_id = ?`, routeID)
+	return err
+}
+
 // MarkPublisherRoutesRevoked sets every route under publisherID to revoked.
 func (s *Store) MarkPublisherRoutesRevoked(publisherID string) error {
 	_, err := s.db.Exec(`UPDATE routes SET trust_state='revoked' WHERE publisher_id=?`, publisherID)

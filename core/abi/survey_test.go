@@ -256,7 +256,10 @@ func TestSurvey_StaysInsideTheHourlyAllowance(t *testing.T) {
 	if left != surveyReserve {
 		t.Fatalf("the survey left %d of the allowance, want the reserve (%d)", left, surveyReserve)
 	}
-	if surveyReserve < raceMaxInFlight || surveyFirstMin < 20*time.Second || surveyGapMin < 30*time.Second || surveyGapMax > 90*time.Second {
+	// The pacing (survey.go WHY THESE WAITS): never a burst, and the
+	// other three routes of a default relay known within two minutes.
+	if surveyReserve < raceMaxInFlight || surveyFirstMin < 10*time.Second || surveyGapMin < 10*time.Second ||
+		surveyFirstMax+3*surveyGapMax > 2*time.Minute {
 		t.Fatalf("constants: reserve %d, first %s, gap %s..%s", surveyReserve, surveyFirstMin, surveyGapMin, surveyGapMax)
 	}
 }
