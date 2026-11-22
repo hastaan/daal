@@ -304,6 +304,7 @@ dependencies = [
  "time",
  "x25519-dalek",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

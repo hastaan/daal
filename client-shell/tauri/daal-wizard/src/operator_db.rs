@@ -136,6 +136,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "relay_addons",
         sql: include_str!("../migrations/V019__relay_addons.sql"),
     },
+    Migration {
+        version: 20,
+        name: "recipients_readd",
+        sql: include_str!("../migrations/V020__recipients_readd.sql"),
+    },
 ];
 
 /// The highest migration version this build knows. A publisher backup
@@ -3907,6 +3912,113 @@ mod tests {
         db.insert_recipient(sample_recipient(op_id, 3)).unwrap();
         db.mark_recipient_revoked(r1, 1_701_000_000).unwrap();
         assert_eq!(db.count_live_recipients(op_id).unwrap(), 2);
+    }
+
+    /// V020: one LIVE row per address per relay. A removed row is
+    /// history and does not hold the address; two live rows still clash.
+    #[test]
+    fn an_address_is_unique_among_live_rows_only() {
+        let db = OperatorDb::open_in_memory().unwrap();
+        let op_id = db
+            .insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1)
+            .unwrap();
+        let first = db.insert_recipient(sample_recipient(op_id, 1)).unwrap();
+        let same_address = |name: &str| NewRecipientRow {
+            name: name.into(),
+            ..sample_recipient(op_id, 1)
+        };
+        let err = db.insert_recipient(same_address("r2")).unwrap_err();
+        assert!(format!("{err}").contains("UNIQUE"), "{err}");
+
+        db.mark_recipient_revoked(first, 1_701_000_000).unwrap();
+        let again = db.insert_recipient(same_address("r2")).unwrap();
+        assert_ne!(again, first);
+        // A third live row for the address is refused again.
+        assert!(db.insert_recipient(same_address("r3")).is_err());
+        // Names stay unique across live and removed rows alike.
+        db.mark_recipient_revoked(again, 1_701_000_001).unwrap();
+        assert!(db.insert_recipient(same_address("r1")).is_err());
+        assert_eq!(db.list_recipients(op_id).unwrap().len(), 2);
+    }
+
+    /// V020 on a book that already holds people: every row and column
+    /// survives the table rebuild, and so does the per-device restore
+    /// state that references them (V018, ON DELETE CASCADE).
+    #[test]
+    fn v020_keeps_every_row_and_the_restore_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", &"ON").unwrap();
+        let db = OperatorDb {
+            conn: Mutex::new(conn),
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                     name TEXT NOT NULL, applied_at_unix INTEGER NOT NULL)",
+            )
+            .unwrap();
+            for m in MIGRATIONS.iter().filter(|m| m.version < 20) {
+                conn.execute_batch(m.sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_migrations VALUES (?1, ?2, 0)",
+                    params![m.version, m.name],
+                )
+                .unwrap();
+            }
+        }
+        let op = db.insert_pre_provision("{}", "ab", "k1", "hetzner", "t1", 1).unwrap();
+        let live = db.insert_recipient(sample_recipient(op, 1)).unwrap();
+        let gone = db.insert_recipient(sample_recipient(op, 2)).unwrap();
+        db.mark_recipient_revoked(gone, 1_701_000_000).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE recipients SET creds_box_fp = 'fp-live' WHERE id = ?1",
+                params![live],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO restore_unsettled (operator_id, recipient_id, state) VALUES (?1, ?2, 'ask')",
+                params![op, live],
+            )
+            .unwrap();
+        }
+        let before = db.list_recipients(op).unwrap();
+
+        db.run_migrations().unwrap();
+
+        let after = db.list_recipients(op).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(db.recipient_box_fps(op).unwrap()[&live], "fp-live");
+        let unsettled: Vec<(i64, String)> = {
+            let conn = db.conn.lock().unwrap();
+            let mut st = conn
+                .prepare("SELECT recipient_id, state FROM restore_unsettled")
+                .unwrap();
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(unsettled, vec![(live, "ask".to_string())]);
+        // The foreign key still points at the rebuilt table.
+        db.delete_recipient(op, live).unwrap();
+        let n: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM restore_unsettled", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        // And the removed address can be added again.
+        db.insert_recipient(NewRecipientRow {
+            name: "r3".into(),
+            ..sample_recipient(op, 2)
+        })
+        .unwrap();
     }
 
     // ---- FRP-14 Layer 3c V010: recipient_identity tests ----

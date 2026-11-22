@@ -696,7 +696,71 @@ fn reply_digest(reply: &ReplyMaterial<'_>) -> String {
 /// `Ok(None)` is the common case: nothing moved. A failed re-sign is an
 /// error, because the caller is about to build a file from a pack that
 /// is known to be wrong.
+///
+/// It also keeps the pack's NAME true. Everyone's file is built from
+/// the relay's signed pack, so the name a family sees on a new file is
+/// the one the pack was signed with — for a pack signed before the
+/// relay's own name went into it (or before the relay was renamed),
+/// not the relay's name. When the two differ the pack is signed again
+/// first, by the same path; when they agree nothing is signed. That
+/// half is best effort: a pack with an old name is still a correct
+/// pack, so failing to rename it never stops a file being made.
 pub(crate) fn heal_after_reply(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    reply: &ReplyMaterial<'_>,
+    on_progress: &mut dyn FnMut(ProgressEvent),
+) -> Result<Option<PackResigned>, WizardError> {
+    if let Some(resigned) = heal_identity_after_reply(ctx, operator_id, reply, on_progress)? {
+        // Signing again took the relay's current name too.
+        return Ok(Some(resigned));
+    }
+    Ok(heal_publisher_name(ctx, operator_id, on_progress)
+        .ok()
+        .flatten())
+}
+
+/// The publisher name inside a signed `.sbp` (`manifest.json` →
+/// `publisher.name`), or `None` when the file is missing or cannot be
+/// read as a pack — which is never a reason to sign.
+pub(crate) fn signed_publisher_name(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let entry = zip.by_name("manifest.json").ok()?;
+    let mut buf = Vec::new();
+    // A manifest is a few KiB; never read an unbounded entry.
+    entry.take(4 << 20).read_to_end(&mut buf).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&buf).ok()?;
+    v.get("publisher")?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Sign again when the relay's signed pack carries a different name
+/// than the relay has. Reads one small file and signs nothing when the
+/// names agree, so it is cheap to run before every file.
+fn heal_publisher_name(
+    ctx: &WizardCtx,
+    operator_id: i64,
+    on_progress: &mut dyn FnMut(ProgressEvent),
+) -> Result<Option<PackResigned>, WizardError> {
+    let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
+    let Some(want) = crate::commands::relay_publisher_name(&row) else {
+        return Ok(None);
+    };
+    let path = crate::freshness::default_signed_pack_path(ctx, operator_id);
+    match signed_publisher_name(&path) {
+        Some(have) if have != want => {
+            resign_and_republish(ctx, operator_id, Freshness::Fresh, on_progress).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The identity half of [`heal_after_reply`].
+fn heal_identity_after_reply(
     ctx: &WizardCtx,
     operator_id: i64,
     reply: &ReplyMaterial<'_>,

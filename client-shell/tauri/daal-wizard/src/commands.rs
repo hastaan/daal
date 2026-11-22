@@ -2539,6 +2539,15 @@ pub fn sign_relaypack(
     )
 }
 
+/// The publisher name a relay's pack is signed with: the relay's own
+/// name, or `None` for a relay without one (the caller's default then
+/// stands). `relay_identity::heal_after_reply` compares the signed pack
+/// against this before each person's file.
+pub(crate) fn relay_publisher_name(row: &crate::operator_db::OperatorRow) -> Option<String> {
+    let name = row.nickname.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// [`sign_relaypack`] with a say in how current the relay's identity
 /// must be. Only the address swap passes `AllowCached`; see
 /// [`crate::relay_identity::Freshness`].
@@ -2562,8 +2571,8 @@ pub fn sign_relaypack_with(
     // The name the family sees on this file is the relay's own name
     // (owner, 2026-11-22: "make it simple"). A relay without one keeps
     // what the caller passed, the old default.
-    let relay_name = row.nickname.trim().to_string();
-    let publisher_name: &str = if relay_name.is_empty() { publisher_name } else { &relay_name };
+    let relay_name = relay_publisher_name(&row);
+    let publisher_name: &str = relay_name.as_deref().unwrap_or(publisher_name);
     // Network test: a relay with a live report key is the Test relay,
     // and every route of its pack carries the address (`_report_to`).
     let report_to = crate::report_key::report_to_for_signing(ctx, operator_id)?;
@@ -10417,6 +10426,92 @@ mod tests {
             );
             assert_eq!(crate::relay_identity::committed(&ctx, id).unwrap().unwrap(), before);
         }
+    }
+
+    /// The owner's second bug: a person added after the relay's own name
+    /// went into packs still got a file named "Family Relay Publisher",
+    /// because every person's file is built from the relay's signed pack
+    /// and that pack was signed before. When the names differ the pack
+    /// is signed again first (the normal re-sign path); when they agree
+    /// nothing is signed.
+    #[test]
+    fn a_new_persons_file_carries_the_relays_name_signing_again_only_when_it_differs() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        sign(&ctx, id).unwrap();
+        let pack = crate::freshness::default_signed_pack_path(&ctx, id);
+        // A pack signed before the relay's name went into it.
+        std::fs::write(
+            &pack,
+            crate::cli_bridge::mock_signed_pack_bytes(
+                crate::cli_bridge::SIGNER_DEFAULT_PUBLISHER_NAME,
+            ),
+        )
+        .unwrap();
+        *mock.bind_writes_pack.lock().unwrap() = true;
+        // Someone already on the relay, so the relay's first-person
+        // changes (its shadowsocks key) are behind us and only the name
+        // is left to differ.
+        crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x33u8; 32]),
+            "Ava",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::relay_identity::signed_publisher_name(&pack).as_deref(),
+            Some("Family Relay Publisher")
+        );
+        ctx.db.set_nickname(id, "  Sony's relay ").unwrap();
+        let signed_before = mock.bind_calls.lock().unwrap().len();
+
+        let added = crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x11u8; 32]),
+            "Bahar",
+        )
+        .unwrap();
+
+        {
+            let calls = mock.bind_calls.lock().unwrap();
+            assert_eq!(calls.len(), signed_before + 1, "the pack was not signed again");
+            assert_eq!(calls.last().unwrap().publisher_name, "Sony's relay");
+        }
+        assert_eq!(
+            crate::relay_identity::signed_publisher_name(&pack).as_deref(),
+            Some("Sony's relay")
+        );
+        // The person's file was built, from the renamed pack.
+        assert!(!added.sbpx_path.is_empty(), "{added:?}");
+        let packed = mock.users_pack_sbpx_calls.lock().unwrap();
+        assert_eq!(packed.last().unwrap().in_sbp_path, pack);
+        drop(packed);
+
+        // The next person: the names agree, nothing is signed.
+        crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x22u8; 32]),
+            "Dara",
+        )
+        .unwrap();
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), signed_before + 1);
+
+        // A relay renamed later: its next file is signed under the new name.
+        ctx.db.set_nickname(id, "Mum's relay").unwrap();
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        {
+            let calls = mock.bind_calls.lock().unwrap();
+            assert_eq!(calls.len(), signed_before + 2);
+            assert_eq!(calls.last().unwrap().publisher_name, "Mum's relay");
+        }
+
+        // A relay without a name has nothing to compare: never signed for it.
+        ctx.db.set_nickname(id, "").unwrap();
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), signed_before + 2);
     }
 
     /// The other side of the rule above: a REBUILT relay has new keys

@@ -3855,6 +3855,26 @@ pub struct MockBindCall {
     pub record_json: String,
     /// The `--relay-identity` document, if one was passed.
     pub relay_identity_json: Option<String>,
+    /// `--publisher-name`, as passed (`""` means the signer's default).
+    pub publisher_name: String,
+}
+
+/// The signer's own default publisher name (`relaypack.defaultPublisherDisplayName`).
+pub const SIGNER_DEFAULT_PUBLISHER_NAME: &str = "Family Relay Publisher";
+
+/// A stand-in for a signed `.sbp`: a zip whose `manifest.json` names
+/// `publisher_name`, the only part of a pack the app reads back.
+pub fn mock_signed_pack_bytes(publisher_name: &str) -> Vec<u8> {
+    use std::io::Write;
+    let manifest = serde_json::json!({
+        "spec_version": 5,
+        "publisher": {"name": publisher_name, "key_fingerprint_hex": "f".repeat(64)},
+    });
+    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zw.start_file("manifest.json", zip::write::FileOptions::default())
+        .expect("zip entry");
+    zw.write_all(manifest.to_string().as_bytes()).expect("zip write");
+    zw.finish().expect("zip finish").into_inner()
 }
 
 /// `MockRunner` is the in-process stand-in for tests.
@@ -3869,6 +3889,10 @@ pub struct MockRunner {
     pub relay_identity_error: Mutex<Option<String>>,
     /// Every signature, in order, with what it was signed from.
     pub bind_calls: Mutex<Vec<MockBindCall>>,
+    /// Write a pack ([`mock_signed_pack_bytes`]) to the output path on
+    /// every signature, as the real signer does. Off by default: most
+    /// tests stage their own file and must not have it replaced.
+    pub bind_writes_pack: Mutex<bool>,
     pub fixture: Pricing,
     pub last_call: Mutex<Option<MockCall>>,
     /// FRP-4b/FRP-7: count live provision calls.
@@ -4059,6 +4083,14 @@ pub struct MockRunner {
     pub users_revoke_calls: Mutex<Vec<String>>,
     /// FRP-14: count of list calls.
     pub users_list_calls: Mutex<usize>,
+    /// Opt-in model of the relay's user table for `users-provision` /
+    /// `users-revoke`: `Some(name -> vless_uuid)` makes the mock behave
+    /// like `daal-relay-mgmt` — every provision mints credentials no
+    /// earlier provision had, an existing name is refused (409) and
+    /// revoking an unknown name is refused (404). `None` (the default)
+    /// keeps the canned, identical-every-time credentials.
+    pub relay_users: Mutex<Option<std::collections::BTreeMap<String, String>>>,
+    relay_users_minted: Mutex<u64>,
     /// Make `run_users_list` fail (exit code, stderr): a relay that does
     /// not answer.
     pub users_list_error: Mutex<Option<(i32, String)>>,
@@ -4256,6 +4288,7 @@ impl MockRunner {
             relay_identity_unsupported: Mutex::new(false),
             relay_identity_error: Mutex::new(None),
             bind_calls: Mutex::new(Vec::new()),
+            bind_writes_pack: Mutex::new(false),
             fixture,
             last_call: Mutex::new(None),
             provision_calls: Mutex::new(0),
@@ -4307,6 +4340,8 @@ impl MockRunner {
             users_provision_calls: Mutex::new(Vec::new()),
             users_revoke_calls: Mutex::new(Vec::new()),
             users_list_calls: Mutex::new(0),
+            relay_users: Mutex::new(None),
+            relay_users_minted: Mutex::new(0),
             users_list_error: Mutex::new(None),
             users_pack_sbpx_calls: Mutex::new(Vec::new()),
             rotate_credentials_calls: Mutex::new(Vec::new()),
@@ -4451,6 +4486,40 @@ impl MockRunner {
 
 impl MockRunner {
     /// The credentials the mock box mints for `name`.
+    /// [`MockRunner::relay_users`]: the relay's answer to a provision.
+    fn relay_users_provision(&self, name: &str) -> Result<UserCredsResult> {
+        let n = {
+            let mut m = self.relay_users_minted.lock().unwrap();
+            *m += 1;
+            *m
+        };
+        let mut c = self.mock_creds(name);
+        let mut guard = self.relay_users.lock().unwrap();
+        let users = guard.get_or_insert_with(Default::default);
+        if users.contains_key(name) {
+            return Err(BridgeError::SubprocessFailed {
+                rc: 1,
+                stderr: format!("users-provision: 409: user {name:?} already exists"),
+            });
+        }
+        c.vless_uuid = format!("{n:08x}-0000-4000-8000-000000000000");
+        c.hy2_password = format!("hy2-minted-{n:012}");
+        c.naive_password = format!("naive-minted-{n:012}");
+        c.reality_short_id = format!("{:08x}", 0xa000_0000u64 + n);
+        users.insert(name.to_string(), c.vless_uuid.clone());
+        Ok(c)
+    }
+
+    /// [`MockRunner::relay_users`]: would the relay let this credential in?
+    pub fn relay_accepts(&self, vless_uuid: &str) -> bool {
+        self.relay_users
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|u| u.values().any(|v| v == vless_uuid))
+            .unwrap_or(false)
+    }
+
     pub fn mock_creds(&self, name: &str) -> UserCredsResult {
         let (reality_public_key, tls_cert_sha256, cover_sni, serves_ss) = {
             let mut relay = self.relay.lock().unwrap();
@@ -5237,7 +5306,16 @@ impl CliRunner for MockRunner {
         self.bind_calls.lock().unwrap().push(MockBindCall {
             record_json: record_json.clone(),
             relay_identity_json: relay_identity_json.clone(),
+            publisher_name: args.publisher_name.to_string(),
         });
+        if *self.bind_writes_pack.lock().unwrap() {
+            let name = if args.publisher_name.is_empty() {
+                SIGNER_DEFAULT_PUBLISHER_NAME
+            } else {
+                args.publisher_name
+            };
+            std::fs::write(args.output_path, mock_signed_pack_bytes(name)).ok();
+        }
         let rec: serde_json::Value =
             serde_json::from_str(&record_json).unwrap_or(serde_json::Value::Null);
         let id: serde_json::Value = relay_identity_json
@@ -5439,6 +5517,9 @@ impl CliRunner for MockRunner {
             }
             return Ok(r);
         }
+        if self.relay_users.lock().unwrap().is_some() {
+            return self.relay_users_provision(args.name);
+        }
         Ok(self.mock_creds(args.name))
     }
 
@@ -5453,6 +5534,14 @@ impl CliRunner for MockRunner {
             .push(args.name.to_string());
         if let Some(r) = self.users_revoke_result.lock().unwrap().clone() {
             return Ok(r);
+        }
+        if let Some(users) = self.relay_users.lock().unwrap().as_mut() {
+            if users.remove(args.name).is_none() {
+                return Err(BridgeError::SubprocessFailed {
+                    rc: 1,
+                    stderr: format!("users-revoke: 404: user {:?} not found", args.name),
+                });
+            }
         }
         Ok(UsersRevokeResult {
             revoked_at_unix: 1_700_000_001,
