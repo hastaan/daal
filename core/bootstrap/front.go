@@ -153,6 +153,12 @@ func FetchAppsScript(ctx context.Context, rawURL string, dialer Dialer, timeout 
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
+		// The socket carries the context's deadline, so a read can time
+		// out an instant before the context itself reports it. A passed
+		// deadline is the end either way: no second connection.
+		if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+			return res, context.DeadlineExceeded
+		}
 		res.Connections++
 		body, err := frontAttempt(ctx, dialer, timeout, sni, AppsScriptHost, true, path, maxBody, opts)
 		if err == nil {
