@@ -259,10 +259,14 @@ describe('what the engine can import', () => {
         for (const l of ['wg://k@h:51820', 'wireguard://k@h:51820', 'amneziawg://k@h:1', 'hysteria://p@h:1', 'naive+https://u:p@h:443', 'brook://x', 'snowflake://x']) {
             expect(classifyItem(l), l).toMatchObject({ kind: 'route', importable: false });
         }
+        // A wg:// link has no parser in the engine; a WireGuard CONF does,
+        // and is kept as a route used only when picked: added, never
+        // counted for the bulk check.
         const items = pasteItems(`${VLESS}\nwg://k@h:51820\n${CONF}`).items;
         expect(items).toHaveLength(3);
         expect(routeLinkCount(items)).toBe(1);
-        expect(addable(items)).toHaveLength(1);
+        expect(addable(items)).toHaveLength(2);
+        expect(items.find((i) => i.kind === 'route' && i.text.startsWith('['))).toMatchObject({ importable: true, manualOnly: true });
     });
 });
 

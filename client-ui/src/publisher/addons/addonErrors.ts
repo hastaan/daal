@@ -2,7 +2,7 @@
 //
 // The Rust side prefixes every refusal with a stable code
 // (`E_STANDBY_LIMIT: …`). The add-on codes live in the add-on modules
-// (addon_standby.rs, addon_cdn.rs, addon_google.rs); the shared ones in
+// (addon_standby.rs, addon_cdn.rs, addon_google.rs, addon_notes.rs); the shared ones in
 // wizardCommands.ts. This file knows both, so a row can say what
 // happened in one line and keep the raw text for Details only.
 //
@@ -37,6 +37,13 @@ export const ADDON_ERROR_CODES = [
     'E_GOOGLE_BAD_ADDRESS',
     'E_GOOGLE_CHECK_FAILED',
     'E_GOOGLE_NO_ACCOUNT',
+    // addon_notes.rs
+    'E_GITHUB_NO_ACCOUNT',
+    'E_GITTAG_REFUSED',
+    'E_GITTAG_UNREACHABLE',
+    'E_DNSNOTE_REFUSED',
+    'E_DNSNOTE_UNREACHABLE',
+    'E_NOTES_NO_PACK',
 ] as const;
 
 export type AddonErrorCode = (typeof ADDON_ERROR_CODES)[number];

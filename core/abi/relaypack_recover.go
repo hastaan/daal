@@ -90,6 +90,12 @@ const recoverMaxPacks = 3
 // instance is down for all of it.
 const recoverAutoBudget = 45 * time.Second
 
+// recoverLadderBudget replaces it when the lost pack's routes hold the
+// update ladder's secret and carriers member (refresh/ladder.go): the
+// mirrors' 30 s, then the ladder's own 120 s. Without this the ladder
+// would rarely get past its first rung on the engine's own walk.
+const recoverLadderBudget = 30*time.Second + 120*time.Second
+
 // recoverShutdownWait: how long Shutdown waits for a walk it cut off to
 // let go of the store.
 const recoverShutdownWait = 3 * time.Second
@@ -392,7 +398,11 @@ func (c *Core) autoRecoverBeginLocked(gen uint64, lost autoLost, verdict string)
 	if len(packs) == 0 {
 		return false
 	}
-	t := c.recoverBeginLocked(lost, packs, RecoverTriggerFailure, recoverAutoBudget)
+	budget := recoverAutoBudget
+	if c.relayPackProbeLocked().LadderHeld(packs[0]) {
+		budget = recoverLadderBudget
+	}
+	t := c.recoverBeginLocked(lost, packs, RecoverTriggerFailure, budget)
 	t.gen, t.verdict = gen, verdict
 	// The route the pass moved away from is still the one to put back,
 	// for whoever takes over.

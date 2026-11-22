@@ -28,6 +28,9 @@
 // are stubs that answer E_NOT_BUILT until their lanes land.
 pub mod addon_cdn;
 pub mod addon_google;
+// The update notes: the GitHub account, and the two per-relay carriers
+// (through GitHub, through DNS).
+pub mod addon_notes;
 pub mod addon_standby;
 pub mod addons;
 pub mod cli_bridge;
@@ -74,6 +77,8 @@ pub mod relay_identity;
 pub mod report_key;
 pub mod relay_rotation;
 pub mod renew;
+// "New files for everyone" after a removal: the standby code wraps again.
+pub mod refile;
 pub mod restore_settle;
 pub mod setup_recovery;
 // "Links for other apps": share links for one person.

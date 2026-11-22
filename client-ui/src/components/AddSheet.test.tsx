@@ -1,4 +1,4 @@
-// "Add my file", driven in the miniDom rig (spec C3): three ways in, no
+// The add sheet ("Add to Daal"), driven in the miniDom rig (spec C3): three ways in, no
 // tabs and no Import/Preview taps; a recognised paste and a chosen file
 // go on by themselves; a new publisher gets the trust question in place
 // of the whole sheet; the result is "File added" + Connect, or one
@@ -128,7 +128,9 @@ describe('the add sheet: one sheet, three ways in', () => {
         expect(all(m.container, (n) => n.getAttribute('role') === 'tab')).toHaveLength(0);
         const text = m.container.textContent ?? '';
         expect(text).not.toContain(t('common.cancel'));
-        expect(text).toContain('Add my file');
+        // One neutral title: the sheet takes links and codes too.
+        expect(text).toContain(t('add.title'));
+        expect(text).not.toContain('Add my file');
     });
 
     it('a standby code someone sent has its own quiet way in, and goes to the engine once', async () => {

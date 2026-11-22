@@ -46,6 +46,8 @@ func TestRefusalsNeverQuoteTheLink(t *testing.T) {
 		"hy2://" + secret + "@x.example.com:1-99999",
 		"tuic://" + secret + ":" + secret + "@x.example.com:443?allow_insecure=1",
 		"vless://" + secret + "@x.example.com:notaport?security=tls",
+		"vless://" + secret + "@x.example.com:443?security=tls&allowInsecure=1",
+		"trojan://" + secret + "@x.example.com:443?allowInsecure=1",
 	} {
 		_, _, err := ParseURI(raw)
 		if err == nil {
@@ -111,6 +113,9 @@ func TestClashEntryRefusals(t *testing.T) {
 		{"trojan-reality", map[string]string{"type": "trojan", "server": "t.example.com", "port": "443", "password": "p", "public-key": key}, "transport_unsupported"},
 		{"hy2-skip-cert", map[string]string{"type": "hysteria2", "server": "h.example.com", "port": "443", "password": "p", "skip-cert-verify": "true"}, "insecure_refused"},
 		{"tuic-skip-cert", map[string]string{"type": "tuic", "server": "t.example.com", "port": "443", "uuid": "u", "password": "p", "skip-cert-verify": "true"}, "insecure_refused"},
+		{"vless-skip-cert", map[string]string{"type": "vless", "server": "v.example.com", "port": "443", "uuid": "u", "tls": "true", "skip-cert-verify": "true"}, "insecure_refused"},
+		{"trojan-skip-cert", map[string]string{"type": "trojan", "server": "t.example.com", "port": "443", "password": "p", "skip-cert-verify": "true"}, "insecure_refused"},
+		{"vmess-tls-skip-cert", map[string]string{"type": "vmess", "server": "m.example.com", "port": "443", "uuid": "u", "cipher": "auto", "tls": "true", "skip-cert-verify": "true"}, "insecure_refused"},
 		{"ss-none", map[string]string{"type": "ss", "server": "s.example.com", "port": "443", "cipher": "none", "password": "p"}, "plaintext_refused"},
 		{"ss-plugin", map[string]string{"type": "ss", "server": "s.example.com", "port": "443", "cipher": "aes-128-gcm", "password": "p", "plugin": "obfs"}, "transport_unsupported"},
 	}
@@ -121,5 +126,20 @@ func TestClashEntryRefusals(t *testing.T) {
 				t.Errorf("code = %q, want %q (err %v)", got, tc.code, err)
 			}
 		})
+	}
+}
+
+// TestClashSkipCertWhereItMeansNothing: skip-cert-verify on an entry
+// with no certificate to check (a REALITY vless entry, a vmess entry
+// without tls) is not a refusal; skip-cert-verify: false never is.
+func TestClashSkipCertWhereItMeansNothing(t *testing.T) {
+	for name, e := range map[string]map[string]string{
+		"vless-reality": {"type": "vless", "server": "r.example.com", "port": "443", "uuid": "u", "public-key": testRealityKey, "servername": "www.example.com", "skip-cert-verify": "true"},
+		"vmess-no-tls":  {"type": "vmess", "server": "m.example.com", "port": "80", "uuid": "u", "cipher": "auto", "skip-cert-verify": "true"},
+		"trojan-false":  {"type": "trojan", "server": "t.example.com", "port": "443", "password": "p", "skip-cert-verify": "false"},
+	} {
+		if _, err := ProfileFromClashEntry(e); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

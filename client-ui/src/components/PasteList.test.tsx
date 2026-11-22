@@ -329,7 +329,7 @@ describe('bulk: check, then remove only what failed', () => {
         await rig.click(btn(m.container, 'paste-check'));
         await drain();
         expect(byAttr(m.container, 'data-testid', 'paste-check-result')?.textContent).toBe(t('add.multi.none_failed'));
-        expect(byAttr(m.container, 'data-testid', 'paste-unchecked')?.textContent).toBe('2 could not be checked now and stay. Check again later.');
+        expect(byAttr(m.container, 'data-testid', 'paste-unchecked')?.textContent).toBe('2 could not be checked this time and stay. Check again in a while.');
         await rig.unmountAll();
 
         surveyResults = { 'old-1': 'carried' };

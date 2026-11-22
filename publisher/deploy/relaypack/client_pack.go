@@ -104,6 +104,17 @@ func RewriteProfilesForRecipient(sbp []byte, params ClientConnParams) ([]byte, [
 // --creds-file does not come through here; it refuses an input that
 // carries the member instead.)
 func RewriteProfilesForRecipientWithSecret(sbp []byte, params ClientConnParams, secret *bundle.UpdateSecret) ([]byte, []SkippedRoute, error) {
+	return RewriteProfilesForRecipientWithMembers(sbp, params, secret, nil)
+}
+
+// RewriteProfilesForRecipientWithMembers is RewriteProfilesForRecipientWithSecret
+// that also writes the carriers member (specs/update-ladder-v2.md §4.5)
+// as bundle.UpdateCarriersPath: WHERE the person's phone reads update
+// notes (the git repository, the DNS zone). Like the secret it sits
+// outside the signed manifest, in the per-recipient half; the caller
+// seals the archive to the person. carriers nil: no member. Either way
+// any member of that name already in the INPUT is dropped.
+func RewriteProfilesForRecipientWithMembers(sbp []byte, params ClientConnParams, secret *bundle.UpdateSecret, carriers *bundle.UpdateCarriers) ([]byte, []SkippedRoute, error) {
 	b, err := bundle.ParseSBP(bytes.NewReader(sbp), int64(len(sbp)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("rewrite: parse sbp: %w", err)
@@ -125,6 +136,14 @@ func RewriteProfilesForRecipientWithSecret(sbp []byte, params ClientConnParams, 
 			return nil, nil, fmt.Errorf("rewrite: update secret: %w", err)
 		}
 		files[bundle.UpdateSecretPath] = member
+	}
+	delete(files, bundle.UpdateCarriersPath)
+	if carriers != nil {
+		member, err := bundle.MarshalUpdateCarriers(*carriers)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rewrite: update carriers: %w", err)
+		}
+		files[bundle.UpdateCarriersPath] = member
 	}
 
 	var skipped []SkippedRoute

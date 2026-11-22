@@ -217,6 +217,12 @@ pub struct Engine {
     field_probe_start: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
     field_probe_status: Option<extern "C" fn(*mut c_void, c_int) -> c_int>,
     field_probe_cancel: Option<extern "C" fn(*const c_char) -> c_int>,
+
+    /// `engine_set_link_resolvers` — the DNS servers of the network
+    /// under any VPN, as a JSON list (core/abi/link_resolvers.go), for
+    /// the update ladder's DNS reader. Optional: an older library loads
+    /// and is simply not told.
+    set_link_resolvers: Option<extern "C" fn(*const c_char) -> c_int>,
     field_probe_seal: Option<extern "C" fn(*const c_char, *mut c_void, c_int) -> c_int>,
     field_probe_discard: Option<extern "C" fn() -> c_int>,
 
@@ -539,6 +545,10 @@ impl Engine {
                 lookup::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(&lib, b"engine_field_probe_status")
                     .ok()
                     .map(|sym| *sym);
+            let set_link_resolvers =
+                lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(&lib, b"engine_set_link_resolvers")
+                    .ok()
+                    .map(|sym| *sym);
             let field_probe_cancel =
                 lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(&lib, b"engine_field_probe_cancel")
                     .ok()
@@ -640,6 +650,7 @@ impl Engine {
                 field_probe_start: field_probe_start.map(|f| std::mem::transmute(f)),
                 field_probe_status: field_probe_status.map(|f| std::mem::transmute(f)),
                 field_probe_cancel: field_probe_cancel.map(|f| std::mem::transmute(f)),
+                set_link_resolvers: set_link_resolvers.map(|f| std::mem::transmute(f)),
                 field_probe_seal: field_probe_seal.map(|f| std::mem::transmute(f)),
                 field_probe_discard: field_probe_discard.map(|f| std::mem::transmute(f)),
                 relaypack_refresh: relaypack_refresh.map(|f| std::mem::transmute(f)),
@@ -1515,6 +1526,26 @@ impl Engine {
         };
         let r = CString::new(reason).map_err(|_| DesktopError::EngineSymbol("reason NUL".into()))?;
         Ok(Some((f)(r.as_ptr()) == 1))
+    }
+
+    /// `engine_set_link_resolvers`: tell the engine the DNS servers of
+    /// the network under any VPN (`[]` when it was lost). Returns
+    /// `Ok(Some(true))` when the engine has a resolver to ask now,
+    /// `Ok(Some(false))` when it has none, `Ok(None)` when this library
+    /// has no such call. The addresses are never logged.
+    pub fn set_link_resolvers(&self, servers: &[String]) -> Result<Option<bool>> {
+        self.ensure_ready()?;
+        let Some(f) = self.set_link_resolvers else {
+            return Ok(None);
+        };
+        let list: Vec<&str> = servers.iter().take(8).map(|s| s.as_str()).collect();
+        let body = serde_json::to_string(&list).map_err(|_| DesktopError::EngineSymbol("servers JSON".into()))?;
+        let c = CString::new(body).map_err(|_| DesktopError::EngineSymbol("servers NUL".into()))?;
+        match (f)(c.as_ptr()) {
+            1 => Ok(Some(true)),
+            0 => Ok(Some(false)),
+            _ => Err(DesktopError::EngineSymbol("engine_set_link_resolvers refused the list".into())),
+        }
     }
 
     /// `engine_relaypack_refresh`: look for a newer signed file for one

@@ -141,6 +141,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "recipients_readd",
         sql: include_str!("../migrations/V020__recipients_readd.sql"),
     },
+    Migration {
+        version: 21,
+        name: "relay_addons_notes",
+        sql: include_str!("../migrations/V021__relay_addons_notes.sql"),
+    },
 ];
 
 /// The highest migration version this build knows. A publisher backup
@@ -2541,9 +2546,28 @@ impl OperatorDb {
             // The relay's update state (addon_standby::update_state_alias).
             // No column; carried by migration, erased by panic_wipe.
             push(format!("update_people_{id}"));
+            // Whether a note switch was ever on (addon_notes::notes_ever_on_alias).
+            push(crate::addon_notes::notes_ever_on_alias(id));
         }
         // The publisher's update root (addon_standby::UPDATE_ROOT_ALIAS).
         push("update_root".to_string());
+        // The GitHub account key and what is kept beside it
+        // (addon_notes::GITHUB_ACCOUNT_ALIASES). No column, no relay.
+        for a in crate::addon_notes::GITHUB_ACCOUNT_ALIASES {
+            push(a.to_string());
+        }
+        // The Cloudflare and Google accounts (Accounts page): the key, the
+        // zone every person's phone asks for, what is kept beside them.
+        for a in [
+            crate::addon_cdn::ACCOUNT_ALIAS,
+            crate::addon_cdn::ACCOUNT_ZONE_ALIAS,
+            crate::addon_cdn::ACCOUNT_EXTRA_ALIAS,
+        ] {
+            push(a.to_string());
+        }
+        for a in crate::addon_google::ACCOUNT_ALIASES {
+            push(a.to_string());
+        }
         // V019: an add-on's own secret (a Cloudflare token, a script
         // write key). Listed so panic_wipe erases it too.
         if let Ok(mut stmt) = conn.prepare("SELECT secret_alias FROM relay_addons") {

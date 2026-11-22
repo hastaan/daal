@@ -117,7 +117,7 @@ func ApplyVerifiedRefresh(
 				Fingerprint: fp.Hex, HexEN: rendered.EN, HexFA: rendered.FA},
 			errors.New("publisher revoked")
 	}
-	return applyWithRelayPackPhase(st, parsed, nil, fp, rendered, bucket, pin.TrustLevel, false, relaypack.CurrentPhase, true)
+	return applyWithRelayPackPhase(st, parsed, fileMembers{}, fp, rendered, bucket, pin.TrustLevel, false, relaypack.CurrentPhase, true)
 }
 
 // equalHex compares two hex strings case-insensitively.

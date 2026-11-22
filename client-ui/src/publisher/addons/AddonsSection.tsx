@@ -18,7 +18,13 @@
 //                                or keeps billing, then it runs
 //
 // The standby code shows only after a switch to the standby, or from
-// «Details». The engine's choices (open standby, plain fallback) stay in
+// «Details».
+//
+// The two update-note switches (GitHub, DNS) write by themselves from
+// then on; their row says when the last write went through, or that it
+// did not and Daal will try again. Right after one is turned on, people
+// who already have a file are told once that they need a new one, with
+// «New files for everyone» when the page can offer it. The engine's choices (open standby, plain fallback) stay in
 // the CLI and the Rust layer; this UI never asks for them.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -27,13 +33,16 @@ import { WhatIsThis } from '../Disclosure';
 import { useConfirm } from '../ui';
 import { Addons } from '../wizardCommands';
 import type { AddonKind, AddonRemoveReport, AddonRow } from './addonTypes';
-import { ADDON_COPY, liveRow } from './addonText';
+import { ADDON_COPY, NOTE_KINDS, liveRow } from './addonText';
 import type { AddonCopy } from './addonText';
 import { classifyAddonError } from './addonErrors';
-import { CloudflareSheet, GoogleSheet } from './AccountSheets';
-import { useAccounts } from './accounts';
+import { CloudflareSheet, GithubSheet, GoogleSheet, githubPermissionList } from './AccountSheets';
+import { useDensity } from '../../design/DensityProvider';
+import { accountConnected, useAccounts } from './accounts';
 import type { AccountsState } from './accounts';
 import { BODY, ErrorNote, MONO, MUTED, copyText, useRun } from './addonUi';
+import { formatAgo } from '../../lib/format';
+import type { NotesDetail } from './addonTypes';
 import { addonNeed, clearAddonFailure, failedAddons, runAddon, waitsForPerson } from './wizardAddons';
 
 export interface AddonsSectionProps {
@@ -44,6 +53,13 @@ export interface AddonsSectionProps {
     variant?: 'relay';
     /** The accounts, for tests; read from the shell otherwise. */
     accounts?: AccountsState;
+    /** «New files for everyone» (the people section's sheet), when the
+     *  page can offer it: shown once after a note switch is turned on
+     *  while people already have files. */
+    onNewFiles?: () => void;
+    /** The relay has a file for everyone: the note switches never reach
+     *  it, and people get new files one by one from their own menu. */
+    everyoneFile?: boolean;
 }
 
 /** What a row is doing now, beyond what the ledger says. */
@@ -52,14 +68,22 @@ type Phase =
     | { k: 'running' }
     | { k: 'stopping' }
     | { k: 'failed'; op: 'on' | 'off'; error: unknown }
-    | { k: 'billing'; what: string[] };
+    | { k: 'billing'; what: string[]; repo?: string };
 
 type Open =
     | { k: 'cloudflare'; then?: AddonKind }
     | { k: 'google'; then?: AddonKind }
+    | { k: 'github'; then?: AddonKind; newKey?: boolean }
     | { k: 'code'; code: string; wrapped: boolean; plain?: string };
 
-export function AddonsSection({ t, operatorId, variant = 'relay', accounts: given }: AddonsSectionProps) {
+export function AddonsSection({
+    t,
+    operatorId,
+    variant = 'relay',
+    accounts: given,
+    onNewFiles,
+    everyoneFile = false,
+}: AddonsSectionProps) {
     const [rows, setRows] = useState<AddonRow[]>([]);
     const [generation, setGeneration] = useState(0);
     const reload = useCallback(() => setGeneration((g) => g + 1), []);
@@ -127,12 +151,8 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
     const turnOn = async (kind: AddonKind, acc: AccountsState = accounts) => {
         if (operatorId == null) return;
         const need = addonNeed(kind, acc);
-        if (need === 'cloudflare') {
-            setOpen({ k: 'cloudflare', then: 'cdn' });
-            return;
-        }
-        if (need === 'google') {
-            setOpen({ k: 'google', then: 'google' });
+        if (need !== 'ready') {
+            setOpen({ k: need, then: kind });
             return;
         }
         setPhase(kind, { k: 'running' });
@@ -146,10 +166,18 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
             const code = classifyAddonError(e);
             if (code === 'E_CDN_NO_TOKEN') {
                 read.reload();
-                setOpen({ k: 'cloudflare', then: 'cdn' });
+                setOpen({ k: 'cloudflare', then: kind });
             } else if (code === 'E_GOOGLE_NO_ACCOUNT') {
                 read.reload();
                 setOpen({ k: 'google', then: 'google' });
+            } else if (code === 'E_GITHUB_NO_ACCOUNT') {
+                read.reload();
+                setOpen({ k: 'github', then: 'gittag' });
+            } else if (code === 'E_GITTAG_REFUSED') {
+                // The kept key cannot do it (a permission, expired,
+                // revoked): the row names what, and the sheet takes a new one.
+                read.reload();
+                setOpen({ k: 'github', then: 'gittag', newKey: true });
             }
         }
         reload();
@@ -172,9 +200,12 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
         setPhase(kind, { k: 'stopping' });
         try {
             const r: AddonRemoveReport = await Addons.remove(row.id);
-            const billing = r.still_billing ?? [];
+            // What stays: what still bills, and a GitHub repository the
+            // publisher may delete themselves.
+            const billing = [...(r.still_billing ?? []), ...(r.by_hand ?? []).filter((w) => w === 'github_repository')];
+            const repo = typeof row.detail?.repo === 'string' ? (row.detail.repo as string) : '';
             if (!r.removed) setPhase(kind, { k: 'failed', op: 'off', error: '' });
-            else setPhase(kind, billing.length > 0 ? { k: 'billing', what: billing } : { k: 'idle' });
+            else setPhase(kind, billing.length > 0 ? { k: 'billing', what: billing, repo } : { k: 'idle' });
         } catch (e) {
             setPhase(kind, { k: 'failed', op: 'off', error: e });
         }
@@ -237,7 +268,11 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
                         copy={c}
                         row={liveRow(rows, c.kind)}
                         phase={phases[c.kind] ?? { k: 'idle' }}
-                        connected={c.needs == null || (c.needs === 'cloudflare' ? accounts.cloudflare.connected : accounts.google.connected)}
+                        connected={c.needs == null || accountConnected(accounts, c.needs)}
+                        needsStandby={c.kind === 'dnsnote' && !standby && !promoted}
+                        everyoneFile={everyoneFile}
+                        onNewFiles={onNewFiles}
+                        onFixKey={(acct) => setOpen(acct === 'github' ? { k: 'github', newKey: true } : { k: 'cloudflare' })}
                         first={i === 0}
                         disabled={operatorId == null}
                         onToggle={(on) => void (on ? turnOn(c.kind) : turnOff(c.kind, true))}
@@ -293,6 +328,17 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
                     onConnected={() => afterConnect(open.then, { ...accounts, google: { ...accounts.google, connected: true } })}
                 />
             )}
+            {open?.k === 'github' && (
+                <GithubSheet
+                    t={t}
+                    github={accounts.github}
+                    newKey={open.newKey}
+                    onClose={() => setOpen(null)}
+                    onConnected={(login) =>
+                        afterConnect(open.then, { ...accounts, github: { connected: true, login } })
+                    }
+                />
+            )}
             {open?.k === 'code' && (
                 <CodeSheet t={t} code={open.code} wrapped={open.wrapped} plain={open.plain} onClose={() => setOpen(null)} />
             )}
@@ -311,9 +357,20 @@ function ProtectRow({
     disabled,
     onToggle,
     onRetry,
+    onNewFiles,
+    needsStandby = false,
+    everyoneFile = false,
+    onFixKey,
 }: {
     t: (key: string) => string;
     copy: AddonCopy;
+    onNewFiles?: () => void;
+    /** The DNS switch carries only the standby address: none is held. */
+    needsStandby?: boolean;
+    /** The relay has a file for everyone (notes never reach it). */
+    everyoneFile?: boolean;
+    /** Open the account's sheet to take a new key. */
+    onFixKey?: (account: 'github' | 'cloudflare') => void;
     row: AddonRow | null;
     phase: Phase;
     /** The account it needs is connected (or it needs none). */
@@ -328,7 +385,18 @@ function ProtectRow({
     const checked = phase.k === 'running' || (phase.k !== 'stopping' && row != null);
     // The same words on or off: the cost never loses its "+ VAT".
     const cost = t(copy.costKey);
-    const needs = !connected && copy.needs ? t(`pub.addons.needs.${copy.needs}`) : '';
+    const { isRTL } = useDensity();
+    const needList = [
+        !connected && copy.needs ? t(`pub.addons.needs.${copy.needs}`) : '',
+        needsStandby ? t('pub.addons.needs.standby') : '',
+    ].filter(Boolean);
+    const needs = needList.join(' · ');
+    const isNote = NOTE_KINDS.includes(copy.kind);
+    // People had files when the switch went on: they need new ones. Read
+    // from the row, so the line comes back on the next visit too.
+    const newFiles = isNote && row?.state === 'ready' && Number(row.detail?.people_before ?? 0) > 0;
+    // A refused GitHub write names what GitHub said.
+    const failLine = phase.k === 'failed' && copy.kind === 'gittag' ? gittagRefusalLine(t, phase.error, isRTL) : undefined;
     const state =
         phase.k === 'idle' || phase.k === 'billing' ? (row ? row.state : 'off') : phase.k;
 
@@ -373,6 +441,28 @@ function ProtectRow({
                 </div>
             )}
 
+            {/* A note switch writes by itself: how the last write went. */}
+            {!busy && phase.k !== 'failed' && row?.state === 'ready' && isNote && (
+                <NoteStatus t={t} kind={copy.kind} detail={row.detail as NotesDetail} onFix={onFixKey} />
+            )}
+
+            {!busy && phase.k !== 'failed' && newFiles && (
+                <div data-testid={`addon-${copy.kind}-new-files`} style={{ display: 'grid', gap: 6, justifyItems: 'start' }}>
+                    <p style={MUTED}>{t(everyoneFile ? 'pub.addons.notes.new_files_each' : `pub.addons.${copy.kind}.new_files`)}</p>
+                    {onNewFiles && !everyoneFile && (
+                        <Button size="sm" variant="secondary" onClick={onNewFiles} dataButton={`addon-${copy.kind}-new-files`}>
+                            {t('pub.refile.menu')}
+                        </Button>
+                    )}
+                </div>
+            )}
+
+            {isNote && everyoneFile && (row != null || phase.k === 'running') && (
+                <p data-testid={`addon-${copy.kind}-not-everyone`} style={MUTED}>
+                    {t('pub.addons.notes.not_everyone')}
+                </p>
+            )}
+
             {/* Set up and signed; the relay's door opens with the first
                 person (addon_cdn.rs `door_waits`). Not a failure. */}
             {!busy && phase.k !== 'failed' && waitsForPerson(row) && (
@@ -386,16 +476,97 @@ function ProtectRow({
             )}
 
             {phase.k === 'failed' && (
-                <Failed t={t} error={phase.error} line={phase.error ? undefined : t('pub.addons.state.removing')} onRetry={onRetry} kind={copy.kind} />
+                <Failed
+                    t={t}
+                    error={phase.error}
+                    line={failLine ?? (phase.error ? undefined : t('pub.addons.state.removing'))}
+                    onRetry={onRetry}
+                    kind={copy.kind}
+                />
             )}
 
             {phase.k === 'billing' &&
-                phase.what.map((w) => (
-                    <p key={w} data-testid={`addon-${copy.kind}-billing`} style={{ ...MUTED, color: 'var(--amber)' }}>
-                        {t(w === 'domain' ? 'pub.addons.billing.domain' : 'pub.addons.billing.address')}
-                    </p>
-                ))}
+                phase.what.map((w) =>
+                    w === 'github_repository' ? (
+                        // Nothing is wrong: the repository is the publisher's
+                        // to delete. Named on this screen only, never logged.
+                        <p key={w} data-testid={`addon-${copy.kind}-billing`} style={MUTED}>
+                            {t('pub.addons.gittag.repo_left').replace('{name}', phase.repo || '…')}
+                        </p>
+                    ) : (
+                        <p key={w} data-testid={`addon-${copy.kind}-billing`} style={{ ...MUTED, color: 'var(--amber)' }}>
+                            {t(w === 'domain' ? 'pub.addons.billing.domain' : 'pub.addons.billing.address')}
+                        </p>
+                    ),
+                )}
         </div>
+    );
+}
+
+/** The last write's code words that retrying never fixes: the person
+ *  must act (a new key, the account connected again). */
+const NOTE_ACT_CODES: Record<string, 'github' | 'cloudflare'> = {
+    e_gittag_refused: 'github',
+    e_github_no_account: 'github',
+    e_dnsnote_refused: 'cloudflare',
+    e_cdn_no_token: 'cloudflare',
+};
+
+/** The line for a refused GitHub write: what GitHub said is missing, or
+ *  that it does not accept the key; undefined for anything else. */
+export function gittagRefusalLine(t: (k: string) => string, e: unknown, rtl: boolean): string | undefined {
+    const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : '';
+    const m = /^E_GITTAG_REFUSED:\s*([a-z_]+)(?::\s*(.*))?/.exec(msg);
+    if (!m) return undefined;
+    if (m[1] === 'invalid_token') return t('pub.accounts.github.verdict.invalid');
+    if (m[1] !== 'missing_permission') return undefined;
+    const names = (m[2] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    const list = githubPermissionList(t, names, rtl) || t('pub.accounts.cf.perm.some');
+    return t('pub.accounts.github.verdict.missing_permission').replace('{list}', list);
+}
+
+/** «Updated 2 hours ago», or «Could not update. Daal will try again.»
+ *  when the last try did not go through for a reason that may pass. A
+ *  refused key, or an account that is gone, will never pass by itself:
+ *  that says what is wrong, in amber, with a way to give a new key. */
+export function NoteStatus({
+    t,
+    kind,
+    detail,
+    onFix,
+}: {
+    t: (k: string) => string;
+    kind: AddonKind;
+    detail: NotesDetail | undefined;
+    onFix?: (account: 'github' | 'cloudflare') => void;
+}) {
+    // The reader's words follow the catalogue `t` reads (as money() does).
+    const locale = /[؀-ۿ]/.test(t('pub.addons.title')) ? 'fa' : 'en';
+    const ok = Number(detail?.last_ok_at_unix ?? 0);
+    const tried = Number(detail?.last_try_at_unix ?? 0);
+    const code = String(detail?.last_error ?? '').toLowerCase();
+    const failed = !!code && tried >= ok;
+    if (!failed && ok <= 0) return null;
+    const act = failed ? NOTE_ACT_CODES[code] : undefined;
+    if (act) {
+        return (
+            <div data-testid={`addon-${kind}-note`} data-note="act" style={{ display: 'grid', gap: 6, justifyItems: 'start' }}>
+                <p style={{ ...MUTED, color: 'var(--amber)' }}>{t(`pub.addons.err.${code.toUpperCase()}`)}</p>
+                {onFix && (
+                    <Button size="sm" variant="secondary" onClick={() => onFix(act)} dataButton={`addon-${kind}-fix-key`}>
+                        {act === 'github' ? t('pub.accounts.github.new_key') : t('pub.addons.notes.fix')}
+                    </Button>
+                )}
+            </div>
+        );
+    }
+    const line = failed
+        ? t(`pub.addons.${kind}.retry`)
+        : t(`pub.addons.${kind}.updated`).replace('{when}', formatAgo(locale, Date.now() - ok * 1000));
+    return (
+        <p data-testid={`addon-${kind}-note`} data-note={failed ? 'retry' : 'updated'} style={MUTED}>
+            {line}
+        </p>
     );
 }
 

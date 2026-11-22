@@ -420,7 +420,7 @@ fn kept(ctx: &WizardCtx, alias: &str) -> Result<Option<Zeroizing<String>>> {
 
 /// The relay's key; when it has none, a copy of the account's, kept as
 /// the relay's own from now on.
-fn cf_token(ctx: &WizardCtx, op: i64) -> Result<Zeroizing<String>> {
+pub(crate) fn cf_token(ctx: &WizardCtx, op: i64) -> Result<Zeroizing<String>> {
     if let Some(t) = kept(ctx, &cloudflare_alias(op))? {
         return Ok(t);
     }

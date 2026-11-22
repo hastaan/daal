@@ -77,7 +77,10 @@ const (
 	// speed check together — and the variants the connect ladder adds
 	// to a pass (connect_ladder.go), each of which counts as one. A
 	// route's remembered first variant is the route's own attempt and is
-	// not counted. In memory; a restart forgets the count.
+	// not counted. In memory; a restart forgets the count. The survey
+	// the PERSON starts (engine_survey_routes) counts against it but is
+	// not bound by it: its own ceiling is surveyUserMax per press
+	// (survey.go, THE ALLOWANCE AND THE CEILING).
 	sideProbesPerHour = 12
 	// sideProbeRouteGap: a route side-probed this recently is not
 	// side-probed again.

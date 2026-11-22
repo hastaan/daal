@@ -8,7 +8,11 @@
 //
 // One primary action for the section: "Add". It is gold only while
 // nobody is on the list; after that the send buttons carry the weight.
+// The section's own ⋯ (beside "Add") holds "New files for everyone"
+// when the page offers it (refile/refile.ts), and the calm card the page
+// shows right after a removal sits under the header (`notice`).
 
+import type { ReactNode } from 'react';
 import type { ArtifactInfo, RecipientSummary } from './wizardCommands';
 import {
     Avatar,
@@ -137,6 +141,13 @@ interface Props {
     everyone?: { onSend: () => void; onAbout: () => void } | null;
     /** "Links for other apps" for this person (their ⋯ menu). */
     onLinks?: (r: RecipientSummary) => void;
+    /** "New files for everyone" (the section's ⋯), when offered. */
+    onRefile?: () => void;
+    /** The i18n key of the refile item's hint (the code, or the update
+     *  switches when the relay has those and no standby). */
+    refileHintKey?: string;
+    /** A calm card under the header (the offer after a removal). */
+    notice?: ReactNode;
 }
 
 export function PeopleSection({
@@ -156,6 +167,9 @@ export function PeopleSection({
     onRemoveRelayOnly,
     everyone,
     onLinks,
+    onRefile,
+    refileHintKey = 'pub.refile.menu.hint',
+    notice,
 }: Props) {
     const locale = useLocale();
     const busy = action.busy !== null;
@@ -266,17 +280,38 @@ export function PeopleSection({
                 }}
             >
                 <h2 style={H2}>{t('pub.people.title')}</h2>
-                <Button
-                    variant={nobody ? 'primary' : 'secondary'}
-                    size="compact"
-                    leading="plus"
-                    onClick={onAdd}
-                    aria-label={t('pub.people.add')}
-                    dataButton="add-person"
-                >
-                    {t('pub.people.add_short')}
-                </Button>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <Button
+                        variant={nobody ? 'primary' : 'secondary'}
+                        size="compact"
+                        leading="plus"
+                        onClick={onAdd}
+                        aria-label={t('pub.people.add')}
+                        dataButton="add-person"
+                    >
+                        {t('pub.people.add_short')}
+                    </Button>
+                    {onRefile && current.length > 0 && (
+                        <OverflowMenu
+                            label={t('ui.more')}
+                            title={t('pub.people.title')}
+                            dataButton="people-more"
+                            items={[
+                                {
+                                    id: 'refile',
+                                    label: t('pub.refile.menu'),
+                                    icon: 'refresh',
+                                    hint: t(refileHintKey),
+                                    disabled: busy,
+                                    onSelect: onRefile,
+                                },
+                            ]}
+                        />
+                    )}
+                </span>
             </header>
+
+            {notice}
 
             {nobody && !everyone && !loading && <div style={SUB}>{t('pub.people.empty')}</div>}
 

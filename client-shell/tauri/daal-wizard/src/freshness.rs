@@ -1080,6 +1080,11 @@ pub fn publish(
         ts: String::new(),
         extra: Default::default(),
     });
+    // The update notes carry the document just signed (addon_notes).
+    // Never fails the publish: each switch keeps its own result.
+    if res.sequence > 0 {
+        let _ = crate::addon_notes::write_relay(ctx, operator_id);
+    }
     Ok(report)
 }
 

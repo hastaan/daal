@@ -49,7 +49,34 @@ export const ADDON_COPY: readonly AddonCopy[] = [
         needs: 'google',
         offKey: 'pub.addons.off.google',
     },
+    // The update notes (addon_notes.rs): where a person's app looks when
+    // every ordinary update address is blocked.
+    {
+        kind: 'gittag',
+        titleKey: 'pub.addons.gittag.title',
+        lineKey: 'pub.addons.gittag.line',
+        costKey: 'pub.addons.gittag.cost',
+        needs: 'github',
+        offKey: 'pub.addons.gittag.off',
+    },
+    {
+        kind: 'dnsnote',
+        titleKey: 'pub.addons.dnsnote.title',
+        lineKey: 'pub.addons.dnsnote.line',
+        costKey: 'pub.addons.dnsnote.cost',
+        needs: 'cloudflare',
+        offKey: 'pub.addons.dnsnote.off',
+    },
 ];
+
+/** The two note switches: they write on their own and say how it went. */
+export const NOTE_KINDS: readonly AddonKind[] = ['gittag', 'dnsnote'];
+
+/** The keys a note switch's status and its "new files" line use (its
+ *  button is the refile sheet's own name, `pub.refile.menu`). */
+export function noteKeys(kind: AddonKind): string[] {
+    return ['updated', 'retry', 'new_files'].map((k) => `pub.addons.${kind}.${k}`);
+}
 
 /** The live row for a kind: a promoted standby is the relay's address
  *  now, not the extra, so it does not turn the switch on. */
@@ -66,6 +93,7 @@ export function addonKeys(): string[] {
         'pub.addons.wizard.waiting',
         'pub.addons.needs.cloudflare',
         'pub.addons.needs.google',
+        'pub.addons.needs.github',
         'pub.addons.state.running',
         'pub.addons.state.stopping',
         'pub.addons.state.on',
@@ -97,6 +125,8 @@ export function addonKeys(): string[] {
     for (const c of ADDON_COPY) {
         for (const k of [c.titleKey, c.lineKey, c.costKey, c.offKey]) keys.add(k);
     }
+    for (const k of NOTE_KINDS) for (const n of noteKeys(k)) keys.add(n);
+    keys.add('pub.addons.gittag.repo_left');
     return [...keys];
 }
 
@@ -171,4 +201,21 @@ export const ACCOUNT_KEYS = [
     'pub.accounts.hz.relay_only',
     'pub.accounts.hz.disconnect.line',
     'pub.accounts.hz.refused',
+    'pub.accounts.github.line',
+    'pub.accounts.github.step.1',
+    'pub.accounts.github.step.1.action',
+    'pub.accounts.github.step.2',
+    'pub.accounts.github.step.2.action',
+    'pub.accounts.github.step.3',
+    'pub.accounts.github.key',
+    'pub.accounts.github.kept',
+    'pub.accounts.github.connected_as',
+    'pub.accounts.github.expires',
+    'pub.accounts.github.broad',
+    'pub.accounts.github.disconnect.line',
+    'pub.accounts.github.verdict.invalid',
+    'pub.accounts.github.verdict.missing_permission',
+    'pub.accounts.github.verdict.owner_mismatch',
+    'pub.accounts.github.verdict.rate_limited',
+    'pub.accounts.github.perm.public_repo',
 ] as const;

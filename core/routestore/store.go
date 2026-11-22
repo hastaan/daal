@@ -478,6 +478,20 @@ type RouteRow struct {
 	RelayPackID         string
 	FreshnessURL        string
 	SharedRiskGraphJSON string
+
+	// ManualOnly: dial this route only when the person picks it; the
+	// automatic connect never races it (core/abi autoCandidatesLocked,
+	// refusal "chosen_only"), whatever the experimental gate says. Set
+	// for a pasted WireGuard conf and an AmneziaWG conf downgraded to
+	// WireGuard (bundle/go/uri Profile.ManualOnly): an automatic
+	// attempt sends a WireGuard handshake from the person's address.
+	//
+	// STICKY. UpsertRoute ORs it with what the row holds and with the
+	// route's meta (RouteMeta, written by core/abi URIImport BEFORE the
+	// import, so the row is never stored without it, whichever path
+	// finishes the import: at once, after the trust prompt, or after a
+	// restart). No upsert clears it.
+	ManualOnly bool
 }
 
 // EncodeRedistributionPolicy renders a RouteRow's policy + cap
@@ -630,6 +644,14 @@ func (s *Store) UpsertRoute(r RouteRow) error {
 	if srgj == "" {
 		srgj = "[]"
 	}
+	// The route's meta (RouteMeta) is the engine's own word about a
+	// route it is about to import; it can only add the manual-only bit.
+	manual := 0
+	if r.ManualOnly {
+		manual = 1
+	} else if m, ok := s.GetRouteMeta(r.RouteID); ok && m.ManualOnly {
+		manual = 1
+	}
 	_, err := s.db.Exec(`
 INSERT INTO routes
   (route_id, transport_family, engine, source_type, publisher_id, publisher_label,
@@ -642,10 +664,10 @@ INSERT INTO routes
    conjure_decoy_pool_json, transport_module_slug, redistribution_policy,
    exposure_mode, family_class, probing_risk_class,
    public_risk_tags_json, origin_risk_tags_json, modifiers_json,
-   relay_pack_id, freshness_url, shared_risk_graph_json)
+   relay_pack_id, freshness_url, shared_risk_graph_json, manual_only)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, NULL, 0, 0,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(route_id) DO UPDATE SET
   transport_family = excluded.transport_family,
   scarcity_class = excluded.scarcity_class,
@@ -674,7 +696,9 @@ ON CONFLICT(route_id) DO UPDATE SET
   modifiers_json         = excluded.modifiers_json,
   relay_pack_id          = excluded.relay_pack_id,
   freshness_url          = excluded.freshness_url,
-  shared_risk_graph_json = excluded.shared_risk_graph_json
+  shared_risk_graph_json = excluded.shared_risk_graph_json,
+  manual_only            = MAX(routes.manual_only, excluded.manual_only)
+  -- manual_only is sticky (RouteRow.ManualOnly): no upsert clears it.
   -- last_winning_rendezvous_channel is NEVER overwritten by an
   -- UpsertRoute (it is engine-recorded; bundle re-imports must
   -- not clobber the user's accumulated history). Use
@@ -695,7 +719,7 @@ ON CONFLICT(route_id) DO UPDATE SET
 		psi, cps, r.ConjureStationPubkeyHex, cdp, r.TransportModuleSlug, rrp,
 		r.ExposureMode, r.FamilyClass, r.ProbingRiskClass,
 		prt, ort, r.ModifiersJSON,
-		r.RelayPackID, r.FreshnessURL, srgj)
+		r.RelayPackID, r.FreshnessURL, srgj, manual)
 	return err
 }
 
@@ -921,7 +945,8 @@ SELECT route_id, transport_family, engine, source_type, publisher_id, publisher_
        COALESCE(freshness_url, ''),
        COALESCE(shared_risk_graph_json, '[]'),
        COALESCE(last_degraded_bucket, ''),
-       COALESCE(last_degraded_category, '')
+       COALESCE(last_degraded_category, ''),
+       COALESCE(manual_only, 0)
 FROM routes ORDER BY imported_at, route_id`)
 	if err != nil {
 		return nil, err
@@ -945,7 +970,7 @@ FROM routes ORDER BY imported_at, route_id`)
 			&r.ExposureMode, &r.FamilyClass, &r.ProbingRiskClass,
 			&prt, &ort, &r.ModifiersJSON,
 			&r.RelayPackID, &r.FreshnessURL, &r.SharedRiskGraphJSON,
-			&r.LastDegradedBucket, &r.LastDegradedCategory); err != nil {
+			&r.LastDegradedBucket, &r.LastDegradedCategory, &r.ManualOnly); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(modes), &r.ModesAllowed)
@@ -988,7 +1013,8 @@ SELECT route_id, transport_family, engine, source_type, publisher_id, publisher_
        COALESCE(freshness_url, ''),
        COALESCE(shared_risk_graph_json, '[]'),
        COALESCE(last_degraded_bucket, ''),
-       COALESCE(last_degraded_category, '')
+       COALESCE(last_degraded_category, ''),
+       COALESCE(manual_only, 0)
 FROM routes WHERE route_id = ?`, id)
 	var r RouteRow
 	var modes, rrp, prt, ort string
@@ -1006,7 +1032,7 @@ FROM routes WHERE route_id = ?`, id)
 		&r.ExposureMode, &r.FamilyClass, &r.ProbingRiskClass,
 		&prt, &ort, &r.ModifiersJSON,
 		&r.RelayPackID, &r.FreshnessURL, &r.SharedRiskGraphJSON,
-		&r.LastDegradedBucket, &r.LastDegradedCategory); err != nil {
+		&r.LastDegradedBucket, &r.LastDegradedCategory, &r.ManualOnly); err != nil {
 		return r, err
 	}
 	_ = json.Unmarshal([]byte(modes), &r.ModesAllowed)

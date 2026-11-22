@@ -209,4 +209,9 @@ var migrations = []string{
 	// writes them.
 	"ALTER TABLE routes ADD COLUMN last_degraded_bucket           TEXT NOT NULL DEFAULT ''",
 	"ALTER TABLE routes ADD COLUMN last_degraded_category         TEXT NOT NULL DEFAULT ''",
+	// Wave 2 (2026-11-22): a route dialled only when the person picks
+	// it (RouteRow.ManualOnly): a pasted WireGuard conf. 0 for every
+	// existing row: nothing was stored manual-only before, because
+	// core/abi URIImport refused such a profile until this column.
+	"ALTER TABLE routes ADD COLUMN manual_only                    INTEGER NOT NULL DEFAULT 0",
 }

@@ -9,6 +9,9 @@
 //   Google     — GoogleSheet: the account's one update script, added by
 //                hand (copy, paste in Apps Script, deploy, paste the
 //                address back), checked through Google, "✓ Connected".
+//   GitHub     — GithubSheet: an account only for this, the key page,
+//                paste the key, "✓ Connected as <name>". Relays' «Updates
+//                through GitHub» switch writes under it.
 //   The other hosting companies the wizard lists as «در دست ساخت».
 //
 // A relay's «More protection» switch opens the same sheets when the
@@ -19,7 +22,7 @@ import { Badge, Button, Card, GroupLabel, Icon, ListRow, PageHeader } from '../d
 import type { IconName } from '../design/primitives/icons';
 import { useBack } from '../lib/useBack';
 import { PageColumn } from './ui';
-import { CloudflareSheet, GoogleSheet, HetznerSheet } from './addons/AccountSheets';
+import { CloudflareSheet, GithubSheet, GoogleSheet, HetznerSheet } from './addons/AccountSheets';
 import { useAccounts } from './addons/accounts';
 import type { ServiceId } from './addons/accounts';
 
@@ -34,7 +37,7 @@ export const SOON_SERVICES = [
 
 const GROUP_LINE = { margin: '-4px 0 0', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 } as const;
 
-const ICON: Record<ServiceId, IconName> = { hetzner: 'server', cloudflare: 'shield', google: 'refresh' };
+const ICON: Record<ServiceId, IconName> = { hetzner: 'server', cloudflare: 'shield', google: 'refresh', github: 'key' };
 
 export default function AccountsPage({
     t,
@@ -54,11 +57,15 @@ export default function AccountsPage({
         hetzner: accounts.hetzner,
         cloudflare: accounts.cloudflare.connected,
         google: accounts.google.connected,
+        github: accounts.github?.connected === true,
     };
     const subtitle = (s: ServiceId): string => {
         if (!connected[s]) return t(`pub.accounts.${s}.line`);
         if (s === 'cloudflare' && accounts.cloudflare.zone) {
             return t('pub.accounts.connected_to').replace('{name}', accounts.cloudflare.zone);
+        }
+        if (s === 'github' && accounts.github?.login) {
+            return t('pub.accounts.github.connected_as').replace('{name}', accounts.github.login);
         }
         return t('pub.accounts.connected');
     };
@@ -68,6 +75,7 @@ export default function AccountsPage({
         hetzner: t('wiz.provider.hetzner.label'),
         cloudflare: 'Cloudflare',
         google: 'Google',
+        github: 'GitHub',
     };
     const serviceRow = (s: { id: ServiceId; label: string }, last: boolean) => {
                     const on = connected[s.id];
@@ -146,7 +154,8 @@ export default function AccountsPage({
             <p style={GROUP_LINE}>{t('pub.accounts.group.extra.line')}</p>
             <Card style={{ padding: '0 16px' }}>
                 {serviceRow({ id: 'cloudflare', label: labelOf.cloudflare }, false)}
-                {serviceRow({ id: 'google', label: labelOf.google }, true)}
+                {serviceRow({ id: 'google', label: labelOf.google }, false)}
+                {serviceRow({ id: 'github', label: labelOf.github }, true)}
             </Card>
 
             {open === 'hetzner' && (
@@ -185,6 +194,21 @@ export default function AccountsPage({
                 <GoogleSheet
                     t={t}
                     google={accounts.google}
+                    onClose={() => {
+                        setOpen(null);
+                        reload();
+                    }}
+                    onConnected={() => reload()}
+                    onDisconnected={() => {
+                        setOpen(null);
+                        reload();
+                    }}
+                />
+            )}
+            {open === 'github' && (
+                <GithubSheet
+                    t={t}
+                    github={accounts.github}
                     onClose={() => {
                         setOpen(null);
                         reload();

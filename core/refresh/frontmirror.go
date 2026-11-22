@@ -254,10 +254,26 @@ type FrontFetchFn func(ctx context.Context, url string, dialer bootstrap.Dialer,
 
 func defaultFrontFetch(ctx context.Context, url string, dialer bootstrap.Dialer, timeout time.Duration) ([]byte, error) {
 	res, err := bootstrap.FetchAppsScript(ctx, url, dialer, timeout, bootstrap.FrontOptions{})
+	NoteGoogleConnections(ctx, res.Connections)
 	if err != nil {
 		return nil, err
 	}
 	return res.Body, nil
+}
+
+// googleConnKey carries a walk's count of connections made to Google's
+// front, so the update ladder keeps the walk to two (ladder.go).
+type googleConnKey struct{}
+
+type googleConnCount struct{ n int }
+
+// NoteGoogleConnections records n connections to Google's front made by
+// a FrontFetchFn under ctx (defaultFrontFetch reports what
+// bootstrap.FetchAppsScript made; a fake may report its own).
+func NoteGoogleConnections(ctx context.Context, n int) {
+	if c, ok := ctx.Value(googleConnKey{}).(*googleConnCount); ok && n > 0 {
+		c.n += n
+	}
 }
 
 // googleAllowed: the walks that may reach the script (see the file
@@ -340,8 +356,9 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // front and parses it. The context it fetches under comes from the
 // caller's (parent) context, not the walk budget, so a walk whose
 // ordinary mirrors timed out still gives Google its two attempts.
+// conns, when set, gains the connections made to Google's front.
 func (r *RelayPackRefresher) fetchGoogleMirror(parent, walkCtx context.Context, ep string,
-	dialer bootstrap.Dialer, perURL time.Duration) (*refreshContainer, error) {
+	dialer bootstrap.Dialer, perURL time.Duration, conns *int) (*refreshContainer, error) {
 
 	if !sleepCtx(walkCtx, r.googleDelay(walkCtx)) && parent.Err() != nil {
 		return nil, parent.Err()
@@ -356,7 +373,14 @@ func (r *RelayPackRefresher) fetchGoogleMirror(parent, walkCtx context.Context, 
 	if !ok {
 		return nil, errors.New("freshness: not an Apps Script mirror")
 	}
-	body, err := fetch(gctx, ep, dialer, perURL)
+	count := &googleConnCount{}
+	body, err := fetch(context.WithValue(gctx, googleConnKey{}, count), ep, dialer, perURL)
+	if count.n == 0 {
+		count.n = 1 // a fetch that did not say: at least one connection
+	}
+	if conns != nil {
+		*conns += count.n
+	}
 	if err != nil {
 		return nil, err
 	}

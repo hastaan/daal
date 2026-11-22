@@ -460,7 +460,7 @@ func (r *RelayPackRefresher) RefreshFailureTriggered(ctx context.Context, relayP
 	rec.OnFailureLog = append(pruneFailureLog(rec.OnFailureLog, now), stamp)
 	r.saveRecord(relayPackID, rec)
 
-	res, err := r.refresh(ctx, relayPackID, kindFailure)
+	res, err := r.refresh(ctx, relayPackID, kindFailure, networkKey)
 
 	// The record may have moved with an applied pack (re-key).
 	key := res.RelayPackID
@@ -555,7 +555,11 @@ func (r *RelayPackRefresher) RefreshOnDemand(ctx context.Context, relayPackID st
 	}
 	rec.OnDemandAt = now.UTC().Format(time.RFC3339)
 	r.saveRecord(relayPackID, rec)
-	res, err := r.refresh(ctx, relayPackID, kindOnDemand)
+	networkKey := ""
+	if r.NetworkKey != nil {
+		networkKey = r.NetworkKey()
+	}
+	res, err := r.refresh(ctx, relayPackID, kindOnDemand, networkKey)
 	key := res.RelayPackID
 	if key == "" {
 		key = relayPackID

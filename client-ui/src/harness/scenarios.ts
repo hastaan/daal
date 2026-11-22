@@ -1470,6 +1470,68 @@ export const SCENARIOS: Scenario[] = [
             id: 'pub-relay-protect',
             title: 'Relay page · More protection',
         }, { steps: [...OPEN_RELAY, { scroll: 'key:pub.addons.title' }] }),
+    // The update notes: the GitHub account, and the two relay switches.
+    ...pub(
+        {
+            id: 'pub-accounts-github',
+            title: 'Accounts · connect GitHub',
+        }, { steps: [...relaysMenu('accounts'), { click: 'btn:account-github-connect' }] }),
+    ...pub(
+        {
+            id: 'pub-accounts-github-refused',
+            title: 'Accounts · a GitHub key that cannot make a repository',
+        }, {
+        steps: [
+            ...relaysMenu('accounts'),
+            { click: 'btn:account-github-connect' },
+            { type: 'css:input[data-button="github-token"]', text: 'github_pat_short_harness' },
+            { click: 'btn:github-connect' },
+            { waitFor: 'key:pub.accounts.github.verdict.missing_permission' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-accounts-github-connected',
+            title: 'Accounts · GitHub connected',
+        }, {
+        steps: [
+            ...relaysMenu('accounts'),
+            { click: 'btn:account-github-connect' },
+            { type: 'css:input[data-button="github-token"]', text: 'github_pat_harness_ok' },
+            { click: 'btn:github-connect' },
+            { waitFor: 'key:pub.accounts.github.kept' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-notes-on',
+            title: 'Relay page · turning on Updates through GitHub (people need new files)',
+        }, {
+        params: { github: 'connected' },
+        steps: [
+            ...OPEN_RELAY,
+            { scroll: 'key:pub.addons.gittag.title' },
+            { click: 'css:[data-button="addon-gittag-toggle"]' },
+            { waitFor: 'key:pub.addons.gittag.new_files' },
+        ],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-notes-github-needed',
+            title: 'Relay page · Updates through GitHub opens the GitHub sheet',
+        }, {
+        steps: [...OPEN_RELAY, { scroll: 'key:pub.addons.gittag.title' }, { click: 'css:[data-button="addon-gittag-toggle"]' }],
+    }),
+    ...pub(
+        {
+            id: 'pub-relay-notes-retry',
+            title: 'Relay page · a note switch whose last write failed',
+        }, { params: { notes: 'retry' }, steps: [...OPEN_RELAY, { scroll: 'key:pub.addons.gittag.retry' }] }),
+    ...pub(
+        {
+            id: 'pub-relay-notes-refused',
+            title: 'Relay page · GitHub refused the key: say so, offer a new key',
+        }, { params: { notes: 'refused' }, steps: [...OPEN_RELAY, { scroll: 'key:pub.addons.err.E_GITTAG_REFUSED' }] }),
     ...pub(
         {
             id: 'pub-relay-healthy',
@@ -1561,6 +1623,18 @@ export const SCENARIOS: Scenario[] = [
         }, {
         steps: [...OPEN_RELAY, { click: 'btn:person-send', nth: 0 }],
     }),
+    // "New files for everyone" (publisher/refile/): the question, then
+    // the list after the files were made, the first one handed over.
+    ...pub(
+        {
+            id: 'pub-refile-ask',
+            title: 'People · "New files for everyone", the question',
+        }, { params: { refile: '1' }, steps: [...OPEN_RELAY, { click: 'btn:people-more' }, { click: 'btn:refile' }, { waitFor: 'css:[data-refile-stage="ask"]' }] }),
+    ...pub(
+        {
+            id: 'pub-refile-list',
+            title: 'People · "New files for everyone", send one by one',
+        }, { params: { refile: '1' }, steps: [...OPEN_RELAY, { click: 'btn:people-more' }, { click: 'btn:refile' }, { click: 'btn:refile-go' }, { waitFor: 'css:[data-refile-stage="list"]' }, { click: 'btn:refile-share', nth: 0 }, { waitFor: 'css:[data-testid="refile-tick"]' }] }),
     ...pub(
         {
             id: 'pub-person-sent',

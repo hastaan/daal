@@ -118,6 +118,18 @@ func profileFromClashEntry(e map[string]string) (Profile, error) {
 		return Profile{}, fmt.Errorf("clash: missing host/port: %w", ErrMalformed)
 	}
 	tag := firstNonEmpty(e["name"], e["ps"])
+	// skip-cert-verify: true turns the certificate check off on a TLS
+	// entry: anyone on the path can be the server. Refused for vless
+	// and trojan (always TLS, except a REALITY vless entry, which is
+	// checked by its REALITY key and where the switch means nothing)
+	// and for vmess with tls: true; hysteria2 and tuic below.
+	if linkInsecure(e["skip-cert-verify"]) {
+		reality := firstNonEmpty(e["public-key"], e["public_key"]) != "" || strings.EqualFold(e["network"], "reality")
+		switch {
+		case typ == "trojan", typ == "vless" && !reality, typ == "vmess" && e["tls"] == "true":
+			return Profile{}, fmt.Errorf("clash %s: skip-cert-verify: %w", safeToken(typ), ErrInsecure)
+		}
+	}
 	switch typ {
 	case "ss":
 		if ssPlaintextMethod(e["cipher"]) {

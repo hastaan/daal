@@ -453,8 +453,9 @@ describe('Daal decides: no open standby, no plain fallback', () => {
         ledger = [row('standby', 'ready'), row('cdn', 'ready', { name_hidden: true }), row('google', 'ready')];
         const m = await mountSection(ALL);
         for (const b of ['standby-open', 'cdn-fallback']) expect(btn(m.container, b)).toBeNull();
-        // Only the three row switches are switches.
-        expect(all(m.container, (n) => n.getAttribute?.('role') === 'switch')).toHaveLength(3);
+        // Only the row switches are switches (the three extras, and the
+        // two update-note carriers).
+        expect(all(m.container, (n) => n.getAttribute?.('role') === 'switch')).toHaveLength(5);
         expect(cmds()).not.toContain('wizard_addon_cdn_set_plain_fallback');
         for (const src of [srcSection, srcSheets, srcPage, srcWizardAddons, srcWizardRows]) {
             expect(src).not.toMatch(/cdnSetPlainFallback|plain_fallback\s*:|mode:\s*'open'|E_STANDBY_OPEN_REFUSED/);

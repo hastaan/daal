@@ -141,6 +141,21 @@ func appendH2Frame(b []byte, typ, flags byte, stream uint32, payload []byte) []b
 // indexing" (no Huffman) for the rest, so nothing goes in the server's
 // dynamic table and our encoder keeps no state.
 func h2RequestHeaders(authority, path string) []byte {
+	return h2RequestHeadersAccept(authority, path, "")
+}
+
+// h2DefaultAccept is the accept header every request sends unless its
+// caller names another (front.go's fetches always send this one).
+const h2DefaultAccept = "*/*"
+
+// h2RequestHeadersAccept is h2RequestHeaders with the accept header
+// chosen by the caller ("" = h2DefaultAccept, byte for byte what
+// h2RequestHeaders has always sent). The value must already be a safe
+// header value (browserget.go checks it).
+func h2RequestHeadersAccept(authority, path, accept string) []byte {
+	if accept == "" {
+		accept = h2DefaultAccept
+	}
 	var b []byte
 	b = append(b, 0x82) // :method GET
 	b = hpackLiteralIndexedName(b, 1, authority)
@@ -152,7 +167,7 @@ func h2RequestHeaders(authority, path string) []byte {
 	}
 	for _, h := range [][2]string{
 		{"user-agent", requestUserAgent},
-		{"accept", "*/*"},
+		{"accept", accept},
 		{"accept-encoding", "identity"},
 		{"accept-language", "en-US,en;q=0.9"},
 	} {
@@ -166,6 +181,12 @@ func h2RequestHeaders(authority, path string) []byte {
 // get sends one GET on a new stream and reads its answer: at most
 // maxBody bytes of body. A body longer than that is ErrResponseTooLarge.
 func (c *h2Client) get(authority, path string, maxBody int) (*h2Response, error) {
+	return c.getAccept(authority, path, "", maxBody)
+}
+
+// getAccept is get with the request's accept header chosen by the
+// caller ("" = h2DefaultAccept).
+func (c *h2Client) getAccept(authority, path, accept string, maxBody int) (*h2Response, error) {
 	if c.stream == 0 {
 		c.stream = 1
 	} else {
@@ -175,7 +196,7 @@ func (c *h2Client) get(authority, path string, maxBody int) (*h2Response, error)
 	if c.goAway && id > c.lastStream {
 		return nil, errors.New("h2: the server is closing the connection")
 	}
-	block := h2RequestHeaders(authority, path)
+	block := h2RequestHeadersAccept(authority, path, accept)
 	if len(block) > h2MaxFrameSize {
 		return nil, errors.New("h2: request headers too long")
 	}

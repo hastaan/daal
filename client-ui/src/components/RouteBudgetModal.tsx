@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
 import { useBack } from '../lib/useBack';
 import type { RouteDisplayRow } from '../contract/D2Contract';
+import { groupName, routeDisplayName } from './files/pasted';
 
 interface Props {
     t: (k: string) => string;
@@ -66,7 +67,7 @@ export default function RouteBudgetModal({ t, route, onClose, onSaved }: Props) 
                     {t('routes.budget.title')}
                 </h2>
                 <div style={{ color: 'var(--paper-dim)', fontSize: 13, marginBottom: 14 }}>
-                    {route.publisherName} · {route.routeNickname}
+                    {[groupName(t, route), routeDisplayName(route)].filter(Boolean).join(' · ')}
                 </div>
                 <label style={{ display: 'block', marginBottom: 14 }}>
                     <div style={{ fontSize: 11, color: 'var(--ink-mute)', marginBottom: 4 }}>

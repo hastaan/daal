@@ -1,5 +1,6 @@
 // WhyThisRoute — right-rail "Why this route?" panel.
 import type { WhyThisRouteSummary } from '../../contract/D2Contract';
+import { groupName, routeDisplayName } from '../files/pasted';
 
 interface Props {
     data: WhyThisRouteSummary | null;
@@ -28,7 +29,7 @@ export default function WhyThisRoute({ data, t, headless }: Props) {
                     <div className="d2-why-row">
                         <span className="k">{t('active')}</span>
                         <span className="v">
-                            {data.active.publisherName} · {data.active.routeNickname}
+                            {[groupName(t, data.active), routeDisplayName(data.active)].filter(Boolean).join(' · ')}
                         </span>
                     </div>
                     <div className="d2-why-row">
@@ -63,7 +64,7 @@ export default function WhyThisRoute({ data, t, headless }: Props) {
                                     {data.skipped.map((s) => (
                                         <li key={s.route.routeId}>
                                             <span>
-                                                {s.route.publisherName} · {s.route.routeNickname}
+                                                {[groupName(t, s.route), routeDisplayName(s.route)].filter(Boolean).join(' · ')}
                                             </span>
                                             <span className="reason">— {s.reason}</span>
                                         </li>

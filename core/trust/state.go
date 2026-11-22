@@ -364,6 +364,7 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 				}
 			}
 			a.saveUpdateSecret(r.RouteID, r.UpdateSecret)
+			a.saveUpdateCarriers(r.RouteID, r.UpdateCarriers)
 		} else {
 			// No commitment: no standby either. Removed before the
 			// commitment, for the same reason as above.
@@ -373,6 +374,7 @@ func (a *StoreAdapter) SaveImport(p importer.PublisherInput, routes []importer.R
 			_ = a.S.DeleteSecret(RouteEndpointKey(r.RouteID))
 			_ = a.S.DeleteSecret(RouteEndpointSignedAtKey(r.RouteID))
 			_ = a.S.DeleteSecret(bundle.UpdateSecretStoreKey(r.RouteID))
+			_ = a.S.DeleteSecret(bundle.UpdateCarriersStoreKey(r.RouteID))
 		}
 	}
 	return nil
@@ -407,6 +409,35 @@ func (a *StoreAdapter) saveUpdateSecret(routeID string, raw []byte) {
 		return
 	}
 	_ = a.S.PutSecret(bundle.UpdateSecretStoreKey(routeID), next)
+}
+
+// saveUpdateCarriers keeps the carriers member of the file a route came
+// in (bundle.UpdateCarriersStoreKey; specs/update-ladder-v2.md §4.5)
+// beside its commitment: WHERE the ladder reads this relay's notes.
+//
+// THE RULES. A valid member replaces what is held (the publisher moved
+// the repository or zone, or switched a carrier off: {"v":1} names none
+// and is kept as such). A save without one (a refresh carries only the
+// signed skeleton; an older file has none; a malformed one is absent)
+// keeps what is held. The member is not signed; what a planted one can
+// and cannot do is in bundle/go/bundle/update_carriers.go: it changes
+// where the phone looks, never what it trusts.
+//
+// A failure here does NOT fail the import, and the member is never
+// logged (it names the publisher's repository and zone).
+func (a *StoreAdapter) saveUpdateCarriers(routeID string, raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	c, err := bundle.ParseUpdateCarriersJSON(raw)
+	if err != nil {
+		return
+	}
+	canon, err := bundle.MarshalUpdateCarriers(*c)
+	if err != nil {
+		return
+	}
+	_ = a.S.PutSecret(bundle.UpdateCarriersStoreKey(routeID), canon)
 }
 
 // forgetStandby removes the route's stored `_standby`

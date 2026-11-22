@@ -66,7 +66,8 @@ detected (`HadReality`, `HadAmnezia`, etc.).
 
 `other` is never selected by the automatic connect (`core/abi`
 `autoCandidatesLocked`, refused `manual_only`); it connects when the
-person picks it. `amneziawg` is refused even when picked
+person picks it. A route stored manual-only (a pasted WireGuard conf)
+is refused before that, as `chosen_only`. `amneziawg` is refused even when picked
 (`connect_refused: family_unsupported`): every attempt would be a plain
 WireGuard handshake to a server that drops it.
 
@@ -148,9 +149,17 @@ Clash, SIP008) built from the same vectors. The rules:
 - TUIC `allow_insecure=1` / `insecure=1` (or `true`) is refused
   (`insecure_refused`) for the same reason. TUIC and Clash
   hysteria2/tuic `alpn` is split like every other ALPN list.
-- VLESS/Trojan `allowInsecure` and Clash `skip-cert-verify` on
-  vless/trojan/vmess are ignored: the check stays on, so a link to a
-  self-signed server fails its check instead of importing unverified.
+- VLESS (`security=tls`), Trojan and VMess (with TLS) links that turn
+  the certificate check off are refused (`insecure_refused`), for the
+  reason hy2 `insecure=1` is: `allowInsecure`, `allow_insecure` or
+  `insecure` set to `1`, `true` or `yes` (VMess: the same keys in its
+  JSON, as a string, a bool or a number), and VMess
+  `skip-cert-verify`. Clash `skip-cert-verify: true` on a `trojan`
+  entry, a non-REALITY `vless` entry, or a `vmess` entry with
+  `tls: true` is refused the same way. Where there is no certificate
+  to check the switch means nothing and is ignored: a REALITY link
+  (the server is checked by its REALITY key), a VMess link without TLS.
+  `allowInsecure=0` / `false` is not a refusal.
 
 ## Refusals
 
@@ -171,9 +180,9 @@ a link of any known kind is not a refusal: it is `uri.ErrNoMatch`
 | `flow_unsupported`        | The link uses a VLESS flow this build cannot dial. | any flow other than `xtls-rprx-vision`, including `xtls-rprx-vision-udp443`; Vision over ws/grpc/httpupgrade |
 | `encryption_unsupported`  | The link uses an encryption mode this build does not have. | VLESS `encryption` other than `none`; an unknown VMess cipher |
 | `plaintext_refused`       | The link has no encryption: every site you visit would cross the network in clear. | VLESS or Trojan `security=none` (or absent for VLESS); VMess `none`/`zero` without TLS; Shadowsocks `none`/`plain`/`dummy` |
-| `insecure_refused`        | The link turns off the server's certificate check, so anyone on the path could pose as the server. | hy2 `insecure=1`; TUIC `allow_insecure=1`; Clash hysteria2/tuic `skip-cert-verify: true` |
+| `insecure_refused`        | The link turns off the server's certificate check, so anyone on the path could pose as the server. | hy2 `insecure=1`; TUIC `allow_insecure=1`; VLESS (tls), Trojan, VMess (tls) `allowInsecure`/`allow_insecure`/`insecure` on; Clash `skip-cert-verify: true` on hysteria2, tuic, trojan, vless (not REALITY), vmess (tls) |
 | `link_malformed`          | The link is incomplete or damaged (a key, port or port list is missing or unusable). | bad URL, missing credential, bad port, bad REALITY key or short id, bad hy2 port list or hop interval |
-| `manual_only`             | The route may be dialled only when the person picks it, and this build has nowhere to keep that. | `core/abi` URIImport, for a profile with `ManualOnly` set or the `amneziawg_unsupported` notice (none reaches it through `ParseURI` today; it holds the line for a WireGuard conf through `ParseAny`) |
+| `manual_only`             | The route may be dialled only when the person picks it, and this build has nowhere to keep that. | Reserved and stable. Not raised by `core/abi` URIImport since wave 2: it stores the flag (see "Pasted WireGuard confs"). A host that cannot store it raises it. |
 
 `ParseURI` lower-cases the scheme before dispatch (`VLESS://…` is
 `vless://…`; RFC 3986 §3.1): messengers and phone keyboards capitalise
@@ -207,6 +216,47 @@ is imported as `amneziawg`, which this build labels unsupported, with
 `Provenance.Notice = "amneziawg_unsupported"`. Both carry
 `DroppedParams` and an English `Downgrade` sentence.
 
+## Pasted WireGuard confs (wave 2)
+
+`engine_uri_import` accepts, besides one link, one pasted conf: text
+whose first line that is not blank or a comment is `[Interface]` (any
+case) goes through `uri.ParseAny(…, "wireguard")` and must hold exactly
+one route. A conf the parser cannot read is refused `link_malformed`
+(the parser's own text, which can quote a value, is not passed on).
+
+- Every pasted WireGuard conf (plain, or AmneziaWG downgraded:
+  `ManualOnly`) is stored **manual-only**: `core/routestore` column
+  `routes.manual_only` (migration: `INTEGER NOT NULL DEFAULT 0`;
+  `RouteRow.ManualOnly`). The flag is written BEFORE the import, in
+  the route's meta (`secrets_kv` `route-meta:<route_id>`,
+  `routestore.RouteMeta`), and `UpsertRoute` ORs it into the row, so
+  the row is never stored without it whichever path finishes the
+  import (at once, after the trust prompt, after a restart). It is
+  sticky: no upsert clears it. If the meta cannot be written the paste
+  is refused.
+- `core/abi` `autoCandidatesLocked` refuses a manual-only route first,
+  before the family and experimental rules, with `chosen_only`
+  (experimental routes on or off). The person can still pick it. The
+  route summary carries `manual_only: true`.
+- An `amneziawg_unsupported` conf is refused `transport_unsupported`:
+  this build cannot dial it. Nothing of it is kept.
+
+## A pasted route's name (wave 2)
+
+The link's own name (`Profile.Tag`: the `#fragment`, VMess `ps`) is kept
+in the same meta, cleaned by `routestore.CleanRouteName` (control, bidi
+and other format characters removed, the zero-width joiner kept for
+emoji; white space collapsed; at most 48 characters), and shown as the
+route's `route_nickname` (`name_from_link: true`) instead of a piece of
+the route id. It is used for nothing but display: not in the route id,
+the logs, the ordering or any decision. The meta is removed with the
+route; a name left by a paste whose import never finished is dropped
+after 31 days (a manual-only meta is kept until its route is stored or
+deleted). Routes whose publisher is this phone's own sharing identity
+carry `pasted_by_you: true`; the identity's fixed display name ("My
+Daal") is what `publisher_name` says, and the app titles that group
+itself.
+
 ## Who runs the server
 
 A pasted link, subscription or conf points at someone else's server.
@@ -218,10 +268,12 @@ screen says so: "This server is run by whoever sent you the link."
 A pasted URI has no publisher signature. The receiver path
 `engine_uri_import`:
 
-1. Parses the URI.
-2. Wraps it in a one-route `.sbp` signed by the device's per-app sharing
+1. Parses the URI (or the WireGuard conf).
+2. Writes the route's meta (manual-only, the link's name) when it has
+   one.
+3. Wraps it in a one-route `.sbp` signed by the device's per-app sharing
    identity.
-3. Hands it to the importer.
+4. Hands it to the importer.
 
 On the importer's first encounter with that identity, the trust prompt
 fires with the badge "Pasted by you" (UI label). Subsequent pastes are

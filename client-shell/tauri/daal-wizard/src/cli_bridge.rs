@@ -2141,7 +2141,12 @@ impl CliRunner for SubprocessRunner {
             // reason is the JSON on stdout (the add-on verbs never print
             // a secret there). It goes first, so the caller's
             // `addon_cdn::json_in` reads the answer before any prose.
-            let stderr = if rc == ADDON_REFUSED_RC && !stdout.is_empty() {
+            // The note verbs (`note-gittag`, `note-dns`) answer every
+            // failure with that JSON (a code, the highest tag sequence,
+            // how long to wait), whatever the exit status, and never a
+            // secret, name or address: theirs is kept on every exit.
+            let note_verb = req.args.first().is_some_and(|a| a.starts_with("note-"));
+            let stderr = if (rc == ADDON_REFUSED_RC || note_verb) && !stdout.is_empty() {
                 format!("{}\n{stderr_tail}", String::from_utf8_lossy(&stdout).trim())
             } else {
                 stderr_tail

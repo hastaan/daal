@@ -34,11 +34,13 @@ type Profile struct {
 	//
 	// The importer that stores the route must keep this bit and the
 	// path manager must honour it; a host that cannot store it must not
-	// import a ManualOnly profile as an ordinary route. NO HOST STORES
-	// IT YET: MarshalOutbound drops it, the route row has no column for
-	// it, and the automatic connect refuses by family only. So
-	// core/abi URIImport refuses a ManualOnly profile (ErrManualOnly)
-	// until the flag is persisted and honoured.
+	// import a ManualOnly profile as an ordinary route. MarshalOutbound
+	// drops it (it is not part of the outbound). core/abi URIImport
+	// keeps it (routestore RouteRow.ManualOnly, written through the
+	// route's meta before the import) and the automatic connect refuses
+	// such a route (refusal chosen_only) before any family rule, with
+	// experimental routes on too. URIImport also stores EVERY pasted
+	// WireGuard conf as manual-only, for the same reason.
 	ManualOnly bool
 }
 

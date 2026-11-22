@@ -115,6 +115,14 @@ export interface RouteDisplayRow {
    *  (`checked_when_used`: tor, wireguard, …): it is checked only when it
    *  is used, so no score appears for it by itself. */
   checkedWhenUsed?: boolean;
+  /** Dialled only when the person picks it (`manual_only`: a pasted
+   *  WireGuard conf). Absent: an engine that predates it. */
+  manualOnly?: boolean;
+  /** Pasted on this phone (`pasted_by_you`): its group gets the app's
+   *  own title, never publisherName ("My Daal"). */
+  pastedByYou?: boolean;
+  /** routeNickname is the link's own #name (`name_from_link`). */
+  nameFromLink?: boolean;
   /** The route reaches its relay through Cloudflare (`via_cdn`: a
    *  cdn_fronted websocket-tls route). Named "WebSocket TLS · Cloudflare"
    *  wherever a route's name is shown (lib/familyName.ts kindLabel).

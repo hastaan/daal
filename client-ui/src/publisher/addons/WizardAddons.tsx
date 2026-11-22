@@ -1,7 +1,8 @@
 // WizardAddons — «More protection (optional)» while building a relay.
 //
 //   WizardAddonsStep — the build wizard's step before «Create my relay»:
-//     the relay page's three rows, each a title, one line, its cost and a
+//     the relay page's rows (the standby, Cloudflare, Google, and the two
+//     update-note switches, GitHub and DNS), each a title, one line, its cost and a
 //     switch, all off. A switch whose account is not connected opens that
 //     account's sheet (Cloudflare, Google) here, then comes back on.
 //     Nothing is rented or set up here: it is only the choice.
@@ -14,8 +15,8 @@
 
 import { useState } from 'react';
 import { Button, StateIcon, Toggle } from '../../design/primitives';
-import { CloudflareSheet, GoogleSheet } from './AccountSheets';
-import { useAccounts } from './accounts';
+import { CloudflareSheet, GithubSheet, GoogleSheet } from './AccountSheets';
+import { accountConnected, useAccounts } from './accounts';
 import type { AccountsState } from './accounts';
 import { ADDON_COPY } from './addonText';
 import type { AddonKind } from './addonTypes';
@@ -49,7 +50,8 @@ export function WizardAddonsStep({
 }) {
     const read = useAccounts(given == null);
     const accounts = given ?? read.accounts;
-    const [open, setOpen] = useState<'cloudflare' | 'google' | null>(null);
+    // The account sheet open, and the switch it turns on once connected.
+    const [open, setOpen] = useState<{ k: 'cloudflare' | 'google' | 'github'; then: AddonKind } | null>(null);
 
     const set = (kind: AddonKind, on: boolean) => {
         const next = ADDON_ORDER.filter((k) => (k === kind ? on : chosen.includes(k)));
@@ -58,8 +60,7 @@ export function WizardAddonsStep({
     const toggle = (kind: AddonKind, on: boolean) => {
         if (!on) return set(kind, false);
         const need = addonNeed(kind, accounts);
-        if (need === 'cloudflare') return setOpen('cloudflare');
-        if (need === 'google') return setOpen('google');
+        if (need !== 'ready') return setOpen({ k: need, then: kind });
         set(kind, true);
     };
 
@@ -68,8 +69,7 @@ export function WizardAddonsStep({
             <div style={CARD}>
                 {ADDON_COPY.map((c, i) => {
                     const on = chosen.includes(c.kind);
-                    const connected =
-                        c.needs == null || (c.needs === 'cloudflare' ? accounts.cloudflare.connected : accounts.google.connected);
+                    const connected = c.needs == null || accountConnected(accounts, c.needs);
                     const cost = t(costKey(c.kind, c.costKey));
                     const needs = !connected && c.needs ? t(`pub.addons.needs.${c.needs}`) : '';
                     const titleId = `wizard-addon-${c.kind}-title`;
@@ -102,7 +102,7 @@ export function WizardAddonsStep({
                 })}
             </div>
 
-            {open === 'cloudflare' && (
+            {open?.k === 'cloudflare' && (
                 <CloudflareSheet
                     t={t}
                     zone={null}
@@ -110,11 +110,11 @@ export function WizardAddonsStep({
                     onConnected={() => {
                         setOpen(null);
                         read.reload();
-                        set('cdn', true);
+                        set(open.then, true);
                     }}
                 />
             )}
-            {open === 'google' && (
+            {open?.k === 'google' && (
                 <GoogleSheet
                     t={t}
                     google={accounts.google}
@@ -123,6 +123,18 @@ export function WizardAddonsStep({
                         setOpen(null);
                         read.reload();
                         set('google', true);
+                    }}
+                />
+            )}
+            {open?.k === 'github' && (
+                <GithubSheet
+                    t={t}
+                    github={accounts.github}
+                    onClose={() => setOpen(null)}
+                    onConnected={() => {
+                        setOpen(null);
+                        read.reload();
+                        set('gittag', true);
                     }}
                 />
             )}
