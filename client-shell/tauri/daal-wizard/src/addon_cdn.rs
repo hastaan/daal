@@ -6,11 +6,13 @@
 //! hello fallback unless the publisher turns it on). No Worker (D-5).
 //!
 //! The flow the card runs: paste the token ([`set_token`]: checked by
-//! `cdn-token-check`, kept only when it is exactly the five zone
-//! permissions on one zone) → pick the zone → [`build`] (certificate and
-//! Cloudflare settings and the relay firewall by `cdn-provision`, the
-//! relay door by `cdn-door`, a real handshake through the front by
-//! `cdn-test`, then the signature) → [`posture`] on every open.
+//! `cdn-token-check`, kept when it can do the five zone things on the
+//! zone; one that can do more is kept with the extra named, one that
+//! sees several zones asks which) → pick the zone → [`build`]
+//! (certificate and Cloudflare settings and the relay firewall by
+//! `cdn-provision`, the relay door by `cdn-door`, a real handshake
+//! through the front by `cdn-test`, then the signature) → [`posture`]
+//! on every open.
 //!
 //! # What is stored where
 //!
@@ -37,8 +39,12 @@
 //! # The Cloudflare account (Accounts page)
 //!
 //! [`connect`] checks a token the same way without a relay and keeps it
-//! under [`ACCOUNT_ALIAS`], with the one zone it sees under
-//! [`ACCOUNT_ZONE_ALIAS`]. A relay that has no key of its own takes a
+//! under [`ACCOUNT_ALIAS`], with its zone under [`ACCOUNT_ZONE_ALIAS`]:
+//! the only one it sees, or the one the publisher picked when it sees
+//! several (`pick_zone`: the page asks, then calls [`connect`] again with
+//! the token and the zone). What it can do beyond the five is kept under
+//! [`ACCOUNT_EXTRA_ALIAS`], so the Accounts page keeps saying so. A
+//! relay that has no key of its own takes a
 //! copy of the account's the first time it needs one (`cf_token`), so
 //! from then on it is that relay's key exactly as [`set_token`] would
 //! have stored it: backed up, forgotten by [`remove`]. [`account`] says
@@ -85,14 +91,18 @@ pub const E_CDN_PROVISION: &str = "E_CDN_PROVISION";
 
 /// The Cloudflare account's key, kept apart from any relay.
 pub const ACCOUNT_ALIAS: &str = "daal.cloudflare.account.token";
-/// The one zone the account's key sees (not a secret; kept beside it).
+/// The zone the account's key is used on: the only one it sees, or the
+/// one picked (not a secret; kept beside it).
 pub const ACCOUNT_ZONE_ALIAS: &str = "daal.cloudflare.account.zone";
+/// What the account's key can do beyond the five, one Cloudflare
+/// permission name a line (not a secret; absent when nothing).
+pub const ACCOUNT_EXTRA_ALIAS: &str = "daal.cloudflare.account.extra";
 
 /// The record member the binder reads for the CDN route.
 pub const RECORD_MEMBER: &str = "cdn_front";
 
 /// `wizard_addon_cdn_set_token`: check a pasted Cloudflare token and,
-/// when it is exactly what Daal needs, keep it in custody.
+/// when it can do what Daal needs, keep it in custody.
 ///
 /// No `Debug`: the token must never reach a log line.
 #[derive(Clone, Deserialize)]
@@ -111,6 +121,9 @@ pub struct CdnTokenInput {
 #[derive(Clone, Deserialize)]
 pub struct CdnConnectInput {
     pub token: String,
+    /// The zone picked from a `pick_zone` answer; empty the first time.
+    #[serde(default)]
+    pub zone: String,
 }
 
 /// `wizard_addon_cdn_account`: whether this phone keeps a Cloudflare
@@ -120,6 +133,10 @@ pub struct CdnAccount {
     pub connected: bool,
     /// The zone's name; empty when not connected.
     pub zone: String,
+    /// What the key can do beyond the five (Cloudflare's names), for the
+    /// page's warning; empty for a key that is exactly what Daal asks.
+    #[serde(default)]
+    pub extra: Vec<String>,
 }
 
 /// What the token can see and do.
@@ -127,20 +144,34 @@ pub struct CdnAccount {
 pub struct CdnTokenCheck {
     /// Zones the token can see (name only).
     pub zones: Vec<String>,
-    /// `ok` | `invalid` (not a working token) | `no_zone` (sees no
-    /// active zone) | `zone_not_visible` (not the zone asked for) |
-    /// `too_broad` (more than one zone, or more than the five
-    /// permissions; refused, not stored) | `missing_permission` |
-    /// `refused` (the helper refused it without saying why).
+    /// The zone checked and to use: the one asked for, or the only one
+    /// it sees. Empty when no zone was checked.
+    #[serde(default)]
+    pub zone: String,
+    /// `ok` | `ok_broad` (works, and can do more than the five: `extra`
+    /// names what; kept) | `pick_zone` (sees several zones and none was
+    /// asked for: `zones` to pick from; not kept) | `invalid` (not a
+    /// working token) | `no_zone` (sees no active zone) |
+    /// `zone_not_visible` (not a zone it sees) | `missing_permission`
+    /// (`missing` names which) | `refused` (the helper refused it
+    /// without saying why). Only `ok` and `ok_broad` are kept.
     pub verdict: String,
-    /// Stored in custody (only when `ok`).
+    /// Stored in custody (only when `ok` or `ok_broad`).
     pub stored: bool,
-    /// Permission names missing (`missing_permission`) or extra
-    /// (`too_broad`), in Cloudflare's words.
+    /// Permission names missing (`missing_permission`) or beyond the
+    /// five (`ok_broad`, and alongside a refusal), in Cloudflare's words.
+    /// Never the token.
     #[serde(default)]
     pub missing: Vec<String>,
     #[serde(default)]
     pub extra: Vec<String>,
+}
+
+impl CdnTokenCheck {
+    /// The token can do what Daal needs on `zone`: it may be kept.
+    pub fn usable(&self) -> bool {
+        matches!(self.verdict.as_str(), "ok" | "ok_broad")
+    }
 }
 
 /// `wizard_addon_cdn_build`: certificate, Cloudflare settings, firewall,
@@ -583,7 +614,7 @@ pub fn set_token(
     }
     let _ = ctx.db.get(op)?;
     let mut check = check_token(ctx, op, &token, input.zone.trim(), on_progress)?;
-    if check.verdict == "ok" {
+    if check.usable() {
         custody_put(ctx, &cloudflare_alias(op), token.as_bytes())?;
         check.stored = true;
         on_progress(progress(op, "token", "ok", ""));
@@ -593,9 +624,13 @@ pub fn set_token(
     Ok(check)
 }
 
-/// The Accounts page: the same check, no relay. Kept only when the key
-/// sees exactly one zone (`too_broad` otherwise), so every relay knows
-/// which zone to use without asking. Progress is on relay id 0.
+/// The Accounts page: the same check, no relay. Kept with one zone, so
+/// every relay knows which zone to use without asking: the only one the
+/// key sees, or `input.zone` when it sees several (the first answer is
+/// then `pick_zone` with the list, nothing kept, and the page calls
+/// again with the token and the zone picked). A key that can do more
+/// than the five is kept (`ok_broad`) and what it can do beyond them
+/// with it. Progress is on relay id 0.
 pub fn connect(
     ctx: &WizardCtx,
     mut input: CdnConnectInput,
@@ -605,13 +640,15 @@ pub fn connect(
     if token.is_empty() {
         return Err(WizardError::EmptyToken);
     }
-    let mut check = check_token(ctx, 0, &token, "", on_progress)?;
-    if check.verdict == "ok" && check.zones.len() > 1 {
-        check.verdict = "too_broad".into();
-    }
-    if check.verdict == "ok" {
+    let mut check = check_token(ctx, 0, &token, input.zone.trim(), on_progress)?;
+    if check.usable() {
         custody_put(ctx, ACCOUNT_ALIAS, token.as_bytes())?;
-        custody_put(ctx, ACCOUNT_ZONE_ALIAS, check.zones[0].as_bytes())?;
+        custody_put(ctx, ACCOUNT_ZONE_ALIAS, check.zone.as_bytes())?;
+        if check.extra.is_empty() {
+            let _ = ctx.custody.forget(ACCOUNT_EXTRA_ALIAS);
+        } else {
+            custody_put(ctx, ACCOUNT_EXTRA_ALIAS, check.extra.join("\n").as_bytes())?;
+        }
         check.stored = true;
         on_progress(progress(0, "token", "ok", ""));
     } else {
@@ -626,20 +663,23 @@ pub fn account(ctx: &WizardCtx) -> Result<CdnAccount> {
         return Ok(CdnAccount::default());
     }
     let zone = kept(ctx, ACCOUNT_ZONE_ALIAS)?.map(|z| z.trim().to_string()).unwrap_or_default();
-    Ok(CdnAccount { connected: true, zone })
+    let extra = kept(ctx, ACCOUNT_EXTRA_ALIAS)?
+        .map(|x| x.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default();
+    Ok(CdnAccount { connected: true, zone, extra })
 }
 
 /// Forget the account key. Relays that took a copy keep theirs, so a
 /// way in that is on stays removable.
 pub fn disconnect(ctx: &WizardCtx) -> Result<()> {
-    for a in [ACCOUNT_ALIAS, ACCOUNT_ZONE_ALIAS] {
+    for a in [ACCOUNT_ALIAS, ACCOUNT_ZONE_ALIAS, ACCOUNT_EXTRA_ALIAS] {
         let _ = ctx.custody.forget(a);
     }
     Ok(())
 }
 
-/// `cdn-token-check` on a token: what it sees and whether it is exactly
-/// what Daal needs. Stores nothing.
+/// `cdn-token-check` on a token: what it sees and whether it can do what
+/// Daal needs, on `zone` when one is given. Stores nothing.
 fn check_token(
     ctx: &WizardCtx,
     op: i64,
@@ -681,6 +721,7 @@ fn check_token(
         })
         .unwrap_or_default();
     let mut check = CdnTokenCheck {
+        zone: v.get("zone").and_then(Value::as_str).unwrap_or("").trim().to_string(),
         verdict: v
             .get("verdict")
             .and_then(Value::as_str)
@@ -691,8 +732,16 @@ fn check_token(
         missing: str_list(&v, "missing"),
         extra: str_list(&v, "extra"),
     };
-    if check.verdict == "ok" && check.zones.is_empty() {
-        check.verdict = "no_zone".into();
+    if check.usable() && check.zone.is_empty() {
+        // The zone the permissions were checked on is the one to use;
+        // an answer that does not say which can only be trusted with
+        // one zone.
+        match check.zones.as_slice() {
+            [] => check.verdict = "no_zone".into(),
+            [only] => check.zone = only.clone(),
+            _ if !zone.is_empty() => check.zone = zone.trim_end_matches('.').to_ascii_lowercase(),
+            _ => check.verdict = "pick_zone".into(),
+        }
     }
     Ok(check)
 }

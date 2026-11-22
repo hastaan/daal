@@ -117,10 +117,31 @@ func TestCDNTokenCheckVerb(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &res); err != nil || res.Verdict != cloudflare.VerdictOK {
 		t.Fatalf("out = %s", out)
 	}
+	if res.Zone != "example.com" {
+		t.Fatalf("zone = %q", res.Zone)
+	}
+	// More than the five: it works, and the extra is named.
 	m.ProbeAnswer["/accounts/acct-1/workers/scripts"] = cloudflare.ProbeAllowed
 	rc, out, _ = cdnRunCLI(t, "cdn-token-check", "--token-file", filepath.Join(dir, "cf"))
-	if rc != exitCDNRefused || !strings.Contains(out, `"too_broad"`) {
-		t.Fatalf("too broad: rc=%d out=%s", rc, out)
+	if rc != 0 || !strings.Contains(out, `"ok_broad"`) || !strings.Contains(out, "Workers Scripts") {
+		t.Fatalf("broad: rc=%d out=%s", rc, out)
+	}
+	// Several zones and none picked: the list, not usable yet.
+	m.Zones = append(m.Zones, cloudflare.Zone{ID: "zone-b.org", Name: "b.org", Status: "active", AccountID: "acct-1"})
+	rc, out, _ = cdnRunCLI(t, "cdn-token-check", "--token-file", filepath.Join(dir, "cf"))
+	if rc != exitCDNRefused || !strings.Contains(out, `"pick_zone"`) || !strings.Contains(out, "b.org") {
+		t.Fatalf("two zones: rc=%d out=%s", rc, out)
+	}
+	// The zone picked is the one checked.
+	rc, out, _ = cdnRunCLI(t, "cdn-token-check", "--token-file", filepath.Join(dir, "cf"), "--zone", "example.com")
+	if rc != 0 || !strings.Contains(out, `"zone": "example.com"`) {
+		t.Fatalf("picked: rc=%d out=%s", rc, out)
+	}
+	// Short of one of the five: refused, and the missing one is named.
+	delete(m.ProbeAnswer, "/zones/zone-example.com/dns_records?per_page=1")
+	rc, out, _ = cdnRunCLI(t, "cdn-token-check", "--token-file", filepath.Join(dir, "cf"), "--zone", "example.com")
+	if rc != exitCDNRefused || !strings.Contains(out, `"missing_permission"`) || !strings.Contains(out, "Zone — DNS") {
+		t.Fatalf("short: rc=%d out=%s", rc, out)
 	}
 	if rc, _, _ := cdnRunCLI(t, "cdn-token-check"); rc != 2 {
 		t.Errorf("no flags: rc=%d", rc)

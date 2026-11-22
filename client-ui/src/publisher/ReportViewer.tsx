@@ -30,6 +30,7 @@ import {
     stageOf,
 } from './reportView';
 import type { ReportView } from './reportView';
+import { writeClipboardText } from '../lib/clipboard';
 
 export interface ReportApi {
     /** A file the person picked, staged; null when they picked none. */
@@ -48,7 +49,7 @@ export const reportApi: ReportApi = {
     },
     open: (path) => Wizard.reportOpen(path),
     copy: async (text) => {
-        await navigator.clipboard.writeText(text);
+        await writeClipboardText(text);
     },
 };
 

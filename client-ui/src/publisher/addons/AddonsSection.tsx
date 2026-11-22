@@ -261,6 +261,7 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
                 <CloudflareSheet
                     t={t}
                     zone={accounts.cloudflare.connected ? accounts.cloudflare.zone : null}
+                    extra={accounts.cloudflare.extra}
                     onClose={() => setOpen(null)}
                     onConnected={(zone) => {
                         const acc = { ...accounts, cloudflare: { connected: true, zone } };

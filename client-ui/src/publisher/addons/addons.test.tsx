@@ -433,15 +433,94 @@ describe('the Accounts page', () => {
         expect(tid(m.container, 'account-cloudflare-state')?.textContent).toBe('✓ Connected: example.com');
     });
 
-    it('a key that sees two domains is refused in one line, and kept nowhere', async () => {
+    it('a key that sees two domains asks which one, and the one picked is the one checked and kept', async () => {
         shellWith({ connected: false, zone: '' });
-        handlers.wizard_addon_cdn_connect = () => ({ zones: ['a.com', 'b.org'], verdict: 'too_broad', stored: false });
+        handlers.wizard_addon_cdn_connect = (a) => {
+            const input = (a?.input ?? {}) as { token?: string; zone?: string };
+            if (!input.zone) return { zones: ['a.com', 'b.org'], verdict: 'pick_zone', stored: false };
+            return { zones: ['a.com', 'b.org'], zone: input.zone, verdict: 'ok', stored: true };
+        };
         const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
         await rig.click(btn(m.container, 'account-cloudflare-connect'));
-        await rig.type(btn(m.container, 'cloudflare-token'), 'broad');
+        await rig.type(btn(m.container, 'cloudflare-token'), 'two-domains-key');
         await rig.click(btn(m.container, 'cloudflare-connect'));
-        expect(tid(m.container, 'cloudflare-verdict')?.textContent).toBe(en('pub.accounts.cf.verdict.too_broad'));
+        // Not refused: the domains to pick from, and the key stays until then.
+        expect(tid(m.container, 'cloudflare-verdict')).toBeNull();
+        expect(tid(m.container, 'cloudflare-pick')?.textContent).toContain(en('pub.accounts.cf.pick'));
+        expect(btn(m.container, 'cloudflare-zone-a.com')?.getAttribute('aria-checked')).toBe('false');
+        expect(btn(m.container, 'cloudflare-token')?.value).toBe('two-domains-key');
+        expect(btn(m.container, 'cloudflare-connect')?.getAttribute('disabled')).not.toBeNull();
+        expect(inputOf('wizard_addon_cdn_connect')).toEqual({ token: 'two-domains-key' });
+        await rig.click(btn(m.container, 'cloudflare-zone-b.org'));
+        expect(btn(m.container, 'cloudflare-zone-b.org')?.getAttribute('aria-checked')).toBe('true');
+        handlers.wizard_addon_cdn_account = () => ({ connected: true, zone: 'b.org' });
+        await rig.click(btn(m.container, 'cloudflare-connect'));
+        const sent = calls.filter((c) => c.cmd === 'wizard_addon_cdn_connect').map((c) => (c.args as { input: unknown }).input);
+        expect(sent).toEqual([{ token: 'two-domains-key' }, { token: 'two-domains-key', zone: 'b.org' }]);
+        expect(tid(m.container, 'cloudflare-connected')?.textContent).toBe('✓ Connected: b.org');
+        expect(btn(m.container, 'cloudflare-token')).toBeNull();
+        expect(tid(m.container, 'cloudflare-broad')).toBeNull();
+    });
+
+    it('a key that can do more is kept, with one muted line naming what more, then and later', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_addon_cdn_connect = () => ({
+            zones: ['example.com'],
+            zone: 'example.com',
+            verdict: 'ok_broad',
+            stored: true,
+            extra: ['Account — Billing', 'Account — Workers Scripts'],
+        });
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        await rig.click(btn(m.container, 'account-cloudflare-connect'));
+        await rig.type(btn(m.container, 'cloudflare-token'), 'broad-key');
+        handlers.wizard_addon_cdn_account = () => ({ connected: true, zone: 'example.com', extra: ['Account — Billing', 'Account — Workers Scripts'] });
+        await rig.click(btn(m.container, 'cloudflare-connect'));
+        expect(tid(m.container, 'cloudflare-connected')?.textContent).toBe('✓ Connected: example.com');
+        const line = 'This key can do more than Daal needs (billing, running code (Workers)). It works, but a narrower key is safer if this phone is lost.';
+        expect(tid(m.container, 'cloudflare-broad')?.textContent).toBe(line);
+        expect(tid(m.container, 'cloudflare-verdict')).toBeNull();
+        // Reopened from the Accounts page: still said.
+        await rig.click(btn(m.container, 'cloudflare-done'));
+        expect(tid(m.container, 'cloudflare-sheet')).toBeNull();
+        expect(tid(m.container, 'account-cloudflare-state')?.textContent).toBe('✓ Connected: example.com');
+        await rig.click(btn(m.container, 'account-cloudflare'));
+        expect(tid(m.container, 'cloudflare-connected')?.textContent).toBe('✓ Connected: example.com');
+        expect(tid(m.container, 'cloudflare-broad')?.textContent).toBe(line);
+    });
+
+    it('a key short of a permission is refused, naming what it lacks, and kept nowhere', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_addon_cdn_connect = () => ({
+            zones: ['example.com'],
+            zone: 'example.com',
+            verdict: 'missing_permission',
+            stored: false,
+            missing: ['Zone — DNS', 'Zone — Origin Rules'],
+            extra: ['Account — Billing'],
+        });
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        await rig.click(btn(m.container, 'account-cloudflare-connect'));
+        await rig.type(btn(m.container, 'cloudflare-token'), 'short-key');
+        await rig.click(btn(m.container, 'cloudflare-connect'));
+        expect(tid(m.container, 'cloudflare-verdict')?.textContent).toBe(
+            'This key is missing what Daal needs: DNS (Edit), Origin Rules (Edit). Add it to the key in Cloudflare, or make the key again with «Make the key».',
+        );
         expect(tid(m.container, 'cloudflare-connected')).toBeNull();
+        expect(btn(m.container, 'cloudflare-token')?.value).toBe('');
+    });
+
+    it('Paste reads the phone\'s clipboard; when nothing comes back the field says so', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.platform_clipboard_read = () => '  cf-pasted-key \n';
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        await rig.click(btn(m.container, 'account-cloudflare-connect'));
+        await rig.click(btn(m.container, 'cloudflare-paste'));
+        expect(btn(m.container, 'cloudflare-token')?.value).toBe('cf-pasted-key');
+        expect(m.container.textContent).not.toContain(en('wiz.provider.token.paste_failed'));
+        handlers.platform_clipboard_read = () => '';
+        await rig.click(btn(m.container, 'cloudflare-paste'));
+        expect(m.container.textContent).toContain(en('wiz.provider.token.paste_failed'));
     });
 
     it('Google: the script by hand in five steps, checked through Google, then ✓ Connected', async () => {

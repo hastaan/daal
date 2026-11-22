@@ -72,6 +72,7 @@ import { useDeveloperMode } from '../lib/devMode';
 import { isolate } from '../lib/format';
 import { useOpenedFileSheet } from '../recipient/openedFile';
 import type { SectionId } from '../shell/Sidebar';
+import { writeClipboardText } from '../lib/clipboard';
 
 interface Props {
     t: (k: string) => string;
@@ -486,7 +487,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         try {
             const json = await contract.exportDiagnostics();
             try {
-                await navigator.clipboard.writeText(json);
+                await writeClipboardText(json);
                 toast.show('good', t('conn.export_copied'), 6000);
             } catch {
                 toast.show('bad', t('conn.export_failed'));

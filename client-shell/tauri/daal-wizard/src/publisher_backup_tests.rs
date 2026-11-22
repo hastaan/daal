@@ -2137,6 +2137,10 @@ fn the_account_keys_travel_with_the_backup() {
         .custody
         .put(crate::addon_cdn::ACCOUNT_ZONE_ALIAS, b"example.com")
         .unwrap();
+    a.ctx
+        .custody
+        .put(crate::addon_cdn::ACCOUNT_EXTRA_ALIAS, "Account — Billing".as_bytes())
+        .unwrap();
     let words = set_words(&a);
     let file = make(&a);
 
@@ -2155,7 +2159,11 @@ fn the_account_keys_travel_with_the_backup() {
     );
     assert_eq!(
         crate::addon_cdn::account(&b.ctx).unwrap(),
-        crate::addon_cdn::CdnAccount { connected: true, zone: "example.com".into() }
+        crate::addon_cdn::CdnAccount {
+            connected: true,
+            zone: "example.com".into(),
+            extra: vec!["Account — Billing".into()],
+        }
     );
     let st = crate::hosting_account::status(&b.ctx).unwrap();
     assert!(st["hetzner"].account && st["hetzner"].connected);

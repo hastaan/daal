@@ -40,7 +40,7 @@ import (
 //   - API tokens with PERMISSIONS and a ZONE scope (cf-tokens.json, read
 //     on every request so an op can hand out a new token): a call the
 //     token may not make answers 403, as Cloudflare does. That is what
-//     makes cdn-token-check's too_broad / missing_permission verdicts
+//     makes cdn-token-check's ok_broad / pick_zone / missing_permission verdicts
 //     testable at all.
 //   - State that has consequences: the proxied records, the origin rule's
 //     port, SSL mode, WebSockets, origin pull and its client certificate

@@ -229,10 +229,15 @@ prints, any case, `-` or spaces) and carries the one canonical form.
 - Cloudflare: proxied record `<label>.<zone>`, SSL Full (strict), an
   Origin Rule overriding the destination port for the host name,
   WebSockets on, AOP on, ECH left on. No Worker.
-- The token has exactly these permissions on the one zone and nothing
-  at account level: Zone Read, DNS Edit, SSL and Certificates Edit, Zone
-  Settings Edit, Origin Rules Edit. A token that can do more is refused
-  and not stored (`CdnTokenCheck.verdict = too_broad`).
+- The token Daal asks for has exactly these permissions on the one zone
+  and nothing at account level: Zone Read, DNS Edit, SSL and
+  Certificates Edit, Zone Settings Edit, Origin Rules Edit. Only a token
+  that does not work, sees no zone or lacks one of the five is refused
+  (`missing_permission` names what is missing). A token that can do more
+  is kept with a warning naming the extra (`ok_broad`); one that sees
+  several zones asks which one (`pick_zone`), and the zone picked is the
+  one checked and used (2026-11-22, the owner: "it should reject if it
+  is restricted, not broad").
 - What is signed: one more `websocket-tls` route, exposure `cdn_fronted`,
   whose commitment is the sibling member `_cdn_endpoint` (no
   `_endpoint`), with `_cdn_attestation` and the RP005/RP006 tags as

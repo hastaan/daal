@@ -41,6 +41,7 @@ import {
     StateIcon,
     useToast,
 } from '../design/primitives';
+import { writeClipboardText } from '../lib/clipboard';
 
 interface Props {
     t: (k: string) => string;
@@ -131,7 +132,7 @@ export default function StatusPage({ t, locale = 'en', onBack }: Props) {
     const onReport = async () => {
         try {
             const json = await contract.exportDiagnostics();
-            await navigator.clipboard.writeText(json);
+            await writeClipboardText(json);
             toast.show('good', t('status.report.done'), 6000);
         } catch {
             toast.show('bad', t('status.report.failed'));

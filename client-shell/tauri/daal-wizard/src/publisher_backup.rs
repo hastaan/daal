@@ -1013,8 +1013,8 @@ fn report_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<String> {
 }
 
 /// The account keys a phone may hold apart from any relay (the Accounts
-/// page): each hosting company's key, the Cloudflare key with the zone
-/// it sees, and the Google account's write key with its script's
+/// page): each hosting company's key, the Cloudflare key with its zone
+/// and what it can do beyond the five, and the Google account's write key with its script's
 /// address. Not columns, so carried only when present: a phone
 /// with no account keeps the same digest (and the same backup) as
 /// before they existed, and a backup made before them restores as is.
@@ -1022,6 +1022,7 @@ fn account_aliases() -> Vec<String> {
     let mut out = crate::hosting_account::all_account_aliases();
     out.push(crate::addon_cdn::ACCOUNT_ALIAS.to_string());
     out.push(crate::addon_cdn::ACCOUNT_ZONE_ALIAS.to_string());
+    out.push(crate::addon_cdn::ACCOUNT_EXTRA_ALIAS.to_string());
     out.extend(crate::addon_google::ACCOUNT_ALIASES.iter().map(|a| a.to_string()));
     out
 }

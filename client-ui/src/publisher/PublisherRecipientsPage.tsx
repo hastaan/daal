@@ -122,6 +122,7 @@ import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
 // Optional add-ons: standby address, Cloudflare, Google channel (X3).
 import { AddonsSection } from './addons/AddonsSection';
+import { readClipboardText, writeClipboardText } from '../lib/clipboard';
 
 interface Props {
     t: (k: string) => string;
@@ -642,7 +643,7 @@ export default function PublisherRecipientsPage({
             'everyone:copy',
             async () => {
                 const text = await Wizard.copyPasteable(operatorId, 'shared');
-                await navigator.clipboard.writeText(text);
+                await writeClipboardText(text);
             },
             { ok: t('pub.artifacts.copied'), fail: t('pub.fb.copy.fail') },
         );
@@ -722,7 +723,7 @@ export default function PublisherRecipientsPage({
                 `copy:${id}`,
                 async () => {
                     const text = await Wizard.copyPasteable(operatorId, recipientArtifact(id));
-                    await navigator.clipboard.writeText(text);
+                    await writeClipboardText(text);
                 },
                 {
                     ok: t('pub.person.copied').replace(/\{name\}/g, label),
@@ -812,7 +813,7 @@ export default function PublisherRecipientsPage({
     /** "Paste" next to the address: the clipboard, else the field. */
     const pasteAddress = useCallback(async () => {
         try {
-            const text = await navigator.clipboard.readText();
+            const text = await readClipboardText();
             if (text && text.trim()) {
                 setAddAddress(normalizeDaalAddress(text));
                 setAddError(null);

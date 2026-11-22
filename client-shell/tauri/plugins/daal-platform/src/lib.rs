@@ -24,8 +24,11 @@
 //! Also reached from the app's own commands (not invoked from the page
 //! as plugin commands): `PlatformHandle::secure_screen(on)` (PB-20,
 //! FLAG_SECURE while the recovery words are on screen; a no-op on
-//! desktop) and `PlatformHandle::field_probe_watch(on)` (the network
-//! test's start facts and its watch; `None` on desktop).
+//! desktop), `PlatformHandle::field_probe_watch(on)` (the network
+//! test's start facts and its watch; `None` on desktop) and
+//! `PlatformHandle::clipboard_read()` / `clipboard_write(text)` (Paste
+//! and Copy, which the Android web view's own clipboard refuses; `None`
+//! / `false` on desktop, where the page's clipboard works).
 
 use tauri::{
     plugin::{Builder, TauriPlugin},
@@ -90,6 +93,15 @@ impl<R: Runtime> PlatformHandle<R> {
     pub fn secure_screen(&self, on: bool) -> Result<()> {
         self.inner.secure_screen(on).map(|_| ())
     }
+    /// Paste: the clipboard's text, `Some("")` when there is none. The
+    /// text may be a key: never logged.
+    pub fn clipboard_read(&self) -> Result<Option<String>> {
+        self.inner.clipboard_read().map(|r| Some(r.text))
+    }
+    /// Copy: `text` onto the clipboard; true once it is there.
+    pub fn clipboard_write(&self, text: &str) -> Result<bool> {
+        self.inner.clipboard_write(text).map(|r| r.written)
+    }
     /// Network test: what the start needs from the phone, and the watch
     /// for the length of the run (`on`) or its end. `None` = nothing to
     /// tell (desktop).
@@ -140,6 +152,15 @@ impl<R: Runtime> PlatformHandle<R> {
     /// PB-20: the desktop window has no capture flag; nothing to do.
     pub fn secure_screen(&self, _on: bool) -> Result<()> {
         Ok(())
+    }
+    /// Desktop: the page's own clipboard works; `None` says so and the
+    /// page reads it itself.
+    pub fn clipboard_read(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// Desktop: nothing written here (`false`); the page writes it itself.
+    pub fn clipboard_write(&self, _text: &str) -> Result<bool> {
+        Ok(false)
     }
     /// Network test: the desktop shell has no network watch; the engine
     /// is told nothing extra.

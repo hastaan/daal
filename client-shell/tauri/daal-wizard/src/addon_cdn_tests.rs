@@ -272,24 +272,42 @@ fn a_token_with_exactly_the_five_permissions_is_kept_trimmed() {
 }
 
 #[test]
-fn a_token_that_can_do_more_is_refused_and_not_stored() {
+fn a_token_that_can_do_more_is_kept_with_what_it_can_do_beyond_named() {
     let f = fx();
     let op = with_token(&f);
-    let refusal = serde_json::json!({"verdict":"too_broad","zones":[{"name":"example.com"},{"name":"other.org"}],
-        "extra":["Account — Workers Scripts — Edit"]});
-    f.helper.lock().unwrap().token_check = Some(Err((4, format!("{}\n", serde_json::to_string_pretty(&refusal).unwrap()))));
+    f.helper.lock().unwrap().token_check = Some(Ok(serde_json::json!({"verdict":"ok_broad","zone":"example.com",
+        "zones":[{"name":"example.com"}],"extra":["Account — Workers Scripts","Account — Billing"]})));
     let c = set_token(
         &f.ctx,
         CdnTokenInput { operator_id: op, token: "cf-broad-token".into(), zone: String::new() },
         &mut noop(),
     )
     .unwrap();
-    assert_eq!(c.verdict, "too_broad");
-    assert!(!c.stored);
-    assert_eq!(c.extra, vec!["Account — Workers Scripts — Edit".to_string()]);
-    assert_eq!(c.zones.len(), 2);
+    assert_eq!((c.verdict.as_str(), c.stored, c.zone.as_str()), ("ok_broad", true, "example.com"));
+    assert_eq!(c.extra, vec!["Account — Workers Scripts".to_string(), "Account — Billing".to_string()]);
+    assert_eq!(token_of(&f, op).as_deref(), Some("cf-broad-token"));
+}
+
+#[test]
+fn a_token_short_of_a_permission_is_refused_from_the_json_on_a_refusal_and_not_stored() {
+    let f = fx();
+    let op = with_token(&f);
+    let refusal = serde_json::json!({"verdict":"missing_permission","zone":"example.com","zones":[{"name":"example.com"}],
+        "missing":["Zone — DNS","Zone — Origin Rules"],"extra":["Account — Billing"]});
+    f.helper.lock().unwrap().token_check = Some(Err((4, format!("{}\n", serde_json::to_string_pretty(&refusal).unwrap()))));
+    let c = set_token(
+        &f.ctx,
+        CdnTokenInput { operator_id: op, token: "cf-short-token".into(), zone: String::new() },
+        &mut noop(),
+    )
+    .unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored), ("missing_permission", false));
+    assert_eq!(c.missing, vec!["Zone — DNS".to_string(), "Zone — Origin Rules".to_string()]);
+    assert_eq!(c.extra, vec!["Account — Billing".to_string()]);
     // The good one from before is untouched.
     assert_eq!(token_of(&f, op).as_deref(), Some(CF_TOKEN));
+    // The answer never carries the token.
+    assert!(!serde_json::to_string(&c).unwrap().contains("cf-short-token"));
 }
 
 #[test]
@@ -566,36 +584,85 @@ fn the_json_of_a_refusal_is_found_inside_the_failure_text() {
 fn an_account_key_is_checked_without_a_relay_and_kept_with_its_one_zone() {
     let f = fx();
     assert_eq!(account(&f.ctx).unwrap(), CdnAccount::default());
-    let c = connect(&f.ctx, CdnConnectInput { token: format!(" {CF_TOKEN}\n") }, &mut noop()).unwrap();
-    assert_eq!((c.verdict.as_str(), c.stored), ("ok", true));
+    let c = connect(&f.ctx, CdnConnectInput { token: format!(" {CF_TOKEN}\n"), zone: String::new() }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored, c.zone.as_str()), ("ok", true, "example.com"));
     assert_eq!(verbs(&f), ["cdn-token-check"]);
+    assert!(!args_of(&f, "cdn-token-check")[0].iter().any(|a| a == "--zone"));
     assert_eq!(
         account(&f.ctx).unwrap(),
-        CdnAccount { connected: true, zone: "example.com".into() }
+        CdnAccount { connected: true, zone: "example.com".into(), extra: vec![] }
     );
     let kept = f.ctx.custody.get(ACCOUNT_ALIAS).unwrap();
     assert_eq!(String::from_utf8(kept).unwrap(), CF_TOKEN);
     disconnect(&f.ctx).unwrap();
     assert_eq!(account(&f.ctx).unwrap(), CdnAccount::default());
-    let e = connect(&f.ctx, CdnConnectInput { token: "  ".into() }, &mut noop()).unwrap_err();
+    let e = connect(&f.ctx, CdnConnectInput { token: "  ".into(), zone: String::new() }, &mut noop()).unwrap_err();
     assert!(matches!(e, WizardError::EmptyToken));
 }
 
 #[test]
-fn an_account_key_that_sees_two_zones_is_not_kept() {
+fn an_account_key_that_sees_two_zones_asks_which_and_keeps_the_one_picked() {
     let f = fx();
-    f.helper.lock().unwrap().token_check =
-        Some(Ok(serde_json::json!({"verdict":"ok","zones":[{"name":"example.com"},{"name":"other.org"}]})));
-    let c = connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into() }, &mut noop()).unwrap();
-    assert_eq!((c.verdict.as_str(), c.stored), ("too_broad", false));
+    let two = serde_json::json!([{"name":"example.com"},{"name":"other.org"}]);
+    f.helper.lock().unwrap().token_check = Some(Err((
+        4,
+        serde_json::json!({"verdict":"pick_zone","zones":two.clone()}).to_string(),
+    )));
+    let c = connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: String::new() }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored), ("pick_zone", false));
+    assert_eq!(c.zones, vec!["example.com".to_string(), "other.org".to_string()]);
     assert!(!account(&f.ctx).unwrap().connected);
+
+    // The page asks, then sends the token again with the zone picked.
+    f.helper.lock().unwrap().token_check =
+        Some(Ok(serde_json::json!({"verdict":"ok","zone":"other.org","zones":two.clone()})));
+    let c = connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: " other.org ".into() }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored, c.zone.as_str()), ("ok", true, "other.org"));
+    assert!(args_of(&f, "cdn-token-check")[1].windows(2).any(|w| w[0] == "--zone" && w[1] == "other.org"));
+    assert_eq!(account(&f.ctx).unwrap().zone, "other.org");
+
+    // An answer that is usable but names no zone among several is not
+    // trusted to pick one.
+    disconnect(&f.ctx).unwrap();
+    f.helper.lock().unwrap().token_check = Some(Ok(serde_json::json!({"verdict":"ok","zones":two})));
+    let c = connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: String::new() }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored), ("pick_zone", false));
+    assert!(!account(&f.ctx).unwrap().connected);
+}
+
+#[test]
+fn an_account_key_that_can_do_more_is_kept_and_the_account_keeps_saying_so() {
+    let f = fx();
+    f.helper.lock().unwrap().token_check = Some(Ok(serde_json::json!({"verdict":"ok_broad","zone":"example.com",
+        "zones":[{"name":"example.com"}],"extra":["Account — Billing","User — API Tokens"]})));
+    let c = connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: String::new() }, &mut noop()).unwrap();
+    assert_eq!((c.verdict.as_str(), c.stored), ("ok_broad", true));
+    assert_eq!(
+        account(&f.ctx).unwrap(),
+        CdnAccount {
+            connected: true,
+            zone: "example.com".into(),
+            extra: vec!["Account — Billing".into(), "User — API Tokens".into()],
+        }
+    );
+    // A narrower key in its place: nothing extra any more.
+    f.helper.lock().unwrap().token_check = None;
+    connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: String::new() }, &mut noop()).unwrap();
+    assert!(account(&f.ctx).unwrap().extra.is_empty());
+    // Disconnect forgets it all.
+    f.helper.lock().unwrap().token_check = Some(Ok(serde_json::json!({"verdict":"ok_broad","zone":"example.com",
+        "zones":[{"name":"example.com"}],"extra":["Account — Billing"]})));
+    connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: String::new() }, &mut noop()).unwrap();
+    disconnect(&f.ctx).unwrap();
+    assert_eq!(account(&f.ctx).unwrap(), CdnAccount::default());
+    assert!(f.ctx.custody.get(ACCOUNT_EXTRA_ALIAS).is_err());
 }
 
 #[test]
 fn a_relay_without_its_own_key_builds_with_a_copy_of_the_accounts_and_remove_forgets_only_the_copy() {
     let f = fx();
     let op = provisioned(&f);
-    connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into() }, &mut noop()).unwrap();
+    connect(&f.ctx, CdnConnectInput { token: CF_TOKEN.into(), zone: String::new() }, &mut noop()).unwrap();
     assert!(token_of(&f, op).is_none());
     let row = built(&f, op);
     assert_eq!(row.state, AddonState::Ready);

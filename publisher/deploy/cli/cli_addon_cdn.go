@@ -4,9 +4,12 @@ package cli
 // items B-2, B-3, B-5; specs/optional-addons-v1.md §4 and §6.3).
 //
 //	cdn-token-check --token-file F [--zone Z]
-//	        verify the token, list the zones it sees, refuse one that sees
-//	        more than one zone or can do more than the five zone
-//	        permissions (verdict too_broad), or lacks one of them
+//	        verify the token and list the zones it sees; refuse one that
+//	        does not work, sees no zone or lacks one of the five zone
+//	        permissions (missing names which). One that can do more
+//	        works (verdict ok_broad, extra names what). One that sees
+//	        several zones with no --zone answers pick_zone: run again
+//	        with the zone picked, which is then the one checked and used
 //	cdn-test        --record-file R [--edge ip:port] [--require-ech=false]
 //	                [--refresh-ech] [--timeout 15s]
 //	        one real TLS + WebSocket handshake through the front, with ECH
@@ -36,8 +39,10 @@ package cli
 //
 // Tokens are read from files (the wizard writes them 0600 and deletes
 // them), zeroed after use, and never printed: not on stdout, not on
-// stderr, not inside an error. Exit codes: 0 done; 1 an error (nothing
-// was decided); 2 usage; 4 a refusal or a failed check, with the JSON
+// stderr, not inside an error. Exit codes: 0 done (for cdn-token-check:
+// the token is usable, ok or ok_broad); 1 an error (nothing was
+// decided); 2 usage; 4 a refusal or a failed check (for cdn-token-check
+// also pick_zone: not usable until a zone is picked), with the JSON
 // that says why on stdout.
 
 import (
@@ -162,7 +167,7 @@ func runCDNTokenCheck(ctx context.Context, args []string, stdout, stderr io.Writ
 		fmt.Fprintf(stderr, "cdn-token-check: %v\n", err)
 		return 1
 	}
-	if res.Verdict != cloudflare.VerdictOK {
+	if !res.Usable() {
 		return exitCDNRefused
 	}
 	return 0

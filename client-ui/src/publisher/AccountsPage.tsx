@@ -169,6 +169,7 @@ export default function AccountsPage({
                 <CloudflareSheet
                     t={t}
                     zone={accounts.cloudflare.connected ? accounts.cloudflare.zone : null}
+                    extra={accounts.cloudflare.extra}
                     onClose={() => {
                         setOpen(null);
                         reload();

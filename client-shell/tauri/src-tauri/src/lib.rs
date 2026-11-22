@@ -1779,6 +1779,39 @@ async fn platform_secure_screen(app: tauri::AppHandle, on: bool) -> Result<(), S
     }.await)
 }
 
+/// Paste: the clipboard's text, read by the phone itself (the Android
+/// web view refuses the page's `navigator.clipboard.readText()`). `None`
+/// on desktop, where the page reads its own clipboard; `Some("")` when
+/// there is nothing. The text may be a key: it is returned and never
+/// logged (a failure logs the plugin's error, which carries no text).
+#[tauri::command]
+async fn platform_clipboard_read(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    cmdlog::result("platform_clipboard_read", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_daal_platform::PlatformExt;
+            app.platform().clipboard_read().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("platform_clipboard_read: {e}"))?
+    }.await)
+}
+
+/// Copy: `text` onto the clipboard by the phone itself (marked
+/// sensitive on Android). `false` on desktop, where the page writes its
+/// own clipboard. Never logged.
+#[tauri::command]
+async fn platform_clipboard_write(app: tauri::AppHandle, text: String) -> Result<bool, String> {
+    cmdlog::result("platform_clipboard_write", async move {
+        let text = zeroize::Zeroizing::new(text);
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri_plugin_daal_platform::PlatformExt;
+            app.platform().clipboard_write(&text).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("platform_clipboard_write: {e}"))?
+    }.await)
+}
+
 // ---- FRP-4b live operations ----------------------------------------
 
 /// `wizard_provision_run`: runs `daal-deploy provision` on a
@@ -4248,6 +4281,8 @@ pub fn run() {
             wizard_restore_answer,
             wizard_relay_only_revoke,
             platform_secure_screen,
+            platform_clipboard_read,
+            platform_clipboard_write,
             wizard_provision_run,
             wizard_sign_relaypack,
             wizard_qr_render,

@@ -108,29 +108,37 @@ export interface CdnTokenInput {
 }
 /** The Accounts page: a Cloudflare key checked without a relay. */
 export interface CdnConnectInput {
-    /** Crosses this boundary once, inbound. */
+    /** Crosses this boundary inbound: once, or twice when the key sees
+     *  several domains (again with the one picked). */
     token: string;
+    /** The domain picked from a `pick_zone` answer. */
+    zone?: string;
 }
 /** daal_wizard::addon_cdn::CdnAccount */
 export interface CdnAccount {
     connected: boolean;
-    /** The one zone the key sees; '' when not connected. */
+    /** The zone the key is used on; '' when not connected. */
     zone: string;
+    /** What the key can do beyond the five (Cloudflare's names). */
+    extra?: string[];
 }
 export type CdnTokenVerdict =
     | 'ok'
+    | 'ok_broad'
+    | 'pick_zone'
     | 'invalid'
     | 'no_zone'
     | 'zone_not_visible'
-    | 'too_broad'
     | 'missing_permission'
     | 'refused';
 export interface CdnTokenCheck {
     zones: string[];
+    /** The zone checked and to use; '' when none was (pick_zone). */
+    zone?: string;
     verdict: CdnTokenVerdict;
-    /** Kept on this phone (only when ok). */
+    /** Kept on this phone (only when ok or ok_broad). */
     stored: boolean;
-    /** Cloudflare's names of the permissions missing / extra. */
+    /** Cloudflare's names of the permissions missing / beyond the five. */
     missing?: string[];
     extra?: string[];
 }

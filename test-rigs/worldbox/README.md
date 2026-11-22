@@ -938,8 +938,8 @@ standby), `standby-open` (the engine's address variant `a:standby`, zero
 fetches), `standby-stale` (the released address at a stranger's: the
 variant is tried and fails closed), `standby-google` (the switch and the
 key through the Google channel with the ordinary mirrors cut),
-`cdn-provision` (token verdicts ok / too_broad ×2 / missing_permission /
-invalid; a provision that fails at the origin rule leaves the zone as it
+`cdn-provision` (token verdicts ok / ok_broad / pick_zone and the zone
+picked / missing_permission / invalid; a provision that fails at the origin rule leaves the zone as it
 was; the zone state, the relay firewall's door rule from the published
 ranges only, the ECH config read over DoH; the door opened by `cdn-door`,
 which opens the box firewall to the same ranges itself (provisioning

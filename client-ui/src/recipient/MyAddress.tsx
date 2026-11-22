@@ -19,6 +19,7 @@ import {
     type RecipientIdentitySummary,
 } from './recipientCommands';
 import { Button, Disclosure, Icon, Input, StateIcon, useToast } from '../design/primitives';
+import { writeClipboardText } from '../lib/clipboard';
 
 interface Props {
     t: (k: string) => string;
@@ -115,7 +116,7 @@ export default function MyAddress({ t }: Props) {
     const onCopy = async () => {
         if (!summary) return;
         try {
-            await navigator.clipboard.writeText(summary.address);
+            await writeClipboardText(summary.address);
             toast.show('good', t('ui.copied'));
         } catch {
             toast.show('bad', t('recipient.address.copy_failed'));

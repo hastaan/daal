@@ -243,25 +243,61 @@ func opCDNProvision(rc *RunCtx) {
 	}
 	tok := rc.cdnTokens()
 
-	// 1. The token check (plan §2.3 step 3).
-	for _, c := range []struct{ id, want string }{{"tokgood", "ok"}, {"tokbroad", "too_broad"}, {"toktwozones", "too_broad"},
-		{"tokshort", "missing_permission"}, {"tokdead", "invalid"}} {
+	// 1. The token check (plan §2.3 step 3). Refused only when it cannot
+	// do the job (dead, short of one of the five: what is missing is
+	// named). More than the five works (ok_broad, the extra named); two
+	// zones with none picked asks for the pick, and the zone picked is
+	// the one checked.
+	for _, c := range []struct {
+		id, zone, want string
+		named          []string // must appear in extra / missing
+	}{
+		{"tokgood", CDNZone, "ok", nil},
+		{"tokbroad", CDNZone, "ok_broad", []string{"Account — Workers Scripts", "User — User Details"}},
+		{"toktwozones", "", "pick_zone", nil},
+		{"toktwozones", CDNZone, "ok", nil},
+		{"tokshort", CDNZone, "missing_permission", []string{"Zone — Origin Rules"}},
+		{"tokdead", CDNZone, "invalid", nil},
+	} {
 		t0 = time.Now()
-		v := rc.Pub.Deploy(rc.Ctx, "cdn-token-check", "--token-file", tok[c.id], "--zone", CDNZone)
+		args := []string{"cdn-token-check", "--token-file", tok[c.id]}
+		name := c.id
+		if c.zone != "" {
+			args = append(args, "--zone", c.zone)
+		} else {
+			name += ".no_zone"
+		}
+		v := rc.Pub.Deploy(rc.Ctx, args...)
 		var ans struct {
 			Verdict string   `json:"verdict"`
+			Zone    string   `json:"zone"`
+			Zones   []any    `json:"zones"`
 			Extra   []string `json:"extra"`
 			Missing []string `json:"missing"`
 		}
 		_ = json.Unmarshal([]byte(v.Stdout), &ans)
-		rcWant := 0
-		if c.want != "ok" {
-			rcWant = 4
+		rcWant := 4
+		if c.want == "ok" || c.want == "ok_broad" {
+			rcWant = 0
 		}
 		ok := ans.Verdict == c.want && v.RC == rcWant
-		rc.R.Add("", phase, "token-check."+c.id, Pass, got(ok, Pass, Fail),
-			got(ok, "", fmt.Sprintf("verdict %q rc %d, want %q rc %d: %s", ans.Verdict, v.RC, c.want, rcWant, v.Tail())),
-			map[string]any{"verdict": ans.Verdict, "extra": ans.Extra, "missing": ans.Missing}, t0)
+		named := strings.Join(append(append([]string{}, ans.Extra...), ans.Missing...), "|")
+		for _, n := range c.named {
+			ok = ok && strings.Contains(named, n)
+		}
+		switch c.want {
+		case "ok", "ok_broad":
+			ok = ok && ans.Zone == CDNZone
+		case "pick_zone":
+			ok = ok && len(ans.Zones) == 2 && ans.Zone == ""
+		}
+		// The answer never carries the token.
+		if secret, err := os.ReadFile(tok[c.id]); err == nil && len(strings.TrimSpace(string(secret))) > 0 {
+			ok = ok && !strings.Contains(v.Stdout+v.Stderr, strings.TrimSpace(string(secret)))
+		}
+		rc.R.Add("", phase, "token-check."+name, Pass, got(ok, Pass, Fail),
+			got(ok, "", fmt.Sprintf("verdict %q zone %q rc %d, want %q rc %d naming %v: %s", ans.Verdict, ans.Zone, v.RC, c.want, rcWant, c.named, v.Tail())),
+			map[string]any{"verdict": ans.Verdict, "zone": ans.Zone, "extra": ans.Extra, "missing": ans.Missing}, t0)
 	}
 
 	// 2. A provision that fails at the origin rule leaves nothing.

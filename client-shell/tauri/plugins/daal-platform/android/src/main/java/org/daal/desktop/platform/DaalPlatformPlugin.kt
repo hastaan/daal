@@ -1,9 +1,13 @@
 package org.daal.desktop.platform
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.graphics.Color
+import android.os.PersistableBundle
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebView
@@ -45,6 +49,12 @@ class FieldProbeWatchArgs {
 class SecureScreenArgs {
   /** true while a screen showing the recovery words is mounted. */
   var on: Boolean = false
+}
+
+@InvokeArg
+class ClipboardWriteArgs {
+  /** What a Copy button copies. May be a key: never logged. */
+  var text: String = ""
 }
 
 /**
@@ -208,6 +218,68 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (t: Throwable) {
       Logger.error("DaalPlatformPlugin.secureScreen failed: ${t.message}")
       invoke.reject(t.message ?: "secureScreen failed")
+    }
+  }
+
+  /**
+   * Paste: the text on the clipboard, "" when there is none or it is not
+   * text. The page's own navigator.clipboard.readText() is refused by the
+   * Android web view, so every Paste button comes here
+   * (`platform_clipboard_read` in src-tauri, client-ui/src/lib/clipboard.ts).
+   * Android lets the app in focus read the clipboard, which it is when a
+   * Paste button is pressed. The text may be a key: it is handed back
+   * and never logged.
+   */
+  @Command
+  fun clipboardRead(invoke: Invoke) {
+    activity.runOnUiThread {
+      try {
+        val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val clip = cm?.primaryClip
+        val text = if (clip != null && clip.itemCount > 0) {
+          clip.getItemAt(0).coerceToText(activity)?.toString() ?: ""
+        } else {
+          ""
+        }
+        invoke.resolve(JSObject().apply { put("text", text) })
+      } catch (t: Throwable) {
+        Logger.error("DaalPlatformPlugin.clipboardRead failed: ${t.javaClass.simpleName}")
+        invoke.reject("clipboardRead failed")
+      }
+    }
+  }
+
+  /**
+   * Copy: put `text` on the clipboard (`platform_clipboard_write` in
+   * src-tauri). The web view's navigator.clipboard.writeText() needs a
+   * fresh tap, which a Copy that first waits for the app (a file, a
+   * script, a report) no longer has. Marked sensitive, so Android 13 and
+   * later do not show it in the "copied" preview: it may be a key.
+   * Never logged.
+   */
+  @Command
+  fun clipboardWrite(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(ClipboardWriteArgs::class.java)
+      activity.runOnUiThread {
+        try {
+          val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+          val clip = ClipData.newPlainText("Daal", args.text)
+          // ClipDescription.EXTRA_IS_SENSITIVE (API 33), by its value so
+          // older systems simply ignore it.
+          clip.description.extras = PersistableBundle().apply {
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+          }
+          cm.setPrimaryClip(clip)
+          invoke.resolve(JSObject().apply { put("written", true) })
+        } catch (t: Throwable) {
+          Logger.error("DaalPlatformPlugin.clipboardWrite failed: ${t.javaClass.simpleName}")
+          invoke.reject("clipboardWrite failed")
+        }
+      }
+    } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.clipboardWrite failed: ${t.javaClass.simpleName}")
+      invoke.reject("clipboardWrite failed")
     }
   }
 

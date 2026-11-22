@@ -102,6 +102,29 @@ pub struct SecureScreenResponse {
     pub on: bool,
 }
 
+/// What the Kotlin `clipboardRead` command answers: the clipboard's
+/// text, "" when there is none. No `Debug`: it may be a key, and must
+/// never reach a log line.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipboardReadResponse {
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Arguments of the Kotlin `clipboardWrite` command (`@InvokeArg
+/// ClipboardWriteArgs.text`). No `Debug`, for the same reason.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipboardWriteRequest {
+    pub text: String,
+}
+
+/// What `clipboardWrite` answers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipboardWriteResponse {
+    #[serde(default)]
+    pub written: bool,
+}
+
 /// Arguments of the Kotlin `fieldProbeWatch` command (network test):
 /// `on` when a test is starting, `false` when it has ended.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +193,22 @@ mod tests {
         );
         let r: SecureScreenResponse = serde_json::from_str("{}").unwrap();
         assert!(!r.on);
+    }
+
+    #[test]
+    fn the_clipboard_speaks_the_kotlin_names() {
+        // The Kotlin @InvokeArg ClipboardWriteArgs reads exactly `text`.
+        assert_eq!(
+            serde_json::to_string(&ClipboardWriteRequest { text: "k".into() }).unwrap(),
+            r#"{"text":"k"}"#
+        );
+        let r: ClipboardReadResponse = serde_json::from_str(r#"{"text":"pasted"}"#).unwrap();
+        assert_eq!(r.text, "pasted");
+        // Nothing on the clipboard reads as "".
+        let r: ClipboardReadResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(r.text, "");
+        let w: ClipboardWriteResponse = serde_json::from_str(r#"{"written":true}"#).unwrap();
+        assert!(w.written);
     }
 
     #[test]

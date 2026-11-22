@@ -10,6 +10,7 @@ import { useDensity } from '../../design/DensityProvider';
 import { toFaDigits } from '../../lib/i18n';
 import { WhatIsThis } from '../Disclosure';
 import { addonErrorText } from './addonErrors';
+import { writeClipboardText } from '../../lib/clipboard';
 
 export const BODY: React.CSSProperties = { fontSize: 14, color: 'var(--fg)', lineHeight: 1.55, margin: 0 };
 export const MUTED: React.CSSProperties = { fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: 0 };
@@ -38,7 +39,7 @@ export async function openExternal(url: string): Promise<void> {
 /** Copy a text. Never logs it (a script carries a write key). */
 export async function copyText(text: string): Promise<boolean> {
     try {
-        await navigator.clipboard.writeText(text);
+        await writeClipboardText(text);
         return true;
     } catch {
         return false;

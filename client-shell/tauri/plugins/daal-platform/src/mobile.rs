@@ -14,8 +14,9 @@ use tauri::{
 
 use crate::error::{Error, Result};
 use crate::models::{
-    FieldProbeHost, FieldProbeWatchRequest, SecureScreenRequest, SecureScreenResponse,
-    VpnStartResponse, VpnStatusResponse, VpnStopResponse,
+    ClipboardReadResponse, ClipboardWriteRequest, ClipboardWriteResponse, FieldProbeHost,
+    FieldProbeWatchRequest, SecureScreenRequest, SecureScreenResponse, VpnStartResponse,
+    VpnStatusResponse, VpnStopResponse,
 };
 
 #[cfg(target_os = "android")]
@@ -146,5 +147,16 @@ impl<R: Runtime> Platform<R> {
         Ok(self
             .0
             .run_mobile_plugin::<SecureScreenResponse>("secureScreen", SecureScreenRequest { on })?)
+    }
+    pub fn clipboard_read(&self) -> Result<ClipboardReadResponse> {
+        Ok(self
+            .0
+            .run_mobile_plugin::<ClipboardReadResponse>("clipboardRead", ())?)
+    }
+    pub fn clipboard_write(&self, text: &str) -> Result<ClipboardWriteResponse> {
+        Ok(self.0.run_mobile_plugin::<ClipboardWriteResponse>(
+            "clipboardWrite",
+            ClipboardWriteRequest { text: text.to_string() },
+        )?)
     }
 }

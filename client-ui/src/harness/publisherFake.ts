@@ -366,7 +366,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         updated_at_unix: number;
     };
     let addons: FakeAddon[] = [];
-    let cfAccount = { connected: false, zone: '' };
+    let cfAccount: { connected: boolean; zone: string; extra?: string[] } = { connected: false, zone: '' };
     let googleAccount = { connected: false, script_made: false, url: '', sign_in: false };
     let hostingAccount = false;
     const STANDBY_KEY = '000G40 R40M3 0E209 185WP 03H2G';
@@ -443,11 +443,23 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         wizard_addon_standby_key: () => ({ key: STANDBY_KEY }),
         // The Cloudflare account (Accounts page): kept for every relay.
         wizard_addon_cdn_account: () => cfAccount,
+        // A key with "short" in it lacks a permission; "broad" can do
+        // more (kept, named); "two" sees two domains and asks which.
         wizard_addon_cdn_connect: (a) => {
-            const tok = String((a?.input as { token?: string })?.token ?? '');
-            if (tok.includes('broad')) return { zones: ['example.com', 'other.org'], verdict: 'too_broad', stored: false };
-            cfAccount = { connected: true, zone: 'example.com' };
-            return { zones: ['example.com'], verdict: 'ok', stored: true };
+            const input = (a?.input as { token?: string; zone?: string }) ?? {};
+            const tok = String(input.token ?? '');
+            const want = String(input.zone ?? '');
+            if (tok.includes('short'))
+                return { zones: ['example.com'], zone: 'example.com', verdict: 'missing_permission', stored: false, missing: ['Zone — DNS'] };
+            if (tok.includes('two') && !want) return { zones: ['example.com', 'other.org'], verdict: 'pick_zone', stored: false };
+            const zone = want || 'example.com';
+            const zones = tok.includes('two') ? ['example.com', 'other.org'] : [zone];
+            if (tok.includes('broad')) {
+                cfAccount = { connected: true, zone, extra: ['Account — Billing'] };
+                return { zones, zone, verdict: 'ok_broad', stored: true, extra: ['Account — Billing'] };
+            }
+            cfAccount = { connected: true, zone };
+            return { zones, zone, verdict: 'ok', stored: true };
         },
         wizard_addon_cdn_disconnect: () => {
             cfAccount = { connected: false, zone: '' };
@@ -455,9 +467,9 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         },
         wizard_addon_cdn_set_token: (a) => {
             const tok = String((a?.input as { token?: string })?.token ?? '');
-            return tok.includes('broad')
-                ? { zones: ['example.com', 'other.org'], verdict: 'too_broad', stored: false, extra: ['Account — Workers Scripts — Edit'] }
-                : { zones: ['example.com'], verdict: 'ok', stored: true };
+            return tok.includes('short')
+                ? { zones: ['example.com'], zone: 'example.com', verdict: 'missing_permission', stored: false, missing: ['Zone — DNS'] }
+                : { zones: ['example.com'], zone: 'example.com', verdict: 'ok', stored: true };
         },
         wizard_addon_cdn_build: async (a) => {
             const o = addonOp(a);
@@ -556,6 +568,9 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
             return null;
         },
         platform_secure_screen: () => null,
+        // The desktop answer: the page's own clipboard (fakeClipboard).
+        platform_clipboard_read: () => null,
+        platform_clipboard_write: () => false,
         // ---- recipient: QR receive, address, custody
         recipient_qr_session_new: () => 'harness-scan-1',
         recipient_qr_feed_frame: () => {

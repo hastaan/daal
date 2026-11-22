@@ -47,7 +47,9 @@ export interface AccountsState {
     /** That key is the account's own (Disconnect forgets it); false when
      *  only relays hold one. */
     hetznerAccount: boolean;
-    cloudflare: { connected: boolean; zone: string };
+    /** `extra`: what the kept key can do beyond the five (Cloudflare's
+     *  names), present only when there is something; the sheet warns. */
+    cloudflare: { connected: boolean; zone: string; extra?: string[] };
     google: GoogleState;
 }
 
@@ -81,7 +83,11 @@ export async function readAccounts(): Promise<AccountsState> {
     return {
         hetzner,
         hetznerAccount,
-        cloudflare: { connected: !!cf?.connected, zone: cf?.zone ?? '' },
+        cloudflare: {
+            connected: !!cf?.connected,
+            zone: cf?.zone ?? '',
+            ...(cf?.connected && Array.isArray(cf.extra) && cf.extra.length > 0 ? { extra: cf.extra } : {}),
+        },
         google: { connected: !!g?.connected, scriptMade: !!g?.script_made, signIn: g?.sign_in === true },
     };
 }

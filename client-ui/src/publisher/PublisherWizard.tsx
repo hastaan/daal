@@ -90,6 +90,7 @@ import { useDensity } from '../design/DensityProvider';
 import { useBack } from '../lib/useBack';
 import { toFaDigits } from '../lib/i18n';
 import { useConfirm, useDeviceT } from './ui';
+import { readClipboardText } from '../lib/clipboard';
 
 /** Open a URL in the system's default browser (not Custom Tabs). */
 async function openExternal(url: string) {
@@ -1472,7 +1473,7 @@ export default function PublisherWizard({
                                     dataButton="paste-key"
                                     onClick={async () => {
                                         try {
-                                            const text = await navigator.clipboard.readText();
+                                            const text = await readClipboardText();
                                             if (text && text.trim()) {
                                                 setToken(text.trim());
                                                 return;

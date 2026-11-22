@@ -9,8 +9,12 @@
 //     The key is kept by hosting_account::connect, for every new relay;
 //     Disconnect forgets it and the relays keep their own copies.
 //   CloudflareSheet — account, domain, access key (the pre-filled token
-//     page); paste → check → the one domain it sees → "✓ Connected".
-//     The key is kept by addon_cdn::connect, for every relay.
+//     page); paste → check → "✓ Connected: <domain>". A key that sees
+//     several domains asks which one, then is checked again on it. A key
+//     that can do more than Daal needs is kept, with one line naming
+//     what more (also on the connected state, later). Only a key that
+//     cannot do the job is refused, and what it lacks is named. The key
+//     is kept by addon_cdn::connect, for every relay.
 //   GoogleSheet — the account's one update script, added by hand: an
 //     account only for this, copy the script (its key is already in it),
 //     paste it in Apps Script, deploy it as a web app, paste the address
@@ -21,6 +25,7 @@
 //     clients. Disconnect forgets the key; the script stays in Google.
 
 import { useState } from 'react';
+import { useDensity } from '../../design/DensityProvider';
 import { Button, Input, Sheet, Textarea } from '../../design/primitives';
 import { useDeviceT } from '../ui';
 import { useSecureScreen } from '../useSecureScreen';
@@ -29,6 +34,7 @@ import type { CdnTokenCheck } from './addonTypes';
 import type { GoogleState } from './accounts';
 import { classifyAddonError } from './addonErrors';
 import { BODY, ErrorNote, MONO, MUTED, NumberedSteps, copyText, openExternal, useRun } from './addonUi';
+import { readClipboardText } from '../../lib/clipboard';
 
 /** The wizard's sign-up link (PublisherWizard CLOUD_PROVIDERS). */
 export const HETZNER_SIGNUP_URL = 'https://console.hetzner.cloud/register';
@@ -42,7 +48,7 @@ export const APPS_SCRIPT_NEW_URL = 'https://script.google.com/home/projects/crea
 
 /** The pre-filled token page (plan §2.5): exactly the five zone
  *  permissions Daal needs. It cannot pre-pick one zone; the owner picks
- *  the domain they bought, and a key that sees more is refused. */
+ *  the domain they bought (a key that sees more asks which one). */
 export function cloudflareTokenUrl(): string {
     const groups = JSON.stringify([
         { key: 'zone', type: 'read' },
@@ -58,11 +64,54 @@ export function cloudflareTokenUrl(): string {
     );
 }
 
-const VERDICTS = new Set(['invalid', 'no_zone', 'too_broad', 'missing_permission', 'refused']);
+const VERDICTS = new Set(['invalid', 'no_zone', 'zone_not_visible', 'missing_permission', 'refused']);
 
 /** The line for a key that was not kept. */
 export function verdictKey(v: string): string {
     return `pub.accounts.cf.verdict.${VERDICTS.has(v) ? v : 'refused'}`;
+}
+
+/** Cloudflare's permission names (cdn-token-check's `missing` and
+ *  `extra`, publisher/deploy/cloudflare/token_check.go) in plain words.
+ *  The five Daal needs keep Cloudflare's own label, which is what the
+ *  publisher looks for on the key's page. */
+const CF_PERMISSION_WORDS: Record<string, string> = {
+    'zone — zone': 'pub.accounts.cf.perm.zone',
+    'zone — dns': 'pub.accounts.cf.perm.dns',
+    'zone — ssl and certificates': 'pub.accounts.cf.perm.ssl',
+    'zone — zone settings': 'pub.accounts.cf.perm.zone_settings',
+    'zone — origin rules': 'pub.accounts.cf.perm.origin_rules',
+    'user — user details': 'pub.accounts.cf.perm.user_details',
+    'user — api tokens': 'pub.accounts.cf.perm.api_tokens',
+    'zone — workers routes': 'pub.accounts.cf.perm.workers_routes',
+    'zone — firewall services': 'pub.accounts.cf.perm.firewall',
+    'zone — page rules': 'pub.accounts.cf.perm.page_rules',
+    'account — workers scripts': 'pub.accounts.cf.perm.workers_scripts',
+    'account — registrar': 'pub.accounts.cf.perm.registrar',
+    'account — billing': 'pub.accounts.cf.perm.billing',
+    'account — members': 'pub.accounts.cf.perm.members',
+};
+
+/** The i18n key for one of Cloudflare's permission names, or null for a
+ *  name this build does not know (it is then shown as Cloudflare says
+ *  it). A trailing access level ("— Edit") is not part of the name. */
+export function cfPermissionKey(name: string): string | null {
+    const n = name
+        .trim()
+        .toLowerCase()
+        .replace(/\s*[—-]\s*(read|edit)$/, '');
+    return CF_PERMISSION_WORDS[n] ?? null;
+}
+
+/** Permission names as one list in plain words, each once. */
+export function cfPermissionList(t: (k: string) => string, names: string[] | undefined, rtl: boolean): string {
+    const words: string[] = [];
+    for (const name of names ?? []) {
+        const k = cfPermissionKey(name);
+        const w = k ? t(k) : name.trim();
+        if (w && !words.includes(w)) words.push(w);
+    }
+    return words.join(rtl ? '، ' : ', ');
 }
 
 function Connected({ text, testId }: { text: string; testId: string }) {
@@ -126,17 +175,10 @@ export function HetznerSheet({
         }
     };
     const paste = async () => {
-        try {
-            const s = await navigator.clipboard.readText();
-            if (s && s.trim()) {
-                setToken(s.trim());
-                setPasteFailed(false);
-                return;
-            }
-        } catch {
-            /* the web view would not read it */
-        }
-        setPasteFailed(true);
+        // '' when nothing could be read: the field takes it by hand.
+        const s = (await readClipboardText()).trim();
+        if (s) setToken(s);
+        setPasteFailed(!s);
     };
     const disconnect = async () => {
         const r = await run(async () => {
@@ -251,6 +293,7 @@ export function HetznerSheet({
 export function CloudflareSheet({
     t,
     zone,
+    extra,
     onClose,
     onConnected,
     onDisconnected,
@@ -258,39 +301,45 @@ export function CloudflareSheet({
     t: (k: string) => string;
     /** The connected zone; '' or null when not connected. */
     zone: string | null;
+    /** What the kept key can do beyond the five (Cloudflare's names). */
+    extra?: string[];
     onClose: () => void;
     onConnected: (zone: string) => void;
     onDisconnected?: () => void;
 }) {
+    const { isRTL } = useDensity();
     const [token, setToken] = useState('');
     const [check, setCheck] = useState<CdnTokenCheck | null>(null);
+    const [picked, setPicked] = useState('');
     const [pasteFailed, setPasteFailed] = useState(false);
     const { busy, error, run } = useRun();
-    const done = check?.stored ? check.zones[0] ?? '' : null;
+    const done = check?.stored ? check.zone || check.zones[0] || '' : null;
     const shown = done ?? (zone || null);
+    const picking = check?.verdict === 'pick_zone' && check.zones.length > 1;
+    const broad = cfPermissionList(t, done != null ? check?.extra : extra, isRTL);
 
     const connect = async () => {
         const typed = token;
-        const c = await run(() => Addons.cdnConnect({ token: typed }));
-        // The key leaves the page once it is checked, kept or not.
-        setToken('');
-        if (c) {
-            setCheck(c);
-            if (c.stored) onConnected(c.zones[0] ?? '');
-        }
+        const want = picking ? picked : '';
+        const c = await run(() => Addons.cdnConnect(want ? { token: typed, zone: want } : { token: typed }));
+        if (!c) return;
+        setCheck(c);
+        setPicked('');
+        // The key leaves the page once it is checked, kept or not; only a
+        // key that sees several domains stays until one is picked.
+        if (c.verdict !== 'pick_zone') setToken('');
+        if (c.stored) onConnected(c.zone || c.zones[0] || '');
+    };
+    const typeToken = (v: string) => {
+        setToken(v);
+        // A different key: the domains it was asked about are not its.
+        if (picking) setCheck(null);
     };
     const paste = async () => {
-        try {
-            const s = await navigator.clipboard.readText();
-            if (s && s.trim()) {
-                setToken(s.trim());
-                setPasteFailed(false);
-                return;
-            }
-        } catch {
-            /* the web view would not read it */
-        }
-        setPasteFailed(true);
+        // '' when nothing could be read: the field takes it by hand.
+        const s = (await readClipboardText()).trim();
+        if (s) typeToken(s);
+        setPasteFailed(!s);
     };
     const disconnect = async () => {
         const r = await run(async () => {
@@ -299,6 +348,13 @@ export function CloudflareSheet({
         });
         if (r) onDisconnected?.();
     };
+    const refusal = (c: CdnTokenCheck): string => {
+        const line = t(verdictKey(c.verdict));
+        if (c.verdict !== 'missing_permission') return line;
+        // Name what is missing, so the key can be fixed; "a permission"
+        // when the helper did not say.
+        return line.replace('{list}', cfPermissionList(t, c.missing, isRTL) || t('pub.accounts.cf.perm.some'));
+    };
 
     return (
         <Sheet title="Cloudflare" onClose={onClose} width={480}>
@@ -306,6 +362,11 @@ export function CloudflareSheet({
                 {shown != null ? (
                     <>
                         <Connected testId="cloudflare-connected" text={t('pub.accounts.connected_to').replace('{name}', shown)} />
+                        {broad && (
+                            <p data-testid="cloudflare-broad" style={MUTED}>
+                                {t('pub.accounts.cf.broad').replace('{list}', broad)}
+                            </p>
+                        )}
                         <p style={MUTED}>{t('pub.accounts.cf.sees')}</p>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
                             {done == null && onDisconnected ? (
@@ -363,7 +424,7 @@ export function CloudflareSheet({
                                     spellCheck={false}
                                     dir="ltr"
                                     value={token}
-                                    onChange={(e) => setToken(e.target.value)}
+                                    onChange={(e) => typeToken(e.target.value)}
                                     placeholder={t('wiz.provider.token.placeholder')}
                                     aria-label={t('pub.accounts.cf.key')}
                                     data-button="cloudflare-token"
@@ -375,15 +436,29 @@ export function CloudflareSheet({
                             </div>
                             {pasteFailed && <p style={{ ...MUTED, color: 'var(--red)' }}>{t('wiz.provider.token.paste_failed')}</p>}
                         </div>
-                        {check && !check.stored && (
+                        {picking && check && (
+                            <div data-testid="cloudflare-pick" style={{ display: 'grid', gap: 8 }}>
+                                <p style={BODY}>{t('pub.accounts.cf.pick')}</p>
+                                <div role="radiogroup" aria-label={t('pub.accounts.cf.pick')} style={{ display: 'grid', gap: 6 }}>
+                                    {check.zones.map((z) => (
+                                        <ZoneChoice key={z} name={z} selected={picked === z} onSelect={() => setPicked(z)} />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        {check && !check.stored && !picking && (
                             <p data-testid="cloudflare-verdict" data-verdict={check.verdict} style={{ ...MUTED, color: 'var(--red)' }}>
-                                {t(verdictKey(check.verdict))}
+                                {refusal(check)}
                             </p>
                         )}
                         {error != null && <ErrorNote t={t} error={error} />}
                         <p style={MUTED}>{t('pub.accounts.cf.sees')}</p>
                         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                            <Button onClick={() => void connect()} disabled={busy || token.trim() === ''} dataButton="cloudflare-connect">
+                            <Button
+                                onClick={() => void connect()}
+                                disabled={busy || token.trim() === '' || (picking && picked === '')}
+                                dataButton="cloudflare-connect"
+                            >
                                 {busy ? t('pub.accounts.checking') : t('pub.accounts.connect')}
                             </Button>
                         </div>
@@ -391,6 +466,50 @@ export function CloudflareSheet({
                 )}
             </div>
         </Sheet>
+    );
+}
+
+/** One domain to pick, as a radio row. */
+function ZoneChoice({ name, selected, onSelect }: { name: string; selected: boolean; onSelect: () => void }) {
+    return (
+        <button
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={onSelect}
+            data-button={`cloudflare-zone-${name}`}
+            dir="ltr"
+            style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                width: '100%',
+                minHeight: 44,
+                padding: '8px 12px',
+                font: 'inherit',
+                fontSize: 14,
+                color: 'var(--fg)',
+                textAlign: 'start',
+                background: 'var(--surface-2)',
+                border: `1px solid ${selected ? 'var(--gold)' : 'var(--line)'}`,
+                borderRadius: 'var(--radius-md)',
+                cursor: 'pointer',
+            }}
+        >
+            <span
+                aria-hidden
+                style={{
+                    width: 18,
+                    height: 18,
+                    flexShrink: 0,
+                    borderRadius: '50%',
+                    border: `2px solid ${selected ? 'var(--gold)' : 'var(--muted)'}`,
+                    background: selected ? 'var(--gold)' : 'transparent',
+                    boxShadow: selected ? 'inset 0 0 0 3px var(--surface-2)' : 'none',
+                }}
+            />
+            <span style={{ ...MONO, overflowWrap: 'anywhere' }}>{name}</span>
+        </button>
     );
 }
 
@@ -431,17 +550,10 @@ export function GoogleSheet({
         setCopied(await copyText(s));
     };
     const paste = async () => {
-        try {
-            const s = await navigator.clipboard.readText();
-            if (s && s.trim()) {
-                setUrl(s.trim());
-                setPasteFailed(false);
-                return;
-            }
-        } catch {
-            /* the web view would not read it */
-        }
-        setPasteFailed(true);
+        // '' when nothing could be read: the field takes it by hand.
+        const s = (await readClipboardText()).trim();
+        if (s) setUrl(s);
+        setPasteFailed(!s);
     };
     const finished = () => {
         setDone(true);

@@ -3,7 +3,7 @@
 // Three ways in, as three large rows:
 //   Choose a file  the system picker opens at once (Android SAF or the
 //                  desktop dialog); the file is read and checked by itself
-//   Paste text     reads the clipboard when the web view allows it, else
+//   Paste text     reads the clipboard (lib/clipboard.ts: the phone's own), else
 //                  a box with a Paste button; a Daal file goes on by itself
 //                  (its own signature check and trust question follow). A
 //                  web address or a proxy link waits for one "Add" tap: a
@@ -46,6 +46,7 @@ import RecipientImport from '../recipient/RecipientImport';
 import { syntheticSubscriptionFingerprint, subscriptionDisplayName } from '../lib/subscriptionIdentity';
 import { friendlyError, parseVerdict, type ImportVerdict, type TrustResolution } from '../lib/importVerdict';
 import { StandbyCodeEntry } from './StandbyCodeEntry';
+import { readClipboardText } from '../lib/clipboard';
 
 /** Kept for callers of the old two-tab sheet. */
 export type Tab = 'paste' | 'file';
@@ -323,7 +324,7 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
     /** "Paste text": the clipboard first, else the box. */
     const readClipboard = async (): Promise<boolean> => {
         try {
-            const text = await navigator.clipboard?.readText?.();
+            const text = await readClipboardText();
             if (text && text.trim()) {
                 setPasted(text);
                 return true;
