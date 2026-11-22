@@ -295,7 +295,7 @@ describe('the strings', () => {
         expect(FA['pub.accounts.cf.key']).toBe('کلید دسترسی');
         expect(FA['pub.addons.title']).toBe('محافظت بیشتر');
         expect(FA['pub.accounts.title']).toBe('حساب‌ها');
-        expect(FA['pub.accounts.google.by_hand']).toBe('بدون ورود با گوگل');
+        expect(FA['pub.accounts.google.by_hand']).toBe('بدون ورود با Google');
     });
 
     it('the warnings that matter are kept, each once and short', () => {
