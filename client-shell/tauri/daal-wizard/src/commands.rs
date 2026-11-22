@@ -2536,6 +2536,11 @@ pub fn sign_relaypack_with(
         crate::relay_identity::stage_for_signing(ctx, operator_id, identity_freshness)?;
 
     let row = ctx.db.get(operator_id)?;
+    // The name the family sees on this file is the relay's own name
+    // (owner, 2026-11-22: "make it simple"). A relay without one keeps
+    // what the caller passed, the old default.
+    let relay_name = row.nickname.trim().to_string();
+    let publisher_name: &str = if relay_name.is_empty() { publisher_name } else { &relay_name };
     // Network test: a relay with a live report key is the Test relay,
     // and every route of its pack carries the address (`_report_to`).
     let report_to = crate::report_key::report_to_for_signing(ctx, operator_id)?;
