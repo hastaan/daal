@@ -48,6 +48,14 @@ type RunCtx struct {
 	// yet. Both belong to the app's order of operations at mint.
 	identity      RelayIdentityDoc
 	signedPending []string
+	// desync: the strategy (JSON) the phone of every Session started
+	// while it is set connects with (op desync). Empty: off.
+	desync string
+	// cdnWorld: the CDN add-on is under test (a cdn-* scenario or op):
+	// Cloudflare's stand-ins come up before provisioning. Provisioning
+	// itself contacts no Cloudflare stand-in, as the app's does not: the
+	// door opens its own box-firewall rule (cdn-door).
+	cdnWorld bool
 }
 
 func cmdRun(args []string) int {
@@ -173,6 +181,7 @@ func cmdRun(args []string) int {
 	}
 	rawPatience = time.Duration(scn.ProbePatienceMs) * time.Millisecond
 	rc := &RunCtx{Ctx: ctx, P: p, R: res, Scn: scn, Fams: fams, Want: want, Serve: serve, ExplicitFamilies: explicit}
+	rc.cdnWorld = contains(scn.World, "cdn") || contains(ops, "cdn") || contains(ops, "cdn-provision")
 	t0 := time.Now()
 	fmt.Fprintf(res.human, "worldbox: scenario=%s  under test: %s  relay serves: %s  ops: %s  box artefacts: %s\nworldbox: evidence in %s\n",
 		scn.Name, strings.Join(want, ","), strings.Join(serve, ","), strings.Join(ops, ","), got(*override == "", "pinned release", "TREE BUILD "+*override), p.Run)
@@ -184,6 +193,8 @@ func cmdRun(args []string) int {
 		}
 		if err := InstallWireTap(ctx, served); err != nil {
 			res.Add("", "world", "censor.wire_tap", Pass, Fail, err.Error(), nil, time.Now())
+		} else if err := rc.scenarioWorld(); err != nil {
+			res.Add("", "world", "addons.world", Pass, Fail, err.Error(), nil, time.Now())
 		} else if err := ApplyScenario(ctx, p, scn, scenarioVars(rc.Rec.CoverSNI)); err != nil {
 			res.Add("", "world", "censor.apply", Pass, Fail, err.Error(), nil, time.Now())
 		} else {
@@ -318,6 +329,11 @@ func (rc *RunCtx) provision() bool {
 	if rc.ExplicitFamilies {
 		famFlag = rc.Serve
 	}
+	if rc.cdnWorld {
+		if err := rc.BringUpCDN(); err != nil {
+			return r.Add("", "provision", "addons.cdn_world", Pass, Fail, err.Error(), nil, t0)
+		}
+	}
 	v := rc.Pub.Provision(ctx, famFlag)
 	if !r.Add("", "provision", "verb.provision", Pass, got(v.OK(), Pass, Fail), v.Tail(), map[string]any{"rc": v.RC, "serve": rc.Serve, "families_flag": famFlag}, t0) {
 		return false
@@ -388,7 +404,7 @@ func (rc *RunCtx) provision() bool {
 	for inst, art := range map[string]string{"sing-box": "sing-box-*-linux-amd64", "daal-relay-mgmt": "daal-relay-mgmt-*-linux-amd64", "daal-relay-health": "daal-relay-health-*-linux-amd64"} {
 		installed := fileSum(filepath.Join(box, "rootfs", "usr", "local", "bin", inst))
 		ev[inst] = installed
-		matches, _ := filepath.Glob(filepath.Join(p.Repo, "dist-release", "relay-v1.5.1", art))
+		matches, _ := filepath.Glob(filepath.Join(p.Repo, "dist-release", "relay-v1.6.0", art))
 		same := false
 		for _, m := range matches {
 			same = same || (installed != "" && fileSum(m) == installed)
@@ -600,6 +616,47 @@ func (rc *RunCtx) resignIfRelayMoved(phase, recipient string) bool {
 		return true
 	}
 	return rc.Resign(phase)
+}
+
+// healAfterReply is the app's heal_after_reply (relay_identity.rs),
+// which every flow that adds a recipient runs on the box's reply before
+// it builds a file: when the reply's relay-wide fields are not what the
+// signed pack commits to, the relay is asked again and `base` is signed
+// again (with the flags it was signed with, signArgs) BEFORE anything is
+// minted from it.
+//
+// The case that needs it after mint is a re-mint of the relay's ONLY
+// recipient (the app's Rebuild, recipient_repack_sbpx: revoke the name,
+// provision it again). Revoking the last shadowsocks user drops ss-in
+// with its box-wide server key — it must: an ss inbound with no users is
+// the single-user service keyed on that key, open to every revoked
+// recipient (singbox_shadowsocks.go removeSSUser) — so the provision
+// mints a NEW server key, and a pack signed before it commits to the old
+// one. users-pack-sbp then refuses the route ("the signed pack no longer
+// describes this relay"), which is the endpoint guard doing its job; the
+// app signs again here, and so does the rig.
+func (rc *RunCtx) healAfterReply(phase, recipient, base string, signArgs ...string) bool {
+	moved := rc.replyDisagreesWithSignedPack("creds-" + recipient + ".json")
+	if len(moved) == 0 {
+		return true
+	}
+	if rc.Pub.identityFile != "" {
+		rc.askRelay(phase, "before-heal")
+	}
+	t0 := time.Now()
+	v := rc.Pub.BindAndSign(rc.Ctx, base, signArgs...)
+	var ans struct {
+		Uncommitted []string `json:"uncommitted_families"`
+	}
+	_ = json.Unmarshal([]byte(v.Stdout), &ans)
+	ok := rc.R.Add("", phase, "heal."+recipient+".bind-and-sign", Pass, got(v.OK(), Pass, Fail),
+		"the reply disagreed with the signed pack on: "+strings.Join(moved, ", ")+"; "+v.Tail(),
+		map[string]any{"moved": moved, "base": base, "uncommitted_families": ans.Uncommitted}, t0)
+	if ok && len(ans.Uncommitted) > 0 {
+		rc.R.Add("", phase, "heal."+recipient+".every_route_has_a_signed_endpoint", Pass, Fail,
+			"signed without an endpoint: "+strings.Join(ans.Uncommitted, ", ")+" — "+oneLine(v.Tail(), 400), nil, t0)
+	}
+	return ok
 }
 
 // replyDisagreesWithSignedPack lists the relay-wide fields of a
@@ -828,7 +885,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 
 	t0 = time.Now()
 	_, _ = WireReset(rc.Ctx) // the wire tap's window for this session starts here
-	c, err := StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental})
+	c, err := StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental, Desync: rc.desync})
 	if err != nil {
 		r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
 		return Fail, false
@@ -856,7 +913,7 @@ func (rc *RunCtx) session(f Family, pack, phase, expect string, retry bool) (str
 		deadline := time.Now().Add(EstablishBudget)
 		for err != nil && ev != nil && ev["stage"] == StageProof && time.Now().Before(deadline) && rc.Ctx.Err() == nil {
 			c.Stop()
-			if c, err = StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental}); err != nil {
+			if c, err = StartClient(p, f.Name, ClientOpts{Pack: pack, Family: f.Name, Experimental: f.Experimental, Desync: rc.desync}); err != nil {
 				r.Add(f.Name, phase, "tunnel", expect, Fail, err.Error(), nil, t0)
 				return Fail, false
 			}

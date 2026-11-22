@@ -11,8 +11,12 @@ package relaypack
 // dial anything else.
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -295,4 +299,190 @@ func committedIdentity(routes []bundle.RouteManifestEntry) CommittedIdentity {
 	}
 	sort.Strings(out.Families)
 	return out
+}
+
+// ---------------------------------------------------------------------
+// The standby address (`_standby`, specs/relaypack-v1.md "`_standby`
+// key"; docs/optional-addons-plan.md §1).
+//
+// A relay with a standby address answers on a second Floating IPv4 on
+// the same ports with the same keys. Every route of the pack except
+// shadowsocks carries one `_standby` member beside `_endpoint`: either a
+// commitment to the address (sealed, the default) or the address itself
+// (open). The commitment is what lets a 16-byte key, sent later by any
+// means, move recipients without a new signature: the key either
+// matches what the publisher already signed or it matches nothing.
+//
+// Publisher side only. The format and the recipient half (parse,
+// match, the dial-time variant) are bundle/go/bundle/standby.go and
+// core.
+
+// StandbyKey is the reserved family_specific_config key. The format
+// (parse, commitment, key text) is bundle/go/bundle/standby.go; this
+// file only decides what a publisher signs.
+const StandbyKey = bundle.StandbyKey
+
+// ErrBadStandby is returned for a record whose standby cannot be
+// signed. The pack is not signed: a publisher who rented a standby and
+// gets a pack without it would believe recipients can be moved to it.
+var ErrBadStandby = errors.New("relaypack: the record's standby address cannot be signed")
+
+// StandbyKeyText is the key for a standby, in its text form. It is what
+// "Switch to standby" shows and what a person types.
+func StandbyKeyText(sb *provider.StandbyAddress) (string, error) {
+	key, err := standbyKeyOf(sb)
+	if err != nil {
+		return "", err
+	}
+	return key.Text(), nil
+}
+
+// standbyKeyOf is salt ‖ ipv4 for the record's standby.
+func standbyKeyOf(sb *provider.StandbyAddress) (bundle.StandbyKeyBytes, error) {
+	var k bundle.StandbyKeyBytes
+	if sb == nil {
+		return k, fmt.Errorf("%w: the record has no standby", ErrBadStandby)
+	}
+	salt, err := base64.StdEncoding.DecodeString(sb.Salt)
+	if err != nil || len(salt) != bundle.StandbySaltLen {
+		return k, fmt.Errorf("%w: the salt is not %d bytes of base64", ErrBadStandby, bundle.StandbySaltLen)
+	}
+	addr, ok := standbyPublicV4(sb.IP)
+	if !ok {
+		return k, fmt.Errorf("%w: %v is not a public IPv4 address", ErrBadStandby, sb.IP)
+	}
+	copy(k[:bundle.StandbySaltLen], salt)
+	copy(k[bundle.StandbySaltLen:], net.ParseIP(addr).To4())
+	return k, nil
+}
+
+// NewStandbySalt draws a fresh salt, base64 for the record.
+func NewStandbySalt() (string, error) {
+	var b [bundle.StandbySaltLen]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
+}
+
+// standbyPublicV4 is the spec's address rule (bundle.StandbyAddressOK)
+// for a net.IP, returning the canonical dotted quad.
+func standbyPublicV4(ip net.IP) (string, bool) {
+	v4 := ip.To4()
+	if v4 == nil {
+		return "", false
+	}
+	addr := v4.String()
+	return addr, bundle.StandbyAddressOK(addr)
+}
+
+// StandbyCommitmentFor builds the `_standby` member for a standby, for
+// a route whose endpoint dials endpointServer. Nil with a nil error:
+// there is no standby.
+func StandbyCommitmentFor(sb *provider.StandbyAddress, endpointServer string) (*bundle.Standby, error) {
+	if sb == nil {
+		return nil, nil
+	}
+	addr, ok := standbyPublicV4(sb.IP)
+	if !ok {
+		return nil, fmt.Errorf("%w: %v is not a public IPv4 address", ErrBadStandby, sb.IP)
+	}
+	if addr == strings.TrimSpace(endpointServer) {
+		return nil, fmt.Errorf("%w: the standby is the address recipients already dial (%s)", ErrBadStandby, addr)
+	}
+	switch sb.Mode {
+	case provider.StandbySealed, "":
+		key, err := standbyKeyOf(sb)
+		if err != nil {
+			return nil, err
+		}
+		c := bundle.SealedStandby(key)
+		return &c, nil
+	case provider.StandbyOpen:
+		c := bundle.OpenStandby(addr)
+		return &c, nil
+	default:
+		return nil, fmt.Errorf("%w: unknown mode %q", ErrBadStandby, sb.Mode)
+	}
+}
+
+// standbyEligible reports whether a route may carry `_standby`: it has
+// a signed endpoint that dials an IPv4 address, it is not shadowsocks
+// (no server authentication independent of the shared key, so a stale
+// standby could hand a stranger the traffic), and it is not fronted by
+// a CDN (whose endpoint is a hostname, not this relay's address).
+func standbyEligible(route bundle.RouteManifestEntry, fc map[string]any) (string, bool) {
+	if route.TransportFamily == string(bundle.TransportShadowsocks) {
+		return "", false
+	}
+	ep, err := bundle.ParseEndpoint(route.FamilySpecificConfig)
+	if err != nil || ep == nil {
+		return "", false
+	}
+	if net.ParseIP(ep.Server).To4() == nil {
+		return "", false
+	}
+	if rp, ok := fc["_relaypack"].(map[string]any); ok {
+		if mode, _ := rp["exposure_mode"].(string); mode == "cdn_fronted" {
+			return "", false
+		}
+	}
+	return ep.Server, true
+}
+
+// setStandby writes `_standby` into every eligible route (and the
+// matching profile, which starts as the same bytes). A record without a
+// standby leaves the pack exactly as before. Kept out of
+// renderCandidates for the same reason setReportTo is.
+//
+// A relay none of whose routes is eligible signs without it rather than
+// failing: refusing would stop every later signature of that relay.
+// `standby add` refuses such a relay before anything is rented
+// (StandbyEligibleRecord).
+func (r *renderedCandidates) setStandby(sb *provider.StandbyAddress) error {
+	if sb == nil {
+		return nil
+	}
+	for i := range r.routes {
+		fc := map[string]any{}
+		if err := json.Unmarshal(r.routes[i].FamilySpecificConfig, &fc); err != nil {
+			return fmt.Errorf("route %s: family_specific_config: %w", r.routes[i].ID, err)
+		}
+		server, ok := standbyEligible(r.routes[i], fc)
+		if !ok {
+			continue
+		}
+		c, err := StandbyCommitmentFor(sb, server)
+		if err != nil {
+			return err
+		}
+		fc[StandbyKey] = c
+		b, err := json.Marshal(fc)
+		if err != nil {
+			return fmt.Errorf("route %s: marshal family_specific_config: %w", r.routes[i].ID, err)
+		}
+		r.routes[i].FamilySpecificConfig = b
+		r.profiles[r.routes[i].ConfigPath] = b
+	}
+	return nil
+}
+
+// StandbyEligibleRecord reports whether any candidate of rec could
+// carry `_standby`: a direct (not CDN-fronted) route of a family other
+// than shadowsocks. Checked before a standby is rented, so nobody pays
+// for an address no pack can name.
+func StandbyEligibleRecord(rec *provider.OperatorRecord) bool {
+	if rec == nil {
+		return false
+	}
+	for _, c := range rec.Candidates {
+		fam := normaliseFamily(c.Family)
+		if fam == string(bundle.TransportShadowsocks) || c.ExposureMode == "cdn_fronted" {
+			continue
+		}
+		if bundle.EndpointFamilySupported(fam) {
+			return true
+		}
+	}
+	return false
 }

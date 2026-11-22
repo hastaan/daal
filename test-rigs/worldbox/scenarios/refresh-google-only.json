@@ -1,0 +1,20 @@
+{
+  "name": "refresh-google-only",
+  "description": "The ordinary refresh hosts (the R2 bucket, GitHub Pages, the pack URL) and script.google.com are reset by SNI; www.google.com is open. Nothing a direct family uses is touched. Op google-refresh: a phone connected when its relay's address is null-routed and the relay has moved finds the new address through the Google front (SNI www.google.com, authority script.google.com, one redirect) and reconnects with no new file.",
+  "analogue": "Plan §3.1: the Google channel carries the fix when the usual refresh addresses are blocked or SNI-filtered, because Google is the name most often left open; MasterHttpRelayVPN-RUST #313 (April 2026: script.google.com blocked, the front partly open). Model: exact names, reassembling, RST both ways. Not modelled: Google's front breaking (refresh-google-rst), the HTTP/2 fingerprint of the fetch, Apps Script quotas.",
+  "world": ["storage", "google"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$R2_SNI", "$GH_SNI", "$PACK_SNI", "script.google.com"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "r2-blocked", "probe": "tls", "to": "storage", "port": 443, "sni": "$R2_SNI", "expect": "reset_after_hello"},
+    {"name": "pages-blocked", "probe": "tls", "to": "storage", "port": 443, "sni": "$GH_SNI", "expect": "reset_after_hello"},
+    {"name": "script-plain-blocked", "probe": "tls", "to": "gscript", "port": 443, "sni": "script.google.com", "expect": "reset_after_hello"},
+    {"name": "front-open", "probe": "tls", "to": "gfe", "port": 443, "sni": "www.google.com", "expect": "ok"},
+    {"name": "relay-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "google_expect": "recovered"
+}

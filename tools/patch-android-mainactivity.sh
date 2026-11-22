@@ -17,7 +17,8 @@
 # `tauri android init`, before `tauri android build`.
 #
 # Sibling patches that must also run after `tauri android init`:
-#   tools/patch-android-manifest.sh  (CAMERA permission — the QR-scan lane)
+#   tools/patch-android-manifest.sh  (CAMERA permission — the QR-scan lane;
+#                                     the "Open with Daal" intent filters)
 #   tools/patch-android-icons.sh     (app icon)
 #   tools/patch-android-signing.sh   (release signingConfig)
 #
@@ -57,6 +58,18 @@ class MainActivity : TauriActivity() {
   override fun onDestroy() {
     if (instance === this) instance = null
     super.onDestroy()
+  }
+
+  // "Open with Daal" / "Share to Daal": the activity is singleTask
+  // (tools/patch-android-manifest.sh), so a file opened or shared while
+  // Daal runs comes here. TauriActivity hands it to every plugin; the
+  // daal-platform plugin's onNewIntent holds it for the page
+  // (platform/OpenedFiles.kt, durable source, not in gen/). setIntent
+  // keeps getIntent() on the newest intent, as Android recommends for
+  // singleTask, so nothing reads the launch intent's file again.
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
   }
 
   companion object {
@@ -286,6 +299,11 @@ cat > "$PROGUARD_KEEP" <<'PROGUARD'
     public static void setInstance(***);
 }
 -keep class org.daal.desktop.DaalKeystore { *; }
+# "Open with Daal" / "Share to Daal" and the text share sheet: reached
+# from Rust by JNI (src-tauri/src/opened.rs). The plugin's consumer rules
+# say the same; kept here too so a plugin built without them still works.
+-keep class org.daal.desktop.platform.OpenedFiles { *; }
+-keep class org.daal.desktop.platform.ShareText { *; }
 PROGUARD
 
 echo "==> patched $MAIN_ACTIVITY"

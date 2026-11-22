@@ -201,6 +201,10 @@ type Core struct {
 	// auto: the automatic connect (connect_auto.go). Its own lock for
 	// the readers; `gen` inside it is guarded by mu.
 	auto autoState
+	// recover: the direct walk for a new relay address when the
+	// connected route has gone dead (relaypack_recover.go). Its control
+	// fields are guarded by mu; its own lock for the readers.
+	recover recoverState
 	// shuttingDown: Shutdown has taken this core. Nothing starts an
 	// engine instance after it is set. Guarded by mu.
 	shuttingDown bool
@@ -210,6 +214,9 @@ type Core struct {
 	side  sideLimits
 	race  *raceHandle
 	speed speedState
+	// survey: checking the other routes beside the tunnel (survey.go).
+	// Its own lock.
+	survey surveyState
 
 	// activeSnap mirrors activeRoute/activeFamily for readers that must
 	// not wait for mu (SetRoute holds it across driver.Start): the
@@ -316,6 +323,7 @@ func Init(stateDir, logLevel string) error {
 		subs:                 make(chan engine.Event, 32),
 	}
 	core.pm.SetNow(nowUTC)
+	core.adapter.OnRouteRebound = core.routeRebound
 	core.driver.Subscribe(core.subs)
 	// From what this Init just did, not only from the marker on disk:
 	// the marker is written best-effort (a nearly full disk can take the
@@ -419,11 +427,23 @@ func Shutdown() error {
 	c.routeEpoch++
 	c.auto.gen++
 	c.cancelRaceLocked()
+	c.survey.stop("shutdown")
+	recoverDone := c.recover.done
+	c.cancelRecoverLocked()
 	c.check.abandon()
 	if c.driver != nil {
 		_ = c.driver.Stop()
 	}
 	c.mu.Unlock()
+	// A walk for a new relay address that was just cut off writes its
+	// stamps back on the way out; let it, briefly, before the store
+	// closes. (Outside the lock: it takes the lock to finish.)
+	if recoverDone != nil {
+		select {
+		case <-recoverDone:
+		case <-time.After(recoverShutdownWait):
+		}
+	}
 	// Side instances (a race, a speed check) are cancelled above or by
 	// the liveness loop's context; this waits until each is closed, so
 	// nothing of the engine is still dialling when the store goes away.
@@ -443,6 +463,7 @@ func Shutdown() error {
 	resetPushQueueForShutdown()
 	resetWasmStateForShutdown()
 	resetDelegateStateForShutdown()
+	resetFieldProbeForShutdown()
 	if c.store != nil {
 		return c.store.Close()
 	}
@@ -557,6 +578,14 @@ type connectOpts struct {
 	// caller already has (the side probe that just proved the route is
 	// the measurement; this attempt is its hand-over to the tunnel).
 	noMemory bool
+	// variant / ladder: the connect ladder (connect_ladder.go). variant
+	// nil is the variant in use for the route on this network (or the
+	// plain route); non-nil is exactly that one. ladder: an extra of a
+	// pass, after the route's own attempt was charged in it — the
+	// route's cooldown is not checked, and a failure is the variant's
+	// alone (never the route's, the relay's or the family's).
+	variant *routeVariant
+	ladder  bool
 }
 
 // connectOutcome is what one attempt at one route came to. result is
@@ -592,7 +621,7 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 	// through prepareRouteOpts, which keeps the reason (as a closed
 	// code) for the diagnostics blob: on Android the returned error
 	// reaches nobody.
-	row, body, err := c.prepareRouteOpts(routeID, o.record, false)
+	row, body, err := c.prepareAttemptLocked(routeID, &o)
 	if err != nil {
 		code := ConnectRefusedOther
 		var rr *routeRefusal
@@ -634,7 +663,7 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 		// text alone — a config or start-up error has no phase.
 		cat := diagnostics.Classify(err.Error())
 		c.setActiveLocked(routeID, family)
-		c.routeDownOptsLocked(routeID, family, cat, err.Error(), true, o.auto)
+		c.attemptStartFailedLocked(routeID, family, cat, err.Error(), o)
 		return connectOutcome{result: AutoResultStartFailed, family: family, category: cat, err: err}
 	}
 	// The instance is up and has dialled nothing. From here until
@@ -644,6 +673,10 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 	// Note this deliberately fires even on platforms that have no
 	// tunnel-aware dialer yet: on those, scheduled refresh stops working
 	// while connected, which is the intended trade.
+	// A walk for a new relay address (relaypack_recover.go) that may
+	// still hold a connection open from the real address ends here, not
+	// a few seconds after a live tunnel is beside it.
+	c.cancelRecoverLocked()
 	refresh.SetTunnelRequired(true)
 	c.setActiveLocked(routeID, family)
 	c.pm.Verifying()
@@ -655,6 +688,7 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 	proofCfg := c.proofCfg
 	if o.auto {
 		proofCfg.StopAtUnreachedRelay = true
+		proofCfg.TimeHelloStop = true // the connect ladder reads it
 	}
 	c.mu.Unlock()
 
@@ -670,20 +704,20 @@ func (c *Core) connectRouteLocked(routeID string, o connectOpts) connectOutcome 
 	}
 	if !res.OK {
 		cat := res.Category()
-		reason := proofFailureText(res)
-		c.routeDownOptsLocked(routeID, family, cat, reason, true, o.auto)
-		if !o.auto {
-			c.rememberRoute(routeID, false, cat)
-		}
+		reason := c.attemptProofFailedLocked(routeID, family, cat, res, o)
 		return connectOutcome{result: AutoResultNotCarrying, family: family, category: cat, obs: res.Observation,
 			err: &routeFailure{routeID: routeID, category: cat, reason: reason}}
 	}
 	setupMs := setupOf(time.Since(started), res)
+	// The running route's latest proof, until its first liveness check
+	// (the move to the best route compares against it: connect_best.go).
+	c.speed.lastCheck = time.Duration(setupMs) * time.Millisecond
 	c.routeUpLocked(routeID, family, res)
 	c.startLivenessLocked()
 	if !o.noMemory {
-		c.rememberOutcome(routeID, netmem.RouteOutcome{Carried: true, HasSetup: true, SetupMs: setupMs, Slow: res.Slow})
+		c.rememberOutcome(attemptMemKey(routeID, o), netmem.RouteOutcome{Carried: true, HasSetup: true, SetupMs: setupMs, Slow: res.Slow})
 	}
+	c.variantCarriedLocked(routeID, o)
 	// A host that turned tunnelled refresh on is pointed at THIS
 	// instance's inlet: it may not know this instance exists.
 	rearmTunnelRefresh()
@@ -1042,6 +1076,19 @@ func ExportDiagnostics() (string, error) {
 		// present. `state` is "idle", "trying", "connected" or "failed";
 		// `mode` is true while the engine is the one choosing the route.
 		"auto": c.auto.block(),
+		// `relay_recovery`: the engine's own walk for a new relay
+		// address when the connected route went dead, or the one the
+		// person asked for (engine_relaypack_refresh) —
+		// {state, trigger, packs, outcome, bucket}. From memory only;
+		// always present. See relaypack_recover.go.
+		"relay_recovery": c.recover.block(),
+		// `survey`: the check of the other routes beside the tunnel
+		// (survey.go) — {state, trigger, checking, total, done, seq,
+		// stop_reason, results}. state is "idle", "waiting", "checking",
+		// "done" or "stopped"; trigger "auto" or "user"; seq counts the
+		// results that changed what is remembered (a page re-reads the
+		// route list when it moves). From memory only; always present.
+		"survey": c.survey.block(),
 		// `network`: what the HOST last said about the network the device
 		// is on (engine_network_facts) — {from_host, kind, validated,
 		// metered}. from_host false: no host has said anything, and the

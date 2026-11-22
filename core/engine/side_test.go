@@ -25,9 +25,9 @@ func sideCfgFor(t *testing.T, family, profile string) []byte {
 }
 
 // Which routes may be proved beside the running one — and, above all,
-// which may not: naive (process-wide Cronet), wireguard (an endpoint; a
-// second handshake moves the peer's session), anything detoured, and
-// every type nobody vouched for.
+// which may not: naive (never raced; the survey alone may: below),
+// wireguard (an endpoint; a second handshake moves the peer's session),
+// anything detoured, and every type nobody vouched for.
 func TestSideProbeable_Table(t *testing.T) {
 	cases := []struct {
 		family, profile string
@@ -60,6 +60,41 @@ func TestSideProbeable_Table(t *testing.T) {
 	// its outbound type must be refused whatever the profile says.
 	if SideProbeable([]byte(`{"outbounds":[{"tag":"active","type":"tor","server":"x"}]}`)) {
 		t.Error("a tor outbound was called side-probeable")
+	}
+}
+
+// The survey — and only a caller that says so (ProofConfig.SideCronet)
+// — may also side-probe naive. Nothing else widens: wireguard, tor,
+// ssh, a detoured naive stay refused.
+func TestSurveyProbeable_NaiveOnlyWhenAskedFor(t *testing.T) {
+	naive := sideCfgFor(t, "naive", `{"type":"naive","server":"203.0.113.1","server_port":443}`)
+	if SideProbeable(naive) || !SurveyProbeable(naive) {
+		t.Fatalf("naive: side %v, survey %v; want false, true", SideProbeable(naive), SurveyProbeable(naive))
+	}
+	for _, c := range [][2]string{
+		{"wireguard", `{"type":"wireguard","address":["10.0.0.2/32"],"private_key":"x","peers":[{"address":"203.0.113.1","port":51820,"public_key":"y","allowed_ips":["0.0.0.0/0"]}]}`},
+		{"other", `{"type":"ssh","server":"203.0.113.1","server_port":22}`},
+		{"other", `{"type":"naive","server":"203.0.113.1","server_port":443,"detour":"x"}`},
+	} {
+		if SurveyProbeable(sideCfgFor(t, c[0], c[1])) {
+			t.Errorf("SurveyProbeable(%s %s) = true", c[0], c[1])
+		}
+	}
+	if SurveyProbeable([]byte(`{"outbounds":[{"tag":"active","type":"tor","server":"x"}]}`)) {
+		t.Error("a tor outbound was called survey-probeable")
+	}
+	s := NewStub()
+	s.SetSideProbeHook(func(context.Context, []byte, ProofConfig) (ProofResult, error) {
+		return ProofResult{OK: true}, nil
+	})
+	if s.CanSideProbe(naive) || !s.CanSurveyProbe(naive) {
+		t.Fatal("the Stub's answers for naive")
+	}
+	if _, err := s.SideProbe(context.Background(), naive, ProofConfig{}); !errors.Is(err, ErrSideProbeUnsupported) {
+		t.Fatalf("naive without SideCronet: err = %v", err)
+	}
+	if res, err := s.SideProbe(context.Background(), naive, ProofConfig{SideCronet: true}); err != nil || !res.OK {
+		t.Fatalf("naive with SideCronet: %+v err=%v", res, err)
 	}
 }
 

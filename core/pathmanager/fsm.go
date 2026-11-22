@@ -335,6 +335,43 @@ func (m *Manager) Forgive(routeID string) {
 	}
 }
 
+// ForgiveFamily takes back ONE family-class charge of a family on the
+// ACTIVE network: its cooldown is lifted and its escalation goes one step
+// back down (an escalation earned before stays). Route cooldowns,
+// RouteHealth and every other network's state are untouched. For a
+// family whose cooldown a route's hello-shaped failure started, when a
+// changed hello of the SAME route then carried on the same network (abi
+// connect_ladder.go): the family is not what the censor stopped. The
+// caller decides that this route's charge is the one being taken back.
+func (m *Manager) ForgiveFamily(family string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := familyEscKey(family, m.activeNetwork)
+	delete(m.familyCooldown, key)
+	if m.familyEscalation[key] > 1 {
+		m.familyEscalation[key]--
+	} else {
+		delete(m.familyEscalation, key)
+		delete(m.familyLastReason, key)
+	}
+}
+
+// EndAttempt closes the attempt in flight on routeID without an outcome
+// for the route: no cooldown, no health entry, no family count. For an
+// attempt that tried something OTHER than the route as it is (abi
+// connect_ladder.go: a variant of its first flight) and did not carry —
+// the route is not what failed, but the FSM must not go on saying it is
+// being checked. A no-op when routeID is not the current route.
+func (m *Manager) EndAttempt(routeID, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.currentRoute != routeID {
+		return
+	}
+	m.state = StateFailed
+	m.lastReason = reason
+}
+
 func (m *Manager) failed(routeID, family string, cat diagnostics.Category, countFamily bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

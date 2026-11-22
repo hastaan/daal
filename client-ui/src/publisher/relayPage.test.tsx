@@ -13,8 +13,9 @@ import peopleSource from './PeopleSection.tsx?raw';
 import everyoneSource from './EveryoneFileSection.tsx?raw';
 import listSource from './RelayListPage.tsx?raw';
 import actionSource from './useAction.tsx?raw';
-import { EveryoneFileSection } from './EveryoneFileSection';
-import { PeopleSection, joinPeople, personState } from './PeopleSection';
+import { EveryoneFileSheet } from './EveryoneFileSection';
+import { DensityProvider } from '../design/DensityProvider';
+import { PeopleSection, joinPeople, personState, personStateOf } from './PeopleSection';
 import type { ArtifactInfo, RecipientSummary } from './wizardCommands';
 
 const EN = en as Record<string, string>;
@@ -65,48 +66,62 @@ describe('relay page copy', () => {
         }
     });
 
-    it('the four sections have plain names, in order', () => {
+    it('the relay page is health, People, Details, Danger zone, in that order (C7.2)', () => {
         const order = [
+            '<HealthPanel',
             '<PeopleSection',
-            '<EveryoneFileSection',
-            '<FreshnessPanel',
-            "title={t('pub.danger.title')}",
-            "title={t('pub.details.title')}",
+            "summary={t('pub.details.title')}",
+            "summary={t('pub.danger.title')}",
         ].map((m) => pageSource.indexOf(m));
         expect(order.every((i) => i > 0)).toBe(true);
         expect([...order].sort((a, b) => a - b)).toEqual(order);
+        // The file for everyone and "Keep files working" are no longer
+        // sections of the page (H-23, H-25): they open from the ⋯.
+        expect(pageSource.includes('<EveryoneFileSection')).toBe(false);
+        expect(pageSource).toContain("label: t('pub.more.everyone')");
+        expect(pageSource).toContain("label: t('pub.more.keep')");
         expect(EN['pub.people.title']).toBe('People');
-        expect(EN['pub.everyone.title']).toBe('One file for everyone');
-        expect(EN['pub.keep.title']).toBe('Keep it working');
+        expect(EN['pub.everyone.title']).toBe('File for everyone');
+        expect(EN['pub.keep.title']).toBe('Keep files working');
         expect(EN['pub.danger.title']).toBe('Danger zone');
     });
 
-    it('at most one short sentence is visible per section', () => {
+    it('the lines left visible are short: at most two sentences', () => {
         const visible = [
-            'pub.people.line',
+            'pub.health.hedge',
             'pub.everyone.line',
             'pub.keep.summary.can',
             'pub.keep.summary.cannot',
-            'pub.danger.line',
-            'pub.details.line',
+            'pub.people.empty',
+            'pub.keep.failing',
         ];
         for (const k of visible) {
             for (const [lang, cat] of [['en', EN], ['fa', FA]] as const) {
                 const s = cat[k];
-                expect(s.length, `${lang} ${k} length`).toBeLessThanOrEqual(110);
-                // One sentence: at most one full stop, and only at the end.
+                expect(s.length, `${lang} ${k} length`).toBeLessThanOrEqual(150);
                 const stops = [...s.matchAll(/[.!?؟](\s|$)/g)];
-                expect(stops.length, `${lang} ${k}`).toBeLessThanOrEqual(1);
+                expect(stops.length, `${lang} ${k}`).toBeLessThanOrEqual(2);
             }
         }
+        // MUST KEEP 7: hedged, and the limit named.
+        expect(EN['pub.health.hedge']).toMatch(/^As far as this phone can tell\./);
+        expect(EN['pub.health.hedge']).toMatch(/can't see blocking inside Iran/);
     });
 
-    it('the summary says whether people\'s apps can repair themselves', () => {
+    it('the summary says whether people\'s apps can repair themselves, and the privacy cost is in view', () => {
         expect(EN['pub.keep.summary.can']).toBe("People's apps can repair themselves.");
-        expect(EN['pub.keep.summary.cannot']).toBe("People's apps can not repair themselves yet.");
-        // Closed until tapped.
-        expect(freshSource.includes('useState(false)')).toBe(true);
-        expect(freshSource.includes('<Collapsible')).toBe(true);
+        expect(EN['pub.keep.summary.cannot']).toBe("People's apps cannot repair themselves yet.");
+        // A sub-page now, not a fold; MUST KEEP 14 visible above the forms.
+        expect(freshSource.includes('<Collapsible')).toBe(false);
+        expect(freshSource).toContain('data-testid="keep-privacy"');
+        // The two facts in view (logs count readers; a stored key can
+        // replace the trusted note), the reasoning behind Details.
+        expect(freshSource.indexOf("t('pub.fresh.privacy.line')")).toBeLessThan(freshSource.indexOf("t('pub.fresh.pack_url.title')"));
+        expect(freshSource.indexOf("t('pub.fresh.privacy.key_line')")).toBeLessThan(freshSource.indexOf("t('pub.fresh.pack_url.title')"));
+        expect(EN['pub.fresh.privacy.line']).toMatch(/count your readers and see roughly where they are/);
+        expect(freshSource.indexOf("t('pub.fresh.privacy.body')")).toBeLessThan(freshSource.indexOf("t('pub.fresh.pack_url.title')"));
+        // No amber "needs new files" pill by default (H-25).
+        expect(freshSource.includes('pub.fresh.pill.manual')).toBe(false);
     });
 
     it('no two "add" buttons differ only by an unexplained noun', () => {
@@ -123,7 +138,7 @@ describe('relay page copy', () => {
 
     it('the internal signed bundle is under Details, not among the files to hand out', () => {
         expect(pageSource.includes('pub.artifacts.raw')).toBe(false);
-        const details = pageSource.indexOf("title={t('pub.details.title')}");
+        const details = pageSource.indexOf("summary={t('pub.details.title')}");
         const raw = pageSource.indexOf('rawArtifact?.exists');
         expect(raw).toBeGreaterThan(details);
         expect(peopleSource.includes('raw')).toBe(false);
@@ -181,15 +196,20 @@ describe('joinPeople', () => {
             [person(1), person(2), person(3, { revoked_at_unix: 5 })],
             [file(1), file(2, { exists: false }), file(3, { exists: false })],
         );
-        expect(personState(t, ok)).toMatch(/^Has a file · added 20\d\d-/);
+        expect(personState(t, ok)).toBe(EN['pub.people.state.has_file']);
+        expect(personStateOf(ok)).toBe('ready');
+        expect(personStateOf(missing)).toBe('no_file');
+        expect(personStateOf(removed)).toBe('removed');
+        expect(personStateOf(ok, true)).toBe('waiting');
         expect(personState(t, missing)).toBe(EN['pub.people.state.no_file']);
         expect(personState(t, removed)).toBe(EN['pub.people.state.removed']);
     });
 });
 
 describe('PeopleSection', () => {
-    const render = (people: ReturnType<typeof joinPeople>, busy: string | null = null) =>
+    const render = (people: ReturnType<typeof joinPeople>, busy: string | null = null, extra = {}) =>
         renderToStaticMarkup(
+            <DensityProvider>
             <PeopleSection
                 t={t}
                 action={{ busy, outcome: null }}
@@ -197,56 +217,69 @@ describe('PeopleSection', () => {
                 people={people}
                 onAdd={noop}
                 onSend={noop}
-                onSave={noop}
                 onRemake={noop}
                 onReplace={noop}
                 onRemoveAccess={noop}
                 onRemoveFromList={noop}
-            />,
+                {...extra}
+            />
+            </DensityProvider>,
         );
     const count = (html: string, s: string) => html.split(s).length - 1;
 
-    it('has one primary action and one sentence', () => {
+    it('with nobody yet, "Add" is the one gold button and the empty line says why', () => {
         const html = render([]);
         expect(html).not.toContain('MISSING:');
-        expect(count(html, '>Add a person<')).toBe(1);
-        expect(html).toContain(EN['pub.people.line']);
+        expect(count(html, 'data-button="add-person"')).toBe(1);
+        expect(html).toContain(`aria-label="${EN['pub.people.add']}"`);
         expect(html).toContain(EN['pub.people.empty']);
+        expect(html).not.toContain(EN['pub.people.line'] ?? 'Each person gets their own file');
     });
 
-    it('puts the file actions and Remove access on the person\'s own row', () => {
+    it('one row per person: a badge, ONE send button and a ⋯ — never a row of buttons (H-14)', () => {
         const html = render(joinPeople([person(1)], [file(1)]));
         expect(html).not.toContain('MISSING:');
-        for (const label of ['Send file', 'Save file', 'Remove access']) {
-            expect(count(html, `>${label}<`), label).toBe(1);
+        expect(count(html, 'data-button="person-send"')).toBe(1);
+        expect(count(html, 'data-button="person-more"')).toBe(1);
+        expect(html).toContain(`>${EN['pub.people.badge.ready']}<`);
+        for (const gone of ['Send file', 'Save file', 'Show as QR code', 'Copy as text', '>Remove access<']) {
+            expect(html, gone).not.toContain(gone);
         }
-        // Replacing their file is there, but behind a question.
-        expect(html).toContain('<details>');
-        expect(html).toContain(EN['pub.people.more']);
-        expect(html).toContain('Replace their file');
-        expect(html).not.toContain('Make their file again');
+        // The raw address is not on the row (H-20).
+        expect(html).not.toContain('daal1qqqq');
+        // With someone on the list, "Add" is no longer the gold button.
+        expect(html).not.toMatch(/data-button="add-person"[^>]*background:var\(--gold\)/);
     });
 
     it('offers to make a missing file again, and never to a person whose access was removed', () => {
         const missing = render(joinPeople([person(1)], [file(1, { exists: false })]));
-        expect(missing).toContain('Make their file again');
-        expect(missing).toContain('Remove access');
-        expect(missing).not.toContain('Send file');
-        const removed = render(
-            joinPeople([person(1, { revoked_at_unix: 9 })], [file(1, { exists: false })]),
-        );
-        expect(removed).toContain('Remove from list');
+        expect(missing).toContain(`aria-label="${EN['pub.people.remake']}"`);
+        expect(missing).toContain(`>${EN['pub.people.badge.no_file']}<`);
+        expect(missing).not.toContain('data-button="person-send"');
+        const removed = render(joinPeople([person(1, { revoked_at_unix: 9 })], [file(1, { exists: false })]));
+        // Removed people are history, folded at the end.
+        expect(removed).toContain(EN['pub.people.removed'].replace('{n}', '1'));
         // Re-making would hand a working file back to someone cut off.
-        expect(removed).not.toContain('Make their file again');
-        expect(removed).not.toContain('Send file');
-        expect(removed).not.toContain('>Remove access<');
+        expect(removed).not.toContain(EN['pub.people.remake']);
+        expect(removed).not.toContain('data-button="person-send"');
     });
 
-    it('shows progress on the button that was pressed and locks the rest', () => {
-        const html = render(joinPeople([person(1)], [file(1)]), 'save:/stage/1.sbpx');
-        expect(html).toContain('Saving…');
-        expect(html).not.toContain('>Save file<');
-        expect(count(html, 'disabled=""')).toBe(4); // send, save, remove access, replace
+    it('a person waiting for an answer offers no send, and says so', () => {
+        const html = render(joinPeople([person(1)], [file(1)]), null, { waiting: new Set([1]) });
+        expect(html).toContain(`>${EN['pub.people.badge.needs_answer']}<`);
+        expect(html).not.toContain('data-button="person-send"');
+    });
+
+    it('while any action runs, the send buttons are locked', () => {
+        const html = render(joinPeople([person(1), person(2)], [file(1), file(2)]), 'save:/stage/1.sbpx');
+        expect(count(html, 'data-button="person-send" disabled=""')).toBe(2);
+    });
+
+    it('the everyone file is one more row, with its own send button', () => {
+        const html = render(joinPeople([person(1)], [file(1)]), null, { everyone: { onSend: noop, onAbout: noop } });
+        expect(html).toContain('data-testid="everyone-row"');
+        expect(html).toContain(EN['pub.everyone.badge']);
+        expect(count(html, 'data-button="everyone-send"')).toBe(1);
     });
 
     it('uses no physical left/right, so it lays out right-to-left', () => {
@@ -256,20 +289,12 @@ describe('PeopleSection', () => {
     });
 });
 
-describe('EveryoneFileSection', () => {
+describe('EveryoneFileSheet', () => {
     const render = (f: ArtifactInfo | null) =>
         renderToStaticMarkup(
-            <EveryoneFileSection
-                t={t}
-                action={idle}
-                file={f}
-                onSend={noop}
-                onSave={noop}
-                onQr={noop}
-                onCopy={noop}
-                onMake={noop}
-                onReplace={noop}
-            />,
+            <DensityProvider>
+                <EveryoneFileSheet t={t} action={idle} file={f} onSend={noop} onMake={noop} onReplace={noop} onClose={noop} />
+            </DensityProvider>,
         );
     const shared = (exists: boolean): ArtifactInfo => ({
         ...file(null, { exists }),
@@ -277,23 +302,21 @@ describe('EveryoneFileSection', () => {
         path: '/stage/1.shared.sbp',
     });
 
-    it('says in one line when to use it instead of a person\'s file', () => {
+    it('says what it costs first (MUST KEEP 9), then Send… and Replace', () => {
         const html = render(shared(true));
         expect(html).not.toContain('MISSING:');
-        expect(html).toContain('One file for everyone');
-        expect(html).toContain(EN['pub.everyone.line']);
-        for (const label of ['Send file', 'Save file', 'Show as QR', 'Copy as text', 'Replace this file']) {
-            expect(html, label).toContain(`>${label}<`);
-        }
+        expect(html).toContain('File for everyone');
+        expect(html).toContain(EN['pub.everyone.line'].replace(/'/g, '&#x27;'));
+        expect(html).toContain(`>${EN['pub.everyone.send_open']}<`);
+        expect(html).toContain(`>${EN['pub.everyone.replace']}<`);
         expect(html).toContain('What is this?');
     });
 
     it('offers to make it when it is missing, and not to replace what is not there', () => {
         const html = render(shared(false));
         expect(html).toContain('Make the file');
-        expect(html).toContain(EN['pub.everyone.none']);
-        expect(html).not.toContain('Send file');
-        expect(html).not.toContain('Replace this file');
+        expect(html).not.toContain(EN['pub.everyone.send_open']);
+        expect(html).not.toContain(EN['pub.everyone.replace']);
     });
 });
 
@@ -314,18 +337,15 @@ describe('the page as it first appears', () => {
     it.each([
         ['en', EN],
         ['fa', FA],
-    ] as const)('%s: four named sections in order, one sentence each, nothing from behind a tap', async (_l, cat) => {
+    ] as const)('%s: People, Details, Danger zone in order; nothing from behind a tap', async (_l, cat) => {
         const html = await render(cat);
         expect(html).not.toContain('MISSING:');
-        const at = ['pub.people.title', 'pub.everyone.title', 'pub.keep.title', 'pub.danger.title', 'pub.details.title'].map(
-            (k) => html.indexOf(`>${cat[k]}<`),
-        );
+        const at = ['pub.people.title', 'pub.details.title', 'pub.danger.title'].map((k) => html.indexOf(`>${cat[k]}<`));
         expect(at.every((i) => i > 0)).toBe(true);
         expect([...at].sort((a, b) => a - b)).toEqual(at);
-        for (const k of ['pub.people.line', 'pub.everyone.line', 'pub.danger.line', 'pub.details.line']) {
-            expect(html, k).toContain(cat[k].replace(/'/g, '&#x27;'));
-        }
-        // Closed sections show their one line and none of their rows.
+        // No "One file for everyone" or "Keep it working" section.
+        expect(html.includes(cat['pub.everyone.line'].slice(0, 30).replace(/'/g, '&#x27;'))).toBe(false);
+        // Closed sections show none of their rows.
         for (const k of [
             'pub.danger.recovery.body',
             'pub.danger.rotate_tls.body',
@@ -337,9 +357,9 @@ describe('the page as it first appears', () => {
         ]) {
             expect(html.includes(cat[k].slice(0, 40).replace(/'/g, '&#x27;')), k).toBe(false);
         }
-        expect((html.match(/aria-expanded="false"/g) ?? []).length).toBe(3);
+        expect((html.match(/aria-expanded="false"/g) ?? []).length).toBeGreaterThanOrEqual(2);
         // The only "add" on the default page adds a person.
-        expect(html).toContain(`>${cat['pub.people.add']}<`);
+        expect(html).toContain(`aria-label="${cat['pub.people.add']}"`);
         expect(html.includes(cat['pub.fresh.add.title'])).toBe(false);
     });
 });
@@ -361,7 +381,9 @@ describe('what the sheets tell the publisher to press exists on the page', () =>
                 expect(cat[k], k).toContain(cat['pub.people.replace']);
                 expect(cat[k], k).toContain(cat['pub.everyone.title']);
             }
-            expect(cat['pub.danger.rebuild.done.by_hand']).toContain(cat['pub.people.more']);
+            // The person's own ⋯ action, by its words; the old fold is gone.
+            expect(cat['pub.danger.rebuild.done.by_hand']).toContain(cat['pub.more.everyone'].replace('…', ''));
+            expect(cat['pub.danger.rebuild.done.by_hand']).not.toContain('File lost');
             for (const k of ['pub.danger.rebuild.done.by_hand_fresh', 'pub.danger.rebuild.confirm.by_hand_fresh']) {
                 expect(cat[k], k).toContain(cat['pub.keep.title']);
                 expect(cat[k], k).toContain(`“${cat['pub.fresh.publish.action']}”`.replace(/“|”/g, (q) => (cat === FA ? (q === '“' ? '«' : '»') : q)));
@@ -384,11 +406,9 @@ describe('what the sheets tell the publisher to press exists on the page', () =>
         }
         expect(FA['pub.danger.rotate_tls.done.local_files']).not.toContain('رایانه');
     });
-    it('the closed section\'s pill says what it is about', () => {
-        expect(EN['pub.fresh.pill.healing']).toBe('Repairs itself');
-        expect(EN['pub.fresh.pill.manual']).toBe('Needs new files');
-        expect(FA['pub.fresh.pill.healing']).not.toBe('خودترمیم');
-        expect(FA['pub.fresh.pill.manual']).not.toBe('دستی');
+    it('the "needs new files" pill is gone from the page by default (H-25)', () => {
+        expect(freshSource.includes('pub.fresh.pill')).toBe(false);
+        expect(pageSource.includes('pub.fresh.pill')).toBe(false);
     });
     it('"Keep it working" says each thing once and keeps the long explanation behind a tap', () => {
         // What a refresh address IS: once, behind "What is this?".
@@ -405,5 +425,16 @@ describe('what the sheets tell the publisher to press exists on the page', () =>
         // The sentence about what went wrong is in both languages.
         expect(EN['pub.danger.rotate_tls.done.sign_failed.next']).toContain('The message below says what went wrong.');
         expect(FA['pub.danger.rotate_tls.done.sign_failed.next']).toContain('پیام پایین می‌گوید');
+    });
+});
+
+describe('the Accounts summary on the publisher page', () => {
+    it('names Google when the Google account is connected', async () => {
+        const { connectedAccountNames } = await import('./RelayListPage');
+        const t = (k: string) => (k === 'wiz.provider.hetzner.label' ? 'Hetzner Cloud' : k);
+        const all = { hetzner: true, cloudflare: { connected: true }, google: { connected: true } };
+        expect(connectedAccountNames(all, t)).toEqual(['Hetzner Cloud', 'Cloudflare', 'Google']);
+        expect(connectedAccountNames({ ...all, google: { connected: false } }, t)).toEqual(['Hetzner Cloud', 'Cloudflare']);
+        expect(connectedAccountNames({ hetzner: false, cloudflare: { connected: false }, google: { connected: true } }, t)).toEqual(['Google']);
     });
 });

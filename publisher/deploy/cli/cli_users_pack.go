@@ -214,6 +214,11 @@ func clientParamsFromCredsFile(path, server, recordCoverSNI string) (relaypack.C
 		// field belongs beside it: anytls negotiates the scheme in
 		// band, so the pack never carries it.
 		AnyTLSPassword string `json:"anytls_password"`
+		// CDNWSPath is the relay door's WebSocket path for the way in
+		// through Cloudflare (FrontRecord.OriginPath). Not the box's:
+		// the app copies it from the record's cdn_front member, where
+		// the front record lives. --cdn-front overrides it.
+		CDNWSPath string `json:"cdn_ws_path"`
 	}
 	if err := json.Unmarshal(body, &c); err != nil {
 		return relaypack.ClientConnParams{}, fmt.Errorf("parse: %w", err)
@@ -252,7 +257,38 @@ func clientParamsFromCredsFile(path, server, recordCoverSNI string) (relaypack.C
 		SSPassword:       c.SSPassword,
 		SSMethod:         c.SSMethod,
 		AnyTLSPassword:   c.AnyTLSPassword,
+		CDNWSPath:        c.CDNWSPath,
 	}, nil
+}
+
+// cdnPackFlags are the way-in-through-Cloudflare flags of
+// users-pack-sbp and users-pack-sbpx.
+type cdnPackFlags struct{ front, roots *string }
+
+func addCDNPackFlags(fs *flag.FlagSet) cdnPackFlags {
+	return cdnPackFlags{
+		front: fs.String("cdn-front", "", "the FrontRecord JSON cdn-provision printed: its origin_path is the door's WebSocket path for the CDN route (else the creds file's cdn_ws_path)"),
+		roots: fs.String("cdn-roots-file", "", "PEM bundle of the roots the pack signs for the CDN route (bind-and-sign --cdn-roots-file); default: the roots the app ships"),
+	}
+}
+
+// apply sets the CDN route's path and roots on p.
+func (f cdnPackFlags) apply(p *relaypack.ClientConnParams) error {
+	if *f.front != "" {
+		front, err := cdnReadRecord(*f.front)
+		if err != nil {
+			return fmt.Errorf("--cdn-front: %w", err)
+		}
+		p.CDNWSPath = front.OriginPath
+	}
+	if *f.roots != "" {
+		b, err := os.ReadFile(*f.roots)
+		if err != nil {
+			return fmt.Errorf("--cdn-roots-file: %w", err)
+		}
+		p.CDNRootPEMs = []string{string(b)}
+	}
+	return nil
 }
 
 // runUsersPackSbp (shared-.sbp path) rewrites a signed .sbp's per-route
@@ -271,6 +307,7 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 	credsFile := fs.String("creds-file", "", "shared creds JSON (mgmt /users/provision shape for the shared user)")
 	server := fs.String("server", "", "box public IP/host for the client outbound")
 	coverSNI := fs.String("cover-sni", "", "OperatorRecord.cover_sni for this relay; used only when the box's creds payload carries none")
+	cdnFlags := addCDNPackFlags(fs)
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -291,6 +328,10 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 	params, err := clientParamsFromCredsFile(*credsFile, *server, *coverSNI)
 	if err != nil {
 		fmt.Fprintf(stderr, "creds-file: %v\n", err)
+		return 2
+	}
+	if err := cdnFlags.apply(&params); err != nil {
+		fmt.Fprintf(stderr, "users-pack-sbp: %v\n", err)
 		return 2
 	}
 	// Degrades per route and fails only when NOTHING renders. A route
@@ -336,6 +377,7 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 	credsFile := fs.String("creds-file", "", "per-recipient creds JSON (mgmt /users/provision shape); enables Tier-2 profile rewrite")
 	server := fs.String("server", "", "box public IP/host for the client outbound (required with --creds-file)")
 	coverSNI := fs.String("cover-sni", "", "OperatorRecord.cover_sni for this relay; used only when the box's creds payload carries none")
+	cdnFlags := addCDNPackFlags(fs)
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
@@ -380,6 +422,10 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 		params, err := clientParamsFromCredsFile(*credsFile, *server, *coverSNI)
 		if err != nil {
 			fmt.Fprintf(stderr, "creds-file: %v\n", err)
+			return 2
+		}
+		if err := cdnFlags.apply(&params); err != nil {
+			fmt.Fprintf(stderr, "users-pack-sbpx: %v\n", err)
 			return 2
 		}
 		var skipped []relaypack.SkippedRoute

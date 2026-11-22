@@ -102,6 +102,60 @@ pub struct SecureScreenResponse {
     pub on: bool,
 }
 
+/// What the Kotlin `clipboardRead` command answers: the clipboard's
+/// text, "" when there is none. No `Debug`: it may be a key, and must
+/// never reach a log line.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipboardReadResponse {
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Arguments of the Kotlin `clipboardWrite` command (`@InvokeArg
+/// ClipboardWriteArgs.text`). No `Debug`, for the same reason.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipboardWriteRequest {
+    pub text: String,
+}
+
+/// What `clipboardWrite` answers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClipboardWriteResponse {
+    #[serde(default)]
+    pub written: bool,
+}
+
+/// Arguments of the Kotlin `fieldProbeWatch` command (network test):
+/// `on` when a test is starting, `false` when it has ended.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FieldProbeWatchRequest {
+    pub on: bool,
+}
+
+/// What the phone knows that the network test's start needs and the
+/// engine cannot see itself. `dns_servers` are addresses: they go into
+/// the engine's start options in memory and are never logged or kept.
+/// Every field defaults, so an older plugin's answer still parses (and
+/// says nothing).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FieldProbeHost {
+    #[serde(default)]
+    pub watching: bool,
+    #[serde(default)]
+    pub dns_servers: Vec<String>,
+    /// `off` | `auto` | `strict` | `unknown`; "" from an older plugin.
+    #[serde(default)]
+    pub private_dns: String,
+    #[serde(default)]
+    pub vpn_active: bool,
+    #[serde(default)]
+    pub ipv6_global: bool,
+    /// The system blocks this app's traffic ("Block connections without
+    /// VPN").
+    #[serde(default)]
+    pub blocked: bool,
+}
+
 /// See `VpnStatusResponse::last_switch`. Ids and closed codes only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwitchNote {
@@ -139,6 +193,41 @@ mod tests {
         );
         let r: SecureScreenResponse = serde_json::from_str("{}").unwrap();
         assert!(!r.on);
+    }
+
+    #[test]
+    fn the_clipboard_speaks_the_kotlin_names() {
+        // The Kotlin @InvokeArg ClipboardWriteArgs reads exactly `text`.
+        assert_eq!(
+            serde_json::to_string(&ClipboardWriteRequest { text: "k".into() }).unwrap(),
+            r#"{"text":"k"}"#
+        );
+        let r: ClipboardReadResponse = serde_json::from_str(r#"{"text":"pasted"}"#).unwrap();
+        assert_eq!(r.text, "pasted");
+        // Nothing on the clipboard reads as "".
+        let r: ClipboardReadResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(r.text, "");
+        let w: ClipboardWriteResponse = serde_json::from_str(r#"{"written":true}"#).unwrap();
+        assert!(w.written);
+    }
+
+    #[test]
+    fn the_field_probe_watch_speaks_the_kotlin_names() {
+        assert_eq!(
+            serde_json::to_string(&FieldProbeWatchRequest { on: true }).unwrap(),
+            r#"{"on":true}"#
+        );
+        let h: FieldProbeHost = serde_json::from_str(
+            r#"{"watching":true,"dns_servers":["192.0.2.53"],"private_dns":"auto",
+                "vpn_active":false,"ipv6_global":true,"blocked":false}"#,
+        )
+        .unwrap();
+        assert_eq!(h.dns_servers, vec!["192.0.2.53".to_string()]);
+        assert_eq!(h.private_dns, "auto");
+        assert!(h.ipv6_global && h.watching);
+        // An answer with nothing in it says nothing.
+        let h: FieldProbeHost = serde_json::from_str("{}").unwrap();
+        assert_eq!(h, FieldProbeHost::default());
     }
 
     #[test]

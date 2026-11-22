@@ -163,7 +163,7 @@ func (pb *Publisher) deployStdin(ctx context.Context, stdin []byte, args ...stri
 
 // ---- the verbs, with the flags the app passes ------------------------
 
-func (pb *Publisher) Provision(ctx context.Context, families []string) Verb {
+func (pb *Publisher) Provision(ctx context.Context, families []string, extra ...string) Verb {
 	args := []string{"provision", "--provider", "hetzner", "--region", "fsn1", "--server-type", "cx22",
 		"--toolbox-profile", ToolboxProfile,
 		"--pubkey-file", pb.Path("publisher.pub"), "--token-file", pb.Path("cloud.token"),
@@ -171,7 +171,7 @@ func (pb *Publisher) Provision(ctx context.Context, families []string) Verb {
 	if len(families) > 0 {
 		args = append(args, "--families", strings.Join(families, ","))
 	}
-	return pb.Deploy(ctx, args...)
+	return pb.Deploy(ctx, append(args, extra...)...)
 }
 
 // BindAndSign signs the base pack against record.json as it is NOW.
@@ -266,14 +266,14 @@ func (pb *Publisher) UsersList(ctx context.Context) Verb {
 
 // PackSBP turns the signed base pack + one recipient's credentials into
 // the file that gets handed to an insider.
-func (pb *Publisher) PackSBP(ctx context.Context, in, credsFile, out string) Verb {
+func (pb *Publisher) PackSBP(ctx context.Context, in, credsFile, out string, extra ...string) Verb {
 	rec, _ := pb.Record()
 	args := []string{"users-pack-sbp", "--in", pb.Path(in), "--out", pb.Path(out),
 		"--creds-file", pb.Path(credsFile), "--server", rec.PublicIP}
 	if rec.CoverSNI != "" {
 		args = append(args, "--cover-sni", rec.CoverSNI)
 	}
-	return pb.Deploy(ctx, args...)
+	return pb.Deploy(ctx, append(args, extra...)...)
 }
 
 // Record is the subset of OperatorRecord the rig reads. It never writes

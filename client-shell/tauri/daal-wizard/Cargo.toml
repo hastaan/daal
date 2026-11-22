@@ -37,6 +37,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 dirs-next = "2.0"
 tempfile = "3.10"
 
+# Reading the publisher name out of a relay's own signed `.sbp` (a zip),
+# to tell whether it still carries the relay's name. Already linked into
+# the app through bundle-rs.
+zip = { workspace = true }
+
 # FRP-14: branded `daal1...` recipient-address codec.
 daal-recipient-addr = { path = "../daal-recipient-addr" }
 

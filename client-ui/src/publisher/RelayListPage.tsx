@@ -21,6 +21,7 @@
 // recorded, in words that say so ("Set up", never a green "LIVE") — see
 // relayStatus.ts.
 
+import { sep } from '../lib/format';
 import { useCallback, useEffect, useState } from 'react';
 import { Wizard } from './wizardCommands';
 import type {
@@ -32,19 +33,27 @@ import type {
     SetupRecovery,
 } from './wizardCommands';
 import { AccountCheckSheet } from './AccountCheckSheet';
-import { checkHealth, checkSequentially, checkedWorking, nowUnix, overallKey } from './relayHealth';
+import { ReportViewer } from './ReportViewer';
+import { checkHealth, checkSequentially, nowUnix } from './relayHealth';
 import {
     Card,
     Button,
-    Input,
+    Disclosure,
+    Icon,
+    ListRow,
+    OverflowMenu,
+    PageHeader,
     Section,
     Sheet,
-    StatusPill,
+    StateIcon,
 } from '../design/primitives';
-import { relayBadge } from './relayStatus';
-import { ActionButton, ActionToast, useAction } from './useAction';
+import type { IconName } from '../design/primitives';
+import { formatAgo } from '../lib/format';
+import { ActionToast, useAction } from './useAction';
+import { PageColumn, RelayBadge, num, relayLook, relayUnfinished, useLocale } from './ui';
 import { explainFailure, failureBlock } from './failureText';
 import { WhatIsThis } from './Disclosure';
+import { useAccounts } from './addons/accounts';
 import { AddressLines, UnreleasedAddresses, retryNeeded, stillBills } from './DestroyAddresses';
 import {
     releaseLiveAddresses,
@@ -55,13 +64,14 @@ import {
 } from './destroyReport';
 import { CancelSetupSheet } from './SetupRecoveryCard';
 import { deleteMine, keepMine, listDeleteFor } from './listDelete';
-import { BackupCard } from './BackupCard';
+import { BackupBadge } from './BackupCard';
 import { NewHostingKeySheet, RestoreNoticeCard } from './RestoreNotice';
 import { backupApi } from './backupHarness';
 import type { BackupApi } from './backupHarness';
 import type { Failure } from './failureText';
 import { OtherServerNote, otherServerId } from './OtherServerNote';
 import { mix } from '../design/mix';
+import { AddonOutcomeLines } from './addons/AddonOutcomeLines';
 
 interface Props {
     t: (k: string) => string;
@@ -75,6 +85,8 @@ interface Props {
     onBackup?: () => void;
     /** Open the restore page. */
     onRestore?: () => void;
+    /** Open «حساب‌ها». */
+    onAccounts?: () => void;
     /** Backup and restore commands (the harness passes a fake). */
     backup?: BackupApi;
 }
@@ -111,7 +123,7 @@ export function ReleaseResults({
                     <span dir="ltr" style={{ fontFamily: 'var(--font-mono)' }}>
                         {r.address}
                     </span>
-                    {' · '}
+                    {sep()}
                     {t(releaseResultKey(r.code))}
                 </div>
             ))}
@@ -151,15 +163,6 @@ export function ReleaseResults({
     );
 }
 
-function dateLabel(unix: number): string {
-    if (!unix) return '';
-    try {
-        return new Date(unix * 1000).toISOString().slice(0, 10);
-    } catch {
-        return '';
-    }
-}
-
 /** The card title. Falls back to something at least *unique* when the
  *  user never named the relay. */
 export function relayTitle(op: OperatorSummary): string {
@@ -168,15 +171,45 @@ export function relayTitle(op: OperatorSummary): string {
 
 const META: React.CSSProperties = {
     fontFamily: 'var(--font-mono)',
-    fontSize: 11,
-    color: 'var(--dim)',
-    letterSpacing: '0.02em',
+    fontSize: 12,
+    color: 'var(--muted)',
 };
 
 const LINE: React.CSSProperties = {
     fontSize: 12,
     color: 'var(--muted)',
 };
+
+/** "Server: 203.0.113.7", or "Daal has no address for this server.":
+ *  the words in the body face and the page direction (the mono face has
+ *  no Persian letters), only the address itself in mono and kept LTR. */
+function ServerAddress({
+    t,
+    addr,
+    size = 13,
+}: {
+    t: (k: string) => string;
+    addr: string | null | undefined;
+    size?: number;
+}) {
+    if (!addr) {
+        return (
+            <span style={{ fontSize: size, color: 'var(--fg)', lineHeight: 1.5 }}>
+                {t('pub.relays.destroy.address.unknown')}
+            </span>
+        );
+    }
+    const [before, after] = t('pub.relays.destroy.address').split('{ip}');
+    return (
+        <span data-testid="destroy-address" style={{ fontSize: size, color: 'var(--fg)', lineHeight: 1.5 }}>
+            {before}
+            <bdi dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
+                {addr}
+            </bdi>
+            {after ?? ''}
+        </span>
+    );
+}
 
 // ---------------------------------------------------------------------
 // Teardown
@@ -220,80 +253,106 @@ const OPTION_TITLE: React.CSSProperties = {
 };
 
 const OPTION_BODY: React.CSSProperties = {
-    fontSize: 12,
+    fontSize: 13,
     color: 'var(--muted)',
     lineHeight: 1.55,
     marginTop: 6,
 };
 
 /** One of the two outcomes. A real radio (not a checkbox in prose) so
- *  the user has to state which one they mean before anything is armed. */
+ *  the user has to state which one they mean before anything is armed.
+ *  One line each (MUST KEEP 2); the long paragraph is behind "More". */
 function DestroyOption({
+    t,
     selected,
     heavy,
     title,
-    body,
+    line,
+    more,
     extra,
     disabled,
     onSelect,
+    dataButton,
 }: {
+    t: (k: string) => string;
     selected: boolean;
     /** The irreversible one: red accent, and it stays red unselected so
      *  its weight is visible before it is chosen. */
     heavy?: boolean;
     title: string;
-    body: string;
+    line: string;
+    more: string;
     extra?: React.ReactNode;
     disabled?: boolean;
     onSelect: () => void;
+    dataButton: string;
 }) {
     const accent = heavy ? 'var(--red)' : 'var(--gold)';
     return (
-        <button
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            disabled={disabled}
-            onClick={onSelect}
+        <div
             style={{
-                display: 'block',
-                width: '100%',
-                textAlign: 'start',
-                font: 'inherit',
-                color: 'var(--fg)',
-                background: selected
-                    ? mix(accent, 12, 'var(--surface-2)')
-                    : 'var(--surface-2)',
+                background: selected ? mix(accent, 12, 'var(--surface-2)') : 'var(--surface-2)',
                 border: `1px solid ${
-                    selected
-                        ? accent
-                        : heavy
-                          ? mix('var(--red)', 40, 'transparent')
-                          : 'var(--line)'
+                    selected ? accent : heavy ? mix('var(--red)', 40, 'transparent') : 'var(--line)'
                 }`,
                 borderRadius: 'var(--radius-md)',
-                padding: '12px 14px',
-                cursor: disabled ? 'not-allowed' : 'pointer',
+                padding: '4px 14px 0',
                 opacity: disabled ? 0.55 : 1,
             }}
         >
-            <span
+            <button
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                disabled={disabled}
+                onClick={onSelect}
+                data-button={dataButton}
                 style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    ...OPTION_TITLE,
-                    color: heavy ? 'var(--red)' : 'var(--fg)',
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'start',
+                    font: 'inherit',
+                    color: 'var(--fg)',
+                    background: 'transparent',
+                    border: 0,
+                    padding: '8px 0 4px',
+                    minHeight: 44,
+                    cursor: disabled ? 'not-allowed' : 'pointer',
                 }}
             >
-                <span aria-hidden style={{ fontSize: 13 }}>
-                    {selected ? '◉' : '◯'}
+                <span
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        ...OPTION_TITLE,
+                        color: heavy ? 'var(--red)' : 'var(--fg)',
+                    }}
+                >
+                    <span
+                        aria-hidden
+                        style={{
+                            width: 18,
+                            height: 18,
+                            flexShrink: 0,
+                            borderRadius: '50%',
+                            border: `2px solid ${selected ? accent : 'var(--muted)'}`,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                        }}
+                    >
+                        {selected && <span style={{ width: 8, height: 8, borderRadius: '50%', background: accent }} />}
+                    </span>
+                    {title}
                 </span>
-                {title}
-            </span>
-            <span style={{ display: 'block', ...OPTION_BODY }}>{body}</span>
-            {extra}
-        </button>
+                <span style={{ display: 'block', ...OPTION_BODY }}>{line}</span>
+                {extra}
+            </button>
+            <Disclosure summary={t('pub.relays.destroy.more')} dataButton={`${dataButton}-more`}>
+                <div style={{ ...OPTION_BODY, marginTop: 0, paddingBottom: 8 }}>{more}</div>
+            </Disclosure>
+        </div>
     );
 }
 
@@ -394,10 +453,8 @@ export function RelayDestroySheet({
      *  a sentence — half-built relays have no address, and "the server
      *  at (none) is still billing" is worse than saying nothing. */
     const addressLine = (
-        <div style={{ ...META, color: 'var(--fg)' }}>
-            {addr
-                ? t('pub.relays.destroy.address').replace('{ip}', addr)
-                : t('pub.relays.destroy.address.unknown')}
+        <div>
+            <ServerAddress t={t} addr={addr} />
         </div>
     );
 
@@ -409,9 +466,9 @@ export function RelayDestroySheet({
           ? t('pub.relays.destroy.choose')
           : choice === 'local'
             ? t('pub.relays.destroy.confirm.local')
-            : addr
-              ? t('pub.relays.destroy.confirm.server').replace('{ip}', addr)
-              : t('pub.relays.destroy.confirm.server_noaddr');
+            : // The button names the choice (C7.1); the address is on
+              // both cards, so the server it deletes is in view.
+              t('pub.relays.destroy.confirm.server_noaddr');
 
     return (
         <Sheet
@@ -441,6 +498,7 @@ export function RelayDestroySheet({
                             variant={askedForServer ? 'danger' : 'secondary'}
                             onClick={() => void run()}
                             disabled={busy || choice === null}
+                            dataButton="destroy-confirm"
                         >
                             {confirmLabel}
                         </Button>
@@ -452,10 +510,9 @@ export function RelayDestroySheet({
                 <div style={{ display: 'grid', gap: 12 }}>
                     <div
                         style={{
-                            fontSize: 12,
+                            fontSize: 13,
+                            fontWeight: 600,
                             color: 'var(--muted)',
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.08em',
                         }}
                     >
                         {t('pub.relays.destroy.report.title')}
@@ -570,6 +627,9 @@ export function RelayDestroySheet({
                         retryBusy={busy}
                         onRetry={() => void run()}
                     />
+                    {/* V019: each add-on — removed, gone with the relay,
+                        kept for a retry, or left running. */}
+                    <AddonOutcomeLines t={t} outcomes={report.addons} />
                     {failure && (
                         <div style={{ display: 'grid', gap: 6 }}>
                             <div style={{ color: 'var(--red)', fontSize: 13, lineHeight: 1.5 }}>
@@ -609,54 +669,45 @@ export function RelayDestroySheet({
                     role="radiogroup"
                     aria-label={t('pub.relays.destroy.intro')}
                 >
-                    <div style={{ fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 }}>
-                        {t('pub.relays.destroy.intro')}
-                    </div>
-
                     <DestroyOption
+                        t={t}
+                        dataButton="destroy-local"
                         selected={choice === 'local'}
                         disabled={busy}
                         onSelect={() => setChoice('local')}
                         title={t('pub.relays.destroy.local.title')}
-                        body={t('pub.relays.destroy.local.body')}
+                        line={t('pub.relays.destroy.local.line')}
+                        more={t('pub.relays.destroy.local.body')}
                         extra={
-                            <span
-                                style={{
-                                    ...META,
-                                    display: 'block',
-                                    marginTop: 8,
-                                    color: 'var(--fg)',
-                                }}
-                            >
-                                {addr
-                                    ? t('pub.relays.destroy.address').replace(
-                                          '{ip}',
-                                          addr,
-                                      )
-                                    : t('pub.relays.destroy.address.unknown')}
+                            <span style={{ display: 'grid', gap: 2, marginTop: 8 }}>
+                                <ServerAddress t={t} addr={addr} />
+                                {addr && (
+                                    <span style={{ fontSize: 13, color: 'var(--amber)' }}>
+                                        {t('pub.relays.destroy.write_down')}
+                                    </span>
+                                )}
                             </span>
                         }
                     />
 
                     <DestroyOption
+                        t={t}
+                        dataButton="destroy-server"
                         heavy
                         selected={choice === 'server'}
                         disabled={busy}
                         onSelect={() => setChoice('server')}
                         title={t('pub.relays.destroy.server.title')}
-                        body={t('pub.relays.destroy.server.body')}
+                        line={t('pub.relays.destroy.server.line')}
                         extra={
-                            addr ? undefined : (
-                                <span
-                                    style={{
-                                        ...OPTION_BODY,
-                                        display: 'block',
-                                        marginTop: 8,
-                                    }}
-                                >
-                                    {t('pub.relays.destroy.server.noaddr')}
-                                </span>
-                            )
+                            <span style={{ display: 'grid', gap: 2, marginTop: 8 }}>
+                                <ServerAddress t={t} addr={addr} />
+                            </span>
+                        }
+                        more={
+                            addr
+                                ? t('pub.relays.destroy.server.body')
+                                : `${t('pub.relays.destroy.server.body')}\n\n${t('pub.relays.destroy.server.noaddr')}`
                         }
                     />
 
@@ -709,36 +760,35 @@ export default function RelayListPage({
     onResume,
     onBackup,
     onRestore,
+    onAccounts,
     backup = backupApi(),
 }: Props) {
+    const locale = useLocale();
     const [operators, setOperators] = useState<OperatorSummary[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    // Inline rename: id being renamed + the draft text.
-    const [renamingId, setRenamingId] = useState<number | null>(null);
-    const [draftName, setDraftName] = useState('');
     // Every action on this screen answers: progress on the button, a
     // result pinned to the screen when it ends.
     const explain = useCallback((e: unknown) => explainFailure(t, e), [t]);
     const action = useAction(explain);
-    const renameBusy = action.busy !== null;
 
-    // The relay whose teardown sheet is open. Modal, so the card behind
-    // it needs no busy state of its own.
-    const [destroying, setDestroying] = useState<DestroyTarget | null>(null);
 
     // D3: the last health result per relay, filled one by one on open.
     const [health, setHealth] = useState<Record<number, RelayHealth | null>>({});
     const [healthStarted, setHealthStarted] = useState(false);
     // D1: the account check sheet.
     const [accountOpen, setAccountOpen] = useState(false);
+    // Network test: open a report someone sent.
+    const [reportOpen, setReportOpen] = useState(false);
     // D1/D2: backup status (null: unknown or an older shell) and the
     // "new hosting key" sheet the restore notice opens.
     const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
-    const [keySheet, setKeySheet] = useState(false);
+    // The relay whose teardown sheet is open (an unfinished setup's ⋯).
+    const [destroying, setDestroying] = useState<DestroyTarget | null>(null);
     // PA-7.
     const [listCancel, setListCancel] = useState<ListCancel | null>(null);
+    const [keySheet, setKeySheet] = useState(false);
     // PA-1: per relay, what the last address release said.
     const [releases, setReleases] = useState<
         Record<number, { results: ReleaseAddressResult[]; failure: Failure | null }>
@@ -906,23 +956,6 @@ export default function RelayListPage({
 
     const anyToken = operators.some((o) => o.has_cloud_token === true);
 
-    const commitRename = useCallback(
-        async (op: OperatorSummary) => {
-            const r = await action.run(
-                `rename:${op.id}`,
-                () => Wizard.setOperatorNickname(op.id, draftName.trim()),
-                { ok: t('pub.fb.renamed'), fail: t('pub.fb.renamed.fail') },
-            );
-            if (r.ok) {
-                setRenamingId(null);
-                setDraftName('');
-                await reload();
-            }
-        },
-        [action.run, draftName, reload, t],
-    );
-
-
     /** A relay is finishable — not openable — until it has a signed
      *  pack, whatever its lifecycle status says.
      *
@@ -938,11 +971,7 @@ export default function RelayListPage({
      *  Rust's `derive_wizard_step` already returns "sign" for this row,
      *  and `runBuild` skips provision when the box is up, so resuming
      *  is exactly the right move. */
-    const needsFinishing = useCallback(
-        (op: OperatorSummary) =>
-            op.status !== 'decommissioned' && !op.has_signed_sbp,
-        [],
-    );
+    const needsFinishing = useCallback((op: OperatorSummary) => relayUnfinished(op), []);
 
     const openRelay = useCallback(
         (op: OperatorSummary) => {
@@ -953,394 +982,225 @@ export default function RelayListPage({
         [needsFinishing, onOpen, onResume],
     );
 
-    return (
-        <div style={{ padding: '12px 16px 24px 16px' }}>
-            <Section
-                eyebrow={t('pub.relays.eyebrow')}
-                title={t('pub.relays.title')}
-                action={<Button onClick={onNew}>{t('pub.relays.new')}</Button>}
-            >
-                {/* D2: a restore committed here; the truth about the
-                    old phone stays until the person has read it. */}
-                {backupStatus?.restore_notice && (
-                    <div style={{ marginBottom: 10 }}>
-                        <RestoreNoticeCard
+    const live = operators.filter((o) => o.status !== 'decommissioned');
+    // Accounts come first: connecting a hosting company is step one.
+    const { accounts: acc } = useAccounts(!!onAccounts);
+    const accNames = connectedAccountNames(acc, t);
+    const accLine = acc.hetzner
+        ? t('pub.accounts.summary.on').replace('{names}', accNames.join(sep()))
+        : t('pub.accounts.summary.start');
+    const accountsCard = onAccounts ? (
+        <Card>
+            <ListRow
+                leading={<Icon name="key" size={20} />}
+                title={t('pub.accounts.title')}
+                subtitle={<span style={{ color: acc.hetzner ? undefined : 'var(--gold)' }}>{accLine}</span>}
+                wrapSubtitle
+                chevron
+                last
+                onClick={onAccounts}
+                dataButton="accounts"
+            />
+        </Card>
+    ) : null;
+    const retired = operators.filter((o) => o.status === 'decommissioned');
+
+    // The publisher's tools, shown on the page instead of behind ⋯: the
+    // owner did not find Accounts, backup or the report there (2026-11-22).
+    const tools: { id: string; icon: IconName; title: string; onSelect: () => void }[] = [
+        ...(onBackup && operators.length > 0 ? [{ id: 'backup', icon: 'shield' as const, title: t('pub.more.backup'), onSelect: onBackup }] : []),
+        ...(anyToken
+            ? [{ id: 'check-account', icon: 'server' as const, title: t('pub.account.open'), onSelect: () => setAccountOpen(true) }]
+            : []),
+        ...(live.length > 0
+            ? [{ id: 'open-report', icon: 'file' as const, title: t('pub.report.open'), onSelect: () => setReportOpen(true) }]
+            : []),
+        ...(onRestore ? [{ id: 'restore-link', icon: 'download' as const, title: t('pub.restore.link'), onSelect: onRestore }] : []),
+    ];
+
+    const row = (op: OperatorSummary, last: boolean) => {
+        const dead = op.status === 'decommissioned';
+        const h = health[op.id] ?? null;
+        const look = relayLook(op, h);
+        const unreleased = op.unreleased_addresses ?? [];
+        const people = t(op.live_recipient_count === 1 ? 'pub.relays.people.one' : 'pub.relays.people').replace(
+            '{n}',
+            num(locale, op.live_recipient_count),
+        );
+        const checked =
+            h && h.checked_at_unix > 0
+                ? t('pub.relays.checked').replace('{ago}', formatAgo(locale, (nowUnix() - h.checked_at_unix) * 1000))
+                : '';
+        return (
+            <div key={op.id} data-relay={op.id} data-relay-state={look.labelKey}>
+                <ListRow
+                    leading={<StateIcon state={look.icon} size={22} />}
+                    title={relayTitle(op)}
+                    // "Unfinished · may cost money" is never cut short: it
+                    // takes the line under the name instead of squeezing it.
+                    badge={look.wrap ? undefined : <RelayBadge t={t} look={look} size="sm" />}
+                    subtitle={
+                        look.wrap ? (
+                            <span style={{ display: 'inline-flex', marginBlockStart: 4 }}>
+                                <RelayBadge t={t} look={look} size="sm" />
+                            </span>
+                        ) : dead ? undefined : checked ? (
+                            `${people} · ${checked}`
+                        ) : (
+                            people
+                        )
+                    }
+                    wrapSubtitle={look.wrap}
+                    chevron={!dead}
+                    onClick={dead ? undefined : () => openRelay(op)}
+                    // An unfinished setup never reaches the relay page,
+                    // so its removal stays here, behind its own ⋯ (PA-7).
+                    trailing={
+                        !dead && needsFinishing(op) ? (
+                            <OverflowMenu
+                                label={t('ui.more')}
+                                title={relayTitle(op)}
+                                dataButton="relay-row-more"
+                                items={[
+                                    {
+                                        id: 'remove',
+                                        label: t('pub.more.remove_setup'),
+                                        icon: 'trash',
+                                        tone: 'danger',
+                                        onSelect: () => void startDelete(op),
+                                    },
+                                ]}
+                            />
+                        ) : undefined
+                    }
+                    stack={false}
+                    dataButton={dead ? undefined : `relay-${op.id}`}
+                    last={last && unreleased.length === 0 && !releases[op.id]}
+                />
+                {/* D4: a delete that could not release an address Daal
+                    reserved — it still costs money, so it stays here. */}
+                {unreleased.length > 0 && (
+                    <div style={{ paddingBlock: 8 }}>
+                        <UnreleasedAddresses
                             t={t}
-                            notice={backupStatus.restore_notice}
-                            onEnterKey={() => setKeySheet(true)}
-                            onDismiss={async () => {
-                                try {
-                                    await backup.dismissNotice();
-                                } catch {
-                                    /* shown again next time; nothing lost */
-                                }
-                                void reloadBackup();
-                            }}
+                            ips={unreleased}
+                            live={releaseRetryFor(op.status) === 'release_address'}
+                            retryBusy={action.busy === `release:${op.id}`}
+                            onRetry={releaseRetryFor(op.status) ? () => void retryRelease(op) : undefined}
                         />
                     </div>
                 )}
-                {/* D1: only this phone can manage the relays. */}
-                <div style={{ marginBottom: 10, display: 'grid', gap: 6 }}>
-                    <BackupCard t={t} status={backupStatus} onBackup={onBackup} />
-                    {onRestore && (
-                        <div>
-                            <Button variant="ghost" size="sm" onClick={onRestore} data-button="restore-link">
-                                {t('pub.restore.link')}
-                            </Button>
-                        </div>
-                    )}
+                {releases[op.id] && (
+                    <div style={{ paddingBlock: 8 }}>
+                        <ReleaseResults t={t} results={releases[op.id].results} failure={releases[op.id].failure} />
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const empty = !loading && live.length === 0;
+
+    return (
+        <PageColumn>
+            {/* The publisher page is two sections, Accounts and Relays; the
+                rest folds away under "More tools" (owner, 2026-11-22). */}
+            <PageHeader
+                title={t('title.publisher')}
+                badge={empty ? undefined : <BackupBadge t={t} status={backupStatus} onBackup={onBackup} />}
+                actions={
+                    !empty && !loading && tools.length > 0 ? (
+                        <OverflowMenu
+                            label={t('ui.more')}
+                            title={t('title.publisher')}
+                            items={tools.map((x) => ({ id: x.id, label: x.title, icon: x.icon, onSelect: x.onSelect }))}
+                            dataButton="more-tools"
+                        />
+                    ) : undefined
+                }
+            />
+
+            {/* D2: a restore committed here; the truth about the old
+                phone stays until the person has read it. */}
+            {backupStatus?.restore_notice && (
+                <RestoreNoticeCard
+                    t={t}
+                    notice={backupStatus.restore_notice}
+                    onEnterKey={() => setKeySheet(true)}
+                    onDismiss={async () => {
+                        try {
+                            await backup.dismissNotice();
+                        } catch {
+                            /* shown again next time; nothing lost */
+                        }
+                        void reloadBackup();
+                    }}
+                />
+            )}
+
+            {error && (
+                <div
+                    style={{
+                        color: 'var(--red)',
+                        fontSize: 13,
+                        padding: '6px 4px',
+                        whiteSpace: 'pre-line',
+                        lineHeight: 1.5,
+                    }}
+                >
+                    {error}
                 </div>
-                {anyToken && (
-                    <div style={{ marginBottom: 10 }}>
-                        <Button variant="secondary" onClick={() => setAccountOpen(true)}>
-                            {t('pub.account.open')}
+            )}
+
+            {loading && operators.length === 0 && <div style={LINE}>{t('common.loading')}</div>}
+
+            {accountsCard && (
+                <Section eyebrow={t('pub.accounts.title')}>{accountsCard}</Section>
+            )}
+
+            <Section
+                eyebrow={t('pub.relays.title')}
+                action={
+                    live.length > 0 ? (
+                        <Button size="compact" variant="link" leading="plus" onClick={onNew} dataButton="new-relay">
+                            {t('pub.relays.new')}
                         </Button>
-                    </div>
-                )}
-                {error && (
-                    <div
-                        style={{
-                            color: 'var(--red)',
-                            fontSize: 12,
-                            padding: '6px 4px',
-                            whiteSpace: 'pre-line',
-                            lineHeight: 1.5,
-                        }}
-                    >
-                        {error}
-                    </div>
-                )}
-
-                {loading && operators.length === 0 && (
+                    ) : undefined
+                }
+            >
+                {empty && (
+                    // No relay yet: the two ways to have one.
                     <Card>
-                        <div style={LINE}>{t('common.loading')}</div>
+                        <ListRow
+                            leading={<Icon name="plus" size={20} />}
+                            title={t('pub.relays.empty.title')}
+                            // MUST KEEP 4: what it costs, before the first tap.
+                            subtitle={t('pub.relays.empty.line')}
+                            wrapSubtitle
+                            chevron
+                            onClick={onNew}
+                            dataButton="new-relay"
+                        />
+                        {onRestore && (
+                            <ListRow
+                                leading={<Icon name="download" size={20} />}
+                                title={t('pub.restore.link')}
+                                subtitle={t('pub.tools.restore.line')}
+                                wrapSubtitle
+                                chevron
+                                last
+                                onClick={onRestore}
+                                dataButton="restore-link"
+                            />
+                        )}
                     </Card>
                 )}
-
-                {!loading && operators.length === 0 && (
-                    <Card>
-                        <div style={{ display: 'grid', gap: 10 }}>
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-display)',
-                                    fontSize: 19,
-                                    color: 'var(--fg)',
-                                }}
-                            >
-                                {t('pub.relays.empty.title')}
-                            </div>
-                            <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.55 }}>
-                                {t('pub.relays.empty.body')}
-                            </div>
-                            <div>
-                                <Button onClick={onNew}>
-                                    {t('pub.relays.new')}
-                                </Button>
-                            </div>
-                        </div>
-                    </Card>
-                )}
-
-                <div style={{ display: 'grid', gap: 10 }}>
-                    {operators.map((op) => {
-                        const dead = op.status === 'decommissioned';
-                        const ip =
-                            op.public_ip || op.public_ipv6 || '';
-                        const since =
-                            op.last_provisioned_at_unix || op.created_at_unix;
-                        const renaming = renamingId === op.id;
-                        const h = health[op.id] ?? null;
-                        const badge = relayBadge(op.status, checkedWorking(h, nowUnix()));
-                        const interrupted =
-                            op.status === 'pre-provision' && op.setup_interrupted === true;
-                        const unreleased = op.unreleased_addresses ?? [];
-                        return (
-                            <Card
-                                key={op.id}
-                                // The whole card is the tap target, so the row
-                                // needs no "Open" button competing with it —
-                                // the only thing tapping a relay can mean is
-                                // "show me this relay". Buttons inside stop
-                                // propagation so they keep their own meaning.
-                                onClick={
-                                    renaming || dead
-                                        ? undefined
-                                        : () => openRelay(op)
-                                }
-                                role={renaming || dead ? undefined : 'button'}
-                                aria-label={
-                                    renaming || dead ? undefined : relayTitle(op)
-                                }
-                                style={{
-                                    opacity: dead ? 0.5 : 1,
-                                    cursor: dead ? 'default' : 'pointer',
-                                }}
-                            >
-                                <div style={{ display: 'grid', gap: 8 }}>
-                                    {/* Title + lifecycle chip */}
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'space-between',
-                                            gap: 10,
-                                        }}
-                                    >
-                                        {renaming ? (
-                                            <Input
-                                                autoFocus
-                                                value={draftName}
-                                                onChange={(e) =>
-                                                    setDraftName(e.target.value)
-                                                }
-                                                placeholder={t(
-                                                    'pub.relays.rename.placeholder',
-                                                )}
-                                                onKeyDown={(e) => {
-                                                    if (e.key === 'Enter') {
-                                                        void commitRename(op);
-                                                    } else if (e.key === 'Escape') {
-                                                        setRenamingId(null);
-                                                    }
-                                                }}
-                                            />
-                                        ) : (
-                                            <div
-                                                style={{
-                                                    fontFamily:
-                                                        'var(--font-display)',
-                                                    fontSize: 18,
-                                                    color: 'var(--fg)',
-                                                    lineHeight: 1.2,
-                                                    minWidth: 0,
-                                                    overflow: 'hidden',
-                                                    textOverflow: 'ellipsis',
-                                                    whiteSpace: 'nowrap',
-                                                }}
-                                            >
-                                                {relayTitle(op)}
-                                            </div>
-                                        )}
-                                        {!renaming && (
-                                            <span
-                                                style={{
-                                                    display: 'inline-flex',
-                                                    alignItems: 'center',
-                                                    gap: 6,
-                                                    flex: '0 0 auto',
-                                                }}
-                                            >
-                                                <StatusPill tone={badge.tone}>
-                                                    {t(badge.labelKey)}
-                                                </StatusPill>
-                                                {/* Affordance for the card-wide
-                                                    tap target that replaced the
-                                                    "Open" button. */}
-                                                {!dead && (
-                                                    <span
-                                                        aria-hidden
-                                                        style={{
-                                                            color: 'var(--dim)',
-                                                            fontSize: 18,
-                                                            lineHeight: 1,
-                                                        }}
-                                                    >
-                                                        ›
-                                                    </span>
-                                                )}
-                                            </span>
-                                        )}
-                                    </div>
-
-                                    {/* Identity: the address the user can
-                                        cross-check against their cloud
-                                        console. */}
-                                    <div style={META}>
-                                        {ip || t('pub.relays.no_ip')}
-                                    </div>
-
-                                    {/* Plan */}
-                                    <div style={LINE}>
-                                        {op.provider} · {op.server_type || '—'} ·{' '}
-                                        {op.region}
-                                    </div>
-
-                                    {/* Who is on it, and is there anything to
-                                        hand out yet. */}
-                                    <div style={LINE}>
-                                        {t('pub.relays.recipients')
-                                            .replace(
-                                                '{live}',
-                                                String(op.live_recipient_count),
-                                            )
-                                            .replace(
-                                                '{total}',
-                                                String(op.total_recipient_count),
-                                            )}
-                                        {' · '}
-                                        {op.has_signed_sbp
-                                            ? t('pub.relays.pack.built').replace(
-                                                  '{date}',
-                                                  dateLabel(op.signed_sbp_at_unix),
-                                              )
-                                            : t('pub.relays.pack.none')}
-                                    </div>
-
-                                    <div style={META}>
-                                        {t('pub.relays.since').replace(
-                                            '{date}',
-                                            dateLabel(since),
-                                        )}
-                                    </div>
-
-                                    {/* The chip above is what the app
-                                        last recorded, not a check — say
-                                        so, and only while that is what
-                                        it is. Badge and caption come
-                                        from the same value, so they
-                                        cannot disagree again. */}
-                                    {/* D1: a setup that stopped part-way may
-                                        have left a server billing. */}
-                                    {interrupted && (
-                                        <div style={{ ...LINE, color: 'var(--gold)' }}>
-                                            {t('pub.relays.interrupted')}
-                                        </div>
-                                    )}
-
-                                    {/* D3: the last check, in one line. */}
-                                    {h && !dead && (
-                                        <div style={LINE} data-testid="card-health">
-                                            {t(overallKey(h.overall))}
-                                        </div>
-                                    )}
-
-                                    {/* D4: a delete that could not release
-                                        an address Daal reserved. */}
-                                    {unreleased.length > 0 && (
-                                        <UnreleasedAddresses
-                                            t={t}
-                                            ips={unreleased}
-                                            live={releaseRetryFor(op.status) === 'release_address'}
-                                            retryBusy={action.busy === `release:${op.id}`}
-                                            onRetry={
-                                                releaseRetryFor(op.status)
-                                                    ? () => void retryRelease(op)
-                                                    : undefined
-                                            }
-                                        />
-                                    )}
-
-                                    {releases[op.id] && (
-                                        <ReleaseResults
-                                            t={t}
-                                            results={releases[op.id].results}
-                                            failure={releases[op.id].failure}
-                                        />
-                                    )}
-
-                                    {badge.recordedOnly && !dead && (
-                                        <div
-                                            style={{
-                                                ...META,
-                                                color: 'var(--dim)',
-                                                fontStyle: 'italic',
-                                            }}
-                                        >
-                                            {t('pub.relays.status.disclaimer')}
-                                        </div>
-                                    )}
-
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            gap: 8,
-                                            flexWrap: 'wrap',
-                                            marginTop: 2,
-                                        }}
-                                    >
-                                        {renaming ? (
-                                            <>
-                                                <ActionButton
-                                                    action={action}
-                                                    k={`rename:${op.id}`}
-                                                    busyLabel={t('pub.fb.saving')}
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        void commitRename(op);
-                                                    }}
-                                                >
-                                                    {t('common.save')}
-                                                </ActionButton>
-                                                <Button
-                                                    variant="ghost"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setRenamingId(null);
-                                                    }}
-                                                    disabled={renameBusy}
-                                                >
-                                                    {t('common.cancel')}
-                                                </Button>
-                                            </>
-                                        ) : (
-                                            <>
-                                                {/* No "Open": tapping the card
-                                                    does that. "Finish setup"
-                                                    stays because an unfinished
-                                                    relay rents a server when
-                                                    resumed — that deserves a
-                                                    deliberate press, not a
-                                                    stray tap on a card. */}
-                                                {!dead && needsFinishing(op) && (
-                                                    <Button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            onResume(op.id);
-                                                        }}
-                                                    >
-                                                        {interrupted
-                                                            ? t('pub.relays.open')
-                                                            : t('pub.relays.resume')}
-                                                    </Button>
-                                                )}
-                                                {!dead && (
-                                                    <Button
-                                                        variant="secondary"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setRenamingId(op.id);
-                                                            setDraftName(
-                                                                op.nickname,
-                                                            );
-                                                        }}
-                                                    >
-                                                        {t('pub.relays.rename')}
-                                                    </Button>
-                                                )}
-                                                {!dead && (
-                                                    <Button
-                                                        variant="danger"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            // PA-7: an unfinished setup asks
-                                                            // the wizard's Cancel question first.
-                                                            void startDelete(op);
-                                                        }}
-                                                    >
-                                                        {t(
-                                                            'pub.relays.decommission',
-                                                        )}
-                                                    </Button>
-                                                )}
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-                            </Card>
-                        );
-                    })}
+                <div style={{ display: 'grid', gap: 12 }}>
+                    {live.length > 0 && <Card>{live.map((op, i) => row(op, i === live.length - 1))}</Card>}
+                    {retired.length > 0 && <Card>{retired.map((op, i) => row(op, i === retired.length - 1))}</Card>}
                 </div>
             </Section>
+
 
             {destroying && (
                 <RelayDestroySheet
@@ -1395,6 +1255,7 @@ export default function RelayListPage({
                 />
             )}
 
+            {reportOpen && <ReportViewer t={t} onClose={() => setReportOpen(false)} />}
             {accountOpen && (
                 <AccountCheckSheet
                     t={t}
@@ -1410,6 +1271,20 @@ export default function RelayListPage({
             )}
 
             <ActionToast t={t} outcome={action.outcome} onDismiss={action.dismiss} />
-        </div>
+        </PageColumn>
     );
+}
+
+/** The accounts the publisher page's summary names ("Connected: …"),
+ *  in the Accounts page's order. Cloudflare and Google are product
+ *  names, kept as they are in both languages. */
+export function connectedAccountNames(
+    acc: { hetzner: unknown; cloudflare: { connected: boolean }; google: { connected: boolean } },
+    t: (k: string) => string,
+): string[] {
+    return [
+        ...(acc.hetzner ? [t('wiz.provider.hetzner.label')] : []),
+        ...(acc.cloudflare.connected ? ['Cloudflare'] : []),
+        ...(acc.google.connected ? ['Google'] : []),
+    ];
 }

@@ -1,18 +1,13 @@
-// CustodyPanel.tsx — Device Custody B4 panel for Settings.
+// CustodyPanel.tsx — "My Daal address" in Settings → Advanced (spec C5.2).
 //
-// Renders inside the Settings → Privacy section. Shows:
-//   - the honest custody level (hardware / OS keystore / session
-//     passphrase) with a status pill,
-//   - a Lock-now button (only meaningful on session-passphrase
-//     devices, hidden on hardware/OS-keystore since lock() is a
-//     no-op there),
-//   - a Rotate-identity button that pops a confirm dialog before
-//     calling DeviceCustody.rotate(),
-//   - an expandable History view listing retired addresses + an
-//     audit log of custody-level events.
-//
-// All copy is i18n-keyed (`settings.custody.*`) and falls back to
-// English when the catalog is missing the key.
+//   - the address, and how this device protects its key, as one Badge
+//     (a "Locked" badge while a session-passphrase device is locked);
+//   - "Lock now" (only on session-passphrase devices, where lock() does
+//     something; hardware and OS keystore re-fetch the key per call);
+//   - "Get a new address", which asks first: the old files still open,
+//     and the person must send the new address on (MUST KEEP 15, with
+//     its checkbox);
+//   - a "History" fold: earlier addresses and recent changes.
 
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -23,25 +18,34 @@ import {
     type RecipientIdentitySummary,
     RecipientIdentity,
 } from '../recipient/recipientCommands';
-import { useBack } from '../lib/useBack';
-import { Card, ListRow } from '../design/primitives';
-import { mix } from '../design/mix';
+import type { Locale } from '../lib/i18n';
+import { errorText } from '../lib/errorText';
+import { formatDate } from '../lib/format';
+import { Badge, Button, Card, Disclosure, ListRow, Sheet, StateIcon, useToast } from '../design/primitives';
 
 interface Props {
     t: (k: string) => string;
+    locale?: Locale;
 }
 
-export default function CustodyPanel({ t }: Props) {
+/** `daal1qm3n8v2k…` → `daal1 qm3n 8v2k …`: easier to read aloud and compare. */
+export function groupAddress(addr: string): string {
+    const m = /^(daal1)(.*)$/i.exec(addr.trim());
+    if (!m) return addr;
+    const groups = m[2].match(/.{1,4}/g) ?? [];
+    return [m[1], ...groups].join(' ');
+}
+
+export default function CustodyPanel({ t, locale = 'en' }: Props) {
     const [level, setLevel] = useState<CustodyLevel | null>(null);
     const [unlocked, setUnlocked] = useState<boolean>(true);
     const [identity, setIdentity] = useState<RecipientIdentitySummary | null>(null);
     const [history, setHistory] = useState<RecipientIdentityHistoryRow[]>([]);
     const [events, setEvents] = useState<CustodyEventRow[]>([]);
-    const [showHistory, setShowHistory] = useState(false);
     const [showRotate, setShowRotate] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [toast, setToast] = useState<string | null>(null);
+    const toast = useToast();
 
     const reload = useCallback(async () => {
         try {
@@ -58,12 +62,12 @@ export default function CustodyPanel({ t }: Props) {
             setHistory(h);
             setEvents(ev);
         } catch (e) {
-            setError(String(e));
+            setError(errorText(e));
         }
     }, []);
 
     useEffect(() => {
-        reload();
+        void reload();
     }, [reload]);
 
     const onLockNow = async () => {
@@ -72,11 +76,10 @@ export default function CustodyPanel({ t }: Props) {
         try {
             await DeviceCustody.lock();
             setUnlocked(false);
-            setToast(t('settings.custody.locked_toast'));
-            setTimeout(() => setToast(null), 1500);
+            toast.show('good', t('settings.custody.locked_toast'));
             await reload();
         } catch (e) {
-            setError(String(e));
+            setError(errorText(e));
         } finally {
             setBusy(false);
         }
@@ -89,239 +92,129 @@ export default function CustodyPanel({ t }: Props) {
             const next = await DeviceCustody.rotate();
             setIdentity(next);
             setShowRotate(false);
-            setToast(t('settings.custody.rotated_toast'));
-            setTimeout(() => setToast(null), 2500);
+            toast.show('good', t('settings.custody.rotated_toast'), 6000);
             await reload();
         } catch (e) {
-            setError(String(e));
+            setShowRotate(false);
+            setError(errorText(e));
         } finally {
             setBusy(false);
         }
     };
 
-    const levelLabel = (l: CustodyLevel | null): string => {
-        if (!l) return '—';
-        return t(`recipient.address.custody.${l}`);
-    };
-    const fmtTs = (n: number) => {
-        if (!n) return '—';
-        try {
-            return new Date(n * 1000).toLocaleString();
-        } catch {
-            return String(n);
-        }
-    };
-    const shortAddr = (addr: string) => {
-        if (addr.length < 16) return addr;
-        return `${addr.slice(0, 10)}…${addr.slice(-6)}`;
-    };
+    const when = (unix: number) => (unix ? formatDate(locale, unix, 'dayTime') : '—');
+
+    const badge = !unlocked ? (
+        <Badge tone="warn" size="sm" icon="lock">
+            {t('settings.custody.locked')}
+        </Badge>
+    ) : level ? (
+        <Badge tone="neutral" size="sm" icon="lock" title={t(`recipient.address.custody.${level}`)}>
+            {t(`settings.custody.badge.${level}`)}
+        </Badge>
+    ) : null;
+
+    // Nothing to show or do (no address made yet, custody unknown): the
+    // card is not drawn rather than shown empty.
+    if (!identity && !level && history.length === 0 && events.length === 0 && !error) return null;
 
     return (
-        <Card style={{ padding: 0 }}>
-            <div style={{ padding: '0 16px' }}>
-                <ListRow
-                    title={t('settings.custody.level_title')}
-                    subtitle={levelLabel(level)}
-                    trailing={
-                        <span
-                            style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 10,
-                                letterSpacing: '0.08em',
-                                textTransform: 'uppercase',
-                                color: unlocked ? 'var(--green)' : 'var(--amber)',
-                            }}
-                        >
-                            {unlocked
-                                ? t('settings.custody.unlocked')
-                                : t('settings.custody.locked')}
-                        </span>
-                    }
-                />
-                {identity && (
-                    <ListRow
-                        title={t('settings.custody.current_address')}
-                        subtitle={
-                            <span
-                                style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 12,
-                                    color: 'var(--muted)',
-                                    wordBreak: 'break-all',
-                                }}
-                            >
-                                {identity.address}
-                            </span>
-                        }
-                    />
-                )}
-                {level === 'session_passphrase' && (
-                    <ListRow
-                        title={t('settings.custody.lock_now')}
-                        subtitle={t('settings.custody.lock_now.help')}
-                        trailing={
-                            <button
-                                disabled={busy || !unlocked}
-                                onClick={onLockNow}
-                                style={smallBtn(false)}
-                            >
-                                {t('settings.custody.lock_now.button')}
-                            </button>
-                        }
-                    />
-                )}
-                <ListRow
-                    title={t('settings.custody.rotate')}
-                    subtitle={t('settings.custody.rotate.help')}
-                    trailing={
-                        <button
-                            disabled={busy || !identity}
-                            onClick={() => setShowRotate(true)}
-                            style={smallBtn(false)}
-                        >
-                            {t('settings.custody.rotate.button')}
-                        </button>
-                    }
-                />
-                <ListRow
-                    title={t('settings.custody.history')}
-                    subtitle={
-                        history.length === 0
-                            ? t('settings.custody.history.empty')
-                            : t('settings.custody.history.count').replace(
-                                  '{n}',
-                                  String(history.length),
-                              )
-                    }
-                    trailing={
-                        <button
-                            onClick={() => setShowHistory((v) => !v)}
-                            style={smallBtn(true)}
-                        >
-                            {showHistory
-                                ? t('settings.custody.history.hide')
-                                : t('settings.custody.history.show')}
-                        </button>
-                    }
-                    last={!showHistory}
-                />
-                {showHistory && (
-                    <div
-                        style={{
-                            padding: '8px 0 14px',
-                            borderTop: '1px solid var(--line-soft)',
-                        }}
-                    >
-                        {/* Retired addresses */}
-                        {history.length === 0 ? (
-                            <div
-                                style={{
-                                    color: 'var(--muted)',
-                                    fontSize: 12,
-                                    padding: '6px 0',
-                                }}
-                            >
-                                {t('settings.custody.history.empty')}
-                            </div>
-                        ) : (
-                            <div style={{ display: 'grid', gap: 6 }}>
-                                {history.map((h) => (
-                                    <div
-                                        key={h.id}
-                                        style={{
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 11,
-                                            color: 'var(--muted)',
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            gap: 8,
-                                        }}
-                                    >
-                                        <span>
-                                            v{h.version}{' '}
-                                            <span style={{ color: 'var(--fg)' }}>
-                                                {shortAddr(h.address_str)}
-                                            </span>
-                                        </span>
-                                        <span>{fmtTs(h.retired_at_unix)}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        {/* Audit events */}
-                        <div
-                            style={{
-                                marginTop: 14,
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 10,
-                                letterSpacing: '0.16em',
-                                textTransform: 'uppercase',
-                                color: 'var(--dim)',
-                            }}
-                        >
-                            {t('settings.custody.events')}
-                        </div>
-                        {events.length === 0 ? (
-                            <div
-                                style={{
-                                    color: 'var(--muted)',
-                                    fontSize: 12,
-                                    padding: '6px 0',
-                                }}
-                            >
-                                —
-                            </div>
-                        ) : (
-                            <div style={{ display: 'grid', gap: 4, marginTop: 6 }}>
-                                {events.slice(0, 20).map((e) => (
-                                    <div
-                                        key={e.id}
-                                        style={{
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 11,
-                                            color: 'var(--muted)',
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            gap: 8,
-                                        }}
-                                    >
-                                        <span style={{ color: 'var(--fg)' }}>
-                                            {t(`settings.custody.event.${e.kind}`)}
-                                        </span>
-                                        <span>{fmtTs(e.at_unix)}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                )}
-                {error && (
-                    <div
-                        style={{
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 11,
-                            color: 'var(--red)',
-                            padding: '0 0 12px',
-                        }}
-                    >
-                        {error}
-                    </div>
-                )}
-            </div>
-            {toast && (
-                <div
-                    role="status"
+        <Card style={{ paddingBlockEnd: 6 }}>
+            <div data-custody-panel style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 28, flexWrap: 'wrap' }}>
+                <h2
                     style={{
-                        textAlign: 'center',
-                        padding: '6px 0 10px',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        color: 'var(--green)',
+                        margin: 0,
+                        flex: '1 1 auto',
+                        fontFamily: 'var(--font-display)',
+                        fontSize: 17,
+                        fontWeight: 500,
+                        color: 'var(--fg)',
                     }}
                 >
-                    {toast}
+                    {t('settings.custody.section')}
+                </h2>
+                {badge}
+            </div>
+            {level && (
+                // The full sentence for screen readers ("Protected by
+                // secure hardware"); the badge carries the short form.
+                <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>
+                    {t(`recipient.address.custody.${level}`)}
+                </span>
+            )}
+            {identity && (
+                <div
+                    dir="ltr"
+                    style={{
+                        marginBlockStart: 8,
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 13,
+                        lineHeight: 1.5,
+                        color: 'var(--muted)',
+                        overflowWrap: 'anywhere',
+                        userSelect: 'text',
+                        textAlign: 'start',
+                    }}
+                >
+                    {groupAddress(identity.address)}
                 </div>
+            )}
+
+            <div style={{ marginBlockStart: 4 }}>
+                {level === 'session_passphrase' && (
+                    <ListRow
+                        dataButton="lock-now"
+                        title={t('settings.custody.lock_now')}
+                        subtitle={t('settings.custody.lock_now.help')}
+                        onClick={busy || !unlocked ? undefined : () => void onLockNow()}
+                    />
+                )}
+                {identity && (
+                    <ListRow
+                        dataButton="new-address"
+                        title={t('settings.custody.rotate')}
+                        chevron
+                        onClick={busy ? undefined : () => setShowRotate(true)}
+                        last
+                    />
+                )}
+            </div>
+
+            {error && (
+                <div role="alert" style={{ display: 'flex', gap: 8, color: 'var(--red)', fontSize: 13, lineHeight: 1.45, paddingBlock: 6 }}>
+                    <StateIcon state="bad" size={16} />
+                    <span>{t('settings.failed')}</span>
+                </div>
+            )}
+
+            {(history.length > 0 || events.length > 0) && (
+            <Disclosure summary={t('settings.custody.history')} dataButton="custody-history">
+                <div style={{ display: 'grid', gap: 6, fontSize: 13, color: 'var(--muted)' }}>
+                    {history.length === 0 ? (
+                        <div>{t('settings.custody.history.empty')}</div>
+                    ) : (
+                        history.map((h) => (
+                            <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                                <span dir="ltr" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {groupAddress(h.address_str)}
+                                </span>
+                                <span style={{ flexShrink: 0 }}>{when(h.retired_at_unix)}</span>
+                            </div>
+                        ))
+                    )}
+                    {events.length > 0 && (
+                        <>
+                            <div style={{ marginBlockStart: 8, fontWeight: 600 }}>{t('settings.custody.events')}</div>
+                            {events.slice(0, 20).map((e) => (
+                                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                                    <span style={{ color: 'var(--fg)' }}>{t(`settings.custody.event.${e.kind}`)}</span>
+                                    <span style={{ flexShrink: 0 }}>{when(e.at_unix)}</span>
+                                </div>
+                            ))}
+                        </>
+                    )}
+                </div>
+            </Disclosure>
             )}
 
             {showRotate && (
@@ -329,28 +222,12 @@ export default function CustodyPanel({ t }: Props) {
                     t={t}
                     busy={busy}
                     onCancel={() => setShowRotate(false)}
-                    onConfirm={onRotateConfirm}
+                    onConfirm={() => void onRotateConfirm()}
                 />
             )}
+            {toast.node}
         </Card>
     );
-}
-
-function smallBtn(ghost: boolean) {
-    return {
-        background: ghost ? 'transparent' : 'var(--surface-2)',
-        border: ghost
-            ? '1px solid var(--line-soft)'
-            : '1px solid var(--gold)',
-        color: ghost ? 'var(--muted)' : 'var(--fg)',
-        padding: '5px 12px',
-        borderRadius: 'var(--r-pill)',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        letterSpacing: '0.06em',
-        textTransform: 'uppercase' as const,
-        cursor: 'pointer' as const,
-    };
 }
 
 interface RotateDialogProps {
@@ -362,106 +239,51 @@ interface RotateDialogProps {
 
 function RotateDialog({ t, busy, onCancel, onConfirm }: RotateDialogProps) {
     const [confirmed, setConfirmed] = useState(false);
-    // Back is Cancel, refused while the rotation runs.
-    useBack(true, () => {
+    // Back, Escape and a tap outside are Cancel, refused while it runs.
+    const close = () => {
         if (!busy) onCancel();
-    });
+    };
     return (
-        <div
-            role="dialog"
-            aria-modal="true"
-            onClick={onCancel}
-            style={{
-                position: 'fixed',
-                inset: 0,
-                background: 'rgba(0,0,0,0.6)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                zIndex: 200,
-            }}
-        >
-            <div
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                    background: 'var(--surface-1)',
-                    border: '1px solid var(--line-soft)',
-                    borderRadius: 12,
-                    padding: 24,
-                    width: 'min(440px, 92vw)',
-                }}
-            >
-                <h3
-                    style={{
-                        margin: 0,
-                        fontFamily: 'var(--font-display)',
-                        fontSize: 18,
-                        color: 'var(--fg)',
-                    }}
-                >
-                    {t('settings.custody.rotate.dialog.title')}
-                </h3>
-                <p
-                    style={{
-                        marginTop: 8,
-                        fontSize: 13,
-                        color: 'var(--muted)',
-                        lineHeight: 1.5,
-                    }}
-                >
+        <Sheet title={t('settings.custody.rotate.dialog.title')} onClose={close} width={460}>
+            <div data-rotate-dialog style={{ display: 'grid', gap: 14, marginBlockStart: 8 }}>
+                <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5, color: 'var(--fg)' }}>
                     {t('settings.custody.rotate.dialog.body')}
                 </p>
                 <label
                     style={{
                         display: 'flex',
-                        gap: 8,
-                        alignItems: 'flex-start',
-                        marginTop: 14,
-                        fontSize: 12,
-                        color: 'var(--muted)',
+                        gap: 12,
+                        alignItems: 'center',
+                        minHeight: 44,
+                        fontSize: 14,
+                        color: 'var(--fg)',
                         lineHeight: 1.4,
+                        cursor: 'pointer',
                     }}
                 >
                     <input
                         type="checkbox"
+                        data-button="rotate-understand"
                         checked={confirmed}
                         onChange={(e) => setConfirmed(e.target.checked)}
+                        style={{ width: 22, height: 22, flexShrink: 0, accentColor: 'var(--gold)' }}
                     />
-                    <span>
-                        {t('settings.custody.rotate.dialog.checkbox')}
-                    </span>
+                    <span>{t('settings.custody.rotate.dialog.checkbox')}</span>
                 </label>
-                <div
-                    style={{
-                        marginTop: 18,
-                        display: 'flex',
-                        gap: 10,
-                        justifyContent: 'flex-end',
-                    }}
-                >
-                    <button onClick={onCancel} style={smallBtn(true)}>
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    <Button variant="ghost" dataButton="rotate-cancel" onClick={close} disabled={busy}>
                         {t('settings.custody.rotate.dialog.cancel')}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                        variant="danger"
+                        dataButton="rotate-confirm"
                         onClick={onConfirm}
                         disabled={!confirmed || busy}
-                        style={{
-                            ...smallBtn(false),
-                            background: confirmed
-                                ? mix('var(--red)', 22, 'transparent')
-                                : 'var(--surface-3)',
-                            border:
-                                `1px solid ${mix('var(--red)', 60, 'transparent')}`,
-                            color: 'var(--red)',
-                            opacity: !confirmed || busy ? 0.5 : 1,
-                        }}
                     >
-                        {busy
-                            ? t('settings.custody.rotate.dialog.busy')
-                            : t('settings.custody.rotate.dialog.confirm')}
-                    </button>
+                        {busy ? t('settings.custody.rotate.dialog.busy') : t('settings.custody.rotate.dialog.confirm')}
+                    </Button>
                 </div>
             </div>
-        </div>
+        </Sheet>
     );
 }

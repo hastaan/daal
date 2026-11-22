@@ -1,0 +1,21 @@
+{
+  "name": "cdn-grey-budget",
+  "description": "Two of the four published edge prefixes are 'grey': a TCP flow to an address in them may send six packets (SYN and ACKs included) and is then silently cut. A TLS handshake gets about that far; a tunnel never does. The other two prefixes are clean. Op cdn: the route carries, on an edge in a clean prefix — the edge picker's failure-state probe (more than ten packets) must move on from the grey ones.",
+  "analogue": "net4people #676 (18 Oct 2026, one author): TCP to some Cloudflare addresses cut a few packets after the handshake; the reason the plan's edge picker (B-6) probes with a >10-packet exchange instead of a handshake. Model: a fixed count of client packets per flow, per /26, silent drop. Not modelled: a budget in bytes or time, one that differs per hour or per ISP, or one counted on both directions (the box sees the client's packets only).",
+  "world": ["cdn"],
+  "censor": {
+    "dpi": [
+      {"when": "budget", "packets": 6, "dst": "$EDGE_NET_A", "action": "drop"},
+      {"when": "budget", "packets": 6, "dst": "$EDGE_NET_B", "action": "drop"}
+    ]
+  },
+  "prove": [
+    {"name": "grey-edge-cuts-a-long-flow", "probe": "exchange", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "cut"},
+    {"name": "second-grey-edge-cuts-it-too", "probe": "exchange", "to": "edge-b", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "cut"},
+    {"name": "clean-edge-carries-it", "probe": "exchange", "to": "edge-c", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "other-clean-edge-carries-it", "probe": "exchange", "to": "edge-d", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "grey-edge-answers-a-connect", "probe": "tcp", "to": "edge-a", "port": 443, "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "pass", "via": ["$EDGE_NET_C", "$EDGE_NET_D"]}
+}

@@ -63,8 +63,20 @@ import (
 	"daal/publisher/deploy/relayports"
 )
 
-// APIHost is the only host the proxy tunnels to.
+// APIHost is the hosting company's API, the host the proxy tunnels to.
 const APIHost = "api.hetzner.cloud"
+
+// CloudflareHost publishes Cloudflare's edge ranges (/ips-v4, /ips-v6),
+// the one other host the proxy reaches. It is modelled so a test can
+// see whether, and how often, the binary contacted Cloudflare
+// (State().CloudflareFetches): building a relay must not.
+const CloudflareHost = "www.cloudflare.com"
+
+// CloudflareRangesV4 / V6 are the lists the fake publishes.
+var (
+	CloudflareRangesV4 = []string{"173.245.48.0/20", "103.21.244.0/22", "104.16.0.0/13"}
+	CloudflareRangesV6 = []string{"2400:cb00::/32"}
+)
 
 // World is one fake hosting account.
 type World struct {
@@ -90,6 +102,7 @@ type World struct {
 
 	holdHealth     bool
 	failFIPDeletes int
+	cfFetches      int
 	created        int
 	rebuilds       int
 	setRules       int
@@ -206,7 +219,7 @@ func (w *World) proxyConn(c net.Conn) {
 	if err != nil {
 		return
 	}
-	if req.Method != http.MethodConnect || req.Host != APIHost+":443" {
+	if req.Method != http.MethodConnect || (req.Host != APIHost+":443" && req.Host != CloudflareHost+":443") {
 		w.note("proxy refused " + req.Method + " " + req.Host)
 		_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
 		return
@@ -306,8 +319,19 @@ func (w *World) apiHandler() http.Handler {
 		}
 		writeJSON(rw, 200, schema.ActionListResponse{Actions: out})
 	})
+	for path, list := range map[string][]string{"/ips-v4": CloudflareRangesV4, "/ips-v6": CloudflareRangesV6} {
+		list := list
+		mux.HandleFunc("GET "+CloudflareHost+path, func(rw http.ResponseWriter, r *http.Request) {
+			w.mu.Lock()
+			w.cfFetches++
+			w.requests = append(w.requests, r.Method+" "+CloudflareHost+r.URL.Path)
+			w.mu.Unlock()
+			rw.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(rw, strings.Join(list, "\n")+"\n")
+		})
+	}
 	mux.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
-		w.note("not modelled: " + r.Method + " " + r.URL.Path)
+		w.note("not modelled: " + r.Method + " " + r.Host + r.URL.Path)
 		apiError(rw, 501, "not_modelled", "fakeworld does not model "+r.Method+" "+r.URL.Path)
 	})
 	return mux
@@ -980,15 +1004,17 @@ type State struct {
 	ServersCreated int           `json:"servers_created"`
 	Rebuilds       int           `json:"rebuilds"`
 	FirewallWrites int           `json:"firewall_writes"`
-	Unmodelled     []string      `json:"unmodelled"`
-	Requests       []string      `json:"requests"`
+	// CloudflareFetches counts GETs of Cloudflare's published ranges.
+	CloudflareFetches int      `json:"cloudflare_fetches"`
+	Unmodelled        []string `json:"unmodelled"`
+	Requests          []string `json:"requests"`
 }
 
 func (w *World) State() State {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	st := State{Servers: []ServerState{}, SSHKeys: []Resource{}, Firewalls: []Resource{}, FloatingIPs: []Resource{},
-		ServersCreated: w.created, Rebuilds: w.rebuilds, FirewallWrites: w.setRules,
+		ServersCreated: w.created, Rebuilds: w.rebuilds, FirewallWrites: w.setRules, CloudflareFetches: w.cfFetches,
 		Unmodelled: append([]string{}, w.unmodelled...), Requests: append([]string{}, w.requests...)}
 	for _, s := range w.sortedServers() {
 		s.box.mu.Lock()
@@ -1173,7 +1199,7 @@ func issueAPICert() (caPEM []byte, leaf tls.Certificate, err error) {
 	if err != nil {
 		return nil, leaf, err
 	}
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: APIHost}, DNSNames: []string{APIHost},
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: APIHost}, DNSNames: []string{APIHost, CloudflareHost},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)

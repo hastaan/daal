@@ -1,28 +1,32 @@
-// Package cloudflare implements the FRP-8 V1.6 CDN-fronted
-// provisioning surface. It targets a Cloudflare zone the FRP
-// controls (BYO domain) and stands up the §11.7 hardening
-// template:
+// Package cloudflare builds the Cloudflare side of add-on 2, the way in
+// through Cloudflare (docs/optional-addons-plan.md §2,
+// specs/optional-addons-v1.md §4). It targets a zone the publisher owns
+// and stands up:
 //
-//   - Origin CA cert on the origin (no public CT log exposure).
-//   - Authenticated Origin Pulls enabled; client cert deployed
-//     to the origin via the FRP-4a cloud-init template.
-//   - Provider-firewall rule allowing 443/tcp only from
-//     Cloudflare's published edge IP ranges (refreshed from the
-//     Helper machine, never from the origin box).
-//   - Public random path → Worker rewrite → stable origin path
-//     indirection so public-path rotation is Cloudflare-API-only.
-//   - Proxied A + AAAA DNS records only; no DNS-only records.
+//   - an Origin CA certificate for the zone and `*.<zone>` (no public CT
+//     entry for the origin);
+//   - Authenticated Origin Pull with a client certificate of this
+//     front's own (aop.go), so the relay's door opens for this zone only;
+//   - SSL mode Full (strict) and WebSockets on;
+//   - a proxied A (and AAAA) record `<label>.<zone>`;
+//   - an Origin Rule sending that hostname to the relay's dedicated CDN
+//     port (relayports.CDNOrigin), so the edge never lands on REALITY;
+//   - ECH turned on when the zone has it off (a CDN route without an
+//     ECH config cannot be signed unless the plain hello is allowed;
+//     removal turns it off again), then a read of the ECH posture: the
+//     zone setting and, over DoH, the ECHConfigList the hostname
+//     publishes (ech.go, B-5), retried briefly while it is not there.
 //
-// The package never imports `core/...` (the existing module-
-// boundary invariant `core → bundle, deploy → bundle, deploy →
-// core never` is preserved).
+// There is no Worker (decision D-5). The token needs exactly five zone
+// permissions on one zone (token_check.go), and Daal never spends money
+// through Cloudflare.
 //
-// The package is structured around a small CFClient interface
-// (cf_client.go). The live implementation talks to Cloudflare's
-// v4 REST API directly through that narrow surface; tests use a
-// mock. `cloudflare-go/v4` is pinned in publisher/go.mod for the
-// phase dependency lock, but the critical path stays behind the
-// wrapper to keep the runtime surface small and testable.
+// The relay firewall rule is Hetzner's (providers/hetzner/firewall_cf.go)
+// and the relay door is daal-relay-mgmt's (POST /cdn, door.go). The
+// package never imports `core/...`.
 //
-// See `phases of development/38-phase-frp-8-v1-6-cdn-fronted.md`.
+// The live client (cf_client_live.go) talks to Cloudflare's v4 REST API
+// directly; tests use MockCFClient, an in-memory Cloudflare.
+// `cloudflare-go/v4` stays pinned in publisher/go.mod (sdk_pin.go) for
+// the phase dependency lock only.
 package cloudflare

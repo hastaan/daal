@@ -100,7 +100,22 @@ var familyMaturity = map[string]Maturity{
 	"vless-reality": MaturityStable,
 	"naive":         MaturityStable,
 	"websocket-tls": MaturityStable,
-	"hysteria2":     MaturityStable,
+	// hysteria2's label is a claim about this BUILD (it mints, it
+	// dials, it has carried traffic), not about Iran. In Iran it is
+	// often blocked or throttled and it fails in whitelist phases
+	// (2026-11-20, research/filtering-the-flow.md:99,253): on TCI the
+	// HTTP/3 share fell from ~40% to under 5% by 3 Jan 2026, UDP is
+	// otherwise "often blocked, throttled, or has 50% packet loss",
+	// and the crisis whitelister passes only DNS/53, HTTP/80 and
+	// HTTPS/443 over TCP, so every UDP family fails there at once.
+	// Do NOT write "blocked since mid-2025": the research does not
+	// say that of non-crisis periods. The label stays stable for
+	// now; whether iran-default should ship hysteria2 off by default
+	// (profiles/loader.go: a QUIC flow to a graylisted host is itself
+	// a signal) is an owner decision, because it rides a
+	// libdaal_deploy.so release. Any copy beside the badge must carry
+	// the Iran caveat rather than imply a lifeline.
+	"hysteria2": MaturityStable,
 
 	// Demoted from Stable in the Wave-1 honesty pass, and STILL
 	// Experimental after Wave 5 — for a reason that changed underneath

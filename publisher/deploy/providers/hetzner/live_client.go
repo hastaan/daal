@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"daal/publisher/deploy/relayports"
@@ -336,57 +338,367 @@ func (l *liveClient) FloatingIPUnassign(ctx context.Context, fipID string) error
 	return nil
 }
 
-// FirewallApplyCloudflareRule creates or updates a Hetzner Cloud
-// Firewall rule allowing inbound 443/tcp ONLY from the supplied
-// Cloudflare edge ranges. Idempotent: passing an existing
-// firewallID re-uses it; empty firewallID creates a fresh rule.
+// cdnOriginPort is the port the Cloudflare-edge rule opens by default:
+// the relay's dedicated CDN door (relayports.CDNOrigin, ws-cdn-in). It
+// used to be 443, which opened nothing (443/tcp is already open to the
+// world for REALITY, and Hetzner unions allow rules) and pointed the
+// edge at REALITY, which answers with the cover site's certificate.
+// The CDN port is in no world-open list (relayports.FirewallPortsFor),
+// so this rule is the only way in to it.
+var cdnOriginPort = strconv.Itoa(relayports.CDNOrigin.Port)
+
+// cdnRuleDescription tags the one rule FirewallApplyCloudflareRule
+// owns, so a refresh replaces that rule (Cloudflare's ranges change)
+// and never touches anything else on the firewall.
+const cdnRuleDescription = "daal-cdn-edge"
+
+// firewallWriteAttempts bounds the read-modify-write retry when a
+// write is found not to have landed (another writer replaced the rule
+// set after ours).
+const firewallWriteAttempts = 3
+
+// errFirewallConcurrentChange is returned when the firewall kept
+// changing under us for every attempt. Nothing is retried after it;
+// the caller sees a failure rather than a rule it believes is there.
+var errFirewallConcurrentChange = errors.New("hetzner firewall: rule set changed concurrently; write did not land")
+
+// errFirewallNotFound is returned when the firewall id does not
+// resolve.
+var errFirewallNotFound = errors.New("hetzner firewall: not found")
+
+// firewallLocks serialises every read-modify-write of one firewall's
+// rule set within this process. Hetzner's set_rules replaces the
+// WHOLE rule set and the API has no version or If-Match, so two
+// writers that read the same set and write back lose one another's
+// rules. Package level, not per liveClient, because callers build a
+// fresh liveClient per verb.
+var firewallLocks sync.Map // int64 -> *sync.Mutex
+
+func lockFirewall(id int64) func() {
+	m, _ := firewallLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// modifyFirewallRules is the only way this file edits an existing
+// firewall's rules. It reads the current set, lets edit derive the
+// next one from it, writes it, then reads it back and asks landed
+// whether the write is visible.
 //
-// FRP-8 §11.7: this binds the origin's 443/tcp ingress to
-// Cloudflare-only sources. Called from the Helper, never from
-// the origin box.
+// What it protects against, and what it cannot:
+//   - Writers in this process: fully, via firewallLocks.
+//   - A writer elsewhere (the console, another publisher process)
+//     that replaces the set AFTER our write: detected by the
+//     read-back and retried on the fresh set, up to
+//     firewallWriteAttempts.
+//   - A writer elsewhere that writes BETWEEN our read and our write:
+//     its change is overwritten and cannot be detected — Hetzner
+//     offers no conditional write. The window is one round trip.
+//
+// edit returning changed=false makes the call a no-op (no write).
+// A read failure is returned wrapped in errFirewallRead.
+func (l *liveClient) modifyFirewallRules(
+	ctx context.Context,
+	fwID int64,
+	edit func(cur []hcloud.FirewallRule) (next []hcloud.FirewallRule, changed bool),
+	landed func(after []hcloud.FirewallRule) bool,
+) error {
+	unlock := lockFirewall(fwID)
+	defer unlock()
+	for attempt := 0; attempt < firewallWriteAttempts; attempt++ {
+		fw, _, err := l.c.Firewall.GetByID(ctx, fwID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errFirewallRead, err)
+		}
+		if fw == nil {
+			return errFirewallNotFound
+		}
+		next, changed := edit(fw.Rules)
+		if !changed {
+			return nil
+		}
+		if _, _, err := l.c.Firewall.SetRules(ctx, &hcloud.Firewall{ID: fwID}, hcloud.FirewallSetRulesOpts{Rules: next}); err != nil {
+			return err
+		}
+		after, _, err := l.c.Firewall.GetByID(ctx, fwID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errFirewallRead, err)
+		}
+		if after == nil {
+			return errFirewallNotFound
+		}
+		if landed(after.Rules) {
+			return nil
+		}
+	}
+	return errFirewallConcurrentChange
+}
+
+// errFirewallRead marks a failure to READ the firewall (as opposed
+// to a failed write), so idempotent removal can keep treating an
+// unreadable firewall as "nothing to remove".
+var errFirewallRead = errors.New("hetzner firewall: read failed")
+
+func ruleHasDescription(r hcloud.FirewallRule, desc string) bool {
+	return r.Description != nil && *r.Description == desc
+}
+
+func findRuleByDescription(rules []hcloud.FirewallRule, desc string) (hcloud.FirewallRule, bool) {
+	for _, r := range rules {
+		if ruleHasDescription(r, desc) {
+			return r, true
+		}
+	}
+	return hcloud.FirewallRule{}, false
+}
+
+// sameSources compares two source lists as sets of CIDR strings.
+func sameSources(a, b []net.IPNet) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]int, len(a))
+	for _, n := range a {
+		set[n.String()]++
+	}
+	for _, n := range b {
+		k := n.String()
+		if set[k] == 0 {
+			return false
+		}
+		set[k]--
+	}
+	return true
+}
+
+// withCloudflareRule returns rules with every rule tagged
+// cdnRuleDescription replaced by rule, all other rules kept in their
+// original order. Pure, so the merge is testable without an API.
+func withCloudflareRule(cur []hcloud.FirewallRule, rule hcloud.FirewallRule) []hcloud.FirewallRule {
+	next := make([]hcloud.FirewallRule, 0, len(cur)+1)
+	for _, r := range cur {
+		if ruleHasDescription(r, cdnRuleDescription) {
+			continue
+		}
+		next = append(next, r)
+	}
+	return append(next, rule)
+}
+
+// FirewallApplyCloudflareRule adds (or refreshes) ONE inbound rule
+// allowing the CDN door's port (cdnOriginPort) from the supplied
+// Cloudflare edge ranges. See FirewallApplyCloudflareRuleOnPort.
 func (l *liveClient) FirewallApplyCloudflareRule(ctx context.Context, firewallID string, ipv4Ranges, ipv6Ranges []string) (string, error) {
+	return l.FirewallApplyCloudflareRuleOnPort(ctx, firewallID, relayports.CDNOrigin.Port, ipv4Ranges, ipv6Ranges)
+}
+
+// errNoRelayFirewall refuses a Cloudflare rule with no firewall to put
+// it on. The old behaviour (create a fresh firewall holding only that
+// rule) produced a firewall attached to nothing: a lock that locked
+// nothing, which the phone path then reported as done (defect 3 of the
+// blackout plan, Group B).
+var errNoRelayFirewall = errors.New("hetzner firewall: the Cloudflare rule goes on the relay's own firewall (daal-relay-<server id>); pass its id")
+
+// errCDNPortWorldOpen refuses a Cloudflare-only rule for a port the
+// firewall already opens to everyone: Hetzner unions allow rules, so it
+// would narrow nothing while the posture line said "only Cloudflare".
+var errCDNPortWorldOpen = errors.New("hetzner firewall: that port is already open to everyone on this firewall; a Cloudflare-only rule for it would restrict nothing")
+
+// FirewallApplyCloudflareRuleOnPort adds (or refreshes) ONE inbound rule
+// allowing port/tcp from the supplied Cloudflare edge ranges, on the
+// relay's own firewall. Idempotent.
+//
+//   - firewallID must be the relay's firewall (daal-relay-<serverID>,
+//     from FirewallEnsureForServer). Empty is refused.
+//   - The rule replaces a previous rule this function wrote (tagged
+//     cdnRuleDescription) and KEEPS EVERY OTHER RULE. An earlier
+//     version called set_rules with this one rule alone, which on a
+//     relay firewall deleted 80/tcp, every data-plane port and any open
+//     mgmt hole.
+//   - A port another rule already opens to 0.0.0.0/0 or ::/0 is refused
+//     (errCDNPortWorldOpen).
+//
+// Called from the publisher, never from the relay.
+func (l *liveClient) FirewallApplyCloudflareRuleOnPort(ctx context.Context, firewallID string, port int, ipv4Ranges, ipv6Ranges []string) (string, error) {
+	if port <= 0 || port > 65535 {
+		return "", fmt.Errorf("hetzner firewall: port %d out of range", port)
+	}
+	portStr := strconv.Itoa(port)
+	desc := cdnRuleDescription
 	rule := hcloud.FirewallRule{
-		Direction: hcloud.FirewallRuleDirectionIn,
-		Protocol:  hcloud.FirewallRuleProtocolTCP,
-		Port:      stringPtr("443"),
+		Direction:   hcloud.FirewallRuleDirectionIn,
+		Protocol:    hcloud.FirewallRuleProtocolTCP,
+		Port:        stringPtr(portStr),
+		Description: &desc,
 	}
 	for _, r := range ipv4Ranges {
 		_, n, err := net.ParseCIDR(r)
-		if err != nil {
-			return "", fmt.Errorf("hetzner firewall: invalid v4 cidr %q: %w", r, err)
+		if err != nil || n.IP.To4() == nil {
+			return "", fmt.Errorf("hetzner firewall: invalid v4 cidr %q", r)
 		}
 		rule.SourceIPs = append(rule.SourceIPs, *n)
 	}
 	for _, r := range ipv6Ranges {
 		_, n, err := net.ParseCIDR(r)
-		if err != nil {
-			return "", fmt.Errorf("hetzner firewall: invalid v6 cidr %q: %w", r, err)
+		if err != nil || n.IP.To4() != nil {
+			return "", fmt.Errorf("hetzner firewall: invalid v6 cidr %q", r)
 		}
 		rule.SourceIPs = append(rule.SourceIPs, *n)
 	}
-
-	if firewallID == "" {
-		res, _, err := l.c.Firewall.Create(ctx, hcloud.FirewallCreateOpts{
-			Name:  "daal-cloudflare-edge-only",
-			Rules: []hcloud.FirewallRule{rule},
-		})
-		if err != nil {
-			return "", err
-		}
-		return strconv.FormatInt(res.Firewall.ID, 10), nil
+	// An empty source list would be rejected by Hetzner; refusing it
+	// here keeps a failed range fetch from ever reaching the API.
+	if len(rule.SourceIPs) == 0 {
+		return "", errEmptyRanges
 	}
-
+	for _, n := range rule.SourceIPs {
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return "", fmt.Errorf("hetzner firewall: %s is everyone, not a Cloudflare range", n.String())
+		}
+	}
+	if firewallID == "" {
+		return "", errNoRelayFirewall
+	}
 	idInt, err := strconv.ParseInt(firewallID, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
 	}
-	_, _, err = l.c.Firewall.SetRules(ctx, &hcloud.Firewall{ID: idInt}, hcloud.FirewallSetRulesOpts{
-		Rules: []hcloud.FirewallRule{rule},
-	})
+	var refused error
+	err = l.modifyFirewallRules(ctx, idInt,
+		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			if worldOpensTCPPort(cur, portStr) {
+				refused = errCDNPortWorldOpen
+				return nil, false
+			}
+			if have, ok := findRuleByDescription(cur, cdnRuleDescription); ok &&
+				sameSources(have.SourceIPs, rule.SourceIPs) &&
+				have.Port != nil && *have.Port == portStr &&
+				countByDescription(cur, cdnRuleDescription) == 1 {
+				return nil, false // already exactly this rule
+			}
+			return withCloudflareRule(cur, rule), true
+		},
+		func(after []hcloud.FirewallRule) bool {
+			have, ok := findRuleByDescription(after, cdnRuleDescription)
+			return ok && sameSources(have.SourceIPs, rule.SourceIPs) && have.Port != nil && *have.Port == portStr
+		},
+	)
 	if err != nil {
 		return "", err
 	}
+	if refused != nil {
+		return "", refused
+	}
 	return firewallID, nil
+}
+
+// worldOpensTCPPort reports whether a rule other than Daal's Cloudflare
+// rule opens port/tcp to 0.0.0.0/0 or ::/0.
+func worldOpensTCPPort(rules []hcloud.FirewallRule, port string) bool {
+	for _, r := range rules {
+		if ruleHasDescription(r, cdnRuleDescription) || r.Direction != hcloud.FirewallRuleDirectionIn ||
+			r.Protocol != hcloud.FirewallRuleProtocolTCP || r.Port == nil || !portCovers(*r.Port, port) {
+			continue
+		}
+		for _, n := range r.SourceIPs {
+			if ones, _ := n.Mask.Size(); ones == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// portCovers reports whether a Hetzner port spec ("443" or
+// "8000-9000") includes port.
+func portCovers(spec, port string) bool {
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	lo, hi, isRange := strings.Cut(spec, "-")
+	a, err := strconv.Atoi(strings.TrimSpace(lo))
+	if err != nil {
+		return false
+	}
+	if !isRange {
+		return a == p
+	}
+	b, err := strconv.Atoi(strings.TrimSpace(hi))
+	return err == nil && a <= p && p <= b
+}
+
+// CloudflareRuleState is what the posture check reads back.
+type CloudflareRuleState struct {
+	Present bool
+	Port    string
+	Sources int
+}
+
+// FirewallCloudflareRule reads Daal's Cloudflare rule on a firewall.
+// Read-only.
+func (l *liveClient) FirewallCloudflareRule(ctx context.Context, firewallID string) (CloudflareRuleState, error) {
+	idInt, err := strconv.ParseInt(firewallID, 10, 64)
+	if err != nil {
+		return CloudflareRuleState{}, fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
+	}
+	fw, _, err := l.c.Firewall.GetByID(ctx, idInt)
+	if err != nil {
+		return CloudflareRuleState{}, fmt.Errorf("%w: %w", errFirewallRead, err)
+	}
+	if fw == nil {
+		return CloudflareRuleState{}, errFirewallNotFound
+	}
+	have, ok := findRuleByDescription(fw.Rules, cdnRuleDescription)
+	if !ok {
+		return CloudflareRuleState{}, nil
+	}
+	st := CloudflareRuleState{Present: true, Sources: len(have.SourceIPs)}
+	if have.Port != nil {
+		st.Port = *have.Port
+	}
+	return st, nil
+}
+
+// FirewallRemoveCloudflareRule takes Daal's Cloudflare rule off a
+// firewall and keeps every other rule. Idempotent: no rule, or no
+// firewall, is success.
+func (l *liveClient) FirewallRemoveCloudflareRule(ctx context.Context, firewallID string) error {
+	idInt, err := strconv.ParseInt(firewallID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid firewall id %q: %w", firewallID, err)
+	}
+	err = l.modifyFirewallRules(ctx, idInt,
+		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			if countByDescription(cur, cdnRuleDescription) == 0 {
+				return nil, false
+			}
+			next := make([]hcloud.FirewallRule, 0, len(cur))
+			for _, r := range cur {
+				if !ruleHasDescription(r, cdnRuleDescription) {
+					next = append(next, r)
+				}
+			}
+			return next, true
+		},
+		func(after []hcloud.FirewallRule) bool {
+			return countByDescription(after, cdnRuleDescription) == 0
+		},
+	)
+	if errors.Is(err, errFirewallNotFound) {
+		return nil
+	}
+	return err
+}
+
+func countByDescription(rules []hcloud.FirewallRule, desc string) int {
+	n := 0
+	for _, r := range rules {
+		if ruleHasDescription(r, desc) {
+			n++
+		}
+	}
+	return n
 }
 
 // FirewallAddEphemeralRule appends a single inbound (callerIP/32,
@@ -396,14 +708,20 @@ func (l *liveClient) FirewallApplyCloudflareRule(ctx context.Context, firewallID
 // defensive expiry sweep. The Helper is still expected to call
 // FirewallRemoveEphemeralRule explicitly on completion.
 //
-// Strategy: read the server's current firewall rule set, append a
-// new rule, re-set rules in one shot. The rule is tagged with a
+// Strategy: read-modify-write through modifyFirewallRules (append,
+// keep every other rule, verify it landed). The rule is tagged with a
 // stable ruleID derived from (serverID, callerIP, port,
-// expiresAtUnix) so removal can identify it without separate state.
+// expiresAtUnix) so removal can identify it without separate state;
+// adding the same ruleID twice is a no-op. A non-nil error may come
+// with a non-empty ruleID (see the end of the function).
 func (l *liveClient) FirewallAddEphemeralRule(ctx context.Context, serverID, callerIP string, port int, expiresAt time.Time) (string, error) {
 	srvInt, err := strconv.ParseInt(serverID, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid server id %q: %w", serverID, err)
+	}
+	ip := net.ParseIP(callerIP)
+	if ip == nil {
+		return "", errors.New("invalid caller ip")
 	}
 	srv, _, err := l.c.Server.GetByID(ctx, srvInt)
 	if err != nil {
@@ -415,16 +733,8 @@ func (l *liveClient) FirewallAddEphemeralRule(ctx context.Context, serverID, cal
 	if len(srv.PublicNet.Firewalls) == 0 {
 		return "", fmt.Errorf("hetzner: server %s has no attached firewall", serverID)
 	}
-	fw := srv.PublicNet.Firewalls[0].Firewall
-	fwFull, _, err := l.c.Firewall.GetByID(ctx, fw.ID)
-	if err != nil {
-		return "", err
-	}
+	fwID := srv.PublicNet.Firewalls[0].Firewall.ID
 
-	ip := net.ParseIP(callerIP)
-	if ip == nil {
-		return "", fmt.Errorf("invalid caller ip %q", callerIP)
-	}
 	bits := 32
 	if ip.To4() == nil {
 		bits = 128
@@ -441,17 +751,35 @@ func (l *liveClient) FirewallAddEphemeralRule(ctx context.Context, serverID, cal
 		SourceIPs:   []net.IPNet{cidr},
 		Description: &desc,
 	}
-	rules := append([]hcloud.FirewallRule{}, fwFull.Rules...)
-	rules = append(rules, rule)
-	if _, _, err := l.c.Firewall.SetRules(ctx, fwFull, hcloud.FirewallSetRulesOpts{Rules: rules}); err != nil {
-		return "", err
+	err = l.modifyFirewallRules(ctx, fwID,
+		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			if _, ok := findRuleByDescription(cur, ruleID); ok {
+				return nil, false
+			}
+			next := append(append(make([]hcloud.FirewallRule, 0, len(cur)+1), cur...), rule)
+			return next, true
+		},
+		func(after []hcloud.FirewallRule) bool {
+			_, ok := findRuleByDescription(after, ruleID)
+			return ok
+		},
+	)
+	if err != nil {
+		// The ruleID comes back WITH the error: set_rules may have
+		// succeeded before the read-back failed or the three attempts
+		// ran out, so the hole may be open. Removal is idempotent; a
+		// caller that removes on any non-empty id closes it now instead
+		// of at the expiry sweep.
+		return ruleID, err
 	}
 	return ruleID, nil
 }
 
 // FirewallRemoveEphemeralRule strips the rule whose Description
 // matches ruleID from the server's firewall. Idempotent: a
-// missing rule (already expired or never present) returns nil.
+// missing rule (already expired or never present) returns nil, and
+// so does a server or firewall that cannot be read (the Provider's
+// expiry sweep is the backstop for a rule left behind that way).
 func (l *liveClient) FirewallRemoveEphemeralRule(ctx context.Context, ruleID string) error {
 	if ruleID == "" {
 		return nil
@@ -485,25 +813,26 @@ func (l *liveClient) FirewallRemoveEphemeralRule(ctx context.Context, ruleID str
 	if err != nil || srv == nil || len(srv.PublicNet.Firewalls) == 0 {
 		return nil
 	}
-	fw := srv.PublicNet.Firewalls[0].Firewall
-	fwFull, _, err := l.c.Firewall.GetByID(ctx, fw.ID)
-	if err != nil || fwFull == nil {
-		return nil
-	}
-	filtered := make([]hcloud.FirewallRule, 0, len(fwFull.Rules))
-	dropped := false
-	for _, r := range fwFull.Rules {
-		if r.Description != nil && *r.Description == ruleID {
-			dropped = true
-			continue
-		}
-		filtered = append(filtered, r)
-	}
-	if !dropped {
-		return nil // already removed
-	}
-	_, _, err = l.c.Firewall.SetRules(ctx, fwFull, hcloud.FirewallSetRulesOpts{Rules: filtered})
-	if hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
+	fwID := srv.PublicNet.Firewalls[0].Firewall.ID
+	err = l.modifyFirewallRules(ctx, fwID,
+		func(cur []hcloud.FirewallRule) ([]hcloud.FirewallRule, bool) {
+			filtered := make([]hcloud.FirewallRule, 0, len(cur))
+			dropped := false
+			for _, r := range cur {
+				if ruleHasDescription(r, ruleID) {
+					dropped = true
+					continue
+				}
+				filtered = append(filtered, r)
+			}
+			return filtered, dropped
+		},
+		func(after []hcloud.FirewallRule) bool {
+			_, ok := findRuleByDescription(after, ruleID)
+			return !ok
+		},
+	)
+	if errors.Is(err, errFirewallRead) || errors.Is(err, errFirewallNotFound) || hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
 		return nil
 	}
 	return err
@@ -604,8 +933,14 @@ func (l *liveClient) FirewallEnsureForServer(ctx context.Context, serverID strin
 	}
 	// Existing firewall: re-apply rules in case they drifted, and
 	// attach to the server.
+	// This one is a deliberate full replace (the firewall is ours by
+	// name and not attached to the server yet), but it still takes the
+	// per-firewall lock so it cannot interleave with a read-modify-write.
 	fwRef := &hcloud.Firewall{ID: fwID}
-	if _, _, err := l.c.Firewall.SetRules(ctx, fwRef, hcloud.FirewallSetRulesOpts{Rules: baseRules}); err != nil {
+	unlock := lockFirewall(fwID)
+	_, _, err = l.c.Firewall.SetRules(ctx, fwRef, hcloud.FirewallSetRulesOpts{Rules: baseRules})
+	unlock()
+	if err != nil {
 		return "", fmt.Errorf("hetzner firewall set rules: %w", err)
 	}
 	if _, _, err := l.c.Firewall.ApplyResources(ctx, fwRef, []hcloud.FirewallResource{{

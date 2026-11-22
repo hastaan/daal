@@ -2,150 +2,119 @@ package cloudflare
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestIssueAndPersistOriginCert_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	cf := &MockCFClient{}
-	fp, certPath, privPath, err := IssueAndPersistOriginCert(
-		context.Background(), cf, []byte("token"), []string{"momsroute.example.com"}, dir, 0,
+	m := NewMockCFClient("example.com")
+	cert, certPath, privPath, err := IssueAndPersistOriginCert(
+		context.Background(), m, []byte(testToken), []string{"example.com", "*.example.com"}, dir, 0,
 	)
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
-	if fp == "" {
-		t.Fatalf("fingerprint empty")
+	if cert.ID == "" || cert.FingerprintHex == "" {
+		t.Fatalf("cert = %+v", cert)
 	}
-	if filepath.Dir(certPath) != dir || filepath.Dir(privPath) != dir {
-		t.Errorf("paths not under outDir: cert=%s priv=%s", certPath, privPath)
+	if cert.KeyPEM != nil {
+		t.Error("the private key is still held after it was written")
 	}
 	for _, p := range []string{certPath, privPath} {
-		info, err := os.Stat(p)
+		if filepath.Dir(p) != dir {
+			t.Errorf("%s not under out dir", p)
+		}
+		st, err := os.Stat(p)
 		if err != nil {
-			t.Fatalf("stat %s: %v", p, err)
+			t.Fatal(err)
 		}
-		if runtime.GOOS != "windows" {
-			if info.Mode().Perm() != 0o600 {
-				t.Errorf("%s mode = %o, want 0600", p, info.Mode().Perm())
-			}
+		if st.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %o, want 0600", p, st.Mode().Perm())
 		}
 	}
-}
-
-func TestIssueAndPersistOriginCert_RequiresHostnames(t *testing.T) {
-	cf := &MockCFClient{}
-	_, _, _, err := IssueAndPersistOriginCert(
-		context.Background(), cf, []byte("token"), nil, t.TempDir(), 0,
-	)
-	if err == nil {
-		t.Fatal("want error on empty hostnames")
+	if !strings.Contains(m.Calls[0], "5475") {
+		t.Errorf("default validity not 5475 days: %v", m.Calls)
 	}
 }
 
-func TestIssueAndPersistOriginCert_RequiresOutDir(t *testing.T) {
-	cf := &MockCFClient{}
-	_, _, _, err := IssueAndPersistOriginCert(
-		context.Background(), cf, []byte("token"), []string{"x.example.com"}, "", 0,
-	)
-	if err == nil {
-		t.Fatal("want error on empty outDir")
+func TestIssueAndPersistOriginCert_Validation(t *testing.T) {
+	m := NewMockCFClient("example.com")
+	if _, _, _, err := IssueAndPersistOriginCert(context.Background(), m, []byte(testToken), nil, t.TempDir(), 0); err == nil {
+		t.Error("empty hostnames accepted")
+	}
+	if _, _, _, err := IssueAndPersistOriginCert(context.Background(), m, []byte(testToken), []string{"x.example.com"}, "", 0); err == nil {
+		t.Error("empty out dir accepted")
 	}
 }
 
-func TestIssueAndPersistOriginCert_PropagatesIssueError(t *testing.T) {
-	cf := &MockCFClient{IssueErr: errors.New("cf API down")}
-	_, _, _, err := IssueAndPersistOriginCert(
-		context.Background(), cf, []byte("token"), []string{"x.example.com"}, t.TempDir(), 0,
-	)
-	if err == nil || !errors.Is(err, ErrOriginCAIssueFailed) {
-		t.Fatalf("want wrapped ErrOriginCAIssueFailed, got %v", err)
+func TestIssueAndPersistOriginCert_ScrubsTheToken(t *testing.T) {
+	m := NewMockCFClient("example.com")
+	m.FailOn = map[string]error{"IssueOriginCert": errors.New("echo " + testToken)}
+	_, _, _, err := IssueAndPersistOriginCert(context.Background(), m, []byte(testToken), []string{"example.com"}, t.TempDir(), 0)
+	if !errors.Is(err, ErrOriginCAIssueFailed) {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Contains(err.Error(), testToken) {
+		t.Fatalf("token in error: %v", err)
 	}
 }
 
-func TestIssueAndPersistOriginCert_RejectsEmptyCertOrPriv(t *testing.T) {
-	cf := &MockCFClient{IssueCertPEM: []byte{}, IssuePrivPEM: []byte("priv")}
-	_, _, _, err := IssueAndPersistOriginCert(
-		context.Background(), cf, []byte("token"), []string{"x.example.com"}, t.TempDir(), 0,
-	)
-	if err == nil {
-		t.Fatal("want error on empty cert PEM")
-	}
-}
-
-func TestIssueAndPersistOriginCert_DefaultValidityIs5475Days(t *testing.T) {
-	cf := &MockCFClient{}
-	_, _, _, err := IssueAndPersistOriginCert(
-		context.Background(), cf, []byte("token"), []string{"x.example.com"}, t.TempDir(), 0,
-	)
+// The origin-pull pair: a CA that signs exactly one client certificate
+// for client auth, and the CA's key gone.
+func TestNewAOPMaterial(t *testing.T) {
+	now := time.Now()
+	mat, err := NewAOPMaterial(now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Mock records the call shape, so this is implicitly proved
-	// by the next call passing 5475 internally — we assert via
-	// the recorded calls list as a smoke check.
-	if len(cf.Calls) == 0 {
-		t.Fatal("expected at least one CFClient call")
+	cab, _ := pem.Decode(mat.CACertPEM)
+	ca, err := x509.ParseCertificate(cab.Bytes)
+	if err != nil || !ca.IsCA {
+		t.Fatalf("CA: %v", err)
 	}
-}
-
-func TestEnableAOPAndPersistClientCert_HappyPath(t *testing.T) {
-	dir := t.TempDir()
-	cf := &MockCFClient{}
-	clientPath, err := EnableAOPAndPersistClientCert(
-		context.Background(), cf, []byte("token"), "zone-abc", dir,
-	)
+	clb, _ := pem.Decode(mat.ClientCertPEM)
+	cl, err := x509.ParseCertificate(clb.Bytes)
 	if err != nil {
-		t.Fatalf("enable AOP: %v", err)
+		t.Fatal(err)
 	}
-	if filepath.Dir(clientPath) != dir {
-		t.Errorf("clientPath %s not under outDir %s", clientPath, dir)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	if _, err := cl.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: now}); err != nil {
+		t.Fatalf("client cert does not verify for client auth: %v", err)
 	}
-	info, err := os.Stat(clientPath)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
+	if strings.Contains(string(mat.CACertPEM), "PRIVATE") {
+		t.Fatal("CA key in the CA file")
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Errorf("mode = %o, want 0600", info.Mode().Perm())
-	}
-	wantCalls := []string{"EnableAOP(zone-abc)", "FetchAOPClientCert(zone-abc)"}
-	for i, w := range wantCalls {
-		if i >= len(cf.Calls) || cf.Calls[i] != w {
-			t.Errorf("Calls[%d] = %v, want %v", i, cf.Calls, wantCalls)
+	for _, n := range []string{ca.Subject.CommonName, cl.Subject.CommonName} {
+		if strings.Contains(strings.ToLower(n), "daal") {
+			t.Errorf("subject names the app: %q", n)
 		}
 	}
 }
 
-func TestEnableAOPAndPersistClientCert_PropagatesEnableError(t *testing.T) {
-	cf := &MockCFClient{EnableAOPErr: errors.New("zone forbidden")}
-	_, err := EnableAOPAndPersistClientCert(
-		context.Background(), cf, []byte("token"), "zone-abc", t.TempDir(),
-	)
-	if err == nil || !errors.Is(err, ErrAOPEnableFailed) {
-		t.Fatalf("want wrapped ErrAOPEnableFailed, got %v", err)
+func TestSetupAOP_UploadsAndKeepsOnlyTheCA(t *testing.T) {
+	m := NewMockCFClient("example.com")
+	dir := t.TempDir()
+	caPath, id, err := SetupAOP(context.Background(), m, []byte(testToken), "zone-example.com", dir, time.Now())
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestEnableAOPAndPersistClientCert_PropagatesFetchError(t *testing.T) {
-	cf := &MockCFClient{FetchAOPClientErr: errors.New("rate limit")}
-	_, err := EnableAOPAndPersistClientCert(
-		context.Background(), cf, []byte("token"), "zone-abc", t.TempDir(),
-	)
-	if err == nil {
-		t.Fatal("want error on fetch failure")
+	if id == "" || m.AOPCerts["zone-example.com"][id] == "" {
+		t.Fatalf("upload: id=%q certs=%v", id, m.AOPCerts)
 	}
-}
-
-func TestEnableAOPAndPersistClientCert_RejectsEmptyCert(t *testing.T) {
-	cf := &MockCFClient{FetchAOPClientPEM: []byte{}}
-	_, err := EnableAOPAndPersistClientCert(
-		context.Background(), cf, []byte("token"), "zone-abc", t.TempDir(),
-	)
-	if err == nil {
-		t.Fatal("want error on empty AOP client cert")
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 1 || filepath.Join(dir, ents[0].Name()) != caPath {
+		t.Fatalf("out dir = %v, want only the CA", ents)
+	}
+	b, _ := os.ReadFile(caPath)
+	if strings.Contains(string(b), "PRIVATE") {
+		t.Fatal("a private key reached disk")
 	}
 }

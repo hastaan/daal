@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { applyDir, detectLocale, setLocalePref, translate, type Locale } from './lib/i18n';
 import { useContract } from './contract/ContractProvider';
 import { Prefs } from './lib/prefs';
-import { isHarnessActive } from './harness/scenarios';
+import { isHarnessActive, scenarioFromUrl } from './harness/scenarios';
 import { isTauriRuntime } from './backends';
 import ShellRouter from './shell/ShellRouter';
 import Onboarding from './onboarding/Onboarding';
 import VaultUnlock from './components/VaultUnlock';
+import { Badge } from './design/primitives';
 
 export default function App() {
     const contract = useContract();
@@ -18,8 +19,11 @@ export default function App() {
     // present. In the harness or in a plain dev browser we treat
     // it as unlocked so the GUI stays interactive.
     const engineLive = isTauriRuntime() && !isHarnessActive();
-    const [vaultUnlocked, setVaultUnlocked] = useState<boolean>(!engineLive);
-    const [needsUnlock, setNeedsUnlock] = useState<boolean>(false);
+    // Harness scenario `vault-locked`: the PIN screen, as a high-risk
+    // device shows it (no engine answers there, so ask by name).
+    const [harnessLocked] = useState<boolean>(() => isHarnessActive() && scenarioFromUrl()?.id === 'vault-locked');
+    const [vaultUnlocked, setVaultUnlocked] = useState<boolean>(!engineLive && !harnessLocked);
+    const [needsUnlock, setNeedsUnlock] = useState<boolean>(harnessLocked);
     const [onboardingDone, setOnboardingDone] = useState<boolean>(() => {
         // Harness / plain-browser dev mode jumps straight to the shell
         // so screens are visible without going through onboarding —
@@ -178,28 +182,19 @@ export default function App() {
                     alignItems: 'center',
                     justifyContent: 'center',
                     background: 'var(--bg)',
-                    color: 'var(--paper)',
+                    color: 'var(--fg)',
                     padding: 32,
                     textAlign: 'center',
                 }}
             >
                 <div>
-                    <div
-                        style={{
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 11,
-                            letterSpacing: '0.2em',
-                            textTransform: 'uppercase',
-                            color: 'var(--danger)',
-                            marginBottom: 14,
-                        }}
-                    >
-                        {t('common.error')}
+                    <div style={{ marginBlockEnd: 14 }}>
+                        <Badge tone="bad">{t('common.error')}</Badge>
                     </div>
-                    <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 32 }}>
+                    <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 500, maxWidth: 560 }}>
                         {t('engine.mismatch')}
                     </h1>
-                    <p style={{ color: 'var(--paper-dim)' }}>
+                    <p dir="ltr" style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>
                         {engineVersion || '?'}
                     </p>
                 </div>

@@ -10,6 +10,7 @@
 //	wb dpi | rawprobe | elsewhere the censor's payload box and its Daal-free probes (censor_*.go)
 //	wb flows …                    the censor's packet log of the client's connections to the relay (flowtap.go)
 //	wb summary …                  many worlds → one report and one exit status (summary.go)
+//	wb fakecf | fakecdn | fakegoogle  Cloudflare's API and edge, Google's front and Apps Script (add-ons; addons_net.go)
 //
 // `run` must be PID 1 of a fresh user+net+mount+pid namespace; run.sh
 // arranges that. See ../README.md.
@@ -52,6 +53,12 @@ func main() {
 		os.Exit(cmdRawProbe(os.Args[2:]))
 	case "elsewhere": // the unblocked control host (censor_probe.go)
 		os.Exit(cmdElsewhere(os.Args[2:]))
+	case "fakecf": // Cloudflare's API, published ranges and DoH (fakecf_api.go)
+		os.Exit(cmdFakeCF(os.Args[2:]))
+	case "fakecdn": // Cloudflare's edge (fakecdn.go)
+		os.Exit(cmdFakeCDN(os.Args[2:]))
+	case "fakegoogle": // Google's front, web apps and Apps Script API (fakegfe.go, fakegas_api.go)
+		os.Exit(cmdFakeGoogle(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "wb: unknown subcommand %q\n", os.Args[1])
 		os.Exit(2)

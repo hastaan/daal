@@ -24,6 +24,7 @@ import { parseAuto, parseAutoNote, parseAutoResult, parseHolding, stateWithAuto 
 import { clearLocalTraces, forgetPublisher, forgetRoute } from '../lib/localTraces';
 import { MissingRoutes } from '../lib/missingRoutes';
 import { parseMeasured, rowForThisNetwork } from '../lib/measured';
+import { parseSurvey } from '../lib/routeSurvey';
 import { gradesAreForThisNetwork, parseHostNetwork, webviewMayReportNetwork } from '../lib/networkFacts';
 import { invoke } from '@tauri-apps/api/core';
 import type {
@@ -111,6 +112,7 @@ interface RawRouteSummary {
     budget_exhausted: boolean | null;
     health_pct: number | null;
     proven?: boolean;
+    checked_when_used?: boolean;
     // What the engine measured for this route on the CURRENT network:
     // {grade, setup_ms, samples, carried, failed, last}. Untyped on
     // purpose — lib/measured.ts parseMeasured is the one reading, and
@@ -235,6 +237,7 @@ function rawToRowAll(r: RawRouteSummary): RouteDisplayRow {
         healthPct: typeof r.health_pct === 'number' ? r.health_pct : undefined,
         measured: parseMeasured(r.measured),
         proven: !!r.proven,
+        ...(r.checked_when_used === true ? { checkedWhenUsed: true } : {}),
     };
 }
 
@@ -467,6 +470,7 @@ export class TauriContract implements D2Contract {
             auto,
             network: parseHostNetwork(d.network),
             routeCountHint: typeof d.route_count === 'number' ? d.route_count : undefined,
+            survey: parseSurvey(d.survey) ?? undefined,
             // Android only (null elsewhere): the VPN service's note
             // about a switch that did not take. Never throws.
             // Where there is no service (desktop) — or it has no note —

@@ -90,6 +90,24 @@ export class FakeNode extends Listeners {
         }) as FakeNode['style'];
     }
 
+    /** A <select>'s options, as react-dom reads them to mark the chosen
+     *  one (`node.options[i].value / .selected`). An option's `value`
+     *  is its attribute, which is all react-dom writes. */
+    get options(): FakeNode[] | undefined {
+        if (this.nodeName !== 'SELECT') return undefined;
+        const out: FakeNode[] = [];
+        const walk = (n: FakeNode) => {
+            for (const c of n.childNodes) {
+                if (c.nodeName === 'OPTION') {
+                    if (c.value === undefined) c.value = c.getAttribute('value') ?? '';
+                    out.push(c);
+                } else walk(c);
+            }
+        };
+        walk(this);
+        return out;
+    }
+
     get firstChild(): FakeNode | null {
         return this.childNodes[0] ?? null;
     }

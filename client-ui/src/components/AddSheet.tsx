@@ -1,614 +1,645 @@
-// AddSheet.tsx — D-2 unified intake. "Clean and powerful."
+// AddSheet.tsx — "Add my file": one sheet, no tabs (spec C3).
 //
-// Two surfaces only:
-//   • Paste   — single textarea. Auto-detects on input: .sbp/.sbpx
-//               base64, vless://, vmess://, subscription URL, etc.
-//   • File    — native file picker (Android SAF / desktop dialog).
-//               PIN field appears only after the picked file sniffs
-//               as .sbpx.
+// Three ways in, as three large rows:
+//   Choose a file  the system picker opens at once (Android SAF or the
+//                  desktop dialog); the file is read and checked by itself
+//   Paste text     reads the clipboard (lib/clipboard.ts: the phone's own), else
+//                  a box with a Paste button; a Daal file goes on by itself
+//                  (its own signature check and trust question follow). A
+//                  web address or a proxy link waits for one "Add" tap: a
+//                  link copied for another reason, or half typed, must not
+//                  become a subscription the engine starts fetching.
+//   Scan a code    the camera starts at once (recipient/RecipientImport)
+// and one more way that needs no tap here: a file handed to Daal by
+// Android ("Open with Daal", recipient/openedFile.ts) arrives as
+// `openedPath` and goes straight to the check.
 //
-// "My Daal address" is reachable from a separate top-level action
-// next to Add on the Network page header; it is NOT a tab here.
+// Every way ends in the same place (components/ImportResult.tsx):
+//   a new publisher      the trust question replaces the whole sheet
+//   imported             "File added" + "Connect"
+//   refused / changed    one reason + "Close"
+// There is no "Preview" or "Import" tap: nothing waits for a button the
+// person cannot know they need.
 //
-// Everything is wired end-to-end:
-//   • previewBundle / importSbp for plain .sbp
+// Wiring, unchanged from before this wave:
+//   • previewBundle / importSbp for a plain .sbp
 //   • Sbpx.sniff / Sbpx.import (device-key decrypt) → importSbp for .sbpx
-//   • importSbpBytes for a .sbp or .sbpx pasted as
-//     base64 text — the offline path for a channel that bans files
-//     (Wave 4 Step 11). Same verification as the file path; the only
-//     difference is how the bytes arrived.
-//   • uri_detect / uri_import for one-off vless/vmess/etc URIs
-//   • subscriptionAdd for http(s) URLs
+//   • importSbpBytes for a .sbp or .sbpx pasted as base64 text — the
+//     offline path for a channel that bans files; same verification
+//   • uriImport for one-off vless/vmess/… links
+//   • subscriptionAdd for http(s) addresses
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useContract } from '../contract/ContractProvider';
 import type { PreviewedBundle } from '../contract/D2Contract';
 import { DeviceCustody, PickedFile, Sbpx } from '../recipient/recipientCommands';
-import PickedFileNote, { sealedCustody, type SealedCustody } from './PickedFileNote';
+import { sealedCustody } from './PickedFileNote';
 import { recordImportOrigin } from '../lib/importOrigin';
 import { detectPastedContainer } from '../lib/pastedBundle';
-import { Sheet, Button } from '../design/primitives';
+import { Badge, Button, Disclosure, Icon, Input, Sheet, StateIcon } from '../design/primitives';
+import type { IconName } from '../design/primitives';
+import { useDensity } from '../design/DensityProvider';
 import TrustPrompt from './TrustPrompt';
-import {
-    syntheticSubscriptionFingerprint,
-    subscriptionDisplayName,
-} from '../lib/subscriptionIdentity';
-import {
-    KIND_REJECTED,
-    KIND_TRUST_PROMPT_NEEDED,
-    friendlyError,
-    friendlyReason,
-    parseVerdict,
-    trustFailure,
-    trustFromVerdict,
-} from '../lib/importVerdict';
-import type { ImportVerdict, TrustResolution } from '../lib/importVerdict';
-import UnavailableRoutes from './UnavailableRoutes';
+import ImportResult, { importOutcome, trustOutcome, type ImportOutcome } from './ImportResult';
+import RecipientImport from '../recipient/RecipientImport';
+import { syntheticSubscriptionFingerprint, subscriptionDisplayName } from '../lib/subscriptionIdentity';
+import { friendlyError, parseVerdict, type ImportVerdict, type TrustResolution } from '../lib/importVerdict';
+import { StandbyCodeEntry } from './StandbyCodeEntry';
+import { readClipboardText } from '../lib/clipboard';
 
-
-
-
+/** Kept for callers of the old two-tab sheet. */
+export type Tab = 'paste' | 'file';
+export type AddStep = 'choose' | 'paste' | 'scan';
 
 interface Props {
     t: (k: string) => string;
     onClose: () => void;
+    /** Routes committed: the page reads its list again. */
     onImported?: () => void;
-    /** Which tab to open on. "Add your file" on the main screen opens
-     *  straight on the file tab. */
+    /** "Connect" on the result: the page connects (and closes the sheet). */
+    onConnect?: () => void;
+    /** Kept for old callers: 'paste' opens on the paste box. */
     initialTab?: Tab;
+    /** Where the sheet opens. Default: the three choices. */
+    initialStep?: AddStep;
+    /** A file handed to Daal by Android, already staged: checked at once. */
+    openedPath?: string;
+    /** Told whether the sheet is in the middle of something (anything but
+     *  the three choices or a result), so a newly handed-over file waits
+     *  instead of replacing it (recipient/openedFile.ts). */
+    onProgress?: (inProgress: boolean) => void;
 }
 
-export type Tab = 'paste' | 'file';
+/** Best-effort client-side classifier for the paste box. The engine is
+ *  the source of truth; this only decides what to hand it. */
+export type PasteKind = 'empty' | 'sbp-b64' | 'sbpx-b64' | 'http' | 'uri' | 'unknown';
 
-/** Best-effort client-side classifier for the paste box. The engine
- *  is the source of truth — this only drives the "What I see" pill. */
-type PasteKind = 'empty' | 'sbp-b64' | 'sbpx-b64' | 'http' | 'uri' | 'unknown';
-
-function classifyPaste(s: string): PasteKind {
+export function classifyPaste(s: string): PasteKind {
     const trimmed = s.trim();
     if (!trimmed) return 'empty';
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return 'http';
     // URI schemes the engine's uri.ParseAny handles.
-    if (/^(vless|vmess|trojan|ss|hy2|hysteria2?|tuic|wg|amneziawg|naive|brook|snowflake):\/\//i.test(
-            trimmed,
-        ))
+    if (/^(vless|vmess|trojan|ss|hy2|hysteria2?|tuic|wg|amneziawg|naive|brook|snowflake):\/\//i.test(trimmed))
         return 'uri';
-    // A pasted bundle is located by the base64 spelling of its
-    // container magic, after the joiners a messenger inserts are
-    // dropped — see lib/pastedBundle.ts.
-    //
-    // The previous rule here was `/^RFNCU/` plus "longer than 200
-    // chars means sealed", which was wrong twice over: RFNCU is the
-    // .sbpx envelope magic, so a plain .sbp (a zip — "UEsDB…") never
-    // matched at all and the Import button stayed dead for it, and a
-    // short .sbpx was mislabelled a bundle. Neither mattered while
-    // both were handed to uriImport, which cannot parse base64
-    // anyway; both matter now that the paste actually imports.
+    // A pasted bundle is located by the base64 spelling of its container
+    // magic, after the joiners a messenger inserts are dropped — see
+    // lib/pastedBundle.ts.
     const container = detectPastedContainer(trimmed);
     if (container === 'sbpx') return 'sbpx-b64';
     if (container === 'sbp') return 'sbp-b64';
     return 'unknown';
 }
 
-export default function AddSheet({ t, onClose, onImported, initialTab }: Props) {
+/** How long the paste box waits after the last change before it hands
+ *  the text on: a paste arrives at once, typing does not. */
+export const PASTE_SETTLE_MS = 400;
+
+/** Only a Daal file (base64 .sbp/.sbpx) goes on by itself after a paste. */
+export function autoAdvances(k: PasteKind): boolean {
+    return k === 'sbp-b64' || k === 'sbpx-b64';
+}
+
+/** Engine errors that mean the file must not be used (bad signature,
+ *  withdrawn, not for this phone, damaged, expired): the refused screen,
+ *  not a line under the box. */
+const UNSAFE = /^(ErrInvalidSignature|ErrFingerprintMismatch|ErrRevokedPublisher|ErrRevokedRoute|ErrEnvelopeCorrupt|ErrZip|ErrJson|ErrMissingSignature|ErrMissingManifest|ErrMissingPublisherKey|ErrInvalidPublisherKey|ErrUnsafePath|ErrExpiredBundle|ErrExpiredRoute)\b|envelope corrupt or not addressed/;
+export function unsafeError(raw: string): boolean {
+    return UNSAFE.test(raw);
+}
+
+type Stage =
+    | { at: 'choose' }
+    | { at: 'paste' }
+    | { at: 'scan' }
+    | { at: 'code' }
+    | { at: 'working' }
+    | { at: 'unlock'; path: string }
+    | { at: 'trust'; preview: PreviewedBundle; origin: Origin }
+    | { at: 'result'; outcome: Exclude<ImportOutcome, { kind: 'trust' }>; name?: string };
+
+type Origin = 'paste' | 'file' | 'sealed_file' | 'scan';
+
+function errText(e: unknown): string {
+    return e instanceof Error ? e.message : String(e);
+}
+
+export default function AddSheet({ t, onClose, onImported, onConnect, initialTab, initialStep, openedPath, onProgress }: Props) {
     const contract = useContract();
-    const [tab, setTab] = useState<Tab>(initialTab ?? 'paste');
+    const { density } = useDensity();
+    const first: AddStep = initialStep ?? (initialTab === 'paste' ? 'paste' : 'choose');
+    const [stage, setStage] = useState<Stage>(openedPath ? { at: 'working' } : { at: first });
     const [pasted, setPasted] = useState('');
-    const [filePath, setFilePath] = useState('');
-    const [isSbpx, setIsSbpx] = useState(false);
-    // Whether a sealed file will open by itself (components/PickedFileNote.tsx).
-    const [custody, setCustody] = useState<SealedCustody>('unknown');
-    const [preview, setPreview] = useState<PreviewedBundle | null>(null);
-    const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [done, setDone] = useState(false);
-    /** The verdict of the import that completed, kept for the one thing
-     *  the "Imported." screen must add: which ways to connect the file
-     *  did NOT give this device (UnavailableRoutes). */
-    const [doneVerdict, setDoneVerdict] = useState<ImportVerdict | null>(null);
-    /** True after the engine returns VerdictTrustPromptNeeded — the
-     *  user must confirm the publisher EN+FA word grid before any
-     *  routes commit. */
-    const [awaitingTrust, setAwaitingTrust] = useState(false);
+    const [passphrase, setPassphrase] = useState('');
+    // Blocks the scanner holds: closing then asks first.
+    const [scanBlocks, setScanBlocks] = useState(0);
+    const [confirmClose, setConfirmClose] = useState(false);
+    const lastHanded = useRef<string>('');
+    const alive = useRef(true);
+    useEffect(() => {
+        alive.current = true;
+        return () => {
+            alive.current = false;
+        };
+    }, []);
 
     const kind = useMemo(() => classifyPaste(pasted), [pasted]);
 
-    // When the user picks a file, immediately sniff it so the PIN
-    // input appears (or stays hidden) without an extra click.
-    useEffect(() => {
-        let cancelled = false;
-        if (!filePath) {
-            setIsSbpx(false);
+    /** The publisher's name for "From {name}": the preview's, else the
+     *  list's entry for that fingerprint. Never blocks the result. */
+    const nameFor = async (fp: string | undefined, preview: PreviewedBundle | null): Promise<string | undefined> => {
+        if (preview?.publisherName) return preview.publisherName;
+        if (!fp) return undefined;
+        try {
+            const tree = await contract.listPublishers();
+            return tree.find((p) => p.publisherId === fp)?.displayName || undefined;
+        } catch {
+            return undefined;
+        }
+    };
+
+    /** One verdict, read the same way for every lane. */
+    const settle = async (v: ImportVerdict | null, preview: PreviewedBundle | null, origin: Origin) => {
+        const o = importOutcome(t, v, preview);
+        if (o.kind === 'trust') {
+            if (alive.current) setStage({ at: 'trust', preview: o.preview, origin });
             return;
         }
-        setCustody('unknown');
-        Sbpx.sniff(filePath)
-            .then(async (b) => {
-                if (cancelled) return;
-                // A sealed file opens with this phone's key: ask
-                // whether that key can be used right now, so the note
-                // under the button says the one thing that is true.
-                let unlocked: boolean | undefined;
-                if (b) {
-                    try {
-                        unlocked = await DeviceCustody.isUnlocked();
-                    } catch {
-                        unlocked = undefined;
-                    }
-                }
-                if (cancelled) return;
-                setCustody(sealedCustody(unlocked));
-                setIsSbpx(b);
-            })
-            .catch(() => {
-                if (!cancelled) setIsSbpx(false);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, [filePath]);
+        if (o.kind === 'done') {
+            recordImportOrigin(v?.Fingerprint || preview?.fingerprintHex, origin);
+            onImported?.();
+        }
+        const name = o.kind === 'done' ? await nameFor(v?.Fingerprint || preview?.fingerprintHex, preview) : undefined;
+        if (alive.current) setStage({ at: 'result', outcome: o, name });
+    };
+
+    /** A thrown error: the refused screen when the file must not be
+     *  used, else one line on the step the person came from. */
+    const fail = (e: unknown, back: Stage) => {
+        const raw = errText(e);
+        const text = friendlyError(t, raw);
+        if (unsafeError(raw)) {
+            setStage({ at: 'result', outcome: { kind: 'refused', text, changed: false } });
+            return;
+        }
+        setError(text);
+        setStage(back);
+    };
+
+    /** A staged path (picked, or handed over by Android): sniff, unlock
+     *  if needed, preview and import, with no tap in between. */
+    const readFile = async (path: string, back: Stage, opened = false) => {
+        setError(null);
+        // Android hands shared text that holds no Daal file over as a
+        // `.txt` (ANDROID lane). The person used Share, not Paste: the
+        // advice says what to share instead.
+        if (/\.txt$/i.test(path)) {
+            setError(t(opened ? 'add.detect.unknown_shared' : 'add.detect.unknown'));
+            setStage(back);
+            return;
+        }
+        setStage({ at: 'working' });
+        let sealed = false;
+        try {
+            sealed = await Sbpx.sniff(path);
+        } catch {
+            sealed = false;
+        }
+        if (sealed) {
+            let unlocked: boolean | undefined;
+            try {
+                unlocked = await DeviceCustody.isUnlocked();
+            } catch {
+                unlocked = undefined;
+            }
+            if (sealedCustody(unlocked) === 'locked') {
+                setStage({ at: 'unlock', path });
+                return;
+            }
+        }
+        await importPath(path, sealed, back);
+    };
+
+    const importPath = async (path: string, sealed: boolean, back: Stage) => {
+        setStage({ at: 'working' });
+        try {
+            // Device custody opens a sealed file with this phone's key;
+            // the plaintext path is read once and used for both calls.
+            const target = sealed ? await Sbpx.import(path) : path;
+            let preview: PreviewedBundle | null = null;
+            try {
+                preview = await contract.previewBundle(target);
+            } catch (e) {
+                // A preview that refuses is the same refusal the import
+                // would give: say it now.
+                if (unsafeError(errText(e))) throw e;
+                preview = null;
+            }
+            const v = parseVerdict(await contract.importSbp(target));
+            await settle(v, preview, sealed ? 'sealed_file' : 'file');
+        } catch (e) {
+            fail(e, back);
+        }
+    };
+
+    useEffect(() => {
+        onProgress?.(!(stage.at === 'choose' || stage.at === 'result'));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [stage.at]);
+
+    // A file Android handed over: straight to the check.
+    useEffect(() => {
+        if (openedPath) void readFile(openedPath, { at: 'choose' }, true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [openedPath]);
 
     const chooseFile = async () => {
         setError(null);
         try {
-            // Android SAF goes through this plugin too; the engine's
-            // recipient_sbpx_sniff can handle the resulting URI as
-            // long as Rust resolves it to a real path. The Tauri
-            // dialog plugin already does that translation on Android.
-            const picked = await openDialog({
-                multiple: false,
-                directory: false,
-            });
-            if (typeof picked === 'string') {
-                // On Android the picker returns a content:// SAF URI
-                // that std::fs cannot open. stage_picked_file copies
-                // the bytes into the app's private staging dir and
-                // returns a real path. On desktop this is a no-op.
-                const staged = await PickedFile.stage(picked);
-                setFilePath(staged);
-                setPreview(null);
-                setDone(false);
-            }
+            const picked = await openDialog({ multiple: false, directory: false });
+            if (typeof picked !== 'string') return;
+            // On Android the picker returns a content:// URI that std::fs
+            // cannot open; stage_picked_file copies it into the app's
+            // staging dir and returns a real path. A no-op on desktop.
+            const staged = await PickedFile.stage(picked);
+            await readFile(staged, { at: 'choose' });
         } catch (e) {
-            setError(String(e));
+            setError(friendlyError(t, errText(e)));
+            setStage({ at: 'choose' });
         }
     };
 
-    const previewPickedFile = async () => {
-        setBusy(true);
+    const importPasted = async (text: string, k: PasteKind) => {
         setError(null);
+        setStage({ at: 'working' });
+        const back: Stage = { at: 'paste' };
         try {
-            // Device Custody v1: .sbpx unwrap uses the recipient X25519
-            // priv held in device custody — no PIN at this layer. The
-            // recipient must have created an identity first; otherwise
-            // the Rust side returns `IdentityMissing` and the friendly
-            // error mapper points to "Set up your Daal address first".
-            const target = isSbpx ? await Sbpx.import(filePath) : filePath;
-            const p = await contract.previewBundle(target);
-            setPreview(p);
-        } catch (e) {
-            setError(friendlyError(t, (e as Error).message || String(e)));
-        } finally {
-            setBusy(false);
-        }
-    };
-
-    const importPickedFile = async () => {
-        setBusy(true);
-        setError(null);
-        try {
-            const target = isSbpx ? await Sbpx.import(filePath) : filePath;
-            const verdictJson = await contract.importSbp(target);
-            // Engine returns a JSON Verdict; branch on Kind.
-            // 0=Imported (silent), 1=TrustPromptNeeded (first-seen
-            // publisher — caller must render the EN+FA word grid and
-            // call resolveTrustPrompt before the routes commit),
-            // 2=RotationAccepted (silent, accepted via valid
-            // rotation chain), 3=Rejected (Reason populated).
-            // A non-JSON response (older ABI or an error path) parses
-            // to null and falls through to silent success, so the
-            // desktop scenario does not regress.
-            const v: ImportVerdict | null = parseVerdict(verdictJson);
-            if (v && v.Kind === KIND_TRUST_PROMPT_NEEDED) {
-                // Hold the modal open with the trust prompt, showing
-                // the engine's word grid over the preview's (the
-                // preview renders placeholder words — see
-                // trustFromVerdict).
-                setPreview(trustFromVerdict(preview, v));
-                setAwaitingTrust(true);
-                return;
-            }
-            if (v && v.Kind === KIND_REJECTED) {
-                setError(friendlyReason(t, v.Reason || ''));
-                return;
-            }
-            // KIND_IMPORTED, KIND_ROTATION_ACCEPTED, or unknown-but-no-error
-            noteOrigin(v?.Fingerprint || preview?.fingerprintHex);
-            setDoneVerdict(v);
-            setDone(true);
-            onImported?.();
-        } catch (e) {
-            setError(friendlyError(t, (e as Error).message || String(e)));
-        } finally {
-            setBusy(false);
-        }
-    };
-
-    /** Called by TrustPrompt with what the ENGINE said, not with what
-     *  the user tapped. resolveTrustPrompt re-verifies the pending
-     *  bundle before committing, so it can refuse at this point; this
-     *  used to set `done`, which renders the full-sheet "added"
-     *  confirmation, no matter what came back. */
-    /** The Connections page badges a publisher with how its routes
-     *  arrived; only this sheet knows (lib/importOrigin.ts). */
-    const noteOrigin = (fingerprintHex: string | undefined) => {
-        recordImportOrigin(
-            fingerprintHex,
-            tab === 'paste' ? 'paste' : isSbpx ? 'sealed_file' : 'file',
-        );
-    };
-
-    const onTrustResolved = (r: TrustResolution) => {
-        setAwaitingTrust(false);
-        if (r.decision === 2) {
-            // user cancelled — nothing to refresh, nothing to report
-            return;
-        }
-        const failure = trustFailure(t, r);
-        if (failure) {
-            setError(failure);
-            return;
-        }
-        // The routes committed in resolveTrustPrompt, so ITS verdict is
-        // the one that lists what was left out.
-        noteOrigin(r.verdict?.Fingerprint || preview?.fingerprintHex);
-        setDoneVerdict(r.verdict);
-        setDone(true);
-        onImported?.();
-    };
-
-    const importPasted = async () => {
-        setBusy(true);
-        setError(null);
-        try {
-            if (kind === 'http') {
-                // Gap 4-recipient bug fix: the engine rejects an
-                // empty publisher_fingerprint. Synthesise a stable
-                // per-URL id and surface the URL's host as the
-                // display name so derive_tree groups these rows
-                // visibly.
-                const url = pasted.trim();
+            if (k === 'http') {
+                // The engine rejects an empty publisher fingerprint: a
+                // stable per-address id, and the host as the name.
+                const url = text.trim();
                 await contract.subscriptionAdd({
                     publisherFingerprint: await syntheticSubscriptionFingerprint(url),
                     url,
                     displayName: subscriptionDisplayName(url),
                 });
-            } else if (kind === 'sbp-b64' || kind === 'sbpx-b64') {
-                // Wave 4 Step 11. This is the whole point of the paste
-                // box: a bundle that travelled as text because the
-                // channel bans files. It used to be handed to
-                // uriImport, which cannot parse base64 — the UI said
-                // it recognised the blob and then failed.
-                //
-                // importSbpBytes runs the same signature, revocation
-                // and expiry checks the file picker runs, and a sealed
-                // .sbpx still needs this phone's Daal address.
-                const verdictJson = await contract.importSbpBytes(pasted);
-                // Non-JSON response (older ABI) parses to null and is
-                // treated as success, matching the picked-file path.
-                const v: ImportVerdict | null = parseVerdict(verdictJson);
-                if (v && v.Kind === KIND_TRUST_PROMPT_NEEDED) {
-                    // First time we've seen this publisher. Same
-                    // EN+FA word grid as the file path — a pasted
-                    // route does not get a quieter trust decision.
-                    // The words come off the verdict, so nothing has
-                    // to be decoded or decrypted a second time.
-                    setPreview(trustFromVerdict(null, v));
-                    setAwaitingTrust(true);
-                    return;
-                }
-                if (v && v.Kind === KIND_REJECTED) {
-                    setError(friendlyReason(t, v.Reason || ''));
-                    return;
-                }
-                noteOrigin(v?.Fingerprint);
-                setDoneVerdict(v);
-            } else if (kind === 'uri') {
-                const res = await contract.uriImport(pasted.trim());
-                if (res.error) throw new Error(res.error);
-            } else {
-                // Best-effort: hand the body to the engine as a URI
-                // anyway; the engine's parser is strict and will
-                // reject anything it doesn't understand.
-                const res = await contract.uriImport(pasted.trim());
-                if (res.error) throw new Error(res.error);
+                onImported?.();
+                setStage({ at: 'result', outcome: { kind: 'done', verdict: null }, name: subscriptionDisplayName(url) });
+                return;
             }
-            setDone(true);
+            if (k === 'sbp-b64' || k === 'sbpx-b64') {
+                // The same signature, revocation and expiry checks the
+                // file picker runs; a sealed one still needs this
+                // phone's Daal address.
+                const v = parseVerdict(await contract.importSbpBytes(text));
+                await settle(v, null, 'paste');
+                return;
+            }
+            const res = await contract.uriImport(text.trim());
+            if (res.error) throw new Error(res.error);
             onImported?.();
+            setStage({ at: 'result', outcome: { kind: 'done', verdict: null } });
         } catch (e) {
-            setError(friendlyError(t, (e as Error).message || String(e)));
-        } finally {
-            setBusy(false);
+            fail(e, back);
         }
     };
 
-    if (done) {
-        return (
-            <Sheet
-                title={t('add.title')}
-                onClose={onClose}
-                width={520}
-                footer={
-                    <Button onClick={onClose}>{t('common.continue')}</Button>
-                }
-            >
-                <div
-                    style={{
-                        fontSize: 14,
-                        color: 'var(--paper)',
-                        padding: '10px 0',
-                    }}
-                >
-                    {t('add.done')}
-                </div>
-                <UnavailableRoutes t={t} verdict={doneVerdict} />
-            </Sheet>
-        );
-    }
+    // Detection on every change. Only a Daal file goes on by itself
+    // (spec C3.2): it is signed, and a new publisher still gets the trust
+    // question. A web address or a link waits for "Add" (`add-pasted`).
+    useEffect(() => {
+        if (stage.at !== 'paste') return;
+        if (!autoAdvances(kind)) return;
+        const text = pasted;
+        if (text === lastHanded.current) return;
+        const id = setTimeout(() => {
+            lastHanded.current = text;
+            void importPasted(text, kind);
+        }, PASTE_SETTLE_MS);
+        return () => clearTimeout(id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pasted, kind, stage.at]);
+
+    /** "Paste text": the clipboard first, else the box. */
+    const readClipboard = async (): Promise<boolean> => {
+        try {
+            const text = await readClipboardText();
+            if (text && text.trim()) {
+                setPasted(text);
+                return true;
+            }
+        } catch {
+            /* not allowed here: the box takes it */
+        }
+        return false;
+    };
+    const openPaste = async () => {
+        setError(null);
+        setStage({ at: 'paste' });
+        await readClipboard();
+    };
+
+    const onTrustResolved = (r: TrustResolution, origin: Origin, preview: PreviewedBundle) => {
+        const o = trustOutcome(t, r);
+        if (!o) {
+            // "No": nothing was added.
+            onClose();
+            return;
+        }
+        if (o.kind === 'done') {
+            recordImportOrigin(r.verdict?.Fingerprint || preview.fingerprintHex, origin);
+            onImported?.();
+            void nameFor(r.verdict?.Fingerprint || preview.fingerprintHex, preview).then((name) => {
+                if (alive.current) setStage({ at: 'result', outcome: o, name });
+            });
+            return;
+        }
+        if (o.kind !== 'trust') setStage({ at: 'result', outcome: o });
+    };
+
+    const onScanVerdict = (raw: string) => {
+        setScanBlocks(0);
+        void settle(parseVerdict(raw), null, 'scan');
+    };
+
+    const requestClose = () => {
+        if (stage.at === 'scan' && scanBlocks > 0 && !confirmClose) {
+            setConfirmClose(true);
+            return;
+        }
+        onClose();
+    };
+
+    const connect = onConnect
+        ? () => {
+              onClose();
+              onConnect();
+          }
+        : undefined;
+
+    const title =
+        stage.at === 'choose' || stage.at === 'paste' || stage.at === 'working' || stage.at === 'unlock'
+            ? t('add.title')
+            : stage.at === 'scan'
+            ? t('scan.title')
+            : stage.at === 'code'
+            ? t('add.choose.code')
+            : undefined;
 
     return (
-        <Sheet
-            title={t('add.title')}
-            onClose={onClose}
-            width={520}
-            footer={
-                <>
-                    <Button variant="ghost" onClick={onClose}>
-                        {t('common.cancel')}
-                    </Button>
-                    {awaitingTrust ? (
-                        // TrustPrompt provides its own Trust / Once /
-                        // Cancel buttons; no footer action needed.
-                        null
-                    ) : tab === 'paste' ? (
-                        <Button
-                            onClick={importPasted}
-                            disabled={busy || kind === 'empty' || kind === 'unknown'}
-                        >
-                            {busy ? '…' : t('add.import')}
-                        </Button>
-                    ) : preview ? (
-                        <Button onClick={importPickedFile} disabled={busy}>
-                            {busy ? '…' : t('add.confirm_import')}
-                        </Button>
-                    ) : (
-                        <Button
-                            onClick={previewPickedFile}
-                            disabled={busy || !filePath}
-                        >
-                            {busy ? '…' : t('add.preview')}
-                        </Button>
-                    )}
-                </>
-            }
-        >
-            <div
-                role="tablist"
-                style={{
-                    display: 'flex',
-                    gap: 4,
-                    background: 'var(--teal-deep)',
-                    padding: 4,
-                    borderRadius: 'var(--radius-md)',
-                    marginBottom: 16,
-                }}
-            >
-                <TabButton label={t('add.tab.paste')} active={tab === 'paste'} onClick={() => setTab('paste')} />
-                <TabButton label={t('add.tab.file')} active={tab === 'file'} onClick={() => setTab('file')} />
-            </div>
+        <Sheet title={title} onClose={requestClose} width={480}>
+            {stage.at === 'choose' && (
+                <div style={{ display: 'grid', gap: 4 }}>
+                    <div role="list" style={{ display: 'grid', gap: 4, marginInline: -8 }}>
+                        <ChoiceRow icon="file" label={t('add.choose.file')} onClick={() => void chooseFile()} dataButton="add-choose-file" />
+                        <ChoiceRow icon="paste" label={t('add.choose.paste')} onClick={() => void openPaste()} dataButton="add-paste" />
+                        <ChoiceRow icon="camera" label={t('add.choose.scan')} onClick={() => setStage({ at: 'scan' })} dataButton="add-scan" />
+                        {/* Optional add-ons: the standby code a relay's
+                            owner sends after switching addresses. */}
+                        <ChoiceRow icon="key" label={t('add.choose.code')} onClick={() => setStage({ at: 'code' })} dataButton="add-code" />
+                    </div>
+                    {error && <ErrorLine text={error} />}
+                    <PasteHelp t={t} />
+                </div>
+            )}
 
-            {tab === 'paste' && (
-                <div>
-                    <div style={ledeStyle()}>{t('add.lede.paste')}</div>
+            {stage.at === 'paste' && (
+                <div style={{ display: 'grid', gap: 10 }}>
                     <textarea
                         value={pasted}
-                        onChange={(e) => setPasted(e.target.value)}
+                        onChange={(e) => {
+                            setError(null);
+                            setPasted(e.target.value);
+                        }}
                         placeholder={t('add.paste_placeholder')}
-                        rows={5}
+                        rows={density === 'phone' ? 4 : 5}
+                        autoFocus
+                        aria-label={t('add.choose.paste')}
+                        data-button="paste-box"
+                        // A pasted message keeps its own direction: Latin
+                        // text is not laid out right to left in Farsi.
+                        dir="auto"
                         style={inputStyle()}
                     />
-                    <DetectPill t={t} kind={kind} />
-                    {/* The kinds of link Daal understands are named
-                        here and only here: behind a question the person
-                        chooses to ask, never in the box they type in. */}
-                    <details style={{ marginTop: 10, fontSize: 12, color: 'var(--paper-dim)' }}>
-                        <summary style={{ cursor: 'pointer' }}>{t('add.paste_help.title')}</summary>
-                        <div style={{ marginTop: 6, lineHeight: 1.6 }}>{t('add.paste_help.body')}</div>
-                    </details>
-                    {awaitingTrust && preview && (
-                        <TrustPrompt
-                            t={t}
-                            preview={preview}
-                            onResolve={onTrustResolved}
-                        />
-                    )}
-                </div>
-            )}
-
-            {tab === 'file' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <Button variant="secondary" onClick={chooseFile} disabled={busy}>
-                        {filePath ? t('add.file.change') : t('add.file.choose')}
-                    </Button>
-                    {/* ONE line, and for a sealed file the one that is
-                        true (PickedFileNote.tsx). */}
-                    {filePath && <PickedFileNote t={t} sealed={isSbpx} custody={custody} />}
-                    {preview && !awaitingTrust && (
-                        <div
-                            style={{
-                                border: '1px solid var(--teal-border)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 12,
-                                background: 'var(--teal-deep)',
-                                fontSize: 13,
-                                color: 'var(--paper)',
-                                display: 'grid',
-                                gap: 4,
-                            }}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <Button
+                            variant="secondary"
+                            leading="paste"
+                            onClick={() => void readClipboard()}
+                            dataButton="paste-again"
                         >
-                            <div>
-                                <strong>{preview.publisherName}</strong>
-                            </div>
-                            <div style={{ color: 'var(--paper-dim)', fontSize: 12 }}>
-                                {t('add.file.preview_routes').replace(
-                                    '{n}',
-                                    String(preview.routeCount),
-                                )}
-                            </div>
-                            {/* The HEX fingerprint, not the word grid.
-                                `previewBundle` is desktop-core's
-                                `preview_bundle`, which renders its words with
-                                a FOUR-WORD PLACEHOLDER list (see
-                                daal-desktop-core/src/commands.rs) — so the
-                                phrase it produces is not the phrase the
-                                publisher reads, and showing it here taught the
-                                user a fingerprint that is not theirs. The hex
-                                comes from `publisher_fingerprint` over the
-                                real publisher key and is the same on both
-                                sides. The trust decision itself is made on the
-                                engine's word grid in TrustPrompt, never on
-                                this line. */}
-                            <div
-                                style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 11,
-                                    color: 'var(--ink-mute)',
-                                    marginTop: 4,
-                                    wordBreak: 'break-all',
-                                }}
-                            >
-                                {preview.fingerprintHex}
-                            </div>
+                            {t('ui.paste')}
+                        </Button>
+                        <DetectBadge t={t} kind={kind} />
+                    </div>
+                    {(kind === 'http' || kind === 'uri') && (
+                        <div>
+                            <Button onClick={() => void importPasted(pasted, kind)} dataButton="add-pasted">
+                                {t('add.pasted.add')}
+                            </Button>
                         </div>
                     )}
-                    {awaitingTrust && preview && (
-                        <TrustPrompt
-                            t={t}
-                            preview={preview}
-                            onResolve={onTrustResolved}
-                        />
-                    )}
+                    {kind === 'unknown' && <ErrorLine text={t('add.detect.unknown')} />}
+                    {error && <ErrorLine text={error} />}
+                    <PasteHelp t={t} />
                 </div>
             )}
 
-            {error && (
-                <div
-                    style={{
-                        color: 'var(--red, #c8553d)',
-                        fontSize: 12,
-                        marginTop: 12,
-                        fontFamily: 'var(--font-mono)',
-                    }}
-                >
-                    {error}
+            {stage.at === 'code' && <StandbyCodeEntry t={t} onAccepted={() => onImported?.()} />}
+
+            {stage.at === 'scan' && (
+                <div>
+                    {confirmClose && (
+                        <div
+                            role="alert"
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                                marginBlockEnd: 12,
+                                fontSize: 14,
+                            }}
+                        >
+                            <span style={{ flex: 1, minWidth: 160 }}>{t('scan.discard.confirm')}</span>
+                            <Button variant="secondary" size="sm" onClick={() => setConfirmClose(false)} dataButton="scan-keep">
+                                {t('scan.keep')}
+                            </Button>
+                            <Button variant="danger" size="sm" onClick={onClose} dataButton="scan-discard-close">
+                                {t('scan.discard')}
+                            </Button>
+                        </div>
+                    )}
+                    <RecipientImport
+                        t={t}
+                        onVerdict={onScanVerdict}
+                        onProgress={setScanBlocks}
+                        onUsePaste={() => void openPaste()}
+                    />
                 </div>
+            )}
+
+            {stage.at === 'working' && (
+                <div
+                    role="status"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, padding: '28px 0' }}
+                >
+                    <StateIcon state="busy" size={24} />
+                    <span style={{ fontSize: 15, color: 'var(--muted)' }}>{t('add.working')}</span>
+                </div>
+            )}
+
+            {stage.at === 'unlock' && (
+                <form
+                    onSubmit={(e) => {
+                        e.preventDefault();
+                        const path = stage.path;
+                        void (async () => {
+                            try {
+                                await DeviceCustody.unlock(passphrase);
+                                setPassphrase('');
+                                await importPath(path, true, { at: 'choose' });
+                            } catch (err) {
+                                setError(friendlyError(t, errText(err)));
+                            }
+                        })();
+                    }}
+                    style={{ display: 'grid', gap: 10 }}
+                >
+                    <p style={{ margin: 0, fontSize: 14, color: 'var(--muted)' }}>{t('recipient.import.sbpx_pin_required')}</p>
+                    <Input
+                        type="password"
+                        autoFocus
+                        value={passphrase}
+                        onChange={(e) => setPassphrase(e.target.value)}
+                        placeholder={t('recipient.import.sbpx_pin_placeholder')}
+                        aria-label={t('recipient.import.sbpx_pin_placeholder')}
+                    />
+                    {error && <ErrorLine text={error} />}
+                    <Button type="submit" block disabled={!passphrase} dataButton="unlock-open">
+                        {t('add.unlock.open')}
+                    </Button>
+                </form>
+            )}
+
+            {stage.at === 'trust' && (
+                <TrustPrompt
+                    t={t}
+                    preview={stage.preview}
+                    onResolve={(r) => onTrustResolved(r, stage.origin, stage.preview)}
+                />
+            )}
+
+            {stage.at === 'result' && (
+                <ImportResult
+                    t={t}
+                    outcome={stage.outcome}
+                    name={stage.name}
+                    onConnect={stage.outcome.kind === 'done' ? connect : undefined}
+                    onClose={onClose}
+                />
             )}
         </Sheet>
     );
 }
 
-function TabButton({
+function ChoiceRow({
+    icon,
     label,
-    active,
     onClick,
+    dataButton,
 }: {
+    icon: IconName;
     label: string;
-    active: boolean;
     onClick: () => void;
+    dataButton: string;
 }) {
     return (
         <button
-            role="tab"
-            aria-selected={active}
+            type="button"
+            role="listitem"
             onClick={onClick}
+            data-button={dataButton}
+            className="daal-hover daal-inset-focus"
             style={{
-                flex: 1,
-                background: active ? 'var(--teal-raised)' : 'transparent',
+                appearance: 'none',
+                width: '100%',
+                minHeight: 64,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+                padding: 8,
+                background: 'transparent',
                 border: 0,
-                color: active ? 'var(--paper)' : 'var(--paper-dim)',
-                padding: '10px 12px',
-                borderRadius: 'var(--radius-md)',
+                borderRadius: 'var(--r-tile)',
+                color: 'var(--fg)',
                 cursor: 'pointer',
+                textAlign: 'start',
                 fontFamily: 'var(--font-body)',
-                fontSize: 13,
             }}
         >
-            {label}
+            <span
+                aria-hidden
+                style={{
+                    width: 44,
+                    height: 44,
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'var(--surface-2)',
+                    color: 'var(--gold-warm)',
+                }}
+            >
+                <Icon name={icon} size={22} />
+            </span>
+            <span style={{ flex: 1, fontSize: 16, fontWeight: 600 }}>{label}</span>
         </button>
     );
 }
 
-function DetectPill({ t, kind }: { t: (k: string) => string; kind: PasteKind }) {
-    if (kind === 'empty') return null;
-    const label = (() => {
-        switch (kind) {
-            case 'sbp-b64':
-                return t('add.detect.sbp');
-            case 'sbpx-b64':
-                return t('add.detect.sbpx');
-            case 'http':
-                return t('add.detect.subscription');
-            case 'uri':
-                return t('add.detect.uri');
-            default:
-                return t('add.detect.unknown');
-        }
-    })();
-    const bad = kind === 'unknown';
+function PasteHelp({ t }: { t: (k: string) => string }) {
+    // The kinds of link Daal understands are named here and only here:
+    // behind a question the person chooses to ask.
     return (
-        <div
-            style={{
-                marginTop: 8,
-                display: 'inline-block',
-                padding: '4px 10px',
-                borderRadius: 999,
-                background: bad
-                    ? 'rgba(200,85,61,0.10)'
-                    : 'rgba(193,158,80,0.10)',
-                border: bad
-                    ? '1px solid rgba(200,85,61,0.40)'
-                    : '1px solid rgba(193,158,80,0.40)',
-                color: bad ? 'var(--red, #c8553d)' : 'var(--gold-warm)',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 11,
-                letterSpacing: '0.04em',
-            }}
-        >
-            {label}
-        </div>
+        <Disclosure summary={t('add.paste_help.title')} icon="help" dataButton="paste-help">
+            <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>{t('add.paste_help.body')}</div>
+        </Disclosure>
     );
 }
 
-function ledeStyle() {
-    return {
-        fontSize: 14,
-        color: 'var(--paper)',
-        marginBottom: 8,
-    };
+function DetectBadge({ t, kind }: { t: (k: string) => string; kind: PasteKind }) {
+    if (kind === 'empty' || kind === 'unknown') return null;
+    const key = kind === 'http' ? 'add.detect.subscription' : kind === 'uri' ? 'add.detect.uri' : 'add.detect.ok';
+    return (
+        <Badge tone="good" icon="check">
+            {t(key)}
+        </Badge>
+    );
+}
+
+function ErrorLine({ text }: { text: string }) {
+    return (
+        <div role="alert" style={{ color: 'var(--red)', fontSize: 13, lineHeight: 1.5 }}>
+            {text}
+        </div>
+    );
 }
 
 function inputStyle() {
     return {
         width: '100%',
-        background: 'var(--teal-deep)',
-        border: '1px solid var(--teal-border)',
-        color: 'var(--paper)',
-        padding: 10,
+        background: 'var(--bg)',
+        border: '1px solid var(--line)',
+        color: 'var(--fg)',
+        padding: 12,
         borderRadius: 'var(--radius-md)',
         fontFamily: 'var(--font-body)',
-        fontSize: 13,
+        fontSize: 14,
         outline: 'none',
         boxSizing: 'border-box' as const,
+        resize: 'vertical' as const,
     };
 }

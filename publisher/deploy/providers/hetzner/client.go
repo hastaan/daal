@@ -118,7 +118,7 @@ type hcloudClient interface {
 	// rule allowing inbound 443/tcp ONLY from the supplied edge
 	// ranges. firewallID is "" on first call (creates a new
 	// rule + returns its ID); subsequent calls update the same
-	// rule in place.
+	// rule in place and keep every other rule on the firewall.
 	//
 	// FRP-8: this binds the §11.7 origin firewall to the
 	// freshly-fetched Cloudflare edge ranges. Called from the
@@ -133,6 +133,10 @@ type hcloudClient interface {
 	// the adapter spawns a defensive expiry sweep; the Helper
 	// is still expected to call FirewallRemoveEphemeralRule on
 	// completion. FRP-10 §9.5.2.
+	//
+	// An error may come WITH a non-empty ruleID: the write may have
+	// landed before the failure (read-back failed, concurrent change).
+	// Callers remove on any non-empty ruleID, error or not.
 	FirewallAddEphemeralRule(ctx context.Context, serverID, callerIP string, port int, expiresAt time.Time) (ruleID string, err error)
 
 	// FirewallRemoveEphemeralRule removes the rule identified by

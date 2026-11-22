@@ -519,9 +519,12 @@ export function RelayRebuild({
                         ? t('pub.danger.rebuild.region.body')
                         : t('pub.danger.rebuild.region.unavailable')
                 }
+                stack
+                wrapSubtitle
                 trailing={
                     <Button
                         variant="danger"
+                        leading="refresh"
                         onClick={(e) => {
                             e.stopPropagation();
                             open('L4');
@@ -543,9 +546,12 @@ export function RelayRebuild({
                         ? t('pub.danger.rebuild.provider.body')
                         : t('pub.danger.rebuild.provider.unavailable')
                 }
+                stack
+                wrapSubtitle
                 trailing={
                     <Button
                         variant="danger"
+                        leading="refresh"
                         onClick={(e) => {
                             e.stopPropagation();
                             open('L5');
@@ -559,9 +565,12 @@ export function RelayRebuild({
             <ListRow
                 title={t('pub.danger.rebuild.profile.title')}
                 subtitle={t('pub.danger.rebuild.profile.body')}
+                stack
+                wrapSubtitle
                 trailing={
                     <Button
                         variant="danger"
+                        leading="refresh"
                         onClick={(e) => {
                             e.stopPropagation();
                             open('L6');

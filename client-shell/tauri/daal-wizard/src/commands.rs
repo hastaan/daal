@@ -176,6 +176,10 @@ pub const E_RELAY_UNREACHABLE: &str = "E_RELAY_UNREACHABLE";
 pub const E_FILE_MISSING: &str = "E_FILE_MISSING";
 /// The setup helper bundled with this app lacks the verb asked for.
 pub const E_DEPLOY_TOO_OLD: &str = "E_DEPLOY_TOO_OLD";
+/// An optional add-on operation (standby address, Cloudflare, Google
+/// update channel) whose code has not landed yet. Nothing was changed.
+/// Not retryable: only an app update brings it (`addons::not_built`).
+pub const E_NOT_BUILT: &str = "E_NOT_BUILT";
 
 // ---- Publisher backup and restore (`publisher_backup`) ------------
 //
@@ -423,7 +427,7 @@ pub(crate) fn custody_get(ctx: &WizardCtx, alias: &str) -> Result<Zeroizing<Vec<
 /// every alias — so a naive `custody.get(a).is_ok()` would copy every
 /// relay's Ed25519 signing key into freed heap on each mount of the
 /// publisher surface, in a crate that otherwise zeroizes carefully.
-fn custody_has(ctx: &WizardCtx, alias: &str) -> bool {
+pub(crate) fn custody_has(ctx: &WizardCtx, alias: &str) -> bool {
     ctx.custody.get(alias).map(Zeroizing::new).is_ok()
 }
 
@@ -787,20 +791,34 @@ pub fn store_cloud_token(
     Ok(id)
 }
 
-/// A relay that already holds a readable hosting key for `provider`,
-/// so a new relay can be started without pasting the key again.
+/// A hosting key a new relay at `provider` can start with, so the key
+/// is not pasted again: the connected account's (Accounts page), or
+/// else one another relay already holds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SavedCloudToken {
+    /// The relay whose key it is; 0 when it is the account's.
     pub operator_id: i64,
-    /// The person's name for that relay; empty when they gave none.
+    /// The person's name for that relay; empty when they gave none, and
+    /// for the account's key.
     pub nickname: String,
+    /// True: the connected account's key (`hosting_account`).
+    #[serde(default)]
+    pub account: bool,
 }
 
-/// Which relay's saved hosting key a new relay at `provider` could
-/// reuse: the newest relay at that company that is not deleted and
-/// whose key custody can read right now. `None` when there is none.
+/// Which saved hosting key a new relay at `provider` would use: the
+/// account key when the Accounts page connected one and custody can read
+/// it; otherwise the newest relay at that company that is not deleted
+/// and whose key custody can read right now. `None` when there is none.
 /// Reads no secret into the result.
 pub fn saved_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<Option<SavedCloudToken>> {
+    if crate::hosting_account::has_account_key(ctx, provider) {
+        return Ok(Some(SavedCloudToken {
+            operator_id: 0,
+            nickname: String::new(),
+            account: true,
+        }));
+    }
     let mut rows = ctx.db.list()?;
     rows.sort_by_key(|r| std::cmp::Reverse(r.id));
     Ok(rows
@@ -813,17 +831,23 @@ pub fn saved_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<Option<Saved
         .map(|r| SavedCloudToken {
             operator_id: r.id,
             nickname: r.nickname,
+            account: false,
         }))
 }
 
-/// Start a new relay at `provider` with the hosting key another relay
-/// already holds. The key is copied inside custody under the new
-/// relay's own alias, so deleting either relay leaves the other's key
+/// Start a new relay at `provider` with the saved hosting key (the
+/// account's first, see [`saved_cloud_token`]). The key is copied
+/// inside custody under the new relay's own alias, so forgetting the
+/// account key or deleting either relay leaves the new relay's key
 /// alone, and it never passes through the UI.
 pub fn reuse_cloud_token(ctx: &WizardCtx, provider: &str) -> Result<i64> {
     let src = saved_cloud_token(ctx, provider)?.ok_or(WizardError::EmptyToken)?;
-    let row = ctx.db.get(src.operator_id)?;
-    let token = custody_get_string(ctx, &row.cloud_token_keystore_alias)?;
+    let alias = if src.account {
+        crate::hosting_account::account_alias(provider)
+    } else {
+        ctx.db.get(src.operator_id)?.cloud_token_keystore_alias
+    };
+    let token = custody_get_string(ctx, &alias)?;
     store_cloud_token(ctx, provider, &token, None)
 }
 
@@ -1358,8 +1382,7 @@ pub struct ProvisionCdnFrontInput {
     #[serde(default)]
     pub origin_ipv6: String,
     pub origin_path: String,
-    /// Optional. When empty the provider generates a random
-    /// `/r/<hex>` path.
+    /// Optional. Must be empty or equal `origin_path` (no Worker).
     #[serde(default)]
     pub public_path: String,
 }
@@ -1377,6 +1400,7 @@ pub fn provision_cdn_front(ctx: &WizardCtx, input: &ProvisionCdnFrontInput) -> R
             "hostname, origin_ip, origin_path required".into(),
         ));
     }
+
     let op = ctx.db.get(input.operator_id)?;
     // Read the Cloudflare token (alias =
     // daal.cloudflare.<operator_id>.token) and the cloud-provider
@@ -1398,10 +1422,18 @@ pub fn provision_cdn_front(ctx: &WizardCtx, input: &ProvisionCdnFrontInput) -> R
         .cli
         .run_cdn_provision(CdnProvisionArgs {
             hostname: &input.hostname,
+            zone: "",
             origin_ip: &input.origin_ip,
             origin_ipv6: &input.origin_ipv6,
             origin_path: &input.origin_path,
             public_path: &input.public_path,
+            origin_port: 0,
+            // This FRP-8 path has no source for the relay firewall's
+            // id (the record does not carry it), so the helper refuses
+            // it ("--firewall-id required") rather than create a
+            // firewall attached to nothing. B-7 (`addon_cdn`) replaces
+            // this path and supplies it.
+            firewall_id: "",
             out_dir: &out_dir,
             cf_token: token_str,
             cloud_token: cloud_token_str,
@@ -1827,6 +1859,14 @@ pub fn cancel_and_cleanup(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
     aliases.push(pub_alias(operator_id));
     aliases.push(cloud_alias(operator_id));
     aliases.push(cloudflare_alias(operator_id));
+    // The network test's report key, live and retired. It goes with the
+    // relay: reports are opened only with the keys of relays still in
+    // the list, and an id used again must not inherit a live key (its
+    // pack would silently be signed as a Test relay).
+    aliases.extend(crate::report_key::optional_aliases(operator_id));
+    // V019: each add-on's own secret. Read now: the add-on rows go with
+    // the relay row (ON DELETE CASCADE).
+    aliases.extend(crate::addons::secret_aliases(ctx, operator_id));
     aliases.sort();
     aliases.dedup();
 
@@ -1899,6 +1939,11 @@ pub struct DestroyReport {
     pub other_server_id: String,
     #[serde(default)]
     pub other_server_name: String,
+    /// V019: what happened to each add-on of the relay (standby address,
+    /// Cloudflare, Google channel). One that could not be taken down
+    /// keeps the relay row, like an address that still bills.
+    #[serde(default)]
+    pub addons: Vec<crate::addons::AddonOutcome>,
 }
 
 /// PA-3: the report for "another server with this relay's name is still
@@ -1917,6 +1962,7 @@ pub(crate) fn named_server_report(cloud: DecommissionResult) -> Option<DestroyRe
         retry_needed: false,
         other_server_id: named.id,
         other_server_name: named.name,
+        addons: Vec::new(),
     })
 }
 
@@ -2033,9 +2079,13 @@ pub fn relay_destroy_with(
     delete_own_server: bool,
 ) -> Result<DestroyReport> {
     if !delete_server {
+        // Nothing is asked of any provider: every add-on keeps running
+        // (and billing), as the server does. Said in the report.
+        let addons = crate::addons::left_by_local_removal(ctx, operator_id);
         cancel_and_cleanup(ctx, operator_id)?;
         return Ok(DestroyReport {
             local_removed: true,
+            addons,
             ..Default::default()
         });
     }
@@ -2063,13 +2113,21 @@ pub fn relay_destroy_with(
         ));
     }
 
+    // V019: the add-ons first (docs/optional-addons-plan.md §1.6, §2.6:
+    // the Cloudflare side goes before the server). An add-on that could
+    // not be taken down keeps the relay row below, with the credentials
+    // that remove it; the server still goes.
+    let addons = crate::addons::before_relay_destroy(ctx, operator_id)?;
+    let addons_kept = addons.iter().any(|a| a.keeps_relay);
+
     // Cloud first. A failure here propagates and the local state — row,
     // token, staged record — survives untouched for the retry.
     let cloud = destroy_cloud_resources(ctx, operator_id, &row, true, delete_own_server)?;
 
     // PA-3: another Daal server with this relay's name is still there.
     // Nothing was deleted; keep the row and its token.
-    if let Some(rep) = named_server_report(cloud.clone()) {
+    if let Some(mut rep) = named_server_report(cloud.clone()) {
+        rep.addons = addons;
         return Ok(rep);
     }
 
@@ -2077,9 +2135,10 @@ pub fn relay_destroy_with(
     // and billing. Forgetting the relay now would forget the only
     // credential that can give it back, so the row stays — marked
     // decommissioned, naming what still bills — and the same call is the
-    // retry (a server that no longer exists counts as deleted).
+    // retry (a server that no longer exists counts as deleted). An
+    // add-on still standing is the same case.
     let still_billing = failed_addresses(&cloud);
-    if cloud.retry_needed || !still_billing.is_empty() {
+    if cloud.retry_needed || !still_billing.is_empty() || addons_kept {
         ctx.db.mark_decommissioned_with_unreleased(
             operator_id,
             (ctx.clock)(),
@@ -2095,6 +2154,7 @@ pub fn relay_destroy_with(
             warnings,
             addresses: cloud.addresses,
             retry_needed: true,
+            addons,
             ..Default::default()
         });
     }
@@ -2127,6 +2187,7 @@ pub fn relay_destroy_with(
         warnings,
         addresses: cloud.addresses,
         retry_needed: false,
+        addons,
         ..Default::default()
     })
 }
@@ -2292,6 +2353,10 @@ pub fn provision_run(
         .map_err(|e| WizardError::Pricing(format!("write pubkey: {e}")))?;
 
     let families: Vec<&str> = rec.enabled_families.iter().map(|s| s.as_str()).collect();
+    // Cancel: a file `provision_cancel` writes. One left from an earlier
+    // run must not stop this one before it starts.
+    let cancel_file = crate::provision_journal::cancel_path(&ctx.journal_dir, operator_id);
+    let _ = std::fs::remove_file(&cancel_file);
     // The last `provision_error` line: on a refusal it carries the code
     // and, for `server_exists`, the id of the server already there.
     let mut last_error: Option<ProgressEvent> = None;
@@ -2326,10 +2391,12 @@ pub fn provision_run(
                 // ProvisionArgs::rollback_on_failure.
                 rollback_on_failure: true,
                 journal_path: Some(&journal),
+                cancel_file: Some(&cancel_file),
             },
             &mut forward,
         );
     let _ = std::fs::remove_file(&pubkey_path);
+    let _ = std::fs::remove_file(&cancel_file);
     let stdout_json = stdout_json.map_err(|e| map_provision_err(e, last_error.as_ref()))?;
 
     ctx.db.update_record_json(operator_id, &stdout_json)?;
@@ -2338,6 +2405,23 @@ pub fn provision_run(
     ctx.db.mark_provisioned(operator_id, now)?;
     // Only now is what the journal recorded safely in the database.
     crate::provision_journal::remove(&ctx.journal_dir, operator_id);
+    Ok(())
+}
+
+/// `provision_cancel`: the build screen's Cancel. Asks the running
+/// `provision` child for this relay to stop; it then rolls back the
+/// server and firewall it created (the run always passes
+/// `--rollback-on-failure`) and reports what it removed on its progress
+/// stream before `provision_run` returns its error. Harmless when no
+/// build is running: `provision_run` clears a stale request first.
+pub fn provision_cancel(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
+    std::fs::create_dir_all(&ctx.journal_dir)
+        .map_err(|e| WizardError::Subprocess(format!("cancel the setup: {e}")))?;
+    std::fs::write(
+        crate::provision_journal::cancel_path(&ctx.journal_dir, operator_id),
+        b"cancel\n",
+    )
+    .map_err(|e| WizardError::Subprocess(format!("cancel the setup: {e}")))?;
     Ok(())
 }
 
@@ -2455,6 +2539,15 @@ pub fn sign_relaypack(
     )
 }
 
+/// The publisher name a relay's pack is signed with: the relay's own
+/// name, or `None` for a relay without one (the caller's default then
+/// stands). `relay_identity::heal_after_reply` compares the signed pack
+/// against this before each person's file.
+pub(crate) fn relay_publisher_name(row: &crate::operator_db::OperatorRow) -> Option<String> {
+    let name = row.nickname.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// [`sign_relaypack`] with a say in how current the relay's identity
 /// must be. Only the address swap passes `AllowCached`; see
 /// [`crate::relay_identity::Freshness`].
@@ -2475,6 +2568,14 @@ pub fn sign_relaypack_with(
         crate::relay_identity::stage_for_signing(ctx, operator_id, identity_freshness)?;
 
     let row = ctx.db.get(operator_id)?;
+    // The name the family sees on this file is the relay's own name
+    // (owner, 2026-11-22: "make it simple"). A relay without one keeps
+    // what the caller passed, the old default.
+    let relay_name = relay_publisher_name(&row);
+    let publisher_name: &str = relay_name.as_deref().unwrap_or(publisher_name);
+    // Network test: a relay with a live report key is the Test relay,
+    // and every route of its pack carries the address (`_report_to`).
+    let report_to = crate::report_key::report_to_for_signing(ctx, operator_id)?;
 
     let active_subkey = ctx.db.active_subkey(operator_id)?;
     let subkey_cert_path = active_subkey
@@ -2525,6 +2626,7 @@ pub fn sign_relaypack_with(
                 // none.
                 freshness_mirrors: &mirrors,
                 relay_identity_path: identity_path.as_deref(),
+                report_to: report_to.as_deref(),
             },
             priv_buf.as_slice(),
             on_progress,
@@ -2536,7 +2638,20 @@ pub fn sign_relaypack_with(
     if let Some(p) = identity_path.as_ref() {
         let _ = std::fs::remove_file(p);
     }
-    let res = res.map_err(|e| WizardError::Pricing(e.to_string()))?;
+    let res = res.map_err(|e| {
+        // A helper from before the network test: it cannot sign the
+        // Test relay's pack, and saying so beats its flag error.
+        if report_to.is_some() && crate::cli_bridge::flag_not_defined(&e, "report-to") {
+            return coded(
+                E_DEPLOY_TOO_OLD,
+                "the setup helper bundled with this app cannot sign a test relay",
+            );
+        }
+        // A signing failure is the helper's, not pricing's: labelled
+        // `subprocess:` so the text says what failed (it used to read
+        // "pricing: … bind-and-sign: …").
+        WizardError::Subprocess(e.to_string())
+    })?;
 
     ctx.db
         .record_signed_sbp(operator_id, &res.sbp_sha256, &res.relay_pack_id, now)?;
@@ -3026,6 +3141,72 @@ fn carry_floating_ip_forward(
     } else {
         format!(
             "the reserved address (floating IP {prior_fip_id}) is still reserved and still billing, and it CANNOT be moved to the rebuilt relay: a reserved address is tied to the location it was created in, and this rebuild put the relay somewhere else. An address swap would be refused by your provider. Release it, or reserve a fresh one in the new location"
+        )
+    };
+    match serde_json::to_string(&v) {
+        Ok(body) => (body, Some(warning)),
+        Err(_) => (provisioned.to_string(), None),
+    }
+}
+
+/// Carry the `standby` object (add-on 1) from the pre-rotation record
+/// onto a freshly provisioned one, as [`carry_floating_ip_forward`] does
+/// for the primary Floating IP.
+///
+/// Every destroy-and-rebuild rung builds a brand-new record without it,
+/// while the Floating IP stays on the account and keeps billing. A record
+/// that has lost it is a standby nothing can release (removal and relay
+/// delete read it from the record), and packs signed from it lose
+/// `_standby`: a key sent later then matches nothing, and the salt —
+/// chosen once for the standby's life — is gone with it.
+///
+/// It is NOT attached to the new server (the delete unassigned it) and
+/// the new box has not bound it, so the warning always says so: in open
+/// mode recipients would reach nothing there until it is attached again.
+/// Across providers it cannot follow (a Hetzner id means nothing to
+/// another cloud) and is reported, not carried.
+fn carry_standby_forward(
+    provisioned: &str,
+    prior_record_json: &str,
+    same_provider: bool,
+    same_region: bool,
+) -> (String, Option<String>) {
+    let prior = serde_json::from_str::<serde_json::Value>(prior_record_json)
+        .ok()
+        .and_then(|v| v.get("standby").cloned())
+        .filter(|s| s.is_object());
+    let Some(prior) = prior else {
+        return (provisioned.to_string(), None);
+    };
+    let fip = prior
+        .get("floating_ip_id")
+        .and_then(|f| f.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !same_provider {
+        return (
+            provisioned.to_string(),
+            Some(format!(
+                "the standby address (floating IP {fip}) is on the PREVIOUS provider and cannot follow the relay across clouds — it is still reserved and still billing there, and Daal can no longer see it. Release it in that provider's console"
+            )),
+        );
+    }
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(provisioned) else {
+        return (provisioned.to_string(), None);
+    };
+    if v.get("standby") == Some(&prior) {
+        return (provisioned.to_string(), None);
+    }
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("standby".into(), prior);
+    }
+    let warning = if same_region {
+        format!(
+            "the standby address (floating IP {fip}) is not attached to the rebuilt relay: it is still reserved and still billing, and nobody can switch to it until it is attached again. Remove the standby and rent a new one"
+        )
+    } else {
+        format!(
+            "the standby address (floating IP {fip}) is still reserved and still billing, and it CANNOT be moved to the rebuilt relay: it is tied to the location it was rented in. Remove the standby, and rent a new one in the new location"
         )
     };
     match serde_json::to_string(&v) {
@@ -3907,6 +4088,7 @@ fn rotate_execute_inner(
                         // Journalled like a first setup, so a rebuild
                         // killed half way is found by the account check.
                         journal_path: rotate_journal.as_deref(),
+                        cancel_file: None,
                     },
                     on_progress,
                 )
@@ -3961,6 +4143,20 @@ fn rotate_execute_inner(
                 region == rec.region,
             );
             if let Some(w) = fip_warning {
+                warnings.push(w);
+            }
+            // The standby address (add-on 1) is a second Floating IP the
+            // rebuild leaves on the account, billing, and drops from the
+            // record. Carried the same way, so removal and relay delete
+            // can still release it and every later pack keeps the same
+            // commitment. See carry_standby_forward.
+            let (provisioned, standby_warning) = carry_standby_forward(
+                &provisioned,
+                &prior_record_json,
+                provider == rec.provider,
+                region == rec.region,
+            );
+            if let Some(w) = standby_warning {
                 warnings.push(w);
             }
             ctx.db.update_record_json(operator_id, &provisioned)?;
@@ -5429,6 +5625,21 @@ mod tests {
         assert!(!ctx.keystore.has(&pub_alias(id)), "legacy priv");
     }
 
+    #[test]
+    fn cancel_and_cleanup_erases_the_report_keys() {
+        // The network test's report key goes with its relay: an id used
+        // again must not inherit a live key.
+        let (ctx, _dir) = ctx(1_700_000_000);
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        ctx.custody.put(&crate::report_key::key_alias(id), &[7u8; 32]).unwrap();
+        ctx.custody.put(&crate::report_key::retired_alias(id), &[8u8; 32]).unwrap();
+
+        cancel_and_cleanup(&ctx, id).unwrap();
+
+        assert!(ctx.custody.get(&crate::report_key::key_alias(id)).is_err(), "live report key");
+        assert!(ctx.custody.get(&crate::report_key::retired_alias(id)).is_err(), "retired report key");
+    }
+
     // ---- Real teardown (relay_destroy) ---------------------------
 
     /// Drive a relay to a state that looks provisioned: a record with a
@@ -6449,6 +6660,35 @@ mod tests {
         assert!(row.last_provisioned_at_unix.is_some());
         assert!(events.iter().any(|e| e.step == "provision_start"));
         assert!(events.iter().any(|e| e.step == "provision_done"));
+    }
+
+    /// The build screen's Cancel: a request left from an earlier run is
+    /// cleared before the child starts, the child is told where to look,
+    /// and nothing is left behind afterwards.
+    #[test]
+    fn provision_run_hands_the_child_a_fresh_cancel_file() {
+        let bind = BindResult { sbp_path: "/tmp/ignored".into(), ..Default::default() };
+        let (base, _dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind.clone());
+        let mock = Arc::new(
+            MockRunner::new(test_pricing())
+                .with_provision_record(&full_record_json())
+                .with_bind_result(bind),
+        );
+        let ctx = WizardCtx { cli: mock.clone(), ..base };
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        select_profile(&ctx, id, "fsn1", "cx22", "iran-default", vec!["vless-reality".into()]).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
+        // A stale request from a run that already ended.
+        provision_cancel(&ctx, id).unwrap();
+        let path = crate::provision_journal::cancel_path(&ctx.journal_dir, id);
+        assert!(path.exists(), "provision_cancel wrote no request");
+
+        let mut on_prog = |_ev: ProgressEvent| {};
+        provision_run(&ctx, id, "", &mut on_prog).unwrap();
+        let seen = mock.provision_cancel_files.lock().unwrap().clone();
+        assert_eq!(seen, vec![(Some(path.clone()), false)], "stale request reached the child");
+        assert!(!path.exists(), "the cancel request outlived the run");
     }
 
     #[test]
@@ -8622,6 +8862,33 @@ mod tests {
     /// so "re-attach it with an address swap" was advice that fails for
     /// the rung's most common use — after which the address keeps
     /// billing and the operator concludes the app is broken.
+    /// The standby (add-on 1) survives a rebuild in the record, salt and
+    /// all, and is always reported; across providers it is reported and
+    /// not carried.
+    #[test]
+    fn a_rebuild_carries_the_standby_forward() {
+        let prior = r#"{"provider":"hetzner","region":"fsn1","server_id":"1","standby":{"floating_ip_id":"77","ip":"203.0.113.20","mode":"sealed","salt":"AAAAAAAAAAAAAAAA"}}"#;
+        let rebuilt = r#"{"provider":"hetzner","region":"fsn1","server_id":"9"}"#;
+        let (body, w) = carry_standby_forward(rebuilt, prior, true, true);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["standby"]["floating_ip_id"], "77");
+        assert_eq!(v["standby"]["salt"], "AAAAAAAAAAAAAAAA");
+        assert_eq!(v["server_id"], "9");
+        assert!(w.expect("always reported").contains("not attached"));
+
+        let (_, w) = carry_standby_forward(rebuilt, prior, true, false);
+        assert!(w.unwrap().contains("CANNOT be moved"));
+
+        let (body, w) = carry_standby_forward(rebuilt, prior, false, false);
+        assert!(!body.contains("standby"));
+        assert!(w.unwrap().contains("PREVIOUS provider"));
+
+        // No standby before: nothing changes, nothing said.
+        let (body, w) = carry_standby_forward(rebuilt, rebuilt, true, true);
+        assert_eq!(body, rebuilt);
+        assert!(w.is_none());
+    }
+
     #[test]
     fn a_carried_address_says_release_not_reattach_when_the_region_moved() {
         let rebuilt = r#"{"provider":"hetzner","region":"ash","server_id":"9"}"#;
@@ -10159,6 +10426,92 @@ mod tests {
             );
             assert_eq!(crate::relay_identity::committed(&ctx, id).unwrap().unwrap(), before);
         }
+    }
+
+    /// The owner's second bug: a person added after the relay's own name
+    /// went into packs still got a file named "Family Relay Publisher",
+    /// because every person's file is built from the relay's signed pack
+    /// and that pack was signed before. When the names differ the pack
+    /// is signed again first (the normal re-sign path); when they agree
+    /// nothing is signed.
+    #[test]
+    fn a_new_persons_file_carries_the_relays_name_signing_again_only_when_it_differs() {
+        let (ctx, _dir, mock, id) = relay_with_record(&vultr_shaped_record());
+        sign(&ctx, id).unwrap();
+        let pack = crate::freshness::default_signed_pack_path(&ctx, id);
+        // A pack signed before the relay's name went into it.
+        std::fs::write(
+            &pack,
+            crate::cli_bridge::mock_signed_pack_bytes(
+                crate::cli_bridge::SIGNER_DEFAULT_PUBLISHER_NAME,
+            ),
+        )
+        .unwrap();
+        *mock.bind_writes_pack.lock().unwrap() = true;
+        // Someone already on the relay, so the relay's first-person
+        // changes (its shadowsocks key) are behind us and only the name
+        // is left to differ.
+        crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x33u8; 32]),
+            "Ava",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::relay_identity::signed_publisher_name(&pack).as_deref(),
+            Some("Family Relay Publisher")
+        );
+        ctx.db.set_nickname(id, "  Sony's relay ").unwrap();
+        let signed_before = mock.bind_calls.lock().unwrap().len();
+
+        let added = crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x11u8; 32]),
+            "Bahar",
+        )
+        .unwrap();
+
+        {
+            let calls = mock.bind_calls.lock().unwrap();
+            assert_eq!(calls.len(), signed_before + 1, "the pack was not signed again");
+            assert_eq!(calls.last().unwrap().publisher_name, "Sony's relay");
+        }
+        assert_eq!(
+            crate::relay_identity::signed_publisher_name(&pack).as_deref(),
+            Some("Sony's relay")
+        );
+        // The person's file was built, from the renamed pack.
+        assert!(!added.sbpx_path.is_empty(), "{added:?}");
+        let packed = mock.users_pack_sbpx_calls.lock().unwrap();
+        assert_eq!(packed.last().unwrap().in_sbp_path, pack);
+        drop(packed);
+
+        // The next person: the names agree, nothing is signed.
+        crate::recipient_book::recipient_provision(
+            &ctx,
+            id,
+            &daal_recipient_addr::encode(&[0x22u8; 32]),
+            "Dara",
+        )
+        .unwrap();
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), signed_before + 1);
+
+        // A relay renamed later: its next file is signed under the new name.
+        ctx.db.set_nickname(id, "Mum's relay").unwrap();
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        {
+            let calls = mock.bind_calls.lock().unwrap();
+            assert_eq!(calls.len(), signed_before + 2);
+            assert_eq!(calls.last().unwrap().publisher_name, "Mum's relay");
+        }
+
+        // A relay without a name has nothing to compare: never signed for it.
+        ctx.db.set_nickname(id, "").unwrap();
+        crate::recipient_book::produce_shared_sbp(&ctx, id).unwrap();
+        assert_eq!(mock.bind_calls.lock().unwrap().len(), signed_before + 2);
     }
 
     /// The other side of the rule above: a REBUILT relay has new keys

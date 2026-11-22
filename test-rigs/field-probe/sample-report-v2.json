@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "report_id": "7K2M9QXR4TVB8N3PWH6JCZ5D1A",
+  "generated_hour_bucket": "2026-11-20T19:00Z",
+  "platform": "android",
+  "country_hint": "IR",
+  "carrier_class": "mobile",
+  "network_label": "mci",
+  "net": {
+    "kind": "cellular",
+    "validated": "no",
+    "metered": "yes",
+    "ipv6_global": false,
+    "private_dns": "auto",
+    "resolver_class": "isp_public"
+  },
+  "app": {
+    "build": "daal-core-0.9.0+v3-share",
+    "targets_list_version": "2026-11-20.1",
+    "targets_list_sha256": "3f1c0b7e8a9d2c4f6e5b1a0d9c8b7a6f5e4d3c2b1a09f8e7d6c5b4a392817160",
+    "desync_available": true,
+    "hello_fp": "mixed"
+  },
+  "relay_ref": "9e41c2ab",
+  "run": {
+    "complete": true,
+    "abort_reason": "",
+    "duration_bucket_s": 180,
+    "steps_run": 24,
+    "short_circuit": false
+  },
+  "probes": [
+    { "id": "A1", "name": "dns_link_allowed", "target_role": "google", "variant": "a", "result": "ok", "phase": "reach", "signals": { "dns_rcode": "noerror" } },
+    { "id": "A1", "name": "dns_link_allowed", "target_role": "google", "variant": "aaaa", "result": "ok", "phase": "reach", "signals": { "dns_rcode": "noerror" } },
+    { "id": "A2", "name": "dns_https_record", "target_role": "cf_edge", "variant": "https", "result": "type_dropped", "phase": "reach", "signals": {} },
+    { "id": "A5", "name": "dns_calibration", "target_role": "cf_edge", "variant": "a", "result": "bogon", "phase": "reach", "signals": { "dns_rcode": "noerror" } },
+    { "id": "A6", "name": "dns_public_resolver", "target_role": "public_resolver", "variant": "calibration", "result": "bogon", "phase": "reach", "signals": { "dns_rcode": "noerror" } },
+    { "id": "B1", "name": "tls_baseline", "target_role": "google", "variant": "addr_link", "result": "ok", "phase": "carry", "signals": { "connect_rtt_bucket_ms": "<160", "hello_acked": true, "rx_bytes_bucket": "<8k", "http_status_class": "2xx" } },
+    { "id": "B6", "name": "cdn_neutral_carry", "target_role": "cf_edge", "variant": "addr_public", "result": "flow_capped_suspected", "phase": "carry", "signals": { "connect_rtt_bucket_ms": "<160", "hello_acked": true, "rx_bytes_bucket": "<16k" } },
+    { "id": "B9", "name": "quic_443", "target_role": "google", "result": "timeout", "phase": "handshake", "signals": {} },
+    { "id": "C2", "name": "relay_reality", "target_role": "relay", "variant": "desync_off", "result": "reset", "phase": "handshake", "signals": {} },
+    { "id": "C3", "name": "relay_reality_split", "target_role": "relay", "variant": "sni-cut", "result": "ok", "phase": "carry", "signals": {} },
+    { "id": "C4", "name": "relay_plain_white_sni", "target_role": "relay", "variant": "sni_white", "result": "ok_carried", "phase": "carry", "signals": { "connect_rtt_bucket_ms": "<160", "first_event_ratio_tenths": 12, "hello_acked": true, "rx_bytes_bucket": ">=32k" } },
+    { "id": "C5", "name": "relay_plain_cover_sni", "target_role": "relay", "variant": "sni_cover", "result": "reset_injected_likely", "phase": "handshake", "signals": { "connect_rtt_bucket_ms": "<160", "first_event_ratio_tenths": 3, "hello_acked": true, "rx_bytes_bucket": "0" } }
+  ],
+  "findings": [
+    { "question": "reality_443_works", "answer": "no", "basis": ["C2"] },
+    { "question": "split_hello_helps", "answer": "yes", "basis": ["C2", "C3"] },
+    { "question": "white_name_helps_on_relay_ip", "answer": "yes", "basis": ["C4", "C5"] },
+    { "question": "reset_looks_injected", "answer": "yes", "basis": ["C5"] },
+    { "question": "grey_cap_seen_on_cdn_ip", "answer": "yes", "basis": ["B6"] },
+    { "question": "quic_443_alive", "answer": "no", "basis": ["B9"] }
+  ],
+  "failures": [
+    { "category": "dns_poisoned", "count_bucket": 2 },
+    { "category": "tcp_reset", "count_bucket": 2 },
+    { "category": "flow_capped_suspected", "count_bucket": 1 }
+  ],
+  "notes": ""
+}

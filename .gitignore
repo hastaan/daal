@@ -131,3 +131,6 @@ test-rigs/worldbox/driver/driver
 # AppVeyor after_build stages the renamed installers here
 # (appveyor.yml:282-296, :354).
 release-assets/
+
+# Public CDN root certificates the minter embeds (no keys).
+!publisher/deploy/relaypack/cdnroots/*.pem

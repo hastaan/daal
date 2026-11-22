@@ -151,7 +151,9 @@ func NetworkFacts(kind, id string, validated, metered int) (string, error) {
 	fresh, netChanged := false, false
 	if kind == NetKindNone {
 		// No network is not A network: what is remembered stays filed
-		// under the one the device was last on.
+		// under the one the device was last on. A survey has nothing to
+		// check with (survey.go).
+		c.survey.stop("network")
 		next.validated = 0
 	} else {
 		incoming := netmem.HashID(netmem.Kind(kind), netFactsDomain, id)

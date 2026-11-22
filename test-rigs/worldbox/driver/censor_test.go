@@ -191,6 +191,44 @@ func TestDPIEngine(t *testing.T) {
 	v, _ = run(sni, other, []byte("more"))
 	eq("another name is spared", v, true, true, true, true)
 
+	// "First two packets, no reassembly": the two halves together hold
+	// the name and are caught; a cut that leaves the name unfinished
+	// after packet two passes, and so does a name that only completes in
+	// packet three.
+	two := DPIRule{When: "tls_sni", SNI: []string{"cover.example"}, Packets: 2, Action: "rst", RSTTo: "client"}
+	v, _ = run(two, hello[:half], hello[half:], []byte("more"))
+	eq("first-two, hello in two halves", v, true, true, true, false, false)
+	at := bytes.Index(hello, []byte("cover.example"))
+	if at < 0 {
+		t.Fatal("no name in the test hello")
+	}
+	v, inj = run(two, hello[:1], hello[1:at+5], hello[at+5:], []byte("more"))
+	eq("first-two, name cut after packet two", v, true, true, true, true, true, true)
+	if len(inj) != 0 {
+		t.Fatalf("first-two box injected on a hello cut mid-name: %v", inj)
+	}
+	v, _ = run(two, hello, []byte("more"))
+	eq("first-two, whole hello in packet one", v, true, true, false, false)
+	// The whole name in packet two, the record not yet complete: the
+	// whole-record box misses it, the partial reader does not.
+	nameEnd := at + len("cover.example")
+	v, _ = run(two, hello[:1], hello[1:nameEnd+2], hello[nameEnd+2:], []byte("more"))
+	eq("first-two (whole record), name whole but record short", v, true, true, true, true, true, true)
+	two.Partial = true
+	v, _ = run(two, hello[:1], hello[1:nameEnd+2], hello[nameEnd+2:], []byte("more"))
+	eq("first-two partial, name whole in packet two", v, true, true, true, false, false, false)
+	v, inj = run(two, hello[:1], hello[1:at+5], hello[at+5:], []byte("more"))
+	eq("first-two partial, name cut after packet two", v, true, true, true, true, true, true)
+	if len(inj) != 0 {
+		t.Fatalf("partial first-two box injected on a hello cut mid-name: %v", inj)
+	}
+	if name, st := parseClientHelloPartial(hello[:at+5]); st != chNeedMore {
+		t.Fatalf("partial parse of a hello cut mid-name: %q %d", name, st)
+	}
+	if name, st := parseClientHelloPartial(hello[:nameEnd]); st != chSNI || name != "cover.example" {
+		t.Fatalf("partial parse of a hello cut right after the name: %q %d", name, st)
+	}
+
 	sni.Action = "drop"
 	v, inj = run(sni, hello, []byte("retransmit"), nil)
 	eq("drop swallows the rest of the flow, bare ACKs included", v, true, true, false, false, false)
@@ -229,6 +267,9 @@ func TestRuleValidation(t *testing.T) {
 		{When: "first_bytes_not", Allow: []string{"quic"}, Action: "drop"},
 		{When: "sometimes", Action: "drop"},
 		{When: "first_data", Action: "rst", RSTTo: "server"},
+		{When: "tls_sni", SNI: []string{"x"}, Packets: 2, Reassemble: true, Action: "rst"},
+		{When: "tls_sni", SNI: []string{"x"}, Packets: dpiMaxPkts + 1, Action: "rst"},
+		{When: "first_data", Packets: 2, Action: "rst"},
 	}
 	for _, r := range bad {
 		if r.validate() == nil {

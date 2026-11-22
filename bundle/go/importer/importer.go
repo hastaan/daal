@@ -67,13 +67,26 @@ type RouteInput struct {
 	Profile         []byte // sing-box outbound JSON; passed through to PutSecret
 
 	// Endpoint is the route's SIGNED endpoint commitment
-	// (bundle.Endpoint, as JSON), or nil for a route that is not part
+	// (bundle.Endpoint, as JSON — or, for a CDN-fronted route, its
+	// bundle.CDNEndpoint as signed under `_cdn_endpoint`; readers tell
+	// them apart with bundle.IsCDNCommitment), or nil for a route that is not part
 	// of a RelayPack. The store keeps it beside the profile so the
 	// engine can re-check, at set-route, that the outbound it is about
 	// to dial still points where the publisher signed — a second gate
 	// behind planRoutes, for any path that writes a profile without
 	// coming through here.
 	Endpoint []byte
+
+	// Standby is the route's signed `_standby` (bundle.Standby, as
+	// JSON, exactly as signed), or nil when the route may use none:
+	// absent, malformed, a shadowsocks route, a CDN-fronted route. The
+	// store keeps it beside the commitment
+	// (bundle.StandbyStoreKey(route id)) and REMOVES what it held there
+	// when this is nil, together with any accepted standby key
+	// (bundle.StandbyKeyStoreKey): a newer commitment without `_standby`
+	// must leave no address behind that the publisher may have released.
+	// Never on the route row (it can hold an address).
+	Standby []byte
 
 	// SignedAt is the signed manifest's bundle.created_at for the
 	// manifest Endpoint came from: when the publisher signed the
@@ -82,6 +95,16 @@ type RouteInput struct {
 	// so a signed skeleton handed over as a file can only move a route
 	// FORWARD. Empty exactly when Endpoint is.
 	SignedAt string
+
+	// EngineConfig is the part of the route's SIGNED
+	// family_specific_config the engine reads at connect time
+	// (bundle.EngineFamilyConfig: the pack's `_desync` offer and its
+	// `_cover_names`), or "" — always "" for a route with no signed
+	// endpoint (a pasted link, a subscription): only a route whose
+	// address its publisher signed gets a publisher's word on how its
+	// first flight may be changed. The store keeps it on the route's
+	// row (RouteRow.FamilySpecificConfigJSON); a refresh rewrites it.
+	EngineConfig string
 
 	// RelayPack carries the parsed FRP-2 metadata for this candidate.
 	// nil for non-RelayPack routes; legacy callers leave it nil. The
@@ -471,8 +494,12 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, fp bundle.Fingerpr
 			Profile:         append([]byte(nil), profile...),
 			Endpoint:        append([]byte(nil), pr.endpoint...),
 		}
+		if len(pr.standby) > 0 {
+			ri.Standby = append([]byte(nil), pr.standby...)
+		}
 		if len(pr.endpoint) > 0 {
 			ri.SignedAt = parsed.Manifest.Bundle.CreatedAt
+			ri.EngineConfig = bundle.EngineFamilyConfig(r.FamilySpecificConfig)
 		}
 		if hasRP {
 			entry, err := bundle.ParseRelayPackEntry(r.FamilySpecificConfig)

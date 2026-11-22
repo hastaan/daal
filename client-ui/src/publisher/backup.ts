@@ -16,6 +16,8 @@ import type {
     RestoreNotice,
 } from './wizardCommands';
 import { classifyPublisherError } from './wizardCommands';
+import { formatDate } from '../lib/format';
+import type { Locale } from '../lib/i18n';
 import { failureKey, rawErrorText } from './failureText';
 
 export const WORD_COUNT = 12;
@@ -56,13 +58,11 @@ export function backupCardButtonKey(c: BackupCard): string | null {
 }
 
 /** A date in the phone's own time zone and language. */
-export function dayLabel(unix: number): string {
+export function dayLabel(unix: number, locale: Locale): string {
     if (!unix) return '';
-    try {
-        return new Date(unix * 1000).toLocaleDateString(undefined, { dateStyle: 'medium' });
-    } catch {
-        return '';
-    }
+    // The app's one date format: "18 Nov 2025" in English, the Persian
+    // calendar and digits in Farsi (lib/format.ts).
+    return formatDate(locale, unix);
 }
 
 // ---- what a backup holds ---------------------------------------------
@@ -275,10 +275,15 @@ export function backupFailure(e: unknown, context: 'backup' | 'restore' = 'backu
 // ---- restore ------------------------------------------------------------
 
 /** "Made on {date}. It has {n} relays ({names}) and {m} people." */
-export function previewText(t: (k: string) => string, madeAt: number, c: BackupContents): string {
+export function previewText(
+    t: (k: string) => string,
+    madeAt: number,
+    c: BackupContents,
+    locale: Locale = 'en',
+): string {
     const live = liveRelays(c);
     return fill(t('pub.restore.preview'), {
-        date: dayLabel(madeAt),
+        date: dayLabel(madeAt, locale),
         n: live.length,
         names: relayNames(live),
         m: c.people_total,

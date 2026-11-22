@@ -1,0 +1,20 @@
+{
+  "name": "cdn-sni-allowlist",
+  "description": "On Cloudflare's addresses only ONE name may be opened: any other ClientHello to an edge — including every ECH hello, whose outer name is cloudflare-ech.com — is reset. The relay's own address is not under the rule. Op cdn: the CDN route is dead (the plan says the add-on does not rescue an SNI allowlist phase), and it does not fall back to a plain hello (the zone name is not on the list either, and the censor's log would show it).",
+  "analogue": "net4people #626: Cloudflare addresses open for one name only during an allowlist phase. Plan §2.1: 'cloudflare-ech.com is not on such a list'. Model: an exact allowlist on the edge prefix, reassembling, RST both ways; flows that carry no ClientHello are let through. Not modelled: allowlists keyed on the certificate or on the HTTP Host.",
+  "world": ["cdn"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni_not", "sni": ["www.wb-allowed.example"], "dst": "$EDGE_NET", "reassemble": true, "action": "rst", "rst_to": "both"},
+      {"when": "tls_sni", "sni": ["$CDN_HOST"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "allowed-name-spared", "probe": "tls", "to": "edge-a", "port": 443, "sni": "www.wb-allowed.example", "expect": "ok"},
+    {"name": "ech-hello-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "reset_after_hello"},
+    {"name": "other-name-blocked", "probe": "tls", "to": "edge-c", "port": 443, "sni": "www.wb-control.example", "expect": "reset_after_hello"},
+    {"name": "relay-not-under-the-rule", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "blocked"}
+}

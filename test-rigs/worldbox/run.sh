@@ -29,12 +29,15 @@ set -euo pipefail
 RIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$RIG/../.." && pwd)"
 BIN="${WB_BIN:-$RIG/bin}"
-ART="${WB_ARTIFACTS:-$REPO/dist-release/relay-v1.5.1}"
+ART="${WB_ARTIFACTS:-$REPO/dist-release/relay-v1.6.0}"
 # The tag set tools/build-engine-android.sh ships (minus cshared): naive is
 # part of the phone's engine, so it is part of the lab's.
 ENGINE_TAGS="singbox,with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego"
 export GOCACHE="${GOCACHE:-/tmp/daal-go-build}"
-export GOFLAGS="${GOFLAGS:-} -mod=mod"
+# WB_GO_MOD: the module mode of every build here. The default (-mod=mod)
+# is what the rig always used; -mod=readonly builds without touching any
+# go.mod / go.sum (what a shared working tree wants).
+export GOFLAGS="${GOFLAGS:-} ${WB_GO_MOD:--mod=mod}"
 
 mgmt=pinned
 build_only=""
@@ -81,7 +84,7 @@ unshare --map-root-user --map-auto true 2>/dev/null || cannot "need a subordinat
 unshare -Urn sh -c 'nft add table inet wb_pre && nft add chain inet wb_pre f "{ type filter hook forward priority 0; }" && nft add rule inet wb_pre f ct state new counter && nft add rule inet wb_pre f tcp dport 1 queue num 1' 2>/dev/null \
   || cannot "nftables with conntrack and NFQUEUE is not usable inside a user namespace (modules nf_tables, nf_conntrack, nfnetlink_queue)"
 for f in sing-box-1.13.12-linux-amd64 daal-relay-mgmt-0.1.0-linux-amd64 daal-relay-health-0.1.0-linux-amd64; do
-  [[ -f "$ART/$f" ]] || cannot "release artefact $ART/$f is missing — stage the release this tree pins: gh release download relay-v1.5.1 --dir $ART (see tools/release/README.md)"
+  [[ -f "$ART/$f" ]] || cannot "release artefact $ART/$f is missing — stage the release this tree pins: gh release download relay-v1.6.0 --dir $ART (see tools/release/README.md)"
 done
 [[ -n "$preflight_only" ]] && { echo "worldbox: this machine can host the rig"; exit 0; }
 
@@ -97,7 +100,12 @@ build() { # dir out [go build args…]
   (cd "$dir" && go build "$@" -o "$BIN/$out" .) || die "build failed: $out"
 }
 build "$RIG/driver"            wb
-build "$RIG/labclient"         wb-client   -tags "$ENGINE_TAGS"
+# Host calls into engine code that is still landing (add-ons wave 2) are
+# behind a tag, switched on when the engine has the function: until then
+# wb-client answers "not built" and the ops that need it record SKIPPED.
+LAB_TAGS="$ENGINE_TAGS"
+grep -qs '^func StandbyKey(' "$REPO"/core/abi/*.go && LAB_TAGS="$LAB_TAGS,wb_standby_key"
+build "$RIG/labclient"         wb-client   -tags "$LAB_TAGS"
 build "$REPO/cmd/daal-deploy"  daal-deploy
 # naive rides Cronet, loaded at run time (with_purego) from beside the
 # binary — the APK ships it in lib/<abi>/. sing-box's own dependency,
@@ -119,8 +127,9 @@ if [[ "$mgmt" == tree ]]; then
   (cd "$REPO/cmd/daal-relay-mgmt" && CGO_ENABLED=0 go build -o "$BIN/daal-relay-mgmt.tree" .) || die "build failed: daal-relay-mgmt"
   # The health endpoint is the other half of the provisioning bootstrap
   # (publisher/deploy/health): the tree's publisher pins a management
-  # fingerprint only from a box that authenticates it, which the pinned
-  # relay-v1.5.1 health binary cannot. A tree world runs the tree's.
+  # fingerprint only from a box that authenticates it, which a pinned
+  # health binary older than the tree's need not do (relay-v1.5.0's
+  # could not). A tree world runs the tree's.
   (cd "$REPO/cmd/daal-relay-health" && CGO_ENABLED=0 go build -o "$BIN/daal-relay-health.tree" .) || die "build failed: daal-relay-health"
 fi
 fi # WB_NO_BUILD

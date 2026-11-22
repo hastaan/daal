@@ -23,6 +23,13 @@
 //! The OPSEC test (`tests/key_opsec_test.rs`) greps for either
 //! symbol and fails the build if found.
 
+// Optional add-ons (docs/optional-addons-plan.md): the shared ledger
+// and plumbing, and one module per add-on. The three per-kind modules
+// are stubs that answer E_NOT_BUILT until their lanes land.
+pub mod addon_cdn;
+pub mod addon_google;
+pub mod addon_standby;
+pub mod addons;
 pub mod cli_bridge;
 pub mod commands;
 pub mod device_custody;
@@ -30,6 +37,7 @@ pub mod device_custody;
 // backends. It is the ONE place this crate opens a socket; everything
 // else reaches the network through the `daal-deploy` subprocess.
 pub mod freshness;
+pub mod hosting_account;
 pub mod keystore;
 // `modifiers_i18n` is gone. It guarded 11 `wizard.modifiers.*` keys in
 // `tauri/src/wizard/i18n/wizard.{en,fa}.json` for
@@ -62,6 +70,8 @@ pub mod recipient_sbpx;
 // matches what the pack commits to signs again.
 pub mod relay_health;
 pub mod relay_identity;
+// Network test: the Test relay's report key, and opening reports.
+pub mod report_key;
 pub mod relay_rotation;
 pub mod renew;
 pub mod restore_settle;

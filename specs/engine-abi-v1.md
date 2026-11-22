@@ -8,11 +8,14 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **62 release symbols** (61 verified 2026-11-19
+Current surface count: **70 release symbols** (61 verified 2026-11-19
 with `nm` against a library built from the tree; `engine_network_facts`
-added the same day and counted from the source — see the ABI ledger at
-the end of this document, which is the authoritative count). The source
-tree carries **65** `//export engine_*` declarations; the extra three
+added the same day, `engine_relaypack_refresh`, the five
+`engine_field_probe_*`, `engine_survey_routes` and `engine_standby_key`
+on 2026-11-20, all counted from the source — see
+the ABI ledger at the end of this document, which is the authoritative
+count). The source
+tree carries **73** `//export engine_*` declarations; the extra three
 are `//go:build cshared && soak` and are never present in a release
 build.
 
@@ -490,7 +493,9 @@ A route is connected only once it has carried one real round trip
   code, and for which route. `""` (it was not), `"needs_new_file"` (a
   RelayPack route with no signed endpoint: it was imported from a file
   made before files carried one, and only a new file fixes it),
-  `"cooldown"`, `"revoked"`, `"expired"`, `"other"`. Cleared by the next
+  `"cooldown"`, `"revoked"`, `"expired"`, `"family_unsupported"` (an
+  `amneziawg` route: refused even when picked, since every attempt is a
+  plain WireGuard handshake to a server that drops it), `"other"`. Cleared by the next
   `engine_set_route` that is not refused and by an `engine_clear_route`
   that stops something (above) — however soon after the refusal that
   call comes: a disconnected engine reports no refusal. (Between
@@ -539,8 +544,13 @@ A route is connected only once it has carried one real round trip
     not refuse right now (same function: not revoked, not expired, not
     needing a new file, not cooling down, endpoint guard), minus
     experimental families while that gate is off (`refused:
-    "experimental_off"`) and bulk-capable routes in `lifeline-strict`
-    (`refused: "mode"`). Routes left out are listed after the tried
+    "experimental_off"`), bulk-capable routes in `lifeline-strict`
+    (`refused: "mode"`), and, gate open or closed, every family the
+    path manager never selects (`routestore.IsSelectableFamily` false):
+    `refused: "family_unsupported"` for one this build cannot dial
+    (amneziawg, tor-bridge, ...), `refused: "manual_only"` for `other`
+    or an unknown family (a pasted link to someone else's server,
+    connected only when the person picks it). Routes left out are listed after the tried
     ones with `result: "refused"`; nothing is written to
     `connect_refused`. `candidates` counts the routes that could be
     tried.
@@ -606,7 +616,12 @@ A route is connected only once it has carried one real round trip
     (two different names to the same address AND port: one got through /
     both stopped at the same point); `all_failed`; and four beyond the
     first design: `none_usable`, `cancelled`, `no_data_plane`,
-    `store_unreadable`. `udp_blocked_here` keeps the contract's name
+    `store_unreadable`; and `looking_for_address` (added 2026-11-20:
+    nothing else carried and the engine has paused the dead route for
+    one direct walk of its pack's freshness mirrors — see "Recovery for
+    a route that is connected and carries nothing" below; `state` is
+    `trying` while it says this, and the pass's own verdict comes back
+    when the walk finds nothing). `udp_blocked_here` keeps the contract's name
     and says more than is proved: the two observations show that THIS
     route's UDP port was silent while the server's address was alive —
     a network dropping UDP, a stopped UDP service on the relay and a
@@ -765,6 +780,236 @@ A route is connected only once it has carried one real round trip
     a consumer shows the pass, not each candidate's failure. A failed
     pass's block survives an `engine_clear_route` that finds nothing
     running, with `mode` false.
+  - **Recovery for a route that is connected and carries nothing**
+    (added 2026-11-20, blackout plan C0; `core/abi/relaypack_recover.go`,
+    `core/refresh/relaypack_recover.go`). When the automatic connect is in
+    charge of a route that is failed-but-running and nothing else
+    carries — at the end of a fall-over pass, at the end of one with NO
+    other candidate (a one-route file, or every other route cooling
+    down), or on a later check of the dead route while the pass back-off
+    holds — and the lost route's pack names a freshness endpoint whose
+    failure-walk limit allows it, the engine: stops the dead instance and
+    opens the RECOVERY WINDOW (no route is active, but every ordinary
+    fetcher — subscription, revocation, bootstrap, the scheduled
+    freshness poll — still sees the tunnel guard as up, because the
+    person has not disconnected); walks THAT pack's freshness mirrors
+    ONCE, directly from the device's own address (one pack, at most 45 s
+    end to end, no pointer recovery on this kind); applies a newer signed
+    pack only through the ordinary verified path; then puts the route's
+    instance back and closes the window. When a pack was applied, the
+    routes of the applied pack are forgiven their cooldowns, the outage's
+    pass back-off is reset and the route is checked at once on its new
+    endpoint. Not in `lifeline-strict` ("nothing unless I ask": only the
+    button below walks there). During the walk `auto.state` is `trying`
+    with `verdict: "looking_for_address"` (and `trying: ""`),
+    `route_running` false and `active_route` `""`; the host keeps the TUN
+    and does nothing. `engine_connect_auto` called during the walk
+    returns AT ONCE with `verdict: "looking_for_address"`, `connected`
+    false, and puts the automatic connect in charge; it does not wait
+    for the walk and does not cut it off. Any stop
+    (`engine_clear_route`, `engine_set_route`, a newer pass,
+    `engine_shutdown`, any connect that starts an instance) cuts the walk
+    off and nothing is put back; Shutdown waits up to 3 s for it to let
+    go of the store.
+    - Rate limits, per pack, persisted: per network (hashed tag; the
+      last four networks kept) at most once per 10 min, doubling per
+      walk on that network that found nothing new, capped at 1 h; a
+      network not walked yet after 1 min since the last walk anywhere;
+      and never more than 4 walks an hour or 12 a day whatever the
+      networks. A walk that was cancelled, or that never reached the
+      network, does not spend the floor and is not a miss (a cancelled
+      one still counts toward the hourly/daily ceiling). A fall-over
+      pass on another network (after 1 min there) is not held to the
+      pass back-off unless that network had a pass of its own this
+      outage whose back-off still holds. Neither unscheduled kind moves
+      the scheduled poll's `last_failure_at` / `consecutive_failures`;
+      a scheduled poll the guard refuses — or one that would ride the
+      tunnel of a running route whose connection check has failed —
+      keeps its stamp but does not escalate, dials nothing and does not
+      try pointer recovery.
+    - The walk's dialer re-checks on every dial whether a route is
+      active: if one comes up mid-walk the rest of the walk is refused,
+      not sent direct; and any connect cancels the walk before it raises
+      the guard, so no connection from the real address stays open
+      beside a live tunnel.
+    - One attempt per pack at a time: a scheduled poll, a failure walk
+      or a press that finds the pack being walked returns at once
+      (`skipped_rate_limited`, `retry_after_s` 30), dials nothing and
+      stamps nothing.
+    - `engine_export_diagnostics` member `relay_recovery` (always
+      present, from memory): `{"state":"idle|looking|updated|unchanged|
+      unreachable|rejected|tunnel_required|rate_limited|cancelled",
+      "trigger":"failure|user|","packs":N,"outcome":"<core/refresh
+      outcome code>","bucket":"YYYY-MM-DDTHH:00:00Z|"}`. The refresh
+      outcome `cancelled` is new with this kind (an unscheduled walk cut
+      off from outside; never recorded as `freshness_unreachable`).
+  - **The connect ladder** (added 2026-11-20, revised the same day;
+    `core/abi/connect_ladder.go`; blackout plan T2/T5,
+    `docs/adaptive-cover-names-plan.md` §1.3–§1.7). Inside the pass, no
+    new call. When a TCP route's attempt is stopped AT ITS TLS HELLO, the
+    pass tries the SAME route again at once, alone, with its first flight
+    changed — a VARIANT: a hello desync preset (the pack's `_desync`
+    offer first, then `sni-cut`, `tlsrec-sni`, `chain`; only where the
+    outbound can be cut), a cover name from the route's signed
+    `_cover_names` list (`specs/relaypack-v1.md`), or both. What it gets
+    depends on what stopped the hello:
+    - reset or closed at the hello (not measured as the relay's own: a
+      stop that came back no sooner than one measured round trip is the
+      relay refusing, and gets nothing), category
+      `tls_sni_or_cert_block_suspected`, `tcp_reset` /
+      `tls_handshake_failed` in the handshake phase, or `refined:
+      name_blocked`: up to 2 variants, names included;
+    - unanswered after the TCP connect (a timeout — what a default-deny
+      address looks like as much as a name): one preset at most, no name;
+    - `refined: address_blocked` (two names to the same address and port
+      stopped alike), or any other failure: nothing more for the route in
+      this pass. When two routes or more were tried and every TCP attempt
+      timed out at its hello, the ladder is off for the rest of the pass.
+    A fall-over pass whose connected route failed with a hello-shaped
+    category tries that route's next variant (or, when a variant was what
+    was running, the route as it is) first.
+    - Cover names are offered only for a route with a stored signed
+      endpoint, from a `trusted` or `tofu` publisher, whose outbound is
+      proved by its key (REALITY on with its public key; or a certificate
+      key pin with no `insecure`); vless-reality only takes `reality:
+      true` entries; class `cdn` entries are not offered by this build;
+      none on the shared bucket of a host that has reported no network.
+    - Budget: at most 2 variants per route per pass (1 after a hello
+      timeout) and at most 3 per pass; each counts against the
+      12-per-hour side-probe allowance and none is tried once it is spent
+      (a route's remembered first variant is its own attempt, not
+      counted); at most 3 distinct cover names per (network, relay
+      address) ever — a count kept in the network's snapshot, hashes
+      only, which forgetting or re-minting a route does not reset — and
+      none new to a relay while two names to it carry a blocked mark
+      here. In `lifeline-strict`, and in every pass the engine starts by
+      itself, only variants that carried on this network before are
+      used. Always sequential.
+    - A variant's failure at its hello is the variant's alone: no route
+      cooldown, no family cooldown, no failure row, nothing remembered
+      against the route (the path manager's attempt is closed without an
+      outcome). A connected route whose variant fails a liveness check in
+      any OTHER way is charged as a route. A variant that carries after
+      the route's own hello was stopped in the same pass drops the route's
+      charge, lifts its cooldown, and takes back the family step that
+      charge took — unless another route of the family failed in the
+      pass. Its outcome is kept per network under its own key
+      (`specs/network-memory-v1.md` "Route variants"): only a reset or
+      close at the hello marks a variant (a silent failure, a server-side
+      stop or a later failure writes nothing; one that carried here
+      before needs two in a row); one that cannot start is set aside in
+      memory until the engine restarts. One that carried here within 48 h,
+      more recently than the plain route, is the route's FIRST attempt
+      there next time (and what a reconnect of the route starts while the
+      device stays on that network); on another network nothing of it
+      applies. When a route's signed endpoint changes, its variants are
+      forgotten.
+    - `tried[]` entries gain `"variant":"<word>"` (omitted for the route
+      as it is): `d:<preset>` (`split1|sni-cut|chain|tlsrec-sni`, or
+      `pack-<6 hex>` for a pack offer that is not one preset — the hex a
+      digest of the offer), `n:<id>` (the entry's signed id — never the
+      name), or both joined by `#`. A NEW `why` value `ladder` marks an
+      attempt the ladder added. The result gains `"variant"` for the
+      connected route, and the `auto` block gains `"variant"` (`""` for
+      the route as it is). Log lines carry the same words only; the
+      failure text of a name variant is not published.
+- **Look for a new address now** — `engine_relaypack_refresh(relay_pack_id,
+  out, out_len)` (added 2026-11-20):
+
+  ```c
+  int engine_relaypack_refresh(const char* relay_pack_id, void* out, int out_len);
+  ```
+
+  One freshness walk on request, for one pack or (`""`) for every held
+  pack that names an endpoint (at most three). With a route that
+  carries: through the tunnel dialer, or refused (`tunnel_required`) —
+  the guard is unchanged. With nothing running: direct. With a route
+  running that carries nothing: the recovery above, with
+  `trigger: "user"`. Works in `lifeline-strict`. Per pack at most one
+  walk a minute, then 2 min after two presses in a row that found
+  nothing new and 5 min after three or more (the count starts again an
+  hour after the last press); a press inside it dials and stops
+  nothing, and a press the guard refuses or that is cut off does not
+  use it. `in_progress` while a walk or an automatic pass is in flight
+  (nothing is started). Every walk is registered with the engine: a
+  disconnect or a connect cuts it off (`cancelled`). Blocking, bounded
+  by the walk (≈ 55 s per pack at worst): call it off the UI thread.
+  Writes `{"outcome":"updated|unchanged|unreachable|rejected|
+  tunnel_required|rate_limited|no_endpoints|unknown_pack|in_progress|cancelled",
+  "retry_after_s":N,"route_paused":bool,"rechecking":bool,
+  "packs":[{"relay_pack_id":"…","outcome":"…","kind":"on_demand",
+  "applied":bool,"changed":bool,"via_tunnel":bool,"endpoints_tried":N,
+  "providers":N,…}]}`; returns the bytes written, or -1 only when the
+  engine is not initialised. No URL, host or address is ever returned.
+- **Network test** — `engine_field_probe_{start,status,cancel,seal,discard}`
+  (added 2026-11-20, `core/abi/fieldprobe.go`; the test is
+  `specs/field-probe-v2.md`):
+
+  ```c
+  int engine_field_probe_start(const char* opts_json, void* out, int out_len);
+  int engine_field_probe_status(void* out, int out_len);
+  int engine_field_probe_cancel(const char* reason);
+  int engine_field_probe_seal(const char* opts_json, void* out, int out_len);
+  int engine_field_probe_discard(void);
+  ```
+
+  - `start` returns AT ONCE; the run (≈ 3 min, hard stop 4) goes on in
+    the engine. `opts_json`: `{"network_label":"home_internet|mci|
+    irancell|rightel|other_mobile|work_or_public|not_said",
+    "dns_servers":["<link DNS server>",…],"private_dns":"off|auto|strict|
+    unknown","consent_version":1,"vpn_active":bool,"ipv6_global":bool,
+    "blocked":bool}` (`blocked`: the host's
+    `onBlockedStatusChanged`). `private_dns: "strict"` skips the
+    link-resolver questions.
+    `dns_servers` are used in memory for the run only (Go cannot ask
+    Android's resolver for TXT/HTTPS); on a Linux desktop with none
+    given, `/etc/resolv.conf`. Writes `{"started":true,"of":0}` or
+    `{"started":false,"refused":"running|connected|vpn_active|
+    no_network|local_blocked|consent_required|no_report_key|
+    no_test_relay|test_relay_shared|rate_limited"}` (`consent_version` / `retry_after_min` added where
+    they apply). -1 only for an engine not initialised or opts that
+    are not JSON.
+  - `status`: `{"state":"running","step":N,"of":M}`, or the most recent
+    kept result `{"state":"done|aborted","net_kind":"wifi|cellular|
+    ethernet|other|unknown","report":{…schema v2…},"summary":
+    ["netTest.summary.…",…],"complete":bool,"abort_reason":"…"}`, or
+    `{"state":"idle","plan":{"steps","max_connections",
+    "max_relay_connections","minutes","consent_version",
+    "targets_version","names":[…],"public_resolver":"1.1.1.1"}}`
+    (`names`: every name the test may resolve or put in a hello, and
+    `public_resolver` the one resolver it asks directly — the "what is
+    tested" screen). `abort_reason` adds `local_blocked`, `vpn_active`,
+    `connected` to v1's set. The idle and done/aborted answers also carry
+    `"has_test_relay":bool` (a trusted held route carries a report
+    address; the page offers the test only then) and `"publisher_id"`
+    (that route's publisher, "" when none).
+  - `cancel(reason)`: `""` (the person), `"backgrounded"`,
+    `"network_changed"`, `"vpn_active"` (the Android shell's
+    NetworkCallback on `TRANSPORT_VPN`), `"connecting"`; the partial
+    result is kept. The engine also stops a run by itself when Daal
+    connects, another VPN shows in the network facts, or the network
+    changes. Returns 1 when a run
+    was going, else 0.
+  - `seal`: `opts_json` `{"notes":"≤500 chars","transient":bool,
+    "out_path":"<dir or file>","net_kind":""}` — the kept result with
+    the note, validated, padded to 16 KiB and sealed to the main Test
+    route's own `_report_to` (`specs/sealed-report-v1.md`); file mode
+    0600, neutral name `net-xxxxxxxx.dat`. `transient: true`: the
+    engine writes it in `<state_dir>/fieldprobe-out/` and ignores
+    `out_path`; such files are deleted by `discard`, at shutdown, by the
+    next process's first network-test call, and after an hour.
+    `out_path` (required when not transient) is chosen by the shell,
+    never by the page. Writes `{"sealed":true,"path","file_name","bytes"}`
+    or `{"sealed":false,"refused":"no_result|notes_too_long|running"}`.
+  - `discard`: deletes every kept result and transient file (cancelling a
+    run first); returns how many results, or -1.
+  - Kept in the route store's encrypted secrets (`fieldprobe/result/
+    <kind>`, `fieldprobe/history`), so `engine_panic_wipe` removes them;
+    7-day expiry. `engine_shutdown` stops a run (waits up to 5 s).
+    Every probe socket goes through the host's protect callback
+    (`engine.ProtectFD`); a refusal with no TUN fd and no route is
+    ignored (nothing to bypass). Logs: one start and one end line and
+    refusal codes, closed words only.
 - **A switch that fails goes back** (added 2026-11-19, the end-to-end
   rig's SW-1): `engine_set_route(B)` while route A is carrying, where B
   then carries nothing, still returns the error and records B's failure
@@ -1233,7 +1478,12 @@ nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_
 grep -rh '^//export engine_' core/ | wc -l
 ```
 
-**Release surface: 62.  Source surface: 65.** (2026-11-19. It was 58 /
+**Release surface: 70.  Source surface: 73.** (2026-11-20, later:
+`engine_standby_key` added (optional add-ons S7); counting the source
+for it found `engine_survey_routes` already there and in neither count,
+so the step is 68 / 71 → 70 / 73. Earlier on 2026-11-20: the five
+`engine_field_probe_*` added, after `engine_relaypack_refresh` made it
+63 / 66 the same day. 62 / 65 on 2026-11-19. It was 58 /
 61 on 2026-08-17; `engine_set_tunnel_refresh`, `engine_route_precheck`,
 `engine_connect_auto` and `engine_network_facts` were added since, the
 first without this ledger being updated. 62 / 65 is counted from the
@@ -1274,6 +1524,14 @@ Added after that pass (append-only, no existing signature changed):
 | `engine_route_precheck` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; see "Connection check" above |
 | `engine_connect_auto` | `(void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; blocking; see "Automatic connect" above |
 | `engine_network_facts` | `(const char *kind, const char *id, int validated, int metered, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 for an unknown kind or an engine that is not initialised; never blocks on a connection check; see "Network facts from the host" above |
+| `engine_relaypack_refresh` | `(const char *relay_pack_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when the engine is not initialised; blocking, bounded by one freshness walk; see "Look for a new address now" above |
+| `engine_field_probe_start` | `(const char *opts_json, void *out, int out_len) -> int` | JSON body via `copyOut`; returns at once; refusals are JSON, -1 only for an engine not initialised or bad JSON; see "Network test" above |
+| `engine_field_probe_status` | `(void *out, int out_len) -> int` | JSON body via `copyOut`; -1 only when not initialised |
+| `engine_field_probe_cancel` | `(const char *reason) -> int` | 1 a run was going, 0 not |
+| `engine_field_probe_seal` | `(const char *opts_json, void *out, int out_len) -> int` | JSON body via `copyOut`; writes the sealed file; refusals are JSON |
+| `engine_field_probe_discard` | `(void) -> int` | results deleted (>= 0), -1 on error |
+| `engine_survey_routes` | `(int start, void *out, int out_len) -> int` | JSON body via `copyOut`; recorded here 2026-11-20, the comment above its export in `core/abi/survey_export.go` is its contract |
+| `engine_standby_key` | `(const char *relay_pack_id, const char *key, void *out, int out_len) -> int` | JSON `{"outcome":"accepted\|no_match\|malformed\|no_standby","routes":<n>}` via `copyOut`; `relay_pack_id` `""` = every held file; keeps the 16 key bytes on each route whose sealed `_standby` it opens; never echoes the key or the address; -1 when the engine is not initialised or the store cannot be written. Optional for the desktop core (`Engine::standby_key`). `specs/optional-addons-v1.md` §3.4 |
 
 The TUN triplet was specified only in
 `development-phases/45-gap-dataplane-and-delivery.md` and never merged
@@ -1299,7 +1557,10 @@ grows again, update the live ones together (the count was 60 in each as
 of 2026-11-19; `engine_connect_auto` made it 61 and
 `engine_network_facts` 62 the same day, and only
 `daal` `EXPECTED_ABI` and this document were updated with them; the last three are dated history and keep the number
-they were written with):
+they were written with). On 2026-11-20 (70, after `engine_standby_key`) the live
+ones were brought up together: `daal` `EXPECTED_ABI`, `specs/frp-track-v1.md`,
+`development-phases/README.md`, `docs/build-and-release.md` and the unreleased
+section of `CHANGELOG.md`:
 
 - `daal` `EXPECTED_ABI`
 - `specs/frp-track-v1.md`

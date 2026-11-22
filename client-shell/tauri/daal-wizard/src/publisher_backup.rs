@@ -7,7 +7,8 @@
 //! Everything a publisher needs to keep serving their family lives in
 //! this app's private storage on one phone: the relays, each relay's
 //! signing key and hosting key, the people, their files and the setup
-//! journals. The keys are wrapped under the phone's own key store
+//! journals; and the account keys kept apart from any relay (the
+//! Accounts page's hosting key and Cloudflare key), when there are any. The keys are wrapped under the phone's own key store
 //! (`device_custody`), so they cannot leave the phone as they are. A
 //! backup re-wraps them under a secret the person holds, and a restore
 //! wraps them again under the new phone's key store.
@@ -143,7 +144,23 @@ pub const INCLUDED_TABLES: &[&str] = &[
     "recipient_name_counters",
     "relay_identity",
     "freshness_endpoints",
+    // V019: the add-on ledger. A new phone must know what still bills
+    // and how to take it down; each add-on's secret comes along through
+    // `ALIAS_COLUMNS`.
+    "relay_addons",
 ];
+
+/// INCLUDED tables added after backups were already being made, with
+/// the schema version that added each. A backup from before that
+/// version has no such table and restores as if it were empty; and the
+/// table counts in the staleness digest only once it has rows, so a
+/// phone that never used it keeps the digest (and the up-to-date
+/// backup) it had before the table existed.
+pub const LATER_TABLES: &[(&str, i64)] = &[("relay_addons", 19)];
+
+fn later_table_since(t: &str) -> Option<i64> {
+    LATER_TABLES.iter().find(|(n, _)| *n == t).map(|(_, v)| *v)
+}
 
 /// Tables a backup deliberately leaves out: this phone's own recipient
 /// identity, its audit and bookkeeping, and the per-device backup meta.
@@ -202,6 +219,7 @@ const ALIAS_COLUMNS: &[(&str, &str)] = &[
     ("operators", "publisher_priv_keystore_alias"),
     ("operators", "cloud_token_keystore_alias"),
     ("freshness_endpoints", "secret_alias"),
+    ("relay_addons", "secret_alias"),
     ("cells", "bundle_signer_priv_alias"),
     ("cells", "admin_priv_alias"),
 ];
@@ -983,6 +1001,32 @@ fn referenced_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<(String, Opti
     out
 }
 
+/// The network-test report aliases every relay in `tables` may have
+/// (`crate::report_key`). Not columns: present only once made.
+fn report_aliases(tables: &BTreeMap<String, TableDump>) -> Vec<String> {
+    let empty = TableDump::default();
+    let ops = tables.get("operators").unwrap_or(&empty);
+    ops.rows
+        .iter()
+        .flat_map(|r| crate::report_key::optional_aliases(ops.get(r, "id").as_i64()))
+        .collect()
+}
+
+/// The account keys a phone may hold apart from any relay (the Accounts
+/// page): each hosting company's key, the Cloudflare key with its zone
+/// and what it can do beyond the five, and the Google account's write key with its script's
+/// address. Not columns, so carried only when present: a phone
+/// with no account keeps the same digest (and the same backup) as
+/// before they existed, and a backup made before them restores as is.
+fn account_aliases() -> Vec<String> {
+    let mut out = crate::hosting_account::all_account_aliases();
+    out.push(crate::addon_cdn::ACCOUNT_ALIAS.to_string());
+    out.push(crate::addon_cdn::ACCOUNT_ZONE_ALIAS.to_string());
+    out.push(crate::addon_cdn::ACCOUNT_EXTRA_ALIAS.to_string());
+    out.extend(crate::addon_google::ACCOUNT_ALIASES.iter().map(|a| a.to_string()));
+    out
+}
+
 fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
     let staging = ctx.staging_dir.clone();
     let (tables, path_files) = ctx
@@ -1014,6 +1058,37 @@ fn collect_state(ctx: &WizardCtx, mode: SecretMode) -> Result<Snapshot> {
                         format!("the signing key of relay {id} cannot be read"),
                     ));
                 } else if matches!(e, CustodyError::NotFound(_)) {
+                    snap.missing.push(alias);
+                } else {
+                    return Err(coded(E_CUSTODY_BACKEND, e));
+                }
+            }
+        }
+    }
+    // Network-test report keys and the account keys: in the backup
+    // when they exist, and only then, so a publisher who never made one
+    // keeps the same digest (and the same backup) as before they existed.
+    let optional = snap
+        .operator_ids()
+        .into_iter()
+        .flat_map(crate::report_key::optional_aliases)
+        .chain(account_aliases())
+        .collect::<Vec<_>>();
+    for alias in optional {
+        if snap.secrets.iter().any(|(a, _)| *a == alias) {
+            continue;
+        }
+        match ctx.custody.get(&alias) {
+            Ok(v) => snap.secrets.push((alias, Zeroizing::new(v))),
+            Err(CustodyError::NotFound(_)) => {}
+            Err(CustodyError::Locked) => {
+                return Err(coded(
+                    E_CUSTODY_LOCKED,
+                    "unlock this device's key store to continue",
+                ))
+            }
+            Err(e) => {
+                if mode == SecretMode::Lenient {
                     snap.missing.push(alias);
                 } else {
                     return Err(coded(E_CUSTODY_BACKEND, e));
@@ -1069,6 +1144,9 @@ fn sha_hex(b: &[u8]) -> String {
 fn digest_of(s: &Snapshot) -> String {
     let mut tables = BTreeMap::new();
     for (name, t) in &s.tables {
+        if t.rows.is_empty() && later_table_since(name).is_some() {
+            continue;
+        }
         let keep: Vec<usize> = (0..t.columns.len())
             .filter(|&i| {
                 !is_listed(RESET_COLUMNS, name, &t.columns[i])
@@ -1345,7 +1423,12 @@ fn parse_payload(ctx: &WizardCtx, pt: &[u8]) -> Result<Parsed> {
     }
     for &t in INCLUDED_TABLES {
         if !tables.contains_key(t) {
-            return Err(damaged("a table is missing"));
+            // A table this backup is older than is not missing: it did
+            // not exist yet, and restores as empty.
+            match later_table_since(t) {
+                Some(since) if schema < since => continue,
+                _ => return Err(damaged("a table is missing")),
+            }
         }
     }
     if schema < current {
@@ -1355,7 +1438,14 @@ fn parse_payload(ctx: &WizardCtx, pt: &[u8]) -> Result<Parsed> {
     // Aliases: every column value and every secret must be a publisher
     // alias, and every secret must be referenced by the rows.
     let referenced = referenced_aliases(&tables);
-    let referenced_set: BTreeSet<&str> = referenced.iter().map(|(a, _)| a.as_str()).collect();
+    // A relay's network-test report keys may be there too (only when
+    // they were made; see collect_state). So may the account keys (only when this phone had them).
+    let optional: Vec<String> = report_aliases(&tables)
+        .into_iter()
+        .chain(account_aliases())
+        .collect();
+    let mut referenced_set: BTreeSet<&str> = referenced.iter().map(|(a, _)| a.as_str()).collect();
+    referenced_set.extend(optional.iter().map(String::as_str));
     for (a, _) in &referenced {
         if alias_forbidden(a, &rec_aliases) {
             return Err(damaged("the contents name a key a backup may not hold"));
@@ -1807,7 +1897,10 @@ fn contents_of(s: &Snapshot) -> BackupContents {
         .count() as i64;
     BackupContents {
         people_total: relays.iter().map(|r| r.people).sum(),
-        includes_hosting_key: relays.iter().any(|r| r.has_hosting_key),
+        includes_hosting_key: relays.iter().any(|r| r.has_hosting_key)
+            || crate::hosting_account::all_account_aliases()
+                .iter()
+                .any(|a| s.secret(a).is_some()),
         files: s.files.len() as i64,
         unfinished_setups: unfinished,
         relays,
@@ -2475,6 +2568,7 @@ pub fn backup_restore(
     let mut forget: BTreeSet<String> = referenced_aliases(&current.tables)
         .into_iter()
         .map(|(a, _)| a)
+        .chain(report_aliases(&current.tables))
         .filter(|a| !backup_aliases.contains(a.as_str()))
         .collect();
     for a in ctx.db.list_all_keystore_aliases().unwrap_or_default() {

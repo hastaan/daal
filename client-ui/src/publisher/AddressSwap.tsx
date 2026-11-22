@@ -181,9 +181,12 @@ export function AddressSwap({
                         ? t('pub.danger.address.body')
                         : t('pub.danger.address.unavailable')
                 }
+                stack
+                wrapSubtitle
                 trailing={
                     <Button
                         variant="danger"
+                        leading="refresh"
                         onClick={(e) => {
                             e.stopPropagation();
                             setErr(null);

@@ -45,7 +45,24 @@ type Provenance struct {
 	// same to someone choosing a route under censorship. Empty when
 	// nothing was lost.
 	Downgrade string
+
+	// Notice is a stable token for the host's own copy of Downgrade
+	// ("" when there is nothing to say). See the Notice* constants.
+	Notice string
 }
+
+// Provenance.Notice values.
+const (
+	// An AmneziaWG conf with junk-packet fields only, imported as plain
+	// WireGuard. It connects only where WireGuard is not blocked, and
+	// an attempt sends a WireGuard handshake: it must not be tried
+	// automatically. This build has no per-route "only when the person
+	// picks it" flag; see parseWireGuard.
+	NoticeAmneziaDowngraded = "amneziawg_downgraded"
+	// An AmneziaWG conf whose server would ignore plain WireGuard,
+	// imported under the unsupported "amneziawg" family.
+	NoticeAmneziaUnsupported = "amneziawg_unsupported"
+)
 
 // ErrNoMatch means the caller's input doesn't look like any known format.
 var ErrNoMatch = errors.New("uri: no matching parser")

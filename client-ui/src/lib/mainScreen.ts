@@ -36,6 +36,8 @@ import {
     type PassFailure,
 } from './autoConnect';
 import { connectedQualityKey } from './measured';
+import { readyKinds, readyLine, tryingFact, usingLine, type ReadyKind, type TryingFact } from './homeFacts';
+import { routeForDisplay } from './activeRoute';
 import {
     checkHeadlineKey,
     checkStateLabelKey,
@@ -46,6 +48,7 @@ import {
     type RouteCheck,
     type TapAction,
 } from './routeCheck';
+import { meaningfulNickname } from './familyName';
 
 const HEADLINE_KEY: Record<ConnState, string> = {
     disconnected: 'conn.headline_disconnected',
@@ -102,6 +105,15 @@ export interface FailurePanel {
     wantsChooser: boolean;
 }
 
+/** How the bird is drawn (spec C2): grey with nothing to connect with,
+ *  a breathing gold ring when ready, a spinning ring while connecting,
+ *  green connected, amber slow or holding, red failed. */
+export type HomeTone = 'none' | 'ready' | 'busy' | 'holding' | 'good' | 'slow' | 'bad';
+/** The one gold button under the headline, when the state has one. */
+export type HomePrimary = 'add_file' | 'try_again' | 'try_now' | 'let_daal_choose';
+/** The one link under it, when the state has one. */
+export type HomeLink = 'no_file_address' | 'add_new_file' | 'choose' | 'disconnect' | 'cancel';
+
 export interface MainScreenView {
     /** The state the control and the label are drawn in. */
     state: ConnState;
@@ -111,7 +123,20 @@ export interface MainScreenView {
     pinnedId: string | null;
     action: TapAction;
     plan: MainTapPlan;
+    /** ONE short line, the same size in every state (spec C2). */
     headline: string;
+    /** At most one line under it, or nothing. */
+    line: string | undefined;
+    /** The line is about the phone having no internet (a wifi-off icon). */
+    lineNoInternet: boolean;
+    tone: HomeTone;
+    primary: HomePrimary | undefined;
+    link: HomeLink | undefined;
+    /** Connected, and the engine says the way is slow right now. */
+    slow: boolean;
+    /** The long sentence for this state (the engine's verdict, the
+     *  progress "Trying way 2 of 4…"): the developer fold only. */
+    detail: string;
     stateLabel: string;
     tapLabel: string;
     /** An automatic connect found nothing, and that is the news. */
@@ -123,6 +148,13 @@ export interface MainScreenView {
     noRoutes: boolean;
     needFile: boolean;
     showProgress: boolean;
+    /** What automatic connect is trying, by kind ("Trying VLESS Reality
+     *  · 2 of 4") and where it is, for the step dots. `undefined` when
+     *  the engine named no way this app can name. */
+    trying: TryingFact | undefined;
+    /** Ready: the kinds of connection on this phone, as chips (empty
+     *  in every other state). */
+    readyKinds: { names: string[]; more: number; tags: ReadyKind[] };
     /** i18n key of the note under "You're connected.", if any. ONE
      *  line: what just happened (Daal moved to another way) when there
      *  is such news, otherwise how this way does here, when that helps
@@ -198,7 +230,7 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         routeCheck === 'failed' &&
         !retryableFailure(conn?.routeCheckCategory);
 
-    const headline = holding
+    const detail = holding
         ? t('auto.holding.headline')
         : failure
         ? t(autoVerdictKey(failure.verdict))
@@ -218,6 +250,87 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         : showProgress
         ? t('auto.state.trying')
         : t(checkStateLabelKey(state, routeCheck) ?? STATE_LABEL_KEY[state]);
+    const slow = state === 'connected' && !optimistic && conn?.routeCheck === 'degraded';
+    const trying = showProgress && !optimistic ? tryingFact(t, locale, conn, routes) : undefined;
+    // The engine refused the last connect: its notice says why, and a
+    // "ways ready" line under it would contradict it.
+    const refusedNow = !!conn?.connectRefused && !optimistic;
+    let tone: HomeTone;
+    let headline: string;
+    let line: string | undefined;
+    let lineNoInternet = false;
+    let primary: HomePrimary | undefined;
+    let link: HomeLink | undefined;
+    let kinds: { names: string[]; more: number; tags: ReadyKind[] } = { names: [], more: 0, tags: [] };
+    if (needFile) {
+        tone = 'none';
+        headline = t('auto.need_file.headline');
+        primary = 'add_file';
+        link = 'no_file_address';
+    } else if (holding) {
+        tone = 'holding';
+        headline = t('auto.holding.headline');
+        line = t('auto.holding.body');
+        primary = 'try_now';
+        link = 'disconnect';
+    } else if (failure) {
+        tone = 'bad';
+        if (failure.verdict === 'network_down') {
+            headline = t('conn.headline_no_internet');
+            line = t('conn.no_internet.line');
+            lineNoInternet = true;
+        } else {
+            headline = t('conn.headline_error');
+            line = failure.restText ?? failure.actionText;
+            // Never both: a file when there is nothing to connect with,
+            // else choosing by hand when that is the way forward.
+            link = failure.wantsFile || noRoutes ? 'add_new_file' : failure.wantsChooser ? 'choose' : undefined;
+        }
+        primary = failure.noRetry ? undefined : 'try_again';
+    } else if (pinnedFailed) {
+        tone = 'bad';
+        headline = t('auto.pinned_failed');
+        primary = 'let_daal_choose';
+    } else if (state === 'error') {
+        tone = 'bad';
+        headline = t('conn.headline_error');
+        const cat = routeCheck === 'failed' ? conn?.routeCheckCategory : undefined;
+        line =
+            cat === 'path_too_slow'
+                ? t('conn.headline_too_slow')
+                : cat === 'relay_no_egress'
+                ? t('conn.headline_relay_no_internet')
+                : undefined;
+        primary = 'try_again';
+    } else if (state === 'connecting') {
+        const lost = routeCheck === 'failed' && !showProgress;
+        tone = lost ? 'holding' : 'busy';
+        headline = t(lost ? 'conn.headline_lost' : 'conn.headline_connecting');
+        // Which way, by its kind, and how far along: "Trying VLESS
+        // Reality · 2 of 4". After a connection dropped, the words are
+        // "that way stopped working" instead (the developer fold has it).
+        if (showProgress && !input.wasConnected && trying) line = trying.text;
+        // The bird stops it too, but nobody should have to guess that.
+        link = 'cancel';
+    } else if (state === 'connected') {
+        tone = slow ? 'slow' : 'good';
+        headline = t('conn.headline_connected');
+        // "Using Pars Relays · VLESS Reality": who made the file, and
+        // which kind of connection carries the traffic.
+        line = usingLine(t, usingName(conn, t), conn);
+        // A quiet way out that is visible, beside the bird.
+        link = 'disconnect';
+    } else {
+        tone = 'ready';
+        headline = t('conn.headline_disconnected');
+        // "4 ways ready · VLESS Reality worked here before": the second
+        // half only when the engine measured it on this network.
+        if (state === 'disconnected' && !refusedNow) {
+            line = readyLine(t, locale, routes);
+            if (line) kinds = readyKinds(t, routes, 4, input.nowMs);
+        }
+    }
+
     const tapLabel = t(mainTapLabelKey(plan, auto, tapLabelKey(action, polled, routeCheck), holding));
 
     // One line. News about what just happened (Daal moved) comes first
@@ -248,6 +361,13 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         action,
         plan,
         headline,
+        line,
+        lineNoInternet,
+        tone,
+        primary,
+        link,
+        slow,
+        detail,
         stateLabel,
         tapLabel,
         failure,
@@ -256,10 +376,41 @@ export function mainScreenView(input: MainScreenInput): MainScreenView {
         noRoutes,
         needFile,
         showProgress,
+        trying,
+        readyKinds: kinds,
         connectedNoteKey,
         refusedKey,
         engineAuto: auto?.mode === true,
     };
+}
+
+/** The short name of the way in use, for "Using {name}": the file's
+ *  publisher when the route has one, else the route's own name, else
+ *  our words for a route whose details could not be read. */
+export function usingName(conn: ConnectionSummary | null, t: (k: string) => string): string | undefined {
+    if (!conn || conn.state !== 'connected') return undefined;
+    const r = routeForDisplay(conn.activeRoute, t);
+    if (!r) return undefined;
+    // A bare "r1" names nothing; the kind of connection is said beside it.
+    return r.publisherName || meaningfulNickname(r) || undefined;
+}
+
+/** The badges under the headline (spec C2, at most two): Slow, then
+ *  Manual (a way chosen by hand), then Lifeline (a mode other than
+ *  normal). */
+export type HomeBadge = 'slow' | 'manual' | 'lifeline';
+export function homeBadges(
+    view: Pick<MainScreenView, 'slow' | 'pinnedId' | 'needFile' | 'state' | 'engineAuto'>,
+    mode: string | undefined,
+): HomeBadge[] {
+    if (view.needFile) return [];
+    const out: HomeBadge[] = [];
+    if (view.slow) out.push('slow');
+    // Manual: a way the person chose, or a connection the engine is not
+    // choosing for (it stays on that one way).
+    if (view.pinnedId || (view.state === 'connected' && !view.engineAuto)) out.push('manual');
+    if (mode && mode !== 'normal') out.push('lifeline');
+    return out.slice(0, 2);
 }
 
 /** What the page can do when the main control is tapped. */
@@ -293,4 +444,13 @@ export function runMainTap(plan: MainTapPlan, h: MainTapHandlers): unknown {
  *  chose, else automatic. */
 export function retryTarget(pinnedId: string | null): { kind: 'auto' } | { kind: 'pinned'; routeId: string } {
     return pinnedId ? { kind: 'pinned', routeId: pinnedId } : { kind: 'auto' };
+}
+
+/** Whether a failed connect gets its "Details" fold (or, on a computer,
+ *  the "What Daal tried" panel): only when something was tried. When
+ *  the phone itself has no internet nothing was, and a fold that opens
+ *  onto "Tried no ways" is noise (spec F.2, No internet). Developer
+ *  mode keeps it for the verdict code. */
+export function failureDetailsShown(tried: readonly unknown[], dev: boolean): boolean {
+    return tried.length > 0 || dev;
 }

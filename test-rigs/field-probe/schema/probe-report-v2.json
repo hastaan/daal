@@ -1,0 +1,960 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daal.invalid/schema/probe-report-v2.json",
+  "title": "Daal Field Probe Report v2 (network test)",
+  "description": "specs/field-probe-v2.md. Extends v1: every v1 required field is kept. The Go twin is bundle/go/fieldreport (Validate); a test holds the two together.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_id",
+    "generated_hour_bucket",
+    "platform",
+    "country_hint",
+    "carrier_class",
+    "network_label",
+    "net",
+    "app",
+    "relay_ref",
+    "run",
+    "probes",
+    "findings",
+    "failures"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "report_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "26 random Crockford base32 characters, fresh per run. Deliberately NOT a ULID: a ULID encodes the creation time to the millisecond."
+    },
+    "generated_hour_bucket": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:00Z$"
+    },
+    "platform": {
+      "type": "string",
+      "enum": [
+        "linux",
+        "windows",
+        "android",
+        "macos",
+        "ios",
+        "unknown"
+      ]
+    },
+    "country_hint": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}$|^unknown$",
+      "description": "IR only when the person picked an Iranian mobile operator label; otherwise unknown."
+    },
+    "carrier_class": {
+      "type": "string",
+      "enum": [
+        "mobile",
+        "fixed",
+        "wifi",
+        "unknown"
+      ]
+    },
+    "network_label": {
+      "type": "string",
+      "enum": [
+        "home_internet",
+        "mci",
+        "irancell",
+        "rightel",
+        "other_mobile",
+        "work_or_public",
+        "not_said"
+      ]
+    },
+    "net": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "validated",
+        "metered",
+        "ipv6_global",
+        "private_dns",
+        "resolver_class"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "wifi",
+            "cellular",
+            "ethernet",
+            "other",
+            "unknown"
+          ]
+        },
+        "validated": {
+          "type": "string",
+          "enum": [
+            "yes",
+            "no",
+            "unknown"
+          ]
+        },
+        "metered": {
+          "type": "string",
+          "enum": [
+            "yes",
+            "no",
+            "unknown"
+          ]
+        },
+        "ipv6_global": {
+          "type": "boolean"
+        },
+        "private_dns": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "strict",
+            "unknown"
+          ]
+        },
+        "resolver_class": {
+          "type": "string",
+          "enum": [
+            "private",
+            "isp_public",
+            "well_known_public",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build",
+        "targets_list_version",
+        "targets_list_sha256",
+        "desync_available",
+        "hello_fp"
+      ],
+      "properties": {
+        "build": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z.+_-]{1,48}$"
+        },
+        "targets_list_version": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z._-]{1,32}$"
+        },
+        "targets_list_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "desync_available": {
+          "type": "boolean"
+        },
+        "hello_fp": {
+          "type": "string",
+          "enum": [
+            "chrome_auto",
+            "chrome_auto_h1",
+            "go_std",
+            "mixed",
+            "none"
+          ]
+        }
+      }
+    },
+    "relay_ref": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$|^none$",
+      "description": "First 8 hex of SHA-256(relay_pack_id) of the Test relay, or none."
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "abort_reason",
+        "duration_bucket_s",
+        "steps_run",
+        "short_circuit"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "abort_reason": {
+          "type": "string",
+          "enum": [
+            "",
+            "cancelled",
+            "backgrounded",
+            "time_limit",
+            "budget",
+            "network_changed",
+            "shutdown",
+            "error",
+            "local_blocked",
+            "vpn_active",
+            "connected"
+          ]
+        },
+        "duration_bucket_s": {
+          "type": "integer",
+          "enum": [
+            60,
+            120,
+            180,
+            240
+          ]
+        },
+        "steps_run": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "short_circuit": {
+          "type": "boolean"
+        }
+      }
+    },
+    "probes": {
+      "type": "array",
+      "maxItems": 96,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "target_role",
+          "result",
+          "phase",
+          "signals"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "A1",
+              "A2",
+              "A3",
+              "A4",
+              "A5",
+              "A6",
+              "B1",
+              "B2",
+              "B3",
+              "B4",
+              "B5",
+              "B6",
+              "B7",
+              "B8",
+              "B9",
+              "C1",
+              "C2",
+              "C3",
+              "C4",
+              "C5",
+              "C6",
+              "C7",
+              "C8",
+              "C9"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "enum": [
+              "dns_link_allowed",
+              "dns_https_record",
+              "dns_white_name",
+              "dns_known_zone",
+              "dns_calibration",
+              "dns_public_resolver",
+              "tls_baseline",
+              "google_front",
+              "google_front_redirect",
+              "github_feed",
+              "white_name_cdn",
+              "cdn_neutral_carry",
+              "ech",
+              "ech_control",
+              "quic_443",
+              "relay_http_80",
+              "relay_reality",
+              "relay_reality_split",
+              "relay_plain_white_sni",
+              "relay_plain_cover_sni",
+              "relay_plain_neutral_sni",
+              "relay_alt_port",
+              "relay_quic",
+              "relay_reality_again"
+            ]
+          },
+          "target_role": {
+            "type": "string",
+            "enum": [
+              "google",
+              "github",
+              "cf_edge",
+              "white_name",
+              "neutral_name",
+              "relay",
+              "known_zone",
+              "public_resolver"
+            ]
+          },
+          "variant": {
+            "type": "string",
+            "pattern": "^[a-z0-9_+-]{0,40}$",
+            "description": "Closed-shape qualifier (record type, preset, address source, port class). No dot or colon is allowed, so no host name or address can appear here."
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "ok_carried",
+              "reset_injected_likely",
+              "reset",
+              "silent_drop_forward",
+              "silent_no_reply",
+              "flow_capped_suspected",
+              "refused",
+              "closed",
+              "tls_alert",
+              "timeout",
+              "auth_failed",
+              "skipped",
+              "bogon",
+              "nxdomain",
+              "servfail",
+              "dns_timeout",
+              "type_dropped",
+              "answer_altered",
+              "local_error",
+              "unreachable",
+              "dns_wrong_public",
+              "cert_invalid",
+              "dns_unlisted"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "reach",
+              "handshake",
+              "carry",
+              "none"
+            ]
+          },
+          "signals": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "connect_rtt_bucket_ms": {
+                "type": "string",
+                "enum": [
+                  "<20",
+                  "<40",
+                  "<80",
+                  "<160",
+                  "<320",
+                  "<640",
+                  ">=640"
+                ]
+              },
+              "first_event_ratio_tenths": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "(time from hello write to the first event) / connect_rtt, in tenths, capped at 100."
+              },
+              "hello_acked": {
+                "type": "boolean"
+              },
+              "rx_bytes_bucket": {
+                "type": "string",
+                "enum": [
+                  "0",
+                  "<1.5k",
+                  "<4k",
+                  "<8k",
+                  "<16k",
+                  "<32k",
+                  ">=32k"
+                ]
+              },
+              "http_status_class": {
+                "type": "string",
+                "enum": [
+                  "1xx",
+                  "2xx",
+                  "3xx",
+                  "4xx",
+                  "5xx",
+                  "none"
+                ]
+              },
+              "dns_rcode": {
+                "type": "string",
+                "enum": [
+                  "noerror",
+                  "nxdomain",
+                  "servfail",
+                  "refused",
+                  "other"
+                ]
+              },
+              "cert_valid": {
+                "type": "boolean",
+                "description": "Stage B: the server's chain verified against the device's roots for the hello's name. A probe whose chain did not verify is cert_invalid and sends no request."
+              },
+              "handshake_end": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "alert",
+                  "rst",
+                  "fin",
+                  "timeout",
+                  "other"
+                ],
+                "description": "How the TLS handshake ended, recorded apart from the first event after the hello."
+              },
+              "hello_fp": {
+                "type": "string",
+                "enum": [
+                  "chrome_auto",
+                  "chrome_auto_h1",
+                  "go_std"
+                ],
+                "description": "The ClientHello this probe sent."
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "A1"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "dns_link_allowed"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "A2"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "dns_https_record"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "A3"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "dns_white_name"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "A4"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "dns_known_zone"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "A5"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "dns_calibration"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "A6"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "dns_public_resolver"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B1"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "tls_baseline"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B2"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "google_front"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B3"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "google_front_redirect"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B4"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "github_feed"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B5"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "white_name_cdn"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B6"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "cdn_neutral_carry"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B7"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "ech"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B8"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "ech_control"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "B9"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "quic_443"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C1"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_http_80"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C2"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_reality"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C3"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_reality_split"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C4"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_plain_white_sni"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C5"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_plain_cover_sni"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C6"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_plain_neutral_sni"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C7"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_alt_port"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C8"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_quic"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "id": {
+                  "const": "C9"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "name": {
+                  "const": "relay_reality_again"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question",
+          "answer",
+          "basis"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "enum": [
+              "reality_443_works",
+              "split_hello_helps",
+              "white_name_helps_on_relay_ip",
+              "white_name_uncapped_on_cdn_ip",
+              "grey_cap_seen_on_cdn_ip",
+              "reset_looks_injected",
+              "cloudflare_edge_reachable",
+              "ech_passes",
+              "google_front_passes",
+              "github_feed_fetchable",
+              "resolver_recurses_foreign_zone",
+              "dns_injection_on_path",
+              "quic_443_alive",
+              "relay_alt_ports_open",
+              "test_changed_outcome"
+            ]
+          },
+          "variant": {
+            "type": "string",
+            "pattern": "^[a-z0-9_+-]{0,40}$",
+            "description": "Closed-shape qualifier (record type, preset, address source, port class). No dot or colon is allowed, so no host name or address can appear here."
+          },
+          "answer": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no",
+              "unclear"
+            ]
+          },
+          "basis": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "type": "string",
+              "enum": [
+                "A1",
+                "A2",
+                "A3",
+                "A4",
+                "A5",
+                "A6",
+                "B1",
+                "B2",
+                "B3",
+                "B4",
+                "B5",
+                "B6",
+                "B7",
+                "B8",
+                "B9",
+                "C1",
+                "C2",
+                "C3",
+                "C4",
+                "C5",
+                "C6",
+                "C7",
+                "C8",
+                "C9"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "count_bucket"
+        ],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "dns_poisoned",
+              "dns_timeout",
+              "tcp_connect_timeout",
+              "tcp_reset",
+              "tls_handshake_failed",
+              "tls_sni_or_cert_block_suspected",
+              "udp_unavailable",
+              "quic_unavailable",
+              "auth_failed",
+              "route_expired",
+              "publisher_revoked",
+              "publisher_key_changed",
+              "subscription_unreachable",
+              "engine_crash",
+              "bundle_signature_invalid",
+              "bundle_corrupted",
+              "network_offline",
+              "unknown",
+              "flow_capped_suspected"
+            ]
+          },
+          "count_bucket": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Opt-in, written by the person, shown before sharing."
+    }
+  }
+}

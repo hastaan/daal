@@ -1,0 +1,20 @@
+{
+  "name": "cdn-sni-block-ech",
+  "description": "A reassembling box resets any TLS ClientHello that names the publisher's CDN host, on every address. A hello with ECH shows only the shared outer name cloudflare-ech.com and passes; a plain hello for the zone is caught. The direct families never show that name and pass. Op cdn: the CDN route carries with ECH, and the censor never sees the zone's name in a hello (no plain fallback, owner decision D-2).",
+  "analogue": "An SNI blocklist entry for a CDN-fronted hostname learned from a captured pack (plan §2.2, 'a censor holding a pack can block the zone by SNI on networks where ECH fails'); the GFW-style reassembling SNI reset. Model: exact name, full reassembly, RST both ways. Not modelled: ECH being stripped or blocked in transit (cdn-ech-outer-block), JA3/JA4 of the ECH hello.",
+  "world": ["cdn"],
+  "censor": {
+    "dpi": [
+      {"when": "tls_sni", "sni": ["$CDN_HOST"], "reassemble": true, "action": "rst", "rst_to": "both"}
+    ]
+  },
+  "prove": [
+    {"name": "zone-name-plain-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "expect": "reset_after_hello"},
+    {"name": "zone-name-split-blocked", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "split": true, "expect": "reset_after_hello"},
+    {"name": "zone-name-in-ech-spared", "probe": "tls", "to": "edge-a", "port": 443, "sni": "$CDN_HOST", "ech": true, "expect": "ok"},
+    {"name": "other-name-spared", "probe": "tls", "to": "edge-b", "port": 443, "sni": "www.wb-control.example", "expect": "ok"},
+    {"name": "relay-spared", "probe": "tls", "to": "relay", "port": 443, "sni": "$COVER_SNI", "expect": "ok"}
+  ],
+  "expect": {"*": "pass"},
+  "cdn": {"expect": "pass"}
+}

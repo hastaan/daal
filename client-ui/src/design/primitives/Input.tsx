@@ -21,6 +21,7 @@ export const Input = forwardRef<HTMLInputElement, Props>(function Input(
                     invalid ? 'var(--red)' : 'var(--line)'
                 }`,
                 color: 'var(--fg)',
+                minHeight: 44,
                 padding: '10px 12px',
                 borderRadius: 'var(--radius-md)',
                 fontFamily: 'var(--font-body)',

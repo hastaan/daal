@@ -57,6 +57,9 @@ var opRoutes = map[string]opRoute{
 	"identity":           {"GET", "/identity"},
 	"bind-address":       {"POST", "/bind-address"},
 	"unbind-address":     {"POST", "/unbind-address"},
+	// Add-on 2, the Cloudflare door (cdn.go). One route, three actions
+	// in the body; mutating, so single-use on the box.
+	"cdn": {"POST", "/cdn"},
 }
 
 // RouteForOp returns the method and path an op is sent on.

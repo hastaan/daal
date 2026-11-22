@@ -22,6 +22,33 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 // constants that consume it, and importing it as a type keeps this
 // module free of the QR encoder at runtime.
 import type { FountainFrame as QrFountainFrame } from '../qr/fountainStream';
+import type {
+    AddonOutcome,
+    AddonProgress,
+    AddonRemoveReport,
+    AddonRow,
+    CdnAccount,
+    CdnBuildInput,
+    CdnConnectInput,
+    CdnPlainFallbackInput,
+    CdnPosture,
+    CdnPostureInput,
+    CdnTokenCheck,
+    CdnTokenInput,
+    GoogleAccount,
+    GoogleAccountAttachInput,
+    GoogleCheck,
+    GoogleCheckInput,
+    GoogleOnInput,
+    GoogleScript,
+    StandbyAddInput,
+    StandbyKey,
+    StandbyKeyInput,
+    StandbyPrice,
+    StandbyPriceInput,
+    StandbyPromoteInput,
+    StandbyPromoteResult,
+} from './addons/addonTypes';
 
 export type { QrFountainFrame };
 
@@ -165,6 +192,8 @@ export type PublisherErrorCode =
     | 'E_RESTORE_ALREADY_ANSWERED'
     | 'E_RELAY_USER_INVALID'
     | 'E_RELAY_USER_IN_LIST'
+    // Optional add-ons. See `Addons` below.
+    | 'E_NOT_BUILT'
     | null;
 
 const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
@@ -240,6 +269,10 @@ const PUBLISHER_ERROR_CODES: Exclude<PublisherErrorCode, null>[] = [
     'E_RESTORE_ALREADY_ANSWERED',
     'E_RELAY_USER_INVALID',
     'E_RELAY_USER_IN_LIST',
+    // An optional add-on (standby address, Cloudflare, Google channel)
+    // whose code has not landed in this build. Nothing was changed; not
+    // retryable. The card says "in development", never a raw error.
+    'E_NOT_BUILT',
 ];
 
 /** The server id carried by an `E_SERVER_EXISTS: <id> ...` rejection,
@@ -266,6 +299,30 @@ export function classifyPublisherError(e: unknown): PublisherErrorCode {
 }
 
 // ---- Types mirrored from Rust ----
+
+/** daal_wizard::report_key::TestRelayStatus */
+export interface TestRelayStatus {
+    operator_id: number;
+    is_test_relay: boolean;
+    has_key: boolean;
+    /** People on this relay who are not removed. */
+    people_on_relay: number;
+    /** An everyone file was made for this relay. */
+    everyone_file: boolean;
+}
+
+/** daal_wizard::report_key::TestRelaySet */
+export interface TestRelaySet {
+    operator_id: number;
+    is_test_relay: boolean;
+    key_made: boolean;
+    /** People on this relay who hold a file made before and need a new one. */
+    people_to_send: number;
+    /** An everyone file exists and was left exactly as it was (it keeps
+     *  working and does not offer the test). Never made again here. */
+    everyone_file_kept: boolean;
+    refresh_note_published: boolean;
+}
 
 /**
  * One relay, with enough identity to tell it apart from another on the
@@ -385,6 +442,10 @@ export interface FreshnessStatus {
      *  existed. Never inferred from `endpoints`. */
     mirrors_in_pack: string[];
     pack_signed_at_unix: number;
+    /** The only refresh address is the Google update channel (owner
+     *  decision D-3): accepted alone (min_mirrors is then 1), and the
+     *  card says a Google suspension stops updates. */
+    google_only?: boolean;
 }
 
 /** What the operator types to add one mirror. Credentials travel this
@@ -721,6 +782,27 @@ export interface ProgressEvent {
     message: string;
     ts?: string;
     extra?: Record<string, unknown>;
+    /** The shell's number for a provision event, the same on both of
+     *  its channels (see buildLog.appendEvent). */
+    seq?: number;
+    /** Local time the page heard it (ms since epoch). */
+    at?: number;
+    // The CLI's own detail rides flattened beside step/message:
+    // provision_health_wait / provision_health_unreachable
+    attempt?: number;
+    max_attempts?: number;
+    elapsed_s?: number;
+    box_ip?: string;
+    helper_ip?: string;
+    port?: number;
+    // provision_rollback
+    rollback?: 'start' | 'done';
+    cancelled?: boolean;
+    server_id?: string;
+    public_ip?: string;
+    server_deleted?: boolean;
+    firewall_deleted?: boolean;
+    warnings?: number;
     // Legacy aliases used by fake/mock progress:
     phase?: string;
     detail?: string;
@@ -795,6 +877,10 @@ export interface DestroyReport {
      *  absent when there is none. Details only. */
     other_server_id?: string;
     other_server_name?: string;
+    /** V019: what became of each add-on (standby address, Cloudflare,
+     *  Google channel). One with `keeps_relay` kept the relay, as an
+     *  address that still bills does. Absent from an older shell. */
+    addons?: AddonOutcome[];
 }
 
 export interface AddressOutcome {
@@ -991,7 +1077,25 @@ export interface AccountItem extends ResourceRef {
         | 'cannot_tell';
     belongs_to_relay_id: number | null;
     can_delete: boolean;
+    /** The add-on this item is (setup_recovery::AccountItem.addon):
+     *  'standby' for a relay's standby address, '' otherwise. */
+    addon?: string;
+    /** What the add-on bills each month, as read when it was rented;
+     *  0 with an empty currency when unknown. */
+    monthly_cost_cents?: number;
+    cost_currency?: string;
 }
+
+/** One hosting company on this phone (`hosting_account.rs`). */
+export interface HostingAccountState {
+    /** A key Daal can use is here: the account's, or a live relay's. */
+    connected: boolean;
+    /** The account key itself is here (what Disconnect forgets). */
+    account: boolean;
+}
+
+/** Per hosting company id ("hetzner", …). */
+export type HostingAccountStatus = Record<string, HostingAccountState>;
 
 export interface AccountCheckAccount {
     account_key: string;
@@ -1191,6 +1295,11 @@ export const Wizard = {
         invoke<OperatorState>('wizard_get_operator_state', { operatorId: operator_id }),
     cancelAndCleanup: (operator_id: number) =>
         invoke<void>('wizard_cancel_and_cleanup', { operatorId: operator_id }),
+    /** The build screen's Cancel: the running provision stops and
+     *  deletes the server and firewall it created. Its own progress
+     *  lines say what was removed; provisionRun then rejects. */
+    provisionCancel: (operator_id: number) =>
+        invoke<void>('wizard_provision_cancel', { operatorId: operator_id }),
 
     /**
      * Remove a relay — optionally destroying the cloud server behind it.
@@ -1241,7 +1350,7 @@ export const Wizard = {
      * (null when none). Carries no secret.
      */
     savedCloudToken: (provider: string) =>
-        invoke<{ operator_id: number; nickname: string } | null>(
+        invoke<{ operator_id: number; nickname: string; account?: boolean } | null>(
             'wizard_saved_cloud_token',
             { provider },
         ),
@@ -1252,6 +1361,25 @@ export const Wizard = {
      */
     reuseCloudToken: (provider: string) =>
         invoke<number>('wizard_reuse_cloud_token', { provider }),
+
+    /**
+     * The Accounts page: check a pasted hosting key with one read-only
+     * call to the hosting company and keep it for every new relay. An
+     * empty key rejects with "cloud token must not be empty"; a refused
+     * one with the company's words. Nothing is kept on a refusal.
+     */
+    hostingAccountConnect: (provider: string, token: string) =>
+        invoke<HostingAccountState>('wizard_hosting_account_connect', {
+            input: { provider, token },
+        }),
+
+    /** Per hosting company: whether a key is on this phone. Local. */
+    hostingAccountStatus: () =>
+        invoke<HostingAccountStatus>('wizard_hosting_account_status'),
+
+    /** Forget the account key. Relays keep their own copies. */
+    hostingAccountDisconnect: (provider: string) =>
+        invoke<void>('wizard_hosting_account_disconnect', { provider }),
 
     listExistingServers: (operator_id: number) =>
         invoke<ExistingServer[]>('wizard_list_existing_servers', {
@@ -1746,6 +1874,23 @@ export const Wizard = {
      *  `wizard://renew-event` (see `onRenewEvent`). */
     renewEveryone: (operator_id: number) =>
         invoke<RenewReport>('wizard_renew_everyone', { operatorId: operator_id }),
+    /** Network test: is this relay the Test relay (its pack carries the
+     *  report address)? Read-only. */
+    testRelayStatus: (operator_id: number) =>
+        invoke<TestRelayStatus>('wizard_test_relay_status', { operatorId: operator_id }),
+    /** Network test: "Use as test relay" (`on`) or stop. Makes the
+     *  report key on this phone the first time and signs the relay's
+     *  pack again with (or without) its address. Nobody on the relay is
+     *  touched and no file is made again. Turning it on for a relay
+     *  people connect with is refused (E_TEST_RELAY_IN_USE) unless
+     *  `confirmInUse`, which the sheet sends only after its second
+     *  confirmation naming the count. Reaches the relay. */
+    testRelaySet: (operator_id: number, on: boolean, confirmInUse = false) =>
+        invoke<TestRelaySet>('wizard_test_relay_set', { operatorId: operator_id, on, confirmInUse }),
+    /** Network test: open one received report (`net-xxxxxxxx.dat`, a
+     *  path `PickedFile.stage` returned) with a report key on this
+     *  phone. Answers the report JSON, validated; UNTRUSTED. */
+    reportOpen: (path: string) => invoke<string>('wizard_report_open', { path }),
     /** D3. Rust returns a cached result younger than 10 minutes unless
      *  `force` is true. Read-only. */
     relayHealth: (operator_id: number, force: boolean) =>
@@ -1784,6 +1929,74 @@ export const Wizard = {
         }),
 };
 
+/**
+ * Optional add-ons (docs/optional-addons-plan.md, X2): every command the
+ * standby address, the way in through Cloudflare and the Google update
+ * channel will need, registered once in src-tauri/src/lib.rs. Each
+ * add-on command takes one `input` object and returns one value; their
+ * shapes live in ./addons/addonTypes.ts. Until an add-on's lane lands,
+ * its commands reject with `E_NOT_BUILT: …`. Steps stream on
+ * `onAddonProgress`.
+ */
+export const Addons = {
+    /** A relay's add-ons (the ledger). Read-only, no network. */
+    list: (operator_id: number) =>
+        invoke<AddonRow[]>('wizard_addons_list', { operatorId: operator_id }),
+    /** Take one add-on down; its kind decides the order. */
+    remove: (addon_id: number) =>
+        invoke<AddonRemoveReport>('wizard_addon_remove', { addonId: addon_id }),
+
+    // ---- standby address
+    standbyPrice: (input: StandbyPriceInput) =>
+        invoke<StandbyPrice>('wizard_addon_standby_price', { input }),
+    standbyAdd: (input: StandbyAddInput) =>
+        invoke<AddonRow>('wizard_addon_standby_add', { input }),
+    /** "Switch to standby": answers the key to send. */
+    standbyPromote: (input: StandbyPromoteInput) =>
+        invoke<StandbyPromoteResult>('wizard_addon_standby_promote', { input }),
+    /** The standby key again, after the sheet that showed it closed. */
+    standbyKey: (input: StandbyKeyInput) =>
+        invoke<StandbyKey>('wizard_addon_standby_key', { input }),
+
+    // ---- way in through Cloudflare
+    /** The pasted token crosses this boundary once, inbound. */
+    cdnSetToken: (input: CdnTokenInput) =>
+        invoke<CdnTokenCheck>('wizard_addon_cdn_set_token', { input }),
+    /** The Accounts page: check and keep a key for every relay. */
+    cdnConnect: (input: CdnConnectInput) =>
+        invoke<CdnTokenCheck>('wizard_addon_cdn_connect', { input }),
+    /** Whether an account key is kept, and its zone. Local. */
+    cdnAccount: () => invoke<CdnAccount>('wizard_addon_cdn_account'),
+    /** Forget the account key; relays keep their own copies. */
+    cdnDisconnect: () => invoke<void>('wizard_addon_cdn_disconnect'),
+    cdnBuild: (input: CdnBuildInput) =>
+        invoke<AddonRow>('wizard_addon_cdn_build', { input }),
+    cdnPosture: (input: CdnPostureInput) =>
+        invoke<CdnPosture>('wizard_addon_cdn_posture', { input }),
+    cdnSetPlainFallback: (input: CdnPlainFallbackInput) =>
+        invoke<AddonRow>('wizard_addon_cdn_set_plain_fallback', { input }),
+
+    // ---- update channel through Google
+    /** Accounts → Google: connected or not, and whether this build may
+     *  offer "Sign in with Google". Local. */
+    googleAccount: () => invoke<GoogleAccount>('wizard_google_account'),
+    /** The account's script to paste, with its write key in it. */
+    googleAccountScript: () => invoke<GoogleScript>('wizard_google_account_script'),
+    /** The web-app address pasted back: written to and read back
+     *  through Google before it counts as connected. */
+    googleAccountAttach: (input: GoogleAccountAttachInput) =>
+        invoke<GoogleAccount>('wizard_google_account_attach', { input }),
+    /** The same step by signing in (only when `sign_in`). The token
+     *  never reaches the page. */
+    googleAccountSignIn: () => invoke<GoogleAccount>('wizard_google_account_sign_in'),
+    /** Forget the account; relays that use it keep their own copies. */
+    googleAccountDisconnect: () => invoke<void>('wizard_google_account_disconnect'),
+    /** A relay's switch, on: a slot in the account's script. */
+    googleOn: (input: GoogleOnInput) => invoke<AddonRow>('wizard_addon_google_on', { input }),
+    googleCheck: (input: GoogleCheckInput) =>
+        invoke<GoogleCheck>('wizard_addon_google_check', { input }),
+};
+
 /** PB-20. The platform side of screens that show secrets. */
 export const Platform = {
     /** Android: FLAG_SECURE on the activity window (no screenshots, no
@@ -1810,6 +2023,10 @@ export const onQrFrame = (
     cb: (frame: QrFountainFrame) => void,
 ): Promise<UnlistenFn> =>
     listen<QrFountainFrame>('wizard://qr-frame', (e) => cb(e.payload));
+
+/** Optional add-ons: one step of an add-on operation. */
+export const onAddonProgress = (cb: (ev: AddonProgress) => void): Promise<UnlistenFn> =>
+    listen<AddonProgress>('wizard://addon-progress', (e) => cb(e.payload));
 
 /** D2: one line per person while `renewEveryone` runs. */
 export const onRenewEvent = (cb: (ev: RenewEvent) => void): Promise<UnlistenFn> =>

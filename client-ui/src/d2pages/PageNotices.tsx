@@ -1,25 +1,96 @@
-// PageNotices.tsx — the two boxes the recipient pages share.
+// PageNotices.tsx — the notices the recipient pages share (spec C2: one
+// notice at most, each one bordered row: a state icon, one line, its
+// action; anything longer behind "Details").
 //
-//   FailureBox       a plain sentence of ours, an optional Try again
-//                    button, and the raw error text folded away under
-//                    "Details" (never the sentence the person reads).
-//   StoreResetNotice said once: Daal had to reset its saved connections.
+//   FailureBox        a plain sentence of ours, an optional Try again,
+//                     and the raw error text folded away under Details
+//                     (never the sentence the person reads). Also used by
+//                     the Publisher and Status pages: its props stay.
+//   StoreResetNotice  said once: Daal had to reset its saved files.
 //   EngineStartNotice Daal could not start: nothing on the page can work,
-//                    and "Try again" would be a promise it cannot keep.
-import type { CSSProperties } from 'react';
-import { Button } from '../design/primitives';
+//                     and "Try again" would be a promise it cannot keep.
+//   NoticeRow         the shape all of them share, for the page's own
+//                     notices ("this build cannot carry traffic", a
+//                     refused connect).
+import type { CSSProperties, ReactNode } from 'react';
+import { Button, Disclosure, StateIcon } from '../design/primitives';
+import { mix } from '../design/mix';
 
 type T = (k: string) => string;
 
-const box: CSSProperties = {
-    background: 'rgba(200,85,61,0.10)',
-    border: '1px solid rgba(200,85,61,0.40)',
-    color: 'var(--red)',
-    padding: 12,
-    borderRadius: 'var(--radius-md)',
-    marginBottom: 16,
-    fontSize: 13,
-};
+const TONE: Record<'bad' | 'warn', string> = { bad: 'var(--red)', warn: 'var(--amber)' };
+
+function boxStyle(tone: 'bad' | 'warn'): CSSProperties {
+    return {
+        inlineSize: '100%',
+        maxWidth: 'var(--content-max)',
+        background: mix(TONE[tone], 8, 'transparent'),
+        border: `1px solid ${mix(TONE[tone], 40, 'transparent')}`,
+        color: 'var(--fg)',
+        padding: '10px 12px',
+        borderRadius: 'var(--r-tile)',
+        marginBlockEnd: 16,
+        fontSize: 14,
+        textAlign: 'start',
+    };
+}
+
+/** One bordered row: icon, one line, its action; `more` folds away. */
+export function NoticeRow({
+    t,
+    tone = 'bad',
+    text,
+    action,
+    more,
+    detail,
+    dataTestId,
+}: {
+    t: T;
+    tone?: 'bad' | 'warn';
+    /** Already translated: the one line. */
+    text: ReactNode;
+    action?: ReactNode;
+    /** More words, behind Details. */
+    more?: ReactNode;
+    /** Raw error text (left-to-right, mono), behind Details. */
+    detail?: string;
+    dataTestId?: string;
+}) {
+    return (
+        <div role="alert" data-testid={dataTestId} style={boxStyle(tone)}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <StateIcon state={tone} size={20} />
+                <span style={{ flex: 1, minWidth: 160 }}>{text}</span>
+                {action}
+            </div>
+            {(more || detail) && (
+                <div style={{ marginBlockStart: 2, marginInlineStart: 26 }}>
+                    <Disclosure summary={t('ui.details')} dataButton="notice-details">
+                        <div style={{ color: 'var(--muted)', fontSize: 13 }}>
+                            {more && <div style={{ marginBlockEnd: detail ? 6 : 0 }}>{more}</div>}
+                            {detail && (
+                                <code
+                                    dir="ltr"
+                                    style={{
+                                        display: 'block',
+                                        fontFamily: 'var(--font-mono)',
+                                        fontSize: 11,
+                                        whiteSpace: 'pre-wrap',
+                                        overflowWrap: 'anywhere',
+                                        textAlign: 'start',
+                                        unicodeBidi: 'isolate',
+                                    }}
+                                >
+                                    {detail}
+                                </code>
+                            )}
+                        </div>
+                    </Disclosure>
+                </div>
+            )}
+        </div>
+    );
+}
 
 export function FailureBox({
     t,
@@ -35,100 +106,52 @@ export function FailureBox({
     onRetry?: () => void;
 }) {
     return (
-        <div role="alert" style={box}>
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    flexWrap: 'wrap',
-                }}
-            >
-                <span style={{ flex: 1, minWidth: 180 }}>{text}</span>
-                {onRetry && (
-                    <Button size="sm" variant="secondary" onClick={onRetry}>
+        <NoticeRow
+            t={t}
+            text={text}
+            detail={detail}
+            action={
+                onRetry && (
+                    <Button size="sm" variant="secondary" onClick={onRetry} dataButton="notice-retry">
                         {t('network.try_again')}
                     </Button>
-                )}
-            </div>
-            {detail && (
-                <details style={{ marginTop: 8, color: 'var(--muted)', fontSize: 11 }}>
-                    <summary style={{ cursor: 'pointer' }}>
-                        {t('network.error_details')}
-                    </summary>
-                    <code
-                        dir="ltr"
-                        style={{
-                            display: 'block',
-                            marginTop: 4,
-                            fontFamily: 'var(--font-mono)',
-                            whiteSpace: 'pre-wrap',
-                            overflowWrap: 'anywhere',
-                            textAlign: 'left',
-                        }}
-                    >
-                        {detail}
-                    </code>
-                </details>
-            )}
-        </div>
+                )
+            }
+        />
     );
 }
 
 export function StoreResetNotice({ t, onDismiss }: { t: T; onDismiss: () => void }) {
     return (
-        <div
-            role="alert"
-            style={{
-                background: 'rgba(193,158,80,0.10)',
-                border: '1px solid rgba(193,158,80,0.40)',
-                color: 'var(--fg)',
-                padding: 12,
-                borderRadius: 'var(--radius-md)',
-                marginBottom: 16,
-                fontSize: 13,
-                maxWidth: 640,
-                textAlign: 'start',
-            }}
-        >
-            <strong style={{ display: 'block', marginBottom: 6 }}>
-                {t('store.reset.title')}
-            </strong>
-            <span style={{ display: 'block', marginBottom: 10, opacity: 0.9 }}>
-                {t('store.reset.body')}
-            </span>
-            <Button size="sm" variant="secondary" onClick={onDismiss}>
-                {t('store.reset.dismiss')}
-            </Button>
-        </div>
+        <NoticeRow
+            t={t}
+            tone="warn"
+            text={t('store.reset.title')}
+            more={t('store.reset.body')}
+            action={
+                <Button size="sm" variant="secondary" onClick={onDismiss} dataButton="store-reset-ok">
+                    {t('store.reset.dismiss')}
+                </Button>
+            }
+        />
     );
 }
 
 export function EngineStartNotice({ t, detail }: { t: T; detail?: string }) {
+    // The what-to-do sentence is the notice's action (there is no button
+    // that could help), so it stays on the surface; the reason folds away.
     return (
-        <div role="alert" style={{ ...box, color: 'var(--fg)', textAlign: 'start' }}>
-            <strong style={{ display: 'block', marginBottom: 6, color: 'var(--red)' }}>
-                {t('engine.start_failed.title')}
-            </strong>
-            <span style={{ display: 'block', opacity: 0.9 }}>{t('engine.start_failed.body')}</span>
-            {detail && (
-                <details style={{ marginTop: 8, color: 'var(--muted)', fontSize: 11 }}>
-                    <summary style={{ cursor: 'pointer' }}>{t('network.error_details')}</summary>
-                    <code
-                        dir="ltr"
-                        style={{
-                            display: 'block',
-                            marginTop: 4,
-                            fontFamily: 'var(--font-mono)',
-                            whiteSpace: 'pre-wrap',
-                            overflowWrap: 'anywhere',
-                            textAlign: 'left',
-                        }}
-                    >
-                        {detail}
-                    </code>
-                </details>
-            )}
-        </div>
+        <NoticeRow
+            t={t}
+            text={
+                <>
+                    <strong style={{ display: 'block', fontWeight: 600 }}>{t('engine.start_failed.title')}</strong>
+                    <span style={{ display: 'block', color: 'var(--muted)', fontSize: 13 }}>
+                        {t('engine.start_failed.body')}
+                    </span>
+                </>
+            }
+            detail={detail}
+        />
     );
 }

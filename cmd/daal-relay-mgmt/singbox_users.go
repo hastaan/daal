@@ -183,6 +183,13 @@ func addUserToSingboxFor(path string, c userCreds, validate func(string) error, 
 	} else {
 		c.WSPath = ""
 	}
+	// The Cloudflare door (ws-cdn-in) carries the same recipients as
+	// vless-in and ws-in, by the same UUID (singbox_cdn.go). A recipient
+	// added after the door opened gets a row there too; a closed door is
+	// a no-op. Only a recipient who got a vless row above may pass it.
+	if fams.serves(famVLESSReality) || fams.serves(famWebSocketTLS) {
+		appendCDNUser(doc, c)
+	}
 	// WAVE 5. shadowsocks-2022 — the only family here with no TLS
 	// handshake in it, and therefore the only one the Xue et al.
 	// nested-TLS classifier cannot reach. Creates ss-in on first use
@@ -342,8 +349,8 @@ func asSlice(v any) []any {
 	return s
 }
 
-// removeUserFromSingbox removes the user across all four inbound
-// types. Returns whether the user was present in any inbound.
+// removeUserFromSingbox removes the user from every managed inbound,
+// the Cloudflare door (ws-cdn-in) included. Returns whether the user was present in any inbound.
 func removeUserFromSingbox(path, name string, validate func(string) error) (bool, error) {
 	doc, err := loadSingboxDoc(path)
 	if err != nil {
@@ -369,6 +376,11 @@ func removeUserFromSingbox(path, name string, validate func(string) error) (bool
 		found = true
 	}
 	if removeTUICUser(doc, name) {
+		found = true
+	}
+	// The Cloudflare door: without this a recipient revoked after the
+	// door opened would keep a way in through Cloudflare.
+	if removeCDNUser(doc, name) {
 		found = true
 	}
 	if !found {

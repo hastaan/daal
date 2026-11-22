@@ -262,3 +262,26 @@ func TestTUICNeverSharesHysteria2Endpoint(t *testing.T) {
 		t.Fatalf("tuic and hysteria2 both claim %+v", For("tuic"))
 	}
 }
+
+// TestCDNOriginIsItsOwnPortAndNeverWorldOpen: the CDN door must not
+// share a listener with any family (a clash does not boot), must not be
+// 443/tcp (Cloudflare would land on REALITY), and must never appear in
+// the world-open firewall list whatever the family set.
+func TestCDNOriginIsItsOwnPortAndNeverWorldOpen(t *testing.T) {
+	if CDNOrigin.UDP || CDNOrigin.Port == 443 {
+		t.Fatalf("CDNOrigin = %+v; want a TCP port that is not 443", CDNOrigin)
+	}
+	for _, f := range Declared() {
+		if For(f) == CDNOrigin {
+			t.Errorf("CDNOrigin %+v collides with family %q", CDNOrigin, f)
+		}
+	}
+	sets := [][]string{nil, LegacyFamilies(), Declared()}
+	for _, fams := range sets {
+		for _, ep := range FirewallPortsFor(fams) {
+			if ep == CDNOrigin {
+				t.Errorf("FirewallPortsFor(%v) opens the CDN door to the world", fams)
+			}
+		}
+	}
+}

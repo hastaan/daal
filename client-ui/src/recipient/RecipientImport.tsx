@@ -36,7 +36,8 @@ import {
 } from './sessionStatus';
 import { normalizeFrameText, parseFrameLines } from './frames';
 import { friendlyError } from '../lib/importVerdict';
-import { Button } from '../design/primitives';
+import { Button, ProgressRing } from '../design/primitives';
+import { useDeveloperMode } from '../lib/devMode';
 
 type Mode = 'camera' | 'paste' | 'file';
 
@@ -60,17 +61,27 @@ type CamState =
     | 'unavailable';
 
 /** No decoder progress for this long while the camera runs => stalled. */
-const STALL_MS = 6000;
+const STALL_MS = 10000;
 /** Camera sampling period. ~8/s is plenty for an animated QR. */
 const TICK_MS = 120;
 
 interface Props {
     t: (k: string) => string;
     onVerdict: (verdict: string) => void;
-    onClose: () => void;
+    /** Kept for callers; closing the sheet is how a scan is discarded. */
+    onClose?: () => void;
+    /** How many blocks have been recovered so far (0 = nothing to lose),
+     *  so closing the sheet can ask first. */
+    onProgress?: (received: number) => void;
+    /** When the camera cannot be used: paste the file as text instead
+     *  (the add sheet's paste box). */
+    onUsePaste?: () => void;
 }
 
-export default function RecipientImport({ t, onVerdict, onClose }: Props) {
+export default function RecipientImport({ t, onVerdict, onProgress, onUsePaste }: Props) {
+    // The paste and file lanes, the counters and the session id are for
+    // developers (spec C3.4): a person sees the camera and one ring.
+    const dev = useDeveloperMode();
     const [mode, setMode] = useState<Mode>('camera');
     const [status, setStatus] = useState<SessionStatus | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -111,6 +122,7 @@ export default function RecipientImport({ t, onVerdict, onClose }: Props) {
             const id = await ensureSession();
             const s = await Recipient.feedFrame(id, 0, 0, frameB64);
             setStatus(s);
+            onProgress?.(s.received);
             setFramesRead((n) => n + 1);
             if (s.received !== lastReceived.current) {
                 lastReceived.current = s.received;
@@ -127,7 +139,7 @@ export default function RecipientImport({ t, onVerdict, onClose }: Props) {
             }
             return false;
         },
-        [ensureSession, onVerdict],
+        [ensureSession, onVerdict, onProgress],
     );
 
     /** Feed a whole batch (paste / file). Reports the "ran out of
@@ -200,44 +212,50 @@ export default function RecipientImport({ t, onVerdict, onClose }: Props) {
         setBatchIncomplete(false);
         setConfirmDiscard(false);
         lastReceived.current = -1;
+        onProgress?.(0);
         if (id) await Recipient.cancel(id).catch(() => {});
     };
 
     return (
         <div>
-            <p style={{ color: 'var(--paper-dim)', fontSize: 13, margin: '0 0 14px' }}>
+            <p style={{ color: 'var(--muted)', fontSize: 14, margin: '0 0 14px', textAlign: 'center' }}>
                 {t('scan.lede')}
             </p>
 
-            <div role="tablist" style={tabRow()}>
-                {(['camera', 'paste', 'file'] as Mode[]).map((m) => (
-                    <button
-                        key={m}
-                        role="tab"
-                        aria-selected={mode === m}
-                        onClick={() => setMode(m)}
-                        style={tabBtn(mode === m)}
-                    >
-                        {t(`scan.mode.${m}`)}
-                    </button>
-                ))}
-            </div>
+            {dev && (
+                <div role="tablist" style={tabRow()}>
+                    {(['camera', 'paste', 'file'] as Mode[]).map((m) => (
+                        <button
+                            key={m}
+                            role="tab"
+                            aria-selected={mode === m}
+                            onClick={() => setMode(m)}
+                            style={tabBtn(mode === m)}
+                        >
+                            {t(`scan.mode.${m}`)}
+                        </button>
+                    ))}
+                </div>
+            )}
 
             {contractBroken ? (
                 <Panel tone="danger" title={t('scan.contract.title')}>
                     <div>{t('scan.contract.body')}</div>
-                    {error && <Mono>{error}</Mono>}
+                    {error && dev && <Mono>{error}</Mono>}
                 </Panel>
             ) : (
                 <>
                     {mode === 'camera' && (
                         <CameraLane
                             t={t}
+                            dev={dev}
                             camState={camState}
                             setCamState={setCamState}
                             onFrame={feed}
                             onError={report}
                             onFallback={() => setMode('paste')}
+                            onUsePaste={onUsePaste}
+                            progress={(status?.total_frames ?? 0) > 0 ? progress ?? 0 : undefined}
                         />
                     )}
 
@@ -259,23 +277,37 @@ export default function RecipientImport({ t, onVerdict, onClose }: Props) {
                         />
                     )}
 
-                    <ProgressPanel
-                        t={t}
-                        status={status}
-                        progress={progress}
-                        framesRead={framesRead}
-                        paused={camState === 'paused'}
-                    />
+                    {/* The ring in the camera corner says how far the
+                        file has come. A developer also gets the numbers,
+                        and a progress bar for the paste and file lanes. */}
+                    {(dev || mode !== 'camera') && (
+                        <ProgressPanel
+                            t={t}
+                            status={status}
+                            progress={progress}
+                            framesRead={framesRead}
+                            paused={camState === 'paused'}
+                            counters={dev}
+                        />
+                    )}
 
                     {stalled && !doneRef.current && (
-                        <Panel tone="warn" title={t('scan.stall.title')}>
+                        <p
+                            data-testid="scan-stalled"
+                            style={{ margin: '12px 0 0', fontSize: 14, color: 'var(--amber)', textAlign: 'center' }}
+                        >
+                            {t('scan.stall.title')}
+                        </p>
+                    )}
+                    {dev && stalled && !doneRef.current && (
+                        <Panel tone="warn">
                             {remaining == null || remaining === 0
                                 ? t('scan.stall.nothing')
                                 : t('scan.stall.body').replace('{n}', String(remaining))}
                         </Panel>
                     )}
 
-                    {batchIncomplete && !doneRef.current && (
+                    {dev && batchIncomplete && !doneRef.current && (
                         <Panel tone="warn" title={t('scan.incomplete.title')}>
                             {t('scan.incomplete.body')
                                 .replace('{n}', String(remaining ?? status?.total_frames ?? 0))
@@ -293,32 +325,27 @@ export default function RecipientImport({ t, onVerdict, onClose }: Props) {
                 </>
             )}
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
-                {sessionId && !confirmDiscard && (
-                    <Button variant="ghost" onClick={() => setConfirmDiscard(true)}>
-                        {t('scan.discard')}
-                    </Button>
-                )}
-                {confirmDiscard && (
-                    <>
-                        <span style={{ fontSize: 13, color: 'var(--paper-dim)', alignSelf: 'center' }}>
-                            {t('scan.discard.confirm')}
-                        </span>
-                        <Button variant="ghost" onClick={() => setConfirmDiscard(false)}>
-                            {t('common.cancel')}
+            {dev && sessionId && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {!confirmDiscard ? (
+                        <Button variant="ghost" onClick={() => setConfirmDiscard(true)} dataButton="scan-discard">
+                            {t('scan.discard')}
                         </Button>
-                        <Button onClick={() => void discard()}>{t('scan.discard')}</Button>
-                    </>
-                )}
-                <div style={{ flex: 1 }} />
-                <Button variant="ghost" onClick={onClose}>
-                    {t('common.cancel')}
-                </Button>
-            </div>
-
-            {sessionId && (
-                <Mono>session {sessionId.slice(0, 16)}…</Mono>
+                    ) : (
+                        <>
+                            <span style={{ fontSize: 13, color: 'var(--muted)' }}>{t('scan.discard.confirm')}</span>
+                            <Button variant="ghost" onClick={() => setConfirmDiscard(false)}>
+                                {t('common.cancel')}
+                            </Button>
+                            <Button variant="danger" onClick={() => void discard()}>
+                                {t('scan.discard')}
+                            </Button>
+                        </>
+                    )}
+                </div>
             )}
+
+            {dev && sessionId && <Mono>session {sessionId.slice(0, 16)}…</Mono>}
         </div>
     );
 }
@@ -331,12 +358,15 @@ function ProgressPanel({
     progress,
     framesRead,
     paused,
+    counters,
 }: {
     t: (k: string) => string;
     status: SessionStatus | null;
     progress: number | null;
     framesRead: number;
     paused: boolean;
+    /** Developer mode: the block, frame and byte counters. */
+    counters: boolean;
 }) {
     const done = status?.received ?? 0;
     const total = status?.total_frames ?? 0;
@@ -370,6 +400,7 @@ function ProgressPanel({
                 coverage, so Farsi fell back to a generic unshaped face —
                 on the one readout a sender holding the phone steady is
                 actually watching. */}
+            {counters && (<>
             <div
                 style={{
                     marginTop: 8,
@@ -405,6 +436,7 @@ function ProgressPanel({
                     {t('scan.progress.complete')}
                 </div>
             )}
+            </>)}
         </div>
     );
 }
@@ -435,13 +467,20 @@ function classifyCameraError(e: unknown, alreadyRefusedOnce: boolean): CamState 
 
 function CameraLane({
     t,
+    dev,
     camState,
     setCamState,
     onFrame,
     onError,
     onFallback,
+    onUsePaste,
+    progress,
 }: {
     t: (k: string) => string;
+    dev: boolean;
+    onUsePaste?: () => void;
+    /** 0..1 once the first block has told how big the file is. */
+    progress: number | undefined;
     camState: CamState;
     setCamState: (s: CamState) => void;
     onFrame: (frameB64: string) => Promise<boolean>;
@@ -510,6 +549,14 @@ function CameraLane({
             setCamState(next);
         }
     }, [setCamState]);
+
+    // The camera starts as the sheet opens: no "Start scanning" tap.
+    const started = useRef(false);
+    useEffect(() => {
+        if (started.current || camState !== 'idle') return;
+        started.current = true;
+        void start();
+    }, [camState, start]);
 
     // Release the camera whenever we are not actively scanning.
     useEffect(() => {
@@ -583,61 +630,110 @@ function CameraLane({
     };
     const r = refusal[camState];
 
+    const showVideo = camState === 'live' || camState === 'paused';
     return (
         <div>
             <div
                 style={{
                     position: 'relative',
-                    borderRadius: 10,
+                    borderRadius: 'var(--r-card)',
                     overflow: 'hidden',
-                    background: 'var(--teal-deep)',
-                    aspectRatio: '4 / 3',
-                    display: camState === 'live' || camState === 'paused' ? 'block' : 'none',
+                    background: 'var(--bg-deep)',
+                    aspectRatio: '1 / 1',
+                    width: '100%',
+                    maxWidth: 360,
+                    marginInline: 'auto',
+                    display: showVideo || camState === 'requesting' || camState === 'idle' ? 'block' : 'none',
                 }}
             >
                 <video
                     ref={videoRef}
                     playsInline
                     muted
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: showVideo ? 'block' : 'none' }}
                 />
+                {progress !== undefined && (
+                    <div
+                        data-testid="scan-ring"
+                        style={{
+                            position: 'absolute',
+                            insetBlockEnd: 10,
+                            insetInlineEnd: 10,
+                            background: 'var(--scrim)',
+                            borderRadius: '50%',
+                            padding: 4,
+                        }}
+                    >
+                        <ProgressRing value={progress} size={52} stroke={4}>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>
+                                {percentText(progress)}
+                            </span>
+                        </ProgressRing>
+                    </div>
+                )}
             </div>
             <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-            {camState === 'requesting' && (
-                <Panel>{t('scan.cam.requesting')}</Panel>
-            )}
-
             {r && (
-                <Panel tone="warn" title={t(`scan.cam.${r.key}.title`)}>
-                    <div>{t(`scan.cam.${r.key}.body`)}</div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                <div role="alert" style={{ marginTop: 12, textAlign: 'center' }}>
+                    <p style={{ margin: '0 0 10px', fontSize: 14, color: 'var(--fg)' }}>
+                        {t(`scan.cam.${r.key}.title`)}
+                    </p>
+                    {dev && (
+                        <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--muted)' }}>
+                            {t(`scan.cam.${r.key}.body`)}
+                        </p>
+                    )}
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
                         {r.retry && (
-                            <Button onClick={() => void start()}>
-                                {t('scan.cam.denied.retry')}
+                            <Button variant="secondary" onClick={() => void start()} dataButton="scan-retry">
+                                {t('auto.try_again')}
                             </Button>
                         )}
-                        <Button variant="ghost" onClick={onFallback}>
-                            {t('scan.cam.use_paste')}
-                        </Button>
+                        {dev ? (
+                            <Button variant="ghost" onClick={onFallback}>
+                                {t('scan.cam.use_paste')}
+                            </Button>
+                        ) : (
+                            onUsePaste && (
+                                <Button variant="link" onClick={onUsePaste} dataButton="scan-use-paste">
+                                    {t('add.choose.paste')}
+                                </Button>
+                            )
+                        )}
                     </div>
-                </Panel>
+                </div>
             )}
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                {(camState === 'idle' || camState === 'paused') && (
-                    <Button onClick={() => void start()}>
-                        {camState === 'paused' ? t('scan.resume') : t('scan.start')}
-                    </Button>
-                )}
-                {camState === 'live' && (
-                    <Button variant="ghost" onClick={() => setCamState('paused')}>
-                        {t('scan.pause')}
-                    </Button>
-                )}
-            </div>
+            {dev && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                    {camState === 'paused' && (
+                        <Button variant="secondary" onClick={() => void start()}>
+                            {t('scan.resume')}
+                        </Button>
+                    )}
+                    {camState === 'live' && (
+                        <Button variant="ghost" onClick={() => setCamState('paused')}>
+                            {t('scan.pause')}
+                        </Button>
+                    )}
+                </div>
+            )}
         </div>
     );
+}
+
+/** "42%", in the page's digits. */
+function percentText(p: number): string {
+    const n = `${Math.round(Math.max(0, Math.min(1, p)) * 100)}%`;
+    try {
+        return new Intl.NumberFormat(document.documentElement.lang === 'fa' ? 'fa-IR' : 'en', {
+            style: 'percent',
+            maximumFractionDigits: 0,
+        }).format(Math.max(0, Math.min(1, p)));
+    } catch {
+        return n;
+    }
 }
 
 // ---- Paste -------------------------------------------------------

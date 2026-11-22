@@ -27,6 +27,7 @@
 // silence is the entire point of removing the PIN — if this component
 // ever renders on a clean hardware-backed device, it is a bug.
 
+import { useConfirm } from './ui';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Wizard, classifyPublisherError } from './wizardCommands';
 import type {
@@ -116,6 +117,8 @@ const MONO_SMALL: React.CSSProperties = {
 };
 
 export default function CustodyGate({ t, operators, children }: Props) {
+    // The app's own confirm, not window.confirm (H-29).
+    const confirm = useConfirm();
     const [status, setStatus] = useState<PublisherCustodyStatus | null>(null);
     const [probeError, setProbeError] = useState<string | null>(null);
 
@@ -236,7 +239,14 @@ export default function CustodyGate({ t, operators, children }: Props) {
             const msg = t('pub.custody.migrate.stuck.confirm')
                 .replace('{name}', name)
                 .replace('{ip}', where);
-            if (!window.confirm(msg)) return;
+            const yes = await confirm.ask({
+                title: t('pub.custody.migrate.stuck.title_confirm'),
+                body: msg,
+                confirmLabel: t('pub.custody.migrate.stuck.go'),
+                cancelLabel: t('common.cancel'),
+                danger: true,
+            });
+            if (!yes) return;
             setStuckBusy(op.id);
             try {
                 await Wizard.cancelAndCleanup(op.id);
@@ -247,7 +257,7 @@ export default function CustodyGate({ t, operators, children }: Props) {
                 setStuckBusy(null);
             }
         },
-        [refresh, t],
+        [confirm, refresh, t],
     );
 
     const onExportRecovery = useCallback(
@@ -260,7 +270,13 @@ export default function CustodyGate({ t, operators, children }: Props) {
             // That is the deliberate trade (a non-exportable DWK dies
             // with the device, and there is no escrow), but it is not a
             // trade to make on a single unannounced tap.
-            if (!window.confirm(t('pub.custody.recovery.confirm'))) return;
+            const yes = await confirm.ask({
+                title: t('pub.danger.recovery.confirm.title'),
+                body: t('pub.custody.recovery.confirm'),
+                confirmLabel: t('pub.danger.recovery.confirm.go'),
+                cancelLabel: t('common.cancel'),
+            });
+            if (!yes) return;
             try {
                 const path = await Wizard.saveRecoveryKey(
                     op.id,
@@ -273,7 +289,7 @@ export default function CustodyGate({ t, operators, children }: Props) {
                 setRecoveryMsg(String(e));
             }
         },
-        [t],
+        [confirm, t],
     );
 
     // Still probing, or the probe itself errored — either way, don't
@@ -693,6 +709,7 @@ export default function CustodyGate({ t, operators, children }: Props) {
                         )}
                     </div>
                 </Card>
+                {confirm.node}
             </div>
         );
     }

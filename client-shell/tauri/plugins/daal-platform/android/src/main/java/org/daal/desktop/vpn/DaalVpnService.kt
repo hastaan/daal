@@ -1449,6 +1449,13 @@ class DaalVpnService : VpnService() {
 
     @JvmStatic fun isConnected(): Boolean = connected
     @JvmStatic fun currentRouteId(): String? = activeRouteId
+
+    /**
+     * The service exists (created and not yet destroyed): Daal itself is
+     * connecting, connected or stopping. The network test's VPN watch
+     * uses it to tell Daal's own tunnel from another app's.
+     */
+    @JvmStatic fun isRunning(): Boolean = live != null
     @JvmStatic fun lastSwitchNote(): SwitchPolicy.SwitchNote? = lastSwitch
 
     /** The engine's automatic connect is in charge of the connection. */

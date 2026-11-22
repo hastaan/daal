@@ -119,7 +119,7 @@ func TestAddUserToSingbox_StampsMuxOnExistingRelay(t *testing.T) {
 // it is not present (a clean checkout without dist-release, CI).
 func singboxBinaryForTest(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "..", "dist-release", "relay-v1.5.1", "sing-box-1.13.12-linux-amd64"))
+	p, err := filepath.Abs(filepath.Join("..", "..", "dist-release", "relay-v1.6.0", "sing-box-1.13.12-linux-amd64"))
 	if err != nil {
 		return ""
 	}

@@ -4,6 +4,8 @@
 // (`client-ui/src/backends/harness.ts`) MUST match these field names
 // and types. The UI never reaches into raw engine JSON.
 
+import type { SurveyReport } from '../lib/routeSurvey';
+
 export type ConnState  = 'disconnected' | 'connecting' | 'connected' | 'error';
 export type ConnMode   = 'lifeline' | 'lifeline-strict' | 'normal' | 'bulk';
 export type TrustClass = 'trusted' | 'pinned' | 'lan' | 'unknown';
@@ -56,6 +58,10 @@ export interface Measured {
    *  already made readable by lib/measured.ts — the engine sends Unix
    *  seconds, which become "2026-11-19 10h UTC". Details only. */
   last?: string;
+  /** The same bucket as Unix seconds, when the engine sent a number:
+   *  the pages say it as "21 minutes ago" from this. Absent when the
+   *  engine sent none (or sent the bucket already written out). */
+  lastUnix?: number;
 }
 
 /** What the HOST last told the engine about the network the device is
@@ -105,6 +111,10 @@ export interface RouteDisplayRow {
   measured?: Measured;
   /** True once the route has recorded at least one success. */
   proven?: boolean;
+  /** The engine cannot check this route beside a running connection
+   *  (`checked_when_used`: tor, wireguard, …): it is checked only when it
+   *  is used, so no score appears for it by itself. */
+  checkedWhenUsed?: boolean;
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
   sourceName?: string;
@@ -184,6 +194,9 @@ export interface ConnectionSummary {
    *  read"). Pages use a change in it as the cue to re-read the real
    *  list; "nothing imported" is never concluded from it. */
   routeCountHint?: number;
+  /** The engine's check of the other routes (diagnostics `survey`,
+   *  lib/routeSurvey.ts). `undefined` from an engine without one. */
+  survey?: SurveyReport;
 }
 
 /** One route automatic connect tried, as the engine reports it. Ids and
@@ -210,6 +223,15 @@ export interface AutoTried {
   /** The route this one was tried at the same time as ('' / absent =
    *  it was tried alone). Details only. */
   racedWith?: string;
+  /** Why the engine put this route where it did in the order (the
+   *  engine's `tried[].why`, core/abi/connect_auto.go AutoWhy*):
+   *  'carried_here' (it carried on this network the last time it was
+   *  tried here: those go first), 'ranked' (nothing remembered here:
+   *  the ranking's order), 'mode_other', 'failed_here' (failed here
+   *  recently: last), 'was_connected' (the connected route that
+   *  stopped carrying, put back after nothing else did). Absent when
+   *  the engine said nothing or the route was not a candidate. */
+  why?: string;
 }
 
 /** The engine's own account of automatic connect, from memory.

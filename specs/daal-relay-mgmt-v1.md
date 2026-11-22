@@ -2,7 +2,7 @@
 
 **Status:** locked at FRP-10 (May 2026); **extended at FRP-14** (lifts the 3-route invariant to 6 routes; see `specs/per-recipient-credentials-v1.md`); **extended again at the publisher redesign** (7th route `/whoami`, §4.7). · **Supplement reference:** §9.5.2, §9.5.5. · **Engine line:** `daal-core 0.9.0+v3-share` (no engine ABI surface — this is an in-box userspace daemon).
 
-This spec defines the contract between the FRP Helper and the persistent in-box `daal-relay-mgmt` service that ships with FRP-10's V2 deploys. It locks the wire format, the auth scheme, the TLS posture, the port discipline, and the API surface (ten routes today; §4 counts them and names the amendment each one needed). The Helper-side mirror (`publisher/deploy/mgmt/`) and the box-side service (`cmd/daal-relay-mgmt/`) are both pinned by tests against this contract.
+This spec defines the contract between the FRP Helper and the persistent in-box `daal-relay-mgmt` service that ships with FRP-10's V2 deploys. It locks the wire format, the auth scheme, the TLS posture, the port discipline, and the API surface (eleven routes today; §4 counts them and names the amendment each one needed). The Helper-side mirror (`publisher/deploy/mgmt/`) and the box-side service (`cmd/daal-relay-mgmt/`) are both pinned by tests against this contract.
 
 ---
 
@@ -55,7 +55,7 @@ where:
 * `v2` is the token format. **The box refuses every other format**, including the unversioned v1 shape (`<nonce>:<ts>:<op>:<base64-sig>`, signature over `<nonce>:<ts>:<op>`), which signed neither the body nor the method. There is no compatibility path in either direction: a v1 publisher cannot drive a v2 box and a v2 publisher cannot drive a v1 box. Nothing was fielded on v1 when the format changed; a relay provisioned with a v1 daemon is rebuilt, like every other daemon change (cloud-init has no upgrade path).
 * `nonce` is 16 random bytes hex-encoded (32 hex chars), fresh per request. The on-box service tracks seen nonces for every **mutating** op, each of which is single-use (see **Replay** below).
 * `ts` is the Helper's clock as seconds-since-Unix-epoch.
-* `op` names the route: `rotate-credentials`, `rotate-tls`, `users-provision`, `users-revoke`, `users-list`, `whoami`, `identity` (§4.9), `bind-address`, `unbind-address` (and any read op a later section adds), matching `opFromPath` in `cmd/daal-relay-mgmt/main.go` and the `opRoutes` table in `publisher/deploy/mgmt/token.go`. The on-box service rejects any token whose `op` does not match the URL path.
+* `op` names the route: `rotate-credentials`, `rotate-tls`, `users-provision`, `users-revoke`, `users-list`, `whoami`, `identity` (§4.9), `bind-address`, `unbind-address`, `cdn` (§4.10) (and any read op a later section adds), matching `opFromPath` in `cmd/daal-relay-mgmt/main.go` and the `opRoutes` table in `publisher/deploy/mgmt/token.go`. The on-box service rejects any token whose `op` does not match the URL path.
 * `<base64-sig>` is the standard-encoding base64 of `Ed25519.Sign(privKey, signing_input)`.
 
 **What is signed.** `signing_input` is eight lines joined by a single `\n` (0x0A), with no trailing newline:
@@ -93,9 +93,9 @@ The `privKey` is the Helper's per-deploy publisher Ed25519 private key. Its publ
 
 History: v1 tokens signed `nonce:ts:op` only, so a captured token authorised any body on its route; single use was added for the address verbs (Wave 3c) and then for every mutating verb after the one-machine end-to-end rig replayed a `users-revoke` token against a second recipient (`test-rigs/worldbox/FINDINGS.md` LC-1). That left the restart case open, which v2 closes.
 
-## 4. API surface — exactly ten routes
+## 4. API surface — exactly eleven routes
 
-The FRP-10 baseline locked three routes (`/rotate-credentials`, `/rotate-tls`, `/health`). FRP-14 adds three per-recipient routes (`/users/provision`, `/users/revoke`, `/users/list`), specified in `specs/per-recipient-credentials-v1.md`. The publisher redesign adds a seventh, `/whoami` (§4.7). **Wave 3c adds the eighth and ninth, `/bind-address` and `/unbind-address` (§4.8)** — this paragraph is that supplement amendment. **The truth wave adds the tenth, `GET /identity` (§4.9)** — read-only, and this sentence is its amendment. Adding an **eleventh** route requires another. The implementation-level invariant is pinned by `TestExactlyNRoutes` (n=10) in `cmd/daal-relay-mgmt/main_test.go`.
+The FRP-10 baseline locked three routes (`/rotate-credentials`, `/rotate-tls`, `/health`). FRP-14 adds three per-recipient routes (`/users/provision`, `/users/revoke`, `/users/list`), specified in `specs/per-recipient-credentials-v1.md`. The publisher redesign adds a seventh, `/whoami` (§4.7). **Wave 3c adds the eighth and ninth, `/bind-address` and `/unbind-address` (§4.8)** — this paragraph is that supplement amendment. **The truth wave adds the tenth, `GET /identity` (§4.9)** — read-only, and this sentence is its amendment. **The optional add-ons add the eleventh, `POST /cdn` (§4.10)**, the relay's door for the way in through Cloudflare (`specs/optional-addons-v1.md` §4) — and this sentence is its amendment. Adding a **twelfth** route requires another. The implementation-level invariant is pinned by `TestExactlyNRoutes` (n=11) in `cmd/daal-relay-mgmt/main_test.go`.
 
 The two address routes are counted as one addition, not two, and ship together: an unbind with no bind has nothing to undo, and a box with one and not the other is a shape no release produces. They share a single capability token (§4.8).
 
@@ -172,7 +172,7 @@ The L2 path rotates the data-plane TLS/SNI profile used by sing-box and re-issue
 
 ### 4.2.1. Box REALITY keypair rotation — not specified, not implemented
 
-Rotating the box's REALITY keypair invalidates every recipient's pinned public key, so every pack ever distributed stops working until each recipient receives a new one — which is exactly what does not work under blackout. It is therefore a **third** operation and must never be a side effect or a flag on §4.1 or §4.2. It would be a **new route** (the eleventh — Wave 3c took the eighth and ninth, §4.8, and `GET /identity` the tenth, §4.9) and requires a supplement amendment to §4, plus Step 8's redistribution path underneath it. `publisher/deploy/mgmt` has a tripwire test (`TestNoBoxKeyRotationSurfaceExists`) asserting no such surface exists.
+Rotating the box's REALITY keypair invalidates every recipient's pinned public key, so every pack ever distributed stops working until each recipient receives a new one — which is exactly what does not work under blackout. It is therefore a **third** operation and must never be a side effect or a flag on §4.1 or §4.2. It would be a **new route** (the twelfth — Wave 3c took the eighth and ninth, §4.8, `GET /identity` the tenth, §4.9, and `POST /cdn` the eleventh, §4.10) and requires a supplement amendment to §4, plus Step 8's redistribution path underneath it. `publisher/deploy/mgmt` has a tripwire test (`TestNoBoxKeyRotationSurfaceExists`) asserting no such surface exists.
 
 ### 4.3. `GET /health` — liveness probe **and capability advertisement**
 
@@ -280,6 +280,27 @@ Echoes the source IP the box actually observes for the connection.
 * The summary carries `committed_identity` — what the signed endpoints commit the relay to, read back out of the pack — and `uncommitted_families`.
 
 The publisher app asks before **every** signature (the address swap may reuse an identity already learned from the same relay, identified by `MgmtTLSFingerprint`: it moves the address, not the relay's keys, and has a 15-second budget). It stores `committed_identity`, compares the relay-wide fields of every later reply against it, and **signs again and republishes freshness when they differ** — after the first recipient on a relay with a pending family, after `/rotate-tls`, after a rebuild. For a relay that predates the route it builds the same document from the relay-wide fields of a `/users/provision` reply; if the record carries no key at all and no reply exists yet, it provisions the shared `r0` to obtain one (the reply's recipient secrets are discarded).
+
+### 4.10. `POST /cdn` — the Cloudflare door (optional add-on 2)
+
+**Why it exists.** The way in through Cloudflare (`specs/optional-addons-v1.md` §4) needs a door on the relay that only Cloudflare can open: a dedicated inbound, `ws-cdn-in` (VLESS over WebSocket on port 8448, `relayports.CDNOrigin`), serving the zone's Cloudflare Origin CA certificate and **requiring** Cloudflare's Authenticated Origin Pull client certificate. Its material is a private key, so it can only arrive through this session, never through cloud-init user-data.
+
+* **Auth:** the standard `requireAuth` wrapper; op `cdn`, `POST` only. **Mutating and single-use** (§3 "Replay"), `status` included: the route has one method.
+* **Request** (`cdnReq` on the box, `cloudflare.DoorRequest` on the publisher; JSON names pinned on both ends by `TestCDNRequestFieldNames` and `TestBuildDoorEnable`; unknown members are refused):
+
+      {"action": "enable", "port": 8448, "ws_path": "/<32 hex>",
+       "origin_cert_pem": "…", "origin_key_pem": "…", "aop_ca_pem": "…",
+       "edge_ranges": ["173.245.48.0/20", "2400:cb00::/32", …]}
+      {"action": "disable"}
+      {"action": "status"}
+
+* **enable** checks everything before writing anything: the port is 8448 (the only port both firewalls open to Cloudflare), the path is a usable WebSocket path, the certificate and key are a pair valid now, `aop_ca_pem` holds only CA certificates, and every `edge_ranges` entry is a CIDR that is not everyone (at most 64; each re-printed from its parse). It refuses (`409`) while the relay has no recipient: sing-box refuses an inbound with no users. Then, in this order: the box firewall (ufw) is opened on 8448 to each range it does not hold yet (`ufw allow from <cidr> to any port 8448 proto tcp`, argv, no shell); the three files go to `/etc/daal/cdn`; `ws-cdn-in` is written with the recipients of `vless-in` and `ws-in` (uuid and name); sing-box reloads. Any failure undoes all of it, rules included. After the reload, rules for ranges no longer sent are removed, and the set the box opened is recorded in `/etc/daal/cdn/edge_ranges.json`. An `edge_ranges` that is absent or empty leaves the box firewall as it is (a relay whose first boot already opened it, `provision --cdn-edge-ranges`).
+* **disable** removes the inbound, then the files, then every box-firewall rule enable opened. Idempotent. A rule ufw would not remove stays recorded and is tried again by the next disable; nothing listens behind it.
+* **status** reports the door without changing it.
+* **Response** `200 application/json`, never key material: `{"action", "enabled", "changed", "port", "ws_path", "users", "origin_cert_sha256", "origin_cert_not_after_unix", "box_firewall_rules"}`. `box_firewall_rules` is how many Cloudflare ranges the box firewall opens the door's port to by rules this service wrote. The publisher refuses an enable that answered for another port or path, or that opened no rule although ranges were sent.
+* **Recipients follow the door.** `/users/provision` adds a new recipient to an open door and `/users/revoke` takes one off it. The last one leaving **parks** the door: the inbound goes (sing-box refuses one with no users), its files and its path (`/etc/daal/cdn/ws_path`) stay, and the next recipient provisioned opens it again on the same path, so the signed packs that name the route keep working. Only `disable` closes it for good. `/rotate-credentials` re-keys it like every VLESS inbound.
+* **Feature detection.** The box advertises `cdn` in `/health` `capabilities` (§4.3), and the publisher sends the key only to a box that does (`mgmt.CDNDoorEnable`, `mgmt.ErrCDNDoorUnsupported`, exit `3` from `daal-deploy cdn-door`). No version fallback: the verb rides the pinned artifact (relay-v1.6.0 and later).
+* **Publisher.** `daal-deploy cdn-door --action enable|disable` (inside the usual ephemeral firewall window, `mgmt.CDNDoorEnableWithFW` / `CDNDoorDisableWithFW`); `cdn-remove` closes the door first when it is given the relay's record and key.
 
 ## 5. Cloud-firewall as gate
 

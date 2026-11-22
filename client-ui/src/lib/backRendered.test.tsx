@@ -148,7 +148,13 @@ describe('Back, rendered', () => {
         );
         const radios = all(m.container, (n) => n.getAttribute?.('role') === 'radio');
         await click(radios[1]); // delete the server
-        await click(byText(m.container, t('pub.relays.destroy.confirm.server').replace('{ip}', '203.0.113.7')));
+        // The card being chosen names the server it deletes.
+        expect(radios[1].getAttribute('aria-checked')).toBe('true');
+        expect(radios[1].textContent).toContain('203.0.113.7');
+        const go = byAttr(m.container, 'data-button', 'destroy-confirm');
+        // The button names the choice (C7.1).
+        expect(go?.textContent).toBe(t('pub.relays.destroy.confirm.server_noaddr'));
+        await click(go);
         expect(calls[0]).toEqual(['wizard_relay_destroy', { operatorId: 3, deleteServer: true, deleteOwnServer: false }]);
         await back(); // busy: refused
         expect(closed).toBe(0);
@@ -161,7 +167,7 @@ describe('Back, rendered', () => {
         await m.unmount();
     });
 
-    it('the wizard: Back at step 2 goes to step 1; at step 1 from the list it returns to the list', async () => {
+    it('the wizard: Back at step 2 goes to the key, then to the hosting companies; from there it returns to the list', async () => {
         const { default: PublisherWizard } = await import('../publisher/PublisherWizard');
         let rootBacks = 0;
         let cancels = 0;
@@ -173,13 +179,20 @@ describe('Back, rendered', () => {
                 rootBack={() => (rootBacks += 1)}
             />,
         );
-        const stepTitle = () => all(m.container, (n) => n.nodeName === 'H2')[0]?.textContent ?? '';
+        const stepTitle = () => (all(m.container, (n) => n.nodeType === 1 && n.getAttribute('data-testid') === 'wizard-step-label')[0]?.textContent ?? '');
+        // It opens on "Where should your relay live?"; Hetzner is chosen.
         const first = stepTitle();
+        expect(first).toBe(t('wiz.host.title'));
+        await click(byText(m.container, t('common.continue')));
+        const key = stepTitle();
+        expect(key).toBe(t('wiz.step.cloud.title'));
         await type(all(m.container, (n) => n.nodeName === 'INPUT' && n.getAttribute('type') === 'password')[0], 'tok');
         // "Next" is the primary button of the nav row.
         await click(byText(m.container, t('wiz.nav.next')));
         const second = stepTitle();
-        expect(second).not.toBe(first);
+        expect(second).not.toBe(key);
+        await back();
+        expect(stepTitle()).toBe(key);
         await back();
         expect(stepTitle()).toBe(first);
         expect(rootBacks).toBe(0);
@@ -224,23 +237,54 @@ describe('Back, rendered: the publisher pages', () => {
         served_families: [],
     };
 
-    it('the relay page: Back returns to the relay list', async () => {
+    const answerWith = (ops: unknown[]) => {
         answer.fn = (cmd) => {
-            if (cmd === 'wizard_list_operators') return Promise.resolve([op]);
+            if (cmd === 'wizard_list_operators') return Promise.resolve(ops);
             if (cmd === 'publisher_custody_status')
                 return Promise.resolve({ level: 'hardware', unlocked: true, ok: true, error: '', legacy_pending: false, legacy_aliases: [], has_existing_blob: true });
             return new Promise(() => {}); // everything else: still loading
         };
+    };
+
+    it('one finished relay: the tab opens the publisher page; the relay opens from it and Back returns', async () => {
+        answerWith([op]);
         const { default: PublisherPage } = await import('../d2pages/PublisherPage');
         const m = await mount(<PublisherPage t={t} />);
-        const card = all(m.container, (n) => n.getAttribute?.('role') === 'button' && n.getAttribute('aria-label') === 'Bahar')[0];
-        await click(card);
-        expect(byText(m.container, t('pub.relay.back'))).not.toBeNull();
+        // The publisher page, with the relay row and the tools in view.
+        expect(byAttr(m.container, 'data-testid', 'people')).toBeNull();
+        expect(byAttr(m.container, 'data-button', 'relay-5')).not.toBeNull();
+        expect(byAttr(m.container, 'data-button', 'accounts')).not.toBeNull();
+        expect(win.history.depth).toBe(0);
+        // A tap on the row opens it, and Back comes back.
+        await click(byAttr(m.container, 'data-button', 'relay-5'));
+        expect(byAttr(m.container, 'data-testid', 'people')).not.toBeNull();
         expect(win.history.depth).toBe(1);
         await back();
-        expect(byText(m.container, t('pub.relay.back'))).toBeNull();
-        expect(all(m.container, (n) => n.getAttribute?.('aria-label') === 'Bahar').length).toBe(1);
-        // The list is a top-level page: nothing holds Back any more.
+        expect(byAttr(m.container, 'data-testid', 'people')).toBeNull();
         expect(win.history.depth).toBe(0);
+    });
+
+    it('two relays: the list; none: the "set up a relay" empty state, never the wizard by itself', async () => {
+        answerWith([op, { ...op, id: 6, nickname: 'Sahand' }]);
+        const { default: PublisherPage } = await import('../d2pages/PublisherPage');
+        const two = await mount(<PublisherPage t={t} />);
+        expect(byAttr(two.container, 'data-button', 'relay-5')).not.toBeNull();
+        expect(byAttr(two.container, 'data-button', 'relay-6')).not.toBeNull();
+        expect(byAttr(two.container, 'data-testid', 'people')).toBeNull();
+        await two.unmount();
+        answerWith([]);
+        const none = await mount(<PublisherPage t={t} />);
+        // No relay: the two ways to have one, side by side.
+        expect(byAttr(none.container, 'data-button', 'new-relay')).not.toBeNull();
+        expect(byAttr(none.container, 'data-button', 'restore-link')).not.toBeNull();
+        expect(none.container.textContent).toContain(t('pub.relays.empty.line'));
+    });
+
+    it('one unfinished relay stays on the list, where it says it may cost money', async () => {
+        answerWith([{ ...op, status: 'pre-provision', has_signed_sbp: false }]);
+        const { default: PublisherPage } = await import('../d2pages/PublisherPage');
+        const m = await mount(<PublisherPage t={t} />);
+        expect(byAttr(m.container, 'data-button', 'relay-5')).not.toBeNull();
+        expect(m.container.textContent).toContain(t('pub.relays.status.unfinished'));
     });
 });

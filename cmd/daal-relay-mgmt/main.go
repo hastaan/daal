@@ -517,11 +517,15 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/bind-address", s.requireAuth(s.handleBindAddress))
 	mux.HandleFunc("/unbind-address", s.requireAuth(s.handleUnbindAddress))
 	mux.HandleFunc("/identity", s.requireAuth(s.handleIdentity)) // read-only; see identity.go
+	// Add-on 2: the Cloudflare door (ws-cdn-in). Mutating and carrying
+	// a private key, so it sits behind the same per-request signature
+	// and is single-use; see singbox_cdn.go.
+	mux.HandleFunc("/cdn", s.requireAuth(s.handleCDN))
 	return mux
 }
 
 // routeNames returns the exact set of HTTP paths registered. Used
-// by main_test.go to enforce TestExactlyNRoutes (n=9).
+// by main_test.go to enforce TestExactlyNRoutes (n=11).
 func (s *server) routeNames() []string {
 	return []string{
 		"/health",
@@ -534,6 +538,7 @@ func (s *server) routeNames() []string {
 		"/bind-address",
 		"/unbind-address",
 		"/identity",
+		"/cdn",
 	}
 }
 
@@ -567,7 +572,9 @@ func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		hdr := r.Header.Get("Authorization")
 		if !strings.HasPrefix(hdr, "Daal-Mgmt-Token ") {
-			http.Error(w, "unauthorized: missing Daal-Mgmt-Token", http.StatusUnauthorized)
+			// The body names nothing: this is the one reply a stranger
+			// who reaches the port gets without knowing the scheme.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimPrefix(hdr, "Daal-Mgmt-Token ")
@@ -617,6 +624,8 @@ func opFromPath(p string) string {
 		return "unbind-address"
 	case "/identity":
 		return identityOp
+	case "/cdn":
+		return cdnOp
 	default:
 		return ""
 	}
@@ -847,6 +856,13 @@ const (
 	// Mirrors mgmt.CapTUICUsers.
 	capTUICUsers = "tuic-users"
 
+	// capCDNDoor: this binary serves POST /cdn, keeps ws-cdn-in's
+	// users in step with every provision and revoke, and opens the
+	// door's port at the box firewall to the Cloudflare ranges an
+	// enable carries (add-on 2; singbox_cdn_ufw.go). Mirrors
+	// mgmt.CapCDNDoor.
+	capCDNDoor = "cdn"
+
 	// mgmtAPIVersion is the second signal, sufficient on its own so a
 	// box that reports a version but not a verb list is still usable.
 	// v2 == the Step-7 split-rotation contract.
@@ -898,7 +914,7 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.healthCnt.Add(1)
-	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped, capShadowsocks2022, capAnyTLSInbound, capTUICUsers}
+	caps := []string{capRotateCredentialsScoped, capRotateTLSScoped, capShadowsocks2022, capAnyTLSInbound, capTUICUsers, capCDNDoor}
 	var notes []string
 	if s.addrCapability != nil {
 		ok, note := s.addrCapability()
@@ -1198,7 +1214,7 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 	var warnings []string
 	certPEM := ""
 	if applied.SNI != "" && contains(applied.Changed, "cover_sni") {
-		newPEM, restoreCert, reissued, cerr := s.reissueDataPlaneCert(applied.SNI)
+		newPEM, restoreCert, reissued, renamed, cerr := s.reissueDataPlaneCert(applied.SNI)
 		switch {
 		case errors.Is(cerr, errNoDataPlaneCert):
 			// A relay with no data-plane certificate serves no family
@@ -1208,6 +1224,13 @@ func (s *server) handleRotateTLS(w http.ResponseWriter, r *http.Request) {
 		case reissued:
 			certPEM = newPEM
 			applied.Changed = append(applied.Changed, "tls_certificate")
+			if renamed {
+				// The certificate no longer names the app (tlscert.go,
+				// "THE PRICE"). A stable token for the publisher, and the
+				// sentence for whoever reads the raw reply.
+				applied.Changed = append(applied.Changed, "tls_certificate_subject")
+				warnings = append(warnings, "the relay's TLS certificate no longer carries the app's name; naive files handed out before this rotation trust the old certificate and will stop connecting until their holders get a new file (every other route is unaffected)")
+			}
 			configRollback := rollback
 			rollback = func() {
 				restoreCert()
@@ -1350,12 +1373,16 @@ func ensureSelfSignedCert(certPath, keyPath, fpPath string) (tls.Certificate, er
 	}
 	tmpl := x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "daal-relay-mgmt"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("0.0.0.0")},
+		// Names nothing (it was "daal-relay-mgmt"): the publisher pins
+		// this certificate by its digest, so the name is read by no one
+		// but a stranger. Existing relays keep theirs — the digest is the
+		// relay's token audience, so it never changes.
+		Subject:     pkix.Name{CommonName: "localhost"},
+		NotBefore:   time.Now().Add(-1 * time.Hour),
+		NotAfter:    time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("0.0.0.0")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
 	if err != nil {

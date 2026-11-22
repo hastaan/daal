@@ -32,7 +32,7 @@ export function BottomSheet({ title, children, onClose, footer }: Props) {
             style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'rgba(0,0,0,0.55)',
+                background: 'var(--scrim)',
                 display: 'flex',
                 alignItems: 'flex-end',
                 justifyContent: 'center',
@@ -67,6 +67,9 @@ export function BottomSheet({ title, children, onClose, footer }: Props) {
                     <h2
                         style={{
                             marginTop: 0,
+                            // Room between the title and what comes first
+                            // (often a full-width button).
+                            marginBottom: 16,
                             fontFamily: 'var(--font-display)',
                             fontSize: 18,
                             fontWeight: 500,

@@ -1,9 +1,13 @@
 package org.daal.desktop.platform
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.graphics.Color
+import android.os.PersistableBundle
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebView
@@ -36,9 +40,21 @@ class VpnStartArgs {
 }
 
 @InvokeArg
+class FieldProbeWatchArgs {
+  /** true when a network test is starting; false when it has ended. */
+  var on: Boolean = false
+}
+
+@InvokeArg
 class SecureScreenArgs {
   /** true while a screen showing the recovery words is mounted. */
   var on: Boolean = false
+}
+
+@InvokeArg
+class ClipboardWriteArgs {
+  /** What a Copy button copies. May be a key: never logged. */
+  var text: String = ""
 }
 
 /**
@@ -80,7 +96,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     keepClearOfSystemBars(webView)
+    // The page scrolls inside its own areas; the WebView's own bar only
+    // showed as a stray line at the screen's edge.
+    webView.isVerticalScrollBarEnabled = false
+    webView.isHorizontalScrollBarEnabled = false
+    webView.overScrollMode = View.OVER_SCROLL_NEVER
     DownloadsSaver.context = activity.applicationContext
+    ShareText.context = activity.applicationContext
+    ShareText.setActivity(activity)
+    // "Open with Daal" / "Share to Daal": the file or text Daal was
+    // started with is held for the page, which takes it with
+    // `take_opened_file` once it is up. No event here: the page is not
+    // listening yet.
+    OpenedFiles.context = activity.applicationContext
+    OpenedFiles.offer(activity, activity.intent)
     // A page that loads has asked for nothing yet (PB-20).
     applySecureFlag(synchronized(secure) { secure.atLoad() })
     val host = activity as? ComponentActivity ?: return
@@ -110,6 +139,18 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
     }
     host.onBackPressedDispatcher.addCallback(host, callback)
+  }
+
+  /**
+   * A file opened with Daal, or a file or text shared to it, while Daal
+   * runs (the activity is singleTask, so it comes here rather than
+   * starting a second Daal). Held, and Rust is told: it stages the file
+   * and fires `daal://opened-file` once the page has asked for files
+   * (src-tauri/src/opened.rs). Nothing is imported.
+   */
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    if (OpenedFiles.offer(activity, intent)) OpenedFiles.notifyArrived()
   }
 
   /**
@@ -177,6 +218,108 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (t: Throwable) {
       Logger.error("DaalPlatformPlugin.secureScreen failed: ${t.message}")
       invoke.reject(t.message ?: "secureScreen failed")
+    }
+  }
+
+  /**
+   * Paste: the text on the clipboard, "" when there is none or it is not
+   * text. The page's own navigator.clipboard.readText() is refused by the
+   * Android web view, so every Paste button comes here
+   * (`platform_clipboard_read` in src-tauri, client-ui/src/lib/clipboard.ts).
+   * Android lets the app in focus read the clipboard, which it is when a
+   * Paste button is pressed. The text may be a key: it is handed back
+   * and never logged.
+   */
+  @Command
+  fun clipboardRead(invoke: Invoke) {
+    activity.runOnUiThread {
+      try {
+        val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val clip = cm?.primaryClip
+        val text = if (clip != null && clip.itemCount > 0) {
+          clip.getItemAt(0).coerceToText(activity)?.toString() ?: ""
+        } else {
+          ""
+        }
+        invoke.resolve(JSObject().apply { put("text", text) })
+      } catch (t: Throwable) {
+        Logger.error("DaalPlatformPlugin.clipboardRead failed: ${t.javaClass.simpleName}")
+        invoke.reject("clipboardRead failed")
+      }
+    }
+  }
+
+  /**
+   * Copy: put `text` on the clipboard (`platform_clipboard_write` in
+   * src-tauri). The web view's navigator.clipboard.writeText() needs a
+   * fresh tap, which a Copy that first waits for the app (a file, a
+   * script, a report) no longer has. Marked sensitive, so Android 13 and
+   * later do not show it in the "copied" preview: it may be a key.
+   * Never logged.
+   */
+  @Command
+  fun clipboardWrite(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(ClipboardWriteArgs::class.java)
+      activity.runOnUiThread {
+        try {
+          val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+          val clip = ClipData.newPlainText("Daal", args.text)
+          // ClipDescription.EXTRA_IS_SENSITIVE (API 33), by its value so
+          // older systems simply ignore it.
+          clip.description.extras = PersistableBundle().apply {
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+          }
+          cm.setPrimaryClip(clip)
+          invoke.resolve(JSObject().apply { put("written", true) })
+        } catch (t: Throwable) {
+          Logger.error("DaalPlatformPlugin.clipboardWrite failed: ${t.javaClass.simpleName}")
+          invoke.reject("clipboardWrite failed")
+        }
+      }
+    } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.clipboardWrite failed: ${t.javaClass.simpleName}")
+      invoke.reject("clipboardWrite failed")
+    }
+  }
+
+  /**
+   * The network test (specs/field-probe-v2.md). Reached from the app's
+   * own field_probe_* commands in src-tauri, not from the page.
+   *
+   * on = true: answer what the engine's start needs from the phone (the
+   * network's DNS servers, Private DNS mode, VPN up, global IPv6,
+   * "blocked without VPN") and start watching for the length of the
+   * run: network facts to the engine, a cancel the moment a VPN
+   * appears or Daal's activity stops, and the screen kept on
+   * (FieldProbeWatch). on = false: stop watching; answers the same
+   * facts, read again.
+   *
+   * The DNS server addresses travel to Rust and on into the engine's
+   * memory; neither side logs them.
+   */
+  @Command
+  fun fieldProbeWatch(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(FieldProbeWatchArgs::class.java)
+      val ctx = activity.applicationContext
+      if (args.on) FieldProbeWatch.start(activity) else FieldProbeWatch.stop()
+      val f = FieldProbeWatch.hostFacts(ctx)
+      val dns = app.tauri.plugin.JSArray()
+      for (d in f.dnsServers) dns.put(d)
+      invoke.resolve(
+        JSObject().apply {
+          put("watching", args.on)
+          put("dns_servers", dns)
+          put("private_dns", f.privateDns)
+          put("vpn_active", f.vpnActive)
+          put("ipv6_global", f.ipv6Global)
+          put("blocked", f.blocked)
+        },
+      )
+    } catch (t: Throwable) {
+      Logger.error("DaalPlatformPlugin.fieldProbeWatch failed: ${t.javaClass.simpleName}")
+      invoke.reject(t.message ?: "fieldProbeWatch failed")
     }
   }
 
@@ -305,6 +448,20 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       activity.startService(intent)
     }
   }
+
+  // ---- Optional add-ons, Google update channel, Path A (GoogleAuth.kt)
+
+  private val googleAuth = GoogleAuth(activity) { invoke, request ->
+    startIntentSenderForResult(invoke, request, "googleAuthorizeResult")
+  }
+
+  @Command
+  fun googleAuthorize(invoke: Invoke) = googleAuth.authorize(invoke)
+
+  @ActivityCallback
+  fun googleAuthorizeResult(invoke: Invoke, result: ActivityResult) =
+    googleAuth.onResult(invoke, result)
+
 }
 
 /** The page's own background (client-ui tokens.css --bg-deep), shown behind the system bars. */

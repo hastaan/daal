@@ -1,5 +1,6 @@
 // MetricTile — dashboard tile: small label, big value, optional
-// trend or accent. Used inside Diagnostics page.
+// trend or accent. Used inside the Status page. Sentence case, body font;
+// the value stays on one line (ellipsis), so it never breaks mid-word.
 
 import type { ReactNode } from 'react';
 import { StatusLight } from './StatusLight';
@@ -39,11 +40,10 @@ export function MetricTile({
                     display: 'flex',
                     alignItems: 'center',
                     gap: 8,
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 10,
-                    letterSpacing: '0.18em',
-                    textTransform: 'uppercase',
-                    color: 'var(--dim)',
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: 'var(--muted)',
                 }}
             >
                 {tone && <StatusLight tone={tone} pulse={pulse} />}
@@ -51,20 +51,26 @@ export function MetricTile({
             </div>
             <div
                 style={{
-                    fontFamily: 'var(--font-display)',
-                    fontSize: 26,
-                    fontWeight: 500,
+                    // One line, never broken inside a word: a value too
+                    // long for the tile ends in an ellipsis instead.
+                    fontFamily: 'var(--font-body)',
+                    fontSize: 22,
+                    fontWeight: 600,
                     color: 'var(--fg)',
-                    lineHeight: 1.1,
-                    overflowWrap: 'anywhere',
+                    lineHeight: 1.3,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    minWidth: 0,
                 }}
             >
                 {value}
                 {unit && (
                     <span
                         style={{
-                            fontFamily: 'var(--font-mono)',
+                            fontFamily: 'var(--font-body)',
                             fontSize: 13,
+                            fontWeight: 400,
                             color: 'var(--muted)',
                             marginInlineStart: 6,
                         }}
@@ -76,10 +82,9 @@ export function MetricTile({
             {sub && (
                 <div
                     style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
+                        fontFamily: 'var(--font-body)',
+                        fontSize: 12,
                         color: 'var(--muted)',
-                        letterSpacing: '0.04em',
                     }}
                 >
                     {sub}

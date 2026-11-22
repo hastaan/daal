@@ -133,7 +133,7 @@ func singboxBinaryForTest(t *testing.T) string {
 	// The release artefact, at the path the relay images pin. Gitignored,
 	// so its absence is normal and must not fail the gate.
 	for _, p := range []string{
-		"../../../../dist-release/relay-v1.5.1/sing-box-1.13.12-linux-amd64",
+		"../../../../dist-release/relay-v1.6.0/sing-box-1.13.12-linux-amd64",
 	} {
 		if _, err := os.Stat(p); err == nil {
 			abs, err := filepath.Abs(p)

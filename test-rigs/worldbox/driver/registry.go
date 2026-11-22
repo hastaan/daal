@@ -83,6 +83,24 @@ type Scenario struct {
 		// forged RSTs). See censor_dpi.go.
 		DPI []DPIRule `json:"dpi,omitempty"`
 	} `json:"censor"`
+	// World: the parts of the add-ons' outside world (addons_net.go)
+	// the scenario's rules and probes are about — "storage" (the
+	// freshness mirrors' static host), "cdn" (Cloudflare's API and edge),
+	// "google" (Google's front and Apps Script). Brought up before the
+	// scenario is applied; a probe aimed at one brings it up too.
+	World []string `json:"world,omitempty"`
+	// CDN: what op cdn expects of the CDN route under this censor —
+	// expect pass|blocked, and the edge targets ($EDGE_*, $EDGE_NET_*) a
+	// session that carried must have reached (empty: any).
+	CDN *struct {
+		Expect string   `json:"expect"`
+		Via    []string `json:"via,omitempty"`
+	} `json:"cdn,omitempty"`
+	// GoogleKnobs are set on the lab's Google before op google-refresh
+	// waits for the walk (fakegfe.go), and GoogleExpect is how that walk
+	// must end: recovered (default) | unreachable | refused.
+	GoogleKnobs  *GoogleKnobs `json:"google_knobs,omitempty"`
+	GoogleExpect string       `json:"google_expect,omitempty"`
 	// Analogue: the documented real-world behaviour this models, and
 	// where the model stops. Required.
 	Analogue string `json:"analogue"`
@@ -122,6 +140,34 @@ type Scenario struct {
 	// — the family's own endpoint was tried, and nothing else was — and
 	// not the byte count. See wireUnderRandomLoss.
 	RandomLoss bool `json:"random_loss,omitempty"`
+	// Desync: what op desync expects when the engine's production
+	// ClientHello split (core/desync, plan T2) is on — preset name →
+	// family (or "*") → pass|blocked. The op runs every preset listed
+	// here, on every family the split can sit under (desyncFamilies), and
+	// on every family the engine must refuse to cut (desyncRefused:
+	// shadowsocks), whose expectation is the one it has uncut; a
+	// scenario that lists none is run with sni-cut only and the
+	// scenario's own expectation ("the split must break nothing").
+	Desync map[string]map[string]string `json:"desync,omitempty"`
+}
+
+// desyncPresets are the presets core/desync ships (Presets in
+// core/desync/strategy.go). The rig does not import the product, so the
+// list is repeated here; wb-client refuses a preset the engine does not
+// know, which turns a stale entry into a red check, not a silent pass.
+var desyncPresets = []string{"split1", "sni-cut", "chain", "tlsrec-sni"}
+
+// DesyncExpect is what a session of family with the split on should give.
+func (s Scenario) DesyncExpect(preset, family string) (string, error) {
+	if m, ok := s.Desync[preset]; ok {
+		if v, ok := m[family]; ok {
+			return v, nil
+		}
+		if v, ok := m["*"]; ok {
+			return v, nil
+		}
+	}
+	return s.ExpectFor(family)
 }
 
 // MustEstablish: the scenario claims this family still connects, and only

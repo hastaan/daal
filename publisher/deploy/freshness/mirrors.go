@@ -114,7 +114,116 @@ const (
 	ProviderR2      Provider = "r2"
 	ProviderGHPages Provider = "ghpages"
 	ProviderIPFS    Provider = "ipfs" // reserved; backends/ipfs is disabled
+	// ProviderAppsScript is the Google update channel (optional
+	// add-on 3, specs/relaypack-v1.md "Mirror provider appsscript"):
+	// a web app that serves a daal-refresh-v1 container rather than
+	// a bare document. Its URL has one exact shape
+	// (ValidateAppsScriptURL), enforced wherever the label appears.
+	ProviderAppsScript Provider = "appsscript"
 )
+
+// MeetsMirrorFloor is the two-mirror rule with its one exception
+// (owner decision D-3, specs/optional-addons-v1.md §1): a set whose
+// only provider is appsscript is accepted with that one mirror. Its URL
+// travels inside TLS to Google, so a censor holding a pack cannot block
+// it apart from Google itself, which is the reason the floor exists.
+// Every other set still needs MinMirrors distinct providers.
+func MeetsMirrorFloor(providers []Provider) bool {
+	if len(providers) >= MinMirrors {
+		return true
+	}
+	return len(providers) == 1 && providers[0] == ProviderAppsScript
+}
+
+// MeetsFloor reports whether the set satisfies MeetsMirrorFloor. A
+// set built by NewMirrorSet always does; the method exists for callers
+// holding a possibly-zero *MirrorSet (the binder's sanity check).
+func (s *MirrorSet) MeetsFloor() bool {
+	if s == nil {
+		return false
+	}
+	ps := make([]Provider, 0, len(s.mirrors))
+	for _, m := range s.mirrors {
+		ps = append(ps, m.Provider)
+	}
+	return MeetsMirrorFloor(ps)
+}
+
+// appsScriptIDRe, appsScriptSlotRe and appsScriptTokenRe are the
+// variable parts of an appsscript mirror URL.
+var (
+	appsScriptIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{20,120}$`)
+	appsScriptSlotRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
+	appsScriptTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
+)
+
+// AppsScriptHost is the only host an appsscript mirror may name.
+const AppsScriptHost = "script.google.com"
+
+// ValidateAppsScriptBase enforces the shape of a script's own address,
+// the one an account connects: https://script.google.com/macros/s/<id>/exec,
+// <id> 20–120 of [A-Za-z0-9_-], no query, fragment, port or
+// credentials. It returns the deployment id. It is never a mirror URL
+// by itself (a mirror names a slot).
+func ValidateAppsScriptBase(raw string) (id string, err error) {
+	if err := ValidateMirrorURL(raw); err != nil {
+		return "", err
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", errors.New("url is not parseable")
+	}
+	if u.Host != AppsScriptHost {
+		return "", fmt.Errorf("appsscript url host must be %s", AppsScriptHost)
+	}
+	if u.Fragment != "" || u.RawFragment != "" || u.RawQuery != "" || u.ForceQuery {
+		return "", errors.New("appsscript address must have no query or fragment")
+	}
+	const prefix, suffix = "/macros/s/", "/exec"
+	p := u.EscapedPath()
+	if !strings.HasPrefix(p, prefix) || !strings.HasSuffix(p, suffix) {
+		return "", errors.New("appsscript url path must be /macros/s/<id>/exec")
+	}
+	id = strings.TrimSuffix(strings.TrimPrefix(p, prefix), suffix)
+	if !appsScriptIDRe.MatchString(id) {
+		return "", errors.New("appsscript url deployment id must be 20-120 of [A-Za-z0-9_-]")
+	}
+	return id, nil
+}
+
+// ValidateAppsScriptURL enforces the one shape an appsscript mirror URL
+// has (specs/relaypack-v1.md, "Mirror provider appsscript", protocol
+// daal-refresh-v2): https://script.google.com/macros/s/<id>/exec?s=<slot>&k=<token>,
+// <id> 20–120 of [A-Za-z0-9_-], <slot> 11 base64url characters, <token>
+// 22 base64url characters, exactly those two parameters in that order,
+// no fragment, no port, no credentials. It returns the deployment id,
+// the slot and the token. The single-relay shape of the first build
+// (?k=<token> alone) is refused: nothing was deployed with it.
+func ValidateAppsScriptURL(raw string) (id, slot, token string, err error) {
+	if err := ValidateMirrorURL(raw); err != nil {
+		return "", "", "", err
+	}
+	base, query, ok := strings.Cut(raw, "?")
+	if !ok {
+		return "", "", "", errors.New("appsscript url query must be exactly s=<slot>&k=<token>")
+	}
+	if id, err = ValidateAppsScriptBase(base); err != nil {
+		return "", "", "", err
+	}
+	q, err := url.ParseQuery(query)
+	if err != nil || len(q) != 2 || len(q["s"]) != 1 || len(q["k"]) != 1 ||
+		query != "s="+q.Get("s")+"&k="+q.Get("k") {
+		return "", "", "", errors.New("appsscript url query must be exactly s=<slot>&k=<token>")
+	}
+	slot, token = q.Get("s"), q.Get("k")
+	if !appsScriptSlotRe.MatchString(slot) {
+		return "", "", "", errors.New("appsscript url slot must be 11 base64url characters")
+	}
+	if !appsScriptTokenRe.MatchString(token) {
+		return "", "", "", errors.New("appsscript url token must be 22 base64url characters")
+	}
+	return id, slot, token, nil
+}
 
 var providerRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,15}$`)
 
@@ -159,7 +268,7 @@ var (
 // of its members, independent of the order the operator typed the
 // flags in. BindAndSign's determinism contract depends on this.
 func NewMirrorSet(mirrors []Mirror) (*MirrorSet, error) {
-	if len(mirrors) < MinMirrors {
+	if len(mirrors) < MinMirrors && !(len(mirrors) == 1 && mirrors[0].Provider == ProviderAppsScript) {
 		return nil, ErrTooFewMirrors
 	}
 	if len(mirrors) > MaxMirrors {
@@ -174,6 +283,11 @@ func NewMirrorSet(mirrors []Mirror) (*MirrorSet, error) {
 		}
 		if err := ValidateMirrorURL(m.URL); err != nil {
 			return nil, fmt.Errorf("freshness: mirror %s: %w", m.Provider, err)
+		}
+		if m.Provider == ProviderAppsScript {
+			if _, _, _, err := ValidateAppsScriptURL(m.URL); err != nil {
+				return nil, fmt.Errorf("freshness: mirror %s: %w", m.Provider, err)
+			}
 		}
 		if seenProvider[m.Provider] {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateProvider, m.Provider)
@@ -413,7 +527,7 @@ const mirrorClockSkew = 10 * time.Minute
 func SignMirrors(set *MirrorSet, relayPackID string, rootPub ed25519.PublicKey,
 	signingPriv ed25519.PrivateKey, subkeyCertJSON []byte, issuedAt, notAfter time.Time) ([]byte, error) {
 
-	if set == nil || set.Len() < MinMirrors {
+	if !set.MeetsFloor() {
 		return nil, ErrTooFewMirrors
 	}
 	if relayPackID == "" {

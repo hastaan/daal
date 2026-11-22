@@ -26,7 +26,7 @@
 // an in-memory mock so the screens render meaningfully and you can click
 // through end-to-end. In Tauri it talks to the real wizard_* commands.
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     Wizard,
     onProvisionEvent,
@@ -53,9 +53,21 @@ import {
 } from './setupRecovery';
 import type { RecoveryButton } from './setupRecovery';
 import { explainFailure } from './failureText';
+import { appendEvent, cancelOutcome as readCancelOutcome, clock, healthWait, lineTime, upButNotAnswering, visibleLines } from './buildLog';
+import type { CancelOutcome } from './buildLog';
 import { RelayDestroySheet } from './RelayListPage';
 import { RELAYPACK_PHASE } from './phase';
 import { MoreWaysToConnect } from './MoreWaysToConnect';
+import { WizardAddonsProgress, WizardAddonsStep } from './addons/WizardAddons';
+import {
+    applyAddonChoices,
+    recallAddonChoices,
+    rememberAddonChoices,
+    retryAddon,
+} from './addons/wizardAddons';
+import type { ApplyState } from './addons/wizardAddons';
+import type { AddonKind } from './addons/addonTypes';
+import { readAccounts } from './addons/accounts';
 import {
     enabledFamiliesFor,
     recallExtraFamilies,
@@ -67,14 +79,20 @@ import { isHarnessActive } from '../harness/scenarios';
 import { isTauriRuntime } from '../backends';
 import { invoke } from '@tauri-apps/api/core';
 import {
+    Badge,
     Button,
     Card,
+    Disclosure,
+    Icon,
     Input,
-    StatusLight,
-    StatusPill,
+    PageHeader,
+    StateIcon,
 } from '../design/primitives';
 import { useDensity } from '../design/DensityProvider';
 import { useBack } from '../lib/useBack';
+import { toFaDigits } from '../lib/i18n';
+import { useConfirm, useDeviceT } from './ui';
+import { readClipboardText } from '../lib/clipboard';
 
 /** Open a URL in the system's default browser (not Custom Tabs). */
 async function openExternal(url: string) {
@@ -94,7 +112,8 @@ interface Props {
     /** Fired exactly once when the shared .sbp is confirmed live.
      *  PublisherPage routes to relay detail. This IS the death of the
      *  old "distribute" step. */
-    onDone: (operatorId: number) => void;
+    /** `addPerson`: open the relay with "Add a person" showing. */
+    onDone: (operatorId: number, addPerson?: boolean) => void;
     /** User backed out of screen 1 with no relay created. */
     onCancel: () => void;
     /** System Back at the first step. Set only when the wizard was
@@ -107,7 +126,7 @@ interface Props {
 }
 
 /** What the system Back does in the wizard. */
-export type WizardBack = 'refuse' | 'wait' | 'done' | 'step' | 'root' | 'none';
+export type WizardBack = 'refuse' | 'wait' | 'done' | 'step' | 'host' | 'root' | 'none';
 
 export function wizardBack(o: {
     building: boolean;
@@ -119,19 +138,23 @@ export function wizardBack(o: {
     /** The relay row is already gone and the screen leaves only through
      *  Done: Back does what Done does, never a step onto a dead relay. */
     leavesOnlyByDone?: boolean;
+    /** Screen 1 shows the key field after the hosting-company list:
+     *  Back returns to the list before it leaves the wizard. */
+    keyAfterHost?: boolean;
 }): WizardBack {
     // A setup in progress keeps its guard: Back never interrupts it.
     if (o.building) return 'refuse';
     if (o.busyElsewhere) return 'wait';
     if (o.leavesOnlyByDone) return 'done';
     if (o.stepIdx > 0) return 'step';
+    if (o.keyAfterHost) return 'host';
     if (o.hasRootBack) return 'root';
     return 'none';
 }
 
 // ---- Step model ----
 
-type StepId = 'cloud' | 'plan' | 'build';
+type StepId = 'cloud' | 'plan' | 'extras' | 'build';
 
 interface StepDef {
     id: StepId;
@@ -143,12 +166,20 @@ const STEPS: StepDef[] = [
     {
         id: 'cloud',
         titleKey: 'wiz.step.cloud.title',
-        blurbKey: 'wiz.step.cloud.blurb',
+        // MUST KEEP 4: what it costs, before anything is typed.
+        blurbKey: 'wiz.step.cloud.line',
     },
     {
         id: 'plan',
         titleKey: 'wiz.step.plan.title',
         blurbKey: 'wiz.step.plan.blurb',
+    },
+    {
+        // «More protection (optional)»: each relay picks its own extras
+        // before it is built; they are turned on once it works.
+        id: 'extras',
+        titleKey: 'wiz.step.extras.title',
+        blurbKey: 'pub.addons.wizard.intro',
     },
     {
         id: 'build',
@@ -160,12 +191,17 @@ const STEPS: StepDef[] = [
 const NO_MARKS: Record<StepId, boolean> = {
     cloud: false,
     plan: false,
+    extras: false,
     build: false,
 };
 
+/** The build screen's index (the extras step comes before it). */
+const BUILD_IDX = STEPS.findIndex((s) => s.id === 'build');
+const EXTRAS_IDX = STEPS.findIndex((s) => s.id === 'extras');
+
 /** Rust derives `wizard_step` from DB state and still speaks the old
  *  seven-step vocabulary ("provider" | "pricing" | "keys" | "provision"
- *  | "sign" | "distribute"). Map it onto the three screens here — this
+ *  | "sign" | "distribute"). Map it onto the four screens here — this
  *  is the ONLY place in the app that knows both vocabularies, and the
  *  Rust strings must not be renamed to match. */
 function stepIdToIdx(rustStep: string): number {
@@ -174,11 +210,11 @@ function stepIdToIdx(rustStep: string): number {
         case 'pricing': return 1;    // plan
         case 'keys':
         case 'provision':
-        case 'sign': return 2;       // build
+        case 'sign': return BUILD_IDX; // build
         // PublisherPage never mounts the wizard for a provisioned relay,
         // so "distribute" should be unreachable. Land on the build
         // screen in its already-complete state rather than screen 1.
-        case 'distribute': return 2;
+        case 'distribute': return BUILD_IDX;
         default: return 0;
     }
 }
@@ -201,6 +237,7 @@ const CLOUD_PROVIDERS = [
         tokenHintKey: 'wiz.provider.hetzner.tokenHint',
         signupUrl: 'https://console.hetzner.cloud/register',
         recommended: true,
+        available: true,
     },
     {
         id: 'vultr',
@@ -210,6 +247,7 @@ const CLOUD_PROVIDERS = [
         tokenHintKey: 'wiz.provider.vultr.tokenHint',
         signupUrl: 'https://www.vultr.com/',
         recommended: false,
+        available: false,
     },
     {
         id: 'digitalocean',
@@ -219,27 +257,43 @@ const CLOUD_PROVIDERS = [
         tokenHintKey: 'wiz.provider.do.tokenHint',
         signupUrl: 'https://cloud.digitalocean.com/registrations/new',
         recommended: false,
+        available: false,
     },
     {
         id: 'linode',
-        labelKey: 'wiz.provider.linode.label',
+        labelKey: 'wiz.host.linode',
         regionKey: 'wiz.provider.linode.region',
         defaultServer: 'g6-nanode-1',
         tokenHintKey: 'wiz.provider.linode.tokenHint',
         signupUrl: 'https://login.linode.com/signup',
         recommended: false,
+        available: false,
     },
     {
         id: 'custom',
-        labelKey: 'wiz.provider.custom.label',
+        labelKey: 'wiz.host.own',
         regionKey: 'wiz.provider.custom.region',
         defaultServer: 'custom',
         tokenHintKey: 'wiz.provider.custom.tokenHint',
         signupUrl: '',
         recommended: false,
+        available: false,
     },
 ] as const;
 type ProviderId = (typeof CLOUD_PROVIDERS)[number]['id'];
+
+/** The hosting companies Daal can rent from today. The others are shown
+ *  on the first screen as "In development" and cannot be chosen: there
+ *  is no engine path behind them, so the card says nothing else about
+ *  them (no price, no region). */
+const AVAILABLE_PROVIDERS = CLOUD_PROVIDERS.filter((p) => p.available);
+
+/** What the first screen says under a company that works. Only facts the
+ *  wizard already holds: the region it rents in (REGION_MAP) and the
+ *  price range of the cost line. */
+const HOST_LINE: Partial<Record<ProviderId, string>> = {
+    hetzner: 'wiz.host.hetzner.line',
+};
 
 const REGION_MAP: Record<string, string> = {
     hetzner: 'fsn1',
@@ -307,7 +361,9 @@ type BuildStage =
     | 'sign'
     | 'share'
     | 'done'
-    | 'failed';
+    | 'failed'
+    /** Stopped with Cancel; what it removed is read from the log. */
+    | 'cancelled';
 
 /** The sub-stages, in execution order, that get a progress line. */
 const BUILD_STAGES: Array<{ id: BuildStage; key: string }> = [
@@ -352,8 +408,14 @@ export default function PublisherWizard({
     rootBack,
     onRestore,
 }: Props) {
-    const { density } = useDensity();
+    const { density, isRTL } = useDensity();
+    const confirm = useConfirm();
     const isPhone = density === 'phone';
+    const dt = useDeviceT(t);
+    // Numbers in the reader's digits: Persian digits and the Persian
+    // decimal sign (۱۴٫۳۶) in Persian prose, so one card never mixes two.
+    const readerNum = (v: number | string): string =>
+        isRTL ? toFaDigits(String(v)).replace('.', '\u066B') : String(v);
     const live = isTauriRuntime() && !isHarnessActive();
 
     // Step navigation.
@@ -368,6 +430,13 @@ export default function PublisherWizard({
 
     // Screen 1 — provider & token.
     const [provider, setProvider] = useState<ProviderId>('hetzner');
+    // Screen 1 opens on "Where should your relay live?" (the hosting
+    // companies), then shows the key field for the one chosen. A resume
+    // already has its company (the relay row holds it), so it starts on
+    // the key field and the list is never offered again.
+    const canPickHost = resumeOperatorId == null;
+    const [hostChosen, setHostChosen] = useState(!canPickHost);
+    const onHostList = stepIdx === 0 && !hostChosen;
     const [token, setToken] = useState('');
     // On a resume the token is already sealed under custody and never
     // comes back over IPC. Without this flag the Next gate would demand
@@ -378,6 +447,24 @@ export default function PublisherWizard({
     const [savedElsewhere, setSavedElsewhere] = useState<
         { operator_id: number; nickname: string } | null
     >(null);
+    // The hosting account connected on the Accounts page (or, on older
+    // phones, a relay's key): the key step is skipped and the new relay
+    // takes a copy. `null` while unknown or when the shell cannot say.
+    const [accountConnected, setAccountConnected] = useState<boolean | null>(null);
+    const [useOtherKey, setUseOtherKey] = useState(false);
+    useEffect(() => {
+        let dead = false;
+        if (!live || operatorId != null) {
+            setAccountConnected(null);
+            return;
+        }
+        Wizard.hostingAccountStatus()
+            .then((st) => !dead && setAccountConnected(!!st?.[provider]?.connected))
+            .catch(() => !dead && setAccountConnected(null));
+        return () => {
+            dead = true;
+        };
+    }, [live, provider, operatorId]);
     useEffect(() => {
         let dead = false;
         if (!live || operatorId != null) {
@@ -416,6 +503,10 @@ export default function PublisherWizard({
     // starts collapsed.
     const [extraFamilies, setExtraFamilies] = useState<string[]>([]);
     const [moreWaysOpen, setMoreWaysOpen] = useState(false);
+    // «More protection (optional)»: the extras chosen for THIS relay, and
+    // how each is doing once the build is done.
+    const [addonChoices, setAddonChoices] = useState<AddonKind[]>([]);
+    const [addonProgress, setAddonProgress] = useState<Partial<Record<AddonKind, ApplyState>>>({});
     // Empty array = use the profile's DefaultEnabled candidates
     // (vless-reality, websocket-tls, naive, hysteria2). Otherwise the
     // defaults PLUS the ticked extras — the list replaces the defaults,
@@ -474,6 +565,10 @@ export default function PublisherWizard({
     const [cancelOutcome, setCancelOutcome] = useState<DestroyReport | null>(null);
     const [cancelError, setCancelError] = useState<{ message: string; detail: string } | null>(null);
     const [cancelDestroyOpen, setCancelDestroyOpen] = useState(false);
+    // Cancel DURING the build (the provision stage): asked once, then
+    // the running provision stops and rolls back what it rented.
+    const buildCancelAsked = useRef(false);
+    const [buildCancelling, setBuildCancelling] = useState(false);
 
     // ---- Streaming logs ----
 
@@ -483,22 +578,16 @@ export default function PublisherWizard({
     useEffect(() => {
         if (!live) return;
         const unsubs: Array<() => void> = [];
-        onProvisionEvent((ev) => setBuildLog((l) => [...l, ev])).then((u) =>
-            unsubs.push(u),
-        );
-        onSignEvent((ev) => setBuildLog((l) => [...l, ev])).then((u) =>
-            unsubs.push(u),
-        );
+        // Both channels below carry the same events: appendEvent keeps
+        // the first copy of each (every line used to show twice).
+        const add = (ev: ProgressEvent) => setBuildLog((l) => appendEvent(l, ev, Date.now()));
+        onProvisionEvent(add).then((u) => unsubs.push(u));
+        onSignEvent(add).then((u) => unsubs.push(u));
         // Fallback: CustomEvent injected via webview.eval() on platforms
         // where the Tauri event bridge is flaky.
         const handleCustom = (e: Event) => {
             const detail = (e as CustomEvent).detail;
-            if (detail?.step) {
-                setBuildLog((l) => [
-                    ...l,
-                    { step: detail.step, message: detail.message },
-                ]);
-            }
+            if (detail?.step) add({ ...detail, message: detail.message ?? '' });
         };
         window.addEventListener('daal-provision-event', handleCustom);
         return () => {
@@ -527,6 +616,7 @@ export default function PublisherWizard({
                 // The ticked extras are chosen on screen 2 and used by
                 // the build; a relaunch in between must not silently
                 // fall back to the defaults.
+                setAddonChoices(recallAddonChoices(resumeOperatorId));
                 const recalled = recallExtraFamilies(resumeOperatorId, toolboxProfile);
                 setExtraFamilies(recalled);
                 if (recalled.length > 0) setMoreWaysOpen(true);
@@ -552,7 +642,7 @@ export default function PublisherWizard({
                 // Resuming straight into a build that would create (and
                 // start billing for) a server. See the auto-start effect.
                 setAwaitingBuildConsent(
-                    idx === 2 && !state.is_provisioned,
+                    idx === BUILD_IDX && !state.is_provisioned,
                 );
                 // Defensive: a fully-finished relay should have been
                 // routed to relay detail, not here. Render the build
@@ -560,7 +650,7 @@ export default function PublisherWizard({
                 // a chain that would re-mint the shared pack.
                 if (state.wizard_step === 'distribute') {
                     setStage('done');
-                    setCompleted({ cloud: true, plan: true, build: true });
+                    setCompleted({ cloud: true, plan: true, extras: true, build: true });
                 }
             })
             .catch((e) => setError(String(e)));
@@ -626,6 +716,13 @@ export default function PublisherWizard({
         try {
             return await fn();
         } catch (e) {
+            if (s === 'provision' && buildCancelAsked.current) {
+                // The person stopped it; the screen says what was removed.
+                setError(null);
+                setFailedAt('provision');
+                setStage('cancelled');
+                return STAGE_FAILED;
+            }
             const code = classifyPublisherError(e);
             // D1: provision found a server for this relay already there,
             // or another setup still holds the journal. Neither is a
@@ -731,6 +828,7 @@ export default function PublisherWizard({
     function resetAfterCancel() {
         setOperatorId(null);
         setStepIdx(0);
+        setHostChosen(!canPickHost);
         setCompleted(NO_MARKS);
         setStage('idle');
         setFailedAt(null);
@@ -738,8 +836,13 @@ export default function PublisherWizard({
         setAlreadyProvisioned(false);
         setAlreadySigned(false);
         setHasStoredToken(false);
+        setUseOtherKey(false);
+        setAddonChoices([]);
+        setAddonProgress({});
         setCancelRec(null);
         setCancelDestroyOpen(false);
+        buildCancelAsked.current = false;
+        setBuildCancelling(false);
         setRecoveryLeaving(false);
         setRecoveryOutcome(null);
         onCancel();
@@ -784,13 +887,38 @@ export default function PublisherWizard({
             setCancelRec(rec);
             return;
         }
-        if (!window.confirm(t(localCancelKey(rec)))) return;
+        // The app's own sheet (H-29); the body keeps the money line.
+        const yes = await confirm.ask({
+            title: t('wiz.cancel'),
+            body: t(localCancelKey(rec)),
+            confirmLabel: t('wiz.cancel.go'),
+            cancelLabel: t('common.cancel'),
+            danger: true,
+        });
+        if (!yes) return;
         if (live) {
             // The command returns nothing, which arrives as null: say
             // `true` ourselves, or success looks like run()'s failure and
             // the wizard stays open on a relay that no longer exists
             // (seen on the phone 2026-11-19).
             const ok = await run(() => Wizard.cancelAndCleanup(opId).then(() => true));
+            if (ok === null) return;
+        }
+        resetAfterCancel();
+    };
+
+    /** "Remove this relay" after a stopped build. When the rollback said
+     *  the server is deleted, the unfinished relay is only forgotten (it
+     *  was already confirmed once); otherwise the usual cancel, which
+     *  asks the hosting account what is left first. */
+    const onCancelledRemove = async (confirmed: boolean) => {
+        if (operatorId == null) return;
+        if (!confirmed) {
+            await onCancelPress();
+            return;
+        }
+        if (live) {
+            const ok = await run(() => Wizard.cancelAndCleanup(operatorId).then(() => true));
             if (ok === null) return;
         }
         resetAfterCancel();
@@ -837,6 +965,73 @@ export default function PublisherWizard({
                 ...l,
                 { step: phaseName, message: detail, phase: phaseName, detail, pct },
             ]);
+        }
+    };
+
+    /** Harness only (`?build=wait|unreachable`): the provision as the
+     *  phone sees it on a slow network, slow enough to look at, and
+     *  stoppable with Cancel like the real one. */
+    const fakeHealthWait = async (mode: 'wait' | 'unreachable') => {
+        const add = (ev: ProgressEvent) => setBuildLog((l) => appendEvent(l, ev, Date.now()));
+        const box = '203.0.113.5';
+        const helper = '198.51.100.7';
+        const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        for (const [step, message] of [
+            ['provision_start', 'starting provisioning'],
+            ['provision_create_server', 'Creating server on Hetzner'],
+            ['provision_server_ready', `Server ready: ${box} — waiting for boot (up to 3 min)`],
+            ['provision_cloud_firewall', 'Attaching Daal baseline firewall to server'],
+            ['provision_cloud_firewall', `Opened a temporary cloud firewall window on port 9876 (the relay's health check) for ${helper}`],
+            ['provision_cloud_firewall', `(optional log viewer) Opened a temporary cloud firewall window on port 22 for ${helper}`],
+            ['provision_ssh_debug', '(optional log viewer) SSH observer waiting: dial tcp 203.0.113.5:22: i/o timeout'],
+        ] as const) {
+            add({ step, message });
+            await pause(150);
+        }
+        const max = 60;
+        for (let n = 1; n <= max; n++) {
+            if (buildCancelAsked.current) {
+                add({ step: 'provision_rollback', message: `Cancelled — removing the server that was just created (server_id=4242 ip=${box})`, rollback: 'start', cancelled: true, server_id: '4242', public_ip: box });
+                await pause(600);
+                add({ step: 'provision_rollback', message: 'Rolled back: the server has been deleted, nothing is billing', rollback: 'done', cancelled: true, server_id: '4242', public_ip: box, server_deleted: true, firewall_deleted: true, warnings: 0 });
+                throw new Error('E_CANCELLED: setup cancelled');
+            }
+            const elapsed = 360 + n * 5;
+            add({
+                step: 'provision_health_wait',
+                message: `Waiting for the relay to answer at ${box}:9876 (try ${n} of ${max}, ${clock(elapsed)} so far, window open for ${helper})`,
+                attempt: n, max_attempts: max, elapsed_s: elapsed, box_ip: box, helper_ip: helper, port: 9876,
+            });
+            if (mode === 'unreachable' && n === 3) {
+                add({ step: 'provision_health_unreachable', message: 'The relay is up (port 443 answers) but its health check on port 9876 has not answered this device in 6:15. That may be the network between this device and the relay. Still waiting, up to 60 tries.', box_ip: box, helper_ip: helper });
+            }
+            await pause(900);
+        }
+        throw new Error('hetzner: health check timed out after 60 attempts');
+    };
+
+    /** Cancel during the build: asks once, then stops the provision,
+     *  which deletes the server and firewall it rented. */
+    const onBuildCancel = async () => {
+        if (operatorId == null || buildCancelAsked.current) return;
+        const yes = await confirm.ask({
+            title: t('wiz.build.cancel.title'),
+            body: t('wiz.build.cancel.body'),
+            confirmLabel: t('wiz.build.cancel.go'),
+            cancelLabel: t('wiz.build.cancel.keep'),
+            danger: true,
+        });
+        if (!yes || buildCancelAsked.current) return;
+        buildCancelAsked.current = true;
+        setBuildCancelling(true);
+        if (live) {
+            try {
+                await Wizard.provisionCancel(operatorId);
+            } catch (e) {
+                buildCancelAsked.current = false;
+                setBuildCancelling(false);
+                setError(String(e));
+            }
         }
     };
 
@@ -917,6 +1112,8 @@ export default function PublisherWizard({
         setFailedAt(null);
         setHelperIpRepair(null);
         setBuildLog([]);
+        buildCancelAsked.current = false;
+        setBuildCancelling(false);
         setBusy(true);
         try {
             // 0. Helper IP must exist before ANY mgmt-plane call.
@@ -970,7 +1167,9 @@ export default function PublisherWizard({
                         ? withHelperIp(opId, () =>
                               Wizard.provisionRun(opId, existingId),
                           )
-                        : fakeProgress('provision', [
+                        : harnessBuildPreview()
+                          ? fakeHealthWait(harnessBuildPreview()!)
+                          : fakeProgress('provision', [
                               ['create server', 10],
                               ['await SSH', 40],
                               ['toolbox bring-up', 80],
@@ -988,6 +1187,16 @@ export default function PublisherWizard({
                     return;
                 }
                 setAlreadyProvisioned(true);
+                if (buildCancelAsked.current) {
+                    // The relay finished before the stop reached it: it
+                    // is a real server now, so the stop is the same
+                    // teardown the relay list offers.
+                    setBuildCancelling(false);
+                    setFailedAt('sign');
+                    setStage('cancelled');
+                    setCancelDestroyOpen(true);
+                    return;
+                }
             } else {
                 setStage('provision');
             }
@@ -1041,10 +1250,8 @@ export default function PublisherWizard({
 
             setStage('done');
             mark('build');
-            // Let the success state actually register before the handoff
-            // — a card that renders for one frame reads as a glitch.
-            await new Promise((r) => setTimeout(r, 1200));
-            onDone(opId);
+            // No automatic hand-off: the done screen's next step is "Add
+            // the first person" (H-54), so it stays until it is chosen.
         } finally {
             setBusy(false);
         }
@@ -1076,9 +1283,28 @@ export default function PublisherWizard({
         if (live) return;
         if (!harnessRecoverState()) return;
         setOperatorId((id) => id ?? 1);
-        setStepIdx(2);
+        setStepIdx(BUILD_IDX);
         setAwaitingBuildConsent(true);
     }, [live]);
+
+    // The extras chosen before the build, once the relay is built: the
+    // share stage has just had the relay's management answer, so it
+    // works. Applied once per relay; each is taken out of the stored
+    // choice before it runs (wizardAddons.ts), and a failure is kept for
+    // the relay page, never a failed build.
+    const addonsAppliedFor = useRef<number | null>(null);
+    useEffect(() => {
+        if (stage !== 'done' || !operatorId) return;
+        if (addonsAppliedFor.current === operatorId) return;
+        const kinds = addonChoices;
+        if (kinds.length === 0) return;
+        addonsAppliedFor.current = operatorId;
+        void applyAddonChoices(operatorId, kinds, {
+            accounts: readAccounts,
+            onState: (kind, st) => setAddonProgress((p) => ({ ...p, [kind]: st })),
+            run: live ? undefined : () => new Promise<void>((r) => setTimeout(r, 220)),
+        });
+    }, [stage, operatorId, addonChoices, live]);
 
     const runBuildRef = useRef(runBuild);
     runBuildRef.current = runBuild;
@@ -1092,8 +1318,10 @@ export default function PublisherWizard({
     }, [stepIdx, stage, operatorId, awaitingBuildConsent]);
 
     const step = STEPS[stepIdx];
+    const wait = healthWait(buildLog);
+    const notAnswering = upButNotAnswering(buildLog);
     const building =
-        stage !== 'idle' && stage !== 'done' && stage !== 'failed';
+        stage !== 'idle' && stage !== 'done' && stage !== 'failed' && stage !== 'cancelled';
 
     // System Back: one step back, else back to the list it came from.
     // While the build runs it is refused and says why.
@@ -1103,8 +1331,9 @@ export default function PublisherWizard({
         const h = setTimeout(() => setBackNotice(null), 4000);
         return () => clearTimeout(h);
     }, [backNotice]);
+    const keyAfterHost = stepIdx === 0 && hostChosen && canPickHost;
     useBack(
-        stepIdx > 0 || !!rootBack || recoveryLeaving,
+        stepIdx > 0 || keyAfterHost || !!rootBack || recoveryLeaving,
         () => {
             switch (
                 wizardBack({
@@ -1113,6 +1342,7 @@ export default function PublisherWizard({
                     hasRootBack: !!rootBack,
                     busyElsewhere: recoveryBusy || cancelBusy || busy,
                     leavesOnlyByDone: recoveryLeaving,
+                    keyAfterHost,
                 })
             ) {
                 case 'refuse':
@@ -1126,6 +1356,9 @@ export default function PublisherWizard({
                     return;
                 case 'step':
                     setStepIdx(stepIdx - 1);
+                    return;
+                case 'host':
+                    setHostChosen(false);
                     return;
                 case 'root':
                     rootBack?.();
@@ -1142,8 +1375,13 @@ export default function PublisherWizard({
     // grey (the user needs to see the box was created before the sign
     // failed, or they will assume they lost it).
     const stageIdx = BUILD_STAGES.findIndex(
-        (s) => s.id === (stage === 'failed' ? failedAt : stage),
+        (s) => s.id === (stage === 'failed' || stage === 'cancelled' ? failedAt : stage),
     );
+
+    /** The hosting account is connected: no key to paste (the person
+     *  can still choose a different one). */
+    const skipKey =
+        accountConnected === true && !useOtherKey && !hasStoredToken && operatorId == null;
 
     // ---- Render ----
 
@@ -1151,39 +1389,25 @@ export default function PublisherWizard({
         <div
             style={{
                 width: '100%',
-                maxWidth: 720,
-                margin: '0 auto',
+                boxSizing: 'border-box',
+                // A --content-max column on desktop, like every page.
+                maxWidth: isPhone ? undefined : 'calc(var(--content-max) + 64px)',
                 // On phones the MobileShell <main> already provides the
                 // horizontal gutter; doubling it crushes the content.
-                padding: isPhone ? '4px 0 16px' : 'var(--gutter)',
+                padding: isPhone ? '0 0 16px' : '16px 32px 32px',
                 color: 'var(--fg)',
             }}
         >
-            <header style={{ marginBottom: 14 }}>
-                <div
-                    style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        letterSpacing: '0.18em',
-                        textTransform: 'uppercase',
-                        color: 'var(--gold-warm)',
-                    }}
-                >
-                    {t('wiz.eyebrow')}
-                </div>
-                <h1
-                    style={{
-                        fontFamily: 'var(--font-display)',
-                        fontSize: isPhone ? 20 : 24,
-                        margin: '6px 0',
-                    }}
-                >
-                    {t('wiz.heading')}
-                </h1>
-                <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
-                    {t('wiz.intro.3step')}
-                </p>
-            </header>
+            <PageHeader
+                title={t('wiz.heading')}
+                badge={
+                    !live ? (
+                        <Badge tone="neutral" size="sm">
+                            {t('wiz.harness.preview')}
+                        </Badge>
+                    ) : undefined
+                }
+            />
 
             {/* Three screens fit in a strip. The old build had a 220px
                 desktop side rail and a separate phone pager component
@@ -1198,58 +1422,32 @@ export default function PublisherWizard({
                 </div>
             )}
 
-            {onRestore && !rootBack && stepIdx === 0 && !resumeOperatorId && (
-                <div style={{ margin: '0 0 10px' }}>
-                    <Button variant="ghost" size="sm" onClick={onRestore} data-button="restore-link">
-                        {t('pub.restore.link.wizard')}
-                    </Button>
-                </div>
-            )}
-
             <StepStrip
                 stepIdx={stepIdx}
                 completed={completed}
+                ready={step.id === 'build' && stage === 'done'}
                 locked={building}
                 onJump={setStepIdx}
                 t={t}
+                titleKey={onHostList ? 'wiz.host.title' : undefined}
             />
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <Card>
-                    <div
-                        style={{
-                            display: 'flex',
-                            alignItems: 'baseline',
-                            gap: 12,
-                            justifyContent: 'space-between',
-                            flexWrap: 'wrap',
-                        }}
-                    >
-                        <h2
+                    {!(step.id === 'build' && stage === 'done') && !onHostList && (
+                        <p
                             style={{
-                                fontFamily: 'var(--font-display)',
-                                fontSize: isPhone ? 17 : 20,
-                                margin: isPhone ? '0 0 4px' : '4px 0',
+                                color: step.id === 'cloud' ? 'var(--fg)' : 'var(--muted)',
+                                fontSize: 14,
+                                lineHeight: 1.5,
+                                margin: '0 0 14px',
+                                maxInlineSize: '64ch',
                             }}
+                            data-testid={step.id === 'cloud' ? 'wizard-cost' : undefined}
                         >
-                            {t(step.titleKey)}
-                        </h2>
-                        {!live && (
-                            <StatusPill tone="warn" dotless>
-                                {t('wiz.harness.preview')}
-                            </StatusPill>
-                        )}
-                    </div>
-                    <p
-                        style={{
-                            color: 'var(--muted)',
-                            fontSize: 13,
-                            margin: '4px 0 14px',
-                            maxInlineSize: '64ch',
-                        }}
-                    >
-                        {t(step.blurbKey)}
-                    </p>
+                            {t(step.blurbKey)}
+                        </p>
+                    )}
 
                     {error && (
                         <div
@@ -1268,195 +1466,180 @@ export default function PublisherWizard({
                         </div>
                     )}
 
-                    {/* ===== SCREEN 1: CLOUD ACCOUNT ===== */}
-                    {step.id === 'cloud' && (
+                    {/* ===== SCREEN 1a: WHERE THE RELAY LIVES ===== */}
+                    {onHostList && (
+                        <HostList
+                            t={t}
+                            provider={provider}
+                            onPick={(id) => {
+                                if (id === provider) return;
+                                const def = CLOUD_PROVIDERS.find((p) => p.id === id)!;
+                                setProvider(id);
+                                setServerType(def.defaultServer);
+                                setServerOptions([]);
+                                setUseExisting(null);
+                            }}
+                            onCancel={onCancel}
+                            onContinue={() => {
+                                setError(null);
+                                setHostChosen(true);
+                            }}
+                        />
+                    )}
+
+                    {/* ===== SCREEN 1b: CLOUD ACCOUNT ===== */}
+                    {step.id === 'cloud' && !onHostList && (
                         <div>
-                            <Label>{t('wiz.provider.label')}</Label>
-                            <div
+                            {/* No provider chooser (H-46): Hetzner is the
+                                only one that works. The provider code path
+                                stays; only the "Coming soon" tiles went.
+                                The token path appears once, here, as a
+                                numbered guide (H-47). */}
+                            {skipKey ? (
+                                <div data-testid="wizard-account-connected" style={{ display: 'grid', gap: 6, justifyItems: 'start', marginBottom: 14 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <StateIcon state="ok" size={20} />
+                                        <span style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--fg)', fontWeight: 600 }}>
+                                            {fmt(t('wiz.provider.account.using'), { name: t(providerDef.labelKey) })}
+                                        </span>
+                                    </div>
+                                    <Button
+                                        variant="link"
+                                        size="sm"
+                                        onClick={() => setUseOtherKey(true)}
+                                        dataButton="use-other-key"
+                                        style={{ paddingInline: 0 }}
+                                    >
+                                        {t('wiz.provider.account.other')}
+                                    </Button>
+                                </div>
+                            ) : (
+                            <>
+                            <ol
+                                data-testid="wizard-guide"
                                 style={{
+                                    listStyle: 'none',
+                                    margin: '0 0 16px',
+                                    padding: 0,
                                     display: 'grid',
-                                    gridTemplateColumns:
-                                        'repeat(auto-fit, minmax(140px, 1fr))',
-                                    gap: 8,
-                                    marginBottom: 14,
+                                    gap: 10,
                                 }}
                             >
-                                {CLOUD_PROVIDERS.map((p) => {
-                                    const sel = provider === p.id;
-                                    const available = p.id === 'hetzner';
-                                    return (
-                                        <button
-                                            key={p.id}
-                                            disabled={!available}
-                                            onClick={() => {
-                                                if (!available) return;
-                                                setProvider(p.id);
-                                                setServerType(p.defaultServer);
-                                                setServerOptions([]);
-                                                setUseExisting(null);
-                                            }}
+                                {(['wiz.guide.1', 'wiz.guide.2', 'wiz.guide.3'] as const).map((k, i) => (
+                                    <li key={k} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                                        <span
+                                            aria-hidden
                                             style={{
-                                                background: sel
-                                                    ? 'rgba(201,162,58,0.10)'
-                                                    : 'var(--surface-2)',
-                                                border: `1px solid ${
-                                                    sel
-                                                        ? 'var(--gold)'
-                                                        : 'var(--line-soft)'
-                                                }`,
-                                                color: available
-                                                    ? 'var(--fg)'
-                                                    : 'var(--muted)',
-                                                opacity: available ? 1 : 0.45,
-                                                padding: '10px 12px',
-                                                borderRadius: 'var(--r-tile)',
-                                                cursor: available
-                                                    ? 'pointer'
-                                                    : 'default',
-                                                textAlign: 'start',
-                                                fontFamily: 'var(--font-body)',
-                                            }}
-                                        >
-                                            <div
-                                                style={{
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: 6,
-                                                }}
-                                            >
-                                                <span
-                                                    style={{
-                                                        fontSize: 13,
-                                                        fontWeight: 600,
-                                                    }}
-                                                >
-                                                    {t(p.labelKey)}
-                                                </span>
-                                                {p.recommended && (
-                                                    <span
-                                                        style={{
-                                                            fontSize: 9,
-                                                            fontWeight: 600,
-                                                            color: 'var(--gold)',
-                                                            border: '1px solid var(--gold)',
-                                                            borderRadius: 4,
-                                                            padding: '1px 5px',
-                                                            letterSpacing: 0.5,
-                                                        }}
-                                                    >
-                                                        ★
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div
-                                                style={{
-                                                    fontFamily: 'var(--font-mono)',
-                                                    fontSize: 10,
-                                                    color: 'var(--muted)',
-                                                    marginTop: 4,
-                                                }}
-                                            >
-                                                {available
-                                                    ? t(p.regionKey)
-                                                    : t('wiz.provider.soon')}
-                                            </div>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-
-                            {/* Signup link + "you only need an account" tip.
-                                Users routinely create a server on the
-                                provider's own website first and then get
-                                billed twice. */}
-                            {providerDef.signupUrl && (
-                                <div style={{ marginBottom: 14 }}>
-                                    <button
-                                        onClick={() =>
-                                            openExternal(providerDef.signupUrl)
-                                        }
-                                        style={{
-                                            display: 'block',
-                                            fontSize: 12,
-                                            color: 'var(--gold)',
-                                            marginBottom: 8,
-                                            background: 'none',
-                                            border: 'none',
-                                            padding: 0,
-                                            cursor: 'pointer',
-                                            fontFamily: 'var(--font-body)',
-                                            textAlign: 'start',
-                                        }}
-                                    >
-                                        {t('wiz.provider.signup')}
-                                    </button>
-                                    <div
-                                        style={{
-                                            background: 'rgba(201,162,58,0.06)',
-                                            border: '1px solid rgba(201,162,58,0.15)',
-                                            borderRadius: 'var(--r-tile)',
-                                            padding: '10px 12px',
-                                            fontSize: 12,
-                                            lineHeight: 1.5,
-                                        }}
-                                    >
-                                        <div
-                                            style={{
+                                                width: 24,
+                                                height: 24,
+                                                flexShrink: 0,
+                                                borderRadius: '50%',
+                                                background: 'var(--surface-3)',
+                                                color: 'var(--fg)',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                fontSize: 13,
                                                 fontWeight: 600,
-                                                marginBottom: 4,
-                                                color: 'var(--gold)',
-                                                fontSize: 11,
-                                                textTransform: 'uppercase' as const,
-                                                letterSpacing: 0.5,
                                             }}
                                         >
-                                            {t('wiz.provider.vps.tip.title')}
-                                        </div>
-                                        <div style={{ color: 'var(--fg)' }}>
-                                            {t('wiz.provider.vps.tip.body')}
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
+                                            {isRTL ? toFaDigits(String(i + 1)) : i + 1}
+                                        </span>
+                                        <span style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--fg)', minWidth: 0 }}>
+                                            {t(k)}
+                                            {i === 0 && providerDef.signupUrl && (
+                                                <>
+                                                    {' '}
+                                                    <Button
+                                                        variant="link"
+                                                        trailing={<Icon name="external" size={14} />}
+                                                        onClick={() => openExternal(providerDef.signupUrl)}
+                                                        dataButton="hetzner-signup"
+                                                        style={{ paddingBlock: 0, minHeight: 44, marginBlock: -6 }}
+                                                    >
+                                                        {t('wiz.provider.signup')}
+                                                    </Button>
+                                                </>
+                                            )}
+                                        </span>
+                                    </li>
+                                ))}
+                            </ol>
 
-                            <Label>
-                                {fmt(t('wiz.provider.token'), {
-                                    provider: t(providerDef.labelKey),
-                                })}
-                            </Label>
-                            <Input
-                                type="password"
-                                placeholder={t(providerDef.tokenHintKey)}
-                                value={token}
-                                onChange={(e) => setToken(e.target.value)}
-                                style={{ marginBottom: 6 }}
-                            />
+                            <Label>{t('wiz.provider.token')}</Label>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                                <Input
+                                    type="password"
+                                    placeholder={t('wiz.provider.token.placeholder')}
+                                    value={token}
+                                    onChange={(e) => setToken(e.target.value)}
+                                    autoCapitalize="off"
+                                    autoCorrect="off"
+                                    spellCheck={false}
+                                    style={{ flex: 1, minWidth: 0 }}
+                                />
+                                <Button
+                                    variant="secondary"
+                                    leading="paste"
+                                    dataButton="paste-key"
+                                    onClick={async () => {
+                                        try {
+                                            const text = await readClipboardText();
+                                            if (text && text.trim()) {
+                                                setToken(text.trim());
+                                                return;
+                                            }
+                                        } catch {
+                                            /* the web view would not read it */
+                                        }
+                                        setError(t('wiz.provider.token.paste_failed'));
+                                    }}
+                                >
+                                    {t('ui.paste')}
+                                </Button>
+                            </div>
                             <div
                                 style={{
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: 10,
-                                    color: 'var(--dim)',
+                                    fontSize: 13,
+                                    color: 'var(--muted)',
+                                    lineHeight: 1.5,
                                     marginBottom: 14,
                                 }}
                             >
                                 {hasStoredToken
                                     ? t('wiz.provider.token.stored')
-                                    : canReuseSaved(savedElsewhere, token, hasStoredToken)
+                                    : !useOtherKey && canReuseSaved(savedElsewhere, token, hasStoredToken)
                                     ? savedKeyLine(t, savedElsewhere!.nickname)
-                                    : fmt(t('wiz.provider.token.help'), {
-                                          hint: t(providerDef.tokenHintKey),
-                                      })}
+                                    : dt('wiz.provider.token.kept')}
                             </div>
+
+                            {useOtherKey && accountConnected && (
+                                <Button
+                                    variant="link"
+                                    size="sm"
+                                    onClick={() => {
+                                        setUseOtherKey(false);
+                                        setToken('');
+                                    }}
+                                    dataButton="use-account-key"
+                                    style={{ paddingInline: 0, marginBottom: 8 }}
+                                >
+                                    {t('wiz.provider.account.back')}
+                                </Button>
+                            )}
+                            </>
+                            )}
 
                             <NavRow
                                 t={t}
-                                backLabel={t('wiz.nav.cancel')}
-                                onBack={onCancel}
+                                backLabel={t(canPickHost ? 'wiz.nav.back' : 'wiz.nav.cancel')}
+                                onBack={canPickHost ? () => setHostChosen(false) : onCancel}
                                 nextDisabled={
                                     busy ||
-                                    (!token.trim() &&
+                                    (!skipKey &&
+                                        !token.trim() &&
                                         !hasStoredToken &&
-                                        !savedElsewhere)
+                                        (!savedElsewhere || useOtherKey))
                                 }
                                 onNext={async () => {
                                     if (!live) {
@@ -1476,7 +1659,8 @@ export default function PublisherWizard({
                                         return;
                                     }
                                     const dbId = await run(() =>
-                                        canReuseSaved(savedElsewhere, token, hasStoredToken)
+                                        skipKey ||
+                                        (!useOtherKey && canReuseSaved(savedElsewhere, token, hasStoredToken))
                                             ? Wizard.reuseCloudToken(provider)
                                             : Wizard.storeCloudToken(
                                                   provider,
@@ -1510,16 +1694,7 @@ export default function PublisherWizard({
                                 value={nickname}
                                 onChange={(e) => setNickname(e.target.value)}
                             />
-                            <div
-                                style={{
-                                    fontSize: 10,
-                                    color: 'var(--dim)',
-                                    fontFamily: 'var(--font-mono)',
-                                    margin: '4px 0 16px',
-                                }}
-                            >
-                                {t('wiz.plan.name.help')}
-                            </div>
+<div style={{ height: 16 }} />
 
                             {loadingOptions && (
                                 <div
@@ -1578,29 +1753,9 @@ export default function PublisherWizard({
                                                             >
                                                                 {srv.name}
                                                             </span>
-                                                            <span
-                                                                style={{
-                                                                    fontSize: 9,
-                                                                    fontWeight: 600,
-                                                                    color:
-                                                                        srv.status ===
-                                                                        'running'
-                                                                            ? '#4caf50'
-                                                                            : 'var(--muted)',
-                                                                    border: `1px solid ${
-                                                                        srv.status ===
-                                                                        'running'
-                                                                            ? '#4caf50'
-                                                                            : 'var(--line-soft)'
-                                                                    }`,
-                                                                    borderRadius: 4,
-                                                                    padding: '1px 5px',
-                                                                    textTransform:
-                                                                        'uppercase' as const,
-                                                                }}
-                                                            >
-                                                                {srv.status}
-                                                            </span>
+                                                            <Badge tone={srv.status === 'running' ? 'good' : 'neutral'} size="sm" icon={false}>
+                                                                <span dir="ltr">{srv.status}</span>
+                                                            </Badge>
                                                         </div>
                                                         <div
                                                             style={{
@@ -1685,28 +1840,14 @@ export default function PublisherWizard({
                                                                     {opt.id.toUpperCase()}
                                                                 </span>
                                                                 {i === 0 && (
-                                                                    <span
-                                                                        style={{
-                                                                            fontSize: 9,
-                                                                            fontWeight: 600,
-                                                                            color: 'var(--gold)',
-                                                                            border: '1px solid var(--gold)',
-                                                                            borderRadius: 4,
-                                                                            padding:
-                                                                                '1px 5px',
-                                                                            textTransform:
-                                                                                'uppercase' as const,
-                                                                        }}
-                                                                    >
-                                                                        {t(
-                                                                            'wiz.plan.badge.best',
-                                                                        )}
-                                                                    </span>
+                                                                    <Badge tone="gold" size="sm">
+                                                                        {t('wiz.plan.badge.best')}
+                                                                    </Badge>
                                                                 )}
                                                             </div>
                                                             <div
                                                                 style={{
-                                                                    fontSize: 11,
+                                                                    fontSize: 12,
                                                                     color: 'var(--muted)',
                                                                     marginTop: 2,
                                                                 }}
@@ -1714,11 +1855,14 @@ export default function PublisherWizard({
                                                                 {fmt(
                                                                     t('wiz.plan.spec'),
                                                                     {
-                                                                        cpus: opt.cpus,
-                                                                        mem: opt.memory_gb,
-                                                                        disk: opt.disk_gb,
+                                                                        cpus: readerNum(opt.cpus),
+                                                                        mem: readerNum(opt.memory_gb),
+                                                                        disk: readerNum(opt.disk_gb),
                                                                     },
                                                                 )}
+                                                            </div>
+                                                            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                                                {t('wiz.plan.traffic')}
                                                             </div>
                                                         </div>
                                                         <div
@@ -1734,9 +1878,7 @@ export default function PublisherWizard({
                                                             {fmt(
                                                                 t('wiz.plan.price'),
                                                                 {
-                                                                    eur: opt.monthly_eur.toFixed(
-                                                                        2,
-                                                                    ),
+                                                                    eur: readerNum(opt.monthly_eur.toFixed(2)),
                                                                 },
                                                             )}
                                                         </div>
@@ -1789,18 +1931,18 @@ export default function PublisherWizard({
                                 />
                             )}
 
-                            <div
-                                style={{
-                                    fontSize: 11,
-                                    color: 'var(--muted)',
-                                    marginBottom: 14,
-                                    lineHeight: 1.5,
-                                }}
-                            >
-                                {useExisting
-                                    ? t('wiz.plan.footnote.existing')
-                                    : t('wiz.plan.footnote.new')}
-                            </div>
+                            {useExisting && (
+                                <div
+                                    style={{
+                                        fontSize: 13,
+                                        color: 'var(--muted)',
+                                        margin: '8px 0 14px',
+                                        lineHeight: 1.5,
+                                    }}
+                                >
+                                    {t('wiz.plan.footnote.existing')}
+                                </div>
+                            )}
 
                             <NavRow
                                 t={t}
@@ -1815,7 +1957,7 @@ export default function PublisherWizard({
                                     ) &&
                                         !useExisting)
                                 }
-                                nextLabel={t('wiz.plan.next')}
+                                nextLabel={t('common.continue')}
                                 onNext={async () => {
                                     if (!operatorId) return;
                                     if (live) {
@@ -1832,13 +1974,42 @@ export default function PublisherWizard({
                                         extraFamilies,
                                     );
                                     mark('plan');
-                                    setStepIdx(2);
+                                    setStepIdx(EXTRAS_IDX);
                                 }}
                             />
                         </div>
                     )}
 
-                    {/* ===== SCREEN 3: BUILD ===== */}
+                    {/* ===== SCREEN 3: MORE PROTECTION (OPTIONAL) =====
+                        Only the choice: nothing is rented or set up until
+                        the relay is built and works. */}
+                    {step.id === 'extras' && (
+                        <div>
+                            <WizardAddonsStep
+                                t={t}
+                                chosen={addonChoices}
+                                onChange={(next) => {
+                                    setAddonChoices(next);
+                                    if (operatorId) rememberAddonChoices(operatorId, next);
+                                }}
+                            />
+                            <NavRow
+                                t={t}
+                                backLabel={t('wiz.nav.back')}
+                                onBack={() => setStepIdx(EXTRAS_IDX - 1)}
+                                nextDisabled={busy || !operatorId}
+                                nextLabel={t('wiz.plan.next')}
+                                onNext={() => {
+                                    if (!operatorId) return;
+                                    rememberAddonChoices(operatorId, addonChoices);
+                                    mark('extras');
+                                    setStepIdx(BUILD_IDX);
+                                }}
+                            />
+                        </div>
+                    )}
+
+                    {/* ===== SCREEN 4: BUILD ===== */}
                     {step.id === 'build' && (
                         <div>
                             {/* Resumed straight into a build that would
@@ -1939,32 +2110,25 @@ export default function PublisherWizard({
                                         (stageIdx >= 0 && i < stageIdx);
                                     const active = stage === s.id;
                                     const failed =
-                                        stage === 'failed' && failedAt === s.id;
+                                        (stage === 'failed' || stage === 'cancelled') && failedAt === s.id;
                                     return (
                                         <li
                                             key={s.id}
+                                            data-stage={s.id}
                                             style={{
                                                 display: 'flex',
                                                 alignItems: 'center',
                                                 gap: 10,
-                                                fontSize: 13,
+                                                fontSize: 14,
                                                 color: done || active
                                                     ? 'var(--fg)'
-                                                    : 'var(--dim)',
+                                                    : 'var(--muted)',
                                             }}
                                         >
-                                            <StatusLight
-                                                tone={
-                                                    failed
-                                                        ? 'bad'
-                                                        : done
-                                                            ? 'good'
-                                                            : active
-                                                                ? 'warn'
-                                                                : 'neutral'
-                                                }
-                                                size={8}
-                                                pulse={active}
+                                            <StateIcon
+                                                // A stopped step is not a failure: grey, not red.
+                                                state={failed ? (stage === 'cancelled' ? 'off' : 'bad') : done ? 'ok' : active ? 'busy' : 'none'}
+                                                size={20}
                                             />
                                             <span>{t(buildStageKey(s.id, s.key, !!useExisting))}</span>
                                         </li>
@@ -1985,7 +2149,70 @@ export default function PublisherWizard({
                                 </div>
                             )}
 
-                            <EventList events={buildLog} />
+                            {/* The health wait, live: which try, how long.
+                                It used to run 10-20 minutes with nothing
+                                on screen but a spinner. */}
+                            {stage === 'provision' && wait && !buildCancelling && (
+                                <div
+                                    role="status"
+                                    data-testid="build-wait"
+                                    style={{ fontSize: 13, color: 'var(--fg)', marginBottom: 8, lineHeight: 1.5 }}
+                                >
+                                    {fmt(t('wiz.build.wait.line'), {
+                                        n: readerNum(wait.attempt),
+                                        max: readerNum(wait.max),
+                                        time: readerNum(clock(wait.elapsedS)),
+                                    })}
+                                </div>
+                            )}
+                            {stage === 'provision' && notAnswering && !buildCancelling && (
+                                <div
+                                    role="status"
+                                    data-testid="build-not-answering"
+                                    style={{
+                                        fontSize: 13,
+                                        color: 'var(--fg)',
+                                        background: 'var(--surface-2)',
+                                        borderInlineStart: '3px solid var(--gold)',
+                                        borderRadius: 'var(--radius-md)',
+                                        padding: '8px 10px',
+                                        marginBottom: 10,
+                                        lineHeight: 1.5,
+                                    }}
+                                >
+                                    {dt('wiz.build.wait.not_answering')}
+                                </div>
+                            )}
+                            {stage === 'provision' && buildCancelling && (
+                                <div role="status" data-testid="build-cancelling" style={{ fontSize: 13, color: 'var(--fg)', marginBottom: 10, lineHeight: 1.5 }}>
+                                    {t('wiz.build.cancelling')}
+                                </div>
+                            )}
+                            {stage === 'provision' && !buildCancelling && (live || harnessBuildPreview()) && (
+                                <div style={{ marginBottom: 10 }}>
+                                    <Button variant="secondary" size="sm" onClick={() => void onBuildCancel()} dataButton="build-cancel">
+                                        {t('wiz.build.cancel')}
+                                    </Button>
+                                </div>
+                            )}
+
+                            {stage === 'cancelled' && (
+                                <CancelledCard
+                                    t={t}
+                                    outcome={readCancelOutcome(buildLog)}
+                                    provisioned={alreadyProvisioned}
+                                    busy={busy || cancelBusy}
+                                    onRemove={(confirmed) => void onCancelledRemove(confirmed)}
+                                    onAgain={() => { void runBuild(); }}
+                                />
+                            )}
+
+                            {/* The raw log is for someone helping (H-52). */}
+                            {buildLog.length > 0 && stage !== 'done' && (
+                                <Disclosure summary={t('ui.details')} dataButton="build-log">
+                                    <EventList events={buildLog} />
+                                </Disclosure>
+                            )}
 
                             {/* Helper-IP repair. Reached only when the
                                 automatic detect + one retry both failed;
@@ -2096,6 +2323,7 @@ export default function PublisherWizard({
                                         {failedAt === 'profile' ? (
                                             <Button
                                                 variant="secondary"
+                                                leading="back"
                                                 onClick={() => {
                                                     setStage('idle');
                                                     setFailedAt(null);
@@ -2129,104 +2357,69 @@ export default function PublisherWizard({
                             )}
 
                             {stage === 'done' && (
-                                <Card
-                                    style={{
-                                        marginTop: 12,
-                                        background: 'var(--surface-2)',
-                                    }}
-                                >
-                                    <div
+                                <div data-testid="wizard-done" style={{ display: 'grid', gap: 16, justifyItems: 'center', textAlign: 'center' }}>
+                                    <StateIcon state="ok" size={56} />
+                                    <h2
                                         style={{
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 10,
-                                            color: 'var(--dim)',
-                                            letterSpacing: '0.18em',
-                                            textTransform: 'uppercase',
+                                            fontFamily: 'var(--font-display)',
+                                            fontSize: 24,
+                                            fontWeight: 500,
+                                            margin: 0,
+                                            color: 'var(--fg)',
                                         }}
                                     >
                                         {t('wiz.build.done.eyebrow')}
-                                    </div>
-                                    <div
-                                        style={{
-                                            fontSize: 14,
-                                            color: 'var(--fg)',
-                                            margin: '6px 0 12px',
-                                            lineHeight: 1.5,
-                                        }}
-                                    >
-                                        {t('wiz.build.done.body')}
-                                    </div>
+                                    </h2>
+                                    {/* The words the family may be asked to
+                                        check when they add the file (C-09,
+                                        H-53). Both sets: one is not a
+                                        translation of the other. */}
+                                    {fp && (fp.en_words || fp.fa_words) && (
+                                        <div
+                                            data-testid="wizard-keys"
+                                            style={{
+                                                width: '100%',
+                                                textAlign: 'start',
+                                                background: 'var(--surface-2)',
+                                                borderRadius: 'var(--r-card)',
+                                                padding: '14px 16px',
+                                                display: 'grid',
+                                                gap: 10,
+                                            }}
+                                        >
+                                            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>{t('wiz.keys.title')}</div>
+                                            <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>{t('wiz.keys.line')}</div>
+                                            {fp.en_words && <WordChips words={fp.en_words} lang="en" label={t('wiz.keys.en_label')} />}
+                                            {fp.fa_words && <WordChips words={fp.fa_words} lang="fa" label={t('wiz.keys.fa_label')} />}
+                                        </div>
+                                    )}
                                     {operatorId && (
-                                        <Button onClick={() => onDone(operatorId)}>
-                                            {t('wiz.build.done.open')}
-                                        </Button>
-                                    )}
-                                </Card>
-                            )}
-
-                            {/* Publisher fingerprint — recipients trust
-                                your routes by recognising this, so it is
-                                worth showing once even though nothing on
-                                this screen asks the user to act on it. */}
-                            {fp && fp.hex && (
-                                <Card
-                                    style={{
-                                        marginTop: 12,
-                                        background: 'var(--surface-2)',
-                                    }}
-                                >
-                                    <div
-                                        style={{
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 10,
-                                            color: 'var(--dim)',
-                                            letterSpacing: '0.18em',
-                                            textTransform: 'uppercase',
-                                        }}
-                                    >
-                                        {t('wiz.keys.card.eyebrow')}
-                                    </div>
-                                    <div
-                                        style={{
-                                            fontFamily: 'var(--font-mono)',
-                                            fontSize: 12,
-                                            color: 'var(--fg)',
-                                            marginTop: 4,
-                                            wordBreak: 'break-all',
-                                        }}
-                                    >
-                                        {fp.hex}
-                                    </div>
-                                    {fp.en_words && (
-                                        <div
-                                            style={{
-                                                fontFamily: 'var(--font-mono)',
-                                                fontSize: 11,
-                                                color: 'var(--muted)',
-                                                marginTop: 8,
-                                            }}
-                                        >
-                                            {fmt(t('wiz.keys.en'), {
-                                                words: fp.en_words,
-                                            })}
+                                        <div style={{ display: 'grid', gap: 4, justifyItems: 'center' }}>
+                                            <Button leading="plus" onClick={() => onDone(operatorId, true)} dataButton="add-first-person">
+                                                {t('wiz.build.done.add')}
+                                            </Button>
+                                            <Button variant="link" onClick={() => onDone(operatorId)} dataButton="open-relay">
+                                                {t('wiz.build.done.open')}
+                                            </Button>
                                         </div>
                                     )}
-                                    {fp.fa_words && (
-                                        <div
-                                            style={{
-                                                fontFamily: 'var(--font-fa)',
-                                                fontSize: 12,
-                                                color: 'var(--muted)',
-                                                marginTop: 2,
-                                                direction: 'rtl',
-                                            }}
-                                        >
-                                            {fmt(t('wiz.keys.fa'), {
-                                                words: fp.fa_words,
-                                            })}
-                                        </div>
+                                    {/* The extras chosen before the build, turned
+                                        on now that the relay works. A failure
+                                        here never fails the relay. */}
+                                    {operatorId && (
+                                        <WizardAddonsProgress
+                                            t={t}
+                                            progress={addonProgress}
+                                            onRetry={(kind) =>
+                                                void retryAddon(operatorId, kind, {
+                                                    accounts: readAccounts,
+                                                    onState: (k, st) => setAddonProgress((p) => ({ ...p, [k]: st })),
+                                                    run: live ? undefined : () => new Promise<void>((r) => setTimeout(r, 220)),
+                                                })
+                                            }
+                                        />
                                     )}
-                                </Card>
+                                </div>
                             )}
                         </div>
                     )}
@@ -2236,11 +2429,21 @@ export default function PublisherWizard({
                     persisted in the DB and survives relaunch, so this is
                     the only way to abandon a half-built relay and stop it
                     being resumed forever. */}
-                {operatorId != null && !building && (
-                    <Button variant="ghost" onClick={() => void onCancelPress()}>
-                        {t('wiz.cancel')}
-                    </Button>
+                {operatorId != null && !building && stepIdx > 0 && stage !== 'done' && stage !== 'cancelled' && (
+                    <div>
+                        <Button variant="link" onClick={() => void onCancelPress()} dataButton="wizard-cancel" style={{ color: 'var(--red)' }}>
+                            {t('wiz.cancel')}
+                        </Button>
+                    </div>
                 )}
+                {onRestore && stepIdx === 0 && !resumeOperatorId && (
+                    <div>
+                        <Button variant="link" onClick={onRestore} dataButton="restore-link">
+                            {dt('pub.restore.link.wizard')}
+                        </Button>
+                    </div>
+                )}
+                {confirm.node}
                 {cancelRec && (
                     <CancelSetupSheet
                         t={t}
@@ -2310,6 +2513,8 @@ function StepStrip({
     locked,
     onJump,
     t,
+    ready,
+    titleKey,
 }: {
     stepIdx: number;
     completed: Record<StepId, boolean>;
@@ -2318,42 +2523,26 @@ function StepStrip({
     locked: boolean;
     onJump: (i: number) => void;
     t: (k: string) => string;
+    /** The relay is built: the step name says "Ready", not "Building". */
+    ready?: boolean;
+    /** The current screen's own title, when a step has two screens
+     *  (step 1: the hosting company, then its key). */
+    titleKey?: string;
 }) {
-    // Numbers, not sentences. The card heading directly below already
-    // states the current step's title in full, so repeating it here only
-    // bought a `nowrap` ellipsis ("Connect your clou…") and a strip wide
-    // enough to shove the layout off screen. Three markers say where you
-    // are; the accessible name still carries the real title for
-    // screen-reader and long-press users.
+    // A compact stepper: three dots, then the current step's name. The
+    // dots are buttons (a done step can be revisited); each has a 44 px
+    // hit area around a small dot.
     return (
-        <div
-            style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 14,
-            }}
-        >
-            {STEPS.map((s, i) => {
-                const active = i === stepIdx;
-                const done = completed[s.id];
-                const reachable = !locked && (i < stepIdx || done);
-                return (
-                    <Fragment key={s.id}>
-                        {i > 0 && (
-                            <div
-                                aria-hidden
-                                style={{
-                                    flex: 1,
-                                    height: 2,
-                                    borderRadius: 1,
-                                    background: done || active
-                                        ? 'var(--green-dim)'
-                                        : 'var(--line-soft)',
-                                }}
-                            />
-                        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 8, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, marginInlineStart: -16 }}>
+                {STEPS.map((s, i) => {
+                    const active = i === stepIdx;
+                    const done = completed[s.id];
+                    const reachable = !locked && (i < stepIdx || done);
+                    return (
                         <button
+                            key={s.id}
+                            type="button"
                             disabled={!reachable || active}
                             onClick={() => onJump(i)}
                             title={t(s.titleKey)}
@@ -2362,41 +2551,94 @@ function StepStrip({
                                 total: STEPS.length,
                             })} — ${t(s.titleKey)}`}
                             aria-current={active ? 'step' : undefined}
+                            data-button={`wizard-step-${i + 1}`}
                             style={{
                                 appearance: 'none',
-                                flex: '0 0 auto',
-                                inlineSize: 28,
-                                blockSize: 28,
-                                borderRadius: '50%',
+                                background: 'transparent',
+                                border: 0,
+                                padding: 0,
+                                // 44 px, the smallest comfortable tap (E.1.5).
+                                inlineSize: 44,
+                                blockSize: 44,
                                 display: 'grid',
                                 placeItems: 'center',
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 12,
-                                lineHeight: 1,
-                                background: active
-                                    ? 'var(--gold)'
-                                    : 'transparent',
-                                color: active
-                                    ? 'var(--bg)'
-                                    : done
-                                        ? 'var(--green)'
-                                        : 'var(--dim)',
-                                border: `1.5px solid ${
-                                    active
-                                        ? 'var(--gold)'
-                                        : done
-                                            ? 'var(--green-dim)'
-                                            : 'var(--line-soft)'
-                                }`,
-                                cursor:
-                                    reachable && !active ? 'pointer' : 'default',
+                                cursor: reachable && !active ? 'pointer' : 'default',
                             }}
                         >
-                            {done && !active ? '✓' : i + 1}
+                            <span
+                                aria-hidden
+                                style={{
+                                    inlineSize: active ? 12 : 10,
+                                    blockSize: active ? 12 : 10,
+                                    borderRadius: '50%',
+                                    background: active ? 'var(--gold)' : done ? 'var(--green)' : 'transparent',
+                                    border: `2px solid ${active ? 'var(--gold)' : done ? 'var(--green)' : 'var(--line)'}`,
+                                }}
+                            />
                         </button>
-                    </Fragment>
-                );
-            })}
+                    );
+                })}
+            </div>
+            {/* One small label, not a second heading: the page title
+                above is the only heading (the owner counted three
+                layers of title on the phone, 2026-11-22). */}
+            <span
+                data-testid="wizard-step-label"
+                aria-current="step"
+                style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    margin: 0,
+                    minWidth: 0,
+                    color: 'var(--muted)',
+                    lineHeight: 1.3,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                }}
+            >
+                {ready ? t('wiz.step.build.ready') : t(titleKey ?? STEPS[stepIdx]?.titleKey ?? 'wiz.step.cloud.title')}
+            </span>
+        </div>
+    );
+}
+
+/** Four check words as chips: the UI's own language first and large. */
+function WordChips({ words, lang, label }: { words: string; lang: 'en' | 'fa'; label: string }) {
+    const list = words.split(/[\s-]+/).filter(Boolean);
+    const { density } = useDensity();
+    // Even rows (4 across, 2 on a phone): no word alone on a line.
+    const cols = density === 'phone' ? 2 : 4;
+    return (
+        <div
+            role="group"
+            aria-label={label}
+            lang={lang}
+            dir={lang === 'fa' ? 'rtl' : 'ltr'}
+            style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}
+        >
+            <span aria-hidden style={{ color: 'var(--muted)', display: 'inline-flex', marginInlineEnd: 2, paddingBlockStart: 6 }}>
+                <Icon name="globe" size={14} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(max-content, 1fr))`, gap: 6 }}>
+            {list.map((w, i) => (
+                <span
+                    key={i}
+                    style={{
+                        textAlign: 'center',
+                        whiteSpace: 'nowrap',
+                        padding: '4px 6px',
+                        borderRadius: 'var(--r-pill)',
+                        background: 'var(--surface-3)',
+                        color: 'var(--fg)',
+                        fontSize: 15,
+                        fontFamily: lang === 'fa' ? 'var(--font-fa, var(--font-body))' : 'var(--font-body)',
+                    }}
+                >
+                    {w}
+                </span>
+            ))}
+            </span>
         </div>
     );
 }
@@ -2405,11 +2647,9 @@ function Label({ children }: { children: React.ReactNode }) {
     return (
         <div
             style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 10,
-                color: 'var(--dim)',
-                letterSpacing: '0.14em',
-                textTransform: 'uppercase',
+                fontSize: 13,
+                fontWeight: 600,
+                color: 'var(--muted)',
                 margin: '4px 0 6px',
             }}
         >
@@ -2422,12 +2662,10 @@ function SubHead({ children }: { children: React.ReactNode }) {
     return (
         <div
             style={{
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 600,
                 color: 'var(--fg)',
                 marginBottom: 6,
-                textTransform: 'uppercase',
-                letterSpacing: '0.08em',
             }}
         >
             {children}
@@ -2449,6 +2687,199 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
             }}
         >
             {children}
+        </div>
+    );
+}
+
+/**
+ * Screen 1a — "Where should your relay live?": the hosting companies.
+ *
+ * Only the ones Daal can rent from today are choosable. The rest are
+ * dimmed, carry "In development" and do nothing when pressed: they are
+ * there so a publisher sees what is coming, not a promise of a price or
+ * a region. With one company available it is already chosen, so the
+ * screen is one tap ("Continue").
+ */
+export function HostList({
+    t,
+    provider,
+    onPick,
+    onCancel,
+    onContinue,
+}: {
+    t: (k: string) => string;
+    provider: ProviderId;
+    onPick?: (id: ProviderId) => void;
+    onCancel: () => void;
+    onContinue: () => void;
+}) {
+    const chosenOk = AVAILABLE_PROVIDERS.some((p) => p.id === provider);
+    return (
+        <div>
+            <p
+                style={{
+                    color: 'var(--muted)',
+                    fontSize: 14,
+                    lineHeight: 1.5,
+                    margin: '0 0 14px',
+                    maxInlineSize: '64ch',
+                }}
+            >
+                {t('wiz.host.intro')}
+            </p>
+            <div
+                role="radiogroup"
+                aria-label={t('wiz.host.title')}
+                data-testid="wizard-hosts"
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}
+            >
+                {AVAILABLE_PROVIDERS.map((p) => {
+                    const sel = provider === p.id;
+                    const lineKey = HOST_LINE[p.id];
+                    return (
+                        <button
+                            key={p.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={sel}
+                            data-button={`host-${p.id}`}
+                            data-host="available"
+                            onClick={() => onPick?.(p.id)}
+                            style={{
+                                inlineSize: '100%',
+                                minBlockSize: 64,
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 12,
+                                padding: '10px 14px',
+                                background: 'var(--surface-2)',
+                                border: `1.5px solid ${sel ? 'var(--gold)' : 'var(--line-soft)'}`,
+                                borderRadius: 'var(--r-tile)',
+                                cursor: 'pointer',
+                                color: 'var(--fg)',
+                                fontFamily: 'var(--font-body)',
+                                textAlign: 'start',
+                            }}
+                        >
+                            <span
+                                aria-hidden
+                                style={{
+                                    inlineSize: 36,
+                                    blockSize: 36,
+                                    flexShrink: 0,
+                                    borderRadius: '50%',
+                                    display: 'grid',
+                                    placeItems: 'center',
+                                    background: 'var(--surface-3)',
+                                    color: sel ? 'var(--gold)' : 'var(--muted)',
+                                }}
+                            >
+                                <Icon name="server" size={18} />
+                            </span>
+                            <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
+                                    <span dir="auto" style={{ fontSize: 15, fontWeight: 600, unicodeBidi: 'isolate' }}>
+                                        {t(p.labelKey)}
+                                    </span>
+                                    <Badge tone="good" size="sm" icon={false}>
+                                        {t('wiz.host.available')}
+                                    </Badge>
+                                </span>
+                                {lineKey && (
+                                    <span style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.4 }}>
+                                        {t(lineKey)}
+                                    </span>
+                                )}
+                            </span>
+                            <span
+                                aria-hidden
+                                style={{
+                                    inlineSize: 22,
+                                    blockSize: 22,
+                                    flexShrink: 0,
+                                    borderRadius: '50%',
+                                    boxSizing: 'border-box',
+                                    border: `2px solid ${sel ? 'var(--gold)' : 'var(--line)'}`,
+                                    display: 'grid',
+                                    placeItems: 'center',
+                                }}
+                            >
+                                {sel && (
+                                    <span
+                                        style={{
+                                            inlineSize: 10,
+                                            blockSize: 10,
+                                            borderRadius: '50%',
+                                            background: 'var(--gold)',
+                                        }}
+                                    />
+                                )}
+                            </span>
+                        </button>
+                    );
+                })}
+                {/* The ones still being built: smaller, dimmed, inert. */}
+                <div
+                    style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                        gap: 8,
+                    }}
+                >
+                    {CLOUD_PROVIDERS.filter((p) => !p.available).map((p) => (
+                        <button
+                            key={p.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={false}
+                            aria-disabled
+                            disabled
+                            data-button={`host-${p.id}`}
+                            data-host="in-development"
+                            style={{
+                                minBlockSize: 64,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'flex-start',
+                                justifyContent: 'center',
+                                gap: 4,
+                                padding: '8px 12px',
+                                background: 'transparent',
+                                border: '1px dashed var(--line)',
+                                borderRadius: 'var(--r-tile)',
+                                cursor: 'default',
+                                color: 'var(--muted)',
+                                fontFamily: 'var(--font-body)',
+                                textAlign: 'start',
+                                minWidth: 0,
+                            }}
+                        >
+                            <span
+                                dir="auto"
+                                style={{
+                                    fontSize: 14,
+                                    fontWeight: 600,
+                                    unicodeBidi: 'isolate',
+                                    maxInlineSize: '100%',
+                                }}
+                            >
+                                {t(p.labelKey)}
+                            </span>
+                            <Badge tone="neutral" size="sm" icon="clock">
+                                {t('wiz.host.soon')}
+                            </Badge>
+                        </button>
+                    ))}
+                </div>
+            </div>
+            <NavRow
+                t={t}
+                backLabel={t('wiz.nav.cancel')}
+                onBack={onCancel}
+                nextDisabled={!chosenOk}
+                nextLabel={t('common.continue')}
+                onNext={onContinue}
+            />
         </div>
     );
 }
@@ -2477,26 +2908,35 @@ function NavRow({
                 marginTop: 8,
             }}
         >
-            <Button variant="ghost" onClick={onBack}>
+            <Button variant="ghost" leading="back" onClick={onBack} dataButton="wiz-back">
                 {backLabel}
             </Button>
-            <Button disabled={nextDisabled} onClick={onNext}>
+            <Button
+                disabled={nextDisabled}
+                onClick={onNext}
+                dataButton="wiz-next"
+                trailing={<Icon name="chevron" size={16} />}
+            >
                 {nextLabel ?? t('wiz.nav.next')}
             </Button>
         </div>
     );
 }
 
-function EventList({ events }: { events: ProgressEvent[] }) {
+function EventList({ events: all }: { events: ProgressEvent[] }) {
     const listRef = useRef<HTMLUListElement | null>(null);
+    // The health wait is one live line (its latest try), not sixty.
+    const events = visibleLines(all);
     useEffect(() => {
         const el = listRef.current;
         if (el) el.scrollTop = el.scrollHeight;
-    }, [events.length]);
+    }, [all.length]);
     if (events.length === 0) return null;
     return (
         <ul
             ref={listRef}
+            dir="ltr"
+            data-testid="build-log-lines"
             style={{
                 listStyle: 'none',
                 margin: '10px 0 0',
@@ -2512,12 +2952,99 @@ function EventList({ events }: { events: ProgressEvent[] }) {
             }}
         >
             {events.map((ev, i) => (
-                <li key={i} style={{ whiteSpace: 'pre-wrap', marginBottom: 4 }}>
-                    [{ev.step || ev.phase}] {ev.message || ev.detail}
+                <li
+                    key={i}
+                    data-step={ev.step || ev.phase}
+                    style={{
+                        whiteSpace: 'pre-wrap',
+                        marginBottom: 4,
+                        // The live line stands out; the optional log
+                        // viewer's lines step back.
+                        color: ev.step === 'provision_health_wait' || ev.step === 'provision_health_unreachable'
+                            ? 'var(--fg)'
+                            : undefined,
+                        opacity: ev.step === 'provision_ssh_debug' ? 0.7 : undefined,
+                    }}
+                >
+                    <span style={{ opacity: 0.65 }}>{lineTime(ev)}</span> [{ev.step || ev.phase}] {ev.message || ev.detail}
                     {ev.pct !== undefined && ` · ${ev.pct}%`}
                 </li>
             ))}
         </ul>
+    );
+}
+
+/** Harness only: `?build=wait|unreachable` makes the fake provision
+ *  wait for the relay like a slow real one. */
+function harnessBuildPreview(): 'wait' | 'unreachable' | null {
+    if (typeof window === 'undefined') return null;
+    const q = new URLSearchParams(window.location.search || window.location.hash.split('?')[1] || '');
+    const v = q.get('build');
+    return v === 'wait' || v === 'unreachable' ? v : null;
+}
+
+/** After Cancel: what was removed, and the two ways on. */
+function CancelledCard({
+    t,
+    outcome,
+    provisioned,
+    busy,
+    onRemove,
+    onAgain,
+}: {
+    t: (k: string) => string;
+    outcome: CancelOutcome;
+    /** The relay finished before the stop arrived: the destroy sheet
+     *  is open, and this card only says so. */
+    provisioned: boolean;
+    busy: boolean;
+    /** `confirmed`: the rollback said the server is deleted. */
+    onRemove: (confirmed: boolean) => void;
+    onAgain: () => void;
+}) {
+    const gone = outcome.serverDeleted && outcome.warnings === 0;
+    const nothingRented = !outcome.rented && !provisioned;
+    const removed: string[] = [];
+    if (outcome.serverDeleted) {
+        removed.push(outcome.ip ? fmt(t('wiz.build.cancelled.server'), { ip: outcome.ip }) : t('wiz.build.cancelled.server_noip'));
+    }
+    if (outcome.firewallDeleted) removed.push(t('wiz.build.cancelled.firewall'));
+    const status = provisioned
+        ? t('wiz.build.cancelled.finished_first')
+        : nothingRented
+          ? t('wiz.build.cancelled.nothing')
+          : gone
+            ? t('wiz.build.cancelled.not_billing')
+            : t('wiz.build.cancelled.unsure');
+    return (
+        <div data-testid="build-cancelled" data-outcome={provisioned ? 'provisioned' : nothingRented ? 'nothing' : gone ? 'removed' : 'unsure'} style={{ display: 'grid', gap: 10, margin: '4px 0 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <StateIcon state={gone || nothingRented ? 'ok' : 'warn'} size={20} />
+                <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>{t('wiz.build.cancelled.title')}</span>
+            </div>
+            {removed.length > 0 && (
+                <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 13, color: 'var(--fg)', lineHeight: 1.6 }}>
+                    {removed.map((r) => (
+                        <li key={r}>
+                            <bdi>{r}</bdi>
+                        </li>
+                    ))}
+                </ul>
+            )}
+            <p style={{ margin: 0, fontSize: 13, color: gone || nothingRented ? 'var(--muted)' : 'var(--gold)', lineHeight: 1.5 }}>
+                {status}
+            </p>
+            {!provisioned && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <Button variant={gone || nothingRented ? 'secondary' : 'primary'} disabled={busy} onClick={() => onRemove(gone)} dataButton="build-cancelled-remove">
+                        {gone || nothingRented ? t('wiz.build.cancelled.remove') : t('wiz.build.cancelled.check')}
+                    </Button>
+                    <Button variant="ghost" disabled={busy} onClick={onAgain} dataButton="build-cancelled-again">
+                        {t('wiz.build.cancelled.again')}
+                    </Button>
+                </div>
+            )}
+        </div>
     );
 }
 

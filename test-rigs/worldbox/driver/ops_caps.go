@@ -92,6 +92,10 @@ var capProofs = []capProof{
 	{"shadowsocks-2022", "creates the ss-in inbound and its per-recipient keys", "the shadowsocks family under test", familyCarries("shadowsocks")},
 	{"anytls-inbound", "creates the anytls-in inbound and its per-recipient passwords", "the anytls family under test", familyCarries("anytls")},
 	{"tuic-users", "adds, rotates and removes tuic users", "the tuic family under test", familyCarries("tuic")},
+	{"cdn", "opens the CDN door (ws-cdn-in, origin pull required) over /cdn, and closes it again", "--ops cdn-provision",
+		func(rc *RunCtx) (string, []string) {
+			return rc.allOK("op:cdn-provision", "", "front-test.websocket_through_the_edge_with_ech", "door.refuses_without_origin_pull_cert", "removed.zone_as_it_was")
+		}},
 }
 
 // opCaps: capability honesty. The relay's /health names what its

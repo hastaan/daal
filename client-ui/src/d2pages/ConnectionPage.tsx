@@ -1,16 +1,25 @@
-// ConnectionPage.tsx — D-2.1 Connection screen.
+// ConnectionPage.tsx — Home (spec C2).
 //
-// Visual contract: client-shared/designs/daal-desktop.html (.work + .work-main + .rail).
-// Data contract: client-ui/src/contract/d2-contract.ts
-//   - connectionSummary()  : state, mode, activeRoute, networkLabel, pointerValidDays
-//   - whyThisRoute()       : active + reasonText + skipped[]
-//   - pointerRotation()    : lastRotated, validForDays, rotatedSuccessfully
-//   - routeHealth()        : RouteHealthDisplayRow[]
-//   - connect/disconnect/setMode/exportDiagnostics
+// One column, top to bottom: the ⋯ menu; at most one notice; the bird,
+// which IS the button; one headline; at most one line ("Using Pars
+// Relays · VLESS Reality", "Trying VLESS Reality · 2 of 4" with step
+// dots, "4 ways ready · …" with the kinds as chips); at most two badges
+// (Slow, Manual, Lifeline); the one gold button and the one link a
+// state has. Connected, a card of what Daal knows sits under it: why
+// this way, the network, live speed, quality — each row only when the
+// engine sent its fact (lib/homeFacts.ts) — with a Details fold listing
+// every way once, with its state here and its score. Developer mode
+// adds the raw engine detail (ids, decision id, scores) in its own fold.
 //
-// No legacy `bridge.diagnostics()` usage. The titlebar + connection-duration
-// ticker live in the active shell (lifted state); this page only renders the
-// center hero + right rail and dispatches actions.
+// Desktop: two columns in every state, so the bird never moves: the
+// card is the right column while connected ("This connection"), "What
+// Daal tried" after a failure, and the ways on this computer otherwise.
+//
+// What is shown and what a tap does is decided in lib/mainScreen.ts;
+// this file draws it and runs the actions. Data contract:
+// client-ui/src/contract/d2-contract.ts (connectionSummary, whyThisRoute,
+// pointerRotation, routeHealth, connect/disconnect/setMode/
+// exportDiagnostics).
 
 import { useEffect, useRef, useState } from 'react';
 import { useContract } from '../contract/ContractProvider';
@@ -24,19 +33,21 @@ import type {
     ConnMode,
     RouteDisplayRow,
 } from '../contract/D2Contract';
-import { effectiveLocale } from '../lib/i18n';
+import { effectiveLocale, toFaDigits } from '../lib/i18n';
 import { useDensity } from '../design/DensityProvider';
-import DaalButton, { type DaalConnectState } from '../components/DaalButton';
-import WayChooser from '../components/connection/WayChooser';
+import DaalButton from '../components/DaalButton';
+import WayChooser, { routeLabel } from '../components/connection/WayChooser';
 import AutoFailure from '../components/connection/AutoFailure';
 import MeasuredDetails from '../components/connection/MeasuredDetails';
-import { anyMeasured } from '../lib/measured';
+import { anyMeasured, localDigits } from '../lib/measured';
+import { checkAllRoutes, surveyLine, surveyRefusedKey, surveyRunning } from '../lib/routeSurvey';
+import type { SurveyReport } from '../lib/routeSurvey';
 import AddSheet from '../components/AddSheet';
-import { Button } from '../design/primitives';
+import MyAddressSheet from '../components/MyAddressSheet';
+import { Badge, Button, Disclosure, Icon, OverflowMenu, Sheet, useToast } from '../design/primitives';
+import type { MenuItem } from '../design/primitives';
 import {
     autoFailure,
-    autoProgressText,
-    autoVerdictKey,
     failureSignature,
     getPinnedRoute,
     rememberPassFailure,
@@ -45,19 +56,23 @@ import {
     startConnect,
     type PassFailure,
 } from '../lib/autoConnect';
-import { mainScreenView, retryTarget, runMainTap } from '../lib/mainScreen';
-import StatusLine from '../components/connection/StatusLine';
-import ModeChip from '../components/connection/ModeChip';
+import { failureDetailsShown, homeBadges, mainScreenView, retryTarget, runMainTap } from '../lib/mainScreen';
+import { connectedFacts, rateText, triedRows, wayRows } from '../lib/homeFacts';
+import { HomeDetails, HomeFactsCard, ReadyChips, TriedList, TryingSteps, WayList } from '../components/connection/HomeFacts';
 import WhyThisRoute from '../components/connection/WhyThisRoute';
 import RouteHealthBars from '../components/connection/RouteHealthBars';
 import PointerBanner from '../components/connection/PointerBanner';
 import ModePickerSheet from '../components/connection/ModePickerSheet';
 import { idOnlyRoute, routeForDisplay, summaryExtras } from '../lib/activeRoute';
 import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
-import { EngineStartNotice, StoreResetNotice } from './PageNotices';
+import { EngineStartNotice, NoticeRow, StoreResetNotice } from './PageNotices';
 import { tapAllowedWithStartProblem, useEngineStartProblem } from '../lib/engineStart';
 import RecoverySheet from '../components/RecoverySheet';
+import { useDeveloperMode } from '../lib/devMode';
+import { isolate } from '../lib/format';
+import { useOpenedFileSheet } from '../recipient/openedFile';
 import type { SectionId } from '../shell/Sidebar';
+import { writeClipboardText } from '../lib/clipboard';
 
 interface Props {
     t: (k: string) => string;
@@ -67,27 +82,13 @@ interface Props {
 /** How often the route list is re-read while it could not be read. */
 const ROUTES_RETRY_MS = 10_000;
 
-// (what this page shows and what a tap does: lib/mainScreen.ts; copy
-// for the connection-check states: lib/routeCheck.ts; for automatic
-// connect: lib/autoConnect.ts)
-function toDaalConnectState(s: ConnState): DaalConnectState {
-    return s;
-}
-
-// `bps` is nullable on purpose: null means the build has no byte
-// accounting, which is NOT the same as a measured zero. The caller
-// shows no speed line in that case rather than "0 B/s"; see
-// ThroughputSnapshot in contract/D2Contract.ts.
-function formatBps(bps: number): string {
-    if (!Number.isFinite(bps) || bps <= 0) return '0 B/s';
-    const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s'];
-    let v = bps;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-        v /= 1024;
-        i++;
-    }
-    return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+/** "01:02:03" in the page's digits. (The desktop panel no longer
+ *  repeats the elapsed time; the title bar shows it.) */
+export function elapsedText(locale: string, ms: number): string {
+    const s = Math.floor(Math.max(0, ms) / 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const out = `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+    return isolate(locale === 'fa' ? toFaDigits(out) : out);
 }
 
 export default function ConnectionPage({ t, onNavigate }: Props) {
@@ -100,6 +101,11 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     const [throughput, setThroughput] = useState<ThroughputSnapshot | null>(null);
     const [showMode, setShowMode] = useState(false);
     const [showRecovery, setShowRecovery] = useState(false);
+    const [showAddress, setShowAddress] = useState(false);
+    // A file Android handed to Daal: the add sheet opens on it.
+    const [openedPath, setOpenedPath] = useState<string | undefined>(undefined);
+    const dev = useDeveloperMode();
+    const toast = useToast();
     const [busy, setBusy] = useState(false);
     // A connect this page asked for and has not heard back from. On
     // desktop the call returns only when the engine has finished
@@ -111,10 +117,6 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // ("connection attempt cancelled") is then the expected outcome and
     // must not open the recovery sheet.
     const cancelledRef = useRef(false);
-    // Phone-only: the right rail (why-this-route + health + pointer
-    // banner) collapses behind a single disclosure header so the first
-    // paint is the Daal mark and route chip only.
-    const [diagOpen, setDiagOpen] = useState(false);
     // Optimistic-UI flag: while a user-initiated connect/disconnect is
     // in flight, override the FSM-derived state so the eagle and
     // headline reflect the user's intent instantly instead of waiting
@@ -122,8 +124,6 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // state matches the optimistic target, OR after a 6 s safety
     // timeout so a stuck backend can never freeze the UI.
     const [optimistic, setOptimistic] = useState<ConnState | null>(null);
-    // Transient user-facing notice (export result, failed mode change, …).
-    const [notice, setNotice] = useState<string | null>(null);
     // The engine set a damaged store aside at start; said once
     // (lib/storeNotice.ts), here and on the Connections page.
     const [storeReset, setStoreReset] = useState(false);
@@ -137,6 +137,12 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
     // empty.
     const [routes, setRoutes] = useState<RouteDisplayRow[] | undefined>(undefined);
     const routesReadRef = useRef<{ hint: number | undefined; atMs: number; ok: boolean } | null>(null);
+    // The engine's check of every way (lib/routeSurvey.ts): `seq` moves
+    // whenever a result changed what it remembers — the cue to read the
+    // route list (and so its scores) again. `pressedSurvey` bridges a
+    // press and the first poll that reports the check.
+    const surveySeqRef = useRef<number | undefined>(undefined);
+    const [pressedSurvey, setPressedSurvey] = useState<SurveyReport | null | 'pending'>(null);
     // The route the person chose by hand (null = Automatic, the
     // default). Remembered across launches (lib/autoConnect.ts).
     const [pinnedRaw, setPinnedRaw] = useState<string | null>(() => getPinnedRoute());
@@ -162,11 +168,14 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         rememberedRef.current = rememberPassFailure(rememberedRef.current, c);
         setConn(c);
     };
-    useEffect(() => {
-        if (!notice) return;
-        const id = setTimeout(() => setNotice(null), 4000);
-        return () => clearTimeout(id);
-    }, [notice]);
+    // Bumped for every handed-over file, so the add sheet always starts
+    // fresh on it (even when two files share a path).
+    const [addNonce, setAddNonce] = useState(0);
+    const openedSheet = useOpenedFileSheet(showAdd, (path) => {
+        setOpenedPath(path);
+        setAddNonce((n) => n + 1);
+        setShowAdd(true);
+    });
     const locale = effectiveLocale();
 
     useEffect(() => {
@@ -185,7 +194,11 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
                 setWhy(w);
                 setPointer(p);
                 setHealth(h);
-                void readRoutes(c.routeCountHint, false);
+                const seq = c.survey?.seq;
+                const surveyed = seq !== undefined && surveySeqRef.current !== undefined && seq !== surveySeqRef.current;
+                surveySeqRef.current = seq;
+                if (c.survey?.trigger === 'user') setPressedSurvey(null);
+                void readRoutes(c.routeCountHint, surveyed);
                 // Clear optimistic flag as soon as the polled state
                 // agrees with what the user asked for, so the UI
                 // converges to the truth.
@@ -281,7 +294,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         wasConnected: wasConnectedRef.current,
         remembered: rememberedRef.current,
     });
-    const { state, auto, plan, failure } = view;
+    const { state, plan, failure } = view;
     const mode: ConnMode = conn?.mode ?? 'normal';
     // The pin that still means something: a pinned route this device no
     // longer holds is no choice at all (back to Automatic).
@@ -348,7 +361,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         // connection this binary cannot make. The engine would refuse
         // anyway; showing intent-state first would be a 6-second lie.
         if (noDataPlane) {
-            setNotice(t('conn.no_data_plane.title'));
+            toast.show('bad', t('conn.no_data_plane.title'));
             return;
         }
         // Optimistic: flip to 'connecting' the instant the tap fires.
@@ -413,7 +426,10 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         }
     };
 
-    const openAddFile = () => setShowAdd(true);
+    const openAddFile = () => {
+        setOpenedPath(undefined);
+        setShowAdd(true);
+    };
 
     const onDaalClick = () =>
         runMainTap(plan, {
@@ -460,7 +476,7 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
             await contract.setMode(m);
         } catch {
             // Don't fail silently — tell the user the change didn't take.
-            setNotice(t('conn.mode_failed'));
+            toast.show('bad', t('conn.mode_failed'));
         }
     };
 
@@ -471,465 +487,514 @@ export default function ConnectionPage({ t, onNavigate }: Props) {
         try {
             const json = await contract.exportDiagnostics();
             try {
-                await navigator.clipboard.writeText(json);
-                setNotice(t('conn.export_copied'));
+                await writeClipboardText(json);
+                toast.show('good', t('conn.export_copied'), 6000);
             } catch {
-                setNotice(t('conn.export_failed'));
+                toast.show('bad', t('conn.export_failed'));
             }
         } catch {
-            setNotice(t('conn.export_failed'));
+            toast.show('bad', t('conn.export_failed'));
         }
     };
 
-    const daalLabel = view.tapLabel;
-    const { refusedKey, headline, stateLabel, needFile, noRoutes, showProgress } = view;
-    const connectedNote = view.connectedNoteKey;
+    const { refusedKey } = view;
     // The row for the pinned route: its details when the list has them,
     // an id-only row (our own words for its name) when it does not.
     const pinnedRow = pinnedId
         ? routeForDisplay(routes?.find((r) => r.routeId === pinnedId) ?? idOnlyRoute(pinnedId), t) ?? null
         : null;
     const somethingRunning = state === 'connected' || state === 'connecting';
-
-    // Layout: phone → single column, rail stacks under hero.
-    // tablet  → single column with wider hero, rail collapses to
-    //           cards below.
-    // desktop → 1fr / 320px grid (the original layout).
     const isPhone = density === 'phone';
     const isDesktop = density === 'desktop';
+    // What Daal knows about the connection, as icon rows: why this way,
+    // the network, live speed, quality — each only when the engine sent
+    // it (lib/homeFacts.ts).
+    const showFacts = state === 'connected' && !view.holding && !optimistic;
+    // Slow while connected: the amber ring and the card's Quality badge
+    // say it already; a third "Slow" pill under the line was one too many.
+    const badges = homeBadges(view, mode).filter((b) => b !== 'slow' || !showFacts);
+    const facts = showFacts ? connectedFacts({ t, locale, conn, throughput, pinnedId }) : {};
+    // Every way on the device, once each: its state here (in use,
+    // resting, failed just now, the engine's grade) and its score. The
+    // tries of THIS pass count only while the engine's automatic pass is
+    // the one that is up (after a connect by hand an older pass may
+    // still be in the block).
+    const passUp = conn?.auto?.mode === true && conn.auto.state === 'connected';
+    const scores = new Map<string, number>();
+    for (const h of health) if (typeof h.pct === 'number') scores.set(h.routeId, h.pct);
+    // The person's "Check all ways": what the engine last reported of
+    // it, or what the press itself answered until the next poll does.
+    const survey: SurveyReport | null | undefined =
+        conn?.survey?.trigger !== 'user' && pressedSurvey && pressedSurvey !== 'pending' ? pressedSurvey : conn?.survey;
+    const allWays = wayRows({
+        t,
+        locale,
+        routes,
+        activeId: state === 'connected' ? conn?.activeRoute?.routeId : undefined,
+        why,
+        tried: showFacts && passUp ? conn?.auto?.tried : undefined,
+        scores,
+        checking: survey?.trigger === 'user' ? new Set(survey.checking) : undefined,
+        nowMs: Date.now(),
+    });
+    const onCheckAll = async () => {
+        setPressedSurvey('pending');
+        const r = await checkAllRoutes();
+        if (r.started || r.refused === 'running') {
+            setPressedSurvey(r.report ?? null);
+            return;
+        }
+        setPressedSurvey(null);
+        const key = r.refused ? surveyRefusedKey(r.refused) : 'home.survey.failed';
+        if (key) toast.show(r.refused === 'busy' ? 'neutral' : 'bad', t(key));
+    };
+    // Offered once there is something besides the way in use to check.
+    const wayCheck =
+        allWays.length >= 2 && !view.holding
+            ? {
+                  onCheck: () => void onCheckAll(),
+                  running: pressedSurvey === 'pending' || surveyRunning(survey),
+                  line: pressedSurvey === 'pending' ? t('home.survey.checking_one') : surveyLine(t, survey, (n) => localDigits(n, locale)),
+              }
+            : undefined;
+    const waysTitle = t(isPhone ? 'home.details.ways' : 'home.details.ways_device');
+    // No fold that opens onto nothing.
+    const details =
+        showFacts && allWays.length > 0 ? <HomeDetails t={t} locale={locale} ways={allWays} title={waysTitle} check={wayCheck} /> : null;
+    const failureRows = failure ? triedRows(t, failure.tried, routes) : [];
+
+    // One notice at most: Daal did not start > the saved files were
+    // reset > this build cannot carry traffic > the engine refused.
+    const notice = startProblem ? (
+        <EngineStartNotice t={t} detail={startProblem.detail} />
+    ) : storeReset ? (
+        <StoreResetNotice
+            t={t}
+            onDismiss={() => {
+                markStoreResetNoticeSeen();
+                setStoreReset(false);
+            }}
+        />
+    ) : noDataPlane ? (
+        <NoticeRow t={t} text={t('conn.no_data_plane.title')} more={t('conn.no_data_plane.body')} />
+    ) : refusedKey ? (
+        <NoticeRow t={t} text={t(refusedKey)} />
+    ) : null;
+
+    const onTryAgain = () => void connectNow(retryTarget(pinnedId));
+    const primaryButton =
+        view.primary === 'add_file' ? (
+            <Button size="lg" onClick={openAddFile} dataButton="add-my-file">
+                {t('auto.add_file')}
+            </Button>
+        ) : view.primary === 'try_again' ? (
+            <Button size="lg" onClick={onTryAgain} disabled={!!failure?.retryOff} dataButton="try-again">
+                {t('auto.try_again')}
+            </Button>
+        ) : view.primary === 'try_now' ? (
+            <Button size="lg" onClick={() => void connectNow({ kind: 'auto' })} dataButton="try-now">
+                {t('auto.holding.try_now')}
+            </Button>
+        ) : view.primary === 'let_daal_choose' ? (
+            <Button size="lg" onClick={onLetDaalChoose} dataButton="let-daal-choose">
+                {t('auto.let_daal_choose')}
+            </Button>
+        ) : null;
+    const link =
+        view.link === 'no_file_address' ? (
+            <Button variant="link" onClick={() => setShowAddress(true)} dataButton="no-file-address">
+                {t('auto.no_file_link')}
+            </Button>
+        ) : view.link === 'add_new_file' ? (
+            <Button variant="link" onClick={openAddFile} dataButton="add-new-file">
+                {t('conn.recovery.add')}
+            </Button>
+        ) : view.link === 'choose' ? (
+            <Button variant="link" onClick={() => setChooserOpen(true)} dataButton="choose-way">
+                {t('conn.more.choose')}
+            </Button>
+        ) : view.link === 'disconnect' ? (
+            <Button variant="link" onClick={() => void disconnectNow()} dataButton="disconnect">
+                {t('auto.holding.disconnect')}
+            </Button>
+        ) : view.link === 'cancel' ? (
+            <Button variant="link" onClick={() => void disconnectNow()} dataButton="cancel-connect">
+                {t('conn.cancel_action')}
+            </Button>
+        ) : null;
+
+    const moreItems: MenuItem[] = [];
+    if (routes && routes.length >= 2) {
+        moreItems.push({ id: 'choose-way', label: t('conn.more.choose'), icon: 'lock', onSelect: () => setChooserOpen(true) });
+    }
+    if (routes && routes.length > 0) {
+        moreItems.push({ id: 'add-another', label: t('conn.more.add'), icon: 'plus', onSelect: openAddFile });
+    }
+    moreItems.push({ id: 'my-address', label: t('conn.more.address'), icon: 'person', onSelect: () => setShowAddress(true) });
+    moreItems.push({ id: 'status', label: t('conn.more.status'), icon: 'info', onSelect: () => onNavigate('status') });
+
+    // The desktop's right column, in every state so the bird never moves
+    // sideways: this connection while connected, what was tried after a
+    // failure, the ways on this computer otherwise (an empty column when
+    // there are none).
+    const panel: 'connected' | 'failed' | 'ways' | 'empty' | null = !isDesktop
+        ? null
+        : showFacts
+        ? 'connected'
+        : failure && !view.holding && failureDetailsShown(failure.tried, dev)
+        ? 'failed'
+        : allWays.length > 0
+        ? 'ways'
+        : 'empty';
+
+    const helperFold = dev ? (
+        <div data-dev style={{ inlineSize: '100%', maxWidth: 'var(--content-max)', marginBlockStart: 24 }}>
+            <Disclosure summary={t('ui.helper_fold')} variant="card" icon="help" dataButton="helper-fold">
+                <div style={{ display: 'grid', gap: 12, fontSize: 13, color: 'var(--muted)', textAlign: 'start' }}>
+                    <div>{view.detail}</div>
+                    {view.connectedNoteKey && <div>{t(view.connectedNoteKey)}</div>}
+                    {state === 'connected' &&
+                        throughput &&
+                        throughput.upBytesPerSec !== null &&
+                        throughput.downBytesPerSec !== null && (
+                            <div
+                                className="d2-throughput"
+                                style={{ display: 'flex', gap: 18, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                            >
+                                <bdi dir="ltr" aria-label={t('conn.throughput.down')}>↓ {rateText(throughput.downBytesPerSec, locale)}</bdi>
+                                <bdi dir="ltr" aria-label={t('conn.throughput.up')}>↑ {rateText(throughput.upBytesPerSec, locale)}</bdi>
+                            </div>
+                        )}
+                    {routes && anyMeasured(routes) && (
+                        <MeasuredDetails
+                            t={t}
+                            locale={locale}
+                            routes={routes}
+                            onOpen={() => void readRoutes(conn?.routeCountHint, true)}
+                        />
+                    )}
+                    <WhyThisRoute data={why} t={t} headless />
+                    <RouteHealthBars rows={health} locale={locale} t={t} />
+                    <PointerBanner data={pointer} locale={locale} t={t} />
+                </div>
+            </Disclosure>
+        </div>
+    ) : null;
+
+    const hero = (
+        <section
+            className="d2-home-hero"
+            style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                textAlign: 'center',
+                inlineSize: '100%',
+                maxWidth: 'var(--hero-max)',
+                marginInline: 'auto',
+            }}
+        >
+            {notice}
+            <DaalButton tone={view.tone} onClick={onDaalClick} label={view.tapLabel} size={isDesktop ? 200 : 168} />
+            <h1
+                className="d2-home-headline"
+                data-testid="home-headline"
+                style={{
+                    fontFamily: 'var(--font-display)',
+                    fontSize: isPhone ? 'var(--fs-xl)' : 'var(--fs-hero)',
+                    fontWeight: 600,
+                    lineHeight: 1.2,
+                    color: 'var(--fg)',
+                    margin: '20px 0 0',
+                }}
+            >
+                {view.headline}
+            </h1>
+            {view.line && (
+                <p
+                    data-testid="home-line"
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6,
+                        margin: '8px 0 0',
+                        fontSize: isPhone ? 'var(--fs-sm)' : 'var(--fs-md)',
+                        color: 'var(--muted)',
+                        lineHeight: 1.45,
+                        maxWidth: 420,
+                    }}
+                >
+                    {view.lineNoInternet && (
+                        <span aria-hidden style={{ color: 'var(--red)', display: 'inline-flex', flexShrink: 0 }}>
+                            <Icon name="wifiOff" size={18} />
+                        </span>
+                    )}
+                    {/* Translated copy, not user data: laid out in the page's
+                        direction. A <bdi> would take its direction from the
+                        first strong letter («Wi-Fi …» → LTR in Farsi). */}
+                    <span dir={locale === 'fa' ? 'rtl' : 'ltr'}>{view.line}</span>
+                </p>
+            )}
+            {view.trying && !view.holding && <TryingSteps fact={view.trying} />}
+            {view.readyKinds.tags.length > 0 && (
+                <ReadyChips
+                    t={t}
+                    kinds={view.readyKinds.tags}
+                    more={view.readyKinds.more}
+                    moreText={`+${locale === 'fa' ? toFaDigits(String(view.readyKinds.more)) : view.readyKinds.more}`}
+                />
+            )}
+            {badges.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap', marginBlockStart: 12 }}>
+                    {badges.map((b) =>
+                        b === 'slow' ? (
+                            <Badge key={b} tone="warn">
+                                {t('conn.badge.slow')}
+                            </Badge>
+                        ) : b === 'manual' ? (
+                            <Badge
+                                key={b}
+                                tone="neutral"
+                                icon="lock"
+                                onClick={() => setChooserOpen(true)}
+                                dataButton="badge-manual"
+                                title={pinnedRow ? routeLabel(t, pinnedRow, routes) : undefined}
+                            >
+                                {t('conn.badge.manual')}
+                            </Badge>
+                        ) : (
+                            <Badge key={b} tone="info" onClick={() => setShowMode(true)} dataButton="badge-lifeline">
+                                {t('conn.badge.lifeline')}
+                            </Badge>
+                        ),
+                    )}
+                </div>
+            )}
+            {(primaryButton || link) && (
+                <div style={{ display: 'grid', justifyItems: 'center', gap: 4, marginBlockStart: 20 }}>
+                    {primaryButton}
+                    {link}
+                </div>
+            )}
+            {/* Nothing tried (the phone itself has no internet): no
+                empty fold (spec F.2). */}
+            {failure && panel !== 'failed' && failureDetailsShown(failure.tried, dev) && (
+                <div style={{ marginBlockStart: 8 }}>
+                    <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev={dev} rows={failureRows} />
+                </div>
+            )}
+            {/* Phone, ready: every way here and how it did, folded away
+                under the chips (the computer shows it as its right
+                column). */}
+            {!isDesktop && !showFacts && !failure && view.readyKinds.tags.length > 0 && allWays.length > 0 && (
+                <div
+                    data-testid="home-ready-ways"
+                    style={{
+                        inlineSize: '100%',
+                        maxWidth: 420,
+                        marginBlockStart: 24,
+                        background: 'var(--surface)',
+                        borderRadius: 'var(--r-card)',
+                        padding: '0 16px',
+                        boxSizing: 'border-box',
+                    }}
+                >
+                    <Disclosure summary={waysTitle} dataButton="home-ready-ways">
+                        <div style={{ paddingBlockEnd: 12, textAlign: 'start' }}>
+                            <WayList t={t} locale={locale} ways={allWays} check={wayCheck} />
+                        </div>
+                    </Disclosure>
+                </div>
+            )}
+            {/* Phone: the facts card under the bird, Details at its foot. */}
+            {showFacts && !isDesktop && (
+                <div style={{ inlineSize: '100%', maxWidth: 420, marginBlockStart: 24 }}>
+                    <HomeFactsCard t={t} facts={facts}>
+                        {details}
+                    </HomeFactsCard>
+                </div>
+            )}
+        </section>
+    );
+
+    // The column's card: top-aligned with the ring, and never taller than
+    // the window — Details scrolls inside it rather than scrolling the
+    // bird out of view.
+    const panelCard = {
+        maxHeight: 'calc(100vh - 140px)',
+        overflowY: 'auto' as const,
+    };
+    const sidePanel =
+        panel === 'connected' ? (
+            <aside className="d2-home-panel" data-testid="home-panel" style={{ inlineSize: '100%', maxWidth: 340, alignSelf: 'start' }}>
+                <HomeFactsCard t={t} facts={facts} showWay title={t('conn.panel.title')} style={panelCard}>
+                    {routes && routes.length >= 2 && (
+                        <div style={{ borderBlockStart: '1px solid var(--line-soft)' }}>
+                            <Button variant="link" onClick={() => setChooserOpen(true)} dataButton="panel-choose">
+                                {t('conn.more.choose')}
+                            </Button>
+                        </div>
+                    )}
+                    {details}
+                </HomeFactsCard>
+            </aside>
+        ) : panel === 'failed' ? (
+            <aside
+                className="d2-home-panel"
+                data-testid="home-panel"
+                style={{
+                    background: 'var(--surface)',
+                    borderRadius: 'var(--r-card)',
+                    padding: '16px 18px',
+                    inlineSize: '100%',
+                    maxWidth: 340,
+                    textAlign: 'start',
+                    alignSelf: 'start',
+                    boxSizing: 'border-box',
+                    ...panelCard,
+                }}
+            >
+                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--fs-lg)', fontWeight: 600, margin: '0 0 12px' }}>
+                    {t('conn.panel.tried')}
+                </h2>
+                {failureRows.length > 0 ? (
+                    <TriedList rows={failureRows.slice(0, 6)} />
+                ) : (
+                    <div style={{ fontSize: 14, color: 'var(--muted)' }}>{t('auto.details.none')}</div>
+                )}
+                {dev && failure && (
+                    <div style={{ marginBlockStart: 8 }}>
+                        <AutoFailure t={t} locale={locale} tried={failure.tried} verdict={failure.verdict} dev />
+                    </div>
+                )}
+            </aside>
+        ) : panel === 'ways' ? (
+            <aside
+                className="d2-home-panel"
+                data-testid="home-panel"
+                data-panel="ways"
+                style={{
+                    background: 'var(--surface)',
+                    borderRadius: 'var(--r-card)',
+                    padding: '16px 18px',
+                    inlineSize: '100%',
+                    maxWidth: 340,
+                    alignSelf: 'start',
+                    textAlign: 'start',
+                    boxSizing: 'border-box',
+                    ...panelCard,
+                }}
+            >
+                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--fs-lg)', fontWeight: 600, margin: '0 0 8px' }}>
+                    {waysTitle}
+                </h2>
+                <WayList t={t} locale={locale} ways={allWays} check={wayCheck} />
+            </aside>
+        ) : panel === 'empty' ? (
+            <aside className="d2-home-panel" aria-hidden style={{ inlineSize: '100%', maxWidth: 340 }} />
+        ) : null;
 
     return (
         <div
+            className="d2-home"
             style={{
                 flex: 1,
-                display: isDesktop ? 'grid' : 'flex',
-                flexDirection: isDesktop ? undefined : 'column',
-                gridTemplateColumns: isDesktop ? '1fr 320px' : undefined,
-                minHeight: 0,
+                minHeight: '100%',
                 overflow: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                boxSizing: 'border-box',
+                padding: isPhone ? '4px var(--gutter) 24px' : '16px 32px 32px',
             }}
         >
-            {/* Transient status line (export result, failed mode change). */}
-            <div
-                aria-live="polite"
-                style={{
-                    position: 'absolute',
-                    insetInlineStart: 0,
-                    insetInlineEnd: 0,
-                    top: 8,
-                    textAlign: 'center',
-                    pointerEvents: 'none',
-                    zIndex: 10,
-                }}
-            >
-                {notice && (
-                    <span
-                        style={{
-                            display: 'inline-block',
-                            padding: '6px 14px',
-                            borderRadius: 999,
-                            background: 'var(--teal-hairline)',
-                            color: 'var(--fg)',
-                            fontSize: 13,
-                        }}
-                    >
-                        {notice}
-                    </span>
-                )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', minHeight: 48 }}>
+                <OverflowMenu label={t('ui.more')} items={moreItems} dataButton="home-more" />
             </div>
-
-            {/* CENTER: hero */}
-            <section
+            <div
+                className={panel ? 'd2-home-body d2-home-body--panel' : 'd2-home-body'}
+                // The bird sits at a fixed height (about a fifth of the way
+                // down), and what is under it grows downward: centring the
+                // whole block moved the button the person had just tapped
+                // whenever a state added or dropped a line.
                 style={{
-                    padding: isPhone ? '20px 4px' : '36px 48px',
+                    flex: 1,
                     display: 'flex',
                     flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    overflow: 'auto',
-                    borderInlineEnd: isDesktop
-                        ? '1px solid var(--teal-hairline)'
-                        : undefined,
+                    justifyContent: 'flex-start',
+                    paddingBlockStart: isPhone ? 'max(12px, calc(16vh - 56px))' : 'max(24px, calc(20vh - 64px))',
+                    gap: 24,
                 }}
             >
-                {noDataPlane && (
-                    <div
-                        role="alert"
-                        style={{
-                            maxWidth: 520,
-                            marginBlockEnd: 20,
-                            padding: '12px 16px',
-                            borderRadius: 12,
-                            border: '1px solid var(--danger, #c0392b)',
-                            background: 'var(--surface-2, transparent)',
-                            color: 'var(--fg)',
-                            textAlign: 'center',
-                        }}
-                    >
-                        <strong style={{ display: 'block', marginBlockEnd: 6 }}>
-                            {t('conn.no_data_plane.title')}
-                        </strong>
-                        <span style={{ fontSize: 13, opacity: 0.9 }}>
-                            {t('conn.no_data_plane.body')}
-                        </span>
-                    </div>
-                )}
+                {hero}
+                {sidePanel}
+            </div>
+            {helperFold && <div style={{ display: 'flex', justifyContent: 'center' }}>{helperFold}</div>}
 
-                {startProblem && <EngineStartNotice t={t} detail={startProblem.detail} />}
+            {showMode && <ModePickerSheet t={t} current={mode} onPick={onPickMode} onClose={() => setShowMode(false)} />}
 
-                {storeReset && (
-                    <StoreResetNotice
-                        t={t}
-                        onDismiss={() => {
-                            markStoreResetNoticeSeen();
-                            setStoreReset(false);
-                        }}
-                    />
-                )}
-
-                {refusedKey && (
-                    <div
-                        role="alert"
-                        style={{
-                            maxWidth: 520,
-                            marginBlockEnd: 20,
-                            padding: '12px 16px',
-                            borderRadius: 12,
-                            border: '1px solid var(--danger, #c0392b)',
-                            background: 'var(--surface-2, transparent)',
-                            color: 'var(--fg)',
-                            textAlign: 'center',
-                            fontSize: 14,
-                        }}
-                    >
-                        {t(refusedKey)}
-                    </div>
-                )}
-
-                <div className={`d2-conn-state-label ${state}`}>{stateLabel}</div>
-
-                <DaalButton
-                    state={toDaalConnectState(state)}
-                    onClick={onDaalClick}
-                    label={daalLabel}
-                />
-
-                <h1
-                    className="d2-conn-headline"
-                    // A verdict is a whole sentence, not three words:
-                    // at headline size it filled the phone's screen and
-                    // pushed "Try again" off it.
-                    style={{
-                        marginBlockStart: 24,
-                        marginBlockEnd: 10,
-                        ...(failure
-                            ? { fontSize: 20, lineHeight: 1.4, maxWidth: 520, textAlign: 'center' as const }
-                            : {}),
-                    }}
-                >
-                    {headline}
-                </h1>
-
-                {/* While automatic connect works through its candidates
-                    the progress sentence above is the whole story; the
-                    same words again, a little longer, when the engine
-                    moved by itself. */}
-                {showProgress && wasConnectedRef.current && (
-                    <div style={{ fontSize: 13, color: 'var(--ink-soft)', marginBlockEnd: 10 }}>
-                        {autoProgressText(t, locale, auto)}
-                    </div>
-                )}
-
-                {connectedNote && (
-                    <div
-                        style={{
-                            maxWidth: 520,
-                            fontSize: 13,
-                            color: 'var(--ink-soft)',
-                            textAlign: 'center',
-                            marginBlockEnd: 12,
-                        }}
-                    >
-                        {t(connectedNote)}
-                    </div>
-                )}
-
-                {view.holding ? (
-                    // Android: the VPN is kept closed while Daal retries.
-                    // The phone has no internet meanwhile, so this says
-                    // so, and offers both ways out.
-                    <AutoFailure
-                        t={t}
-                        lead={failure ? t(autoVerdictKey(failure.verdict)) : undefined}
-                        actionText={t('auto.holding.body')}
-                        tried={failure?.tried ?? []}
-                        verdict={failure?.verdict ?? ''}
-                        retryLabel={t('auto.holding.try_now')}
-                        onRetry={() => void connectNow({ kind: 'auto' })}
-                        onDisconnect={() => void disconnectNow()}
-                    />
-                ) : failure ? (
-                    <AutoFailure
-                        t={t}
-                        actionText={failure.actionText}
-                        restText={failure.restText}
-                        retryOff={failure.retryOff}
-                        tried={failure.tried}
-                        verdict={failure.verdict}
-                        onRetry={failure.noRetry ? undefined : () => void connectNow(retryTarget(pinnedId))}
-                        onChoose={failure.wantsChooser ? () => setChooserOpen(true) : undefined}
-                        onAddFile={failure.wantsFile || noRoutes ? openAddFile : undefined}
-                    />
-                ) : view.pinnedFailed ? (
-                    // The way the person chose did not work. The way
-                    // forward is Daal choosing — not a list to pick from.
-                    <div
-                        role="alert"
-                        style={{
-                            maxWidth: 520,
-                            marginBlockEnd: 16,
-                            textAlign: 'center',
-                            fontSize: 14,
-                            color: 'var(--fg)',
-                        }}
-                    >
-                        <div style={{ marginBlockEnd: 12 }}>{t('auto.pinned_failed.do')}</div>
-                        <Button onClick={onLetDaalChoose}>{t('auto.let_daal_choose')}</Button>
-                    </div>
-                ) : null}
-
-                {needFile ? (
-                    // Nothing imported: say that a file is needed and
-                    // offer the way to add one. Never an empty list.
-                    <div
-                        style={{
-                            maxWidth: 520,
-                            textAlign: 'center',
-                            marginBlockEnd: 16,
-                            fontSize: 14,
-                            color: 'var(--ink-soft)',
-                        }}
-                    >
-                        <div style={{ marginBlockEnd: 12 }}>{t('auto.need_file.body')}</div>
-                        <Button onClick={openAddFile}>{t('auto.add_file')}</Button>
-                    </div>
-                ) : noRoutes ? null : (
+            {chooserOpen && (
+                <Sheet title={t('conn.more.choose')} onClose={() => setChooserOpen(false)} width={480}>
                     <WayChooser
                         t={t}
+                        bare
                         pinned={pinnedRow}
                         routes={routes}
                         // A route whose details could not be read still
-                        // has an id: it gets our own words, never an
-                        // empty name under "You're connected."
-                        running={
-                            state === 'connected' ? routeForDisplay(conn?.activeRoute, t) : undefined
-                        }
+                        // has an id: it gets our own words, never an empty
+                        // name.
+                        running={state === 'connected' ? routeForDisplay(conn?.activeRoute, t) : undefined}
                         engineAuto={view.engineAuto}
                         busy={somethingRunning}
-                        open={chooserOpen}
-                        onToggle={() => setChooserOpen((v) => !v)}
+                        open
+                        onToggle={() => setChooserOpen(false)}
                         onPick={onPickRoute}
                         onBackToAuto={onBackToAuto}
-                        onManage={() => onNavigate('network')}
-                    />
-                )}
-
-                {/* For the person helping: how each way has done on this
-                    network, with the numbers. Folded away; absent when
-                    the engine measured nothing. */}
-                {routes && anyMeasured(routes) && (
-                    <MeasuredDetails
-                        t={t}
-                        locale={locale}
-                        routes={routes}
-                        onOpen={() => void readRoutes(conn?.routeCountHint, true)}
-                    />
-                )}
-
-                <StatusLine
-                    locale={locale}
-                    t={t}
-                    networkLabel={
-                        conn?.networkLabel
-                            ? t('conn.network.wifi')
-                            : undefined
-                    }
-                    pointerSource={conn?.pointerSource}
-                    pointerValidDays={conn?.pointerValidDays}
-                />
-
-                {state === 'connected' && (
-                    <ModeChip
-                        mode={mode}
-                        t={t}
-                        onClick={() => setShowMode(true)}
-                    />
-                )}
-
-                {/* A build without byte accounting shows no speed line
-                 * at all: "not measured yet" under "You're connected."
-                 * read as a verdict on the route (seen on the phone). */}
-                {state === 'connected' &&
-                    throughput &&
-                    throughput.upBytesPerSec !== null &&
-                    throughput.downBytesPerSec !== null && (
-                    <div
-                        className="d2-throughput"
-                        style={{
-                            marginTop: 14,
-                            display: 'flex',
-                            gap: 18,
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 11,
-                            color: 'var(--paper-dim)',
-                            letterSpacing: '0.08em',
+                        onManage={() => {
+                            setChooserOpen(false);
+                            onNavigate('network');
                         }}
-                    >
-                            <>
-                                <span aria-label={t('conn.throughput.up')}>
-                                    ↑ {formatBps(throughput.upBytesPerSec)}
-                                </span>
-                                <span aria-label={t('conn.throughput.down')}>
-                                    ↓ {formatBps(throughput.downBytesPerSec)}
-                                </span>
-                            </>
-                    </div>
-                )}
-            </section>
-
-            {/* RIGHT RAIL
-             * On desktop this is a stacked column of sections that sit
-             * directly on the page background — no card wrapping. On
-             * phone we mirror that exactly: same typography, same
-             * sections; we just make the heading row tappable so the
-             * body collapses by default. No outer card, so the gold
-             * pointer banner doesn't look nested. */}
-            {isPhone ? (
-                <aside
-                    className="d2-rail"
-                    style={{ padding: '8px var(--gutter) 24px' }}
-                >
-                    <button
-                        type="button"
-                        aria-expanded={diagOpen}
-                        onClick={() => setDiagOpen((v) => !v)}
-                        style={{
-                            appearance: 'none',
-                            inlineSize: '100%',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 12,
-                            background: 'transparent',
-                            border: 0,
-                            padding: '6px 0 10px',
-                            color: 'var(--fg)',
-                            cursor: 'pointer',
-                            textAlign: 'start',
-                            borderBlockEnd: '1px solid var(--line-soft)',
-                        }}
-                    >
-                        <span>
-                            <span
-                                className="d2-rail-title"
-                                style={{ marginBlockEnd: 4 }}
-                            >
-                                {t('rail_diagnostic')}
-                            </span>
-                            <span
-                                style={{
-                                    display: 'block',
-                                    fontFamily: 'var(--font-display)',
-                                    fontSize: 14,
-                                    fontWeight: 600,
-                                    color: 'var(--paper)',
-                                }}
-                            >
-                                {t('why_this_route')}
-                            </span>
-                        </span>
-                        <span
-                            aria-hidden
-                            style={{
-                                color: 'var(--muted)',
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 14,
-                                transform: diagOpen
-                                    ? 'rotate(180deg)'
-                                    : 'rotate(0)',
-                                transition: 'transform var(--t-fast)',
-                            }}
-                        >
-                            ⌄
-                        </span>
-                    </button>
-                    {diagOpen && (
-                        <>
-                            <WhyThisRoute data={why} t={t} headless />
-                            <RouteHealthBars
-                                rows={health}
-                                locale={locale}
-                                t={t}
-                            />
-                            <PointerBanner
-                                data={pointer}
-                                locale={locale}
-                                t={t}
-                            />
-                        </>
-                    )}
-                </aside>
-            ) : (
-                <aside className="d2-rail">
-                    <WhyThisRoute data={why} t={t} />
-                    <RouteHealthBars rows={health} locale={locale} t={t} />
-                    <PointerBanner data={pointer} locale={locale} t={t} />
-                </aside>
-            )}
-
-            {showMode && (
-                <ModePickerSheet
-                    t={t}
-                    current={mode}
-                    onPick={onPickMode}
-                    onClose={() => setShowMode(false)}
-                />
+                    />
+                </Sheet>
             )}
 
             {showAdd && (
                 <AddSheet
+                    key={`${openedPath ?? 'add'}#${addNonce}`}
                     t={t}
-                    initialTab="file"
+                    openedPath={openedPath}
+                    onProgress={openedSheet.setInProgress}
                     onClose={() => {
                         setShowAdd(false);
+                        setOpenedPath(undefined);
                         void readRoutes(conn?.routeCountHint, true);
+                        openedSheet.closed();
                     }}
                     onImported={() => void readRoutes(conn?.routeCountHint, true)}
+                    // Already connected (or on the way): no "Connect" on the
+                    // result, just Close — the new file joins automatically.
+                    onConnect={
+                        conn?.state === 'connected' || conn?.state === 'connecting'
+                            ? undefined
+                            : () => void connectNow({ kind: 'auto' })
+                    }
                 />
             )}
+
+            {showAddress && <MyAddressSheet t={t} onClose={() => setShowAddress(false)} />}
 
             {showRecovery && (
                 <RecoverySheet
                     t={t}
                     onClose={() => setShowRecovery(false)}
-                    onTryOther={() => {
-                        setShowRecovery(false);
-                        onNavigate('network');
-                    }}
-                    onRefreshSources={() => {
-                        setShowRecovery(false);
-                        onNavigate('network');
-                    }}
-                    onLifeline={() => {
-                        setShowRecovery(false);
-                        onPickMode('lifeline');
-                    }}
-                    onExportDiag={() => {
-                        setShowRecovery(false);
-                        void onExport();
-                    }}
+                    onAuto={onLetDaalChoose}
+                    onFiles={() => onNavigate('network')}
+                    onAdd={openAddFile}
+                    onLifeline={() => void onPickMode('lifeline')}
+                    onExportDiag={() => void onExport()}
                 />
             )}
+            {toast.node}
         </div>
     );
 }

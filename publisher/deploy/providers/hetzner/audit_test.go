@@ -395,6 +395,33 @@ func TestAudit_AnAddressARecordStillNamesIsKeptNotReclaimed(t *testing.T) {
 	}
 }
 
+// The standby address (add-on 1) is a second record-named address: the
+// same rule keeps it, so a sweep never frees an address packs may still
+// commit to.
+func TestAudit_TheStandbyAddressIsKeptNotReclaimed(t *testing.T) {
+	f := newFake()
+	f.seedFIP("88", "203.0.113.8", "fsn1", "", ownedLabels(relayA()))
+	rec := recordFor(pubKeyA, "fsn1", "") // server long gone
+	rec.Standby = &provider.StandbyAddress{FloatingIPID: "88", IP: net.ParseIP("203.0.113.8"), Mode: provider.StandbySealed, Salt: "AAAAAAAAAAAAAAAA"}
+	p := New(f)
+
+	a, err := p.AuditAccount(context.Background(), []*provider.OperatorRecord{rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := find(t, a, provider.KindFloatingIP, "88")
+	if got.Reclaimable || got.Verdict != provider.VerdictUnclaimed {
+		t.Fatalf("standby address: %+v, want unclaimed and not reclaimable", got)
+	}
+	rep, err := p.ReclaimOrphans(context.Background(), []*provider.OperatorRecord{rec}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Deleted() != 0 {
+		t.Fatalf("reclaim deleted the standby: %+v", rep.Outcomes)
+	}
+}
+
 // --- servers: reported, never deleted -------------------------------
 
 // The worst outcome this wave can produce: a destructive rung builds

@@ -126,6 +126,14 @@ type Snapshot struct {
 	// counter the entries are ordered by. See RouteMemory.
 	RouteMemory    map[string]RouteMemory `json:"route_memory,omitempty"`
 	RouteMemorySeq uint64                 `json:"route_memory_seq,omitempty"`
+
+	// CoverNamesShown — the connect ladder's per-relay name count on
+	// THIS network (variant.go RecordCoverNameShown): for each relay
+	// (ShownKey of its address), the ShownKey of every cover name ever
+	// presented to it from here. Hashes only, never a name or an
+	// address. Not keyed by route, so forgetting or re-minting a route
+	// does not reset it; it goes with the snapshot (Sweep, Forget).
+	CoverNamesShown map[string][]string `json:"cover_names_shown,omitempty"`
 }
 
 // RouteMemory is one route's record on one network.
@@ -185,7 +193,8 @@ func (s Snapshot) Empty() bool {
 		!s.DNSPoisoned &&
 		s.LastWinningRendezvousChannel == "" &&
 		s.LastUsedMasqueSubmode == "" &&
-		len(s.RouteMemory) == 0 && s.RouteMemorySeq == 0
+		len(s.RouteMemory) == 0 && s.RouteMemorySeq == 0 &&
+		len(s.CoverNamesShown) == 0
 }
 
 // MarshalCanonical returns the canonical-JSON encoding (sorted keys

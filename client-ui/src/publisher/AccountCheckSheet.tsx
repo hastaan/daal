@@ -3,7 +3,7 @@
 // (D1). Sorting and the deletability rule live in accountCheck.ts.
 
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Sheet } from '../design/primitives';
+import { Badge, Button, Sheet } from '../design/primitives';
 import { Wizard } from './wizardCommands';
 import type {
     AccountCheck,
@@ -25,10 +25,31 @@ import {
 } from './accountCheck';
 import type { AccountGroup } from './accountCheck';
 import { kindKey } from './setupRecovery';
+import { money } from './addons/addonErrors';
+
+/** The add-on an account item is, in words (a standby address bills
+ *  every month until it is removed or the relay is deleted). */
+export function addonItemLine(t: (k: string) => string, item: AccountItem): string | null {
+    if (item.addon !== 'standby') return null;
+    const cents = item.monthly_cost_cents ?? 0;
+    return cents > 0 && item.cost_currency
+        ? t('pub.addons.account.standby').replace('{price}', money(t, cents, item.cost_currency))
+        : t('pub.addons.account.standby_nocost');
+}
 
 const BODY: React.CSSProperties = { fontSize: 13, color: 'var(--fg)', lineHeight: 1.55 };
 const SUB: React.CSSProperties = { fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 };
-const MONO: React.CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dim)' };
+// The raw name a provider console shows: a secondary detail, readable
+// (--muted, never --dim for text) but quieter than the line above it.
+const MONO: React.CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' };
+
+/** "Hetzner", not the raw token "hetzner". */
+export function providerLabel(t: (k: string) => string, provider: string): string {
+    const k = `pub.danger.rebuild.provider.name.${provider}`;
+    const v = t(k);
+    if (v && v !== k) return v;
+    return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : provider;
+}
 
 function groupTitleKey(g: AccountGroup): string {
     return `pub.account.group.${g}`;
@@ -59,15 +80,24 @@ function ItemLine({
                     {t(kindKey(item.kind))}
                     {item.address ? ` · ${item.address}` : ''}
                 </span>
-                <span style={{ ...SUB, color: item.billing ? 'var(--red)' : 'var(--muted)' }}>
-                    {item.billing ? t('pub.account.billing.yes') : t('pub.account.billing.no')}
-                </span>
+                {item.billing ? (
+                    <Badge tone="warn" size="sm">
+                        {t('pub.account.billing.yes')}
+                    </Badge>
+                ) : (
+                    <span style={SUB}>{t('pub.account.billing.no')}</span>
+                )}
             </label>
             <div style={MONO} dir="ltr">
                 {item.name || item.id}
             </div>
+            {addonItemLine(t, item) && (
+                <div data-testid="account-item-addon" style={SUB}>
+                    {addonItemLine(t, item)}
+                </div>
+            )}
             {item.finding === 'not_on_this_phone' && item.kind === 'server' && (
-                <div style={{ ...SUB, color: 'var(--gold)' }}>{t('pub.account.warn.other_phone')}</div>
+                <div style={{ ...SUB, color: 'var(--amber)' }}>{t('pub.account.warn.other_phone')}</div>
             )}
             {item.finding === 'unfinished_setup' && item.belongs_to_relay_id != null && onOpenRelay && (
                 <div>
@@ -100,7 +130,7 @@ export function AccountBlock({
     return (
         <div style={{ display: 'grid', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--line-soft)' }}>
             <div style={{ ...BODY, fontWeight: 600 }}>
-                {t('pub.account.account_title').replace('{provider}', acc.provider)}
+                {t('pub.account.account_title').replace('{provider}', providerLabel(t, acc.provider))}
             </div>
             {err && <div style={{ ...SUB, color: 'var(--red)' }}>{t(err)}</div>}
             {!acc.complete && <div style={{ ...SUB, color: 'var(--red)' }}>{t('pub.account.incomplete')}</div>}

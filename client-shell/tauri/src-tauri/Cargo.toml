@@ -31,6 +31,9 @@ daal-wizard = { path = "../daal-wizard" }
 # Custody v1: device-wrap-key handling needs explicit zero-on-drop
 # semantics whether we're on desktop (keyring) or Android (JNI).
 zeroize = "1.8"
+# build_wizard_ctx (every platform) logs a repaired path; on desktop with
+# no logger installed the macros are no-ops.
+log = "0.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # Desktop custody provider stores a 32-byte Device Wrap Key in the
@@ -41,7 +44,6 @@ base64 = "0.22"
 rand = "0.8"
 
 [target.'cfg(target_os = "android")'.dependencies]
-log = "0.4"
 android_logger = "0.13"
 # share_file Tauri command calls MainActivity.shareFile via JNI;
 # custody provider also uses JNI to talk to DaalKeystore.kt.

@@ -91,6 +91,32 @@ pub fn recipient_provision(
     let pub_key = decode_recipient_address(address)?;
     let fp_hex = recipaddr::fingerprint(&pub_key);
     let address_canonical = recipaddr::encode(&pub_key);
+    let pub_hex = hex::encode(pub_key);
+
+    // RE-ADDING SOMEONE. A removed person's row stays as history (the
+    // "removed" fold, renew removing them again by name), and does not
+    // hold their address (V020): adding them back is a new person in
+    // every way — a fresh row, a fresh `r<n>`, fresh credentials from
+    // the relay — so the file that was cut off stays dead. Only an
+    // address that is still LIVE here is refused, and BEFORE the relay
+    // is touched: the insert would refuse it anyway, but only after a
+    // working user had been made on the relay.
+    if let Some(live) = ctx
+        .db
+        .list_recipients(operator_id)
+        .map_err(WizardError::Db)?
+        .into_iter()
+        .find(|r| r.revoked_at_unix == 0 && r.pubkey_x25519_hex == pub_hex)
+    {
+        let who = if live.display_name.trim().is_empty() {
+            live.name.clone()
+        } else {
+            live.display_name.clone()
+        };
+        return Err(WizardError::Validation(format!(
+            "this Daal address is already on this relay as \u{201c}{who}\u{201d}; send them their file again instead of adding them twice"
+        )));
+    }
 
     // Cap check (mirrors the on-box 128 limit; FRP-14 invariant 7).
     let live = ctx
@@ -158,23 +184,41 @@ pub fn recipient_provision(
     // (the insert moves the per-recipient fields out of `creds`).
     let relay_said = RelaySaid::of(&creds);
 
-    let inserted = ctx
-        .db
-        .insert_recipient(NewRecipientRow {
-            operator_id,
-            name: creds.name.clone(),
-            display_name: display_name.to_string(),
-            address_str: address_canonical,
-            pubkey_x25519_hex: hex::encode(pub_key),
-            fingerprint_hex: fp_hex,
-            vless_uuid: creds.vless_uuid,
-            reality_short_id: creds.reality_short_id,
-            hy2_password: creds.hy2_password,
-            naive_password: creds.naive_password,
-            ws_path: creds.ws_path,
-            provisioned_at_unix: creds.provisioned_at_unix,
-        })
-        .map_err(WizardError::Db)?;
+    let minted_name = creds.name.clone();
+    let inserted = match ctx.db.insert_recipient(NewRecipientRow {
+        operator_id,
+        name: creds.name.clone(),
+        display_name: display_name.to_string(),
+        address_str: address_canonical,
+        pubkey_x25519_hex: pub_hex.clone(),
+        fingerprint_hex: fp_hex,
+        vless_uuid: creds.vless_uuid,
+        reality_short_id: creds.reality_short_id,
+        hy2_password: creds.hy2_password,
+        naive_password: creds.naive_password,
+        ws_path: creds.ws_path,
+        provisioned_at_unix: creds.provisioned_at_unix,
+    }) {
+        Ok(id) => id,
+        Err(e) => {
+            // The relay already has a working user the book will not
+            // know: take it back off (best effort) rather than leave a
+            // credential nobody can see or remove.
+            if let Ok(p) = write_record_staging(ctx, operator_id, &row.operator_record_json) {
+                let _ = ctx.cli.run_users_revoke(
+                    UsersRevokeArgs {
+                        record_path: &p,
+                        helper_ip: &helper_ip,
+                        token: token.as_str(),
+                        name: &minted_name,
+                    },
+                    priv_buf.as_slice(),
+                );
+                let _ = std::fs::remove_file(&p);
+            }
+            return Err(WizardError::Db(e));
+        }
+    };
     let row = ctx
         .db
         .get_recipient(operator_id, inserted)
@@ -233,6 +277,10 @@ pub fn recipient_provision(
         }
         let _ = std::fs::remove_file(&creds_path);
     }
+    // A way in through Cloudflare set up while nobody was on the relay
+    // waits for its door: this person is someone to let in. Never fails
+    // the add.
+    crate::addon_cdn::after_person_added(ctx, operator_id);
     Ok(summary)
 }
 
@@ -242,12 +290,11 @@ pub fn recipient_provision(
 /// # Why this is not "just call recipient_provision again"
 ///
 /// [`recipient_provision`] has no upsert path. Re-running it for an
-/// address already on the roster burns a fresh `r<n>` name, mints a
-/// **new live user on the box**, and only then hits
-/// `UNIQUE (operator_id, pubkey_x25519_hex)` and fails — leaving a
-/// working credential set on the relay that the local roster does not
-/// know about, cannot revoke, and which still counts against the
-/// 128-recipient cap. Every retry adds another. The relay-detail
+/// address still live on the roster is refused (it used to burn a fresh
+/// `r<n>`, mint a **new live user on the box**, and only then hit the
+/// unique address index — leaving a working credential set on the relay
+/// that the local roster did not know about, could not revoke, and which
+/// still counted against the 128-recipient cap). The relay-detail
 /// "Rebuild" affordance exists precisely for the case where
 /// `run_users_pack_sbpx` failed closed (a pre-Tier-2 box with no
 /// `reality_public_key`), so it needs a path that repairs rather than
@@ -389,6 +436,8 @@ pub fn produce_shared_sbp(
     let helper_ip = crate::commands::require_helper_ip(ctx, operator_id)?;
 
     let row = ctx.db.get(operator_id).map_err(WizardError::Db)?;
+    // D-1, before the shared user is re-keyed on the box.
+    refuse_everyone_with_open_standby(&row.operator_record_json)?;
 
     // The signed .sbp from Step 6 must exist before we can rewrite it.
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
@@ -445,6 +494,9 @@ pub fn produce_shared_sbp(
     ctx.db
         .stamp_shared_box_fp(operator_id)
         .map_err(WizardError::Db)?;
+    // The shared user is someone on the relay too: a Cloudflare door
+    // that waited for the first person opens now. Never fails the share.
+    crate::addon_cdn::after_person_added(ctx, operator_id);
     Ok(out)
 }
 
@@ -457,6 +509,7 @@ pub(crate) fn rewrite_shared_sbp(
     creds: &crate::cli_bridge::UserCredsResult,
     record_json: &str,
 ) -> Result<SharedSbpSummary, WizardError> {
+    refuse_everyone_with_open_standby(record_json)?;
     let in_sbp_path = ctx.staging_dir.join(format!("{operator_id}.sbp"));
     if !in_sbp_path.exists() {
         return Err(WizardError::Pricing(
@@ -502,6 +555,31 @@ pub(crate) fn rewrite_shared_sbp(
         sbp_path: out_path.to_string_lossy().to_string(),
         server: relay_server_ip,
     })
+}
+
+/// Owner decision D-1, the other way round from `addon_standby::add`: an
+/// OPEN standby puts the second address in every pack, so a file meant
+/// for anyone (which may reach a censor) would burn both addresses on
+/// day one. While the record names an open standby, no Everyone file is
+/// made or renewed. A sealed standby carries only a commitment and is
+/// no reason to refuse.
+fn refuse_everyone_with_open_standby(record_json: &str) -> Result<(), WizardError> {
+    let open = serde_json::from_str::<serde_json::Value>(record_json)
+        .ok()
+        .and_then(|v| {
+            v.get("standby")
+                .and_then(|s| s.get("mode"))
+                .and_then(|m| m.as_str())
+                .map(|m| m == "open")
+        })
+        .unwrap_or(false);
+    if open {
+        return Err(crate::commands::coded(
+            crate::addon_standby::E_STANDBY_OPEN_REFUSED,
+            "this relay's standby address is open, so it cannot have an Everyone file: anyone holding that file would learn both addresses. Share files for named people, or remove the standby",
+        ));
+    }
+    Ok(())
 }
 
 /// `recipient_revoke` revokes the recipient on the box (sing-box
@@ -800,6 +878,18 @@ fn fill_box_material_from_record(creds: &mut serde_json::Value, record: &serde_j
             }
         }
     }
+    // The way in through Cloudflare: the door's WebSocket path is the
+    // front record's (`cdn_front.origin_path`, live while the route is
+    // signed), not the box's, and the minter needs it for the CDN route
+    // (`users-pack-sbp[x]` reads `cdn_ws_path`).
+    if let Some(p) = record
+        .get(crate::addon_cdn::RECORD_MEMBER)
+        .and_then(|f| f.get("origin_path"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        obj.insert("cdn_ws_path".into(), p.into());
+    }
 }
 
 pub(crate) fn write_record_staging(
@@ -1069,5 +1159,186 @@ mod tests {
 
         let err = recipient_repack_sbpx(&ctx, op_id, r.id).unwrap_err();
         assert!(format!("{err:?}").contains("revoked"), "got: {err:?}");
+    }
+
+    fn creds_of(ctx: &WizardCtx, op_id: i64, id: i64) -> RecipientRow {
+        ctx.db.get_recipient(op_id, id).unwrap().unwrap()
+    }
+
+    /// The owner's bug: "Sony" was removed, then the same Daal address
+    /// was added back under the same name, and the add failed on
+    /// `UNIQUE (operator_id, pubkey_x25519_hex)`. It must just work —
+    /// and the relay must hold NEW credentials for the person while the
+    /// file that was cut off stays dead.
+    #[test]
+    fn a_removed_person_added_again_gets_new_credentials_and_the_old_file_stays_dead() {
+        let (ctx, mock, op_id) = mk_ctx();
+        *mock.relay_users.lock().unwrap() = Some(Default::default());
+
+        let first = recipient_provision(&ctx, op_id, &sample_address(), "Sony").unwrap();
+        let old = creds_of(&ctx, op_id, first.id);
+        assert!(mock.relay_accepts(&old.vless_uuid));
+        let removed = recipient_revoke(&ctx, op_id, first.id).unwrap();
+        assert!(!mock.relay_accepts(&old.vless_uuid), "revoke did not reach the relay");
+
+        let again = recipient_provision(&ctx, op_id, &sample_address(), "Sony")
+            .expect("re-adding a removed person must just work");
+
+        // A new person in every way: row, relay name, credentials.
+        assert_ne!(again.id, first.id);
+        assert_eq!(again.name, "r2", "a burned name is never reissued");
+        assert_eq!(again.display_name, "Sony");
+        assert_eq!(again.address_str, sample_address());
+        assert_eq!(again.revoked_at_unix, 0);
+        let new = creds_of(&ctx, op_id, again.id);
+        assert_ne!(new.vless_uuid, old.vless_uuid);
+        assert_ne!(new.hy2_password, old.hy2_password);
+        assert_ne!(new.naive_password, old.naive_password);
+        assert_ne!(new.reality_short_id, old.reality_short_id);
+        assert_ne!(new.ws_path, old.ws_path);
+        // The relay was asked for a fresh user, exactly as for a new
+        // person, and the old credentials are still refused.
+        assert_eq!(
+            *mock.users_provision_calls.lock().unwrap(),
+            vec!["r1".to_string(), "r2".to_string()]
+        );
+        assert_eq!(*mock.users_revoke_calls.lock().unwrap(), vec!["r1".to_string()]);
+        assert!(mock.relay_accepts(&new.vless_uuid));
+        assert!(!mock.relay_accepts(&old.vless_uuid));
+
+        // The removed row is history, unchanged.
+        let old_after = creds_of(&ctx, op_id, first.id);
+        assert_eq!(
+            old_after,
+            RecipientRow {
+                revoked_at_unix: removed.revoked_at_unix,
+                ..old.clone()
+            }
+        );
+        let list = recipient_list(&ctx, op_id).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.iter().filter(|r| r.revoked_at_unix == 0).count(), 1);
+
+        // Nothing that touches the old row brings the old file back:
+        // Rebuild refuses it, and renew only ever removes it again.
+        assert!(recipient_repack_sbpx(&ctx, op_id, first.id).is_err());
+        let rows = ctx.db.list_recipients(op_id).unwrap();
+        let fp = String::new();
+        let markers = ctx.db.recipient_box_fps(op_id).unwrap();
+        let plan = crate::renew::plan(&rows, &markers, &fp, &|_| true, None);
+        assert_eq!(plan.revoke, vec!["r1".to_string()]);
+        assert!(!plan.ensure.contains(&"r1".to_string()));
+        assert!(!plan.replace.contains(&"r1".to_string()));
+        assert!(plan.replace.contains(&"r2".to_string()) || plan.ensure.contains(&"r2".to_string()));
+
+        // And it works more than once.
+        recipient_revoke(&ctx, op_id, again.id).unwrap();
+        let third = recipient_provision(&ctx, op_id, &sample_address(), "Sony").unwrap();
+        assert_eq!(third.name, "r3");
+        assert!(!mock.relay_accepts(&new.vless_uuid));
+        assert!(mock.relay_accepts(&creds_of(&ctx, op_id, third.id).vless_uuid));
+    }
+
+    /// Same address, a different name: still one person coming back.
+    /// Same name, a different address: a different person — names are
+    /// labels, never identities.
+    #[test]
+    fn re_adding_under_another_name_or_with_another_address() {
+        let (ctx, mock, op_id) = mk_ctx();
+        *mock.relay_users.lock().unwrap() = Some(Default::default());
+        let other_address = recipaddr::encode(&[0x22u8; 32]);
+
+        let a = recipient_provision(&ctx, op_id, &sample_address(), "Sony").unwrap();
+        recipient_revoke(&ctx, op_id, a.id).unwrap();
+        let renamed = recipient_provision(&ctx, op_id, &sample_address(), "Sony phone").unwrap();
+        assert_eq!(renamed.display_name, "Sony phone");
+        assert_eq!(renamed.address_str, sample_address());
+        assert_ne!(renamed.name, a.name);
+
+        // A second "Sony phone" with someone else's address is a second
+        // person, alongside the first.
+        let twin = recipient_provision(&ctx, op_id, &other_address, "Sony phone").unwrap();
+        assert_eq!(twin.display_name, "Sony phone");
+        assert_ne!(twin.id, renamed.id);
+        assert_eq!(ctx.db.count_live_recipients(op_id).unwrap(), 2);
+        assert!(mock.relay_accepts(&creds_of(&ctx, op_id, renamed.id).vless_uuid));
+        assert!(mock.relay_accepts(&creds_of(&ctx, op_id, twin.id).vless_uuid));
+        assert!(!mock.relay_accepts(&creds_of(&ctx, op_id, a.id).vless_uuid));
+    }
+
+    /// An address that is still LIVE on the relay is refused before the
+    /// relay is touched — the add used to mint a working user first and
+    /// only then fail on the roster's constraint, orphaning it.
+    #[test]
+    fn adding_a_live_address_twice_is_refused_before_the_relay_is_touched() {
+        let (ctx, mock, op_id) = mk_ctx();
+        *mock.relay_users.lock().unwrap() = Some(Default::default());
+        recipient_provision(&ctx, op_id, &sample_address(), "Sony").unwrap();
+        let calls_before = mock.users_provision_calls.lock().unwrap().len();
+
+        let err = recipient_provision(&ctx, op_id, &sample_address(), "Someone else").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("already on this relay") && msg.contains("Sony"), "{msg}");
+        assert!(!msg.contains("UNIQUE"), "{msg}");
+        assert_eq!(mock.users_provision_calls.lock().unwrap().len(), calls_before);
+        assert_eq!(mock.relay_users.lock().unwrap().as_ref().unwrap().len(), 1);
+        assert_eq!(recipient_list(&ctx, op_id).unwrap().len(), 1);
+    }
+
+    /// If the roster insert fails anyway, the user just made on the relay
+    /// is taken back off instead of being left as a credential nobody
+    /// can see or remove.
+    #[test]
+    fn a_failed_insert_takes_the_new_relay_user_back_off() {
+        let (ctx, mock, op_id) = mk_ctx();
+        *mock.relay_users.lock().unwrap() = Some(Default::default());
+        // A row already holding the next name, so the insert clashes.
+        ctx.db
+            .insert_recipient(NewRecipientRow {
+                operator_id: op_id,
+                name: "r1".into(),
+                display_name: "seed".into(),
+                address_str: "daal1seed".into(),
+                pubkey_x25519_hex: "33".repeat(32),
+                fingerprint_hex: "44".repeat(32),
+                vless_uuid: "u".into(),
+                reality_short_id: "s".into(),
+                hy2_password: "h".into(),
+                naive_password: "n".into(),
+                ws_path: "/w".into(),
+                provisioned_at_unix: 1,
+            })
+            .unwrap();
+        assert!(recipient_provision(&ctx, op_id, &sample_address(), "Sony").is_err());
+        assert_eq!(*mock.users_revoke_calls.lock().unwrap(), vec!["r1".to_string()]);
+        assert!(mock.relay_users.lock().unwrap().as_ref().unwrap().is_empty());
+    }
+
+    /// D-1: no Everyone file while the record names an OPEN standby, and
+    /// nothing is touched on the box before the refusal. A sealed
+    /// standby is no reason to refuse.
+    #[test]
+    fn an_open_standby_refuses_the_everyone_file() {
+        let (ctx, mock, op_id) = mk_ctx();
+        std::fs::write(ctx.staging_dir.join(format!("{op_id}.sbp")), b"signed").unwrap();
+        let rec = |mode: &str| {
+            format!(
+                r#"{{"region":"fsn1","server_type":"cpx12","public_ip":"1.2.3.4","mgmt_port":42424,"standby":{{"floating_ip_id":"7","ip":"203.0.113.20","mode":"{mode}","salt":"AAAAAAAAAAAAAAAA"}}}}"#
+            )
+        };
+        ctx.db.update_record_json(op_id, &rec("open")).unwrap();
+        let err = produce_shared_sbp(&ctx, op_id).unwrap_err();
+        assert!(
+            err.to_string().contains(crate::addon_standby::E_STANDBY_OPEN_REFUSED),
+            "{err}"
+        );
+        assert!(mock.users_provision_calls.lock().unwrap().is_empty());
+        assert!(mock.users_revoke_calls.lock().unwrap().is_empty());
+        // Renew's half refuses too.
+        let creds = crate::cli_bridge::UserCredsResult::default();
+        assert!(rewrite_shared_sbp(&ctx, op_id, &creds, &rec("open")).is_err());
+
+        assert!(refuse_everyone_with_open_standby(&rec("sealed")).is_ok());
+        assert!(refuse_everyone_with_open_standby(r#"{"region":"fsn1"}"#).is_ok());
     }
 }
