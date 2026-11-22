@@ -34,7 +34,6 @@ import AccountsPage from '../publisher/AccountsPage';
 import { Wizard } from '../publisher/wizardCommands';
 import type { OperatorSummary } from '../publisher/wizardCommands';
 import { useBack } from '../lib/useBack';
-import { relayUnfinished } from '../publisher/ui';
 
 export type View =
     | { k: 'loading' }
@@ -62,14 +61,12 @@ export function pageBackTarget(view: View): View | null {
     return view.k === 'relay' ? { k: 'list' } : null;
 }
 
-/** Where the Publisher tab opens (spec C7.0): the relay itself when there
- *  is exactly one and it is finished; otherwise the list, which is also
- *  the "set up a relay" empty state when there are none. An unfinished
- *  relay is never hidden behind a page: the list says it may cost money. */
-export function bootView(ops: OperatorSummary[] | null): View {
-    if (ops === null) return { k: 'list' };
-    const live = ops.filter((o) => o.status !== 'decommissioned');
-    if (live.length === 1 && !relayUnfinished(live[0])) return { k: 'relay', operatorId: live[0].id };
+/** Where the Publisher tab opens: always the publisher page (the relay
+ *  list, with the tools under it), which is also the "set up a relay"
+ *  empty state when there are none. It used to jump straight into a lone
+ *  relay (spec C7.0); the owner found that hid the publisher page and
+ *  everything on it (2026-11-22). */
+export function bootView(_ops: OperatorSummary[] | null): View {
     return { k: 'list' };
 }
 

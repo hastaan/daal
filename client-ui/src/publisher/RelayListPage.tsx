@@ -40,13 +40,15 @@ import {
     Button,
     Disclosure,
     EmptyState,
+    GroupLabel,
+    Icon,
     ListRow,
     OverflowMenu,
     PageHeader,
     Sheet,
     StateIcon,
 } from '../design/primitives';
-import type { MenuItem } from '../design/primitives';
+import type { IconName } from '../design/primitives';
 import { formatAgo } from '../lib/format';
 import { ActionToast, useAction } from './useAction';
 import { PageColumn, RelayBadge, num, relayLook, relayUnfinished, useLocale } from './ui';
@@ -983,16 +985,18 @@ export default function RelayListPage({
     const live = operators.filter((o) => o.status !== 'decommissioned');
     const retired = operators.filter((o) => o.status === 'decommissioned');
 
-    const menu: MenuItem[] = [
-        ...(onAccounts ? [{ id: 'accounts', label: t('pub.accounts.title'), icon: 'key' as const, onSelect: onAccounts }] : []),
-        ...(onBackup ? [{ id: 'backup', label: t('pub.more.backup'), icon: 'shield' as const, onSelect: onBackup }] : []),
-        ...(onRestore ? [{ id: 'restore-link', label: t('pub.restore.link'), icon: 'download' as const, onSelect: onRestore }] : []),
+    // The publisher's tools, shown on the page instead of behind ⋯: the
+    // owner did not find Accounts, backup or the report there (2026-11-22).
+    const tools: { id: string; icon: IconName; title: string; line: string; onSelect: () => void }[] = [
+        ...(onAccounts ? [{ id: 'accounts', icon: 'key' as const, title: t('pub.accounts.title'), line: t('pub.tools.accounts.line'), onSelect: onAccounts }] : []),
+        ...(onBackup ? [{ id: 'backup', icon: 'shield' as const, title: t('pub.more.backup'), line: t('pub.tools.backup.line'), onSelect: onBackup }] : []),
         ...(anyToken
-            ? [{ id: 'check-account', label: t('pub.account.open'), icon: 'server' as const, onSelect: () => setAccountOpen(true) }]
+            ? [{ id: 'check-account', icon: 'server' as const, title: t('pub.account.open'), line: t('pub.tools.account.line'), onSelect: () => setAccountOpen(true) }]
             : []),
         ...(live.length > 0
-            ? [{ id: 'open-report', label: t('pub.report.open'), icon: 'file' as const, onSelect: () => setReportOpen(true) }]
+            ? [{ id: 'open-report', icon: 'file' as const, title: t('pub.report.open'), line: t('pub.tools.report.line'), onSelect: () => setReportOpen(true) }]
             : []),
+        ...(onRestore ? [{ id: 'restore-link', icon: 'download' as const, title: t('pub.restore.link'), line: t('pub.tools.restore.line'), onSelect: onRestore }] : []),
     ];
 
     const row = (op: OperatorSummary, last: boolean) => {
@@ -1089,7 +1093,6 @@ export default function RelayListPage({
                             <Button size="compact" variant="secondary" leading="plus" onClick={onNew} dataButton="new-relay">
                                 {t('pub.relays.new')}
                             </Button>
-                            <OverflowMenu label={t('ui.more')} title={t('pub.relays.title')} items={menu} dataButton="relays-more" />
                         </>
                     }
                 />
@@ -1153,6 +1156,27 @@ export default function RelayListPage({
             {live.length > 0 && <Card>{live.map((op, i) => row(op, i === live.length - 1))}</Card>}
 
             {retired.length > 0 && <Card>{retired.map((op, i) => row(op, i === retired.length - 1))}</Card>}
+
+            {!empty && tools.length > 0 && (
+                <>
+                    <GroupLabel>{t('pub.tools.title')}</GroupLabel>
+                    <Card>
+                        {tools.map((x, i) => (
+                            <ListRow
+                                key={x.id}
+                                leading={<Icon name={x.icon} size={20} />}
+                                title={x.title}
+                                subtitle={x.line}
+                                wrapSubtitle
+                                chevron
+                                last={i === tools.length - 1}
+                                onClick={x.onSelect}
+                                dataButton={x.id}
+                            />
+                        ))}
+                    </Card>
+                </>
+            )}
 
             {destroying && (
                 <RelayDestroySheet

@@ -378,8 +378,7 @@ describe('D1 rendered: the relay list card', () => {
         expect(byAttr(m.container, 'data-card', 'never')).not.toBeNull();
         await rig.click(button(m.container, 'backup'));
         expect(opened).toBe(1);
-        // Restore is in the header's ⋯ once relays exist.
-        await rig.click(button(m.container, 'relays-more'));
+        // Restore is a row in the tools card once relays exist.
         await rig.click(button(m.container, 'restore-link'));
         expect(restore).toBe(1);
     });

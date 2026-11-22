@@ -246,25 +246,21 @@ describe('Back, rendered: the publisher pages', () => {
         };
     };
 
-    it('one finished relay: the tab opens it; Back returns to the relay list (C7.0)', async () => {
+    it('one finished relay: the tab opens the publisher page; the relay opens from it and Back returns', async () => {
         answerWith([op]);
         const { default: PublisherPage } = await import('../d2pages/PublisherPage');
         const m = await mount(<PublisherPage t={t} />);
-        // The relay page itself, with a back control to "Relays".
-        expect(byAttr(m.container, 'data-testid', 'people')).not.toBeNull();
-        const backBtn = byAttr(m.container, 'data-button', 'page-back');
-        expect(backBtn?.getAttribute('aria-label')).toBe(t('pub.relays.title'));
-        expect(win.history.depth).toBe(1);
-        await back();
+        // The publisher page, with the relay row and the tools in view.
         expect(byAttr(m.container, 'data-testid', 'people')).toBeNull();
         expect(byAttr(m.container, 'data-button', 'relay-5')).not.toBeNull();
-        // The list is a top-level page: nothing holds Back any more.
+        expect(byAttr(m.container, 'data-button', 'accounts')).not.toBeNull();
         expect(win.history.depth).toBe(0);
-        // A tap on the row opens it again, and Back comes back.
+        // A tap on the row opens it, and Back comes back.
         await click(byAttr(m.container, 'data-button', 'relay-5'));
         expect(byAttr(m.container, 'data-testid', 'people')).not.toBeNull();
         expect(win.history.depth).toBe(1);
         await back();
+        expect(byAttr(m.container, 'data-testid', 'people')).toBeNull();
         expect(win.history.depth).toBe(0);
     });
 
