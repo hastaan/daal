@@ -36,10 +36,18 @@ export interface DetectedIp {
 // hijacked by a captive portal must not be able to stop the user, and
 // no single one of them gets to be a chokepoint for the publisher
 // surface.
+//
+// IPv4 ONLY. Daal reaches a relay at its IPv4 address, so the firewall
+// window must name this device's IPv4 egress. On a dual-stack network
+// (5G with IPv6) a dual-stack echo answered with the IPv6 address first,
+// the window opened for it, and the relay's health check (sent over IPv4)
+// was dropped until the build timed out (seen on the owner's Samsung,
+// 2026-11-22). Every source here is IPv4-only, and an IPv6 answer is
+// refused below.
 const SOURCES: readonly string[] = [
     'https://api.ipify.org?format=text',
-    'https://ifconfig.me/ip',
-    'https://icanhazip.com',
+    'https://ipv4.icanhazip.com',
+    'https://v4.ident.me',
 ];
 
 const IPV4_OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
@@ -108,6 +116,7 @@ async function fetchIp(url: string, timeoutMs: number): Promise<DetectedIp> {
         // or captive-portal page answers 200 with HTML and would
         // otherwise be persisted as an "IP".
         if (!isValidIp(body)) throw new Error(`${url}: not an IP address`);
+        if (!IPV4_RE.test(body)) throw new Error(`${url}: not an IPv4 address`);
         return { ip: body, via: url };
     } finally {
         window.clearTimeout(timer);
@@ -150,7 +159,9 @@ export function ensureHelperIp(
         try {
             if (!force) {
                 const stored = await Wizard.getHelperIp(operatorId);
-                if (stored && isValidIp(stored)) return stored;
+                // An IPv6 address stored by an older build is re-detected:
+                // the relay is reached over IPv4 (see SOURCES).
+                if (stored && IPV4_RE.test(stored.trim())) return stored;
             }
             const detected = await detectPublicIp();
             if (!detected) return null;
