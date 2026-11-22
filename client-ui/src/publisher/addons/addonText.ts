@@ -91,6 +91,7 @@ export function addonKeys(): string[] {
         'pub.addons.standby.switch.go',
         'pub.addons.standby.in_use',
         'pub.addons.cdn.name_hidden',
+        'pub.addons.cdn.waits_person',
         ...ACCOUNT_KEYS,
     ]);
     for (const c of ADDON_COPY) {

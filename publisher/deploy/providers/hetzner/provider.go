@@ -68,6 +68,11 @@ func (p *Provider) ensureFirewallAfterCreate(ctx context.Context, serverID strin
 		if attempt == firewallAttachAttempts {
 			break
 		}
+		// A cancelled run is not a network that is not ready: say
+		// nothing and let the caller roll back.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		progress("provision_cloud_firewall", "The server's network is not ready for its firewall yet; trying again")
 		select {
 		case <-ctx.Done():
@@ -331,7 +336,11 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 		}
 		// Create path: spin up a fresh VPS.
 		progress("provision_create_server", "Creating server on Hetzner")
-		srv, err = p.c.ServerCreate(ctx, ServerCreateOpts{
+		// WithoutCancel: a create already on its way is let finish, so
+		// a cancel that lands mid-request still learns the server's id
+		// and rolls it back below, instead of leaving a server nobody
+		// knows the id of. The create itself takes a second or two.
+		srv, err = p.c.ServerCreate(context.WithoutCancel(ctx), ServerCreateOpts{
 			Name:       name,
 			ServerType: opts.ServerType,
 			Region:     opts.Region,
@@ -373,14 +382,23 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 	// mgmt call (incl. /users/provision used by the recipient
 	// roster) fails with "no attached firewall" because
 	// FirewallAddEphemeralRule has nothing to mutate.
-	progress("provision_cloud_firewall", "Attaching Daal baseline firewall to server")
-	if err := p.ensureFirewallAfterCreate(ctx, rec.ServerID, dataPlanePorts, j, progress); err != nil {
-		// Don't tear the whole provision down; the box-side ufw
-		// still provides surface-area minimisation for the
-		// non-mgmt ports. We just won't be able to talk to the
-		// mgmt plane until a firewall is attached out-of-band.
-		// Log via the progress channel and continue.
-		progress("provision_cloud_firewall", fmt.Sprintf("firewall ensure failed: %v", err))
+	if ctx.Err() == nil {
+		progress("provision_cloud_firewall", "Attaching Daal baseline firewall to server")
+		if err := p.ensureFirewallAfterCreate(ctx, rec.ServerID, dataPlanePorts, j, progress); err != nil && ctx.Err() == nil {
+			// Don't tear the whole provision down; the box-side ufw
+			// still provides surface-area minimisation for the
+			// non-mgmt ports. We just won't be able to talk to the
+			// mgmt plane until a firewall is attached out-of-band.
+			// Log via the progress channel and continue.
+			progress("provision_cloud_firewall", fmt.Sprintf("firewall ensure failed: %v", err))
+		}
+	}
+	// Cancelled (the app's Cancel, or Ctrl-C on the CLI) once the
+	// server exists: the same rollback a failure gets, now rather than
+	// after the health wait.
+	if err := ctx.Err(); err != nil {
+		return nil, p.afterServerFailure(ctx, opts, ours, progress, rec,
+			provider.Coded(provider.CodeCancelled, fmt.Errorf("hetzner: setup cancelled: %w", err)))
 	}
 
 	// ---- past this line a real, billing server exists ----
@@ -431,6 +449,9 @@ func classifyHealthErr(err error) error {
 // It is the production binding of Provider.health; on failure the
 // caller decides what happens to the server that is already running.
 func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRecord, srv *ServerInfo, healthToken string, opts provider.ProvisionOpts, progress func(step, message string)) error {
+	emit := detailedProgress(opts, progress)
+	helper := opts.HelperIP.String()
+	box := rec.PublicIP.String()
 	// If the server has a Hetzner Cloud Firewall attached, the
 	// box-side UFW rule is not enough; open the provisioning
 	// health endpoint from this helper IP while cloud-init runs.
@@ -441,21 +462,30 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	// concurrent change) returns the id with the error, and without the
 	// defer the hole would stay open to the helper until the expiry
 	// sweep.
-	healthRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 9876, p.clock().Add(10*time.Minute))
+	healthRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, helper, healthPort, p.clock().Add(10*time.Minute))
 	if healthRuleID != "" {
 		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), healthRuleID) }()
 	}
+	// The address the window was opened for is said out loud: a window
+	// opened for the wrong address (an IPv6 one while the box is
+	// reached over IPv4, seen on 5G 2026-11-22) is otherwise invisible.
+	windowFor := ""
 	if err == nil {
-		progress("provision_cloud_firewall", "Opened temporary cloud firewall window for server health")
+		windowFor = helper
+		emit("provision_cloud_firewall",
+			fmt.Sprintf("Opened a temporary cloud firewall window on port %d (the relay's health check) for %s", healthPort, helper),
+			map[string]any{"helper_ip": helper, "port": healthPort})
 	} else if !strings.Contains(err.Error(), "no attached firewall") {
 		return fmt.Errorf("hetzner: open temporary health firewall: %w", err)
 	}
-	sshRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, opts.HelperIP.String(), 22, p.clock().Add(10*time.Minute))
+	sshRuleID, err := p.c.FirewallAddEphemeralRule(ctx, rec.ServerID, helper, 22, p.clock().Add(10*time.Minute))
 	if sshRuleID != "" {
 		defer func() { _ = p.c.FirewallRemoveEphemeralRule(context.WithoutCancel(ctx), sshRuleID) }()
 	}
 	if err == nil {
-		progress("provision_cloud_firewall", "Opened temporary cloud firewall window for SSH log streaming")
+		emit("provision_cloud_firewall",
+			fmt.Sprintf("%s Opened a temporary cloud firewall window on port 22 for %s", optionalLogViewer, helper),
+			map[string]any{"helper_ip": helper, "port": 22, "optional": true})
 	} else if !strings.Contains(err.Error(), "no attached firewall") {
 		return fmt.Errorf("hetzner: open temporary ssh firewall: %w", err)
 	}
@@ -464,20 +494,30 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	// cloud-init output when the temporary debug endpoint is up,
 	// without spamming repeated connection errors.
 	var sshSigner ssh.Signer
-	if signer, err := ssh.NewSignerFromKey(opts.EphemeralSSHKey); err == nil {
+	if len(opts.EphemeralSSHKey) != ed25519.PrivateKeySize {
+		// NewSignerFromKey panics on a short ed25519 key.
+		progress("provision_ssh_debug", optionalLogViewer+" SSH key unavailable: no one-shot key for this run")
+	} else if signer, err := ssh.NewSignerFromKey(opts.EphemeralSSHKey); err == nil {
 		sshSigner = signer
 	} else {
-		progress("provision_ssh_debug", fmt.Sprintf("SSH observer key unavailable: %v", err))
+		progress("provision_ssh_debug", fmt.Sprintf("%s SSH key unavailable: %v", optionalLogViewer, err))
 	}
-	poller := &health.Poller{BoxIP: rec.PublicIP, Token: healthToken}
-	maxAttempts := 60
-	interval := 5 * time.Second
+	poller := &health.Poller{BoxIP: rec.PublicIP, Token: healthToken, Port: healthPollPort}
+	maxAttempts := healthMaxAttempts
+	interval := healthInterval
+	start := time.Now()
 	var fp string
 	var healthErr error
 	var lastDebugLog string
 	var lastSSHDebug string
 	var lastPollErr error
 	var refused health.RefusalCounter
+	// answered: the health endpoint has sent any HTTP reply at all.
+	// Until it has, a relay whose port 443 is up is most likely one
+	// this device cannot reach on the health port — said once, below.
+	answered := false
+	saidUnreachable := false
+	var lastReachCheck time.Time
 	// Labelled so `break poll` leaves the loop. The bare `break`
 	// this replaced only left the select, so a cancelled context
 	// still burned the full 5-minute timeout before returning —
@@ -485,8 +525,10 @@ func (p *Provider) waitForHealthy(ctx context.Context, rec *provider.OperatorRec
 	// half-built server billing for the whole window.
 poll:
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		msg, extra := healthWaitLine(attempt, maxAttempts, time.Since(start), box, windowFor)
+		emit("provision_health_wait", msg, extra)
 		if sshSigner != nil || srv.RootPassword != "" {
-			if logTail, err := sshCloudInitTail(rec.PublicIP.String(), sshSigner, srv.RootPassword); err == nil && logTail != "" && logTail != lastDebugLog {
+			if logTail, err := sshCloudInitTail(box, sshSigner, srv.RootPassword); err == nil && logTail != "" && logTail != lastDebugLog {
 				lastDebugLog = logTail
 				progress("provision_cloud_init", logTail)
 			} else if err != nil {
@@ -499,7 +541,7 @@ poll:
 					return fmt.Errorf("hetzner: server provisioning failed: %s", fatal.Summary())
 				}
 				if attempt == 1 || attempt%6 == 0 {
-					msg := fmt.Sprintf("SSH observer waiting: %v", err)
+					msg := fmt.Sprintf("%s SSH observer waiting: %v", optionalLogViewer, err)
 					if len(msg) > 500 {
 						msg = msg[:500]
 					}
@@ -521,6 +563,9 @@ poll:
 		if err != nil {
 			lastPollErr = err
 		}
+		if healthAnswered(err) {
+			answered = true
+		}
 		if err == nil && st != nil && st.Healthy {
 			candidate := strings.ToLower(strings.TrimSpace(st.MgmtTLSFingerprint))
 			raw, decErr := hex.DecodeString(candidate)
@@ -536,6 +581,22 @@ poll:
 			if st != nil && st.DebugLog != "" && st.DebugLog != lastDebugLog {
 				lastDebugLog = st.DebugLog
 				progress("provision_cloud_init", st.DebugLog)
+			}
+		}
+		// The faster honest failure: never answered, long enough for
+		// any normal boot, yet the relay's 443 is up. Keep waiting to
+		// the limit (a slow box still finishes), but say what it
+		// looks like now rather than at the end.
+		if elapsed := time.Since(start); !answered && !saidUnreachable && elapsed >= notAnsweringAfter &&
+			(lastReachCheck.IsZero() || time.Since(lastReachCheck) >= notAnsweringRecheck) {
+			lastReachCheck = time.Now()
+			if relay443Up(ctx, rec.PublicIP) {
+				saidUnreachable = true
+				emit("provision_health_unreachable", fmt.Sprintf(
+					"The relay is up (port 443 answers) but its health check on port %d has not answered this device in %s. "+
+						"That may be the network between this device and the relay. Still waiting, up to %d tries.",
+					healthPort, clockDuration(elapsed), maxAttempts),
+					map[string]any{"box_ip": box, "helper_ip": windowFor, "port": healthPort, "elapsed_s": int(elapsed.Seconds()), "max_attempts": maxAttempts})
 			}
 		}
 		if attempt == maxAttempts {
@@ -608,7 +669,17 @@ func (p *Provider) afterServerFailure(ctx context.Context, opts provider.Provisi
 				"%s", where, auditPointer))
 		return fmt.Errorf("%w [the server is still running and still billing: %s]", cause, where)
 	}
-	progress("provision_rollback", fmt.Sprintf("Provisioning failed — removing the server that was just created (%s)", where))
+	emit := detailedProgress(opts, progress)
+	cancelled := false
+	if code, _ := provider.ProvisionErrorCode(cause); code == provider.CodeCancelled {
+		cancelled = true
+	}
+	why := "Provisioning failed"
+	if cancelled {
+		why = "Cancelled"
+	}
+	emit("provision_rollback", fmt.Sprintf("%s — removing the server that was just created (%s)", why, where),
+		map[string]any{"rollback": "start", "cancelled": cancelled, "server_id": rec.ServerID, "public_ip": rec.PublicIP.String()})
 	// WithoutCancel: a cancelled provision is precisely the case
 	// whose cleanup must still reach the cloud API.
 	rep, err := p.Decommission(context.WithoutCancel(ctx), rec)
@@ -634,11 +705,23 @@ func (p *Provider) afterServerFailure(ctx context.Context, opts provider.Provisi
 			"Rollback failed — the server is still running and still billing: %s (%v). %s", where, err, auditPointer))
 		return fmt.Errorf("%w [rollback failed, the server is still running and still billing: %s: %v]", cause, where, err)
 	}
+	// What was removed, as data: the app lists it after a cancel.
+	removed := map[string]any{
+		"rollback":         "done",
+		"cancelled":        cancelled,
+		"server_id":        rec.ServerID,
+		"public_ip":        rec.PublicIP.String(),
+		"server_deleted":   rep.ServerDeleted,
+		"firewall_deleted": rep.FirewallDeleted,
+		"firewall_id":      rep.FirewallID,
+		"ssh_keys_deleted": len(rep.DeletedSSHKeyIDs),
+		"warnings":         len(rep.Warnings),
+	}
 	if len(rep.Warnings) > 0 {
-		progress("provision_rollback", "Rolled back with warnings: "+strings.Join(rep.Warnings, "; "))
+		emit("provision_rollback", "Rolled back with warnings: "+strings.Join(rep.Warnings, "; "), removed)
 		return fmt.Errorf("%w [rolled back with warnings: %s]", cause, strings.Join(rep.Warnings, "; "))
 	}
-	progress("provision_rollback", "Rolled back: the server has been deleted, nothing is billing")
+	emit("provision_rollback", "Rolled back: the server has been deleted, nothing is billing", removed)
 	return fmt.Errorf("%w [rolled back: server deleted, nothing is billing]", cause)
 }
 

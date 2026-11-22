@@ -165,7 +165,7 @@ describe('«More protection (optional)» while building', () => {
         shell();
         const m = await mountWizard();
         await toExtras(m);
-        const title = all(m.container, (n) => n.nodeName === 'H2')[0]?.textContent ?? '';
+        const title = (all(m.container, (n) => n.nodeType === 1 && n.getAttribute('data-testid') === 'wizard-step-label')[0]?.textContent ?? '');
         expect(title).toBe(EN['wiz.step.extras.title']);
         for (const k of ['standby', 'cdn', 'google']) {
             expect(tid(m.container, `wizard-addon-${k}`)?.getAttribute('data-chosen'), k).toBe('false');

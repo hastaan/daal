@@ -13,7 +13,7 @@
 
 import { Addons } from '../wizardCommands';
 import type { AccountsState } from './accounts';
-import type { AddonKind } from './addonTypes';
+import type { AddonKind, AddonRow } from './addonTypes';
 
 /** The order the rows show and the order they are applied in. */
 export const ADDON_ORDER: readonly AddonKind[] = ['standby', 'cdn', 'google'];
@@ -95,14 +95,27 @@ export function addonNeed(kind: AddonKind, acc: AccountsState): AddonNeed {
 /** The one call that turns `kind` on for relay `op`: the same call the
  *  relay page's switch makes. The standby is always sealed; Google takes
  *  a place in the account's script. */
-export async function runAddon(kind: AddonKind, op: number, acc: AccountsState): Promise<void> {
-    if (kind === 'standby') await Addons.standbyAdd({ operator_id: op, mode: 'sealed' });
-    else if (kind === 'cdn') await Addons.cdnBuild({ operator_id: op, zone: acc.cloudflare.zone });
-    else await Addons.googleOn({ operator_id: op });
+export async function runAddon(kind: AddonKind, op: number, acc: AccountsState): Promise<AddonRow | void> {
+    if (kind === 'standby') return Addons.standbyAdd({ operator_id: op, mode: 'sealed' });
+    if (kind === 'cdn') return Addons.cdnBuild({ operator_id: op, zone: acc.cloudflare.zone });
+    return Addons.googleOn({ operator_id: op });
 }
 
-/** One chosen extra on the wizard's finishing screen. */
-export type ApplyState = { k: 'waiting' } | { k: 'running' } | { k: 'on' } | { k: 'failed'; error: unknown };
+/** The way in through Cloudflare is set up and signed, and the relay's
+ *  door opens once the first person is on the relay (addon_cdn.rs,
+ *  `door_waits`). */
+export function waitsForPerson(row: unknown): boolean {
+    const r = row as Partial<AddonRow> | null | undefined;
+    return r?.kind === 'cdn' && r.state === 'ready' && r.detail?.door_waits === true;
+}
+
+/** One chosen extra on the wizard's finishing screen. `waitsForPerson`:
+ *  on, and starts working with the relay's first person. */
+export type ApplyState =
+    | { k: 'waiting' }
+    | { k: 'running' }
+    | { k: 'on'; waitsForPerson?: boolean }
+    | { k: 'failed'; error: unknown };
 
 /** The line kept for an extra whose account is not connected any more. */
 const NOT_CONNECTED: Record<Exclude<AddonNeed, 'ready'>, string> = {
@@ -117,7 +130,7 @@ async function applyOne(
     kind: AddonKind,
     acc: AccountsState,
     onState: (kind: AddonKind, st: ApplyState) => void,
-    run: (kind: AddonKind, op: number, acc: AccountsState) => Promise<void>,
+    run: (kind: AddonKind, op: number, acc: AccountsState) => Promise<unknown>,
 ): Promise<void> {
     const need = addonNeed(kind, acc);
     if (need !== 'ready') {
@@ -128,9 +141,9 @@ async function applyOne(
     }
     onState(kind, { k: 'running' });
     try {
-        await run(kind, op, acc);
+        const row = await run(kind, op, acc);
         clearAddonFailure(op, kind);
-        onState(kind, { k: 'on' });
+        onState(kind, waitsForPerson(row) ? { k: 'on', waitsForPerson: true } : { k: 'on' });
     } catch (error) {
         recordAddonFailure(op, kind, error);
         onState(kind, { k: 'failed', error });
@@ -144,7 +157,7 @@ export async function retryAddon(
     deps: {
         accounts: () => Promise<AccountsState>;
         onState: (kind: AddonKind, st: ApplyState) => void;
-        run?: (kind: AddonKind, op: number, acc: AccountsState) => Promise<void>;
+        run?: (kind: AddonKind, op: number, acc: AccountsState) => Promise<unknown>;
     },
 ): Promise<void> {
     if (applying.has(op)) return;
@@ -173,7 +186,7 @@ export async function applyAddonChoices(
     deps: {
         accounts: () => Promise<AccountsState>;
         onState: (kind: AddonKind, st: ApplyState) => void;
-        run?: (kind: AddonKind, op: number, acc: AccountsState) => Promise<void>;
+        run?: (kind: AddonKind, op: number, acc: AccountsState) => Promise<unknown>;
     },
 ): Promise<void> {
     if (applying.has(op)) return;

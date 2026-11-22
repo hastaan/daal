@@ -126,7 +126,16 @@ type cfZone struct {
 	Records     []cfRecord        `json:"records"`
 	Ruleset     bool              `json:"ruleset_exists"`
 	OriginRules []cfRule          `json:"origin_rules"`
+
+	// echOnAt is when the `ech` setting last went on through the API.
+	// The HTTPS record carries the config only cfECHPublishLag later,
+	// as Cloudflare's does: publishing is not instant.
+	echOnAt time.Time
 }
+
+// cfECHPublishLag is how long after ECH is turned on the zone's HTTPS
+// records start carrying the config.
+const cfECHPublishLag = 3 * time.Second
 
 type cfOriginCert struct {
 	ID        string   `json:"id"`
@@ -242,7 +251,13 @@ func initialCFState() *CFState {
 			// origin in plain HTTP), WebSockets on, ECH on (plan §2.5).
 			Settings: map[string]string{"ssl": "flexible", "websockets": "on", "ech": "on", "min_tls_version": "1.0"}}
 	}
-	return &CFState{Zones: []*cfZone{mk("3f2e1d0c9b8a79685746352413021f0e", CDNZone), mk("9e8d7c6b5a4938271605f4e3d2c1b0a9", "otherzone.example")}}
+	pub := mk("3f2e1d0c9b8a79685746352413021f0e", CDNZone)
+	// The publisher's zone has ECH off, as the owner's real zone had
+	// (2026-11-21: it published no ech parameter, and the CDN route
+	// could not be signed). Provisioning must turn it on and wait for
+	// the record; removal turns it off again.
+	pub.Settings["ech"] = "off"
+	return &CFState{Zones: []*cfZone{pub, mk("9e8d7c6b5a4938271605f4e3d2c1b0a9", "otherzone.example")}}
 }
 
 type fakeCF struct {
@@ -467,7 +482,7 @@ func (f *fakeCF) doh(w http.ResponseWriter, r *http.Request) {
 	if z := f.st.ZoneFor(name); z != nil {
 		if _, ok := z.Proxied(name); ok {
 			exists = true
-			if z.Settings["ech"] == "on" {
+			if z.Settings["ech"] == "on" && time.Since(z.echOnAt) >= cfECHPublishLag {
 				ech, _, _, _ = LabECH(f.run)
 			}
 		}
@@ -669,6 +684,9 @@ func (f *fakeCF) zoneAPI(w http.ResponseWriter, r *http.Request, z *cfZone, sub 
 			if json.Unmarshal(body, &v) != nil || v.Value == "" {
 				cfEnvelope(w, 400, nil, "value required")
 				return
+			}
+			if name == "ech" && v.Value == "on" && z.Settings[name] != "on" {
+				z.echOnAt = time.Now()
 			}
 			z.Settings[name] = v.Value
 			f.save()

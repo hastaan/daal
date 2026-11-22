@@ -14,6 +14,20 @@
 //! through the front by `cdn-test`, then the signature) → [`posture`]
 //! on every open.
 //!
+//! # ECH, and a relay with nobody on it
+//!
+//! `cdn-provision` turns the zone's Encrypted ClientHello on when it is
+//! off and waits for the HTTPS record. A front that still publishes no
+//! ECH config stops the build before the relay is touched
+//! ([`E_CDN_NO_ECH`], naming the zone): the binder would refuse the route
+//! anyway (RP026).
+//!
+//! The relay's door refuses to open while nobody is on the relay. The
+//! build then signs the route all the same and keeps the row `ready`
+//! with `detail.door_waits`; [`open_waiting_door`] opens it once the
+//! first person is added (`recipient_book` calls [`after_person_added`])
+//! or the next time the card reads its posture.
+//!
 //! # What is stored where
 //!
 //! * The **token** stays where FRP-8 put it, `commands::cloudflare_alias`
@@ -88,6 +102,27 @@ pub const E_CDN_LEFT_BEHIND: &str = "E_CDN_LEFT_BEHIND";
 /// Cloudflare refused a setup step (zone not active, a record already
 /// using the name, a permission short of Edit). Nothing is left.
 pub const E_CDN_PROVISION: &str = "E_CDN_PROVISION";
+/// Cloudflare does not hide the site name for the zone yet: the zone's
+/// Encrypted ClientHello is off (or its HTTPS record carries no config
+/// even after Daal turned it on and waited), so the route cannot be
+/// signed without a plain hello (relaypack RP026). Nothing was signed
+/// and what was made was taken down again. The tail starts with the
+/// zone: `E_CDN_NO_ECH: example.com: …`.
+pub const E_CDN_NO_ECH: &str = "E_CDN_NO_ECH";
+/// The relay refused to open its door because nobody is on it yet
+/// (daal-relay-mgmt `/cdn` answers 409: sing-box refuses an inbound with
+/// no users). [`build`] does not fail on it: the route is signed and the
+/// door waits ([`DOOR_WAITS`]) until [`open_waiting_door`] runs after
+/// the first person is added.
+pub const E_CDN_WAITS_FOR_PERSON: &str = "E_CDN_WAITS_FOR_PERSON";
+
+/// `cdn-door`'s exit code for a relay with nobody on it yet.
+const DOOR_NO_RECIPIENT_RC: i32 = 5;
+
+/// The row's `detail` flag: the way in is signed and Cloudflare is set
+/// up, but the relay's door is not open yet because nobody is on the
+/// relay. Cleared by [`open_waiting_door`].
+pub const DOOR_WAITS: &str = "door_waits";
 
 /// The Cloudflare account's key, kept apart from any relay.
 pub const ACCOUNT_ALIAS: &str = "daal.cloudflare.account.token";
@@ -223,6 +258,9 @@ pub struct CdnPosture {
     /// Provider words for anything that could not be read. Details only.
     #[serde(default)]
     pub notes: String,
+    /// The door waits for the first person on the relay ([`DOOR_WAITS`]).
+    #[serde(default)]
+    pub door_waits: bool,
 }
 
 /// `wizard_addon_cdn_set_plain_fallback`: the signed per-pack flag that
@@ -513,10 +551,52 @@ fn run_door(ctx: &WizardCtx, op: i64, front: &Value, action: &str) -> Result<()>
         stdin: key.as_slice(),
         progress: false,
     };
-    ctx.cli
-        .run_addon(req, &mut |_| {})
-        .map(|_| ())
-        .map_err(|e| cli_err("Cloudflare door on the relay", e))
+    ctx.cli.run_addon(req, &mut |_| {}).map(|_| ()).map_err(|e| {
+        if action == "enable" && door_waits_for_person(&e) {
+            return coded(E_CDN_WAITS_FOR_PERSON, "the relay has nobody on it yet, so its door opens with the first person");
+        }
+        cli_err("Cloudflare door on the relay", e)
+    })
+}
+
+/// The relay refused the door because nobody is on it yet: `cdn-door`
+/// exit 5, or (a helper from before that code) the relay's own words.
+fn door_waits_for_person(e: &BridgeError) -> bool {
+    match e {
+        BridgeError::SubprocessFailed { rc, stderr } => {
+            *rc == DOOR_NO_RECIPIENT_RC || stderr.contains("no recipient on this relay yet")
+        }
+        _ => false,
+    }
+}
+
+/// The front record publishes no ECH config. Without one, and without
+/// the plain hello (off at build, decision D-2), the binder refuses the
+/// route (RP026), so there is nothing to sign.
+fn front_has_no_ech(front: &Value) -> bool {
+    front
+        .get("ech")
+        .and_then(|e| e.get("config_list_b64"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+}
+
+/// The ECH refusal for `zone`, in this add-on's error contract.
+fn no_ech(zone: &str, detail: &str) -> WizardError {
+    coded(E_CDN_NO_ECH, format!("{zone}: {detail}"))
+}
+
+/// A signing failure in this add-on's terms: the binder's ECH refusal
+/// (RP026: a cdn_fronted candidate with no ech_config and no plain
+/// fallback) becomes [`E_CDN_NO_ECH`] naming the zone; anything else is
+/// passed on as it came.
+fn sign_err(zone: &str, e: WizardError) -> WizardError {
+    let text = e.to_string();
+    if text.contains("RP026") || text.contains("no ech_config") {
+        return no_ech(zone, &crate::freshness::redact_detail(&text));
+    }
+    e
 }
 
 /// `cdn-remove`. Returns the failed steps (empty = complete) and what
@@ -861,30 +941,55 @@ pub fn build(
     set_detail_field(ctx, row_id, "front", front.clone())?;
     addons::set_provider_ids(ctx, row_id, &provider_ids(&front))?;
 
-    // 2. The door on the relay.
-    on_progress(progress(op, "door", "running", ""));
-    if let Err(e) = run_door(ctx, op, &front, "enable") {
-        on_progress(progress(op, "door", "failed", ""));
-        let cause = match &e {
-            WizardError::Coded(c) if c.starts_with(E_RELAY_TOO_OLD) => coded(
-                E_CDN_NEEDS_REBUILD,
-                "this relay was built before the Cloudflare door existed; rebuild it to add this way in",
-            ),
-            _ => e,
-        };
+    // 1b. ECH. cdn-provision turned it on when the zone had it off and
+    //     waited for the record; a front that still publishes no config
+    //     cannot be signed (RP026), so stop here, before the relay is
+    //     touched, and say what to turn on.
+    if front_has_no_ech(&front) {
+        let cause = no_ech(
+            &zone,
+            "Cloudflare publishes no ECH config for this name (Encrypted ClientHello is off for the zone)",
+        );
         return Err(roll_back(ctx, op, row_id, &front, false, token.as_str(), cause, on_progress));
     }
-    on_progress(progress(op, "door", "ok", ""));
 
-    // 3. A real handshake through the front, from this phone.
-    let t = match test_front(ctx, op, &front, on_progress) {
-        Ok(t) => t,
-        Err(e) => return Err(roll_back(ctx, op, row_id, &front, true, token.as_str(), e, on_progress)),
+    // 2. The door on the relay. A relay with nobody on it yet refuses
+    //    it (sing-box will not run an inbound with no users): the route
+    //    is signed anyway and the door opens with the first person
+    //    (`open_waiting_door`).
+    on_progress(progress(op, "door", "running", ""));
+    let door_waits = match run_door(ctx, op, &front, "enable") {
+        Ok(()) => false,
+        Err(WizardError::Coded(c)) if c.starts_with(E_CDN_WAITS_FOR_PERSON) => true,
+        Err(e) => {
+            on_progress(progress(op, "door", "failed", ""));
+            let cause = match &e {
+                WizardError::Coded(c) if c.starts_with(E_RELAY_TOO_OLD) => coded(
+                    E_CDN_NEEDS_REBUILD,
+                    "this relay was built before the Cloudflare door existed; rebuild it to add this way in",
+                ),
+                _ => e,
+            };
+            return Err(roll_back(ctx, op, row_id, &front, false, token.as_str(), cause, on_progress));
+        }
     };
-    if !t.ok {
-        let cause = coded(E_CDN_TEST_FAILED, if t.detail.is_empty() { "no answer".into() } else { t.detail });
-        return Err(roll_back(ctx, op, row_id, &front, true, token.as_str(), cause, on_progress));
-    }
+    on_progress(progress(op, "door", if door_waits { "waiting" } else { "ok" }, ""));
+
+    // 3. A real handshake through the front, from this phone. With the
+    //    door shut there is nothing to reach yet; it runs when it opens.
+    let t = if door_waits {
+        None
+    } else {
+        let t = match test_front(ctx, op, &front, on_progress) {
+            Ok(t) => t,
+            Err(e) => return Err(roll_back(ctx, op, row_id, &front, true, token.as_str(), e, on_progress)),
+        };
+        if !t.ok {
+            let cause = coded(E_CDN_TEST_FAILED, if t.detail.is_empty() { "no answer".into() } else { t.detail });
+            return Err(roll_back(ctx, op, row_id, &front, true, token.as_str(), cause, on_progress));
+        }
+        Some(t)
+    };
 
     // 4. The signature, with the route in it.
     let mut member = front.clone();
@@ -896,12 +1001,12 @@ pub fn build(
         Err(e) => {
             on_progress(progress(op, "signing", "failed", ""));
             ctx.db.update_record_json(op, &prior_json)?;
-            return Err(roll_back(ctx, op, row_id, &front, true, token.as_str(), e, on_progress));
+            let e = sign_err(&zone, e);
+            return Err(roll_back(ctx, op, row_id, &front, !door_waits, token.as_str(), e, on_progress));
         }
     };
     on_progress(progress(op, "signing", "ok", ""));
     let now = (ctx.clock)();
-    let name_hidden = t.ech_accepted;
     addons::set_detail(
         ctx,
         row_id,
@@ -910,9 +1015,10 @@ pub fn build(
             "hostname": front.get("hostname").cloned().unwrap_or(Value::Null),
             "front": front,
             "plain_fallback": false,
-            "name_hidden": name_hidden,
-            "last_test_at_unix": now,
-            "last_test_ok": true,
+            "name_hidden": t.as_ref().map(|t| Value::Bool(t.ech_accepted)).unwrap_or(Value::Null),
+            "last_test_at_unix": if t.is_some() { now } else { 0 },
+            "last_test_ok": if t.is_some() { Value::Bool(true) } else { Value::Null },
+            DOOR_WAITS: door_waits,
             "refresh_note_published": resigned.refresh_note_published,
             "refresh_note_problem": resigned.refresh_note_problem,
         }),
@@ -921,14 +1027,98 @@ pub fn build(
     addons::get(ctx, row_id)
 }
 
+/// Whether a row's door waits for the first person.
+fn waits(row: &AddonRow) -> bool {
+    row.detail.get(DOOR_WAITS).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Open a door that waited for the first person: [`build`] signed the
+/// route while the relay had nobody on it. Called after a person is
+/// added on the relay (`recipient_book`), and by [`posture`]. Ok(false):
+/// nothing waits. Ok(true): the door is open now (and tested from this
+/// device). Err(E_CDN_WAITS_FOR_PERSON): still nobody on the relay; any
+/// other error leaves it waiting for the next try.
+pub fn open_waiting_door(
+    ctx: &WizardCtx,
+    op: i64,
+    on_progress: &mut dyn FnMut(AddonProgress),
+) -> Result<bool> {
+    let row = match live_row(ctx, op)? {
+        Some(r) if r.state == AddonState::Ready && waits(&r) => r,
+        _ => return Ok(false),
+    };
+    let front = front_of(&row)
+        .ok_or_else(|| WizardError::Validation("this way in was never finished".into()))?;
+    // Nobody this phone knows of on the relay (no person, no everyone
+    // file): the relay would refuse, so it is not asked.
+    if ctx.db.count_live_recipients(op)? == 0 && ctx.db.shared_box_fp(op)?.is_empty() {
+        return Err(coded(E_CDN_WAITS_FOR_PERSON, "nobody is on this relay yet"));
+    }
+    on_progress(progress(op, "door", "running", ""));
+    if let Err(e) = run_door(ctx, op, &front, "enable") {
+        let still = matches!(&e, WizardError::Coded(c) if c.starts_with(E_CDN_WAITS_FOR_PERSON));
+        on_progress(progress(op, "door", if still { "waiting" } else { "failed" }, ""));
+        return Err(e);
+    }
+    on_progress(progress(op, "door", "ok", ""));
+    let mut d = addons::get(ctx, row.id)?.detail;
+    if let Some(m) = d.as_object_mut() {
+        m.insert(DOOR_WAITS.into(), Value::Bool(false));
+        // The first handshake through the front. Its result is a
+        // posture line, not a reason to close the door again: the route
+        // is already in people's files.
+        if let Ok(t) = test_front(ctx, op, &front, on_progress) {
+            m.insert("last_test_at_unix".into(), (ctx.clock)().into());
+            m.insert("last_test_ok".into(), Value::Bool(t.ok));
+            m.insert("name_hidden".into(), Value::Bool(t.ok && t.ech_accepted));
+        }
+    }
+    addons::set_detail(ctx, row.id, &d)?;
+    Ok(true)
+}
+
+/// [`open_waiting_door`] after a person was added: never fails the
+/// add. A door that still cannot open keeps waiting, and the relay
+/// page's card tries again ([`posture`]).
+pub fn after_person_added(ctx: &WizardCtx, op: i64) {
+    if let Err(e) = open_waiting_door(ctx, op, &mut |_| {}) {
+        eprintln!("[addon_cdn] op={op}: the waiting door did not open yet: {e}");
+    }
+}
+
 pub fn posture(
     ctx: &WizardCtx,
     input: CdnPostureInput,
     on_progress: &mut dyn FnMut(AddonProgress),
 ) -> Result<CdnPosture> {
     let op = input.operator_id;
-    let row = live_row(ctx, op)?
+    let mut row = live_row(ctx, op)?
         .ok_or_else(|| WizardError::Validation("this relay has no way in through Cloudflare".into()))?;
+    // A door that waited for the first person: try it now (a person may
+    // have been added on another path, or the try after the add failed).
+    // While it still waits there is nothing behind the front to read or
+    // test, so the answer is only that.
+    let mut just_opened = false;
+    if waits(&row) {
+        match open_waiting_door(ctx, op, on_progress) {
+            Ok(_) => {
+                row = addons::get(ctx, row.id)?;
+                just_opened = true;
+            }
+            Err(_) => {
+                let d = &row.detail;
+                return Ok(CdnPosture {
+                    hostname: front_of(&row)
+                        .and_then(|f| f.get("hostname").and_then(Value::as_str).map(str::to_string))
+                        .unwrap_or_default(),
+                    zone: d.get("zone").and_then(Value::as_str).unwrap_or("").to_string(),
+                    plain_fallback: d.get("plain_fallback").and_then(Value::as_bool).unwrap_or(false),
+                    door_waits: true,
+                    ..Default::default()
+                });
+            }
+        }
+    }
     let d = row.detail.clone();
     let front = front_of(&row)
         .ok_or_else(|| WizardError::Validation("this way in was never finished".into()))?;
@@ -944,6 +1134,7 @@ pub fn posture(
         zone: d.get("zone").and_then(Value::as_str).unwrap_or("").to_string(),
         plain_fallback: plain,
         notes: String::new(),
+        door_waits: false,
     };
 
     on_progress(progress(op, "posture", "running", ""));
@@ -976,7 +1167,7 @@ pub fn posture(
     out.notes = crate::freshness::redact_detail(rep.get("notes").and_then(Value::as_str).unwrap_or(""));
     on_progress(progress(op, "posture", "ok", ""));
 
-    if input.test {
+    if input.test && !just_opened {
         let t = test_front(ctx, op, &front, on_progress)?;
         out.last_test_at_unix = (ctx.clock)();
         out.last_test_ok = Some(t.ok);
@@ -1034,7 +1225,8 @@ pub fn set_plain_fallback(
     if let Err(e) = resign_and_republish(ctx, op, Freshness::AllowCached, &mut |_| {}) {
         on_progress(progress(op, "signing", "failed", ""));
         ctx.db.update_record_json(op, &prior_json)?;
-        return Err(e);
+        let zone = row.detail.get("zone").and_then(Value::as_str).unwrap_or("").to_string();
+        return Err(sign_err(&zone, e));
     }
     on_progress(progress(op, "signing", "ok", ""));
     set_detail_field(ctx, row.id, "plain_fallback", Value::Bool(input.allow))?;

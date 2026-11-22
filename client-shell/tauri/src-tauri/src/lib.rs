@@ -1468,6 +1468,20 @@ fn wizard_cancel_and_cleanup(
     })
 }
 
+/// `wizard_provision_cancel`: the build screen's Cancel. The running
+/// provision for this relay stops and rolls back what it created; its
+/// own progress lines say what was removed, and `wizard_provision_run`
+/// then returns the cancelled error.
+#[tauri::command]
+fn wizard_provision_cancel(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<(), String> {
+    cmdlog::logged("wizard_provision_cancel", || {
+    wcmd::provision_cancel(&wstate.0, operator_id).map_err(|e| e.to_string())
+    })
+}
+
 /// `wizard_relay_destroy`: remove a relay, and — when the user asked
 /// for it — destroy the cloud server, ephemeral SSH key and firewall
 /// behind it first.
@@ -1844,8 +1858,12 @@ async fn wizard_provision_run(
         eprintln!("[provision] spawn_blocking entered");
         let ctx = wcmd::WizardCtx { db, keystore, staging_dir, journal_dir, cli, clock, custody };
         let mut event_count = 0u32;
-        let mut on_progress = |ev: ProgressEvent| {
+        let mut on_progress = |mut ev: ProgressEvent| {
             event_count += 1;
+            // One number per event, the same on both channels below:
+            // the page hears each event twice (the Tauri event and the
+            // injected CustomEvent) and keeps the first of each `seq`.
+            ev.extra.insert("seq".into(), serde_json::Value::from(event_count));
             eprintln!("[provision] event #{} step={} msg={}", event_count, ev.step, ev.message);
             // Primary: emit via Tauri event system
             match app_clone.emit("wizard-provision-event", &ev) {
@@ -4266,6 +4284,7 @@ pub fn run() {
             wizard_list_operators,
             wizard_get_operator_state,
             wizard_cancel_and_cleanup,
+            wizard_provision_cancel,
             wizard_relay_destroy,
             wizard_setup_recovery,
             wizard_setup_remove_server,

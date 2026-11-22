@@ -79,7 +79,8 @@ type FrontRecord struct {
 	OriginRuleRef string `json:"origin_rule_ref"`
 
 	// PriorSettings are the zone settings as they were before Daal
-	// changed them ("ssl", "websockets", "aop"). Removal restores a
+	// changed them ("ssl", "websockets", "aop", and "ech" when Daal
+	// turned ECH on). Removal restores a
 	// setting only when it still holds the value Daal set.
 	PriorSettings map[string]string `json:"prior_settings,omitempty"`
 

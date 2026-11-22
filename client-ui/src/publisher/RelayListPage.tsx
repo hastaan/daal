@@ -985,10 +985,7 @@ export default function RelayListPage({
     const live = operators.filter((o) => o.status !== 'decommissioned');
     // Accounts come first: connecting a hosting company is step one.
     const { accounts: acc } = useAccounts(!!onAccounts);
-    const accNames = [
-        ...(acc.hetzner ? [t('wiz.provider.hetzner.label')] : []),
-        ...(acc.cloudflare.connected ? ['Cloudflare'] : []),
-    ];
+    const accNames = connectedAccountNames(acc, t);
     const accLine = acc.hetzner
         ? t('pub.accounts.summary.on').replace('{names}', accNames.join(sep()))
         : t('pub.accounts.summary.start');
@@ -1276,4 +1273,18 @@ export default function RelayListPage({
             <ActionToast t={t} outcome={action.outcome} onDismiss={action.dismiss} />
         </PageColumn>
     );
+}
+
+/** The accounts the publisher page's summary names ("Connected: …"),
+ *  in the Accounts page's order. Cloudflare and Google are product
+ *  names, kept as they are in both languages. */
+export function connectedAccountNames(
+    acc: { hetzner: unknown; cloudflare: { connected: boolean }; google: { connected: boolean } },
+    t: (k: string) => string,
+): string[] {
+    return [
+        ...(acc.hetzner ? [t('wiz.provider.hetzner.label')] : []),
+        ...(acc.cloudflare.connected ? ['Cloudflare'] : []),
+        ...(acc.google.connected ? ['Google'] : []),
+    ];
 }

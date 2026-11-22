@@ -123,6 +123,9 @@ func cdnZoneClean(st *CFState) []string {
 	if z.Settings["ssl"] != "flexible" {
 		left = append(left, "ssl="+z.Settings["ssl"]+" (it was flexible)")
 	}
+	if z.Settings["ech"] != "off" {
+		left = append(left, "ech="+z.Settings["ech"]+" (it was off)")
+	}
 	for _, c := range st.Certs {
 		if !c.Revoked {
 			left = append(left, "origin certificate "+c.ID+" not revoked")
@@ -149,8 +152,9 @@ func (rc *RunCtx) cdnProvision(phase string, tok map[string]string) (string, boo
 	_ = os.WriteFile(recFile, []byte(v.Stdout), 0o600)
 	var rec struct {
 		Hostname, ZoneID, OriginPath string
-		OriginPort                   int  `json:"origin_port"`
-		AOPEnabled                   bool `json:"aop_enabled"`
+		OriginPort                   int               `json:"origin_port"`
+		AOPEnabled                   bool              `json:"aop_enabled"`
+		PriorSettings                map[string]string `json:"prior_settings"`
 		ECH                          struct {
 			ZoneSetting   string `json:"zone_setting"`
 			Published     bool   `json:"published"`
@@ -175,6 +179,11 @@ func (rc *RunCtx) cdnProvision(phase string, tok map[string]string) (string, boo
 		}
 		if z.Settings["websockets"] != "on" {
 			wrong = append(wrong, "websockets off")
+		}
+		// The lab zone starts with ECH off (fakecf_api.go): Daal turns
+		// it on and records that it did, so removal turns it off again.
+		if z.Settings["ech"] != "on" || rec.PriorSettings["ech"] != "off" {
+			wrong = append(wrong, fmt.Sprintf("ech=%s, recorded prior %q (want on, prior off)", z.Settings["ech"], rec.PriorSettings["ech"]))
 		}
 		if !z.AOPEnabled || len(z.AOPCerts) != 1 {
 			wrong = append(wrong, fmt.Sprintf("origin pull on=%v with %d certificate(s)", z.AOPEnabled, len(z.AOPCerts)))

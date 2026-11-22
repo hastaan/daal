@@ -1456,6 +1456,10 @@ pub struct ProvisionArgs<'a> {
     /// created (`--journal`). The child holds an exclusive lock on it
     /// for its whole life. `None` only from callers that predate it.
     pub journal_path: Option<&'a Path>,
+    /// The app's Cancel (`--cancel-file`): the child stops once this
+    /// file exists, and rolls back what it created
+    /// (`rollback_on_failure`). `None` from callers that cannot cancel.
+    pub cancel_file: Option<&'a Path>,
 }
 
 /// Static shape passed to `daal-deploy cdn-provision`.
@@ -1968,6 +1972,7 @@ impl SubprocessRunner {
         &self,
         args: &ProvisionArgs<'_>,
         journal: Option<&Path>,
+        cancel_file: Option<&Path>,
         on_progress: &mut dyn FnMut(ProgressEvent),
     ) -> Result<String> {
         // Token tempfile (mode 0o600); zeroized on drop.
@@ -2013,6 +2018,9 @@ impl SubprocessRunner {
         // needs no Cloudflare list at first boot and no rebuild later.
         if let Some(j) = journal {
             cmd.arg("--journal").arg(j);
+        }
+        if let Some(c) = cancel_file {
+            cmd.arg("--cancel-file").arg(c);
         }
         let mut child = cmd
             .apply_env()
@@ -2475,7 +2483,18 @@ impl CliRunner for SubprocessRunner {
         // the flag at parse time, before any cloud call, so one retry
         // without it is safe — the run is then simply not journalled
         // (the account check still finds what it creates by its labels).
-        match self.provision_once(&args, args.journal_path, on_progress) {
+        //
+        // `--cancel-file` is newer still: a helper that refuses it is
+        // run once more without it (the build then cannot be cancelled,
+        // which is what such a helper always did).
+        let first = self.provision_once(&args, args.journal_path, args.cancel_file, on_progress);
+        let first = match first {
+            Err(e) if args.cancel_file.is_some() && flag_not_defined(&e, "cancel-file") => {
+                self.provision_once(&args, args.journal_path, None, on_progress)
+            }
+            other => other,
+        };
+        match first {
             Err(e) if args.journal_path.is_some() && flag_not_defined(&e, "journal") => {
                 on_progress(ProgressEvent {
                     step: "journal_unsupported".into(),
@@ -2485,7 +2504,7 @@ impl CliRunner for SubprocessRunner {
                     ts: String::new(),
                     extra: Default::default(),
                 });
-                self.provision_once(&args, None, on_progress)
+                self.provision_once(&args, None, None, on_progress)
             }
             other => other,
         }
@@ -4068,6 +4087,9 @@ pub struct MockRunner {
     // ---- publisher-alone wave ------------------------------------
     /// `--journal` each `run_provision` was handed.
     pub provision_journal_paths: Mutex<Vec<Option<PathBuf>>>,
+    /// `--cancel-file` each `run_provision` was handed, and whether the
+    /// file was already there when the run began.
+    pub provision_cancel_files: Mutex<Vec<(Option<PathBuf>, bool)>>,
     /// `--existing-server-id` each `run_provision` was handed.
     pub provision_existing_ids: Mutex<Vec<String>>,
     /// Fail `run_provision` with this exit code and stderr, after
@@ -4293,6 +4315,7 @@ impl MockRunner {
             rotate_tls_result: Mutex::new(None),
             rotate_tls_err: Mutex::new(None),
             provision_journal_paths: Mutex::new(Vec::new()),
+            provision_cancel_files: Mutex::new(Vec::new()),
             provision_existing_ids: Mutex::new(Vec::new()),
             provision_fail: Mutex::new(None),
             provision_fail_events: Mutex::new(Vec::new()),
@@ -4783,6 +4806,10 @@ impl CliRunner for MockRunner {
             .lock()
             .unwrap()
             .push(args.journal_path.map(|p| p.to_path_buf()));
+        self.provision_cancel_files
+            .lock()
+            .unwrap()
+            .push((args.cancel_file.map(|p| p.to_path_buf()), args.cancel_file.is_some_and(|p| p.exists())));
         self.provision_existing_ids
             .lock()
             .unwrap()
@@ -5803,6 +5830,7 @@ mod tests {
                     dry_run: false,
                     rollback_on_failure: true,
                     journal_path: Some(&journal),
+                    cancel_file: None,
                 },
                 &mut |ev| steps.push(ev.step),
             )
@@ -5843,6 +5871,7 @@ mod tests {
                     dry_run: false,
                     rollback_on_failure: true,
                     journal_path: Some(&journal),
+                    cancel_file: None,
                 },
                 &mut |_| {},
             )

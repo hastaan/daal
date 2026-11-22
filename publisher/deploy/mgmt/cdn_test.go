@@ -159,6 +159,27 @@ func TestCDNDoorEnable_SignedAndChecked(t *testing.T) {
 	}
 }
 
+// A relay with nobody on it refuses the door (409): ErrCDNDoorNoRecipient,
+// so the app can keep the way in waiting for the first person.
+func TestCDNDoorEnable_NoRecipientYet(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	front := cdnTestFront(t)
+	box := &fakeDoorBox{pub: pub, caps: `{"ok":true,"capabilities":["cdn"]}`,
+		answer: func(cloudflare.DoorRequest) (int, string) {
+			return 409, "no recipient on this relay yet: the door opens once there is someone to let in"
+		}}
+	ts, fp := startTLSServer(t, box.mux(t))
+	rec := recForServer(t, ts, fp)
+	cli, err := NewClient(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cli.CDNDoorEnable(context.Background(), rec, priv, front)
+	if !errors.Is(err, ErrCDNDoorNoRecipient) || !strings.Contains(err.Error(), "no recipient") {
+		t.Fatalf("err = %v, want ErrCDNDoorNoRecipient with the relay's words", err)
+	}
+}
+
 // The key is never sent to a box that does not advertise the door,
 // and a box without the route answers ErrCDNDoorUnsupported.
 func TestCDNDoorEnable_OldBoxGetsNothing(t *testing.T) {

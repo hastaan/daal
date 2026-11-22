@@ -298,6 +298,79 @@ describe('a switch whose account is connected just runs', () => {
     });
 });
 
+describe('Cloudflare on a zone without ECH, and on a relay with nobody yet', () => {
+    it('ECH off: one line naming the zone and where to turn it on, never «Something went wrong»', async () => {
+        handlers.wizard_addon_cdn_build = () => {
+            throw 'E_CDN_NO_ECH: example.com: Cloudflare publishes no ECH config for this name';
+        };
+        const m = await mountSection(ALL);
+        await rig.click(btn(m.container, 'addon-cdn-toggle'));
+        const f = tid(m.container, 'addon-cdn-failed')!;
+        expect(byAttr(f, 'data-testid', 'addon-error')?.getAttribute('data-code')).toBe('E_CDN_NO_ECH');
+        const line = f.textContent ?? '';
+        expect(line).toContain("Cloudflare isn't hiding the site name for example.com yet (ECH is off).");
+        expect(line).toContain('SSL/TLS → Edge Certificates');
+        expect(line).not.toContain(en('pub.addons.err.other'));
+        expect(line).not.toContain('{zone}');
+    });
+
+    it('in Persian it names the zone too, without «بزنید»', async () => {
+        handlers.wizard_addon_cdn_build = () => {
+            throw 'E_CDN_NO_ECH: example.com: no config';
+        };
+        const m = await mountSection(ALL, fa);
+        await rig.click(btn(m.container, 'addon-cdn-toggle'));
+        const line = tid(m.container, 'addon-cdn-failed')?.textContent ?? '';
+        expect(line).toContain('example.com');
+        expect(line).toContain('Encrypted ClientHello');
+        expect(line).not.toContain('بزنید');
+        expect(line).not.toContain('{zone}');
+    });
+
+    it('a door that waited opens on the next visit once someone is on the relay, and the row says On', async () => {
+        ledger = [row('cdn', 'ready', { door_waits: true })];
+        handlers.wizard_addon_cdn_posture = () => {
+            ledger = [row('cdn', 'ready', { door_waits: false, name_hidden: true })];
+            return { door_waits: false };
+        };
+        const m = await mountSection(ALL);
+        await rig.settle();
+        expect(inputOf('wizard_addon_cdn_posture')).toEqual({ operator_id: 1, test: true });
+        expect(cmds().filter((c) => c === 'wizard_addon_cdn_posture')).toHaveLength(1);
+        expect(tid(m.container, 'addon-cdn-waits')).toBeNull();
+        expect(tid(m.container, 'addon-cdn-status')?.textContent).toContain(en('pub.addons.state.on'));
+    });
+
+    it('nobody on the relay yet: one plain line that it starts with the first person, not On and not a failure', async () => {
+        const waiting = row('cdn', 'ready', { door_waits: true, name_hidden: null });
+        handlers.wizard_addon_cdn_posture = () => ({ door_waits: true });
+        handlers.wizard_addon_cdn_build = () => waiting;
+        const m = await mountSection(ALL);
+        ledger = [waiting];
+        await rig.click(btn(m.container, 'addon-cdn-toggle'));
+        expect(tid(m.container, 'addon-cdn-waits')?.textContent).toBe(en('pub.addons.cdn.waits_person'));
+        expect(tid(m.container, 'addon-cdn-failed')).toBeNull();
+        expect(tid(m.container, 'addon-cdn-status')).toBeNull();
+        expect(btn(m.container, 'addon-cdn-toggle')?.getAttribute('aria-checked')).toBe('true');
+    });
+
+    it('the build wizard says the same when the extra turned on with nobody on the relay', async () => {
+        const { WizardAddonsProgress } = await import('./WizardAddons');
+        const { applyAddonChoices } = await import('./wizardAddons');
+        const states: unknown[] = [];
+        await applyAddonChoices(41, ['cdn'], {
+            accounts: async () => ALL,
+            onState: (_k, st) => states.push(st),
+            run: async () => row('cdn', 'ready', { door_waits: true }),
+        });
+        expect(states.at(-1)).toEqual({ k: 'on', waitsForPerson: true });
+        const m = await rig.mount(<WizardAddonsProgress t={en} progress={{ cdn: { k: 'on', waitsForPerson: true } }} onRetry={() => {}} />);
+        expect(tid(m.container, 'wizard-addon-cdn-status')?.textContent).toBe(en('pub.addons.cdn.waits_person'));
+        const fm = await rig.mount(<WizardAddonsProgress t={fa} progress={{ cdn: { k: 'on', waitsForPerson: true } }} onRetry={() => {}} />);
+        expect(tid(fm.container, 'wizard-addon-cdn-status')?.textContent).toBe(fa('pub.addons.cdn.waits_person'));
+    });
+});
+
 describe('turning one off asks one sentence first', () => {
     it('Cloudflare: names that the domain keeps billing; No leaves it on', async () => {
         ledger = [row('cdn', 'ready')];

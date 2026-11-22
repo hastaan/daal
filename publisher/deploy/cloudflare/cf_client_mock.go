@@ -436,11 +436,20 @@ func (m *MockCFClient) OriginRule(_ context.Context, _ []byte, zoneID, ref strin
 }
 
 // MockECHFetcher answers FetchECH from fixed values.
+//
+// Zone and ZoneID, when set, model Cloudflare: the hostname publishes
+// ConfigList only while that zone's `ech` setting is "on". LagCalls
+// models the publishing delay: that many reads after the setting first
+// reads "on" still find no ech parameter.
 type MockECHFetcher struct {
 	ConfigList []byte
 	Resolver   string
 	Err        error
 	Calls      []string
+
+	Zone     *MockCFClient
+	ZoneID   string
+	LagCalls int
 }
 
 func (f *MockECHFetcher) FetchECH(_ context.Context, hostname string) ([]byte, string, error) {
@@ -451,6 +460,13 @@ func (f *MockECHFetcher) FetchECH(_ context.Context, hostname string) ([]byte, s
 	r := f.Resolver
 	if r == "" {
 		r = "mock-doh"
+	}
+	if f.Zone != nil && f.Zone.Settings[f.ZoneID]["ech"] != "on" {
+		return nil, r, nil
+	}
+	if f.LagCalls > 0 {
+		f.LagCalls--
+		return nil, r, nil
 	}
 	return f.ConfigList, r, nil
 }

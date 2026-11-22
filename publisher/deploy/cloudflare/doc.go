@@ -11,9 +11,11 @@
 //   - a proxied A (and AAAA) record `<label>.<zone>`;
 //   - an Origin Rule sending that hostname to the relay's dedicated CDN
 //     port (relayports.CDNOrigin), so the edge never lands on REALITY;
-//   - a read of the ECH posture: the zone setting and, over DoH, the
-//     ECHConfigList the hostname publishes (ech.go, B-5). ECH is left as
-//     Cloudflare has it.
+//   - ECH turned on when the zone has it off (a CDN route without an
+//     ECH config cannot be signed unless the plain hello is allowed;
+//     removal turns it off again), then a read of the ECH posture: the
+//     zone setting and, over DoH, the ECHConfigList the hostname
+//     publishes (ech.go, B-5), retried briefly while it is not there.
 //
 // There is no Worker (decision D-5). The token needs exactly five zone
 // permissions on one zone (token_check.go), and Daal never spends money

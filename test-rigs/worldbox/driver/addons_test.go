@@ -265,18 +265,33 @@ func TestFakeCloudflareAPI(t *testing.T) {
 	if r, ok := z.Proxied(CDNHost); !ok || r.Content != "203.0.113.10" || z.OriginPort(CDNHost) != 8448 || z.Settings["ssl"] != "strict" {
 		t.Fatalf("state the edge reads: record=%v port=%d ssl=%q", r, z.OriginPort(CDNHost), z.Settings["ssl"])
 	}
-	// DoH: the proxied host has an HTTPS record with the lab's ECH config.
+	// DoH: the proxied host has an HTTPS record with the lab's ECH config
+	// once ECH is on (the publisher's zone starts with it off, as the
+	// owner's did) and the publishing lag has passed.
 	q := []byte{0, 7, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0}
 	for _, l := range strings.Split(CDNHost, ".") {
 		q = append(q, byte(len(l)))
 		q = append(q, l...)
 	}
 	q = append(q, 0, 0, 65, 0, 1)
-	r := httptest.NewRequest("GET", "https://cloudflare-dns.com/dns-query?dns="+base64.RawURLEncoding.EncodeToString(q), nil)
-	w := httptest.NewRecorder()
-	f.ServeHTTP(w, r)
+	doh := func() []byte {
+		r := httptest.NewRequest("GET", "https://cloudflare-dns.com/dns-query?dns="+base64.RawURLEncoding.EncodeToString(q), nil)
+		w := httptest.NewRecorder()
+		f.ServeHTTP(w, r)
+		return w.Body.Bytes()
+	}
 	list, _, _, _ := LabECH(run)
-	if !bytes.Contains(w.Body.Bytes(), list) {
+	if bytes.Contains(doh(), list) {
+		t.Fatal("DoH answer carries an ECH config while the zone has ECH off")
+	}
+	cfDo(t, f, "PATCH", api, zp+"/settings/ech", "good", map[string]string{"value": "on"})
+	if bytes.Contains(doh(), list) {
+		t.Fatal("DoH answer carries the ECH config the moment ECH went on: publishing is not instant")
+	}
+	f.mu.Lock()
+	f.st.ZoneFor(CDNHost).echOnAt = time.Now().Add(-cfECHPublishLag)
+	f.mu.Unlock()
+	if !bytes.Contains(doh(), list) {
 		t.Fatal("DoH answer for the proxied host carries no ECH config")
 	}
 	// A fault fails the matching call, and only the times asked.

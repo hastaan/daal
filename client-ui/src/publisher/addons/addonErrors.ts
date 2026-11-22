@@ -10,6 +10,7 @@
 // standby, so the shell has no reason to answer it.
 
 import { classifyPublisherError } from '../wizardCommands';
+import { failureKey } from '../failureText';
 
 /** Every code an add-on module can answer, besides the shared ones. */
 export const ADDON_ERROR_CODES = [
@@ -24,6 +25,8 @@ export const ADDON_ERROR_CODES = [
     'E_CDN_TEST_FAILED',
     'E_CDN_LEFT_BEHIND',
     'E_CDN_PROVISION',
+    'E_CDN_NO_ECH',
+    'E_CDN_WAITS_FOR_PERSON',
     // addon_google.rs
     'E_GOOGLE_NOT_CONFIGURED',
     'E_GOOGLE_API_NOT_ENABLED',
@@ -84,7 +87,18 @@ export function addonErrorText(t: (k: string) => string, e: unknown): AddonError
         code != null &&
         ((ADDON_ERROR_CODES as readonly string[]).includes(code) ||
             (SHARED_CODES_WITH_COPY as readonly string[]).includes(code));
-    let line = t(known ? `pub.addons.err.${code}` : 'pub.addons.err.other');
+    // A code without an add-on sentence still has a plain one of its
+    // own (failureText): «Something went wrong» is only for an error
+    // nothing recognises.
+    const general = known ? null : failureKey(e);
+    let line = t(
+        known ? `pub.addons.err.${code}` : general && general !== 'pub.fail.generic' ? general : 'pub.addons.err.other',
+    );
+    if (code === 'E_CDN_NO_ECH') {
+        // `E_CDN_NO_ECH: <zone>: …`: the sentence names the zone.
+        const zone = /^E_CDN_NO_ECH:\s*([^:\s]+)/.exec(raw)?.[1] ?? '';
+        line = line.replace('{zone}', zone || '…');
+    }
     if (code === 'E_GOOGLE_CHECK_FAILED') {
         // The tail starts with the check's reason word.
         const reason = raw.replace(/^E_GOOGLE_CHECK_FAILED:\s*/, '').split(/[:\s]/)[0] ?? '';

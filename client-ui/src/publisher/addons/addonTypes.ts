@@ -38,7 +38,8 @@ export interface AddonProgress {
     operator_id: number;
     kind: AddonKind;
     step: string;
-    state: 'running' | 'ok' | 'failed';
+    /** `waiting`: the Cloudflare door, on a relay with nobody on it yet. */
+    state: 'running' | 'ok' | 'failed' | 'waiting';
     detail: string;
 }
 
@@ -166,6 +167,8 @@ export interface CdnPosture {
     plain_fallback?: boolean;
     /** Provider words; Details only. */
     notes?: string;
+    /** The relay's door waits for the first person on the relay. */
+    door_waits?: boolean;
 }
 export interface CdnPlainFallbackInput {
     operator_id: number;

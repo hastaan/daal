@@ -250,6 +250,12 @@ type ProvisionOpts struct {
 	// nil (no-op). The step string is machine-readable; message is
 	// human-readable.
 	OnProgress func(step, message string) `json:"-"`
+	// OnProgressData, when set, receives the milestones that carry
+	// machine-readable detail (the health wait's try counter, the
+	// address a firewall window was opened for, what a rollback
+	// removed) with that detail attached. Adapters fall back to
+	// OnProgress, without the detail, when it is nil.
+	OnProgressData func(step, message string, extra map[string]any) `json:"-"`
 
 	// Journal, when set, is told what this run is about to create and
 	// what it created, as it happens (see ProvisionJournal). Never

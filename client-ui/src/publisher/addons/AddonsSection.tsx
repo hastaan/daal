@@ -21,7 +21,7 @@
 // «Details». The engine's choices (open standby, plain fallback) stay in
 // the CLI and the Rust layer; this UI never asks for them.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Sheet, StateIcon, Toggle } from '../../design/primitives';
 import { WhatIsThis } from '../Disclosure';
 import { useConfirm } from '../ui';
@@ -34,7 +34,7 @@ import { CloudflareSheet, GoogleSheet } from './AccountSheets';
 import { useAccounts } from './accounts';
 import type { AccountsState } from './accounts';
 import { BODY, ErrorNote, MONO, MUTED, copyText, useRun } from './addonUi';
-import { addonNeed, clearAddonFailure, failedAddons, runAddon } from './wizardAddons';
+import { addonNeed, clearAddonFailure, failedAddons, runAddon, waitsForPerson } from './wizardAddons';
 
 export interface AddonsSectionProps {
     t: (key: string) => string;
@@ -103,6 +103,22 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
             gone = true;
         };
     }, [operatorId, generation]);
+
+    // A Cloudflare door that waits for the relay's first person: ask
+    // once per visit whether it can open now (someone may have been
+    // added since; the shell only asks the relay when this phone knows
+    // of someone on it). Quiet: the row keeps its one line either way.
+    const doorAsked = useRef(false);
+    const cdnWaits = waitsForPerson(liveRow(rows, 'cdn'));
+    useEffect(() => {
+        if (operatorId == null || !cdnWaits || doorAsked.current) return;
+        doorAsked.current = true;
+        Addons.cdnPosture({ operator_id: operatorId, test: true })
+            .then((p) => {
+                if (p && p.door_waits === false) reload();
+            })
+            .catch(() => {});
+    }, [operatorId, cdnWaits, reload]);
 
     const setPhase = (kind: AddonKind, p: Phase) => setPhases((all) => ({ ...all, [kind]: p }));
 
@@ -348,11 +364,19 @@ function ProtectRow({
                 </div>
             )}
 
-            {!busy && phase.k !== 'failed' && row?.state === 'ready' && (
+            {!busy && phase.k !== 'failed' && row?.state === 'ready' && !waitsForPerson(row) && (
                 <div data-testid={`addon-${copy.kind}-status`} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <StateIcon state="ok" size={16} />
                     <span style={{ ...MUTED, color: 'var(--green)', fontWeight: 600 }}>{t('pub.addons.state.on')}</span>
                 </div>
+            )}
+
+            {/* Set up and signed; the relay's door opens with the first
+                person (addon_cdn.rs `door_waits`). Not a failure. */}
+            {!busy && phase.k !== 'failed' && waitsForPerson(row) && (
+                <p data-testid={`addon-${copy.kind}-waits`} style={MUTED}>
+                    {t('pub.addons.cdn.waits_person')}
+                </p>
             )}
 
             {!busy && phase.k !== 'failed' && (row?.state === 'building' || row?.state === 'removing') && (

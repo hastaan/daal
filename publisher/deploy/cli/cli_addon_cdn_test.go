@@ -66,6 +66,10 @@ func withCDNFakes(t *testing.T) (*cloudflare.MockCFClient, *fakeCDNFirewall, str
 	m := cloudflare.NewMockCFClient("example.com")
 	fw := &fakeCDNFirewall{rules: map[string]*cloudflare.EdgeRanges{}}
 	oldCF, oldEdge, oldECH, oldFW, oldTest := newCFClient, newEdgeFetcher, newECHFetcher, newCDNFirewall, frontTest
+	// The fake publishes no ECH config: keep the wait for it short.
+	oldDelay := cloudflare.ECHPublishDelay
+	cloudflare.ECHPublishDelay = time.Millisecond
+	t.Cleanup(func() { cloudflare.ECHPublishDelay = oldDelay })
 	newCFClient = func() cloudflare.CFClient { return m }
 	newEdgeFetcher = func() cloudflare.EdgeRangeFetcher { return fakeEdgeFetcher{} }
 	newECHFetcher = func() cloudflare.ECHFetcher { return &cloudflare.MockECHFetcher{} }

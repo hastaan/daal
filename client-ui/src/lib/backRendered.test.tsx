@@ -179,7 +179,7 @@ describe('Back, rendered', () => {
                 rootBack={() => (rootBacks += 1)}
             />,
         );
-        const stepTitle = () => all(m.container, (n) => n.nodeName === 'H2')[0]?.textContent ?? '';
+        const stepTitle = () => (all(m.container, (n) => n.nodeType === 1 && n.getAttribute('data-testid') === 'wizard-step-label')[0]?.textContent ?? '');
         // It opens on "Where should your relay live?"; Hetzner is chosen.
         const first = stepTitle();
         expect(first).toBe(t('wiz.host.title'));

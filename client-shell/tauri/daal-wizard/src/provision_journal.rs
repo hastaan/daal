@@ -269,6 +269,12 @@ pub fn journal_path(journal_dir: &Path, operator_id: i64) -> PathBuf {
     journal_dir.join(format!("{operator_id}.jsonl"))
 }
 
+/// The file whose presence asks a running `provision` for this relay to
+/// stop (`daal-deploy provision --cancel-file`).
+pub fn cancel_path(journal_dir: &Path, operator_id: i64) -> PathBuf {
+    journal_dir.join(format!("{operator_id}.cancel"))
+}
+
 /// Read and summarise a journal; `None` when there is none.
 pub fn read(journal_dir: &Path, operator_id: i64) -> Option<JournalSummary> {
     let text = std::fs::read_to_string(journal_path(journal_dir, operator_id)).ok()?;

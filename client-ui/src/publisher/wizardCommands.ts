@@ -782,6 +782,27 @@ export interface ProgressEvent {
     message: string;
     ts?: string;
     extra?: Record<string, unknown>;
+    /** The shell's number for a provision event, the same on both of
+     *  its channels (see buildLog.appendEvent). */
+    seq?: number;
+    /** Local time the page heard it (ms since epoch). */
+    at?: number;
+    // The CLI's own detail rides flattened beside step/message:
+    // provision_health_wait / provision_health_unreachable
+    attempt?: number;
+    max_attempts?: number;
+    elapsed_s?: number;
+    box_ip?: string;
+    helper_ip?: string;
+    port?: number;
+    // provision_rollback
+    rollback?: 'start' | 'done';
+    cancelled?: boolean;
+    server_id?: string;
+    public_ip?: string;
+    server_deleted?: boolean;
+    firewall_deleted?: boolean;
+    warnings?: number;
     // Legacy aliases used by fake/mock progress:
     phase?: string;
     detail?: string;
@@ -1274,6 +1295,11 @@ export const Wizard = {
         invoke<OperatorState>('wizard_get_operator_state', { operatorId: operator_id }),
     cancelAndCleanup: (operator_id: number) =>
         invoke<void>('wizard_cancel_and_cleanup', { operatorId: operator_id }),
+    /** The build screen's Cancel: the running provision stops and
+     *  deletes the server and firewall it created. Its own progress
+     *  lines say what was removed; provisionRun then rejects. */
+    provisionCancel: (operator_id: number) =>
+        invoke<void>('wizard_provision_cancel', { operatorId: operator_id }),
 
     /**
      * Remove a relay — optionally destroying the cloud server behind it.

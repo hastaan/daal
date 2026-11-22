@@ -258,7 +258,7 @@ describe('the wizard (C7.8)', () => {
     it('the wizard shows the key after Continue; Back returns to the companies', async () => {
         const { default: PublisherWizard } = await import('./PublisherWizard');
         const m = await rig.mount(<PublisherWizard t={t} onDone={() => {}} onCancel={() => {}} />);
-        const title = () => all(m.container, (n) => n.nodeName === 'H2')[0]?.textContent ?? '';
+        const title = () => (all(m.container, (n) => n.nodeType === 1 && n.getAttribute('data-testid') === 'wizard-step-label')[0]?.textContent ?? '');
         expect(title()).toBe(EN['wiz.host.title']);
         expect(byAttr(m.container, 'data-testid', 'wizard-hosts')).not.toBeNull();
         // The key field is not on the first screen.

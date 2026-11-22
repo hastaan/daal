@@ -494,9 +494,14 @@ type cdnDoorResult struct {
 	BoxFirewallRules int    `json:"box_firewall_rules"`
 }
 
+// exitCDNDoorNoRecipient: cdn-door enable on a relay with nobody on it
+// yet. Nothing changed; the app opens the door after the first person.
+const exitCDNDoorNoRecipient = 5
+
 // runCDNDoor opens or closes the relay's ws-cdn-in door through its
 // management. Exit 3: the relay's management has no door (built before
-// the add-on: it needs a rebuild); 1: any other failure.
+// the add-on: it needs a rebuild); 5: the relay has nobody on it yet
+// (enable only; nothing changed); 1: any other failure.
 func runCDNDoor(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cdn-door", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -538,6 +543,10 @@ func runCDNDoor(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	if errors.Is(err, mgmt.ErrCDNDoorUnsupported) {
 		fmt.Fprintf(stderr, "cdn-door: %v\n", err)
 		return 3
+	}
+	if errors.Is(err, mgmt.ErrCDNDoorNoRecipient) {
+		fmt.Fprintf(stderr, "cdn-door: %v\n", err)
+		return exitCDNDoorNoRecipient
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "cdn-door: %v\n", err)

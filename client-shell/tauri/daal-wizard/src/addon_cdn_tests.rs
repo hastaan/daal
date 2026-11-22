@@ -60,6 +60,8 @@ struct Helper {
     /// Answers of cdn-test in order; the last one repeats.
     tests: Vec<Value>,
     remove_incomplete: bool,
+    /// cdn-provision answers a front whose zone publishes no ECH config.
+    front_no_ech: bool,
 }
 
 struct Fx {
@@ -120,7 +122,11 @@ fn fx() -> Fx {
                 assert!(args.windows(2).any(|w| w[0] == "--zone" && w[1] == "example.com"));
                 assert!(args.windows(2).any(|w| w[0] == "--origin-ip" && w[1] == "203.0.113.7"));
                 assert!(args.windows(2).any(|w| w[0] == "--firewall-id" && w[1] == "daal-relay-123"));
-                front()
+                let mut fr = front();
+                if h.front_no_ech {
+                    fr["ech"] = serde_json::json!({"zone_setting":"off","published":false});
+                }
+                fr
             }
             "cdn-door" => {
                 has_record(HOST);
@@ -671,4 +677,142 @@ fn a_relay_without_its_own_key_builds_with_a_copy_of_the_accounts_and_remove_for
     assert!(rep.removed);
     assert!(token_of(&f, op).is_none());
     assert!(account(&f.ctx).unwrap().connected, "the account stays connected");
+}
+
+// ---------------------------------------------------------------------
+// ECH, and a relay with nobody on it
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_front_without_ech_stops_before_the_relay_and_names_the_zone() {
+    let f = fx();
+    let op = with_token(&f);
+    let rec_before = rec_of(&f, op);
+    let before = binds(&f);
+    f.helper.lock().unwrap().front_no_ech = true;
+    let e = build(&f.ctx, CdnBuildInput { operator_id: op, zone: "example.com".into() }, &mut noop()).unwrap_err();
+    assert_eq!(code_of(&e), E_CDN_NO_ECH);
+    assert!(e.to_string().starts_with("E_CDN_NO_ECH: example.com: "), "{e}");
+    assert!(!e.to_string().starts_with("pricing"), "{e}");
+    // Taken down again; the relay was never touched, nothing signed.
+    assert_eq!(verbs(&f), ["cdn-provision", "cdn-remove"]);
+    assert!(list(&f.ctx, op).unwrap().is_empty());
+    assert_eq!(rec_of(&f, op), rec_before);
+    assert_eq!(binds(&f), before);
+}
+
+#[test]
+fn a_signature_refused_for_ech_is_e_cdn_no_ech_not_pricing() {
+    let f = fx();
+    let op = with_token(&f);
+    *f.mock.bind_error.lock().unwrap() = Some(
+        "bind-and-sign: relaypack RP026 at r5: cdn_fronted candidate can never be dialled: \
+         no ech_config and plain_fallback is off"
+            .into(),
+    );
+    let e = build(&f.ctx, CdnBuildInput { operator_id: op, zone: "example.com".into() }, &mut noop()).unwrap_err();
+    assert_eq!(code_of(&e), E_CDN_NO_ECH, "{e}");
+    assert!(e.to_string().starts_with("E_CDN_NO_ECH: example.com: "), "{e}");
+    assert!(list(&f.ctx, op).unwrap().is_empty());
+    // Any other signing failure is the helper's, never "pricing:".
+    *f.mock.bind_error.lock().unwrap() = Some("bind-and-sign: something else".into());
+    let e = build(&f.ctx, CdnBuildInput { operator_id: op, zone: "example.com".into() }, &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("subprocess: "), "{e}");
+}
+
+#[test]
+fn a_relay_with_nobody_on_it_signs_the_route_and_the_door_waits_for_the_first_person() {
+    let f = fx();
+    let op = with_token(&f);
+    let before = binds(&f);
+    f.helper.lock().unwrap().door_fail = Some((5, "cdn-door: mgmt: the relay has nobody on it yet\n".into()));
+    let mut steps = Vec::new();
+    let row = build(
+        &f.ctx,
+        CdnBuildInput { operator_id: op, zone: "example.com".into() },
+        &mut |p| steps.push(format!("{}:{}", p.step, p.state)),
+    )
+    .unwrap();
+    assert_eq!(row.state, AddonState::Ready);
+    assert_eq!(row.detail[DOOR_WAITS], true);
+    assert_eq!(row.detail["name_hidden"], Value::Null, "not tested yet");
+    // Signed, with the route; no test through a shut door; nothing undone.
+    assert_eq!(binds(&f), before + 1);
+    assert_eq!(last_signed_record(&f)[RECORD_MEMBER]["hostname"], HOST);
+    assert_eq!(verbs(&f), ["cdn-provision", "cdn-door"]);
+    assert!(steps.contains(&"door:waiting".to_string()), "{steps:?}");
+
+    // The card's posture: nobody this phone knows of, so the relay is
+    // not even asked; it says the door waits and reads nothing else.
+    f.helper.lock().unwrap().calls.clear();
+    let p = posture(&f.ctx, CdnPostureInput { operator_id: op, test: true }, &mut noop()).unwrap();
+    assert!(p.door_waits);
+    assert_eq!((p.hostname.as_str(), p.zone.as_str()), (HOST, "example.com"));
+    assert!(verbs(&f).is_empty(), "{:?}", verbs(&f));
+    after_person_added(&f.ctx, op);
+    assert!(verbs(&f).is_empty());
+
+    // Someone is on the relay, but it still refuses: it keeps waiting.
+    let who = daal_recipient_addr::encode(&[0x33u8; 32]);
+    crate::recipient_book::recipient_provision(&f.ctx, op, &who, "Bahar").unwrap();
+    assert_eq!(verbs(&f), ["cdn-door"]);
+    assert_eq!(get(&f.ctx, row.id).unwrap().detail[DOOR_WAITS], true);
+    f.helper.lock().unwrap().calls.clear();
+    let p = posture(&f.ctx, CdnPostureInput { operator_id: op, test: true }, &mut noop()).unwrap();
+    assert!(p.door_waits);
+    assert_eq!(verbs(&f), ["cdn-door"]);
+
+    // Then it opens: the card's next read opens it and tests the front
+    // once.
+    f.helper.lock().unwrap().door_fail = None;
+    f.helper.lock().unwrap().calls.clear();
+    let p = posture(&f.ctx, CdnPostureInput { operator_id: op, test: true }, &mut noop()).unwrap();
+    assert!(!p.door_waits);
+    assert_eq!(p.last_test_ok, Some(true));
+    assert_eq!(verbs(&f), ["cdn-door", "cdn-test", "cdn-posture"]);
+    assert!(args_of(&f, "cdn-door")[0].windows(2).any(|w| w[0] == "--action" && w[1] == "enable"));
+    let row = get(&f.ctx, row.id).unwrap();
+    assert_eq!(row.detail[DOOR_WAITS], false);
+    assert_eq!(row.detail["name_hidden"], true);
+    assert_eq!(row.detail["last_test_ok"], true);
+    assert_eq!(binds(&f), before + 1, "nothing signed again");
+
+    // Nothing waits any more: the next person touches nothing.
+    f.helper.lock().unwrap().calls.clear();
+    after_person_added(&f.ctx, op);
+    assert!(verbs(&f).is_empty());
+}
+
+#[test]
+fn an_older_helper_saying_the_relay_has_nobody_also_waits() {
+    let f = fx();
+    let op = with_token(&f);
+    f.helper.lock().unwrap().door_fail = Some((
+        1,
+        "cdn-door: mgmt: cdn enable 409: no recipient on this relay yet: the door opens once there is someone to let in\n".into(),
+    ));
+    let row = built(&f, op);
+    assert_eq!(row.detail[DOOR_WAITS], true);
+    // Another door failure is still a failure, and is undone.
+    let f = fx();
+    let op = with_token(&f);
+    f.helper.lock().unwrap().door_fail = Some((1, "cdn-door: mgmt: cdn enable 500: reload failed\n".into()));
+    let e = build(&f.ctx, CdnBuildInput { operator_id: op, zone: "example.com".into() }, &mut noop()).unwrap_err();
+    assert_eq!(code_of(&e), E_CDN_PROVISION);
+    assert!(list(&f.ctx, op).unwrap().is_empty());
+}
+
+#[test]
+fn adding_a_person_opens_a_door_that_waited() {
+    let f = fx();
+    let op = with_token(&f);
+    f.helper.lock().unwrap().door_fail = Some((5, "cdn-door: nobody on it yet\n".into()));
+    let row = built(&f, op);
+    assert_eq!(row.detail[DOOR_WAITS], true);
+    f.helper.lock().unwrap().door_fail = None;
+    f.helper.lock().unwrap().calls.clear();
+    let who = daal_recipient_addr::encode(&[0x22u8; 32]);
+    crate::recipient_book::recipient_provision(&f.ctx, op, &who, "Bahar").unwrap();
+    assert_eq!(verbs(&f), ["cdn-door", "cdn-test"]);
+    assert_eq!(get(&f.ctx, row.id).unwrap().detail[DOOR_WAITS], false);
 }

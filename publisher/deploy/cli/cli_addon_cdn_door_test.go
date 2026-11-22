@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,10 +74,13 @@ func withDoorFakes(t *testing.T, answer func(action string) (*mgmt.CDNDoorResp, 
 }
 
 func TestCDNDoorVerb(t *testing.T) {
-	unsupported := false
+	unsupported, nobody := false, false
 	calls, recFile, keyFile, frontFile, hzFile := withDoorFakes(t, func(action string) (*mgmt.CDNDoorResp, error) {
 		if unsupported {
 			return nil, mgmt.ErrCDNDoorUnsupported
+		}
+		if nobody {
+			return nil, fmt.Errorf("%w (relay: no recipient on this relay yet)", mgmt.ErrCDNDoorNoRecipient)
 		}
 		return &mgmt.CDNDoorResp{Action: action, Enabled: action == "enable", Port: 8448, WSPath: "/p", Users: 2, BoxFirewallRules: 1}, nil
 	})
@@ -95,6 +99,11 @@ func TestCDNDoorVerb(t *testing.T) {
 	if rc, out, _ := cdnRunCLI(t, args("disable")...); rc != 0 || !strings.Contains(out, `"enabled": false`) {
 		t.Fatalf("disable rc=%d out=%s", rc, out)
 	}
+	nobody = true
+	if rc, _, errs := cdnRunCLI(t, args("enable")...); rc != exitCDNDoorNoRecipient || !strings.Contains(errs, "nobody on it yet") {
+		t.Fatalf("a relay with nobody on it: rc=%d err=%s, want %d", rc, errs, exitCDNDoorNoRecipient)
+	}
+	nobody = false
 	unsupported = true
 	if rc, _, _ := cdnRunCLI(t, args("enable")...); rc != 3 {
 		t.Fatalf("an old relay: rc=%d, want 3 (needs a rebuild)", rc)

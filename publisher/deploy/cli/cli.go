@@ -48,7 +48,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"daal/bundle-go/fountain"
@@ -421,6 +423,7 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	outFile := fs.String("o", "", "write OperatorRecord JSON here (default: stdout)")
 	progressJSON := fs.Bool("progress-json", false, "emit one JSON line per provisioning step on stderr (FRP-4b)")
 	journalPath := fs.String("journal", "", "append a JSON-lines record of everything this run creates, as it creates it, to this file (locked for the run's life); see provjournal")
+	cancelFile := fs.String("cancel-file", "", "stop when this file appears (polled every half second): the app's Cancel. Ctrl-C and SIGTERM do the same. A stop after the server exists rolls it back with --rollback-on-failure, or names it otherwise")
 	cdnEdgeRanges := fs.Bool("cdn-edge-ranges", false, "contact Cloudflare now for its published ranges and open the CDN door's port to them at the box firewall from first boot (add-on 2). Not needed: the door opens its own box-firewall rule when it is turned on (cdn-door), and the app never passes this, so building a relay contacts no one but the hosting company. Skipped with --dry-run; a failed fetch is a warning, not an error")
 
 	if rc := parseFlags(fs, args); rc >= 0 {
@@ -429,6 +432,17 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if *pubkeyFile == "" && *pubkeyAlias != "" {
 		*pubkeyFile = *pubkeyAlias
 	}
+	// Cancel: a signal or the cancel file stops the run through its
+	// context, so whatever this run created is rolled back (or named)
+	// by the provider instead of the process just dying with a server
+	// billing behind it.
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	// The provider's own lines say what the stop removed (a
+	// "provision_rollback" line with cancelled=true); nothing is
+	// written from the watcher, which runs beside the run's writes.
+	ctx, stopWatch := watchCancelFile(ctx, *cancelFile)
+	defer stopWatch()
 	if *toolboxAlias != "" {
 		*toolboxProfile = *toolboxAlias
 	}
@@ -581,6 +595,9 @@ func runProvision(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		OnProgress: func(step, msg string) {
 			emitProgress(*progressJSON, stderr, step, msg, nil)
 		},
+		OnProgressData: func(step, msg string, extra map[string]any) {
+			emitProgress(*progressJSON, stderr, step, msg, extra)
+		},
 		Journal: pj,
 	})
 	if err != nil {
@@ -652,6 +669,36 @@ func checkEdgeRanges(rs []string) error {
 		}
 	}
 	return nil
+}
+
+// cancelFilePoll is how often watchCancelFile looks for the file.
+var cancelFilePoll = 500 * time.Millisecond
+
+// watchCancelFile returns a context that is cancelled once path
+// exists. An empty path watches nothing. A file
+// already there at the start counts: the app removes a stale one
+// before it starts a run.
+func watchCancelFile(parent context.Context, path string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	if path == "" {
+		return ctx, cancel
+	}
+	go func() {
+		t := time.NewTicker(cancelFilePoll)
+		defer t.Stop()
+		for {
+			if _, err := os.Stat(path); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return ctx, cancel
 }
 
 // emitProgress writes one JSON-line step event to stderr when

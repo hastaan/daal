@@ -33,6 +33,12 @@ const CapCDNDoor = "cdn"
 // add-on. The fix is a relay built with a newer pin, not a retry.
 var ErrCDNDoorUnsupported = errors.New("mgmt: this relay's management service has no Cloudflare door (built before the add-on; rebuild the relay)")
 
+// ErrCDNDoorNoRecipient means the relay refused to open the door
+// because nobody is on it yet (409: sing-box refuses an inbound with no
+// users). Nothing was changed on the relay. The app keeps the way in
+// waiting and opens the door once the first person is added.
+var ErrCDNDoorNoRecipient = errors.New("mgmt: the relay has nobody on it yet, so the Cloudflare door cannot open")
+
 // CDNDoorResp is the box's answer to POST /cdn. It never carries key
 // material. Mirrors cdnResp in cmd/daal-relay-mgmt/singbox_cdn.go.
 type CDNDoorResp struct {
@@ -147,6 +153,9 @@ func (c *Client) cdnDoor(ctx context.Context, rec *provider.OperatorRecord, priv
 		return nil, ErrCDNDoorUnsupported
 	default:
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusConflict && door.Action == "enable" {
+			return nil, fmt.Errorf("%w (relay: %s)", ErrCDNDoorNoRecipient, strings.TrimSpace(string(raw)))
+		}
 		return nil, fmt.Errorf("mgmt: cdn %s %d: %s", door.Action, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var got CDNDoorResp

@@ -55,7 +55,11 @@ export function cloudflareTokenUrl(): string {
         { key: 'dns', type: 'edit' },
         { key: 'ssl_and_certificates', type: 'edit' },
         { key: 'zone_settings', type: 'edit' },
-        { key: 'origin_rules', type: 'edit' },
+        // `origin`, not `origin_rules`: the key is the permission group's
+        // name ("Origin Write", shown as "Origin Rules") without its
+        // read/write ending, and Cloudflare silently drops a key that
+        // matches no group, which is how Origin Rules arrived unticked.
+        { key: 'origin', type: 'edit' },
     ]);
     return (
         'https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=' +

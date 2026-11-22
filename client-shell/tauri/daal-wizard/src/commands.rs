@@ -2353,6 +2353,10 @@ pub fn provision_run(
         .map_err(|e| WizardError::Pricing(format!("write pubkey: {e}")))?;
 
     let families: Vec<&str> = rec.enabled_families.iter().map(|s| s.as_str()).collect();
+    // Cancel: a file `provision_cancel` writes. One left from an earlier
+    // run must not stop this one before it starts.
+    let cancel_file = crate::provision_journal::cancel_path(&ctx.journal_dir, operator_id);
+    let _ = std::fs::remove_file(&cancel_file);
     // The last `provision_error` line: on a refusal it carries the code
     // and, for `server_exists`, the id of the server already there.
     let mut last_error: Option<ProgressEvent> = None;
@@ -2387,10 +2391,12 @@ pub fn provision_run(
                 // ProvisionArgs::rollback_on_failure.
                 rollback_on_failure: true,
                 journal_path: Some(&journal),
+                cancel_file: Some(&cancel_file),
             },
             &mut forward,
         );
     let _ = std::fs::remove_file(&pubkey_path);
+    let _ = std::fs::remove_file(&cancel_file);
     let stdout_json = stdout_json.map_err(|e| map_provision_err(e, last_error.as_ref()))?;
 
     ctx.db.update_record_json(operator_id, &stdout_json)?;
@@ -2399,6 +2405,23 @@ pub fn provision_run(
     ctx.db.mark_provisioned(operator_id, now)?;
     // Only now is what the journal recorded safely in the database.
     crate::provision_journal::remove(&ctx.journal_dir, operator_id);
+    Ok(())
+}
+
+/// `provision_cancel`: the build screen's Cancel. Asks the running
+/// `provision` child for this relay to stop; it then rolls back the
+/// server and firewall it created (the run always passes
+/// `--rollback-on-failure`) and reports what it removed on its progress
+/// stream before `provision_run` returns its error. Harmless when no
+/// build is running: `provision_run` clears a stale request first.
+pub fn provision_cancel(ctx: &WizardCtx, operator_id: i64) -> Result<()> {
+    std::fs::create_dir_all(&ctx.journal_dir)
+        .map_err(|e| WizardError::Subprocess(format!("cancel the setup: {e}")))?;
+    std::fs::write(
+        crate::provision_journal::cancel_path(&ctx.journal_dir, operator_id),
+        b"cancel\n",
+    )
+    .map_err(|e| WizardError::Subprocess(format!("cancel the setup: {e}")))?;
     Ok(())
 }
 
@@ -2615,7 +2638,10 @@ pub fn sign_relaypack_with(
                 "the setup helper bundled with this app cannot sign a test relay",
             );
         }
-        WizardError::Pricing(e.to_string())
+        // A signing failure is the helper's, not pricing's: labelled
+        // `subprocess:` so the text says what failed (it used to read
+        // "pricing: … bind-and-sign: …").
+        WizardError::Subprocess(e.to_string())
     })?;
 
     ctx.db
@@ -4053,6 +4079,7 @@ fn rotate_execute_inner(
                         // Journalled like a first setup, so a rebuild
                         // killed half way is found by the account check.
                         journal_path: rotate_journal.as_deref(),
+                        cancel_file: None,
                     },
                     on_progress,
                 )
@@ -6624,6 +6651,35 @@ mod tests {
         assert!(row.last_provisioned_at_unix.is_some());
         assert!(events.iter().any(|e| e.step == "provision_start"));
         assert!(events.iter().any(|e| e.step == "provision_done"));
+    }
+
+    /// The build screen's Cancel: a request left from an earlier run is
+    /// cleared before the child starts, the child is told where to look,
+    /// and nothing is left behind afterwards.
+    #[test]
+    fn provision_run_hands_the_child_a_fresh_cancel_file() {
+        let bind = BindResult { sbp_path: "/tmp/ignored".into(), ..Default::default() };
+        let (base, _dir) = ctx_with_canned(1_700_000_000, &full_record_json(), bind.clone());
+        let mock = Arc::new(
+            MockRunner::new(test_pricing())
+                .with_provision_record(&full_record_json())
+                .with_bind_result(bind),
+        );
+        let ctx = WizardCtx { cli: mock.clone(), ..base };
+        let id = store_cloud_token(&ctx, "hetzner", "tok", None).unwrap();
+        select_profile(&ctx, id, "fsn1", "cx22", "iran-default", vec!["vless-reality".into()]).unwrap();
+        publisher_keygen(&ctx, id).unwrap();
+        set_helper_ip(&ctx, id, "1.2.3.4", "manual").unwrap();
+        // A stale request from a run that already ended.
+        provision_cancel(&ctx, id).unwrap();
+        let path = crate::provision_journal::cancel_path(&ctx.journal_dir, id);
+        assert!(path.exists(), "provision_cancel wrote no request");
+
+        let mut on_prog = |_ev: ProgressEvent| {};
+        provision_run(&ctx, id, "", &mut on_prog).unwrap();
+        let seen = mock.provision_cancel_files.lock().unwrap().clone();
+        assert_eq!(seen, vec![(Some(path.clone()), false)], "stale request reached the child");
+        assert!(!path.exists(), "the cancel request outlived the run");
     }
 
     #[test]

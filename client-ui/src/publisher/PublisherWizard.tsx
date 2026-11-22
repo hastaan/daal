@@ -53,6 +53,8 @@ import {
 } from './setupRecovery';
 import type { RecoveryButton } from './setupRecovery';
 import { explainFailure } from './failureText';
+import { appendEvent, cancelOutcome as readCancelOutcome, clock, healthWait, lineTime, upButNotAnswering, visibleLines } from './buildLog';
+import type { CancelOutcome } from './buildLog';
 import { RelayDestroySheet } from './RelayListPage';
 import { RELAYPACK_PHASE } from './phase';
 import { MoreWaysToConnect } from './MoreWaysToConnect';
@@ -359,7 +361,9 @@ type BuildStage =
     | 'sign'
     | 'share'
     | 'done'
-    | 'failed';
+    | 'failed'
+    /** Stopped with Cancel; what it removed is read from the log. */
+    | 'cancelled';
 
 /** The sub-stages, in execution order, that get a progress line. */
 const BUILD_STAGES: Array<{ id: BuildStage; key: string }> = [
@@ -561,6 +565,10 @@ export default function PublisherWizard({
     const [cancelOutcome, setCancelOutcome] = useState<DestroyReport | null>(null);
     const [cancelError, setCancelError] = useState<{ message: string; detail: string } | null>(null);
     const [cancelDestroyOpen, setCancelDestroyOpen] = useState(false);
+    // Cancel DURING the build (the provision stage): asked once, then
+    // the running provision stops and rolls back what it rented.
+    const buildCancelAsked = useRef(false);
+    const [buildCancelling, setBuildCancelling] = useState(false);
 
     // ---- Streaming logs ----
 
@@ -570,22 +578,16 @@ export default function PublisherWizard({
     useEffect(() => {
         if (!live) return;
         const unsubs: Array<() => void> = [];
-        onProvisionEvent((ev) => setBuildLog((l) => [...l, ev])).then((u) =>
-            unsubs.push(u),
-        );
-        onSignEvent((ev) => setBuildLog((l) => [...l, ev])).then((u) =>
-            unsubs.push(u),
-        );
+        // Both channels below carry the same events: appendEvent keeps
+        // the first copy of each (every line used to show twice).
+        const add = (ev: ProgressEvent) => setBuildLog((l) => appendEvent(l, ev, Date.now()));
+        onProvisionEvent(add).then((u) => unsubs.push(u));
+        onSignEvent(add).then((u) => unsubs.push(u));
         // Fallback: CustomEvent injected via webview.eval() on platforms
         // where the Tauri event bridge is flaky.
         const handleCustom = (e: Event) => {
             const detail = (e as CustomEvent).detail;
-            if (detail?.step) {
-                setBuildLog((l) => [
-                    ...l,
-                    { step: detail.step, message: detail.message },
-                ]);
-            }
+            if (detail?.step) add({ ...detail, message: detail.message ?? '' });
         };
         window.addEventListener('daal-provision-event', handleCustom);
         return () => {
@@ -714,6 +716,13 @@ export default function PublisherWizard({
         try {
             return await fn();
         } catch (e) {
+            if (s === 'provision' && buildCancelAsked.current) {
+                // The person stopped it; the screen says what was removed.
+                setError(null);
+                setFailedAt('provision');
+                setStage('cancelled');
+                return STAGE_FAILED;
+            }
             const code = classifyPublisherError(e);
             // D1: provision found a server for this relay already there,
             // or another setup still holds the journal. Neither is a
@@ -832,6 +841,8 @@ export default function PublisherWizard({
         setAddonProgress({});
         setCancelRec(null);
         setCancelDestroyOpen(false);
+        buildCancelAsked.current = false;
+        setBuildCancelling(false);
         setRecoveryLeaving(false);
         setRecoveryOutcome(null);
         onCancel();
@@ -896,6 +907,23 @@ export default function PublisherWizard({
         resetAfterCancel();
     };
 
+    /** "Remove this relay" after a stopped build. When the rollback said
+     *  the server is deleted, the unfinished relay is only forgotten (it
+     *  was already confirmed once); otherwise the usual cancel, which
+     *  asks the hosting account what is left first. */
+    const onCancelledRemove = async (confirmed: boolean) => {
+        if (operatorId == null) return;
+        if (!confirmed) {
+            await onCancelPress();
+            return;
+        }
+        if (live) {
+            const ok = await run(() => Wizard.cancelAndCleanup(operatorId).then(() => true));
+            if (ok === null) return;
+        }
+        resetAfterCancel();
+    };
+
     const onCancelDelete = async () => {
         if (operatorId == null) return;
         setCancelBusy(true);
@@ -937,6 +965,73 @@ export default function PublisherWizard({
                 ...l,
                 { step: phaseName, message: detail, phase: phaseName, detail, pct },
             ]);
+        }
+    };
+
+    /** Harness only (`?build=wait|unreachable`): the provision as the
+     *  phone sees it on a slow network, slow enough to look at, and
+     *  stoppable with Cancel like the real one. */
+    const fakeHealthWait = async (mode: 'wait' | 'unreachable') => {
+        const add = (ev: ProgressEvent) => setBuildLog((l) => appendEvent(l, ev, Date.now()));
+        const box = '203.0.113.5';
+        const helper = '198.51.100.7';
+        const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        for (const [step, message] of [
+            ['provision_start', 'starting provisioning'],
+            ['provision_create_server', 'Creating server on Hetzner'],
+            ['provision_server_ready', `Server ready: ${box} — waiting for boot (up to 3 min)`],
+            ['provision_cloud_firewall', 'Attaching Daal baseline firewall to server'],
+            ['provision_cloud_firewall', `Opened a temporary cloud firewall window on port 9876 (the relay's health check) for ${helper}`],
+            ['provision_cloud_firewall', `(optional log viewer) Opened a temporary cloud firewall window on port 22 for ${helper}`],
+            ['provision_ssh_debug', '(optional log viewer) SSH observer waiting: dial tcp 203.0.113.5:22: i/o timeout'],
+        ] as const) {
+            add({ step, message });
+            await pause(150);
+        }
+        const max = 60;
+        for (let n = 1; n <= max; n++) {
+            if (buildCancelAsked.current) {
+                add({ step: 'provision_rollback', message: `Cancelled — removing the server that was just created (server_id=4242 ip=${box})`, rollback: 'start', cancelled: true, server_id: '4242', public_ip: box });
+                await pause(600);
+                add({ step: 'provision_rollback', message: 'Rolled back: the server has been deleted, nothing is billing', rollback: 'done', cancelled: true, server_id: '4242', public_ip: box, server_deleted: true, firewall_deleted: true, warnings: 0 });
+                throw new Error('E_CANCELLED: setup cancelled');
+            }
+            const elapsed = 360 + n * 5;
+            add({
+                step: 'provision_health_wait',
+                message: `Waiting for the relay to answer at ${box}:9876 (try ${n} of ${max}, ${clock(elapsed)} so far, window open for ${helper})`,
+                attempt: n, max_attempts: max, elapsed_s: elapsed, box_ip: box, helper_ip: helper, port: 9876,
+            });
+            if (mode === 'unreachable' && n === 3) {
+                add({ step: 'provision_health_unreachable', message: 'The relay is up (port 443 answers) but its health check on port 9876 has not answered this device in 6:15. That may be the network between this device and the relay. Still waiting, up to 60 tries.', box_ip: box, helper_ip: helper });
+            }
+            await pause(900);
+        }
+        throw new Error('hetzner: health check timed out after 60 attempts');
+    };
+
+    /** Cancel during the build: asks once, then stops the provision,
+     *  which deletes the server and firewall it rented. */
+    const onBuildCancel = async () => {
+        if (operatorId == null || buildCancelAsked.current) return;
+        const yes = await confirm.ask({
+            title: t('wiz.build.cancel.title'),
+            body: t('wiz.build.cancel.body'),
+            confirmLabel: t('wiz.build.cancel.go'),
+            cancelLabel: t('wiz.build.cancel.keep'),
+            danger: true,
+        });
+        if (!yes || buildCancelAsked.current) return;
+        buildCancelAsked.current = true;
+        setBuildCancelling(true);
+        if (live) {
+            try {
+                await Wizard.provisionCancel(operatorId);
+            } catch (e) {
+                buildCancelAsked.current = false;
+                setBuildCancelling(false);
+                setError(String(e));
+            }
         }
     };
 
@@ -1017,6 +1112,8 @@ export default function PublisherWizard({
         setFailedAt(null);
         setHelperIpRepair(null);
         setBuildLog([]);
+        buildCancelAsked.current = false;
+        setBuildCancelling(false);
         setBusy(true);
         try {
             // 0. Helper IP must exist before ANY mgmt-plane call.
@@ -1070,7 +1167,9 @@ export default function PublisherWizard({
                         ? withHelperIp(opId, () =>
                               Wizard.provisionRun(opId, existingId),
                           )
-                        : fakeProgress('provision', [
+                        : harnessBuildPreview()
+                          ? fakeHealthWait(harnessBuildPreview()!)
+                          : fakeProgress('provision', [
                               ['create server', 10],
                               ['await SSH', 40],
                               ['toolbox bring-up', 80],
@@ -1088,6 +1187,16 @@ export default function PublisherWizard({
                     return;
                 }
                 setAlreadyProvisioned(true);
+                if (buildCancelAsked.current) {
+                    // The relay finished before the stop reached it: it
+                    // is a real server now, so the stop is the same
+                    // teardown the relay list offers.
+                    setBuildCancelling(false);
+                    setFailedAt('sign');
+                    setStage('cancelled');
+                    setCancelDestroyOpen(true);
+                    return;
+                }
             } else {
                 setStage('provision');
             }
@@ -1209,8 +1318,10 @@ export default function PublisherWizard({
     }, [stepIdx, stage, operatorId, awaitingBuildConsent]);
 
     const step = STEPS[stepIdx];
+    const wait = healthWait(buildLog);
+    const notAnswering = upButNotAnswering(buildLog);
     const building =
-        stage !== 'idle' && stage !== 'done' && stage !== 'failed';
+        stage !== 'idle' && stage !== 'done' && stage !== 'failed' && stage !== 'cancelled';
 
     // System Back: one step back, else back to the list it came from.
     // While the build runs it is refused and says why.
@@ -1264,7 +1375,7 @@ export default function PublisherWizard({
     // grey (the user needs to see the box was created before the sign
     // failed, or they will assume they lost it).
     const stageIdx = BUILD_STAGES.findIndex(
-        (s) => s.id === (stage === 'failed' ? failedAt : stage),
+        (s) => s.id === (stage === 'failed' || stage === 'cancelled' ? failedAt : stage),
     );
 
     /** The hosting account is connected: no key to paste (the person
@@ -1999,7 +2110,7 @@ export default function PublisherWizard({
                                         (stageIdx >= 0 && i < stageIdx);
                                     const active = stage === s.id;
                                     const failed =
-                                        stage === 'failed' && failedAt === s.id;
+                                        (stage === 'failed' || stage === 'cancelled') && failedAt === s.id;
                                     return (
                                         <li
                                             key={s.id}
@@ -2015,7 +2126,8 @@ export default function PublisherWizard({
                                             }}
                                         >
                                             <StateIcon
-                                                state={failed ? 'bad' : done ? 'ok' : active ? 'busy' : 'none'}
+                                                // A stopped step is not a failure: grey, not red.
+                                                state={failed ? (stage === 'cancelled' ? 'off' : 'bad') : done ? 'ok' : active ? 'busy' : 'none'}
                                                 size={20}
                                             />
                                             <span>{t(buildStageKey(s.id, s.key, !!useExisting))}</span>
@@ -2035,6 +2147,64 @@ export default function PublisherWizard({
                                 >
                                     {t('wiz.build.hint')}
                                 </div>
+                            )}
+
+                            {/* The health wait, live: which try, how long.
+                                It used to run 10-20 minutes with nothing
+                                on screen but a spinner. */}
+                            {stage === 'provision' && wait && !buildCancelling && (
+                                <div
+                                    role="status"
+                                    data-testid="build-wait"
+                                    style={{ fontSize: 13, color: 'var(--fg)', marginBottom: 8, lineHeight: 1.5 }}
+                                >
+                                    {fmt(t('wiz.build.wait.line'), {
+                                        n: readerNum(wait.attempt),
+                                        max: readerNum(wait.max),
+                                        time: readerNum(clock(wait.elapsedS)),
+                                    })}
+                                </div>
+                            )}
+                            {stage === 'provision' && notAnswering && !buildCancelling && (
+                                <div
+                                    role="status"
+                                    data-testid="build-not-answering"
+                                    style={{
+                                        fontSize: 13,
+                                        color: 'var(--fg)',
+                                        background: 'var(--surface-2)',
+                                        borderInlineStart: '3px solid var(--gold)',
+                                        borderRadius: 'var(--radius-md)',
+                                        padding: '8px 10px',
+                                        marginBottom: 10,
+                                        lineHeight: 1.5,
+                                    }}
+                                >
+                                    {dt('wiz.build.wait.not_answering')}
+                                </div>
+                            )}
+                            {stage === 'provision' && buildCancelling && (
+                                <div role="status" data-testid="build-cancelling" style={{ fontSize: 13, color: 'var(--fg)', marginBottom: 10, lineHeight: 1.5 }}>
+                                    {t('wiz.build.cancelling')}
+                                </div>
+                            )}
+                            {stage === 'provision' && !buildCancelling && (live || harnessBuildPreview()) && (
+                                <div style={{ marginBottom: 10 }}>
+                                    <Button variant="secondary" size="sm" onClick={() => void onBuildCancel()} dataButton="build-cancel">
+                                        {t('wiz.build.cancel')}
+                                    </Button>
+                                </div>
+                            )}
+
+                            {stage === 'cancelled' && (
+                                <CancelledCard
+                                    t={t}
+                                    outcome={readCancelOutcome(buildLog)}
+                                    provisioned={alreadyProvisioned}
+                                    busy={busy || cancelBusy}
+                                    onRemove={(confirmed) => void onCancelledRemove(confirmed)}
+                                    onAgain={() => { void runBuild(); }}
+                                />
                             )}
 
                             {/* The raw log is for someone helping (H-52). */}
@@ -2259,7 +2429,7 @@ export default function PublisherWizard({
                     persisted in the DB and survives relaunch, so this is
                     the only way to abandon a half-built relay and stop it
                     being resumed forever. */}
-                {operatorId != null && !building && stepIdx > 0 && stage !== 'done' && (
+                {operatorId != null && !building && stepIdx > 0 && stage !== 'done' && stage !== 'cancelled' && (
                     <div>
                         <Button variant="link" onClick={() => void onCancelPress()} dataButton="wizard-cancel" style={{ color: 'var(--red)' }}>
                             {t('wiz.cancel')}
@@ -2409,19 +2579,26 @@ function StepStrip({
                     );
                 })}
             </div>
-            <h2
+            {/* One small label, not a second heading: the page title
+                above is the only heading (the owner counted three
+                layers of title on the phone, 2026-11-22). */}
+            <span
+                data-testid="wizard-step-label"
+                aria-current="step"
                 style={{
-                    fontFamily: 'var(--font-display)',
-                    fontSize: 18,
-                    fontWeight: 500,
+                    fontSize: 13,
+                    fontWeight: 600,
                     margin: 0,
                     minWidth: 0,
-                    color: 'var(--fg)',
+                    color: 'var(--muted)',
                     lineHeight: 1.3,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
                 }}
             >
                 {ready ? t('wiz.step.build.ready') : t(titleKey ?? STEPS[stepIdx]?.titleKey ?? 'wiz.step.cloud.title')}
-            </h2>
+            </span>
         </div>
     );
 }
@@ -2746,16 +2923,20 @@ function NavRow({
     );
 }
 
-function EventList({ events }: { events: ProgressEvent[] }) {
+function EventList({ events: all }: { events: ProgressEvent[] }) {
     const listRef = useRef<HTMLUListElement | null>(null);
+    // The health wait is one live line (its latest try), not sixty.
+    const events = visibleLines(all);
     useEffect(() => {
         const el = listRef.current;
         if (el) el.scrollTop = el.scrollHeight;
-    }, [events.length]);
+    }, [all.length]);
     if (events.length === 0) return null;
     return (
         <ul
             ref={listRef}
+            dir="ltr"
+            data-testid="build-log-lines"
             style={{
                 listStyle: 'none',
                 margin: '10px 0 0',
@@ -2771,12 +2952,99 @@ function EventList({ events }: { events: ProgressEvent[] }) {
             }}
         >
             {events.map((ev, i) => (
-                <li key={i} style={{ whiteSpace: 'pre-wrap', marginBottom: 4 }}>
-                    [{ev.step || ev.phase}] {ev.message || ev.detail}
+                <li
+                    key={i}
+                    data-step={ev.step || ev.phase}
+                    style={{
+                        whiteSpace: 'pre-wrap',
+                        marginBottom: 4,
+                        // The live line stands out; the optional log
+                        // viewer's lines step back.
+                        color: ev.step === 'provision_health_wait' || ev.step === 'provision_health_unreachable'
+                            ? 'var(--fg)'
+                            : undefined,
+                        opacity: ev.step === 'provision_ssh_debug' ? 0.7 : undefined,
+                    }}
+                >
+                    <span style={{ opacity: 0.65 }}>{lineTime(ev)}</span> [{ev.step || ev.phase}] {ev.message || ev.detail}
                     {ev.pct !== undefined && ` · ${ev.pct}%`}
                 </li>
             ))}
         </ul>
+    );
+}
+
+/** Harness only: `?build=wait|unreachable` makes the fake provision
+ *  wait for the relay like a slow real one. */
+function harnessBuildPreview(): 'wait' | 'unreachable' | null {
+    if (typeof window === 'undefined') return null;
+    const q = new URLSearchParams(window.location.search || window.location.hash.split('?')[1] || '');
+    const v = q.get('build');
+    return v === 'wait' || v === 'unreachable' ? v : null;
+}
+
+/** After Cancel: what was removed, and the two ways on. */
+function CancelledCard({
+    t,
+    outcome,
+    provisioned,
+    busy,
+    onRemove,
+    onAgain,
+}: {
+    t: (k: string) => string;
+    outcome: CancelOutcome;
+    /** The relay finished before the stop arrived: the destroy sheet
+     *  is open, and this card only says so. */
+    provisioned: boolean;
+    busy: boolean;
+    /** `confirmed`: the rollback said the server is deleted. */
+    onRemove: (confirmed: boolean) => void;
+    onAgain: () => void;
+}) {
+    const gone = outcome.serverDeleted && outcome.warnings === 0;
+    const nothingRented = !outcome.rented && !provisioned;
+    const removed: string[] = [];
+    if (outcome.serverDeleted) {
+        removed.push(outcome.ip ? fmt(t('wiz.build.cancelled.server'), { ip: outcome.ip }) : t('wiz.build.cancelled.server_noip'));
+    }
+    if (outcome.firewallDeleted) removed.push(t('wiz.build.cancelled.firewall'));
+    const status = provisioned
+        ? t('wiz.build.cancelled.finished_first')
+        : nothingRented
+          ? t('wiz.build.cancelled.nothing')
+          : gone
+            ? t('wiz.build.cancelled.not_billing')
+            : t('wiz.build.cancelled.unsure');
+    return (
+        <div data-testid="build-cancelled" data-outcome={provisioned ? 'provisioned' : nothingRented ? 'nothing' : gone ? 'removed' : 'unsure'} style={{ display: 'grid', gap: 10, margin: '4px 0 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <StateIcon state={gone || nothingRented ? 'ok' : 'warn'} size={20} />
+                <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>{t('wiz.build.cancelled.title')}</span>
+            </div>
+            {removed.length > 0 && (
+                <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 13, color: 'var(--fg)', lineHeight: 1.6 }}>
+                    {removed.map((r) => (
+                        <li key={r}>
+                            <bdi>{r}</bdi>
+                        </li>
+                    ))}
+                </ul>
+            )}
+            <p style={{ margin: 0, fontSize: 13, color: gone || nothingRented ? 'var(--muted)' : 'var(--gold)', lineHeight: 1.5 }}>
+                {status}
+            </p>
+            {!provisioned && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <Button variant={gone || nothingRented ? 'secondary' : 'primary'} disabled={busy} onClick={() => onRemove(gone)} dataButton="build-cancelled-remove">
+                        {gone || nothingRented ? t('wiz.build.cancelled.remove') : t('wiz.build.cancelled.check')}
+                    </Button>
+                    <Button variant="ghost" disabled={busy} onClick={onAgain} dataButton="build-cancelled-again">
+                        {t('wiz.build.cancelled.again')}
+                    </Button>
+                </div>
+            )}
+        </div>
     );
 }
 

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"daal/publisher/deploy/relayports"
 )
@@ -119,7 +120,7 @@ func TestProvisionFront_HappyPath(t *testing.T) {
 	if len(rules) != 1 || rules[0].Hostname != rec.Hostname || rules[0].Port != relayports.CDNOrigin.Port || rules[0].Ref != rec.OriginRuleRef {
 		t.Errorf("origin rules = %+v", rules)
 	}
-	// ECH read, not changed.
+	// ECH already on: read, not changed.
 	if rec.ECH.ZoneSetting != "on" || !rec.ECH.Published || rec.ECH.PublicName != "cloudflare-ech.com" || !rec.ECH.NameHidden(rec.Hostname) {
 		t.Errorf("ech = %+v", rec.ECH)
 	}
@@ -375,6 +376,88 @@ func TestRemove_TakesEverythingDownAndRestoresSettings(t *testing.T) {
 			t.Errorf("%s left", f)
 		}
 	}
+}
+
+// A zone with ECH off: Daal turns it on, records that it did, waits
+// for the HTTPS record to carry the config, and Remove turns it off
+// again.
+func TestProvisionFront_TurnsECHOnAndWaitsForTheRecord(t *testing.T) {
+	defer shrinkECHWait(t)()
+	m := NewMockCFClient("example.com")
+	z := "zone-example.com"
+	m.Settings[z]["ech"] = "off"
+	before := snap(m)
+	p := NewProvider(m)
+	opts := mkOpts(t.TempDir())
+	f := &MockECHFetcher{ConfigList: testECHConfigList(t, "cloudflare-ech.com"), Zone: m, ZoneID: z, LagCalls: 2}
+	opts.ECH = f
+	rec, err := p.ProvisionFront(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Settings[z]["ech"] != "on" || rec.PriorSettings["ech"] != "off" {
+		t.Errorf("ech setting = %q, prior = %v", m.Settings[z]["ech"], rec.PriorSettings)
+	}
+	if len(f.Calls) != 3 {
+		t.Errorf("DoH reads = %d, want 3 (two lagging, then the record)", len(f.Calls))
+	}
+	if !rec.ECH.Published || rec.ECH.ConfigListB64 == "" || rec.ECH.ZoneSetting != "on" || rec.ECH.Error != "" {
+		t.Errorf("ech = %+v", rec.ECH)
+	}
+	if _, err := p.Remove(context.Background(), []byte(testToken), rec); err != nil {
+		t.Fatal(err)
+	}
+	if after := snap(m); !reflect.DeepEqual(before, after) {
+		t.Errorf("zone not back to start:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// The record never comes: a bounded number of reads, then the posture
+// says unpublished and provisioning still succeeds (the caller decides).
+func TestProvisionFront_ECHNeverPublishedIsBounded(t *testing.T) {
+	defer shrinkECHWait(t)()
+	m := NewMockCFClient("example.com")
+	p := NewProvider(m)
+	opts := mkOpts(t.TempDir())
+	f := &MockECHFetcher{}
+	opts.ECH = f
+	rec, err := p.ProvisionFront(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Calls) != ECHPublishTries || rec.ECH.Published {
+		t.Errorf("reads = %d (want %d), ech = %+v", len(f.Calls), ECHPublishTries, rec.ECH)
+	}
+}
+
+// Cloudflare refuses the ECH setting: not fatal, said in the posture,
+// and nothing recorded to restore.
+func TestProvisionFront_ECHSettingRefused(t *testing.T) {
+	defer shrinkECHWait(t)()
+	m := NewMockCFClient("example.com")
+	z := "zone-example.com"
+	m.Settings[z]["ech"] = "off"
+	m.FailSetting = map[string]error{"ech": errors.New("403 forbidden")}
+	p := NewProvider(m)
+	opts := mkOpts(t.TempDir())
+	opts.ECH = &MockECHFetcher{ConfigList: testECHConfigList(t, "cloudflare-ech.com"), Zone: m, ZoneID: z}
+	rec, err := p.ProvisionFront(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rec.PriorSettings["ech"]; ok || rec.ECH.Published || rec.ECH.ZoneSetting != "off" {
+		t.Errorf("prior = %v, ech = %+v", rec.PriorSettings, rec.ECH)
+	}
+	if !strings.Contains(rec.ECH.Error, "turn ECH on") {
+		t.Errorf("ech error = %q", rec.ECH.Error)
+	}
+}
+
+func shrinkECHWait(t *testing.T) func() {
+	t.Helper()
+	d := ECHPublishDelay
+	ECHPublishDelay = time.Millisecond
+	return func() { ECHPublishDelay = d }
 }
 
 // A setting the publisher changed after the build is theirs.

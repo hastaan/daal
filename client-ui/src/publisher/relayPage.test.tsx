@@ -427,3 +427,14 @@ describe('what the sheets tell the publisher to press exists on the page', () =>
         expect(FA['pub.danger.rotate_tls.done.sign_failed.next']).toContain('پیام پایین می‌گوید');
     });
 });
+
+describe('the Accounts summary on the publisher page', () => {
+    it('names Google when the Google account is connected', async () => {
+        const { connectedAccountNames } = await import('./RelayListPage');
+        const t = (k: string) => (k === 'wiz.provider.hetzner.label' ? 'Hetzner Cloud' : k);
+        const all = { hetzner: true, cloudflare: { connected: true }, google: { connected: true } };
+        expect(connectedAccountNames(all, t)).toEqual(['Hetzner Cloud', 'Cloudflare', 'Google']);
+        expect(connectedAccountNames({ ...all, google: { connected: false } }, t)).toEqual(['Hetzner Cloud', 'Cloudflare']);
+        expect(connectedAccountNames({ hetzner: false, cloudflare: { connected: false }, google: { connected: true } }, t)).toEqual(['Google']);
+    });
+});

@@ -151,7 +151,7 @@ export function WizardAddonsProgress({
                     const copy = ADDON_COPY.find((c) => c.kind === kind)!;
                     const status =
                         st.k === 'on'
-                            ? t('pub.addons.state.on')
+                            ? t(st.waitsForPerson ? 'pub.addons.cdn.waits_person' : 'pub.addons.state.on')
                             : st.k === 'running'
                               ? t('pub.addons.state.running')
                               : st.k === 'waiting'
@@ -184,7 +184,13 @@ export function WizardAddonsProgress({
                                     {status && (
                                         <span
                                             data-testid={`wizard-addon-${kind}-status`}
-                                            style={{ ...MUTED, flex: '0 1 auto', minWidth: 0, color: st.k === 'on' ? 'var(--green)' : undefined }}
+                                            data-waits={st.k === 'on' && st.waitsForPerson ? 'person' : undefined}
+                                            style={{
+                                                ...MUTED,
+                                                flex: '0 1 auto',
+                                                minWidth: 0,
+                                                color: st.k === 'on' && !st.waitsForPerson ? 'var(--green)' : undefined,
+                                            }}
                                         >
                                             {status}
                                         </span>

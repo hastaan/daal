@@ -233,6 +233,10 @@ pub fn recipient_provision(
         }
         let _ = std::fs::remove_file(&creds_path);
     }
+    // A way in through Cloudflare set up while nobody was on the relay
+    // waits for its door: this person is someone to let in. Never fails
+    // the add.
+    crate::addon_cdn::after_person_added(ctx, operator_id);
     Ok(summary)
 }
 
@@ -447,6 +451,9 @@ pub fn produce_shared_sbp(
     ctx.db
         .stamp_shared_box_fp(operator_id)
         .map_err(WizardError::Db)?;
+    // The shared user is someone on the relay too: a Cloudflare door
+    // that waited for the first person opens now. Never fails the share.
+    crate::addon_cdn::after_person_added(ctx, operator_id);
     Ok(out)
 }
 

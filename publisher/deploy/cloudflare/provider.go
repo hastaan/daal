@@ -187,8 +187,10 @@ type undoStep struct {
 //  4. SSL mode Full (strict) and WebSockets on, zone-wide;
 //  5. a proxied A (and AAAA) record for the hostname;
 //  6. an Origin Rule sending that hostname to the relay's CDN port;
-//  7. read the ECH posture (zone setting, and the published HTTPS
-//     record when opts.ECH is set). ECH is left as Cloudflare has it.
+//  7. ECH on when the zone has it off (recorded in PriorSettings, so
+//     Remove restores it), then the ECH posture: the zone setting and,
+//     when opts.ECH is set, the published HTTPS record, read again a
+//     few times while it is not there yet.
 //
 // Any failure undoes everything already done, in reverse, and returns a
 // *ProvisionError. Zone settings are put back to the value they had.
@@ -366,10 +368,52 @@ func (p *Provider) ProvisionFront(ctx context.Context, opts CloudflareOpts) (*Fr
 		return p.cf.RemoveOriginRule(ctx, tok, zone.ID, rec.OriginRuleRef)
 	}})
 
-	// 7. ECH posture. Read-only and never fatal: the endpoint can be
-	// signed without a config (the card then says "Name hidden: no").
-	rec.ECH = p.readECH(ctx, tok, zone.ID, host, opts.ECH, now())
+	// 7. ECH. A zone with it off publishes no ech parameter, and a CDN
+	// route without an ECH config can never be dialled unless the
+	// publisher allows the plain hello (relaypack RP026), so Daal turns
+	// it on, records that it did (Remove puts it back), and reads the
+	// HTTPS record again for a while, because Cloudflare publishes the
+	// new record a little later. Not fatal: the setting endpoint can
+	// refuse, and the caller decides what a route without ECH means.
+	rec.ECH = p.ensureECH(ctx, tok, zone.ID, host, opts.ECH, rec, now)
 	return rec, nil
+}
+
+// ECHPublishTries and ECHPublishDelay bound the wait for the HTTPS
+// record after ECH is turned on (or on a name that is new): about 30 s
+// in all. Variables so tests can shrink them.
+var (
+	ECHPublishTries = 5
+	ECHPublishDelay = 7 * time.Second
+)
+
+// ensureECH turns the zone's ECH setting on when it reads "off",
+// recording the prior value in rec.PriorSettings, then reads the
+// posture, retrying the DoH read while the zone says on and the
+// hostname does not yet publish a config.
+func (p *Provider) ensureECH(ctx context.Context, tok []byte, zoneID, host string, f ECHFetcher, rec *FrontRecord, now func() time.Time) ECHPosture {
+	var setErr string
+	if v, err := p.cf.GetZoneSetting(ctx, tok, zoneID, "ech"); err == nil && v == "off" {
+		if err := p.cf.SetZoneSetting(ctx, tok, zoneID, "ech", "on"); err != nil {
+			setErr = "turn ECH on: " + scrub(err, tok).Error()
+		} else {
+			rec.PriorSettings["ech"] = "off"
+		}
+	}
+	post := p.readECH(ctx, tok, zoneID, host, f, now())
+	for i := 1; f != nil && i < ECHPublishTries && post.ZoneSetting == "on" && !post.Published; i++ {
+		if !sleepCtx(ctx, ECHPublishDelay) {
+			break
+		}
+		post = p.readECH(ctx, tok, zoneID, host, f, now())
+	}
+	if setErr != "" {
+		if post.Error != "" {
+			setErr = post.Error + "; " + setErr
+		}
+		post.Error = setErr
+	}
+	return post
 }
 
 func (p *Provider) readECH(ctx context.Context, tok []byte, zoneID, host string, f ECHFetcher, now time.Time) ECHPosture {
@@ -389,6 +433,18 @@ func (p *Provider) readECH(ctx context.Context, tok []byte, zoneID, host string,
 	}
 	post.ZoneSetting = v
 	return post
+}
+
+// sleepCtx waits d, or less when ctx ends first (false then).
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func onOff(b bool) string {
@@ -716,7 +772,7 @@ func (p *Provider) Remove(ctx context.Context, cfToken []byte, rec *FrontRecord)
 // where it still holds the value Daal set: a publisher who changed it
 // since then keeps their choice.
 func (p *Provider) restoreSettings(ctx context.Context, tok []byte, rec *FrontRecord) error {
-	set := map[string]string{"ssl": "strict", "websockets": "on"}
+	set := map[string]string{"ssl": "strict", "websockets": "on", "ech": "on"}
 	var first error
 	for name, ours := range set {
 		was, ok := rec.PriorSettings[name]

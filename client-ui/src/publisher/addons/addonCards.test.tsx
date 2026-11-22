@@ -88,6 +88,14 @@ describe('what a failure says', () => {
         expect(e.line).toBe(en('pub.addons.err.E_STANDBY_LIMIT'));
         expect(e.detail).toContain('resource_limit_exceeded');
         expect(errs.addonErrorText(en, 'kaboom').line).toBe(en('pub.addons.err.other'));
+        // A known code without an add-on sentence keeps its own plain one.
+        expect(errs.addonErrorText(en, 'E_RELAY_KEYS_CHANGED: x').line).toBe(en('pub.relay_keys_changed'));
+        expect(errs.addonErrorText(en, 'subprocess: dial tcp: i/o timeout').line).toBe(en('pub.fail.unreachable'));
+        // ECH off: the zone in the sentence.
+        const ech = errs.addonErrorText(en, 'E_CDN_NO_ECH: example.org: Cloudflare publishes no ECH config');
+        expect(ech.code).toBe('E_CDN_NO_ECH');
+        expect(ech.line).toBe(en('pub.addons.err.E_CDN_NO_ECH').replace('{zone}', 'example.org'));
+        expect(ech.detail).toContain('publishes no ECH config');
         // A relay that would bind the standby where its own traffic can
         // leave from it: one plain line, the helper's text in Details only.
         const old = 'E_STANDBY_NEEDS_REBUILD: E_STANDBY_NEEDS_REBUILD: this relay\'s software binds a second address where the relay\'s own traffic could leave from it; Nothing was rented (the relay advertises: bind-address)';
@@ -163,7 +171,7 @@ describe('the Google account sheet', () => {
         const u = new URL(cloudflareTokenUrl());
         expect(u.origin).toBe('https://dash.cloudflare.com');
         const groups = JSON.parse(u.searchParams.get('permissionGroupKeys') ?? '[]') as { key: string }[];
-        expect(groups.map((g) => g.key)).toEqual(['zone', 'dns', 'ssl_and_certificates', 'zone_settings', 'origin_rules']);
+        expect(groups.map((g) => g.key)).toEqual(['zone', 'dns', 'ssl_and_certificates', 'zone_settings', 'origin']);
     });
 });
 
