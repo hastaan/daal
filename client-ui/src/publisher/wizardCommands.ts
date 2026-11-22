@@ -35,12 +35,12 @@ import type {
     CdnPostureInput,
     CdnTokenCheck,
     CdnTokenInput,
-    GoogleAttachInput,
+    GoogleAccount,
+    GoogleAccountAttachInput,
     GoogleCheck,
     GoogleCheckInput,
+    GoogleOnInput,
     GoogleScript,
-    GoogleScriptInput,
-    GoogleSignInInput,
     StandbyAddInput,
     StandbyKey,
     StandbyKeyInput,
@@ -1951,16 +1951,22 @@ export const Addons = {
         invoke<AddonRow>('wizard_addon_cdn_set_plain_fallback', { input }),
 
     // ---- update channel through Google
-    /** Path B: the script to paste, with its write key in it. */
-    googleScript: (input: GoogleScriptInput) =>
-        invoke<GoogleScript>('wizard_addon_google_script', { input }),
-    /** Path A: sign in once, deploy, throw the token away. The token
+    /** Accounts → Google: connected or not, and whether this build may
+     *  offer "Sign in with Google". Local. */
+    googleAccount: () => invoke<GoogleAccount>('wizard_google_account'),
+    /** The account's script to paste, with its write key in it. */
+    googleAccountScript: () => invoke<GoogleScript>('wizard_google_account_script'),
+    /** The web-app address pasted back: written to and read back
+     *  through Google before it counts as connected. */
+    googleAccountAttach: (input: GoogleAccountAttachInput) =>
+        invoke<GoogleAccount>('wizard_google_account_attach', { input }),
+    /** The same step by signing in (only when `sign_in`). The token
      *  never reaches the page. */
-    googleSignIn: (input: GoogleSignInInput) =>
-        invoke<AddonRow>('wizard_addon_google_sign_in', { input }),
-    /** Path B: the web-app address pasted back. */
-    googleAttach: (input: GoogleAttachInput) =>
-        invoke<AddonRow>('wizard_addon_google_attach', { input }),
+    googleAccountSignIn: () => invoke<GoogleAccount>('wizard_google_account_sign_in'),
+    /** Forget the account; relays that use it keep their own copies. */
+    googleAccountDisconnect: () => invoke<void>('wizard_google_account_disconnect'),
+    /** A relay's switch, on: a slot in the account's script. */
+    googleOn: (input: GoogleOnInput) => invoke<AddonRow>('wizard_addon_google_on', { input }),
     googleCheck: (input: GoogleCheckInput) =>
         invoke<GoogleCheck>('wizard_addon_google_check', { input }),
 };

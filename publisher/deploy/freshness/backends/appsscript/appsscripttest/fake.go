@@ -5,10 +5,11 @@
 // the request's authority, the way Google's front does. Nothing here
 // reaches the network.
 //
-// The web app runs the rules of Code.gs in Go, with the write key and
-// path token read out of the source that was actually uploaded (or
-// pasted, for Path B), so a test proves what Daal deployed, not what
-// the test assumed.
+// The web app runs the rules of Code.gs in Go (one container per slot,
+// the slot's read token derived from the write key), with the write key
+// read out of the source that was actually uploaded (or pasted, for
+// Path B), so a test proves what Daal deployed, not what the test
+// assumed.
 package appsscripttest
 
 import (
@@ -78,11 +79,16 @@ type project struct {
 }
 
 type webApp struct {
-	writeKey  []byte
-	pathToken string
-	seq       uint64
-	blob      string
-	posts     int
+	writeKey []byte
+	slots    map[string]*slotState
+	posts    int
+	// Full: the property store refuses every new write.
+	full bool
+}
+
+type slotState struct {
+	seq  uint64
+	blob string
 }
 
 type echoed struct {
@@ -172,7 +178,7 @@ func (f *Fake) ExpectChallenge(code, challenge string) {
 
 // DeployByHand is Path B: the publisher pastes code into a new project
 // and deploys it as a web app. It returns the address Google shows
-// (no k).
+// (no query).
 func (f *Fake) DeployByHand(code string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -192,24 +198,47 @@ func (f *Fake) Projects() int {
 	return len(f.projects)
 }
 
-// Stored is what a deployment's web app holds now.
-func (f *Fake) Stored(deploymentID string) (seq uint64, blob string, ok bool) {
+// Stored is what one slot of a deployment's web app holds now.
+func (f *Fake) Stored(deploymentID, slot string) (seq uint64, blob string, ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	a, ok := f.apps[deploymentID]
 	if !ok {
 		return 0, "", false
 	}
-	return a.seq, a.blob, true
+	st, ok := a.slots[slot]
+	if !ok {
+		return 0, "", false
+	}
+	return st.seq, st.blob, true
 }
 
-// SetStored overwrites what a web app holds (a vandal with Google
-// access, or an older script).
-func (f *Fake) SetStored(deploymentID string, seq uint64, blob string) {
+// Slots is how many slots a deployment's web app holds.
+func (f *Fake) Slots(deploymentID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if a, ok := f.apps[deploymentID]; ok {
-		a.seq, a.blob = seq, blob
+		return len(a.slots)
+	}
+	return 0
+}
+
+// SetStored overwrites what one slot holds (a vandal with Google
+// access, or an older script).
+func (f *Fake) SetStored(deploymentID, slot string, seq uint64, blob string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.apps[deploymentID]; ok {
+		a.slots[slot] = &slotState{seq: seq, blob: blob}
+	}
+}
+
+// SetFull makes a web app's property store refuse new writes.
+func (f *Fake) SetFull(deploymentID string, full bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if a, ok := f.apps[deploymentID]; ok {
+		a.full = full
 	}
 }
 
@@ -226,21 +255,20 @@ func (f *Fake) newID(prefix string) string {
 }
 
 var (
-	keyRe   = regexp.MustCompile(`var WRITE_KEY_B64 = '([A-Za-z0-9+/=]+)';`)
-	tokenRe = regexp.MustCompile(`var PATH_TOKEN = '([A-Za-z0-9_-]{22})';`)
+	keyRe  = regexp.MustCompile(`var WRITE_KEY_B64 = '([A-Za-z0-9+/=]+)';`)
+	slotRe = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 )
 
 func appFromCode(code string) (*webApp, error) {
 	k := keyRe.FindStringSubmatch(code)
-	t := tokenRe.FindStringSubmatch(code)
-	if k == nil || t == nil {
+	if k == nil || !strings.Contains(code, "'daal-refresh-v2'") {
 		return nil, fmt.Errorf("fake: the code is not Daal's script")
 	}
 	key, err := base64.StdEncoding.DecodeString(k[1])
 	if err != nil || len(key) != 32 {
 		return nil, fmt.Errorf("fake: bad write key in the code")
 	}
-	return &webApp{writeKey: key, pathToken: t[1]}, nil
+	return &webApp{writeKey: key, slots: map[string]*slotState{}}, nil
 }
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +468,7 @@ func (f *Fake) exec(w http.ResponseWriter, r *http.Request, body []byte) {
 	case f.SignInWall:
 		out = echoed{200, "text/html", "<html><body>Sign in - Google Accounts</body></html>"}
 	case r.Method == http.MethodGet:
-		out = echoed{200, "text/plain", app.doGet(r.URL.Query().Get("k"))}
+		out = echoed{200, "text/plain", app.doGet(r.URL.Query().Get("s"), r.URL.Query().Get("k"))}
 	case r.Method == http.MethodPost:
 		out = echoed{200, "application/json", app.doPost(body)}
 	default:
@@ -465,14 +493,21 @@ func (f *Fake) echoBack(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, out.body)
 }
 
-func (a *webApp) doGet(k string) string {
-	if subtle.ConstantTimeCompare([]byte(k), []byte(a.pathToken)) != 1 {
+func (a *webApp) readToken(slot string) string {
+	m := hmac.New(sha256.New, a.writeKey)
+	m.Write([]byte("daal-read-v2\n" + slot))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])
+}
+
+func (a *webApp) doGet(slot, k string) string {
+	if !slotRe.MatchString(slot) || subtle.ConstantTimeCompare([]byte(k), []byte(a.readToken(slot))) != 1 {
 		return "Nothing here."
 	}
-	if a.blob == "" {
-		return `{"kind":"daal-refresh-v1"}`
+	st, ok := a.slots[slot]
+	if !ok || st.blob == "" {
+		return "Nothing here."
 	}
-	return a.blob
+	return st.blob
 }
 
 func answer(v map[string]any) string {
@@ -482,13 +517,14 @@ func answer(v map[string]any) string {
 
 func (a *webApp) doPost(body []byte) string {
 	var req struct {
+		Slot *string      `json:"slot"`
 		Seq  *json.Number `json:"seq"`
 		Blob *string      `json:"blob"`
 		MAC  *string      `json:"mac"`
 	}
 	dec := json.NewDecoder(strings.NewReader(string(body)))
 	dec.UseNumber()
-	if dec.Decode(&req) != nil || req.Seq == nil || req.Blob == nil || req.MAC == nil {
+	if dec.Decode(&req) != nil || req.Slot == nil || !slotRe.MatchString(*req.Slot) || req.Seq == nil || req.Blob == nil || req.MAC == nil {
 		return answer(map[string]any{"ok": false, "error": "malformed"})
 	}
 	seq, err := strconv.ParseUint(req.Seq.String(), 10, 64)
@@ -499,15 +535,26 @@ func (a *webApp) doPost(body []byte) string {
 		return answer(map[string]any{"ok": false, "error": "too_large"})
 	}
 	m := hmac.New(sha256.New, a.writeKey)
-	m.Write([]byte(strconv.FormatUint(seq, 10) + "\n" + *req.Blob))
+	m.Write([]byte("daal-refresh-v2\n" + *req.Slot + "\n" + strconv.FormatUint(seq, 10) + "\n" + *req.Blob))
 	want := hex.EncodeToString(m.Sum(nil))
 	if subtle.ConstantTimeCompare([]byte(*req.MAC), []byte(want)) != 1 {
 		return answer(map[string]any{"ok": false, "error": "refused"})
 	}
-	if seq < a.seq || (seq == a.seq && *req.Blob != a.blob) {
-		return answer(map[string]any{"ok": false, "error": "stale", "seq": a.seq})
+	st := a.slots[*req.Slot]
+	if st == nil {
+		st = &slotState{}
 	}
-	a.seq, a.blob = seq, *req.Blob
+	if seq < st.seq || (seq == st.seq && *req.Blob != st.blob) {
+		return answer(map[string]any{"ok": false, "error": "stale", "seq": st.seq})
+	}
+	if seq == st.seq {
+		return answer(map[string]any{"ok": true, "seq": seq})
+	}
+	if a.full {
+		return answer(map[string]any{"ok": false, "error": "full"})
+	}
+	st.seq, st.blob = seq, *req.Blob
+	a.slots[*req.Slot] = st
 	a.posts++
 	return answer(map[string]any{"ok": true, "seq": seq})
 }

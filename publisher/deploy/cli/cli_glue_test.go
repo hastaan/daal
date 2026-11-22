@@ -35,22 +35,7 @@ import (
 func TestPublishFreshness_GoogleChannelIsATarget(t *testing.T) {
 	f := withFakeGoogle(t)
 	keyPath, _ := gKeyFile(t)
-	rc, out, errs := runG(t, "appsscript-script", "--write-key-file", keyPath, "--path-token", gToken)
-	if rc != 0 {
-		t.Fatalf("script rc=%d %s", rc, errs)
-	}
-	var s struct {
-		Code string `json:"code_gs"`
-	}
-	_ = json.Unmarshal([]byte(out), &s)
-	shown, err := f.DeployByHand(s.Code)
-	if err != nil {
-		t.Fatal(err)
-	}
-	url, err := appsscript.NormalizeExecURL(shown, gToken)
-	if err != nil {
-		t.Fatal(err)
-	}
+	url := gSlot(t, gAccount(t, f, keyPath), keyPath, "")
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	privPath := writeTemp(t, "root.key", priv)
@@ -72,7 +57,7 @@ func TestPublishFreshness_GoogleChannelIsATarget(t *testing.T) {
 		t.Fatalf("url without key: rc=%d %s", rc, errs)
 	}
 
-	rc, out, errs = runG(t, append(base, "--appsscript-url", url, "--appsscript-write-key-file", keyPath,
+	rc, out, errs := runG(t, append(base, "--appsscript-url", url, "--appsscript-write-key-file", keyPath,
 		"--appsscript-pack-file", packPath)...)
 	if rc != 0 {
 		t.Fatalf("publish rc=%d %s", rc, errs)
@@ -87,8 +72,8 @@ func TestPublishFreshness_GoogleChannelIsATarget(t *testing.T) {
 	if len(res.Published) != 1 || res.Published[0].Provider != freshness.ProviderAppsScript || !res.Published[0].OK {
 		t.Fatalf("published = %+v", res.Published)
 	}
-	id, _, _ := freshness.ValidateAppsScriptURL(url)
-	_, blob, ok := f.Stored(id)
+	id, slot, _, _ := freshness.ValidateAppsScriptURL(url)
+	_, blob, ok := f.Stored(id, slot)
 	if !ok {
 		t.Fatal("nothing stored at the script")
 	}

@@ -843,7 +843,7 @@ type walkResult struct {
 	doc   *FreshnessDocument
 	raw   []byte
 	tried int
-	// container is set when doc came out of a daal-refresh-v1
+	// container is set when doc came out of a daal-refresh-v2
 	// container (an appsscript mirror); its other parts are usable
 	// only because doc verified.
 	container *refreshContainer

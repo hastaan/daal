@@ -226,6 +226,15 @@ IDs B-1 to B-8 are the blackout plan's; changes are noted.
 
 ## 3. Add-on 3: Google update channel
 
+> **Amended 2026-11-22.** Google is now an account, like Cloudflare: one
+> script per Google account, added once from Accounts → Google (Path B by
+> hand; Path A only in a build with the OAuth clients, otherwise hidden),
+> serving every relay in its own slot (`?s=<slot>&k=<read token>`,
+> protocol `daal-refresh-v2`). A relay's switch takes a slot; there are
+> no per-relay Google steps. The per-relay shape below (`?k=` alone,
+> `daal-refresh-v1`) was never deployed and is gone. Normative:
+> `specs/optional-addons-v1.md` §5 and `specs/relaypack-v1.md`.
+
 ### 3.1 What it gives recipients, and when
 
 - It carries only the signed note and the credential-less signed pack. It rescues no block on its own. It makes the *recovery* from an address block (and delivery of a new CDN hostname or a standby key) reach people when the ordinary refresh addresses (R2, GitHub Pages) are blocked or SNI-filtered, because Google is the name most often left open.

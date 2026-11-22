@@ -1,5 +1,5 @@
 // The pieces around «More protection»: what a failure says, money, the
-// Google by-hand sheet, the relay delete report's add-on lines, the
+// Google account sheet, the relay delete report's add-on lines, the
 // account check's standby line, the recipient's "I was sent a code"
 // field, and every string they use, driven through the real command
 // wrappers (wizardCommands.ts) against a fake shell.
@@ -57,7 +57,7 @@ afterEach(async () => {
 });
 
 const { translate } = await import('../../lib/i18n');
-const { GoogleByHandSheet, cloudflareTokenUrl } = await import('./AccountSheets');
+const { GoogleSheet, cloudflareTokenUrl } = await import('./AccountSheets');
 const { AddonOutcomeLines, addonOutcomeLine } = await import('./AddonOutcomeLines');
 const { addonKeys } = await import('./addonText');
 const errs = await import('./addonErrors');
@@ -117,27 +117,46 @@ describe('what a failure says', () => {
 
 // ------------------------------------------------------------------ by hand
 
-describe('Google without signing in', () => {
+describe('the Google account sheet', () => {
+    const NO_G = { connected: false, scriptMade: false, signIn: false };
+
     it('copy the script, paste the address back, and a failed check says why in one line', async () => {
-        handlers.wizard_addon_google_script = () => ({ code_gs: 'var WRITE_KEY = "abc";', manifest_json: '{}' });
-        handlers.wizard_addon_google_attach = () =>
+        handlers.wizard_google_account_script = () => ({ code_gs: 'var WRITE_KEY_B64 = "abc";', manifest_json: '{}' });
+        handlers.wizard_google_account_attach = () =>
             Promise.reject('E_GOOGLE_CHECK_FAILED: not_deployed: the script did not answer as it should');
-        const onDone = vi.fn();
-        const m = await rig.mount(<GoogleByHandSheet t={en} operatorId={1} onClose={() => {}} onDone={onDone} />);
+        const onConnected = vi.fn();
+        const m = await rig.mount(<GoogleSheet t={en} google={NO_G} onClose={() => {}} onConnected={onConnected} />);
         expect(tid(m.container, 'google-script')).toBeNull();
         await rig.click(btn(m.container, 'google-copy-script'));
-        expect(clipboard).toBe('var WRITE_KEY = "abc";');
-        expect(m.container.textContent).toContain(en('pub.addons.google.hand.secret'));
+        expect(clipboard).toBe('var WRITE_KEY_B64 = "abc";');
+        expect(callsTo('wizard_google_account_script')[0].args).toBeUndefined();
+        expect(m.container.textContent).toContain(en('pub.accounts.google.hand.secret'));
         await rig.type(btn(m.container, 'google-url'), ' https://script.google.com/macros/s/AKfy/exec ');
-        await rig.click(btn(m.container, 'google-attach'));
-        expect(inputOf(callsTo('wizard_addon_google_attach')[0])).toEqual({
-            operator_id: 1,
+        await rig.click(btn(m.container, 'google-connect'));
+        expect(inputOf(callsTo('wizard_google_account_attach')[0])).toEqual({
             url: 'https://script.google.com/macros/s/AKfy/exec',
         });
         const e = tid(m.container, 'addon-error')!;
         expect(e.getAttribute('data-code')).toBe('E_GOOGLE_CHECK_FAILED');
         expect(e.textContent).toContain(en('pub.addons.google.reason.not_deployed'));
-        expect(onDone).not.toHaveBeenCalled();
+        expect(onConnected).not.toHaveBeenCalled();
+    });
+
+    it('a sign-in that needs the Apps Script API on offers the setting', async () => {
+        handlers.wizard_google_account_sign_in = () =>
+            Promise.reject('E_GOOGLE_API_NOT_ENABLED: turn on the Apps Script API at script.google.com/home/usersettings, then try again');
+        const m = await rig.mount(<GoogleSheet t={en} google={{ ...NO_G, signIn: true }} onClose={() => {}} onConnected={() => {}} />);
+        await rig.click(btn(m.container, 'google-sign-in'));
+        expect(tid(m.container, 'addon-error')?.getAttribute('data-code')).toBe('E_GOOGLE_API_NOT_ENABLED');
+        expect(btn(m.container, 'google-api-open')?.textContent).toContain(en('pub.accounts.google.api.open'));
+    });
+
+    it('a build without the OAuth clients shows no sign-in anywhere', async () => {
+        const m = await rig.mount(<GoogleSheet t={en} google={NO_G} onClose={() => {}} onConnected={() => {}} />);
+        expect(btn(m.container, 'google-sign-in')).toBeNull();
+        expect(tid(m.container, 'google-sign-in-block')).toBeNull();
+        expect(m.container.textContent).not.toContain(en('pub.accounts.google.unverified'));
+        expect(srcSheets).toMatch(/google\.signIn && \(/);
     });
 
     it('the Cloudflare key page is the pre-filled one with exactly the five permissions', () => {
@@ -245,7 +264,7 @@ function usedKeys(): string[] {
     for (const c of errs.ADDON_ERROR_CODES) keys.add(`pub.addons.err.${c}`);
     for (const c of errs.SHARED_CODES_WITH_COPY) keys.add(`pub.addons.err.${c}`);
     keys.add('pub.addons.err.other');
-    for (const r of ['not_deployed', 'refused', 'stale', 'wrong_content', 'unreachable', 'no_address'])
+    for (const r of ['not_deployed', 'refused', 'stale', 'wrong_content', 'unreachable', 'full', 'no_address'])
         keys.add(`pub.addons.google.reason.${r}`);
     for (const c of ['removed', 'with_relay', 'failed', 'left', 'not_built']) keys.add(`pub.addons.outcome.${c}`);
     for (const o of ['accepted', 'no_match', 'malformed', 'no_standby', 'unavailable']) keys.add(`add.code.${o}`);
@@ -295,7 +314,7 @@ describe('the strings', () => {
         expect(FA['pub.accounts.cf.key']).toBe('کلید دسترسی');
         expect(FA['pub.addons.title']).toBe('محافظت بیشتر');
         expect(FA['pub.accounts.title']).toBe('حساب‌ها');
-        expect(FA['pub.accounts.google.by_hand']).toBe('بدون ورود با Google');
+        expect(FA['pub.accounts.connected']).toBe('✓ وصل است');
     });
 
     it('the warnings that matter are kept, each once and short', () => {

@@ -2254,31 +2254,63 @@ async fn wizard_addon_cdn_set_plain_fallback(
     )
 }
 
+/// Accounts → Google: whether the account is connected, and whether this
+/// build may offer "Sign in with Google" (OAuth clients configured at
+/// build time; hidden otherwise). Local, no secret.
 #[tauri::command]
-async fn wizard_addon_google_script(
+fn wizard_google_account(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
-    input: daal_wizard::addon_google::GoogleScriptInput,
+) -> Result<daal_wizard::addon_google::GoogleAccount, String> {
+    use tauri_plugin_daal_platform::PlatformExt;
+    cmdlog::logged("wizard_google_account", || {
+        let mut a = daal_wizard::addon_google::account(&wstate.0).map_err(|e| e.to_string())?;
+        a.sign_in = app.platform().google_sign_in_configured()
+            || daal_wizard::addon_google::desktop_sign_in_configured();
+        Ok(a)
+    })
+}
+
+/// The account's script to copy, with its write key in it. The text
+/// crosses to the page once, for the clipboard.
+#[tauri::command]
+async fn wizard_google_account_script(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
 ) -> Result<daal_wizard::addon_google::GoogleScript, String> {
     cmdlog::result(
-        "wizard_addon_google_script",
-        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::script(ctx, input, p)).await,
+        "wizard_google_account_script",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::account_script(ctx, p)).await,
     )
 }
 
-/// Path A. On Android the one-shot token comes from the platform plugin
-/// here, in Rust, so it never passes through the page; on desktop the
-/// plugin answers `None` and the add-on module signs in through the
-/// system browser itself.
+/// The web-app address pasted back: checked through the Google front
+/// (test slot) before the account counts as connected.
 #[tauri::command]
-async fn wizard_addon_google_sign_in(
+async fn wizard_google_account_attach(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
-    input: daal_wizard::addon_google::GoogleSignInInput,
-) -> Result<daal_wizard::addons::AddonRow, String> {
+    input: daal_wizard::addon_google::GoogleAccountAttachInput,
+) -> Result<daal_wizard::addon_google::GoogleAccount, String> {
+    cmdlog::result(
+        "wizard_google_account_attach",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::account_attach(ctx, input, p)).await,
+    )
+}
+
+/// Path A, account level. On Android the one-shot token comes from the
+/// platform plugin here, in Rust, so it never passes through the page;
+/// on desktop the plugin answers `None` and the add-on module signs in
+/// through the system browser itself. The page offers it only when
+/// `wizard_google_account` says `sign_in`.
+#[tauri::command]
+async fn wizard_google_account_sign_in(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<daal_wizard::addon_google::GoogleAccount, String> {
     let platform_app = app.clone();
     cmdlog::result(
-        "wizard_addon_google_sign_in",
+        "wizard_google_account_sign_in",
         addon_on_pool(app, wstate.inner(), move |ctx, p| {
             use tauri_plugin_daal_platform::PlatformExt;
             let token = platform_app
@@ -2286,21 +2318,31 @@ async fn wizard_addon_google_sign_in(
                 .google_authorize(&daal_wizard::addon_google::SCOPES)
                 .map_err(|e| wcmd::WizardError::Coded(e.to_string().trim_start_matches("daal-platform: ").to_string()))?
                 .map(zeroize::Zeroizing::new);
-            daal_wizard::addon_google::sign_in(ctx, input, token, p)
+            daal_wizard::addon_google::account_sign_in(ctx, token, p)
         })
         .await,
     )
 }
 
+/// Forget the Google account (relays that use it keep their own copies).
 #[tauri::command]
-async fn wizard_addon_google_attach(
+fn wizard_google_account_disconnect(wstate: State<'_, WizardStateMgr>) -> Result<(), String> {
+    cmdlog::logged("wizard_google_account_disconnect", || {
+        daal_wizard::addon_google::account_disconnect(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
+/// A relay's switch, on: a slot in the account's script, the mirror,
+/// the first update read back.
+#[tauri::command]
+async fn wizard_addon_google_on(
     app: AppHandle,
     wstate: State<'_, WizardStateMgr>,
-    input: daal_wizard::addon_google::GoogleAttachInput,
+    input: daal_wizard::addon_google::GoogleOnInput,
 ) -> Result<daal_wizard::addons::AddonRow, String> {
     cmdlog::result(
-        "wizard_addon_google_attach",
-        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::attach(ctx, input, p)).await,
+        "wizard_addon_google_on",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::turn_on(ctx, input, p)).await,
     )
 }
 
@@ -4229,9 +4271,12 @@ pub fn run() {
             wizard_addon_cdn_build,
             wizard_addon_cdn_posture,
             wizard_addon_cdn_set_plain_fallback,
-            wizard_addon_google_script,
-            wizard_addon_google_sign_in,
-            wizard_addon_google_attach,
+            wizard_google_account,
+            wizard_google_account_script,
+            wizard_google_account_attach,
+            wizard_google_account_sign_in,
+            wizard_google_account_disconnect,
+            wizard_addon_google_on,
             wizard_addon_google_check,
             // FRP-7 rotation surface
             wizard_rotate_recommend,

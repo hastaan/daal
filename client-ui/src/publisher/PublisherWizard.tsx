@@ -59,9 +59,9 @@ import { MoreWaysToConnect } from './MoreWaysToConnect';
 import { WizardAddonsProgress, WizardAddonsStep } from './addons/WizardAddons';
 import {
     applyAddonChoices,
-    clearAddonFailure,
     recallAddonChoices,
     rememberAddonChoices,
+    retryAddon,
 } from './addons/wizardAddons';
 import type { ApplyState } from './addons/wizardAddons';
 import type { AddonKind } from './addons/addonTypes';
@@ -2238,12 +2238,14 @@ export default function PublisherWizard({
                                     {operatorId && (
                                         <WizardAddonsProgress
                                             t={t}
-                                            operatorId={operatorId}
                                             progress={addonProgress}
-                                            onByHandDone={() => {
-                                                clearAddonFailure(operatorId, 'google');
-                                                setAddonProgress((p) => ({ ...p, google: { k: 'on' } }));
-                                            }}
+                                            onRetry={(kind) =>
+                                                void retryAddon(operatorId, kind, {
+                                                    accounts: readAccounts,
+                                                    onState: (k, st) => setAddonProgress((p) => ({ ...p, [k]: st })),
+                                                    run: live ? undefined : () => new Promise<void>((r) => setTimeout(r, 220)),
+                                                })
+                                            }
                                         />
                                     )}
                                 </div>

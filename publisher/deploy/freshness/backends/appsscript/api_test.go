@@ -11,7 +11,7 @@ import (
 )
 
 func deployOpts(t *testing.T) appsscript.DeployOpts {
-	code, manifest, err := appsscript.Script(key(), token)
+	code, manifest, err := appsscript.Script(key())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +46,16 @@ func TestDeployThenTheChannelWorks(t *testing.T) {
 	if strings.Join(api, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s", strings.Join(api, "\n"))
 	}
-	url, err := appsscript.NormalizeExecURL(res.ExecURL, token)
+	base, err := appsscript.NormalizeExecURL(res.ExecURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := f.Network().SendAndCheck(ctx, url, key(), 3, appsscript.Empty()); !r.OK {
+	// Path A ends where Path B does: the account check passes, and a
+	// relay's slot takes updates.
+	if r := f.Network().AccountCheck(ctx, base, key(), 1); !r.OK {
+		t.Fatalf("%+v", r)
+	}
+	if r := f.Network().SendAndCheck(ctx, slotURL(t, base, slot), key(), 3, appsscript.Empty(slot)); !r.OK {
 		t.Fatalf("%+v", r)
 	}
 }

@@ -6,7 +6,9 @@
 //                needed (accounts come before relays). Also connected
 //                when a relay already holds a key (older phones).
 //   Cloudflare — CloudflareSheet: three steps, paste the key, "✓ Connected".
-//   Google     — GoogleSheet: one step, "Sign in with Google".
+//   Google     — GoogleSheet: the account's one update script, added by
+//                hand (copy, paste in Apps Script, deploy, paste the
+//                address back), checked through Google, "✓ Connected".
 //   The other hosting companies the wizard lists as «در دست ساخت».
 //
 // A relay's «More protection» switch opens the same sheets when the
@@ -18,7 +20,7 @@ import type { IconName } from '../design/primitives/icons';
 import { useBack } from '../lib/useBack';
 import { PageColumn } from './ui';
 import { CloudflareSheet, GoogleSheet, HetznerSheet } from './addons/AccountSheets';
-import { setGoogleChoice, useAccounts } from './addons/accounts';
+import { useAccounts } from './addons/accounts';
 import type { ServiceId } from './addons/accounts';
 
 /** The hosting companies still being built (PublisherWizard's
@@ -51,15 +53,12 @@ export default function AccountsPage({
     const connected: Record<ServiceId, boolean> = {
         hetzner: accounts.hetzner,
         cloudflare: accounts.cloudflare.connected,
-        google: accounts.google != null,
+        google: accounts.google.connected,
     };
     const subtitle = (s: ServiceId): string => {
         if (!connected[s]) return t(`pub.accounts.${s}.line`);
         if (s === 'cloudflare' && accounts.cloudflare.zone) {
             return t('pub.accounts.connected_to').replace('{name}', accounts.cloudflare.zone);
-        }
-        if (s === 'google') {
-            return t(accounts.google === 'manual' ? 'pub.accounts.google.chosen.manual' : 'pub.accounts.google.chosen.signin');
         }
         return t('pub.accounts.connected');
     };
@@ -72,9 +71,7 @@ export default function AccountsPage({
     };
     const serviceRow = (s: { id: ServiceId; label: string }, last: boolean) => {
                     const on = connected[s.id];
-                    // Google is only a chosen way until a relay's switch signs in
-                    // (or the script is added by hand): never shown green here.
-                    const green = on && s.id !== 'google';
+                    const green = on;
                     return (
                         <div key={s.id} data-account={s.id} data-connected={loaded ? String(on) : 'unknown'}>
                             <ListRow
@@ -186,10 +183,13 @@ export default function AccountsPage({
             {open === 'google' && (
                 <GoogleSheet
                     t={t}
-                    choice={accounts.google}
-                    onClose={() => setOpen(null)}
-                    onChoose={(c) => {
-                        setGoogleChoice(c);
+                    google={accounts.google}
+                    onClose={() => {
+                        setOpen(null);
+                        reload();
+                    }}
+                    onConnected={() => reload()}
+                    onDisconnected={() => {
                         setOpen(null);
                         reload();
                     }}

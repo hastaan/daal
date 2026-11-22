@@ -2,13 +2,12 @@ package main
 
 import (
 	"crypto/rand"
-	"regexp"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -17,15 +16,20 @@ import (
 // item G7), from both seats.
 //
 //	google-channel  the publisher's whole side against the lab's Google
-//	                (fakegfe.go, fakegas_api.go): Path A with a one-shot
-//	                token (the API turned off → the exact error the app
-//	                branches on; a call that fails half way → resumed into
-//	                the same project, the token revoked every time); the
-//	                update POSTed and fetched back THROUGH THE FRONT (SNI
-//	                www.google.com, authority script.google.com); a
-//	                stranger's write key refused, an older update refused;
-//	                Path B (the script pasted by hand) ending in the same
-//	                state; a web app behind a sign-in wall named as such.
+//	                (fakegfe.go, fakegas_api.go). One script per Google
+//	                account, one slot per relay (daal-refresh-v2): Path A
+//	                with a one-shot token (the API turned off → the exact
+//	                error the app branches on; a call that fails half way →
+//	                resumed into the same project, the token revoked every
+//	                time); the account's connect check (test slot written
+//	                and read back through the front); a relay's slot and
+//	                its update POSTed and fetched back THROUGH THE FRONT
+//	                (SNI www.google.com, authority script.google.com); a
+//	                second relay's slot in the same script, cleared without
+//	                touching the first; a stranger's write key refused, an
+//	                older update refused; Path B (the script pasted by
+//	                hand) ending in the same state; a web app behind a
+//	                sign-in wall named as such.
 //	google-refresh  a phone CONNECTED when its relay's address is
 //	                null-routed and the relay has moved (L3), under a
 //	                censor that blocks the ordinary refresh hosts (the
@@ -45,8 +49,11 @@ func init() {
 	Ops["google-refresh"] = opGoogleRefresh
 }
 
+// googleChan is one relay's slot in an account's script: url is the
+// relay's mirror URL (?s=<slot>&k=<read token>), base the script's own
+// address.
 type googleChan struct {
-	url, keyFile, pathToken string
+	url, base, keyFile string
 }
 
 func randHex(n int) string {
@@ -62,10 +69,10 @@ func (rc *RunCtx) googleKnobs(k GoogleKnobs) {
 
 // googleDeploy is Path A as the wizard drives it: appsscript-deploy with
 // the sign-in's one-shot token on stdin.
-func (rc *RunCtx) googleDeploy(phase, label, keyFile, pathToken, scriptID string) (map[string]any, Verb) {
+func (rc *RunCtx) googleDeploy(phase, label, keyFile, scriptID string) (map[string]any, Verb) {
 	tok := "ya29.wb-" + randHex(24)
 	_ = os.WriteFile(filepath.Join(rc.P.Run, googleTokenFile), []byte(tok), 0o600)
-	args := []string{"appsscript-deploy", "--write-key-file", keyFile, "--path-token", pathToken, "--progress-json"}
+	args := []string{"appsscript-deploy", "--write-key-file", keyFile, "--progress-json"}
 	if scriptID != "" {
 		args = append(args, "--script-id", scriptID)
 	}
@@ -79,21 +86,49 @@ func (rc *RunCtx) googleDeploy(phase, label, keyFile, pathToken, scriptID string
 	return out, v
 }
 
-// googleChannel sets the channel up by Path A and returns it.
+// googleChannel sets the account's script up by Path A, checks it the
+// way the Accounts page does, and gives one relay a slot in it.
 func (rc *RunCtx) googleChannel(phase string) (*googleChan, bool) {
 	t0 := time.Now()
 	if err := rc.BringUpGoogle(); err != nil {
 		return nil, rc.R.Add("", phase, "google.up", Pass, Fail, err.Error(), nil, t0)
 	}
-	g := &googleChan{keyFile: rc.Pub.Path("google-write.key"), pathToken: base64.RawURLEncoding.EncodeToString([]byte(randHex(8)))[:22]}
-	if err := os.WriteFile(g.keyFile, []byte(randHex(32)+"\n"), 0o600); err != nil {
+	keyFile := rc.Pub.Path("google-write.key")
+	if err := os.WriteFile(keyFile, []byte(randHex(32)+"\n"), 0o600); err != nil {
 		return nil, rc.R.Add("", phase, "google.write_key", Pass, Fail, err.Error(), nil, t0)
 	}
 	rc.googleKnobs(GoogleKnobs{})
-	out, v := rc.googleDeploy(phase, "deploy", g.keyFile, g.pathToken, "")
-	g.url, _ = out["url"].(string)
-	ok := rc.R.Add("", phase, "verb.appsscript-deploy", Pass, got(v.OK() && g.url != "", Pass, Fail), v.Tail(), map[string]any{"has_url": g.url != ""}, t0)
-	return g, ok
+	out, v := rc.googleDeploy(phase, "deploy", keyFile, "")
+	base, _ := out["url"].(string)
+	if !rc.R.Add("", phase, "verb.appsscript-deploy", Pass, got(v.OK() && base != "", Pass, Fail), v.Tail(), map[string]any{"has_url": base != ""}, t0) {
+		return nil, false
+	}
+	if !rc.googleAccountCheck(phase, "account", base, keyFile) {
+		return nil, false
+	}
+	return rc.googleSlot(phase, "relay", base, keyFile)
+}
+
+// googleAccountCheck is the Accounts page's connect check: the test slot
+// written and read back through the front.
+func (rc *RunCtx) googleAccountCheck(phase, label, base, keyFile string) bool {
+	t0 := time.Now()
+	v := rc.Pub.Deploy(rc.Ctx, "appsscript-account-check", "--url", base, "--write-key-file", keyFile)
+	var res map[string]any
+	_ = json.Unmarshal([]byte(v.Stdout), &res)
+	ok := v.OK() && res["ok"] == true && res["via_front"] == true && res["url"] == base
+	return rc.R.Add("", phase, label+".connected_through_the_front", Pass, got(ok, Pass, Fail), v.Tail()+" "+v.Stdout, res, t0)
+}
+
+// googleSlot gives one relay its place in the account's script.
+func (rc *RunCtx) googleSlot(phase, label, base, keyFile string) (*googleChan, bool) {
+	t0 := time.Now()
+	v := rc.Pub.Deploy(rc.Ctx, "appsscript-slot", "--url", base, "--write-key-file", keyFile)
+	var res struct{ Slot, URL string }
+	_ = json.Unmarshal([]byte(v.Stdout), &res)
+	ok := v.OK() && strings.HasPrefix(res.URL, base+"?s="+res.Slot+"&k=") && len(res.Slot) == 11
+	return &googleChan{url: res.URL, base: base, keyFile: keyFile},
+		rc.R.Add("", phase, "verb.appsscript-slot."+label, Pass, got(ok, Pass, Fail), v.Tail()+" "+v.Stdout, nil, t0)
 }
 
 // googlePost sends the container (document, the credential-less pack,
@@ -124,18 +159,17 @@ func opGoogleChannel(rc *RunCtx) {
 	}
 	keyFile := rc.Pub.Path("google-write.key")
 	_ = os.WriteFile(keyFile, []byte(randHex(32)+"\n"), 0o600)
-	pathToken := base64.RawURLEncoding.EncodeToString([]byte(randHex(8)))[:22]
 
 	// 1. The Apps Script API is not turned on for the account.
 	rc.googleKnobs(GoogleKnobs{APIDisabled: true})
-	_, v := rc.googleDeploy(phase, "api-off", keyFile, pathToken, "")
+	_, v := rc.googleDeploy(phase, "api-off", keyFile, "")
 	first := errorLine(v.Stderr)
 	rc.R.Add("", phase, "api-off.named", Pass, got(!v.OK() && strings.HasPrefix(first, "E_GOOGLE_API_NOT_ENABLED"), Pass, Fail), first, map[string]any{"rc": v.RC}, t0)
 
 	// 2. A call fails half way; the app resumes into the same project.
 	t0 = time.Now()
 	rc.googleKnobs(GoogleKnobs{FailStage: "version"})
-	_, v = rc.googleDeploy(phase, "partial", keyFile, pathToken, "")
+	_, v = rc.googleDeploy(phase, "partial", keyFile, "")
 	first = errorLine(v.Stderr)
 	scriptID := ""
 	if i := strings.Index(first, "script_id="); i >= 0 {
@@ -144,9 +178,9 @@ func opGoogleChannel(rc *RunCtx) {
 	rc.R.Add("", phase, "partial.named_with_the_project", Pass, got(!v.OK() && strings.HasPrefix(first, "E_GOOGLE_PARTIAL") && scriptID != "", Pass, Fail), first, nil, t0)
 	rc.googleKnobs(GoogleKnobs{})
 	t0 = time.Now()
-	out, v := rc.googleDeploy(phase, "resume", keyFile, pathToken, scriptID)
-	url, _ := out["url"].(string)
-	if !rc.R.Add("", phase, "verb.appsscript-deploy.resumed", Pass, got(v.OK() && url != "", Pass, Fail), v.Tail(), nil, t0) {
+	out, v := rc.googleDeploy(phase, "resume", keyFile, scriptID)
+	base, _ := out["url"].(string)
+	if !rc.R.Add("", phase, "verb.appsscript-deploy.resumed", Pass, got(v.OK() && base != "" && !strings.Contains(base, "?"), Pass, Fail), v.Tail(), nil, t0) {
 		return
 	}
 	creates, revokes := 0, 0
@@ -160,7 +194,14 @@ func opGoogleChannel(rc *RunCtx) {
 	}
 	rc.R.Add("", phase, "resume.one_project", Pass, got(creates == 1, Pass, Fail), fmt.Sprintf("projects created: %d (the resume must not make a second)", creates), nil, t0)
 	rc.R.Add("", phase, "token_revoked_every_time", Pass, got(revokes >= 3, Pass, Fail), fmt.Sprintf("revocations: %d of 3 sign-ins", revokes), nil, t0)
-	g := &googleChan{url: url, keyFile: keyFile, pathToken: pathToken}
+	// The account's connect check, then this relay's slot.
+	if !rc.googleAccountCheck(phase, "account", base, keyFile) {
+		return
+	}
+	g, ok := rc.googleSlot(phase, "relay", base, keyFile)
+	if !ok {
+		return
+	}
 
 	// 3. An update, posted and fetched back through the front.
 	fc, ok := rc.freshChannel(phase)
@@ -202,6 +243,23 @@ func opGoogleChannel(rc *RunCtx) {
 	}
 	rc.R.Add("", phase, "update.front_routes_by_authority", Pass, got(fronted >= 2 && plain == 0, Pass, Fail),
 		fmt.Sprintf("requests with SNI www.google.com for the script hosts: %d; with SNI script.google.com: %d", fronted, plain), nil, t0)
+	g1sha, _ := res["sha256"].(string)
+
+	// A second relay of the same account: its own slot, its own numbers
+	// (1 is fine though the first slot is past it), and clearing it
+	// leaves the first relay's update as it was.
+	t0 = time.Now()
+	g2, ok := rc.googleSlot(phase, "second-relay", base, keyFile)
+	if !ok {
+		return
+	}
+	v1 := rc.Pub.Deploy(rc.Ctx, "appsscript-check", "--url", g2.url, "--write-key-file", keyFile, "--seq", "1")
+	v2 := rc.Pub.Deploy(rc.Ctx, "appsscript-clear", "--url", g2.url, "--write-key-file", keyFile, "--seq", "2")
+	vf := rc.Pub.Deploy(rc.Ctx, "appsscript-check", "--url", g.url, "--expect-sha256", g1sha)
+	two := v1.OK() && strings.Contains(v1.Stdout, `"ok":true`) && v2.OK() && strings.Contains(v2.Stdout, `"ok":true`) &&
+		vf.OK() && strings.Contains(vf.Stdout, `"ok":true`) && g2.url != g.url
+	rc.R.Add("", phase, "slots.independent_in_one_script", Pass, got(two, Pass, Fail),
+		oneLine(v1.Stdout, 160)+" | "+oneLine(v2.Stdout, 160)+" | "+oneLine(vf.Stdout, 160), nil, t0)
 
 	// 4. A stranger's write key; an older update.
 	t0 = time.Now()
@@ -217,7 +275,7 @@ func opGoogleChannel(rc *RunCtx) {
 
 	// 5. Path B: the same script, pasted and deployed by hand.
 	t0 = time.Now()
-	sv = rc.Pub.Deploy(rc.Ctx, "appsscript-script", "--write-key-file", keyFile, "--path-token", pathToken)
+	sv = rc.Pub.Deploy(rc.Ctx, "appsscript-script", "--write-key-file", keyFile)
 	var script struct {
 		Code string `json:"code_gs"`
 	}
@@ -228,7 +286,15 @@ func opGoogleChannel(rc *RunCtx) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(rc.P.Run, googlePasteDir, depID+".gs"), []byte(script.Code), 0o644)
-	gb := &googleChan{url: "https://script.google.com/macros/s/" + depID + "/exec?k=" + pathToken, keyFile: keyFile, pathToken: pathToken}
+	baseB := "https://script.google.com/macros/s/" + depID + "/exec"
+	if !rc.googleAccountCheck(phase, "path-b.account", baseB, keyFile) {
+		return
+	}
+	gb, ok := rc.googleSlot(phase, "path-b", baseB, keyFile)
+	if !ok {
+		return
+	}
+	t0 = time.Now()
 	res, v = rc.googlePost(phase, "path-b", gb, docFile, rc.Pub.Path("base-g1.sbp"), keyFile, "")
 	rc.R.Add("", phase, "path-b.same_state", Pass, got(v.OK() && res["ok"] == true && res["via_front"] == true, Pass, Fail), v.Tail()+" "+v.Stdout, res, t0)
 

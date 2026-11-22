@@ -1,7 +1,10 @@
 //! The Google update channel, driven through the real functions
-//! against `MockRunner`. Nothing reaches Google: the `daal-deploy`
-//! verbs are answered by `addon_reply` (their own behaviour against a
-//! fake Google is tested in Go, `cli_addon_google_test.go`).
+//! against `MockRunner`: the account (Accounts → Google: the script by
+//! hand, the hidden sign-in, the connect check, disconnect) and a
+//! relay's switch (a slot, the mirror, the first update, off). Nothing
+//! reaches Google: the `daal-deploy` verbs are answered by
+//! `addon_reply` (their own behaviour against a fake Google is tested
+//! in Go, `cli_addon_google_test.go`).
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +21,7 @@ use crate::operator_db::OperatorDb;
 
 const FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DEPLOYMENT: &str = "AKfycbx0123456789abcdefghijklmn";
+const BASE: &str = "https://script.google.com/macros/s/AKfycbx0123456789abcdefghijklmn/exec";
 
 struct Fx {
     ctx: WizardCtx,
@@ -128,10 +132,15 @@ fn arg_after(args: &[String], flag: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
-/// A standard helper: script, check (ok), deploy, clear.
+/// A standard helper: every verb answers as a working script would.
 fn happy_helper(f: &Fx) -> Seen {
     helper(f, |verb, args, _| match verb {
         "appsscript-script" => Ok(r#"{"code_gs":"// code","manifest_json":"{}"}"#.into()),
+        "appsscript-account-check" => Ok(format!(
+            r#"{{"ok":true,"via_front":true,"posted":true,"seq":1800000000000,"sha256":"{}","reason":"","url":"{}"}}"#,
+            "b".repeat(64),
+            arg_after(args, "--url").unwrap()
+        )),
         "appsscript-check" => {
             let seq = arg_after(args, "--seq")
                 .and_then(|s| s.parse().ok())
@@ -139,8 +148,7 @@ fn happy_helper(f: &Fx) -> Seen {
             Ok(ok_check(seq))
         }
         "appsscript-deploy" => Ok(format!(
-            r#"{{"script_id":"1ScriptProject000000000001","deployment_id":"{DEPLOYMENT}","version":1,"url":"https://script.google.com/macros/s/{DEPLOYMENT}/exec?k={}"}}"#,
-            arg_after(args, "--path-token").unwrap()
+            r#"{{"script_id":"1ScriptProject000000000001","deployment_id":"{DEPLOYMENT}","version":1,"url":"{BASE}"}}"#
         )),
         other => Err(BridgeError::SubprocessFailed {
             rc: 2,
@@ -153,230 +161,210 @@ fn google_row(f: &Fx, op: i64) -> AddonRow {
     row_for(&f.ctx, op).unwrap().expect("a google row")
 }
 
+fn calls_of(seen: &Seen, verb: &str) -> Vec<(Vec<String>, Vec<u8>)> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.0.first().map(String::as_str) == Some(verb))
+        .cloned()
+        .collect()
+}
+
+/// Accounts → Google by hand: copy the script, paste the address back.
+fn connect_account(f: &Fx) -> GoogleAccount {
+    account_script(&f.ctx, &mut noop()).unwrap();
+    account_attach(
+        &f.ctx,
+        GoogleAccountAttachInput { url: format!(" {BASE}/ ") },
+        &mut noop(),
+    )
+    .unwrap()
+}
+
+fn account_key_bytes(f: &Fx) -> Vec<u8> {
+    f.ctx.custody.get(ACCOUNT_KEY_ALIAS).unwrap()
+}
+
+// --------------------------------------------------------------------
+// The read token
+// --------------------------------------------------------------------
+
+/// The same vector as the Go side (`appsscript.TestReadTokenAndSlotURL`,
+/// computed outside both with Python's hmac): key bytes 0..31, slot
+/// "AAAAAAAAAAA".
 #[test]
-fn the_script_carries_a_key_from_custody_never_from_argv() {
-    let f = fx();
-    let op = provisioned(&f);
-    let seen = happy_helper(&f);
-    let s = script(&f.ctx, GoogleScriptInput { operator_id: op }, &mut noop()).unwrap();
-    assert_eq!(s.code_gs, "// code");
-    assert!(
-        !format!("{s:?}").contains("// code"),
-        "Debug leaves the script out"
+fn the_read_token_matches_the_script_and_the_helper() {
+    let key: Vec<u8> = (0u8..32).collect();
+    assert_eq!(read_token(&key, "AAAAAAAAAAA"), "IE3eTuAK8S6tNOQQlH44VQ");
+    assert_eq!(
+        slot_url(BASE, &key, "AAAAAAAAAAA"),
+        format!("{BASE}?s=AAAAAAAAAAA&k=IE3eTuAK8S6tNOQQlH44VQ")
     );
-
-    let row = google_row(&f, op);
-    assert_eq!(row.state, AddonState::Building);
-    assert!(row.has_secret);
-    let key = f.ctx.custody.get(&row.secret_alias).unwrap();
-    assert_eq!(key.len(), 32);
-    let d = detail_of(&row);
-    assert_eq!(d.path_token.len(), 22);
-    let calls = seen.lock().unwrap().clone();
-    let args = &calls[0].0;
-    assert_eq!(arg_after(args, "--path-token").unwrap(), d.path_token);
-    let hexkey = hex::encode(&key);
-    assert!(
-        !args.iter().any(|a| a.contains(&hexkey)),
-        "the key never goes in argv"
+    // RFC 4231 test case 2: the HMAC itself.
+    assert_eq!(
+        hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
     );
-    assert!(!row.detail.to_string().contains(&hexkey), "nor in the row");
-
-    // A second look gives the same script for the same relay.
-    script(&f.ctx, GoogleScriptInput { operator_id: op }, &mut noop()).unwrap();
-    let again = google_row(&f, op);
-    assert_eq!(again.id, row.id);
-    assert_eq!(f.ctx.custody.get(&again.secret_alias).unwrap(), key);
+    // A key longer than a block is hashed first (RFC 4231 test case 6).
+    assert_eq!(
+        hex::encode(hmac_sha256(
+            &[0xaa; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First"
+        )),
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+    let slot = new_slot();
+    assert!(valid_slot(&slot) && slot != TEST_SLOT);
+    assert!(valid_slot(TEST_SLOT));
 }
 
 #[test]
-fn path_b_attach_checks_then_becomes_a_mirror() {
-    let f = fx();
-    let op = provisioned(&f);
-    let seen = happy_helper(&f);
-    let bad = attach(
-        &f.ctx,
-        GoogleAttachInput {
-            operator_id: op,
-            url: format!("https://script.google.com/macros/s/{DEPLOYMENT}/exec"),
-        },
-        &mut noop(),
-    )
-    .unwrap_err();
-    assert!(bad.to_string().contains("copy the script first"), "{bad}");
+fn pasted_addresses_have_one_shape() {
+    let id = "AKfycbx0123456789abcdefghij";
+    let want = format!("https://script.google.com/macros/s/{id}/exec");
+    for pasted in [
+        format!("https://script.google.com/macros/s/{id}/exec"),
+        format!("  https://script.google.com/macros/s/{id}/exec/ "),
+        format!("https://script.google.com/macros/s/{id}/exec?usp=sharing#x"),
+        format!("HTTPS://SCRIPT.GOOGLE.COM/macros/s/{id}/exec"),
+    ] {
+        assert_eq!(normalize_base(&pasted).unwrap(), want, "{pasted}");
+    }
+    for bad in [
+        format!("http://script.google.com/macros/s/{id}/exec"),
+        format!("https://script.google.com/macros/s/{id}/dev"),
+        format!("https://script.google.com/a/macros/example.org/s/{id}/exec"),
+        format!("https://script.google.com.evil.example/macros/s/{id}/exec"),
+        "https://script.google.com/macros/s/short/exec".to_string(),
+        "https://script.google.com/macros/s/has%2Fslash000000000000/exec".to_string(),
+        "آدرس https://script.google.com/macros/s/AKfycbx0123456789abcdefghij/exec".to_string(),
+    ] {
+        assert!(normalize_base(&bad).is_err(), "{bad}");
+    }
+}
 
-    script(&f.ctx, GoogleScriptInput { operator_id: op }, &mut noop()).unwrap();
-    let e = attach(
+// --------------------------------------------------------------------
+// The account
+// --------------------------------------------------------------------
+
+#[test]
+fn the_script_carries_the_account_key_from_custody_never_from_argv() {
+    let f = fx();
+    let seen = happy_helper(&f);
+    assert_eq!(account(&f.ctx).unwrap(), GoogleAccount::default());
+    let s = account_script(&f.ctx, &mut noop()).unwrap();
+    assert_eq!(s.code_gs, "// code");
+    assert!(!format!("{s:?}").contains("// code"), "Debug leaves the script out");
+
+    let key = account_key_bytes(&f);
+    assert_eq!(key.len(), 32);
+    let a = account(&f.ctx).unwrap();
+    assert!(a.script_made && !a.connected && a.url.is_empty());
+    let call = &calls_of(&seen, "appsscript-script")[0].0;
+    let hexkey = hex::encode(&key);
+    assert!(!call.iter().any(|a| a.contains(&hexkey)), "the key never goes in argv");
+    assert!(!call.iter().any(|a| a == "--path-token"), "one script for every relay");
+
+    // A second copy is the same script: one pasted already stays good.
+    account_script(&f.ctx, &mut noop()).unwrap();
+    assert_eq!(account_key_bytes(&f), key);
+}
+
+#[test]
+fn connecting_by_hand_checks_the_address_before_it_counts() {
+    let f = fx();
+    let answer = Arc::new(Mutex::new(
+        r#"{"ok":false,"via_front":false,"reason":"not_deployed","detail":"the answer is not from Daal's script"}"#
+            .to_string(),
+    ));
+    let a2 = answer.clone();
+    let seen = helper(&f, move |verb, _, _| match verb {
+        "appsscript-script" => Ok(r#"{"code_gs":"x","manifest_json":"{}"}"#.into()),
+        _ => Ok(a2.lock().unwrap().clone()),
+    });
+    let e = account_attach(&f.ctx, GoogleAccountAttachInput { url: BASE.into() }, &mut noop())
+        .unwrap_err();
+    assert!(e.to_string().contains("copy the script first"), "{e}");
+
+    account_script(&f.ctx, &mut noop()).unwrap();
+    let e = account_attach(
         &f.ctx,
-        GoogleAttachInput {
-            operator_id: op,
-            url: "https://example.com/macros/s/x/exec".into(),
-        },
+        GoogleAccountAttachInput { url: "https://example.com/macros/s/x/exec".into() },
         &mut noop(),
     )
     .unwrap_err();
     assert!(e.to_string().starts_with("E_GOOGLE_BAD_ADDRESS: "), "{e}");
+    assert!(calls_of(&seen, "appsscript-account-check").is_empty(), "no check of a bad address");
 
-    let row = attach(
+    let e = account_attach(&f.ctx, GoogleAccountAttachInput { url: BASE.into() }, &mut noop())
+        .unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_CHECK_FAILED: not_deployed"), "{e}");
+    let a = account(&f.ctx).unwrap();
+    assert!(!a.connected && a.script_made, "not connected until the check passes");
+
+    *answer.lock().unwrap() = format!(
+        r#"{{"ok":true,"via_front":true,"posted":true,"seq":5,"sha256":"{}","reason":"","url":"{BASE}"}}"#,
+        "c".repeat(64)
+    );
+    let a = account_attach(
         &f.ctx,
-        GoogleAttachInput {
-            operator_id: op,
-            url: format!(" https://script.google.com/macros/s/{DEPLOYMENT}/exec "),
-        },
+        GoogleAccountAttachInput { url: format!("{BASE}?usp=sharing") },
         &mut noop(),
     )
     .unwrap();
-    assert_eq!(row.state, AddonState::Ready);
-    assert_eq!(
-        row.provider_ids.get("deployment_id").map(String::as_str),
-        Some(DEPLOYMENT)
-    );
-    let d = detail_of(&row);
-    assert_eq!(d.path, "B");
-    assert_eq!(
-        d.url,
-        format!(
-            "https://script.google.com/macros/s/{DEPLOYMENT}/exec?k={}",
-            d.path_token
-        )
-    );
-    assert!(d.posted_seq >= 1_800_000_000);
-
-    // The check posted the empty container under a fresh number, and
-    // the freshness counter moved past it.
-    let check_call = seen
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|c| c.0[0] == "appsscript-check")
-        .cloned()
-        .unwrap();
-    assert_eq!(arg_after(&check_call.0, "--url").unwrap(), d.url);
-    let seq: u64 = arg_after(&check_call.0, "--seq").unwrap().parse().unwrap();
-    assert!(f.ctx.db.get(op).unwrap().freshness_last_sequence as u64 >= seq);
-
-    let st = freshness::status(&f.ctx, op).unwrap();
-    assert_eq!(st.endpoints.len(), 1);
-    assert_eq!(st.endpoints[0].kind, "appsscript");
-    assert_eq!(st.endpoints[0].public_url, d.url);
-    assert!(st.endpoints[0].has_credential);
-    assert!(st.google_only);
-    assert_eq!(st.min_mirrors, 1);
-    // The table holds no secret of its own for it.
-    let ep = f.ctx.db.list_freshness_endpoints(op).unwrap();
-    assert_eq!(ep[0].secret_alias, "");
-    // And the freshness panel cannot remove it behind the add-on's back.
-    assert!(freshness::delete_endpoint(&f.ctx, ep[0].id).is_err());
-    assert!(freshness::add_endpoint(
-        &f.ctx,
-        op,
-        FreshnessEndpointInput {
-            kind: "appsscript".into(),
-            public_url: d.url.clone(),
-            ..Default::default()
-        }
-    )
-    .is_err());
+    assert!(a.connected && !a.script_made);
+    assert_eq!(a.url, BASE);
+    // The check got the normalised address and the key as a file.
+    let check = calls_of(&seen, "appsscript-account-check").last().cloned().unwrap();
+    assert_eq!(arg_after(&check.0, "--url").as_deref(), Some(BASE));
+    assert!(!check.0.iter().any(|a| a.contains(&hex::encode(account_key_bytes(&f)))));
+    assert_eq!(f.ctx.custody.get(ACCOUNT_URL_ALIAS).unwrap(), BASE.as_bytes());
 }
 
 #[test]
-fn a_failed_first_check_keeps_the_address_and_check_finishes_it() {
-    let f = fx();
-    let op = provisioned(&f);
-    let answer = Arc::new(Mutex::new(
-        r#"{"ok":false,"reason":"not_deployed","detail":"the answer is not from Daal's script"}"#
-            .to_string(),
-    ));
-    let a2 = answer.clone();
-    helper(&f, move |verb, _, _| match verb {
-        "appsscript-script" => Ok(r#"{"code_gs":"x","manifest_json":"{}"}"#.into()),
-        _ => Ok(a2.lock().unwrap().clone()),
-    });
-    script(&f.ctx, GoogleScriptInput { operator_id: op }, &mut noop()).unwrap();
-    let e = attach(
-        &f.ctx,
-        GoogleAttachInput {
-            operator_id: op,
-            url: format!("https://script.google.com/macros/s/{DEPLOYMENT}/exec"),
-        },
-        &mut noop(),
-    )
-    .unwrap_err();
-    assert!(
-        e.to_string()
-            .starts_with("E_GOOGLE_CHECK_FAILED: not_deployed"),
-        "{e}"
-    );
-    let row = google_row(&f, op);
-    assert_eq!(row.state, AddonState::Building);
-    assert!(!detail_of(&row).url.is_empty());
-    assert!(
-        f.ctx.db.list_freshness_endpoints(op).unwrap().is_empty(),
-        "not a mirror until it works"
-    );
-
-    *answer.lock().unwrap() = ok_check(5);
-    let c = check(&f.ctx, GoogleCheckInput { operator_id: op }, &mut noop()).unwrap();
-    assert!(c.ok && c.via_front && c.reason.is_empty());
-    assert_eq!(google_row(&f, op).state, AddonState::Ready);
-    assert_eq!(f.ctx.db.list_freshness_endpoints(op).unwrap().len(), 1);
-
-    // A later check only fetches, against what was posted.
-    let seen = helper(&f, |_, _, _| {
-        Ok(r#"{"ok":false,"via_front":false,"reason":"wrong_content"}"#.into())
-    });
-    let c = check(&f.ctx, GoogleCheckInput { operator_id: op }, &mut noop()).unwrap();
-    assert_eq!(c.reason, "wrong_content");
-    let args = seen.lock().unwrap()[0].0.clone();
-    assert!(args.contains(&"--expect-sha256".to_string()));
-    assert!(
-        !args.contains(&"--seq".to_string()),
-        "a check of a ready channel sends nothing"
-    );
-    assert_eq!(
-        detail_of(&google_row(&f, op)).last_check_reason,
-        "wrong_content"
-    );
-}
-
-#[test]
-fn path_a_with_a_platform_token_passes_it_on_stdin_only() {
+fn disconnect_forgets_the_account_and_relays_keep_theirs() {
     let f = fx();
     let op = provisioned(&f);
     let seen = happy_helper(&f);
-    let token = Zeroizing::new("ya29.one-shot-token".to_string());
-    let row = sign_in(
-        &f.ctx,
-        GoogleSignInInput { operator_id: op },
-        Some(token),
-        &mut noop(),
-    )
-    .unwrap();
-    assert_eq!(row.state, AddonState::Ready);
-    let d = detail_of(&row);
-    assert_eq!(d.path, "A");
-    assert_eq!(d.script_id, "1ScriptProject000000000001");
-    assert_eq!(
-        row.provider_ids.get("script_id").map(String::as_str),
-        Some("1ScriptProject000000000001")
-    );
+    connect_account(&f);
+    let row = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap();
+    account_disconnect(&f.ctx).unwrap();
+    assert_eq!(account(&f.ctx).unwrap(), GoogleAccount::default());
+    assert!(f.ctx.custody.get(ACCOUNT_KEY_ALIAS).is_err());
+    // The relay's channel still has its key, so it still publishes and
+    // can still be turned off.
+    assert!(has_write_key(&f.ctx, op));
+    let r = addons::remove(&f.ctx, row.id, &mut noop()).unwrap();
+    assert!(r.removed, "{r:?}");
+    assert!(calls_of(&seen, "appsscript-check").len() >= 2);
+    // A relay cannot turn it on with no account.
+    let e = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_NO_ACCOUNT: "), "{e}");
+}
 
-    let calls = seen.lock().unwrap().clone();
-    let deploy = calls
-        .iter()
-        .find(|c| c.0[0] == "appsscript-deploy")
-        .unwrap();
-    assert!(
-        !deploy.0.iter().any(|a| a.contains("ya29")),
-        "the token never goes in argv"
-    );
+#[test]
+fn sign_in_with_a_platform_token_passes_it_on_stdin_only() {
+    let f = fx();
+    let seen = happy_helper(&f);
+    let token = Zeroizing::new("ya29.one-shot-token".to_string());
+    let a = account_sign_in(&f.ctx, Some(token), &mut noop()).unwrap();
+    assert!(a.connected);
+    assert_eq!(a.url, BASE);
+
+    let deploy = calls_of(&seen, "appsscript-deploy")[0].clone();
+    assert!(!deploy.0.iter().any(|a| a.contains("ya29")), "the token never goes in argv");
+    assert!(!deploy.0.iter().any(|a| a == "--path-token"));
     let stdin: serde_json::Value = serde_json::from_slice(&deploy.1).unwrap();
     assert_eq!(stdin["access_token"], "ya29.one-shot-token");
+    // The same connect check as by hand.
+    assert_eq!(
+        arg_after(&calls_of(&seen, "appsscript-account-check")[0].0, "--url").as_deref(),
+        Some(BASE)
+    );
     // Nothing of the token is kept.
-    assert!(!row.detail.to_string().contains("ya29"));
-    for a in f.ctx.db.list_all_keystore_aliases().unwrap_or_default() {
-        if let Ok(v) = f.ctx.custody.get(&a) {
-            assert!(!String::from_utf8_lossy(&v).contains("ya29"), "{a}");
+    for alias in ACCOUNT_ALIASES.iter().chain([&ACCOUNT_PARTIAL_ALIAS]) {
+        if let Ok(v) = f.ctx.custody.get(alias) {
+            assert!(!String::from_utf8_lossy(&v).contains("ya29"), "{alias}");
         }
     }
 }
@@ -384,104 +372,66 @@ fn path_a_with_a_platform_token_passes_it_on_stdin_only() {
 #[test]
 fn a_partial_deploy_is_resumed_into_the_same_project() {
     let f = fx();
-    let op = provisioned(&f);
     let fail = Arc::new(Mutex::new(true));
     let f2 = fail.clone();
-    let seen = helper(&f, move |verb, args, _| {
-        match verb {
+    let seen = helper(&f, move |verb, args, _| match verb {
         "appsscript-deploy" if *f2.lock().unwrap() => Err(BridgeError::SubprocessFailed {
             rc: 1,
             stderr: "E_GOOGLE_PARTIAL: script_id=1PartialProject0000000001 stage=version: apps script version: failed (HTTP 500)\n".into(),
         }),
         "appsscript-deploy" => Ok(format!(
-            r#"{{"script_id":"1PartialProject0000000001","deployment_id":"{DEPLOYMENT}","version":1,"url":"https://script.google.com/macros/s/{DEPLOYMENT}/exec?k={}"}}"#,
-            arg_after(args, "--path-token").unwrap()
+            r#"{{"script_id":"1PartialProject0000000001","deployment_id":"{DEPLOYMENT}","version":1,"url":"{BASE}"}}"#
         )),
-        _ => Ok(ok_check(9)),
-    }
+        _ => Ok(format!(
+            r#"{{"ok":true,"via_front":true,"posted":true,"seq":9,"sha256":"{}","reason":"","url":"{}"}}"#,
+            "d".repeat(64),
+            arg_after(args, "--url").unwrap_or_default()
+        )),
     });
     let tok = || Some(Zeroizing::new("ya29.t".to_string()));
-    let e = sign_in(
-        &f.ctx,
-        GoogleSignInInput { operator_id: op },
-        tok(),
-        &mut noop(),
-    )
-    .unwrap_err();
+    let e = account_sign_in(&f.ctx, tok(), &mut noop()).unwrap_err();
     assert!(e.to_string().starts_with("E_GOOGLE_PARTIAL: "), "{e}");
-    assert_eq!(
-        detail_of(&google_row(&f, op)).partial_script_id,
-        "1PartialProject0000000001"
-    );
+    assert!(!account(&f.ctx).unwrap().connected);
 
     *fail.lock().unwrap() = false;
-    sign_in(
-        &f.ctx,
-        GoogleSignInInput { operator_id: op },
-        tok(),
-        &mut noop(),
-    )
-    .unwrap();
-    let calls = seen.lock().unwrap().clone();
-    let second = calls
-        .iter()
-        .filter(|c| c.0[0] == "appsscript-deploy")
-        .nth(1)
-        .unwrap();
+    account_sign_in(&f.ctx, tok(), &mut noop()).unwrap();
+    let second = calls_of(&seen, "appsscript-deploy")[1].clone();
     assert_eq!(
         arg_after(&second.0, "--script-id").as_deref(),
         Some("1PartialProject0000000001")
     );
-    assert!(detail_of(&google_row(&f, op)).partial_script_id.is_empty());
+    assert!(f.ctx.custody.get(ACCOUNT_PARTIAL_ALIAS).is_err(), "the partial project is forgotten once deployed");
 }
 
 #[test]
 fn helper_errors_keep_their_code() {
     let f = fx();
-    let op = provisioned(&f);
     helper(&f, |_, _, _| {
         Err(BridgeError::SubprocessFailed {
             rc: 1,
             stderr: "E_GOOGLE_API_NOT_ENABLED: turn on the Apps Script API at script.google.com/home/usersettings, then try again\n".into(),
         })
     });
-    let e = sign_in(
-        &f.ctx,
-        GoogleSignInInput { operator_id: op },
-        Some(Zeroizing::new("t".into())),
-        &mut noop(),
-    )
-    .unwrap_err();
-    assert!(
-        e.to_string().starts_with("E_GOOGLE_API_NOT_ENABLED: "),
-        "{e}"
-    );
+    let e = account_sign_in(&f.ctx, Some(Zeroizing::new("t".into())), &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_API_NOT_ENABLED: "), "{e}");
 
     // An older helper without the verbs.
     *f.mock.addon_reply.lock().unwrap() = None;
-    let e = script(&f.ctx, GoogleScriptInput { operator_id: op }, &mut noop()).unwrap_err();
+    let e = account_script(&f.ctx, &mut noop()).unwrap_err();
     assert!(e.to_string().starts_with("E_DEPLOY_TOO_OLD: "), "{e}");
 }
 
 #[test]
 fn desktop_sign_in_without_a_client_is_not_configured() {
     let f = fx();
-    let op = provisioned(&f);
     if desktop_client().is_some() {
         return; // a build with the client configured
     }
-    let e = sign_in(
-        &f.ctx,
-        GoogleSignInInput { operator_id: op },
-        None,
-        &mut noop(),
-    )
-    .unwrap_err();
-    assert!(
-        e.to_string().starts_with("E_GOOGLE_NOT_CONFIGURED: "),
-        "{e}"
-    );
+    assert!(!desktop_sign_in_configured(), "the UI must not offer it");
+    let e = account_sign_in(&f.ctx, None, &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_NOT_CONFIGURED: "), "{e}");
     assert!(f.mock.addon_calls.lock().unwrap().is_empty());
+    assert!(!account(&f.ctx).unwrap().sign_in);
 }
 
 fn test_client() -> DesktopClient {
@@ -531,7 +481,6 @@ fn browser(
 #[test]
 fn desktop_loopback_sign_in_with_pkce() {
     let f = fx();
-    let op = provisioned(&f);
     let seen = happy_helper(&f);
     let opened = Arc::new(Mutex::new(String::new()));
     let mut open = browser(
@@ -542,16 +491,15 @@ fn desktop_loopback_sign_in_with_pkce() {
         ],
         opened.clone(),
     );
-    let row = sign_in_with(
+    let a = account_sign_in_with(
         &f.ctx,
-        GoogleSignInInput { operator_id: op },
         SignIn::Desktop(test_client()),
         &mut open,
         Duration::from_secs(10),
         &mut noop(),
     )
     .unwrap();
-    assert_eq!(row.state, AddonState::Ready);
+    assert!(a.connected);
 
     let url = opened.lock().unwrap().clone();
     assert!(url.starts_with("https://accounts.example.test/auth?"));
@@ -587,15 +535,13 @@ fn desktop_loopback_sign_in_with_pkce() {
 #[test]
 fn desktop_sign_in_refused_or_abandoned() {
     let f = fx();
-    let op = provisioned(&f);
     happy_helper(&f);
     let mut open = browser(
         vec!["/?state={state}&error=access_denied".into()],
         Arc::new(Mutex::new(String::new())),
     );
-    let e = sign_in_with(
+    let e = account_sign_in_with(
         &f.ctx,
-        GoogleSignInInput { operator_id: op },
         SignIn::Desktop(test_client()),
         &mut open,
         Duration::from_secs(10),
@@ -608,9 +554,8 @@ fn desktop_sign_in_refused_or_abandoned() {
     );
 
     let mut nobody = |_: &str| Ok(());
-    let e = sign_in_with(
+    let e = account_sign_in_with(
         &f.ctx,
-        GoogleSignInInput { operator_id: op },
         SignIn::Desktop(test_client()),
         &mut nobody,
         Duration::from_millis(300),
@@ -630,41 +575,164 @@ fn desktop_sign_in_refused_or_abandoned() {
         .any(|a| a[0] == "appsscript-deploy"));
 }
 
-fn ready_channel(f: &Fx, op: i64) -> AddonRow {
-    script(&f.ctx, GoogleScriptInput { operator_id: op }, &mut noop()).unwrap();
-    attach(
-        &f.ctx,
-        GoogleAttachInput {
-            operator_id: op,
-            url: format!("https://script.google.com/macros/s/{DEPLOYMENT}/exec"),
-        },
-        &mut noop(),
-    )
-    .unwrap()
+// --------------------------------------------------------------------
+// A relay's switch
+// --------------------------------------------------------------------
+
+#[test]
+fn a_relay_switch_without_the_account_changes_nothing() {
+    let f = fx();
+    let op = provisioned(&f);
+    let seen = happy_helper(&f);
+    let e = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_NO_ACCOUNT: "), "{e}");
+    assert!(row_for(&f.ctx, op).unwrap().is_none());
+    assert!(f.ctx.db.list_freshness_endpoints(op).unwrap().is_empty());
+    assert!(seen.lock().unwrap().is_empty());
+    // A copied script with no address yet is not an account either.
+    account_script(&f.ctx, &mut noop()).unwrap();
+    let e = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_NO_ACCOUNT: "), "{e}");
 }
 
 #[test]
-fn remove_clears_the_script_then_forgets_the_key() {
+fn turning_on_gives_the_relay_a_slot_and_a_mirror() {
+    let f = fx();
+    let op = provisioned(&f);
+    let seen = happy_helper(&f);
+    connect_account(&f);
+    let row = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap();
+    assert_eq!(row.state, AddonState::Ready);
+    let d = detail_of(&row);
+    assert!(valid_slot(&d.slot) && d.slot != TEST_SLOT);
+    let key = account_key_bytes(&f);
+    assert_eq!(d.url, slot_url(BASE, &key, &d.slot));
+    assert_eq!(d.deployment_id, DEPLOYMENT);
+    assert_eq!(row.provider_ids.get("slot"), Some(&d.slot));
+    // The relay holds its own copy of the account key.
+    assert!(row.has_secret);
+    assert_ne!(row.secret_alias, ACCOUNT_KEY_ALIAS);
+    assert_eq!(f.ctx.custody.get(&row.secret_alias).unwrap(), key);
+    assert!(!row.detail.to_string().contains(&hex::encode(&key)), "no key in the row");
+
+    // The first update went to the slot under a fresh number, and the
+    // freshness counter moved past it.
+    let check = calls_of(&seen, "appsscript-check").last().cloned().unwrap();
+    assert_eq!(arg_after(&check.0, "--url").unwrap(), d.url);
+    let seq: u64 = arg_after(&check.0, "--seq").unwrap().parse().unwrap();
+    assert!(f.ctx.db.get(op).unwrap().freshness_last_sequence as u64 >= seq);
+    assert!(d.posted_seq >= 1_800_000_000);
+    assert!(!check.0.iter().any(|a| a.contains(&hex::encode(&key))));
+
+    let st = freshness::status(&f.ctx, op).unwrap();
+    assert_eq!(st.endpoints.len(), 1);
+    assert_eq!(st.endpoints[0].kind, "appsscript");
+    assert_eq!(st.endpoints[0].public_url, d.url);
+    assert!(st.endpoints[0].has_credential);
+    assert!(st.google_only);
+    assert_eq!(st.min_mirrors, 1);
+    // The table holds no secret of its own for it.
+    let ep = f.ctx.db.list_freshness_endpoints(op).unwrap();
+    assert_eq!(ep[0].secret_alias, "");
+    // And the freshness panel cannot remove it behind the add-on's back.
+    assert!(freshness::delete_endpoint(&f.ctx, ep[0].id).is_err());
+    assert!(freshness::add_endpoint(
+        &f.ctx,
+        op,
+        FreshnessEndpointInput {
+            kind: "appsscript".into(),
+            public_url: d.url.clone(),
+            ..Default::default()
+        }
+    )
+    .is_err());
+
+    // On again: nothing more is done.
+    let n = seen.lock().unwrap().len();
+    let again = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap();
+    assert_eq!(again.id, row.id);
+    assert_eq!(seen.lock().unwrap().len(), n);
+}
+
+#[test]
+fn two_relays_share_the_script_and_never_a_slot() {
+    let f = fx();
+    let a = provisioned(&f);
+    let b = provisioned(&f);
+    happy_helper(&f);
+    connect_account(&f);
+    let ra = turn_on(&f.ctx, GoogleOnInput { operator_id: a }, &mut noop()).unwrap();
+    let rb = turn_on(&f.ctx, GoogleOnInput { operator_id: b }, &mut noop()).unwrap();
+    let (da, db) = (detail_of(&ra), detail_of(&rb));
+    assert_ne!(da.slot, db.slot);
+    assert!(da.url.starts_with(BASE) && db.url.starts_with(BASE));
+    assert_ne!(ra.secret_alias, rb.secret_alias);
+}
+
+#[test]
+fn a_failed_first_update_takes_the_mirror_out_and_on_again_finishes() {
+    let f = fx();
+    let op = provisioned(&f);
+    happy_helper(&f);
+    connect_account(&f);
+    let answer = Arc::new(Mutex::new(
+        r#"{"ok":false,"reason":"unreachable","detail":"front: dial: timeout"}"#.to_string(),
+    ));
+    let a2 = answer.clone();
+    helper(&f, move |_, _, _| Ok(a2.lock().unwrap().clone()));
+    let e = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap_err();
+    assert!(e.to_string().starts_with("E_GOOGLE_CHECK_FAILED: unreachable: front: dial"), "{e}");
+    let row = google_row(&f, op);
+    assert_eq!(row.state, AddonState::Building);
+    let slot = detail_of(&row).slot;
+    assert!(
+        f.ctx.db.list_freshness_endpoints(op).unwrap().is_empty(),
+        "not a mirror until it works"
+    );
+
+    *answer.lock().unwrap() = ok_check(5);
+    let row = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap();
+    assert_eq!(row.state, AddonState::Ready);
+    assert_eq!(detail_of(&row).slot, slot, "the retry keeps the slot");
+    assert_eq!(f.ctx.db.list_freshness_endpoints(op).unwrap().len(), 1);
+
+    // A later check only fetches, against what was posted.
+    let seen = helper(&f, |_, _, _| {
+        Ok(r#"{"ok":false,"via_front":false,"reason":"wrong_content"}"#.into())
+    });
+    let c = check(&f.ctx, GoogleCheckInput { operator_id: op }, &mut noop()).unwrap();
+    assert_eq!(c.reason, "wrong_content");
+    let args = seen.lock().unwrap()[0].0.clone();
+    assert!(args.contains(&"--expect-sha256".to_string()));
+    assert!(!args.contains(&"--seq".to_string()), "a check of a ready channel sends nothing");
+    assert_eq!(detail_of(&google_row(&f, op)).last_check_reason, "wrong_content");
+}
+
+fn ready_channel(f: &Fx, op: i64) -> AddonRow {
+    connect_account(f);
+    turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap()
+}
+
+#[test]
+fn turning_off_clears_the_slot_then_forgets_the_relays_key() {
     let f = fx();
     let op = provisioned(&f);
     let seen = happy_helper(&f);
     let row = ready_channel(&f, op);
+    let url = detail_of(&row).url;
     let r = addons::remove(&f.ctx, row.id, &mut noop()).unwrap();
     assert!(r.removed, "{r:?}");
-    assert_eq!(r.by_hand, vec!["delete_google_project".to_string()]);
+    assert!(r.by_hand.is_empty(), "nothing per relay to do in Google: {r:?}");
     assert!(row_for(&f.ctx, op).unwrap().is_none());
-    assert!(
-        f.ctx.custody.get(&row.secret_alias).is_err(),
-        "the write key is forgotten"
-    );
+    assert!(f.ctx.custody.get(&row.secret_alias).is_err(), "the relay's copy is forgotten");
     assert!(f.ctx.db.list_freshness_endpoints(op).unwrap().is_empty());
     let last = seen.lock().unwrap().last().cloned().unwrap();
     assert_eq!(last.0[0], "appsscript-check");
-    assert!(
-        arg_after(&last.0, "--seq").is_some(),
-        "the empty container went out"
-    );
+    assert_eq!(arg_after(&last.0, "--url").unwrap(), url, "the relay's own slot");
+    assert!(arg_after(&last.0, "--seq").is_some(), "the empty container went out");
     assert!(arg_after(&last.0, "--freshness-file").is_none());
+    // The account is untouched.
+    assert!(account(&f.ctx).unwrap().connected);
 }
 
 #[test]
@@ -673,18 +741,15 @@ fn a_remove_that_cannot_clear_keeps_the_key_for_the_retry() {
     let op = provisioned(&f);
     happy_helper(&f);
     let row = ready_channel(&f, op);
-    helper(&f, |_, _, _| {
-        Ok(r#"{"ok":false,"reason":"unreachable"}"#.into())
-    });
+    helper(&f, |_, _, _| Ok(r#"{"ok":false,"reason":"unreachable"}"#.into()));
     let r = addons::remove(&f.ctx, row.id, &mut noop()).unwrap();
     assert!(!r.removed);
-    assert!(
-        r.warnings.iter().any(|w| w == "clear_failed:unreachable"),
-        "{r:?}"
-    );
+    assert!(r.warnings.iter().any(|w| w == "clear_failed:unreachable"), "{r:?}");
     let kept = google_row(&f, op);
     assert_eq!(kept.state, AddonState::Removing);
     assert!(f.ctx.custody.get(&kept.secret_alias).is_ok());
+    let e = turn_on(&f.ctx, GoogleOnInput { operator_id: op }, &mut noop()).unwrap_err();
+    assert!(e.to_string().contains("has not finished"), "{e}");
 
     happy_helper(&f);
     assert!(addons::remove(&f.ctx, row.id, &mut noop()).unwrap().removed);
@@ -696,9 +761,7 @@ fn relay_delete_never_waits_on_the_channel() {
     let op = provisioned(&f);
     happy_helper(&f);
     let row = ready_channel(&f, op);
-    helper(&f, |_, _, _| {
-        Ok(r#"{"ok":false,"reason":"unreachable"}"#.into())
-    });
+    helper(&f, |_, _, _| Ok(r#"{"ok":false,"reason":"unreachable"}"#.into()));
     let o = on_relay_delete(&f.ctx, &row);
     assert!(o.removed && !o.keeps_relay, "{o:?}");
     assert!(o.error.contains("unreachable"));

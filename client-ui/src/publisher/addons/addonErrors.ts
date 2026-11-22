@@ -33,6 +33,7 @@ export const ADDON_ERROR_CODES = [
     'E_GOOGLE_API',
     'E_GOOGLE_BAD_ADDRESS',
     'E_GOOGLE_CHECK_FAILED',
+    'E_GOOGLE_NO_ACCOUNT',
 ] as const;
 
 export type AddonErrorCode = (typeof ADDON_ERROR_CODES)[number];

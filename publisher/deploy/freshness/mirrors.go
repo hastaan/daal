@@ -149,53 +149,80 @@ func (s *MirrorSet) MeetsFloor() bool {
 	return MeetsMirrorFloor(ps)
 }
 
-// appsScriptIDRe and appsScriptTokenRe are the two variable parts of
-// an appsscript mirror URL.
+// appsScriptIDRe, appsScriptSlotRe and appsScriptTokenRe are the
+// variable parts of an appsscript mirror URL.
 var (
 	appsScriptIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{20,120}$`)
+	appsScriptSlotRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 	appsScriptTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 )
 
 // AppsScriptHost is the only host an appsscript mirror may name.
 const AppsScriptHost = "script.google.com"
 
-// ValidateAppsScriptURL enforces the one shape an appsscript mirror
-// URL has: https://script.google.com/macros/s/<id>/exec?k=<token>,
-// <id> 20–120 of [A-Za-z0-9_-], <token> 22 base64url characters (16
-// random bytes), no other query parameter, no fragment, no port, no
-// credentials. It returns the deployment id and the token.
-func ValidateAppsScriptURL(raw string) (id, token string, err error) {
+// ValidateAppsScriptBase enforces the shape of a script's own address,
+// the one an account connects: https://script.google.com/macros/s/<id>/exec,
+// <id> 20–120 of [A-Za-z0-9_-], no query, fragment, port or
+// credentials. It returns the deployment id. It is never a mirror URL
+// by itself (a mirror names a slot).
+func ValidateAppsScriptBase(raw string) (id string, err error) {
 	if err := ValidateMirrorURL(raw); err != nil {
-		return "", "", err
+		return "", err
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", "", errors.New("url is not parseable")
+		return "", errors.New("url is not parseable")
 	}
 	if u.Host != AppsScriptHost {
-		return "", "", fmt.Errorf("appsscript url host must be %s", AppsScriptHost)
+		return "", fmt.Errorf("appsscript url host must be %s", AppsScriptHost)
 	}
-	if u.Fragment != "" || u.RawFragment != "" {
-		return "", "", errors.New("appsscript url must not carry a fragment")
+	if u.Fragment != "" || u.RawFragment != "" || u.RawQuery != "" || u.ForceQuery {
+		return "", errors.New("appsscript address must have no query or fragment")
 	}
 	const prefix, suffix = "/macros/s/", "/exec"
 	p := u.EscapedPath()
 	if !strings.HasPrefix(p, prefix) || !strings.HasSuffix(p, suffix) {
-		return "", "", errors.New("appsscript url path must be /macros/s/<id>/exec")
+		return "", errors.New("appsscript url path must be /macros/s/<id>/exec")
 	}
 	id = strings.TrimSuffix(strings.TrimPrefix(p, prefix), suffix)
 	if !appsScriptIDRe.MatchString(id) {
-		return "", "", errors.New("appsscript url deployment id must be 20-120 of [A-Za-z0-9_-]")
+		return "", errors.New("appsscript url deployment id must be 20-120 of [A-Za-z0-9_-]")
 	}
-	q, err := url.ParseQuery(u.RawQuery)
-	if err != nil || len(q) != 1 || len(q["k"]) != 1 || u.RawQuery != "k="+q.Get("k") {
-		return "", "", errors.New("appsscript url query must be exactly k=<token>")
+	return id, nil
+}
+
+// ValidateAppsScriptURL enforces the one shape an appsscript mirror URL
+// has (specs/relaypack-v1.md, "Mirror provider appsscript", protocol
+// daal-refresh-v2): https://script.google.com/macros/s/<id>/exec?s=<slot>&k=<token>,
+// <id> 20–120 of [A-Za-z0-9_-], <slot> 11 base64url characters, <token>
+// 22 base64url characters, exactly those two parameters in that order,
+// no fragment, no port, no credentials. It returns the deployment id,
+// the slot and the token. The single-relay shape of the first build
+// (?k=<token> alone) is refused: nothing was deployed with it.
+func ValidateAppsScriptURL(raw string) (id, slot, token string, err error) {
+	if err := ValidateMirrorURL(raw); err != nil {
+		return "", "", "", err
 	}
-	token = q.Get("k")
+	base, query, ok := strings.Cut(raw, "?")
+	if !ok {
+		return "", "", "", errors.New("appsscript url query must be exactly s=<slot>&k=<token>")
+	}
+	if id, err = ValidateAppsScriptBase(base); err != nil {
+		return "", "", "", err
+	}
+	q, err := url.ParseQuery(query)
+	if err != nil || len(q) != 2 || len(q["s"]) != 1 || len(q["k"]) != 1 ||
+		query != "s="+q.Get("s")+"&k="+q.Get("k") {
+		return "", "", "", errors.New("appsscript url query must be exactly s=<slot>&k=<token>")
+	}
+	slot, token = q.Get("s"), q.Get("k")
+	if !appsScriptSlotRe.MatchString(slot) {
+		return "", "", "", errors.New("appsscript url slot must be 11 base64url characters")
+	}
 	if !appsScriptTokenRe.MatchString(token) {
-		return "", "", errors.New("appsscript url token must be 22 base64url characters")
+		return "", "", "", errors.New("appsscript url token must be 22 base64url characters")
 	}
-	return id, token, nil
+	return id, slot, token, nil
 }
 
 var providerRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,15}$`)
@@ -258,7 +285,7 @@ func NewMirrorSet(mirrors []Mirror) (*MirrorSet, error) {
 			return nil, fmt.Errorf("freshness: mirror %s: %w", m.Provider, err)
 		}
 		if m.Provider == ProviderAppsScript {
-			if _, _, err := ValidateAppsScriptURL(m.URL); err != nil {
+			if _, _, _, err := ValidateAppsScriptURL(m.URL); err != nil {
 				return nil, fmt.Errorf("freshness: mirror %s: %w", m.Provider, err)
 			}
 		}

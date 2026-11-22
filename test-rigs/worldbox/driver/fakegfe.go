@@ -34,10 +34,12 @@ import (
 //     script.google.com, GET and POST, each answered the way Apps Script
 //     answers — a 302 to script.googleusercontent.com/macros/echo?… whose
 //     GET carries the script's output. The script's rules are Code.gs's
-//     (doGet: the stored container for the right k, a bland page
-//     otherwise; doPost: MAC and seq checked, stored), run in Go with
-//     the write key and path token read out of the source that was
-//     actually uploaded through the API or "pasted" by hand;
+//     (protocol daal-refresh-v2: one script per Google account, one
+//     container per relay slot; doGet: the slot's container for
+//     ?s=<slot>&k=<the slot's read token>, a bland page otherwise; doPost:
+//     MAC over slot, seq and blob checked, seq monotonic per slot,
+//     stored), run in Go with the write key read out of the source that
+//     was actually uploaded through the API or "pasted" by hand;
 //   - the Apps Script API and OAuth (fakegas_api.go).
 //
 // Path B (by hand) is the publisher pasting the script into the editor
@@ -46,8 +48,8 @@ import (
 //
 // Knobs (google-knobs.json, read on every request): api_disabled (the
 // "Apps Script API has not been used" answer), fail_stage (one API call
-// fails), serve_previous (the web app answers with the container it held
-// BEFORE the last update: a rollback), sign_in_wall (web apps answer
+// fails), serve_previous (the web app answers, for every slot, with the
+// container that slot held BEFORE its last update: a rollback), sign_in_wall (web apps answer
 // with a sign-in page: access not "Anyone").
 //
 // Every request is a line in google-requests.jsonl: which address it
@@ -102,13 +104,16 @@ type gProject struct {
 }
 
 type gWebApp struct {
-	id        string
-	writeKey  []byte
-	pathToken string
-	seq       int64
-	blob      string
-	prev      string // the container before the last accepted update
-	source    string // "api" | "paste"
+	id       string
+	writeKey []byte
+	slots    map[string]*gSlot
+	source   string // "api" | "paste"
+}
+
+type gSlot struct {
+	seq  int64
+	blob string
+	prev string // the container before the last accepted update
 }
 
 type googleFake struct {
@@ -232,21 +237,26 @@ func (g *googleFake) ServeHTTP(w0 http.ResponseWriter, r *http.Request) {
 var (
 	reExec     = regexp.MustCompile(`^/macros/s/([A-Za-z0-9_-]{20,120})/exec$`)
 	reWriteKey = regexp.MustCompile(`var WRITE_KEY_B64 = '([A-Za-z0-9+/=]+)';`)
-	rePathTok  = regexp.MustCompile(`var PATH_TOKEN = '([A-Za-z0-9_-]+)';`)
+	reSlot     = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 )
 
-// parseDaalScript reads the two values Code.gs is set up with; a source
-// that is not Daal's script (or was not filled in) is refused.
-func parseDaalScript(src string) (key []byte, tok string, err error) {
-	km, tm := reWriteKey.FindStringSubmatch(src), rePathTok.FindStringSubmatch(src)
-	if km == nil || tm == nil || !strings.Contains(src, "function doGet") || !strings.Contains(src, "function doPost") {
-		return nil, "", fmt.Errorf("not the update script, or its write key / path token were not filled in")
+// parseDaalScript reads the write key Code.gs is set up with; a source
+// that is not Daal's account script (or was not filled in) is refused.
+func parseDaalScript(src string) (key []byte, err error) {
+	km := reWriteKey.FindStringSubmatch(src)
+	if km == nil || !strings.Contains(src, "function doGet") || !strings.Contains(src, "function doPost") ||
+		!strings.Contains(src, "'daal-refresh-v2'") {
+		return nil, fmt.Errorf("not the update script, or its write key was not filled in")
 	}
 	key, err = base64.StdEncoding.DecodeString(km[1])
 	if err != nil || len(key) != 32 {
-		return nil, "", fmt.Errorf("write key is not 32 bytes of base64")
+		return nil, fmt.Errorf("write key is not 32 bytes of base64")
 	}
-	return key, tm[1], nil
+	return key, nil
+}
+
+func newWebApp(id string, key []byte, source string) *gWebApp {
+	return &gWebApp{id: id, writeKey: key, slots: map[string]*gSlot{}, source: source}
 }
 
 func (g *googleFake) app(id string) *gWebApp {
@@ -257,11 +267,11 @@ func (g *googleFake) app(id string) *gWebApp {
 	if err != nil {
 		return nil
 	}
-	key, tok, err := parseDaalScript(string(src))
+	key, err := parseDaalScript(string(src))
 	if err != nil {
 		return nil
 	}
-	a := &gWebApp{id: id, writeKey: key, pathToken: tok, source: "paste"}
+	a := newWebApp(id, key, "paste")
 	g.apps[id] = a
 	return a
 }
@@ -297,7 +307,7 @@ func (g *googleFake) webApp(w http.ResponseWriter, r *http.Request, body []byte,
 	var out string
 	switch r.Method {
 	case "GET":
-		out = a.doGet(r.URL.Query().Get("k"), kn.ServePrevious)
+		out = a.doGet(r.URL.Query().Get("s"), r.URL.Query().Get("k"), kn.ServePrevious)
 	case "POST":
 		out = a.doPost(body)
 		q.Detail = out
@@ -311,31 +321,45 @@ func (g *googleFake) webApp(w http.ResponseWriter, r *http.Request, body []byte,
 	w.WriteHeader(http.StatusFound)
 }
 
-// doGet is Code.gs doGet.
-func (a *gWebApp) doGet(k string, previous bool) string {
-	if subtle.ConstantTimeCompare([]byte(k), []byte(a.pathToken)) != 1 {
+// readToken is Code.gs readToken_: the first 16 bytes of
+// HMAC-SHA256(write key, "daal-read-v2\n" + slot), base64url.
+func (a *gWebApp) readToken(slot string) string {
+	m := hmac.New(sha256.New, a.writeKey)
+	m.Write([]byte("daal-read-v2\n" + slot))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])
+}
+
+// doGet is Code.gs doGet: ?s=<slot>&k=<the slot's read token>.
+func (a *gWebApp) doGet(slot, k string, previous bool) string {
+	if !reSlot.MatchString(slot) || subtle.ConstantTimeCompare([]byte(k), []byte(a.readToken(slot))) != 1 {
 		return "Nothing here."
 	}
-	blob := a.blob
+	st := a.slots[slot]
+	if st == nil {
+		return "Nothing here."
+	}
+	blob := st.blob
 	if previous {
-		blob = a.prev
+		blob = st.prev
 	}
 	if blob == "" {
-		return `{"kind":"daal-refresh-v1"}`
+		return "Nothing here."
 	}
 	return blob
 }
 
-// doPost is Code.gs doPost: {"seq","blob","mac"}, mac = HMAC-SHA256(write
-// key, decimal seq + "\n" + blob).
+// doPost is Code.gs doPost: {"slot","seq","blob","mac"}, mac =
+// HMAC-SHA256(write key, "daal-refresh-v2\n" + slot + "\n" + decimal seq
+// + "\n" + blob); seq only goes up, per slot.
 func (a *gWebApp) doPost(body []byte) string {
 	var req struct {
+		Slot *string     `json:"slot"`
 		Seq  json.Number `json:"seq"`
 		Blob *string     `json:"blob"`
 		MAC  *string     `json:"mac"`
 	}
 	answer := func(v map[string]any) string { b, _ := json.Marshal(v); return string(b) }
-	if json.Unmarshal(body, &req) != nil || req.Blob == nil || req.MAC == nil {
+	if json.Unmarshal(body, &req) != nil || req.Slot == nil || !reSlot.MatchString(*req.Slot) || req.Blob == nil || req.MAC == nil {
 		return answer(map[string]any{"ok": false, "error": "malformed"})
 	}
 	seq, err := strconv.ParseInt(string(req.Seq), 10, 64)
@@ -346,20 +370,25 @@ func (a *gWebApp) doPost(body []byte) string {
 		return answer(map[string]any{"ok": false, "error": "too_large"})
 	}
 	mac := hmac.New(sha256.New, a.writeKey)
-	mac.Write([]byte(strconv.FormatInt(seq, 10) + "\n" + *req.Blob))
+	mac.Write([]byte("daal-refresh-v2\n" + *req.Slot + "\n" + strconv.FormatInt(seq, 10) + "\n" + *req.Blob))
 	want := hex.EncodeToString(mac.Sum(nil))
 	if subtle.ConstantTimeCompare([]byte(*req.MAC), []byte(want)) != 1 {
 		return answer(map[string]any{"ok": false, "error": "refused"})
 	}
-	if seq < a.seq {
-		return answer(map[string]any{"ok": false, "error": "stale", "seq": a.seq})
+	st := a.slots[*req.Slot]
+	if st == nil {
+		st = &gSlot{}
+		a.slots[*req.Slot] = st
 	}
-	if seq == a.seq {
-		if a.blob == *req.Blob {
-			return answer(map[string]any{"ok": true, "seq": a.seq})
+	if seq < st.seq {
+		return answer(map[string]any{"ok": false, "error": "stale", "seq": st.seq})
+	}
+	if seq == st.seq {
+		if st.blob == *req.Blob {
+			return answer(map[string]any{"ok": true, "seq": st.seq})
 		}
-		return answer(map[string]any{"ok": false, "error": "stale", "seq": a.seq})
+		return answer(map[string]any{"ok": false, "error": "stale", "seq": st.seq})
 	}
-	a.prev, a.blob, a.seq = a.blob, *req.Blob, seq
+	st.prev, st.blob, st.seq = st.blob, *req.Blob, seq
 	return answer(map[string]any{"ok": true, "seq": seq})
 }

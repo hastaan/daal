@@ -367,6 +367,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
     };
     let addons: FakeAddon[] = [];
     let cfAccount = { connected: false, zone: '' };
+    let googleAccount = { connected: false, script_made: false, url: '', sign_in: false };
     let hostingAccount = false;
     const STANDBY_KEY = '000G40 R40M3 0E209 185WP 03H2G';
     const addonOp = (a: Args) => Number((a?.input as { operator_id?: number })?.operator_id ?? LIVE_RELAY_ID);
@@ -422,7 +423,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
                 addon_id: id,
                 removed: true,
                 still_billing: [],
-                by_hand: r?.kind === 'cdn' ? ['delete_cloudflare_token', 'cancel_domain'] : r?.kind === 'google' ? ['delete_google_project'] : [],
+                by_hand: r?.kind === 'cdn' ? ['delete_cloudflare_token', 'cancel_domain'] : [],
                 warnings: [],
             };
         },
@@ -480,19 +481,32 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
             if (r) r.detail = { ...r.detail, plain_fallback: !!(a?.input as { allow?: boolean })?.allow };
             return r;
         },
-        wizard_addon_google_script: () => ({
-            code_gs: '// Daal update channel\nvar WRITE_KEY = "harness-not-a-real-key";\nfunction doGet(e) { /* … */ }',
-            manifest_json: '{}',
-        }),
-        wizard_addon_google_sign_in: async (a) => {
-            const o = addonOp(a);
-            for (const step of ['signing_in', 'deploying', 'checking']) await addonStep(o, 'google', step);
-            return addAddon(o, 'google', { path: 'A' }, 0, '');
+        // The Google account (Accounts page): one script for every relay.
+        wizard_google_account: () => googleAccount,
+        wizard_google_account_script: () => {
+            if (!googleAccount.connected) googleAccount = { ...googleAccount, script_made: true };
+            return {
+                code_gs: '// Daal update channel\nvar WRITE_KEY_B64 = "harness-not-a-real-key";\nfunction doGet(e) { /* … */ }',
+                manifest_json: '{}',
+            };
         },
-        wizard_addon_google_attach: async (a) => {
+        wizard_google_account_attach: async (a) => {
+            const url = String((a?.input as { url?: string })?.url ?? '').trim();
+            await addonStep(0, 'google', 'checking');
+            if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,}\/exec\/?$/.test(url))
+                throw 'E_GOOGLE_BAD_ADDRESS: the address must look like script.google.com/macros/s/…/exec';
+            googleAccount = { ...googleAccount, connected: true, script_made: false, url: url.replace(/\/$/, '') };
+            return googleAccount;
+        },
+        wizard_google_account_disconnect: () => {
+            googleAccount = { connected: false, script_made: false, url: '', sign_in: false };
+            return null;
+        },
+        wizard_addon_google_on: async (a) => {
             const o = addonOp(a);
-            await addonStep(o, 'google', 'checking');
-            return addAddon(o, 'google', { url: String((a?.input as { url?: string })?.url ?? ''), path: 'B' }, 0, '');
+            if (!googleAccount.connected) throw 'E_GOOGLE_NO_ACCOUNT: connect Google on the Accounts page first';
+            for (const step of ['slot', 'checking']) await addonStep(o, 'google', step);
+            return addAddon(o, 'google', { slot: 'AAAAAAAAAAA', url: `${googleAccount.url}?s=AAAAAAAAAAA&k=harness` }, 0, '');
         },
         wizard_addon_google_check: () => ({ ok: true, via_front: true, checked_at_unix: NOW(), reason: '' }),
         wizard_restore_unsettled: () => unsettled(f),

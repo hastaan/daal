@@ -68,7 +68,7 @@ func ensureRelayPackRefresh() (*refresh.RelayPackRefresher, error) {
 			}),
 			Now:     nowUTC,
 			Recover: recoverViaBootstrapPointers,
-			// A daal-refresh-v1 container (the Google channel) may carry
+			// A daal-refresh-v2 container (the Google channel) may carry
 			// a standby key; it is kept on every route whose sealed
 			// standby it opens. AcceptStandbyKey takes Core.mu, so this
 			// refresher is only ever run without it held (the scheduler

@@ -165,21 +165,33 @@ export interface CdnPlainFallbackInput {
 }
 
 // ---- update channel through Google (addon_google.rs) ----
+//
+// Google is an account (Accounts → Google): one script per Google
+// account, added once; each relay's switch takes a slot in it.
 
-export interface GoogleScriptInput {
-    operator_id: number;
+/** daal_wizard::addon_google::GoogleAccount. Local, no secret. */
+export interface GoogleAccount {
+    /** The script is added and its check passed. */
+    connected: boolean;
+    /** The script was copied (a key was made) and no address is
+     *  connected yet. */
+    script_made: boolean;
+    /** The script's address; '' when not connected. */
+    url: string;
+    /** This build may offer "Sign in with Google" (OAuth clients
+     *  configured). False: the button is not shown at all. */
+    sign_in: boolean;
 }
 export interface GoogleScript {
-    /** Carries the write key: copy it, never log it. */
+    /** Carries the account's write key: copy it, never log it. */
     code_gs: string;
     manifest_json: string;
 }
-export interface GoogleSignInInput {
-    operator_id: number;
-}
-export interface GoogleAttachInput {
-    operator_id: number;
+export interface GoogleAccountAttachInput {
     url: string;
+}
+export interface GoogleOnInput {
+    operator_id: number;
 }
 export interface GoogleCheckInput {
     operator_id: number;
@@ -188,7 +200,17 @@ export interface GoogleCheck {
     ok: boolean;
     via_front: boolean;
     checked_at_unix: number;
-    /** '' when ok. `api_not_enabled` is a sign-in error
-     *  (E_GOOGLE_API_NOT_ENABLED), not a check reason. */
-    reason: '' | 'not_deployed' | 'refused' | 'stale' | 'wrong_content' | 'unreachable' | 'no_address';
+    /** '' when ok. */
+    reason:
+        | ''
+        | 'not_deployed'
+        | 'refused'
+        | 'stale'
+        | 'wrong_content'
+        | 'unreachable'
+        | 'full'
+        | 'bad_address'
+        | 'no_address';
+    /** The helper's words for a failure; Details only. */
+    detail?: string;
 }

@@ -13,7 +13,7 @@ package abi
 // nothing and is refused here. This file is where a key is ACCEPTED:
 //
 //   - typed by the person (engine_standby_key: StandbyKey below);
-//   - the `standby_key` member of a `daal-refresh-v1` container fetched
+//   - the `standby_key` member of a `daal-refresh-v2` container fetched
 //     by the refresh walk (core/refresh, lane L-fetch:
 //     AcceptStandbyKeyBytes / StandbyKeySink).
 //
@@ -81,7 +81,7 @@ func StandbyKey(relayPackID, key string) (string, error) {
 
 // AcceptStandbyKeyBytes is the store hook for a standby key that did
 // not come from a person: the 16 raw bytes, as the `standby_key` member
-// of a `daal-refresh-v1` container carries them once decoded. Same
+// of a `daal-refresh-v2` container carries them once decoded. Same
 // checks and the same writes as StandbyKey; a key that is not 16 bytes
 // is malformed.
 func AcceptStandbyKeyBytes(relayPackID string, raw []byte) (StandbyKeyResult, error) {

@@ -29,26 +29,38 @@ import (
 
 // The Google update channel on the recipient (frontmirror.go).
 
-const testGoogleMirror = "https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA"
+const (
+	testGoogleSlot   = "AAAAAAAAAAA"
+	testGoogleMirror = "https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?s=" + testGoogleSlot + "&k=AAAAAAAAAAAAAAAAAAAAAA"
+)
 
 func TestIsAppsScriptMirrorURL(t *testing.T) {
+	const base = "https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec"
 	good := []string{
 		testGoogleMirror,
-		"https://script.google.com/macros/s/" + strings.Repeat("A", 120) + "/exec?k=abcdefghijklmnopqrstu_",
+		"https://script.google.com/macros/s/" + strings.Repeat("A", 120) + "/exec?s=ab_-0123456&k=abcdefghijklmnopqrstu_",
 	}
 	bad := []string{
 		"",
-		"http://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
-		"https://script.google.com:443/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
-		"https://u@script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
-		"https://script.google.com/macros/s/AKfycbTEST0000000000000001/dev?k=AAAAAAAAAAAAAAAAAAAAAA",
-		"https://script.google.com/macros/s/short/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
-		"https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec",
-		"https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAA",
-		"https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA&x=1",
-		"https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA#f",
-		"https://script.googleusercontent.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
-		"https://evil.example/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
+		// The single-relay shape of the first build: never deployed.
+		base + "?k=AAAAAAAAAAAAAAAAAAAAAA",
+		base,
+		base + "?s=AAAAAAAAAAA",
+		base + "?k=AAAAAAAAAAAAAAAAAAAAAA&s=AAAAAAAAAAA",
+		base + "?s=AAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		base + "?s=AAAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		base + "?s=AAAAAAAAA%41A&k=AAAAAAAAAAAAAAAAAAAAAA",
+		base + "?s=AAAAAAAAAAA&k=AAAA",
+		base + "?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA&x=1",
+		base + "?s=AAAAAAAAAAA&s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		base + "?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA#f",
+		"http://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		"https://script.google.com:443/macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		"https://u@script.google.com/macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		"https://script.google.com/macros/s/AKfycbTEST0000000000000001/dev?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		"https://script.google.com/macros/s/short/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		"https://script.googleusercontent.com/macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
+		"https://evil.example/macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
 	}
 	for _, u := range good {
 		if !IsAppsScriptMirrorURL(u) {
@@ -59,6 +71,9 @@ func TestIsAppsScriptMirrorURL(t *testing.T) {
 		if IsAppsScriptMirrorURL(u) {
 			t.Errorf("accepted %s", u)
 		}
+	}
+	if s, ok := appsScriptSlot(testGoogleMirror); !ok || s != testGoogleSlot {
+		t.Fatalf("slot %q %v", s, ok)
 	}
 }
 
@@ -96,7 +111,7 @@ func TestValidateMirrorSet_D3(t *testing.T) {
 
 func containerJSON(t *testing.T, doc, pack []byte, key string) []byte {
 	t.Helper()
-	w := map[string]string{"kind": "daal-refresh-v1"}
+	w := map[string]string{"kind": "daal-refresh-v2", "slot": testGoogleSlot}
 	if doc != nil {
 		w["freshness"] = base64.StdEncoding.EncodeToString(doc)
 	}
@@ -115,28 +130,35 @@ func containerJSON(t *testing.T, doc, pack []byte, key string) []byte {
 
 func TestParseRefreshContainer_Limits(t *testing.T) {
 	doc := []byte(`{"kind":"daal/freshness-v2"}`)
-	c, err := parseRefreshContainer(containerJSON(t, doc, []byte("pk"), "0123456789ABCDEFGHJKMNPQR0"))
+	c, err := parseRefreshContainer(containerJSON(t, doc, []byte("pk"), "0123456789ABCDEFGHJKMNPQR0"), testGoogleSlot)
 	if err != nil || string(c.freshness) != string(doc) || string(c.pack) != "pk" || c.standbyKey == "" {
 		t.Fatalf("good container: %+v %v", c, err)
 	}
-	if c, err := parseRefreshContainer([]byte(`{"kind":"daal-refresh-v1"}`)); err != nil || c.freshness != nil {
+	if c, err := parseRefreshContainer([]byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA"}`), testGoogleSlot); err != nil || c.freshness != nil {
 		t.Fatalf("empty container: %+v %v", c, err)
 	}
-	if c, err := parseRefreshContainer([]byte(`{"kind":"daal-refresh-v1","future":1,"freshness":"` +
-		base64.StdEncoding.EncodeToString(doc) + `"}`)); err != nil || c.freshness == nil {
+	if c, err := parseRefreshContainer([]byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","future":1,"freshness":"`+
+		base64.StdEncoding.EncodeToString(doc)+`"}`), testGoogleSlot); err != nil || c.freshness == nil {
 		t.Fatalf("unknown member: %v", err)
+	}
+	// Another relay's slot in the same script: not this relay's text.
+	if _, err := parseRefreshContainer(containerJSON(t, doc, nil, ""), "BBBBBBBBBBB"); err == nil {
+		t.Error("another slot's container accepted")
 	}
 	for name, body := range map[string][]byte{
 		"not JSON":            []byte("<html>Sign in</html>"),
+		"bland page":          []byte("Nothing here."),
 		"wrong kind":          []byte(`{"kind":"daal/freshness-v2"}`),
-		"parts without doc":   []byte(`{"kind":"daal-refresh-v1","pack":"cGs="}`),
-		"bad base64":          []byte(`{"kind":"daal-refresh-v1","freshness":"!!"}`),
+		"v1 container":        []byte(`{"kind":"daal-refresh-v1","freshness":"` + base64.StdEncoding.EncodeToString(doc) + `"}`),
+		"no slot":             []byte(`{"kind":"daal-refresh-v2","freshness":"` + base64.StdEncoding.EncodeToString(doc) + `"}`),
+		"parts without doc":   []byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","pack":"cGs="}`),
+		"bad base64":          []byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","freshness":"!!"}`),
 		"big document":        containerJSON(t, make([]byte, maxContainerFreshness+1), nil, ""),
 		"lower-case key":      containerJSON(t, doc, nil, strings.ToLower("0123456789ABCDEFGHJKMNPQR0")),
 		"short key":           containerJSON(t, doc, nil, "0123"),
 		"over the whole size": append(containerJSON(t, doc, nil, ""), make([]byte, maxRefreshContainer)...),
 	} {
-		if _, err := parseRefreshContainer(body); err == nil {
+		if _, err := parseRefreshContainer(body, testGoogleSlot); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -420,10 +442,24 @@ func TestGoogleMirror_StandbyKeyOnAnUnchangedDocument(t *testing.T) {
 // refusal of the publisher's signature.
 func TestGoogleMirror_EmptyContainer(t *testing.T) {
 	r, _, _, fr, _, _ := googleFixture(t, threeMirrors)
-	fr.body = []byte(`{"kind":"daal-refresh-v1"}`)
+	fr.body = []byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA"}`)
 	res, err := r.RefreshFailureTriggered(context.Background(), "rp-1", "net-a")
 	if !errors.Is(err, errChannelEmpty) || res.Outcome != OutcomeFreshnessUnreachable {
 		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// One script serves many relays: a correctly signed document of this
+// very relay, served in a container that names another slot, is not
+// taken. The slot is part of what the walk checks, never the signature
+// alone.
+func TestGoogleMirror_AnotherSlotsContainerIsRefused(t *testing.T) {
+	r, _, _, fr, pub, priv := googleFixture(t, threeMirrors)
+	body := containerJSON(t, servedDoc(t, pub, priv, nil), nil, "")
+	fr.body = []byte(strings.Replace(string(body), `"slot":"`+testGoogleSlot+`"`, `"slot":"BBBBBBBBBBB"`, 1))
+	res, err := r.RefreshFailureTriggered(context.Background(), "rp-1", "net-a")
+	if err == nil || res.Applied {
+		t.Fatalf("another slot's container applied: %+v %v", res, err)
 	}
 }
 

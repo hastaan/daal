@@ -25,7 +25,8 @@ add-ons, end to end against the lab's stand-ins.**
   the ladder (B-1 to B-8).
 - Google update channel: script, container, Path A and B, the
   `appsscript` mirror in `publish-freshness`, the recipient's front
-  fetcher and container walk (G1–G7).
+  fetcher and container walk (G1–G7). Since 2026-11-22 one script per
+  Google account with a slot per relay (§5).
 
 **Not built:** nothing an add-on needs answers `E_NOT_BUILT` any more
 (the mechanism stays, §6.1). What is still open is in §8: the
@@ -62,7 +63,7 @@ surface, the engine call, the recipient order and the open items.
 | Kind (ledger) | `standby` | `cdn` | `google` |
 | Rescues | one blocked relay address | a blocked address or Hetzner range; an SNI filter on the cover name | nothing alone; carries the fix when the usual refresh addresses are blocked |
 | Cost | €3.00/month per relay excl. VAT, billed by Hetzner | a domain, about $10/year; Cloudflare free | free |
-| Ties to the publisher | nothing new | Cloudflare account email; card and contact data at the registrar; Cloudflare sees recipients' addresses and destinations | a phone-bound Google account; with Path A, a record at Google that it authorised the Daal client |
+| Ties to the publisher | nothing new | Cloudflare account email; card and contact data at the registrar; Cloudflare sees recipients' addresses and destinations | a phone-bound Google account (one script for all of the publisher's relays); with Path A, a record at Google that it authorised the Daal client |
 | In the pack | a commitment (sealed, default) or the address (open) | yes, tried last | yes, one mirror |
 
 - **D-1** Standby is sealed by default; open is offered only while the
@@ -73,6 +74,8 @@ surface, the engine call, the recipient order and the open items.
   two-mirror rule; the card warns that a Google suspension stops updates.
 - **D-4** "Sign in with Google" (Path A) ships for the pilot; the by-hand
   Path B is always visible and described as the more private one.
+  Amended 2026-11-22: until the OAuth clients exist, Path A is hidden
+  completely and Path B is the only way, at account level (§5).
 - **D-5** The Cloudflare Worker code goes. The token is five zone-scoped
   permissions on one zone; Daal never spends money through Cloudflare.
 
@@ -261,31 +264,68 @@ prints, any case, `-` or spaces) and carries the one canonical form.
 
 ## 5. Google update channel
 
-- The script (shipped in the app, the same for both paths): `doGet`
-  returns the stored container as plain text when the request carries
-  the right `k`, and a bland page otherwise; `doPost` checks the MAC and
-  `seq` (`specs/relaypack-v1.md`, "The `daal-refresh-v1` container") and
-  stores the blob in Script Properties, chunked at 9 KB per value. It
-  uses ContentService, PropertiesService and Utilities only — no
-  `UrlFetchApp`, so it asks for no external-request permission.
-- Path A: the user's one-shot access token (scopes
+Amended 2026-11-22 (owner, on a real phone: "it just works like a
+toggle and nothing else"): **Google is an account, like Cloudflare.**
+One script per Google account serves every relay of the publisher, each
+in its own slot (protocol `daal-refresh-v2`, `specs/relaypack-v1.md`).
+The first build's one-script-per-relay shape was never deployed for
+real and is gone everywhere (publisher, recipient, lab).
+
+- The script (shipped in the app, the same for every path and relay):
+  `doGet` returns a slot's container as plain text when the request
+  carries `?s=<slot>&k=<the slot's read token>`, and `Nothing here.`
+  otherwise (wrong key, unknown or never-written slot); `doPost` checks
+  the MAC (it covers the slot, `seq` and the blob) and that `seq` is
+  greater than the slot's stored one, and stores the blob in that
+  slot's Script Properties, chunked at 9 KB per value, other slots
+  untouched. The read token is derived from the account's write key and
+  the slot, so the script keeps no list. It uses ContentService,
+  PropertiesService and Utilities only — no `UrlFetchApp`, so it asks
+  for no external-request permission. Script Properties hold about
+  500 KB in all, which bounds how many relays one account carries; a
+  refused write answers `full`.
+- **Accounts → Google** (`addon_google::account_*`): copy the script (the
+  account's write key is already in it; made on the first copy, the same
+  on every later one), open the Apps Script editor, paste, deploy as a
+  web app (Execute as: Me; Who has access: Anyone), paste the `/exec`
+  address back. Daal writes a container with a fresh nonce to the test
+  slot `connectTest` and reads it back through the Google front, the way
+  recipients fetch (`appsscript-account-check`). Only then is the
+  account connected («✓ وصل است»). The write key is in custody under
+  `daal.google.account.write_key` and the address beside it under
+  `daal.google.account.url`; the publisher backup carries both
+  (`publisher_backup::account_aliases`). Disconnect forgets them and
+  says that the script stays in Google until the publisher deletes it.
+- **Sign in with Google** (Path A) is the same account step done through
+  the Apps Script API: the user's one-shot access token (scopes
   `https://www.googleapis.com/auth/script.projects` and
   `https://www.googleapis.com/auth/script.deployments`) is used for four
-  Apps Script API calls — create project, put content (`Code.gs`,
-  `appsscript.json` with `"webapp": {"access": "ANYONE_ANONYMOUS",
-  "executeAs": "USER_DEPLOYING"}`), create version, create deployment —
-  and dropped. On Android the shell obtains it from the platform plugin
-  (`PlatformHandle::google_authorize`) so it never reaches the page; on
-  desktop the wizard signs in through the system browser (loopback +
-  PKCE). Nothing is stored.
-- Path B: the publisher pastes the script (write key already in it),
-  deploys it by hand and pastes the web-app address back.
-- Both end in the same state: a URL in the signed mirror set and the
-  write key in custody. Publishing an update is one more backend of the
-  existing freshness publish.
-- Removal: sign the mirror set without it and publish; POST an empty
-  container; forget the write key; tell the publisher to delete the
-  project at script.google.com (Daal holds no token to do it).
+  calls — create project, put content (`Code.gs`, `appsscript.json` with
+  `"webapp": {"access": "ANYONE_ANONYMOUS", "executeAs":
+  "USER_DEPLOYING"}`), create version, create deployment — and dropped;
+  then the same connect check. On Android the shell obtains the token
+  from the platform plugin (`PlatformHandle::google_authorize`) so it
+  never reaches the page; on desktop the wizard signs in through the
+  system browser (loopback + PKCE). Nothing is stored. **It is hidden
+  completely** unless the build has the OAuth clients
+  (`DAAL_GOOGLE_ANDROID_CLIENT_ID`, `DAAL_GOOGLE_DESKTOP_CLIENT_ID` /
+  `_SECRET`): `GoogleAccount.sign_in` is false and the sheet shows no
+  trace of it. Tested against mocks only.
+- **A relay's switch** (relay page «محافظت بیشتر», and the wizard's
+  extras step) works only with the account connected; otherwise it opens
+  the Accounts Google sheet and carries on once connected. On
+  (`addon_google::turn_on`): a random slot, the relay's copy of the
+  account key under its row's alias (as a relay copies the Cloudflare
+  account key, so a disconnected account leaves the relays that use it
+  working and removable), the slot's address registered as the relay's
+  `appsscript` freshness mirror, the first update (the last signed
+  document, or the slot's empty container) sent and read back; then
+  «روشن». A failed send or read-back takes the mirror out again and
+  leaves the row `building`; turning it on again is the retry and keeps
+  the slot. No per-relay step happens in Google.
+- Off (`addon_google::remove`): sign the mirror set without it and
+  publish; clear the slot (its empty container); forget the row and the
+  relay's copy of the key. The account and its script stay.
 - It never carries user traffic (plan §3.7).
 
 ## 6. The command surface
@@ -324,9 +364,12 @@ module and never `src-tauri/src/lib.rs`. All run on the blocking pool.
 | `wizard_addon_cdn_build(input)` | `addon_cdn::build` | `Addons.cdnBuild` | built (B-7) |
 | `wizard_addon_cdn_posture(input)` | `addon_cdn::posture` | `Addons.cdnPosture` | built (B-7) |
 | `wizard_addon_cdn_set_plain_fallback(input)` | `addon_cdn::set_plain_fallback` | `Addons.cdnSetPlainFallback` | built (B-7) |
-| `wizard_addon_google_script(input)` | `addon_google::script` | `Addons.googleScript` | built (G3) |
-| `wizard_addon_google_sign_in(input)` | `addon_google::sign_in` (+ `PlatformHandle::google_authorize`) | `Addons.googleSignIn` | built (G3) |
-| `wizard_addon_google_attach(input)` | `addon_google::attach` | `Addons.googleAttach` | built (G3) |
+| `wizard_google_account()` | `addon_google::account` (+ `PlatformHandle::google_sign_in_configured`, `addon_google::desktop_sign_in_configured` for `sign_in`) | `Addons.googleAccount` | built (2026-11-22) |
+| `wizard_google_account_script()` | `addon_google::account_script` | `Addons.googleAccountScript` | built (2026-11-22) |
+| `wizard_google_account_attach(input)` | `addon_google::account_attach` | `Addons.googleAccountAttach` | built (2026-11-22) |
+| `wizard_google_account_sign_in()` | `addon_google::account_sign_in` (+ `PlatformHandle::google_authorize`) | `Addons.googleAccountSignIn` | built, hidden without OAuth clients |
+| `wizard_google_account_disconnect()` | `addon_google::account_disconnect` | `Addons.googleAccountDisconnect` | built (2026-11-22) |
+| `wizard_addon_google_on(input)` | `addon_google::turn_on` | `Addons.googleOn` | built (2026-11-22) |
 | `wizard_addon_google_check(input)` | `addon_google::check` | `Addons.googleCheck` | built (G3) |
 | `recipient_standby_key(relayPackId, key)` | daal-desktop-core `commands::standby_key` → `Engine::standby_key` → `engine_standby_key` | `enterStandbyKey` (`client-ui/src/lib/standbyKey.ts`) | built (S7, S8) |
 
@@ -362,7 +405,7 @@ of the failure text (`cli_bridge::ADDON_REFUSED_RC`).
 | `cdn-door --record-file F --operator-record R --token-file H --action enable\|disable --priv-key - --helper-ip IP` | `publisher/deploy/cli/cli_addon_cdn.go` → `mgmt.CDNDoorEnableWithFW` / `CDNDoorDisableWithFW`; exit 3 = the relay's management has no door | integration |
 | `cdn-provision` (existing, rewritten in place) | `publisher/deploy/cli/cli.go` → `cloudflare.ProvisionFront`; `--firewall-id` takes the id or the name | L-cdn-server (B-3) |
 | `users-pack-sbp[x] --cdn-front F --cdn-roots-file P` | `publisher/deploy/cli/cli_users_pack.go`: the CDN route's door path and roots for the minter | integration |
-| `appsscript-script`, `appsscript-deploy`, `appsscript-check`, `appsscript-clear` | `publisher/deploy/cli/cli_addon_google.go` | L-google-pub (G1/G2) |
+| `appsscript-script`, `appsscript-deploy`, `appsscript-account-check`, `appsscript-slot`, `appsscript-check`, `appsscript-clear` | `publisher/deploy/cli/cli_addon_google.go` (the account's script, its connect check, a relay's slot URL, a slot's update and clear) | L-google-pub (G1/G2), account form 2026-11-22 |
 
 Publishing to the Google channel is not a verb: it is one more backend
 of `publish-freshness`.
@@ -376,8 +419,12 @@ with, its cost and what it ties to the publisher; off by default.
 `addonText.ts` — the copy keys (`pub.addons.*`, English and Persian in
 `client-ui/src/i18n/d2/d2-extra.*.json`) and `ADDON_BUILT`, which keeps a
 block "in development" (switch off and disabled) while false; all three
-are true. The setup sheets are `StandbyCard.tsx`, `CdnCard.tsx` and
-`GoogleCard.tsx`.
+are true. The account sheets (Hetzner, Cloudflare, Google) are in
+`AccountSheets.tsx`, opened from the Accounts page and from a switch
+whose account is missing; the build wizard's extras step and its
+finishing screen are `WizardAddons.tsx` (a failed extra there is one
+line and «تلاش دوباره», the raw text under Details; the status wraps
+under the title on a narrow screen).
 
 ## 7. One order on the recipient
 

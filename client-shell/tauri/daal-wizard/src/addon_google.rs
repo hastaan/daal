@@ -1,52 +1,70 @@
 //! Add-on 3: an update channel through Google (docs/optional-addons-plan.md
 //! §3, specs/optional-addons-v1.md §5).
 //!
-//! A tiny Apps Script web app that serves the `daal-refresh-v1`
-//! container, updated by a plain HTTPS POST with a write key (never by
-//! OAuth after setup). "Sign in with Google" (Path A) is used once, to
-//! create and deploy the script, and its token is thrown away; the
-//! by-hand path (Path B) ends in the same state: the same script, a URL
-//! in the freshness endpoint table (kind `appsscript`) and the write key
-//! in device custody.
+//! Google is an account, like Cloudflare: one tiny Apps Script web app
+//! per Google account serves every relay of this publisher, each relay
+//! in its own "slot". The script is added once, from Accounts → Google:
+//! the publisher copies it (the account's write key is already in it),
+//! deploys it by hand as a web app and pastes the address back
+//! ([`account_attach`]); "Sign in with Google" ([`account_sign_in`],
+//! Path A) is the same step done through the Apps Script API, offered
+//! only by a build that has the OAuth clients. Either way Daal then
+//! writes a test container to the test slot and reads it back the way a
+//! recipient does, and only then is the account connected.
+//!
+//! A relay's switch ([`turn_on`]) needs the account connected. It gives
+//! the relay a random slot, puts the slot's address in the relay's
+//! freshness table (kind `appsscript`), sends the relay's first update
+//! and reads it back. Turning it off ([`remove`]) takes the address out
+//! and clears the slot (the slot's empty container). Nothing per relay
+//! happens in Google.
 //!
 //! # What is stored where
 //!
-//! * The **write key** (32 random bytes) is this add-on's one secret. It
-//!   lives in device custody under the row's `secret_alias`
-//!   (`daal.addon.<id>.google`), like every other publisher secret, and
-//!   is carried by the backup through that column. It reaches
-//!   `daal-deploy` only as a 0600 temp file (`--write-key-file`), never
-//!   argv, a log line or a progress event. The freshness endpoint row
-//!   for the channel holds no alias of its own: one secret, one owner.
-//! * The **path token** (`k`, 16 random bytes) and the URL are public:
-//!   every pack carries them. They are in `detail_json`.
+//! * The account's **write key** (32 random bytes) is in device custody
+//!   under [`ACCOUNT_KEY_ALIAS`], and the script's address (not a secret)
+//!   beside it under [`ACCOUNT_URL_ALIAS`], like the Cloudflare account
+//!   key and its zone. The publisher backup carries both
+//!   (`publisher_backup::account_aliases`). [`account_disconnect`]
+//!   forgets them; the script stays in Google until the publisher deletes
+//!   it.
+//! * A relay that turns the channel on takes a **copy** of the key under
+//!   its add-on row's `secret_alias` (`daal.addon.<id>.google`), as a
+//!   relay takes a copy of the Cloudflare account key. So the relay's
+//!   freshness publish and its removal read the relay's own key, a
+//!   disconnected account leaves the relays that use it working and
+//!   removable, and the backup carries it through the row's alias column.
+//!   It reaches `daal-deploy` only as a 0600 temp file
+//!   (`--write-key-file`), never argv, a log line or a progress event.
+//! * The **slot** and the relay's mirror URL
+//!   (`…/exec?s=<slot>&k=<read token>`) are public: every pack of that
+//!   relay carries them. They are in `detail_json`. The read token is
+//!   derived from the key and the slot ([`read_token`]), so the script
+//!   keeps no list.
 //! * **No Google token is stored.** On Android the shell gets a one-shot
 //!   access token from Play services (`PlatformHandle::google_authorize`)
-//!   and hands it to [`sign_in`]; on desktop [`sign_in`] runs the
-//!   loopback + PKCE sign-in in the system browser and hands the code
-//!   and verifier over. Either goes to `appsscript-deploy` on stdin,
-//!   which makes the four Apps Script API calls, revokes the token and
-//!   zeroes it. This side holds the token in a `Zeroizing` buffer for
-//!   the length of that one call.
+//!   and hands it to [`account_sign_in`]; on desktop it runs the loopback
+//!   + PKCE sign-in in the system browser and hands the code and verifier
+//!   over. Either goes to `appsscript-deploy` on stdin, which makes the
+//!   four Apps Script API calls, revokes the token and zeroes it.
 //!
 //! # OAuth clients (owner prerequisite, plan §3.5)
 //!
 //! The client ids are build-time configuration:
 //! `DAAL_GOOGLE_DESKTOP_CLIENT_ID` and `DAAL_GOOGLE_DESKTOP_CLIENT_SECRET`
 //! (a "Desktop app" client; Google says its secret is not confidential)
-//! for desktop, and `DAAL_GOOGLE_ANDROID_CLIENT_ID` for Android (the
-//! Play services client is matched by package name and signing SHA-1;
-//! the id only proves the owner registered one, and gates the button).
-//! A build without them answers `E_GOOGLE_NOT_CONFIGURED`; Path B always
-//! works.
+//! for desktop, and `DAAL_GOOGLE_ANDROID_CLIENT_ID` for Android (read by
+//! the platform plugin). A build without them hides "Sign in with
+//! Google" altogether ([`GoogleAccount::sign_in`]) and answers
+//! `E_GOOGLE_NOT_CONFIGURED` if asked anyway; adding the script by hand
+//! always works.
 //!
 //! Publishing an update is not a verb of its own: it runs inside the
 //! freshness publish as one more mirror. `freshness::publish` hands
-//! `publish-freshness` the channel's address and write key
+//! `publish-freshness` the relay's mirror URL and its copy of the key
 //! (`--appsscript-url`, `--appsscript-write-key-file`, and the signed
 //! pack as `--appsscript-pack-file`), and the helper's `appsscript`
-//! backend POSTs the container and fetches it back like any other
-//! mirror.
+//! backend POSTs the container to the relay's slot.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -77,7 +95,8 @@ pub const SCOPES: [&str; 2] = [
 ];
 
 /// This build has no OAuth client for this platform (the owner has not
-/// created the Google Cloud project yet). Path B still works.
+/// created the Google Cloud project yet). The UI does not offer sign-in
+/// then; adding the script by hand still works.
 pub const E_GOOGLE_NOT_CONFIGURED: &str = "E_GOOGLE_NOT_CONFIGURED";
 /// The account has not turned on the Apps Script API
 /// (script.google.com/home/usersettings).
@@ -93,9 +112,27 @@ pub const E_GOOGLE_PARTIAL: &str = "E_GOOGLE_PARTIAL";
 pub const E_GOOGLE_API: &str = "E_GOOGLE_API";
 /// The pasted address is not a deployed web app's /exec address.
 pub const E_GOOGLE_BAD_ADDRESS: &str = "E_GOOGLE_BAD_ADDRESS";
-/// The channel was set up but the POST or fetch-back did not work. The
-/// tail starts with the reason word ([`GoogleCheck::reason`]).
+/// The script did not take the update or did not give it back. The tail
+/// starts with the reason word ([`GoogleCheck::reason`]).
 pub const E_GOOGLE_CHECK_FAILED: &str = "E_GOOGLE_CHECK_FAILED";
+/// A relay's switch was turned on with no Google account connected.
+/// Nothing was changed; the UI opens Accounts → Google.
+pub const E_GOOGLE_NO_ACCOUNT: &str = "E_GOOGLE_NO_ACCOUNT";
+
+/// The account's write key (32 bytes), kept apart from any relay.
+pub const ACCOUNT_KEY_ALIAS: &str = "daal.google.account.write_key";
+/// The account script's address, `https://script.google.com/macros/s/<id>/exec`
+/// (not a secret; kept beside the key). Present only once the connect
+/// check passed.
+pub const ACCOUNT_URL_ALIAS: &str = "daal.google.account.url";
+/// A project a failed sign-in created; the next sign-in resumes into it.
+const ACCOUNT_PARTIAL_ALIAS: &str = "daal.google.account.partial_script";
+/// What the publisher backup carries of the account (when present).
+pub const ACCOUNT_ALIASES: [&str; 2] = [ACCOUNT_KEY_ALIAS, ACCOUNT_URL_ALIAS];
+
+/// The slot the connect check writes to (`appsscript.TestSlot` in Go).
+/// No relay is given it.
+pub const TEST_SLOT: &str = "connectTest";
 
 /// Desktop OAuth client, from the build.
 const DESKTOP_CLIENT_ID: Option<&str> = option_env!("DAAL_GOOGLE_DESKTOP_CLIENT_ID");
@@ -112,13 +149,25 @@ const SIGN_IN_WAIT: Duration = Duration::from_secs(300);
 // Types the UI sees
 // ---------------------------------------------------------------------
 
-/// `wizard_addon_google_script` (Path B): the script to paste, with
-/// this relay's write key already in it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct GoogleScriptInput {
-    pub operator_id: i64,
+/// `wizard_google_account`: the Google account on this phone. Local, no
+/// network, no secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoogleAccount {
+    /// The script is added and its check passed: relays can use it.
+    pub connected: bool,
+    /// A write key was made (the script was copied) and no address is
+    /// connected yet: the sheet goes on at "paste the address".
+    pub script_made: bool,
+    /// The script's address, '' when not connected.
+    pub url: String,
+    /// This build can sign in with Google (OAuth clients configured).
+    /// Filled by the shell, which knows the platform's answer.
+    pub sign_in: bool,
 }
 
+/// `wizard_google_account_script`: the script to paste, with the
+/// account's write key already in it.
+///
 /// `code_gs` carries the write key: `Debug` leaves it out.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct GoogleScript {
@@ -142,23 +191,20 @@ impl Drop for GoogleScript {
     }
 }
 
-/// `wizard_addon_google_sign_in` (Path A): sign in once, create and
-/// deploy the script, throw the token away, POST the current container
-/// and fetch it back the way a recipient would.
+/// `wizard_google_account_attach`: the web-app address pasted back.
+/// Checked for shape, written to (test slot), read back.
 #[derive(Debug, Clone, Deserialize)]
-pub struct GoogleSignInInput {
-    pub operator_id: i64,
-}
-
-/// `wizard_addon_google_attach` (Path B): the web-app address pasted
-/// back. Checked for shape, POSTed to, fetched back.
-#[derive(Debug, Clone, Deserialize)]
-pub struct GoogleAttachInput {
-    pub operator_id: i64,
+pub struct GoogleAccountAttachInput {
     pub url: String,
 }
 
-/// `wizard_addon_google_check`: fetch the container back again.
+/// `wizard_addon_google_on`: turn a relay's switch on.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoogleOnInput {
+    pub operator_id: i64,
+}
+
+/// `wizard_addon_google_check`: fetch the relay's container back again.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GoogleCheckInput {
     pub operator_id: i64,
@@ -175,33 +221,27 @@ pub struct GoogleCheck {
     /// `not_deployed` (no web app open to anyone at this address) |
     /// `refused` (a script with another write key) | `stale` (it holds
     /// a newer update) | `wrong_content` (it answered with something
-    /// else) | `unreachable` | `no_address` (the channel has no address
-    /// yet) | "" when ok. `api_not_enabled` is an error of sign-in
-    /// ([`E_GOOGLE_API_NOT_ENABLED`]), not of a check.
+    /// else) | `unreachable` | `full` (the account's script has no room
+    /// left) | `bad_address` | `no_address` (the channel has no address
+    /// yet) | "" when ok.
     #[serde(default)]
     pub reason: String,
+    /// The helper's words for a failure (Details only); never a secret.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
-/// Kind-specific state of the row (`detail_json`). Nothing secret.
+/// Kind-specific state of a relay's row (`detail_json`). Nothing secret.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct GoogleDetail {
-    /// The `k` of the /exec URL.
+    /// The relay's place in the account's script.
     #[serde(default)]
-    pub path_token: String,
-    /// "A" (signed in) | "B" (by hand) | "" (not set up yet).
-    #[serde(default)]
-    pub path: String,
-    /// The mirror URL, `?k=` included; "" until set up.
+    pub slot: String,
+    /// The relay's mirror URL, `?s=<slot>&k=<read token>`.
     #[serde(default)]
     pub url: String,
     #[serde(default)]
-    pub script_id: String,
-    #[serde(default)]
     pub deployment_id: String,
-    /// A project a failed Path A attempt created; the next attempt
-    /// resumes into it, and removal names it.
-    #[serde(default)]
-    pub partial_script_id: String,
     /// The last update the script accepted, and its hash.
     #[serde(default)]
     pub posted_seq: u64,
@@ -217,7 +257,7 @@ pub struct GoogleDetail {
     pub last_check_reason: String,
 }
 
-/// What `appsscript-check` / `appsscript-clear` print.
+/// What `appsscript-check` / `appsscript-account-check` print.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CliCheck {
     #[serde(default)]
@@ -232,6 +272,67 @@ struct CliCheck {
     reason: String,
     #[serde(default)]
     detail: String,
+}
+
+// ---------------------------------------------------------------------
+// The slot's read token (specs/relaypack-v1.md, "Mirror provider
+// appsscript"; `appsscript.ReadToken` in Go, `readToken_` in Code.gs)
+// ---------------------------------------------------------------------
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut k = Zeroizing::new([0u8; 64]);
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = Zeroizing::new([0x36u8; 64]);
+    let mut opad = Zeroizing::new([0x5cu8; 64]);
+    for i in 0..64 {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let inner = Sha256::new()
+        .chain_update(ipad.as_ref())
+        .chain_update(msg)
+        .finalize();
+    Sha256::new()
+        .chain_update(opad.as_ref())
+        .chain_update(inner)
+        .finalize()
+        .into()
+}
+
+/// A slot's read token: the first 16 bytes of
+/// HMAC-SHA256(write key, "daal-read-v2\n" + slot), base64url, no
+/// padding (22 characters).
+pub fn read_token(write_key: &[u8], slot: &str) -> String {
+    let mac = hmac_sha256(write_key, format!("daal-read-v2\n{slot}").as_bytes());
+    URL_SAFE_NO_PAD.encode(&mac[..16])
+}
+
+fn valid_slot(s: &str) -> bool {
+    s.len() == 11
+        && s
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A fresh slot: 8 random bytes as 11 base64url characters.
+fn new_slot() -> String {
+    let mut b = [0u8; 8];
+    loop {
+        OsRng.fill_bytes(&mut b);
+        let s = URL_SAFE_NO_PAD.encode(b);
+        if s != TEST_SLOT {
+            return s;
+        }
+    }
+}
+
+/// A relay's mirror URL in the script at `base`.
+pub fn slot_url(base: &str, write_key: &[u8], slot: &str) -> String {
+    format!("{base}?s={slot}&k={}", read_token(write_key, slot))
 }
 
 // ---------------------------------------------------------------------
@@ -269,47 +370,53 @@ fn random_b64(n: usize) -> String {
     URL_SAFE_NO_PAD.encode(&b)
 }
 
-/// The relay's row, made on first use with a fresh write key in
-/// custody and a fresh path token. The key goes into custody before the
-/// row points at it; a custody failure leaves no row behind.
-fn ensure_row(ctx: &WizardCtx, op: i64) -> Result<AddonRow> {
-    if let Some(r) = row_for(ctx, op)? {
-        if r.has_secret {
-            return Ok(r);
-        }
+/// A kept value under `alias`, or `None` when there is none.
+fn kept(ctx: &WizardCtx, alias: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    match custody_get(ctx, alias) {
+        Ok(v) if !v.is_empty() => Ok(Some(v)),
+        Ok(_) => Ok(None),
+        Err(WizardError::Coded(c)) if c.starts_with(crate::commands::E_SECRET_MISSING) => Ok(None),
+        Err(e) => Err(e),
     }
-    let row = match row_for(ctx, op)? {
-        Some(r) => r,
-        None => {
-            let d = GoogleDetail {
-                path_token: random_b64(16),
-                ..Default::default()
-            };
-            let id = addons::insert(
-                ctx,
-                &NewAddon {
-                    operator_id: op,
-                    kind: Some(AddonKind::Google),
-                    state: Some(AddonState::Building),
-                    detail: Some(serde_json::to_value(&d).unwrap_or_default()),
-                    ..Default::default()
-                },
-            )?;
-            addons::get(ctx, id)?
-        }
-    };
-    let alias = addons::secret_alias(row.id, AddonKind::Google);
-    let mut key = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(key.as_mut());
-    if let Err(e) = custody_put(ctx, &alias, key.as_ref()) {
-        let _ = addons::forget(ctx, row.id);
-        return Err(e);
-    }
-    addons::set_secret_alias(ctx, row.id, &alias)?;
-    addons::get(ctx, row.id)
 }
 
-/// The write key as the 64 hex characters `--write-key-file` takes.
+fn kept_string(ctx: &WizardCtx, alias: &str) -> Result<Option<String>> {
+    Ok(kept(ctx, alias)?
+        .and_then(|v| String::from_utf8(v.to_vec()).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
+/// The account's write key, when one is kept.
+fn account_key(ctx: &WizardCtx) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    Ok(kept(ctx, ACCOUNT_KEY_ALIAS)?.filter(|k| k.len() == 32))
+}
+
+/// The account's key, made on first use (the script is being copied).
+fn ensure_account_key(ctx: &WizardCtx) -> Result<Zeroizing<Vec<u8>>> {
+    if let Some(k) = account_key(ctx)? {
+        return Ok(k);
+    }
+    let mut key = Zeroizing::new(vec![0u8; 32]);
+    OsRng.fill_bytes(key.as_mut_slice());
+    custody_put(ctx, ACCOUNT_KEY_ALIAS, &key)?;
+    Ok(key)
+}
+
+/// The connected account: its address and key. `E_GOOGLE_NO_ACCOUNT`
+/// when either is missing.
+fn connected_account(ctx: &WizardCtx) -> Result<(String, Zeroizing<Vec<u8>>)> {
+    match (kept_string(ctx, ACCOUNT_URL_ALIAS)?, account_key(ctx)?) {
+        (Some(url), Some(key)) => Ok((url, key)),
+        _ => Err(coded(
+            E_GOOGLE_NO_ACCOUNT,
+            "connect Google on the Accounts page first",
+        )),
+    }
+}
+
+/// The relay's copy of the write key as the 64 hex characters
+/// `--write-key-file` takes.
 fn write_key_hex(ctx: &WizardCtx, row: &AddonRow) -> Result<Zeroizing<String>> {
     if row.secret_alias.is_empty() {
         return Err(coded(
@@ -382,10 +489,22 @@ fn run_json<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn check_failed(reason: &str, detail: &str) -> WizardError {
+    let detail = crate::freshness::redact_detail(detail);
+    if detail.is_empty() {
+        coded(
+            E_GOOGLE_CHECK_FAILED,
+            format!("{reason}: the script did not answer as it should"),
+        )
+    } else {
+        coded(E_GOOGLE_CHECK_FAILED, format!("{reason}: {detail}"))
+    }
+}
+
 /// The next update number nobody has used: past the freshness
 /// counter, the clock and the last update the script took. Recorded in
 /// the freshness counter at once, so the next signed document is
-/// numbered past it (the script refuses an older number).
+/// numbered past it (the script refuses an older number in the slot).
 fn next_seq(ctx: &WizardCtx, op: i64, d: &GoogleDetail) -> Result<u64> {
     let row = ctx.db.get(op)?;
     let now = (ctx.clock)().max(0) as u64;
@@ -418,15 +537,15 @@ fn last_document(ctx: &WizardCtx, op: i64) -> Option<(PathBuf, u64, Option<PathB
     Some((doc, seq, pack))
 }
 
-/// What to send: the document (and pack), or the empty container under
-/// a fresh number.
+/// What to send: the document (and pack), or the slot's empty container
+/// under a fresh number.
 enum Payload {
     Document { doc: PathBuf, pack: Option<PathBuf> },
     Empty { seq: u64 },
 }
 
-/// POST one update and fetch it back. Records what the script now
-/// holds in the row.
+/// POST one update to the relay's slot and fetch it back. Records what
+/// the script now holds in the row.
 fn send(
     ctx: &WizardCtx,
     row: &AddonRow,
@@ -489,10 +608,11 @@ fn send(
         via_front: r.via_front,
         checked_at_unix: now,
         reason: r.reason,
+        detail: crate::freshness::redact_detail(&r.detail),
     })
 }
 
-/// The update that goes first on a new channel: the last signed
+/// The update that goes first into a new slot: the last signed
 /// document when there is one, the empty container otherwise.
 fn first_payload(ctx: &WizardCtx, row: &AddonRow) -> Result<Payload> {
     let d = detail_of(row);
@@ -505,36 +625,154 @@ fn first_payload(ctx: &WizardCtx, row: &AddonRow) -> Result<Payload> {
 }
 
 // ---------------------------------------------------------------------
-// Commands
+// The account (Accounts → Google)
 // ---------------------------------------------------------------------
 
-pub fn script(
+/// Whether this build can sign in with Google on a desktop. The shell
+/// adds the Android plugin's answer to make [`GoogleAccount::sign_in`].
+pub fn desktop_sign_in_configured() -> bool {
+    !cfg!(any(target_os = "android", target_os = "ios")) && desktop_client().is_some()
+}
+
+/// The account on this phone. Local: no network, no secret in the
+/// answer. `sign_in` is left false for the shell to fill.
+pub fn account(ctx: &WizardCtx) -> Result<GoogleAccount> {
+    let key = account_key(ctx)?.is_some();
+    let url = kept_string(ctx, ACCOUNT_URL_ALIAS)?.unwrap_or_default();
+    Ok(GoogleAccount {
+        connected: key && !url.is_empty(),
+        script_made: key && url.is_empty(),
+        url: if key { url } else { String::new() },
+        sign_in: false,
+    })
+}
+
+/// Copy the script: Code.gs with the account's write key in it. The
+/// first call makes the key; later calls give the same script, so a
+/// script already pasted stays good.
+pub fn account_script(
     ctx: &WizardCtx,
-    input: GoogleScriptInput,
     on_progress: &mut dyn FnMut(AddonProgress),
 ) -> Result<GoogleScript> {
-    let op = input.operator_id;
-    let row = ensure_row(ctx, op)?;
-    let d = detail_of(&row);
-    let key = write_key_hex(ctx, &row)?;
-    on_progress(progress(op, "script", "running", ""));
+    let key = ensure_account_key(ctx)?;
+    let key_hex = Zeroizing::new(hex::encode(key.as_slice()));
+    on_progress(progress(0, "script", "running", ""));
     let s: GoogleScript = run_json(
         ctx,
         AddonCliRequest {
-            args: vec![
-                "appsscript-script".into(),
-                "--path-token".into(),
-                d.path_token,
-            ],
-            secret_files: vec![("--write-key-file", key.as_str())],
+            args: vec!["appsscript-script".into()],
+            secret_files: vec![("--write-key-file", key_hex.as_str())],
             stdin: &[],
             progress: false,
         },
         on_progress,
-        op,
+        0,
     )?;
-    on_progress(progress(op, "script", "ok", ""));
+    on_progress(progress(0, "script", "ok", ""));
     Ok(s)
+}
+
+/// The script's own address for what a publisher pasted (or the Apps
+/// Script API answered): `https://script.google.com/macros/s/<id>/exec`,
+/// the shape `freshness.ValidateAppsScriptBase` accepts. A trailing
+/// slash, a query or a fragment are dropped.
+pub(crate) fn normalize_base(pasted: &str) -> std::result::Result<String, String> {
+    let s = pasted.trim();
+    const HOST: &str = "https://script.google.com/";
+    // `get`, not indexing: pasted text may start with anything,
+    // including a character that does not end on byte 26.
+    if !s.get(..HOST.len()).is_some_and(|p| p.eq_ignore_ascii_case(HOST)) {
+        return Err("that is not a script.google.com web-app address".into());
+    }
+    let rest = &s[HOST.len() - 1..];
+    let rest = rest.split('#').next().unwrap_or("");
+    let path = rest.split('?').next().unwrap_or("");
+    let path = path.trim_end_matches('/');
+    if path.ends_with("/dev") {
+        return Err(
+            "that is the test address (/dev); copy the web app address that ends in /exec".into(),
+        );
+    }
+    let id = path
+        .strip_prefix("/macros/s/")
+        .and_then(|p| p.strip_suffix("/exec"))
+        .ok_or_else(|| "the address must look like script.google.com/macros/s/…/exec".to_string())?;
+    if !(20..=120).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("the address must look like script.google.com/macros/s/…/exec".into());
+    }
+    Ok(format!("https://script.google.com/macros/s/{id}/exec"))
+}
+
+fn deployment_id_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://script.google.com/macros/s/")?;
+    Some(rest.split('/').next()?.to_string())
+}
+
+/// The connect check: an update with a fresh nonce to the test slot,
+/// read back through the Google front. Only when it worked is the
+/// address kept, and the account connected.
+fn connect_with(
+    ctx: &WizardCtx,
+    base: &str,
+    key: &[u8],
+    on_progress: &mut dyn FnMut(AddonProgress),
+) -> Result<GoogleAccount> {
+    let key_hex = Zeroizing::new(hex::encode(key));
+    on_progress(progress(0, "checking", "running", ""));
+    // The test slot's update is numbered by the helper's clock in
+    // milliseconds, so two checks in one second still go up.
+    let r: CliCheck = run_json(
+        ctx,
+        AddonCliRequest {
+            args: vec![
+                "appsscript-account-check".into(),
+                "--url".into(),
+                base.to_string(),
+            ],
+            secret_files: vec![("--write-key-file", key_hex.as_str())],
+            stdin: &[],
+            progress: false,
+        },
+        on_progress,
+        0,
+    )?;
+    if !r.ok {
+        on_progress(progress(0, "checking", "failed", &r.reason));
+        return Err(check_failed(&r.reason, &r.detail));
+    }
+    custody_put(ctx, ACCOUNT_URL_ALIAS, base.as_bytes())?;
+    let _ = ctx.custody.forget(ACCOUNT_PARTIAL_ALIAS);
+    on_progress(progress(0, "checking", "ok", ""));
+    account(ctx)
+}
+
+/// Accounts → Google, by hand: the web-app address pasted back after
+/// the script was copied and deployed.
+pub fn account_attach(
+    ctx: &WizardCtx,
+    input: GoogleAccountAttachInput,
+    on_progress: &mut dyn FnMut(AddonProgress),
+) -> Result<GoogleAccount> {
+    let key = account_key(ctx)?.ok_or_else(|| {
+        WizardError::Validation("copy the script first: it carries this account's write key".into())
+    })?;
+    let base = normalize_base(&input.url).map_err(|e| coded(E_GOOGLE_BAD_ADDRESS, e))?;
+    connect_with(ctx, &base, &key, on_progress)
+}
+
+/// Forget the account: its key and address. Relays that turned the
+/// channel on keep their own copies, so their channels keep working and
+/// stay removable. The script stays in Google until the publisher
+/// deletes it there.
+pub fn account_disconnect(ctx: &WizardCtx) -> Result<()> {
+    for a in [ACCOUNT_KEY_ALIAS, ACCOUNT_URL_ALIAS, ACCOUNT_PARTIAL_ALIAS] {
+        let _ = ctx.custody.forget(a);
+    }
+    Ok(())
 }
 
 /// `mobile_token`: on Android the shell obtains a one-shot access token
@@ -542,13 +780,12 @@ pub fn script(
 /// hands it here; on desktop it is `None` and this module signs in
 /// through the system browser (loopback + PKCE). Either way the token
 /// is used for the four Apps Script API calls and dropped; nothing is
-/// stored.
-pub fn sign_in(
+/// stored. The UI offers this only when [`GoogleAccount::sign_in`].
+pub fn account_sign_in(
     ctx: &WizardCtx,
-    input: GoogleSignInInput,
     mobile_token: Option<Zeroizing<String>>,
     on_progress: &mut dyn FnMut(AddonProgress),
-) -> Result<AddonRow> {
+) -> Result<GoogleAccount> {
     let auth = match mobile_token {
         Some(t) => SignIn::Token(t),
         None => {
@@ -567,14 +804,7 @@ pub fn sign_in(
             }
         }
     };
-    sign_in_with(
-        ctx,
-        input,
-        auth,
-        &mut open_system_browser,
-        SIGN_IN_WAIT,
-        on_progress,
-    )
+    account_sign_in_with(ctx, auth, &mut open_system_browser, SIGN_IN_WAIT, on_progress)
 }
 
 /// Where Path A's access comes from.
@@ -624,25 +854,22 @@ struct DeployStdin<'a> {
 
 #[derive(Deserialize)]
 struct Deployed {
-    script_id: String,
-    deployment_id: String,
     url: String,
 }
 
-pub(crate) fn sign_in_with(
+/// Path A at account level: the same script deployed through the API,
+/// then the same connect check as by hand.
+pub(crate) fn account_sign_in_with(
     ctx: &WizardCtx,
-    input: GoogleSignInInput,
     auth: SignIn,
     open: &mut dyn FnMut(&str) -> std::io::Result<()>,
     wait: Duration,
     on_progress: &mut dyn FnMut(AddonProgress),
-) -> Result<AddonRow> {
-    let op = input.operator_id;
-    let row = ensure_row(ctx, op)?;
-    let mut d = detail_of(&row);
-    let key = write_key_hex(ctx, &row)?;
+) -> Result<GoogleAccount> {
+    let key = ensure_account_key(ctx)?;
+    let key_hex = Zeroizing::new(hex::encode(key.as_slice()));
 
-    on_progress(progress(op, "signing_in", "running", ""));
+    on_progress(progress(0, "signing_in", "running", ""));
     let stdin: Zeroizing<Vec<u8>> = match &auth {
         SignIn::Token(t) => Zeroizing::new(
             serde_json::to_vec(&DeployStdin {
@@ -659,7 +886,7 @@ pub(crate) fn sign_in_with(
             let got = match loopback_sign_in(c, open, wait) {
                 Ok(g) => g,
                 Err(e) => {
-                    on_progress(progress(op, "signing_in", "failed", ""));
+                    on_progress(progress(0, "signing_in", "failed", ""));
                     return Err(e);
                 }
             };
@@ -677,37 +904,35 @@ pub(crate) fn sign_in_with(
         }
     };
     drop(auth);
-    on_progress(progress(op, "signing_in", "ok", ""));
+    on_progress(progress(0, "signing_in", "ok", ""));
 
     let mut args = vec![
         "appsscript-deploy".to_string(),
-        "--path-token".into(),
-        d.path_token.clone(),
         "--title".into(),
         PROJECT_TITLE.into(),
     ];
-    if !d.partial_script_id.is_empty() {
+    if let Some(id) = kept_string(ctx, ACCOUNT_PARTIAL_ALIAS)? {
         args.push("--script-id".into());
-        args.push(d.partial_script_id.clone());
+        args.push(id);
     }
-    on_progress(progress(op, "deploying", "running", ""));
+    on_progress(progress(0, "deploying", "running", ""));
     let deployed: Result<Deployed> = run_json(
         ctx,
         AddonCliRequest {
             args,
-            secret_files: vec![("--write-key-file", key.as_str())],
+            secret_files: vec![("--write-key-file", key_hex.as_str())],
             stdin: &stdin,
             progress: true,
         },
         on_progress,
-        op,
+        0,
     );
     drop(stdin);
     let deployed = match deployed {
         Ok(v) => v,
         Err(e) => {
             // A project that exists but is not deployed: keep its id
-            // so the next attempt goes into it, and removal names it.
+            // so the next attempt goes into it.
             let text = e.to_string();
             if let Some(rest) = text.strip_prefix(&format!("{E_GOOGLE_PARTIAL}: script_id=")) {
                 let id: String = rest
@@ -715,90 +940,125 @@ pub(crate) fn sign_in_with(
                     .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
                     .collect();
                 if !id.is_empty() {
-                    d.partial_script_id = id;
-                    save_detail(ctx, row.id, &d)?;
+                    custody_put(ctx, ACCOUNT_PARTIAL_ALIAS, id.as_bytes())?;
                 }
             }
-            on_progress(progress(op, "deploying", "failed", ""));
+            on_progress(progress(0, "deploying", "failed", ""));
             return Err(e);
         }
     };
-    on_progress(progress(op, "deploying", "ok", ""));
-    let url = crate::freshness::normalize_appsscript_url(&deployed.url, &d.path_token)
-        .map_err(|e| coded(E_GOOGLE_API, e))?;
-    d.path = "A".into();
-    d.script_id = deployed.script_id;
-    d.deployment_id = deployed.deployment_id;
-    d.partial_script_id.clear();
-    d.url = url.clone();
-    save_detail(ctx, row.id, &d)?;
-    finish_setup(ctx, &addons::get(ctx, row.id)?, &url, on_progress)
+    on_progress(progress(0, "deploying", "ok", ""));
+    let base = normalize_base(&deployed.url).map_err(|e| coded(E_GOOGLE_API, e))?;
+    connect_with(ctx, &base, &key, on_progress)
 }
 
-pub fn attach(
-    ctx: &WizardCtx,
-    input: GoogleAttachInput,
-    on_progress: &mut dyn FnMut(AddonProgress),
-) -> Result<AddonRow> {
-    let op = input.operator_id;
+// ---------------------------------------------------------------------
+// A relay's switch
+// ---------------------------------------------------------------------
+
+/// The relay's row, with a slot and the account's key copied under the
+/// row's own alias. A row left `building` by an earlier attempt keeps
+/// its slot and takes the account's current key and address.
+fn ensure_row(ctx: &WizardCtx, op: i64, base: &str, key: &[u8]) -> Result<AddonRow> {
     let row = match row_for(ctx, op)? {
-        Some(r) if r.has_secret => r,
-        _ => {
-            return Err(WizardError::Validation(
-                "copy the script first: it carries this relay's write key".into(),
-            ))
+        Some(r) => r,
+        None => {
+            let d = GoogleDetail {
+                slot: new_slot(),
+                ..Default::default()
+            };
+            let id = addons::insert(
+                ctx,
+                &NewAddon {
+                    operator_id: op,
+                    kind: Some(AddonKind::Google),
+                    state: Some(AddonState::Building),
+                    detail: Some(serde_json::to_value(&d).unwrap_or_default()),
+                    ..Default::default()
+                },
+            )?;
+            addons::get(ctx, id)?
         }
     };
     let mut d = detail_of(&row);
-    let url = crate::freshness::normalize_appsscript_url(&input.url, &d.path_token)
-        .map_err(|e| coded(E_GOOGLE_BAD_ADDRESS, e))?;
-    if d.path.is_empty() {
-        d.path = "B".into();
+    if !valid_slot(&d.slot) {
+        d.slot = new_slot();
     }
-    d.url = url.clone();
-    if let Some(id) = deployment_id_of(&url) {
-        d.deployment_id = id;
+    let alias = addons::secret_alias(row.id, AddonKind::Google);
+    // The key goes into custody before the row points at it; a custody
+    // failure on a new row leaves no row behind.
+    if let Err(e) = custody_put(ctx, &alias, key) {
+        if row.state == AddonState::Building && detail_of(&row).url.is_empty() {
+            let _ = addons::forget(ctx, row.id);
+        }
+        return Err(e);
     }
+    addons::set_secret_alias(ctx, row.id, &alias)?;
+    d.url = slot_url(base, key, &d.slot);
+    d.deployment_id = deployment_id_of(base).unwrap_or_default();
     save_detail(ctx, row.id, &d)?;
-    finish_setup(ctx, &addons::get(ctx, row.id)?, &url, on_progress)
-}
-
-fn deployment_id_of(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("https://script.google.com/macros/s/")?;
-    Some(rest.split('/').next()?.to_string())
-}
-
-/// Both paths end here: POST the first update, fetch it back, and only
-/// when that worked put the URL in the mirror table and call the
-/// channel ready. A failed check leaves the row building with its URL,
-/// so `check` can finish it later without a second setup.
-fn finish_setup(
-    ctx: &WizardCtx,
-    row: &AddonRow,
-    url: &str,
-    on_progress: &mut dyn FnMut(AddonProgress),
-) -> Result<AddonRow> {
-    let payload = first_payload(ctx, row)?;
-    let c = send(ctx, row, url, payload, on_progress)?;
-    if !c.ok {
-        return Err(coded(
-            E_GOOGLE_CHECK_FAILED,
-            format!("{}: the script did not answer as it should", c.reason),
-        ));
-    }
-    make_ready(ctx, row, url)?;
     addons::get(ctx, row.id)
 }
 
-fn make_ready(ctx: &WizardCtx, row: &AddonRow, url: &str) -> Result<()> {
-    crate::freshness::set_appsscript_endpoint(ctx, row.operator_id, url)?;
+/// The relay's switch, on: a slot in the account's script, the slot's
+/// address in the relay's mirror table, the first update sent and read
+/// back the way a recipient fetches. Only then is the row `ready` («On»).
+/// A failed send or read-back takes the address out of the table again
+/// and leaves the row `building`: turning it on again is the retry.
+pub fn turn_on(
+    ctx: &WizardCtx,
+    input: GoogleOnInput,
+    on_progress: &mut dyn FnMut(AddonProgress),
+) -> Result<AddonRow> {
+    let op = input.operator_id;
+    let _ = ctx.db.get(op)?;
+    if let Some(r) = row_for(ctx, op)? {
+        if r.state == AddonState::Ready {
+            return Ok(r);
+        }
+        if r.state == AddonState::Removing {
+            return Err(WizardError::Validation(
+                "turning this off has not finished; finish it first".into(),
+            ));
+        }
+    }
+    let (base, key) = connected_account(ctx)?;
+    on_progress(progress(op, "slot", "running", ""));
+    let row = ensure_row(ctx, op, &base, &key)?;
+    drop(key);
+    let url = detail_of(&row).url;
+    let had_mirror = crate::freshness::has_appsscript_endpoint(ctx, op, &url);
+    crate::freshness::set_appsscript_endpoint(ctx, op, &url)?;
+    on_progress(progress(op, "slot", "ok", ""));
+    let sent = first_payload(ctx, &row).and_then(|p| send(ctx, &row, &url, p, on_progress));
+    match sent {
+        Ok(c) if c.ok => {
+            make_ready(ctx, &row)?;
+            addons::get(ctx, row.id)
+        }
+        Ok(c) => {
+            if !had_mirror {
+                let _ = crate::freshness::remove_appsscript_endpoint(ctx, op);
+            }
+            Err(check_failed(&c.reason, &c.detail))
+        }
+        Err(e) => {
+            if !had_mirror {
+                let _ = crate::freshness::remove_appsscript_endpoint(ctx, op);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn make_ready(ctx: &WizardCtx, row: &AddonRow) -> Result<()> {
     let d = detail_of(&addons::get(ctx, row.id)?);
     let mut ids = std::collections::BTreeMap::new();
-    if !d.script_id.is_empty() {
-        ids.insert("script_id".to_string(), d.script_id.clone());
-    }
     if !d.deployment_id.is_empty() {
         ids.insert("deployment_id".to_string(), d.deployment_id.clone());
+    }
+    if !d.slot.is_empty() {
+        ids.insert("slot".to_string(), d.slot.clone());
     }
     addons::set_provider_ids(ctx, row.id, &ids)?;
     addons::set_state(ctx, row.id, AddonState::Ready)
@@ -814,21 +1074,14 @@ pub fn check(
         .ok_or_else(|| WizardError::Validation("this relay has no Google update channel".into()))?;
     let d = detail_of(&row);
     let now = (ctx.clock)();
-    if d.url.is_empty() {
+    if d.url.is_empty() || row.state != AddonState::Ready || d.posted_sha256.is_empty() {
         return Ok(GoogleCheck {
             ok: false,
             via_front: false,
             checked_at_unix: now,
             reason: "no_address".into(),
+            detail: String::new(),
         });
-    }
-    if row.state == AddonState::Building || d.posted_sha256.is_empty() {
-        // Set up but never confirmed: this is the retry of the setup.
-        let c = send(ctx, &row, &d.url, first_payload(ctx, &row)?, on_progress)?;
-        if c.ok && row.state == AddonState::Building {
-            make_ready(ctx, &row, &d.url)?;
-        }
-        return Ok(c);
     }
     on_progress(progress(op, "checking", "running", ""));
     let r: CliCheck = run_json(
@@ -860,17 +1113,18 @@ pub fn check(
         via_front: r.via_front,
         checked_at_unix: now,
         reason: r.reason,
+        detail: crate::freshness::redact_detail(&r.detail),
     })
 }
 
-/// Called by `addons::remove`. Order (plan §3.6): take the mirror out of
-/// the table and publish without it; POST the empty container; forget
-/// the row and the write key; tell the publisher to delete the project
-/// at script.google.com (Daal holds no token to do it).
+/// Called by `addons::remove` (the relay's switch, off). Order (plan
+/// §3.6): take the mirror out of the table and publish without it;
+/// clear the relay's slot (its empty container); forget the row and the
+/// relay's copy of the key. The account and its script stay.
 ///
-/// If the empty container cannot be sent, the row stays (state
-/// `removing`) with its key, so the same call is the retry: a forgotten
-/// key would leave a channel nobody can clear.
+/// If the slot cannot be cleared, the row stays (state `removing`) with
+/// its key, so the same call is the retry: a forgotten key would leave a
+/// slot nobody can clear.
 pub fn remove(
     ctx: &WizardCtx,
     row: &AddonRow,
@@ -910,7 +1164,7 @@ pub fn remove(
         let seq = next_seq(ctx, op, &d)?;
         match send(ctx, row, &d.url, Payload::Empty { seq }, on_progress) {
             Ok(c) if c.ok || c.reason == "not_deployed" => {
-                // not_deployed: the publisher already deleted it.
+                // not_deployed: the publisher already deleted the script.
             }
             Ok(c) => {
                 on_progress(progress(op, "removing", "failed", &c.reason));
@@ -928,9 +1182,6 @@ pub fn remove(
         }
     }
     addons::forget(ctx, row.id)?;
-    if !d.script_id.is_empty() || !d.partial_script_id.is_empty() || !d.url.is_empty() {
-        report.by_hand.push("delete_google_project".into());
-    }
     report.removed = true;
     on_progress(progress(op, "removing", "ok", ""));
     Ok(report)
@@ -938,9 +1189,9 @@ pub fn remove(
 
 /// Called by `addons::before_relay_destroy`. The channel is free and
 /// needs nothing of the relay's row, so it never keeps the relay: the
-/// empty container is sent if it can be (best effort), and the row and
-/// key go with the relay either way. Documents the script still holds
-/// are signed and expire on their own.
+/// slot is cleared if it can be (best effort), and the row and key go
+/// with the relay either way. Documents the script still holds are
+/// signed and expire on their own.
 pub fn on_relay_delete(ctx: &WizardCtx, row: &AddonRow) -> AddonOutcome {
     let d = detail_of(row);
     let mut out = AddonOutcome::removed(row);

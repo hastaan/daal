@@ -300,8 +300,8 @@ var (
 		What: "the connect ladder tries the standby address after an address-shaped stop (routeStandbyAddress in core/abi/connect_*.go)",
 		Dir:  "core/abi", Files: "connect_*.go", Pattern: regexp.MustCompile(`routeStandbyAddress\(`)}
 	PreGoogleMirror = Prereq{Lane: "L-fetch", Item: "G5",
-		What: "core/refresh fetches appsscript mirrors through the Google front and applies the daal-refresh-v1 container",
-		Dir:  "core/refresh", Files: "*.go", Pattern: regexp.MustCompile(`(?i)appsscript|daal-refresh-v1`)}
+		What: "core/refresh fetches appsscript mirrors through the Google front and applies the daal-refresh-v2 container",
+		Dir:  "core/refresh", Files: "*.go", Pattern: regexp.MustCompile(`(?i)appsscript|daal-refresh-v2`)}
 	PreFrontFetch = Prereq{Lane: "L-fetch", Item: "G4",
 		What: "core/bootstrap front fetcher (SNI www.google.com, authority script.google.com, one redirect)",
 		Dir:  "core/bootstrap", Files: "*.go", Pattern: regexp.MustCompile(`script\.googleusercontent\.com`)}

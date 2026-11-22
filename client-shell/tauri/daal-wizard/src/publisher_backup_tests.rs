@@ -2163,6 +2163,61 @@ fn the_account_keys_travel_with_the_backup() {
     assert!(!backup_status(&b.ctx).unwrap().stale);
 }
 
+/// The Google account (Accounts → Google) is a key and an address in
+/// custody: both travel, and the new phone is connected as the old one
+/// was. Nothing about it is in a table.
+#[test]
+fn the_google_account_travels_with_the_backup() {
+    const GKEY: [u8; 32] = [0x5a; 32];
+    const GURL: &str = "https://script.google.com/macros/s/AKfycbx0123456789abcdefghijklmn/exec";
+    let a = phone();
+    populate(&a);
+    a.ctx
+        .custody
+        .put(crate::addon_google::ACCOUNT_KEY_ALIAS, &GKEY)
+        .unwrap();
+    a.ctx
+        .custody
+        .put(crate::addon_google::ACCOUNT_URL_ALIAS, GURL.as_bytes())
+        .unwrap();
+    let before = crate::addon_google::account(&a.ctx).unwrap();
+    assert!(before.connected);
+    let words = set_words(&a);
+    let file = make(&a);
+    assert!(
+        !std::fs::read(&file)
+            .unwrap()
+            .windows(GKEY.len())
+            .any(|w| w == GKEY),
+        "the write key is in the file in the clear"
+    );
+
+    let b = phone();
+    crate::recipient_identity::get_or_create(&b.ctx).unwrap();
+    assert!(!crate::addon_google::account(&b.ctx).unwrap().connected);
+    let path = carry(&file, &b);
+    backup_restore(&b.ctx, &path, &words, None).unwrap();
+    assert_eq!(
+        b.ctx
+            .custody
+            .get(crate::addon_google::ACCOUNT_KEY_ALIAS)
+            .unwrap(),
+        GKEY.to_vec()
+    );
+    assert_eq!(crate::addon_google::account(&b.ctx).unwrap(), before);
+    assert!(!backup_status(&b.ctx).unwrap().stale);
+
+    // A phone with no Google account makes the same backup as before
+    // the account existed: no Google alias in it.
+    let c = phone();
+    populate(&c);
+    let snap = collect_state(&c.ctx, SecretMode::Strict).unwrap();
+    assert!(!snap
+        .secrets
+        .iter()
+        .any(|(al, _)| al.starts_with("daal.google.")));
+}
+
 #[test]
 fn a_backup_made_before_accounts_existed_still_restores_and_keeps_the_phones_account() {
     // The backup has no account key (its phone never connected one):

@@ -21,7 +21,7 @@ import (
 // check: a 2-byte length (4) and four bytes.
 const cdnTestECH = "AAT+DQAA"
 
-const cdnTestAppsScriptURL = "https://script.google.com/macros/s/AKfycbx0123456789abcdefghij/exec?k=AAAAAAAAAAAAAAAAAAAAAA"
+const cdnTestAppsScriptURL = "https://script.google.com/macros/s/AKfycbx0123456789abcdefghij/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA"
 
 func cdnTestRec(pub ed25519.PublicKey) *provider.OperatorRecord {
 	return &provider.OperatorRecord{

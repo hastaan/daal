@@ -107,6 +107,11 @@ impl<R: Runtime> PlatformHandle<R> {
     pub fn google_authorize(&self, scopes: &[&str]) -> Result<Option<String>> {
         self.inner.google_authorize(scopes)
     }
+    /// Whether this build has the Android OAuth client, so "Sign in with
+    /// Google" may be offered at all. False hides it.
+    pub fn google_sign_in_configured(&self) -> bool {
+        self.inner.google_sign_in_configured()
+    }
 }
 
 #[cfg(not(mobile))]
@@ -142,10 +147,15 @@ impl<R: Runtime> PlatformHandle<R> {
         Ok(None)
     }
     /// Optional add-ons, Google Path A: desktop has no platform sign-in;
-    /// `None` tells `daal_wizard::addon_google::sign_in` to sign in
-    /// through the system browser (loopback + PKCE) itself.
+    /// `None` tells `daal_wizard::addon_google::account_sign_in` to sign
+    /// in through the system browser (loopback + PKCE) itself.
     pub fn google_authorize(&self, _scopes: &[&str]) -> Result<Option<String>> {
         Ok(None)
+    }
+    /// Desktop has no platform sign-in; whether the desktop client is
+    /// configured is `daal_wizard::addon_google::desktop_sign_in_configured`.
+    pub fn google_sign_in_configured(&self) -> bool {
+        false
     }
 }
 

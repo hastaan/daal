@@ -1,13 +1,14 @@
 package cli
 
 // Add-on 3, update channel through Google (docs/optional-addons-plan.md
-// §3, items G1, G2; specs/optional-addons-v1.md §5).
+// §3, items G1, G2; specs/optional-addons-v1.md §5). One script per
+// Google account, one slot per relay.
 //
-//	appsscript-script  --write-key-file F --path-token T
-//	                   Code.gs and appsscript.json with the write key and
-//	                   path token in them: {"code_gs","manifest_json"}.
-//	appsscript-deploy  --write-key-file F --path-token T [--script-id ID]
-//	                   [--title T] [--progress-json]
+//	appsscript-script  --write-key-file F
+//	                   Code.gs and appsscript.json with the account's
+//	                   write key in them: {"code_gs","manifest_json"}.
+//	appsscript-deploy  --write-key-file F [--script-id ID] [--title T]
+//	                   [--progress-json]
 //	                   Path A. stdin is one JSON object: {"access_token"}
 //	                   (Android, from Play services) or the desktop
 //	                   sign-in's {"code","code_verifier","redirect_uri",
@@ -15,18 +16,34 @@ package cli
 //	                   (or, with --script-id, resumes into one an earlier
 //	                   attempt made), uploads the content, makes a version
 //	                   and a web-app deployment, then revokes the token.
-//	                   Prints {"script_id","deployment_id","version","url"}.
+//	                   Prints {"script_id","deployment_id","version","url"}
+//	                   with url the script's own address (no query).
+//	appsscript-account-check --url U --write-key-file F [--seq N]
+//	                   The account's connect check. U is the address the
+//	                   publisher pasted (or the deploy printed); it is
+//	                   normalised to the script's own address. An update
+//	                   with a fresh nonce goes to the test slot, numbered N
+//	                   (default: the clock in milliseconds), and is read
+//	                   back the way recipients fetch. Prints a CheckResult
+//	                   with "url"; exit 0 whenever the check ran.
+//	appsscript-slot    --url U --write-key-file F [--slot S]
+//	                   A relay's mirror URL in the account's script:
+//	                   {"slot","url"}, with a new random slot unless S is
+//	                   given. No network.
 //	appsscript-check   --url U [--write-key-file F (--freshness-file D
 //	                   [--pack-file P] [--standby-key-file S] | --seq N)]
 //	                   [--expect-sha256 H]
+//	                   U is a relay's mirror URL (?s=<slot>&k=<token>).
 //	                   With a write key: POST the container (the signed
 //	                   document, the pack it names, a standby key; or the
-//	                   empty container numbered --seq), then fetch it back
-//	                   the way a recipient does. Without: fetch only and
-//	                   compare with --expect-sha256. Prints a CheckResult;
-//	                   exit 0 whenever the check ran, whatever it found.
+//	                   slot's empty container numbered --seq), then fetch
+//	                   it back the way a recipient does. Without: fetch
+//	                   only and compare with --expect-sha256. Prints a
+//	                   CheckResult; exit 0 whenever the check ran,
+//	                   whatever it found.
 //	appsscript-clear   --url U --write-key-file F --seq N
-//	                   POST the empty container (removal) and fetch back.
+//	                   POST the slot's empty container (the relay turned
+//	                   the channel off) and fetch back.
 //
 // Secrets: the write key comes only from a file (64 hex characters),
 // the access token or authorization code only on stdin; neither is ever
@@ -37,7 +54,7 @@ package cli
 // by its --appsscript-url, --appsscript-write-key-file,
 // --appsscript-pack-file and --appsscript-standby-key-file flags
 // (cli.go). The app publishes to the channel that way; appsscript-check
-// is the setup's fetch-back test and the card's "check now".
+// is the relay switch's fetch-back test and the card's "check now".
 
 import (
 	"bytes"
@@ -50,6 +67,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"daal/publisher/deploy/freshness"
 	"daal/publisher/deploy/freshness/backends/appsscript"
@@ -90,12 +108,11 @@ func runAppsScriptScript(ctx context.Context, args []string, stdout, stderr io.W
 	_ = ctx
 	fs := flag.NewFlagSet("appsscript-script", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	keyFile := fs.String("write-key-file", "", "file holding the write key (64 hex)")
-	token := fs.String("path-token", "", "the k of the /exec URL (22 base64url characters)")
+	keyFile := fs.String("write-key-file", "", "file holding the account's write key (64 hex)")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
-	if err := requireAll(stderr, map[string]string{"--write-key-file": *keyFile, "--path-token": *token}); err != nil {
+	if err := requireAll(stderr, map[string]string{"--write-key-file": *keyFile}); err != nil {
 		return 2
 	}
 	key, err := readWriteKeyFile(*keyFile)
@@ -104,7 +121,7 @@ func runAppsScriptScript(ctx context.Context, args []string, stdout, stderr io.W
 		return 2
 	}
 	defer zeroBytes(key)
-	code, manifest, err := appsscript.Script(key, *token)
+	code, manifest, err := appsscript.Script(key)
 	if err != nil {
 		fmt.Fprintf(stderr, "appsscript-script: %v\n", err)
 		return 2
@@ -121,15 +138,14 @@ type deployAuth struct {
 func runAppsScriptDeploy(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("appsscript-deploy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	keyFile := fs.String("write-key-file", "", "file holding the write key (64 hex)")
-	token := fs.String("path-token", "", "the k of the /exec URL")
+	keyFile := fs.String("write-key-file", "", "file holding the account's write key (64 hex)")
 	scriptID := fs.String("script-id", "", "resume into the project an earlier attempt created")
 	title := fs.String("title", "Notes", "project title (shown in the publisher's Google Drive)")
 	progress := fs.Bool("progress-json", false, "emit one JSON line per step on stderr")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
 	}
-	if err := requireAll(stderr, map[string]string{"--write-key-file": *keyFile, "--path-token": *token}); err != nil {
+	if err := requireAll(stderr, map[string]string{"--write-key-file": *keyFile}); err != nil {
 		return 2
 	}
 	key, err := readWriteKeyFile(*keyFile)
@@ -138,7 +154,7 @@ func runAppsScriptDeploy(ctx context.Context, args []string, stdin io.Reader, st
 		return 2
 	}
 	defer zeroBytes(key)
-	code, manifest, err := appsscript.Script(key, *token)
+	code, manifest, err := appsscript.Script(key)
 	if err != nil {
 		fmt.Fprintf(stderr, "appsscript-deploy: %v\n", err)
 		return 2
@@ -181,7 +197,7 @@ func runAppsScriptDeploy(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return deployFailed(stderr, err)
 	}
-	url, err := appsscript.NormalizeExecURL(res.ExecURL, *token)
+	url, err := appsscript.NormalizeExecURL(res.ExecURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "E_GOOGLE_PARTIAL: script_id=%s stage=deployment: %v\n", res.ScriptID, err)
 		return 1
@@ -216,8 +232,8 @@ func deployFailed(stderr io.Writer, err error) int {
 func runAppsScriptCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("appsscript-check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	url := fs.String("url", "", "the mirror URL, ?k= included")
-	keyFile := fs.String("write-key-file", "", "file holding the write key; absent: fetch only")
+	url := fs.String("url", "", "the relay's mirror URL, ?s=<slot>&k=<token>")
+	keyFile := fs.String("write-key-file", "", "file holding the account's write key; absent: fetch only")
 	docFile := fs.String("freshness-file", "", "the signed freshness document to send")
 	packFile := fs.String("pack-file", "", "the signed credential-less pack the document names")
 	standbyFile := fs.String("standby-key-file", "", "file holding a standby key to carry")
@@ -239,7 +255,12 @@ func runAppsScriptCheck(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 2
 	}
 	defer zeroBytes(key)
-	blob, n, packIncluded, err := checkContainer(*docFile, *packFile, *standbyFile, *seq)
+	_, slot, _, err := freshness.ValidateAppsScriptURL(*url)
+	if err != nil {
+		fmt.Fprintf(stderr, "appsscript-check: --url: %v\n", err)
+		return 2
+	}
+	blob, n, packIncluded, err := checkContainer(slot, *docFile, *packFile, *standbyFile, *seq)
 	if err != nil {
 		fmt.Fprintf(stderr, "appsscript-check: %v\n", err)
 		return 2
@@ -252,7 +273,7 @@ func runAppsScriptCheck(ctx context.Context, args []string, stdout, stderr io.Wr
 }
 
 // checkContainer builds what appsscript-check sends.
-func checkContainer(docFile, packFile, standbyFile string, seq uint64) (blob []byte, n uint64, packIncluded bool, err error) {
+func checkContainer(slot, docFile, packFile, standbyFile string, seq uint64) (blob []byte, n uint64, packIncluded bool, err error) {
 	if docFile == "" {
 		if packFile != "" || standbyFile != "" {
 			return nil, 0, false, errors.New("--pack-file and --standby-key-file need --freshness-file")
@@ -260,7 +281,7 @@ func checkContainer(docFile, packFile, standbyFile string, seq uint64) (blob []b
 		if seq == 0 {
 			return nil, 0, false, errors.New("--seq is required without --freshness-file")
 		}
-		return appsscript.Empty(), seq, false, nil
+		return appsscript.Empty(slot), seq, false, nil
 	}
 	doc, err := os.ReadFile(docFile)
 	if err != nil {
@@ -285,11 +306,11 @@ func checkContainer(docFile, packFile, standbyFile string, seq uint64) (blob []b
 	if err != nil {
 		return nil, 0, false, err
 	}
-	blob, err = appsscript.Build(doc, pack, standby)
+	blob, err = appsscript.Build(slot, doc, pack, standby)
 	if errors.Is(err, appsscript.ErrPackTooLarge) {
 		// The pack does not fit: send the document alone, and
 		// recipients fetch the pack from its own URL.
-		blob, err = appsscript.Build(doc, nil, standby)
+		blob, err = appsscript.Build(slot, doc, nil, standby)
 		return blob, n, false, err
 	}
 	return blob, n, len(pack) > 0 && err == nil, err
@@ -302,8 +323,8 @@ func appScriptSend(ctx context.Context, url string, key []byte, seq uint64, blob
 func runAppsScriptClear(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("appsscript-clear", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	url := fs.String("url", "", "the mirror URL, ?k= included")
-	keyFile := fs.String("write-key-file", "", "file holding the write key")
+	url := fs.String("url", "", "the relay's mirror URL, ?s=<slot>&k=<token>")
+	keyFile := fs.String("write-key-file", "", "file holding the account's write key")
 	seq := fs.Uint64("seq", 0, "update number, greater than any sent before")
 	if rc := parseFlags(fs, args); rc >= 0 {
 		return rc
@@ -321,7 +342,87 @@ func runAppsScriptClear(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 2
 	}
 	defer zeroBytes(key)
-	return printJSON(stdout, stderr, "appsscript-clear", appScriptSend(ctx, *url, key, *seq, appsscript.Empty()))
+	_, slot, _, err := freshness.ValidateAppsScriptURL(*url)
+	if err != nil {
+		fmt.Fprintf(stderr, "appsscript-clear: --url: %v\n", err)
+		return 2
+	}
+	return printJSON(stdout, stderr, "appsscript-clear", appScriptSend(ctx, *url, key, *seq, appsscript.Empty(slot)))
+}
+
+// appsScriptNow is the clock the account check numbers its update with.
+var appsScriptNow = time.Now
+
+func runAppsScriptAccountCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("appsscript-account-check", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	pasted := fs.String("url", "", "the script's web-app address (what Google shows after Deploy)")
+	keyFile := fs.String("write-key-file", "", "file holding the account's write key")
+	seq := fs.Uint64("seq", 0, "update number for the test slot (default: the clock in milliseconds)")
+	if rc := parseFlags(fs, args); rc >= 0 {
+		return rc
+	}
+	if err := requireAll(stderr, map[string]string{"--url": *pasted, "--write-key-file": *keyFile}); err != nil {
+		return 2
+	}
+	key, err := readWriteKeyFile(*keyFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "appsscript-account-check: %v\n", err)
+		return 2
+	}
+	defer zeroBytes(key)
+	type out struct {
+		appsscript.CheckResult
+		URL string `json:"url"`
+	}
+	base, err := appsscript.NormalizeExecURL(*pasted)
+	if err != nil {
+		// Not an address the check can use: a result, not a usage
+		// error, so the app shows it as the check's answer.
+		return printJSON(stdout, stderr, "appsscript-account-check", out{
+			CheckResult: appsscript.CheckResult{Reason: appsscript.ReasonBadAddress, Detail: err.Error()},
+		})
+	}
+	n := *seq
+	if n == 0 {
+		n = uint64(appsScriptNow().UnixMilli())
+	}
+	r := appsScriptNetwork.AccountCheck(ctx, base, key, n)
+	return printJSON(stdout, stderr, "appsscript-account-check", out{CheckResult: r, URL: base})
+}
+
+func runAppsScriptSlot(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	_ = ctx
+	fs := flag.NewFlagSet("appsscript-slot", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	base := fs.String("url", "", "the script's own address (no query)")
+	keyFile := fs.String("write-key-file", "", "file holding the account's write key")
+	slot := fs.String("slot", "", "the slot (default: a new random one)")
+	if rc := parseFlags(fs, args); rc >= 0 {
+		return rc
+	}
+	if err := requireAll(stderr, map[string]string{"--url": *base, "--write-key-file": *keyFile}); err != nil {
+		return 2
+	}
+	key, err := readWriteKeyFile(*keyFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "appsscript-slot: %v\n", err)
+		return 2
+	}
+	defer zeroBytes(key)
+	s := *slot
+	if s == "" {
+		if s, err = appsscript.NewSlot(); err != nil {
+			fmt.Fprintf(stderr, "appsscript-slot: %v\n", err)
+			return 1
+		}
+	}
+	u, err := appsscript.SlotURL(*base, key, s)
+	if err != nil {
+		fmt.Fprintf(stderr, "appsscript-slot: %v\n", err)
+		return 2
+	}
+	return printJSON(stdout, stderr, "appsscript-slot", map[string]string{"slot": s, "url": u})
 }
 
 // appsScriptFreshnessTarget is the publish-freshness backend for one

@@ -397,7 +397,7 @@ Reserved 2026-11-20 for the standby-address add-on
 `publisher/deploy/relaypack/endpoint.go` (S5); the store keeping it
 (`core/trust` SaveImport; both secrets go with the route,
 `routestore.perRouteSecretKeys`); the engine's address variant and
-`engine_standby_key` (S7); a key carried by a `daal-refresh-v1`
+`engine_standby_key` (S7); a key carried by a `daal-refresh-v2`
 container is offered to the same store by the refresh walk
 (`abi.StandbyKeySink`). All built 2026-11-20.
 
@@ -499,7 +499,7 @@ manifest signature. Two shapes:
   do not all carry the same one (shadowsocks excepted).
 - **Where a key comes from.** A key the person types
   (`engine_standby_key`, `specs/optional-addons-v1.md` §3.4), the
-  `standby_key` member of a `daal-refresh-v1` container (below), or a
+  `standby_key` member of a `daal-refresh-v2` container (below), or a
   file. When the publisher switches to the standby, the next signed pack
   names it as `_endpoint.server` and needs no key at all.
 - **Publisher rules.** Sealed is the default; open is offered only while
@@ -612,16 +612,31 @@ which endpoints are Google mirrors, the container, the D-3 rule in
   the document (and the pack, if any) was applied; a walk whose key was
   kept counts as one that found a new address.
 
+- **One script per Google account, one slot per relay** (amended
+  2026-11-22, protocol `daal-refresh-v2`). The publisher adds one script
+  to a Google account (Accounts → Google) and every relay that turns the
+  channel on gets a *slot* in it: 8 random bytes, 11 base64url
+  characters. The slot's read token is derived, never stored:
+  `k = base64url(HMAC-SHA256(write_key, "daal-read-v2" ‖ 0x0A ‖ slot)[0:16])`,
+  22 characters, so only the holder of the account's write key can make
+  one and one relay's pack says nothing of another relay's slot. The
+  connect check uses the reserved slot `connectTest`, which no relay is
+  given. The single-relay shape of the first build (`?k=<token>` alone,
+  `daal-refresh-v1`) was never deployed and is no longer accepted
+  anywhere.
 - **The entry.** One member of the signed mirror set
   (`trust/freshness-mirrors.json`, `daal/freshness-mirrors-v1`):
-  `{"provider": "appsscript", "url": "https://script.google.com/macros/s/<id>/exec?k=<token>"}`.
+  `{"provider": "appsscript", "url": "https://script.google.com/macros/s/<id>/exec?s=<slot>&k=<token>"}`.
   The URL is exactly that shape: host `script.google.com`, path
   `/macros/s/<id>/exec` with `<id>` of 20–120 characters from
-  `[A-Za-z0-9_-]`, and one query parameter `k`, 22 base64url characters
-  (16 random bytes, the "path token"), nothing else. It is a mirror like
-  any other for the set's rules (https, no credentials, distinct host).
-- **What it serves** is not a freshness document but a `daal-refresh-v1`
-  container (next section) holding one.
+  `[A-Za-z0-9_-]`, and exactly two query parameters in this order: `s`,
+  11 base64url characters, then `k`, 22 base64url characters, nothing
+  else. It is a mirror like any other for the set's rules (https, no
+  credentials, distinct host).
+- **What it serves** is not a freshness document but the slot's
+  `daal-refresh-v2` container (next section) holding one; for a wrong
+  `k`, an unknown slot or a slot never written, the bland text
+  `Nothing here.`.
 - **How a recipient fetches it** (G4): through the Google front — SNI
   `www.google.com`, HTTP/2 `:authority script.google.com`, a Chrome-shaped
   hello — following exactly one redirect, and only to
@@ -641,16 +656,19 @@ which endpoints are Google mirrors, the container, the D-3 rule in
   (`core/refresh`). The card says that a Google suspension then stops
   updates.
 
-### The `daal-refresh-v1` container — optional add-ons
+### The `daal-refresh-v2` container — optional add-ons
 
-The body the `appsscript` mirror serves (and the only thing it stores):
-the freshness document, the signed credential-less pack it names, and
-optionally a standby key, in one small text object, so a recipient
-behind the Google front needs no second fetch.
+The body the `appsscript` mirror serves for one slot (and the only
+thing the script stores per slot): the freshness document, the signed
+credential-less pack it names, and optionally a standby key, in one
+small text object, so a recipient behind the Google front needs no
+second fetch. (v2 is v1 with the slot; v1 was never deployed and is
+read by nothing.)
 
 ```jsonc
 {
-  "kind":        "daal-refresh-v1",
+  "kind":        "daal-refresh-v2",
+  "slot":        "<the slot it was written for>",
   "freshness":   "<base64 of the freshness document, its exact bytes>",
   "pack":        "<base64 of the signed credential-less .sbp>",  // optional
   "standby_key": "<the 26-symbol standby key>"                  // optional
@@ -659,9 +677,13 @@ behind the Google front needs no second fetch.
 
 - UTF-8 JSON, at most 65 536 bytes in all; `freshness` at most 16 KiB
   decoded, `pack` at most 48 KiB decoded. `kind` must be exactly
-  `daal-refresh-v1`. Unknown members are ignored: every part
-  authenticates itself, and nothing in the container is trusted because
-  of where it came from.
+  `daal-refresh-v2`, and `slot` must equal the `s` of the mirror URL it
+  was fetched from; a recipient refuses anything else (a script that
+  mixed two relays' texts up is "nothing here", never a document to
+  weigh). Unknown members are ignored: every part authenticates itself,
+  and nothing in the container is trusted because of where it came from.
+  (The connect check's container carries a `check` nonce; recipients
+  never fetch the test slot.)
 - `freshness` is verified exactly as a document fetched from any mirror
   (signature chain, `relay_pack_id` / `supersedes`, `sequence` high-water
   mark, `not_after`). Nothing else in the container is used unless it
@@ -676,17 +698,22 @@ behind the Google front needs no second fetch.
   zero; the publisher's builder takes the key in any form
   `bundle.ParseStandbyKeyText` reads (the grouped form people are shown)
   and writes this one.
-- `{"kind": "daal-refresh-v1"}` with no `freshness` is the empty
-  container a removed channel serves: "nothing new", not an error.
+- `{"kind": "daal-refresh-v2", "slot": "<slot>"}` with no `freshness`
+  is the empty container a relay that turned the channel off leaves in
+  its slot: "nothing new", not an error.
 - **The update** (publisher → script; recipients never see it) is one
-  HTTPS POST of `{"seq": <integer>, "blob": "<the container JSON as a
-  string>", "mac": "<64 lower-case hex>"}` with
-  `mac = HMAC-SHA256(write_key, ASCII decimal seq ‖ 0x0A ‖ blob)` and
-  `write_key` 32 random bytes the publisher's app generated and embedded
-  in the script. The script stores the blob only when the MAC holds and
-  `seq` is greater than the stored one. The write key only prevents
-  vandalism of the channel; recipients trust the publisher's signature,
-  never the script.
+  HTTPS POST of `{"slot": "<slot>", "seq": <integer>, "blob": "<the
+  container JSON as a string>", "mac": "<64 lower-case hex>"}` with
+  `mac = HMAC-SHA256(write_key, "daal-refresh-v2" ‖ 0x0A ‖ slot ‖ 0x0A ‖
+  ASCII decimal seq ‖ 0x0A ‖ blob)` and `write_key` 32 random bytes the
+  publisher's app generated for the account and embedded in the script.
+  The script stores the blob in that slot only when the MAC holds and
+  `seq` is greater than the slot's stored one (the same update again is
+  answered ok); other slots are untouched. Answers: `{"ok":true,"seq":n}`
+  or `{"ok":false,"error":"malformed"|"too_large"|"refused"|"stale"|"full"}`
+  (`full`: the account's Script Properties store, about 500 KB in all,
+  refused the write). The write key only prevents vandalism of the
+  channel; recipients trust the publisher's signature, never the script.
 
 ### `Manifest.relay_pack.freshness_url` (lifted at V1.6)
 
@@ -1531,7 +1558,7 @@ contract lives in `specs/daal-relay-mgmt-v1.md`.
 - FRP-4b (`34-phase-frp-4b-direct-deploy-integration.md`) — Helper-side `BindAndSign` that turns the OperatorRecord into a signed `.sbp`.
 - FRP-8 (`38-phase-frp-8-v1-6-cdn-fronted.md`) — lifts `cdn_fronted` and non-empty `freshness_url` to V1.6.
 - FRP-11 (`41-phase-frp-11-trusted-cells.md`) — lifts `cell_scope`. See §"V2 cell aggregation" below.
-- `specs/optional-addons-v1.md` and `docs/optional-addons-plan.md` — the `_standby` key, the CDN-fronted endpoint, the `appsscript` mirror provider and the `daal-refresh-v1` container (reserved and built 2026-11-20).
+- `specs/optional-addons-v1.md` and `docs/optional-addons-plan.md` — the `_standby` key, the CDN-fronted endpoint, the `appsscript` mirror provider and the `daal-refresh-v2` container (reserved and built 2026-11-20; one script per Google account with a slot per relay since 2026-11-22).
 
 ## V2 cell aggregation (FRP-11 amendment)
 

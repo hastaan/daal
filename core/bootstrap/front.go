@@ -55,7 +55,7 @@ const (
 	// AppsScriptRedirectHost is the one host a redirect may lead to.
 	AppsScriptRedirectHost = "script.googleusercontent.com"
 	// FrontMaxBody bounds the body read through the front: the
-	// daal-refresh-v1 container's own limit.
+	// daal-refresh-v2 container's own limit.
 	FrontMaxBody = 64 << 10
 )
 

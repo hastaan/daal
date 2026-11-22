@@ -132,13 +132,13 @@ func (g *googleFake) api(w http.ResponseWriter, r *http.Request, body []byte, q 
 			gError(w, 400, "INVALID_ARGUMENT", "worldbox: the manifest does not deploy a web app anyone can run as the deploying user")
 			return
 		}
-		key, ptok, err := parseDaalScript(p.code)
+		key, err := parseDaalScript(p.code)
 		if err != nil {
 			gError(w, 400, "INVALID_ARGUMENT", "worldbox: "+err.Error())
 			return
 		}
 		id := "AKfycb" + randKey(48)
-		g.apps[id] = &gWebApp{id: id, writeKey: key, pathToken: ptok, source: "api"}
+		g.apps[id] = newWebApp(id, key, "api")
 		gJSON(w, map[string]any{"deploymentId": id, "entryPoints": []any{map[string]any{"entryPointType": "WEB_APP",
 			"webApp": map[string]any{"url": "https://script.google.com/macros/s/" + id + "/exec",
 				"entryPointConfig": map[string]string{"access": "ANYONE_ANONYMOUS", "executeAs": "USER_DEPLOYING"}}}}})

@@ -8,45 +8,36 @@
 //   cloudflare — a key checked and kept without a relay
 //                (addon_cdn::connect); a relay takes a copy the first
 //                time it turns "Hide behind Cloudflare" on.
-//   google     — Google sign-in deploys per relay, so connecting Google
-//                only records how the owner wants to do it; the sign-in
-//                itself happens when a relay's switch is turned on.
+//   google     — the account's one update script, added once by hand
+//                (or, in a build with the OAuth clients, by signing in)
+//                and checked through Google (addon_google::account_attach).
+//                Every relay's switch takes a slot in it.
 
 import { useCallback, useEffect, useState } from 'react';
 import { Addons, Wizard } from '../wizardCommands';
 
 export type ServiceId = 'hetzner' | 'cloudflare' | 'google';
 
-/** How Google is used: sign in with Google, or the script by hand. */
-export type GoogleChoice = 'signin' | 'manual';
-
-const GOOGLE_KEY = 'daal.d2.accounts.google';
-
-function store(): Storage | null {
-    try {
-        return typeof localStorage === 'undefined' ? null : localStorage;
-    } catch {
-        return null;
-    }
+/** The Google account as the page needs it. */
+export interface GoogleState {
+    /** The script is added and checked: relays can turn it on. */
+    connected: boolean;
+    /** The script was copied; the address is not pasted back yet. */
+    scriptMade: boolean;
+    /** This build may offer "Sign in with Google". */
+    signIn: boolean;
 }
 
-export function googleChoice(): GoogleChoice | null {
-    try {
-        const v = store()?.getItem(GOOGLE_KEY);
-        return v === 'signin' || v === 'manual' ? v : null;
-    } catch {
-        return null;
-    }
-}
+export const NO_GOOGLE: GoogleState = { connected: false, scriptMade: false, signIn: false };
 
-export function setGoogleChoice(v: GoogleChoice | null): void {
+/** An earlier build kept only a choice here; nothing reads it now. */
+const OLD_GOOGLE_CHOICE = 'daal.d2.accounts.google';
+
+function forgetOldChoice(): void {
     try {
-        const s = store();
-        if (!s) return;
-        if (v == null) s.removeItem(GOOGLE_KEY);
-        else s.setItem(GOOGLE_KEY, v);
+        if (typeof localStorage !== 'undefined') localStorage.removeItem(OLD_GOOGLE_CHOICE);
     } catch {
-        /* not kept: asked again next time */
+        /* nothing kept to forget */
     }
 }
 
@@ -57,22 +48,24 @@ export interface AccountsState {
      *  only relays hold one. */
     hetznerAccount: boolean;
     cloudflare: { connected: boolean; zone: string };
-    google: GoogleChoice | null;
+    google: GoogleState;
 }
 
 export const NO_ACCOUNTS: AccountsState = {
     hetzner: false,
     hetznerAccount: false,
     cloudflare: { connected: false, zone: '' },
-    google: null,
+    google: NO_GOOGLE,
 };
 
 /** What this phone has connected. A shell that cannot say (an older
  *  build, a browser) reads as "not connected", never as an error. */
 export async function readAccounts(): Promise<AccountsState> {
-    const [hosting, cf] = await Promise.all([
+    forgetOldChoice();
+    const [hosting, cf, g] = await Promise.all([
         Wizard.hostingAccountStatus().catch(() => null),
         Addons.cdnAccount().catch(() => null),
+        Addons.googleAccount().catch(() => null),
     ]);
     let hetzner = !!hosting?.hetzner?.connected;
     const hetznerAccount = !!hosting?.hetzner?.account;
@@ -89,7 +82,7 @@ export async function readAccounts(): Promise<AccountsState> {
         hetzner,
         hetznerAccount,
         cloudflare: { connected: !!cf?.connected, zone: cf?.zone ?? '' },
-        google: googleChoice(),
+        google: { connected: !!g?.connected, scriptMade: !!g?.script_made, signIn: g?.sign_in === true },
     };
 }
 

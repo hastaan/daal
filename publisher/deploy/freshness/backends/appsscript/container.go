@@ -1,8 +1,14 @@
 package appsscript
 
-// The daal-refresh-v1 container (specs/relaypack-v1.md, "The
-// daal-refresh-v1 container") and the MAC of the update that carries
-// it to the script.
+// The daal-refresh-v2 container (specs/relaypack-v1.md, "The
+// daal-refresh-v2 container") and the MAC of the update that carries
+// it to the script's slot.
+//
+// v2 is v1 with the slot: one script serves many relays, so a
+// container names the slot it was written for and the MAC covers the
+// slot. A recipient accepts a container only for the slot its mirror
+// URL names. v1 (one script per relay) was never deployed and is not
+// read anywhere.
 
 import (
 	"bytes"
@@ -20,8 +26,9 @@ import (
 	"daal/bundle-go/bundle"
 )
 
-// ContainerKind is the container's kind discriminator.
-const ContainerKind = "daal-refresh-v1"
+// ContainerKind is the container's kind discriminator, and the
+// protocol name the update MAC starts with.
+const ContainerKind = "daal-refresh-v2"
 
 // Limits, all from the spec.
 const (
@@ -37,6 +44,8 @@ var standbyKeyRe = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{26}$`)
 // wire is the container as it travels.
 type wire struct {
 	Kind       string `json:"kind"`
+	Slot       string `json:"slot"`
+	Check      string `json:"check,omitempty"`
 	Freshness  string `json:"freshness,omitempty"`
 	Pack       string `json:"pack,omitempty"`
 	StandbyKey string `json:"standby_key,omitempty"`
@@ -45,6 +54,8 @@ type wire struct {
 // Parts are a parsed container. Nothing in it is trusted because of
 // where it came from: each part authenticates itself downstream.
 type Parts struct {
+	// Slot is the slot the container was written for.
+	Slot string
 	// Freshness is the document's exact bytes; nil in the empty
 	// container a removed channel serves.
 	Freshness  []byte
@@ -52,8 +63,18 @@ type Parts struct {
 	StandbyKey string
 }
 
-// Empty is the container a removed channel serves: "nothing new".
-func Empty() []byte { return []byte(`{"kind":"` + ContainerKind + `"}`) }
+// Empty is the container a cleared slot serves: "nothing new". The
+// slot must be valid (callers take it from a validated URL).
+func Empty(slot string) []byte {
+	return []byte(`{"kind":"` + ContainerKind + `","slot":"` + slot + `"}`)
+}
+
+// CheckContainer is what the account's connect check writes to
+// TestSlot: an empty container with a fresh nonce, so reading it back
+// proves this write, not an earlier one. Recipients ignore the member.
+func CheckContainer(nonce string) []byte {
+	return []byte(`{"kind":"` + ContainerKind + `","slot":"` + TestSlot + `","check":"` + nonce + `"}`)
+}
 
 // docRef is what Build reads of the freshness document: enough to
 // refuse a pack the document does not name, and the sequence the
@@ -88,7 +109,10 @@ func DocSequence(doc []byte) (uint64, error) {
 // (its SHA-256 is the document's current_bundle_sha256): a container
 // carrying another file would be refused by every recipient while the
 // publisher saw a green publish.
-func Build(freshnessDoc, pack []byte, standbyKey string) ([]byte, error) {
+func Build(slot string, freshnessDoc, pack []byte, standbyKey string) ([]byte, error) {
+	if !ValidSlot(slot) {
+		return nil, errors.New("appsscript: a container needs a valid slot")
+	}
 	if len(freshnessDoc) == 0 {
 		return nil, errors.New("appsscript: a container needs the freshness document")
 	}
@@ -99,7 +123,7 @@ func Build(freshnessDoc, pack []byte, standbyKey string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := wire{Kind: ContainerKind, Freshness: base64.StdEncoding.EncodeToString(freshnessDoc)}
+	w := wire{Kind: ContainerKind, Slot: slot, Freshness: base64.StdEncoding.EncodeToString(freshnessDoc)}
 	if len(pack) > 0 {
 		if len(pack) > MaxPack {
 			return nil, fmt.Errorf("%w: %d bytes, at most %d", ErrPackTooLarge, len(pack), MaxPack)
@@ -151,9 +175,12 @@ func Parse(body []byte) (*Parts, error) {
 		return nil, fmt.Errorf("appsscript: container is not JSON: %w", err)
 	}
 	if w.Kind != ContainerKind {
-		return nil, errors.New("appsscript: not a daal-refresh-v1 container")
+		return nil, errors.New("appsscript: not a daal-refresh-v2 container")
 	}
-	p := &Parts{}
+	if !ValidSlot(w.Slot) {
+		return nil, errors.New("appsscript: the container names no valid slot")
+	}
+	p := &Parts{Slot: w.Slot}
 	if w.Freshness == "" {
 		if w.Pack != "" || w.StandbyKey != "" {
 			return nil, errors.New("appsscript: container parts without a freshness document")
@@ -196,9 +223,11 @@ func decodeLimited(s string, max int) ([]byte, error) {
 }
 
 // MAC is the update's authenticator, as 64 lower-case hex characters:
-// HMAC-SHA256(write key, ASCII decimal seq ‖ 0x0A ‖ blob).
-func MAC(writeKey []byte, seq uint64, blob []byte) string {
+// HMAC-SHA256(write key, "daal-refresh-v2" ‖ 0x0A ‖ slot ‖ 0x0A ‖
+// ASCII decimal seq ‖ 0x0A ‖ blob).
+func MAC(writeKey []byte, slot string, seq uint64, blob []byte) string {
 	m := hmac.New(sha256.New, writeKey)
+	m.Write([]byte(ContainerKind + "\n" + slot + "\n"))
 	m.Write([]byte(strconv.FormatUint(seq, 10)))
 	m.Write([]byte{'\n'})
 	m.Write(blob)
@@ -207,15 +236,19 @@ func MAC(writeKey []byte, seq uint64, blob []byte) string {
 
 // update is the body POSTed to the script.
 type update struct {
+	Slot string `json:"slot"`
 	Seq  uint64 `json:"seq"`
 	Blob string `json:"blob"`
 	MAC  string `json:"mac"`
 }
 
 // UpdateBody is the JSON the publisher POSTs for one container.
-func UpdateBody(writeKey []byte, seq uint64, blob []byte) ([]byte, error) {
+func UpdateBody(writeKey []byte, slot string, seq uint64, blob []byte) ([]byte, error) {
 	if len(writeKey) != WriteKeySize {
 		return nil, errors.New("appsscript: write key must be 32 bytes")
+	}
+	if !ValidSlot(slot) {
+		return nil, errors.New("appsscript: bad slot")
 	}
 	if seq == 0 || seq > maxSeq {
 		return nil, fmt.Errorf("appsscript: update number %d is out of range", seq)
@@ -226,7 +259,7 @@ func UpdateBody(writeKey []byte, seq uint64, blob []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(update{Seq: seq, Blob: string(blob), MAC: MAC(writeKey, seq, blob)}); err != nil {
+	if err := enc.Encode(update{Slot: slot, Seq: seq, Blob: string(blob), MAC: MAC(writeKey, slot, seq, blob)}); err != nil {
 		return nil, err
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil

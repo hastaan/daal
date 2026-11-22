@@ -1151,59 +1151,6 @@ pub fn redact_detail(s: &str) -> String {
 // The Google update channel's row (made and removed by `addon_google`)
 // ---------------------------------------------------------------------
 
-/// The mirror URL for what a publisher pasted (or the Apps Script API
-/// answered): `https://script.google.com/macros/s/<id>/exec?k=<token>`,
-/// the one shape `freshness.ValidateAppsScriptURL` accepts. A `k`
-/// already in it must be this relay's.
-pub(crate) fn normalize_appsscript_url(
-    pasted: &str,
-    path_token: &str,
-) -> std::result::Result<String, String> {
-    let tok_ok = |t: &str| {
-        t.len() == 22
-            && t.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    };
-    if !tok_ok(path_token) {
-        return Err("bad path token".into());
-    }
-    let s = pasted.trim();
-    const HOST: &str = "https://script.google.com/";
-    // `get`, not indexing: pasted text may start with anything,
-    // including a character that does not end on byte 26.
-    if !s.get(..HOST.len()).is_some_and(|p| p.eq_ignore_ascii_case(HOST)) {
-        return Err("that is not a script.google.com web-app address".into());
-    }
-    let rest = &s[HOST.len() - 1..];
-    let rest = rest.split('#').next().unwrap_or("");
-    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    for kv in query.split('&') {
-        if let Some(k) = kv.strip_prefix("k=") {
-            if k != path_token {
-                return Err("that address belongs to another relay's script".into());
-            }
-        }
-    }
-    let path = path.trim_end_matches('/');
-    if path.ends_with("/dev") {
-        return Err(
-            "that is the test address (/dev); copy the web app address that ends in /exec".into(),
-        );
-    }
-    let id = path
-        .strip_prefix("/macros/s/")
-        .and_then(|p| p.strip_suffix("/exec"))
-        .ok_or_else(|| "the address must look like script.google.com/macros/s/…/exec".to_string())?;
-    if !(20..=120).contains(&id.len())
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        return Err("the address must look like script.google.com/macros/s/…/exec".into());
-    }
-    Ok(format!("https://script.google.com/macros/s/{id}/exec?k={path_token}"))
-}
-
 /// Put the channel's URL in the mirror table (replacing an older one).
 pub(crate) fn set_appsscript_endpoint(ctx: &WizardCtx, operator_id: i64, url: &str) -> Result<i64> {
     let rows = ctx.db.list_freshness_endpoints(operator_id)?;
@@ -1227,6 +1174,14 @@ pub(crate) fn set_appsscript_endpoint(ctx: &WizardCtx, operator_id: i64, url: &s
         "",
         (ctx.clock)(),
     )?)
+}
+
+/// Whether the channel's URL is in the mirror table already.
+pub(crate) fn has_appsscript_endpoint(ctx: &WizardCtx, operator_id: i64, url: &str) -> bool {
+    ctx.db
+        .list_freshness_endpoints(operator_id)
+        .map(|rows| rows.iter().any(|r| r.kind == KIND_APPSSCRIPT && r.public_base_url == url))
+        .unwrap_or(false)
 }
 
 /// Take the channel out of the mirror table. Whether it was there.
@@ -1349,34 +1304,6 @@ mod tests {
         assert!(!meets_mirror_floor(&["r2"]));
         assert!(!meets_mirror_floor(&["ghpages"]));
         assert!(!meets_mirror_floor(&[]));
-    }
-
-    #[test]
-    fn appsscript_urls_have_one_shape() {
-        let tok = "AAAAAAAAAAAAAAAAAAAAAA";
-        let id = "AKfycbx0123456789abcdefghij";
-        let want = format!("https://script.google.com/macros/s/{id}/exec?k={tok}");
-        for pasted in [
-            format!("https://script.google.com/macros/s/{id}/exec"),
-            format!("  https://script.google.com/macros/s/{id}/exec/ "),
-            format!("https://script.google.com/macros/s/{id}/exec?k={tok}"),
-            format!("https://script.google.com/macros/s/{id}/exec?usp=sharing#x"),
-        ] {
-            assert_eq!(normalize_appsscript_url(&pasted, tok).unwrap(), want, "{pasted}");
-        }
-        for bad in [
-            format!("http://script.google.com/macros/s/{id}/exec"),
-            format!("https://script.google.com/macros/s/{id}/dev"),
-            format!("https://script.google.com/a/macros/example.org/s/{id}/exec"),
-            format!("https://script.google.com.evil.example/macros/s/{id}/exec"),
-            format!("https://script.google.com/macros/s/{id}/exec?k=BBBBBBBBBBBBBBBBBBBBBB"),
-            "https://script.google.com/macros/s/short/exec".to_string(),
-            "https://script.google.com/macros/s/has%2Fslash000000000000/exec".to_string(),
-            "آدرس https://script.google.com/macros/s/AKfycbx0123456789abcdefghij/exec".to_string(),
-        ] {
-            assert!(normalize_appsscript_url(&bad, tok).is_err(), "{bad}");
-        }
-        assert!(normalize_appsscript_url(&want, "bad").is_err());
     }
 
     #[test]

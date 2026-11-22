@@ -1,12 +1,14 @@
 // frontmirror.go — the Google update channel on the recipient
 // (optional add-on 3; docs/optional-addons-plan.md §3, work item G5;
 // specs/relaypack-v1.md "Mirror provider appsscript" and "The
-// daal-refresh-v1 container").
+// daal-refresh-v2 container").
 //
-// An `appsscript` mirror is an Apps Script web app that serves a small
-// container — the signed freshness document, optionally the signed
-// credential-less pack it names, optionally a standby key — instead of
-// a bare document. This file is everything about it the walk needs:
+// An `appsscript` mirror is one slot of an Apps Script web app (one
+// script per publisher's Google account, one slot per relay) that
+// serves a small container — the signed freshness document, optionally
+// the signed credential-less pack it names, optionally a standby key —
+// instead of a bare document. This file is everything about it the walk
+// needs:
 //
 //   - WHICH endpoints are Google mirrors: exactly those whose URL has
 //     the one shape the spec fixes (an endpoint list carries URLs only,
@@ -26,7 +28,9 @@
 //     executions, and a relay-address block makes a whole publisher's
 //     recipients walk at once), with at most two connections;
 //   - WHAT is trusted: nothing in the container because of where it
-//     came from. The freshness document is verified by the very same
+//     came from. A container must name the slot the mirror URL asked
+//     for (protocol daal-refresh-v2), so a script that mixed up two
+//     relays' texts is "nothing here", not a document to weigh. The freshness document is verified by the very same
 //     code as a document from any mirror; the pack is used only when its
 //     SHA-256 is the verified document's current_bundle_sha256 and then
 //     goes through the same applyBundle gate and importer swap as a
@@ -61,9 +65,10 @@ const ProviderAppsScript = "appsscript"
 
 // The container, as specs/relaypack-v1.md fixes it. Mirrors
 // publisher/deploy/freshness/backends/appsscript/container.go (core/
-// cannot import publisher/).
+// cannot import publisher/). v1 (one script per relay, no slot) was
+// never deployed and is not read.
 const (
-	refreshContainerKind  = "daal-refresh-v1"
+	refreshContainerKind  = "daal-refresh-v2"
 	maxRefreshContainer   = 65536
 	maxContainerFreshness = 16 << 10
 	maxContainerPack      = 48 << 10
@@ -76,36 +81,54 @@ const MaxGoogleJitter = 120 * time.Second
 
 var (
 	appsScriptIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{20,120}$`)
+	appsScriptSlotRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 	appsScriptTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 	standbyKeyTextRe  = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{26}$`)
 )
 
 // IsAppsScriptMirrorURL reports whether raw has the one shape an
-// appsscript mirror URL has: https://script.google.com/macros/s/<id>/exec?k=<token>,
-// <id> 20–120 of [A-Za-z0-9_-], <token> 22 base64url characters, no
-// other query parameter, no fragment, port or credentials. Mirrors
-// publisher/deploy/freshness.ValidateAppsScriptURL.
+// appsscript mirror URL has:
+// https://script.google.com/macros/s/<id>/exec?s=<slot>&k=<token>,
+// <id> 20–120 of [A-Za-z0-9_-], <slot> 11 and <token> 22 base64url
+// characters, exactly those two parameters in that order, no fragment,
+// port or credentials. Mirrors
+// publisher/deploy/freshness.ValidateAppsScriptURL. The single-relay
+// shape of the first build (?k= alone) is not one.
 func IsAppsScriptMirrorURL(raw string) bool {
+	_, ok := appsScriptSlot(raw)
+	return ok
+}
+
+// appsScriptSlot is the slot of an appsscript mirror URL, when raw is
+// one.
+func appsScriptSlot(raw string) (string, bool) {
 	if raw == "" || len(raw) > maxFreshnessURLLen || raw != strings.TrimSpace(raw) {
-		return false
+		return "", false
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host != bootstrap.AppsScriptHost || u.User != nil {
-		return false
+		return "", false
 	}
 	if u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" {
-		return false
+		return "", false
 	}
 	const prefix, suffix = "/macros/s/", "/exec"
 	p := u.EscapedPath()
 	if !strings.HasPrefix(p, prefix) || !strings.HasSuffix(p, suffix) {
-		return false
+		return "", false
 	}
 	if !appsScriptIDRe.MatchString(strings.TrimSuffix(strings.TrimPrefix(p, prefix), suffix)) {
-		return false
+		return "", false
 	}
-	k, ok := strings.CutPrefix(u.RawQuery, "k=")
-	return ok && appsScriptTokenRe.MatchString(k)
+	rest, ok := strings.CutPrefix(u.RawQuery, "s=")
+	if !ok {
+		return "", false
+	}
+	slot, k, ok := strings.Cut(rest, "&k=")
+	if !ok || !appsScriptSlotRe.MatchString(slot) || !appsScriptTokenRe.MatchString(k) {
+		return "", false
+	}
+	return slot, true
 }
 
 // MeetsMirrorFloor is the two-mirror rule with its one exception (owner
@@ -118,7 +141,7 @@ func MeetsMirrorFloor(providers []string) bool {
 	return len(providers) == 1 && providers[0] == ProviderAppsScript
 }
 
-// refreshContainer is a parsed daal-refresh-v1 container. Shape only:
+// refreshContainer is a parsed daal-refresh-v2 container. Shape only:
 // every part is verified downstream.
 type refreshContainer struct {
 	freshness  []byte // nil: the empty container of a removed channel
@@ -131,13 +154,15 @@ type refreshContainer struct {
 // walk moves on as it would past a mirror that has no document.
 var errChannelEmpty = errors.New("freshness: the update channel holds nothing")
 
-// parseRefreshContainer reads a container with the spec's limits.
-func parseRefreshContainer(body []byte) (*refreshContainer, error) {
+// parseRefreshContainer reads a container with the spec's limits. It
+// must name slot, the slot the mirror URL asked for.
+func parseRefreshContainer(body []byte, slot string) (*refreshContainer, error) {
 	if len(body) > maxRefreshContainer {
 		return nil, fmt.Errorf("freshness: container is %d bytes, at most %d", len(body), maxRefreshContainer)
 	}
 	var w struct {
 		Kind       string `json:"kind"`
+		Slot       string `json:"slot"`
 		Freshness  string `json:"freshness"`
 		Pack       string `json:"pack"`
 		StandbyKey string `json:"standby_key"`
@@ -146,7 +171,10 @@ func parseRefreshContainer(body []byte) (*refreshContainer, error) {
 		return nil, errors.New("freshness: the update channel did not answer with a container")
 	}
 	if w.Kind != refreshContainerKind {
-		return nil, errors.New("freshness: not a daal-refresh-v1 container")
+		return nil, errors.New("freshness: not a daal-refresh-v2 container")
+	}
+	if slot == "" || w.Slot != slot {
+		return nil, errors.New("freshness: the container is not this relay's slot")
 	}
 	c := &refreshContainer{}
 	if w.Freshness == "" {
@@ -324,11 +352,15 @@ func (r *RelayPackRefresher) fetchGoogleMirror(parent, walkCtx context.Context, 
 	}
 	gctx, cancel := context.WithTimeout(parent, 2*perURL)
 	defer cancel()
+	slot, ok := appsScriptSlot(ep)
+	if !ok {
+		return nil, errors.New("freshness: not an Apps Script mirror")
+	}
 	body, err := fetch(gctx, ep, dialer, perURL)
 	if err != nil {
 		return nil, err
 	}
-	c, err := parseRefreshContainer(body)
+	c, err := parseRefreshContainer(body, slot)
 	if err != nil {
 		return nil, err
 	}

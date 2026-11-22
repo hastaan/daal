@@ -8,7 +8,10 @@
 // as the zone allows); none of it is a choice here.
 //
 //   switch on, account missing → that account's sheet (Accounts); once
-//                                connected, the switch carries on
+//                                connected, the switch carries on. Google
+//                                is an account like Cloudflare: its sheet
+//                                adds the one script, and the switch only
+//                                takes a place in it
 //   switch on                  → «Setting up…», then «On», or one plain
 //                                failure line with «Try again»
 //   switch off                 → one sentence naming what is given back
@@ -27,10 +30,10 @@ import type { AddonKind, AddonRemoveReport, AddonRow } from './addonTypes';
 import { ADDON_COPY, liveRow } from './addonText';
 import type { AddonCopy } from './addonText';
 import { classifyAddonError } from './addonErrors';
-import { CloudflareSheet, GoogleByHandSheet, GoogleSheet, APPS_SCRIPT_SETTINGS_URL } from './AccountSheets';
-import { setGoogleChoice, useAccounts } from './accounts';
-import type { AccountsState, GoogleChoice } from './accounts';
-import { BODY, ErrorNote, MONO, MUTED, copyText, openExternal, useRun } from './addonUi';
+import { CloudflareSheet, GoogleSheet } from './AccountSheets';
+import { useAccounts } from './accounts';
+import type { AccountsState } from './accounts';
+import { BODY, ErrorNote, MONO, MUTED, copyText, useRun } from './addonUi';
 import { addonNeed, clearAddonFailure, failedAddons, runAddon } from './wizardAddons';
 
 export interface AddonsSectionProps {
@@ -54,7 +57,6 @@ type Phase =
 type Open =
     | { k: 'cloudflare'; then?: AddonKind }
     | { k: 'google'; then?: AddonKind }
-    | { k: 'google-hand' }
     | { k: 'code'; code: string };
 
 export function AddonsSection({ t, operatorId, variant = 'relay', accounts: given }: AddonsSectionProps) {
@@ -117,10 +119,6 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
             setOpen({ k: 'google', then: 'google' });
             return;
         }
-        if (need === 'by_hand') {
-            setOpen({ k: 'google-hand' });
-            return;
-        }
         setPhase(kind, { k: 'running' });
         clearAddonFailure(operatorId, kind);
         try {
@@ -129,9 +127,13 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
         } catch (e) {
             setPhase(kind, { k: 'failed', op: 'on', error: e });
             // The key went (a restore, another phone): connect again.
-            if (classifyAddonError(e) === 'E_CDN_NO_TOKEN') {
+            const code = classifyAddonError(e);
+            if (code === 'E_CDN_NO_TOKEN') {
                 read.reload();
                 setOpen({ k: 'cloudflare', then: 'cdn' });
+            } else if (code === 'E_GOOGLE_NO_ACCOUNT') {
+                read.reload();
+                setOpen({ k: 'google', then: 'google' });
             }
         }
         reload();
@@ -219,12 +221,11 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
                         copy={c}
                         row={liveRow(rows, c.kind)}
                         phase={phases[c.kind] ?? { k: 'idle' }}
-                        connected={c.needs == null || (c.needs === 'cloudflare' ? accounts.cloudflare.connected : !!accounts.google)}
+                        connected={c.needs == null || (c.needs === 'cloudflare' ? accounts.cloudflare.connected : accounts.google.connected)}
                         first={i === 0}
                         disabled={operatorId == null}
                         onToggle={(on) => void (on ? turnOn(c.kind) : turnOff(c.kind, true))}
                         onRetry={() => retry(c.kind)}
-                        onByHand={c.kind === 'google' ? () => setOpen({ k: 'google-hand' }) : undefined}
                     />
                 ))}
                 {details && (
@@ -270,30 +271,9 @@ export function AddonsSection({ t, operatorId, variant = 'relay', accounts: give
             {open?.k === 'google' && (
                 <GoogleSheet
                     t={t}
-                    choice={accounts.google}
+                    google={accounts.google}
                     onClose={() => setOpen(null)}
-                    onChoose={(c: GoogleChoice | null) => {
-                        setGoogleChoice(c);
-                        if (c == null) {
-                            setOpen(null);
-                            read.reload();
-                            return;
-                        }
-                        afterConnect(open.then, { ...accounts, google: c });
-                    }}
-                />
-            )}
-            {open?.k === 'google-hand' && operatorId != null && (
-                <GoogleByHandSheet
-                    t={t}
-                    operatorId={operatorId}
-                    onClose={() => setOpen(null)}
-                    onDone={() => {
-                        setOpen(null);
-                        clearAddonFailure(operatorId, 'google');
-                        setPhase('google', { k: 'idle' });
-                        reload();
-                    }}
+                    onConnected={() => afterConnect(open.then, { ...accounts, google: { ...accounts.google, connected: true } })}
                 />
             )}
             {open?.k === 'code' && <CodeSheet t={t} code={open.code} onClose={() => setOpen(null)} />}
@@ -312,7 +292,6 @@ function ProtectRow({
     disabled,
     onToggle,
     onRetry,
-    onByHand,
 }: {
     t: (key: string) => string;
     copy: AddonCopy;
@@ -324,7 +303,6 @@ function ProtectRow({
     disabled: boolean;
     onToggle: (on: boolean) => void;
     onRetry: () => void;
-    onByHand?: () => void;
 }) {
     const titleId = `addon-${copy.kind}-title`;
     const busy = phase.k === 'running' || phase.k === 'stopping';
@@ -332,7 +310,6 @@ function ProtectRow({
     // The same words on or off: the cost never loses its "+ VAT".
     const cost = t(copy.costKey);
     const needs = !connected && copy.needs ? t(`pub.addons.needs.${copy.needs}`) : '';
-    const code = phase.k === 'failed' ? classifyAddonError(phase.error) : null;
     const state =
         phase.k === 'idle' || phase.k === 'billing' ? (row ? row.state : 'off') : phase.k;
 
@@ -382,18 +359,7 @@ function ProtectRow({
             )}
 
             {phase.k === 'failed' && (
-                <Failed t={t} error={phase.error} line={phase.error ? undefined : t('pub.addons.state.removing')} onRetry={onRetry} kind={copy.kind}>
-                    {code === 'E_GOOGLE_API_NOT_ENABLED' && (
-                        <Button size="sm" variant="link" leading="external" onClick={() => void openExternal(APPS_SCRIPT_SETTINGS_URL)} dataButton="google-api-open">
-                            {t('pub.addons.google.api.open')}
-                        </Button>
-                    )}
-                    {code === 'E_GOOGLE_NOT_CONFIGURED' && onByHand && (
-                        <Button size="sm" variant="link" onClick={onByHand} dataButton="google-by-hand">
-                            {t('pub.accounts.google.by_hand')}
-                        </Button>
-                    )}
-                </Failed>
+                <Failed t={t} error={phase.error} line={phase.error ? undefined : t('pub.addons.state.removing')} onRetry={onRetry} kind={copy.kind} />
             )}
 
             {phase.k === 'billing' &&
@@ -412,14 +378,12 @@ function Failed({
     error,
     line,
     onRetry,
-    children,
 }: {
     t: (k: string) => string;
     kind: AddonKind;
     error?: unknown;
     line?: string;
     onRetry: () => void;
-    children?: React.ReactNode;
 }) {
     return (
         <div data-testid={`addon-${kind}-failed`} style={{ display: 'grid', gap: 4, justifyItems: 'start' }}>
@@ -428,7 +392,6 @@ function Failed({
                 <Button size="sm" variant="secondary" onClick={onRetry} dataButton={`addon-${kind}-retry`}>
                     {t('pub.addons.try_again')}
                 </Button>
-                {children}
             </div>
         </div>
     );

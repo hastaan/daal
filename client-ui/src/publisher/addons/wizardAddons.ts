@@ -83,32 +83,79 @@ export function clearAddonFailure(op: number, kind: AddonKind): void {
     writeJson(FAILED_KEY(op), Object.keys(all).length > 0 ? all : null);
 }
 
-/** What turning an extra on needs before it can run. */
-export type AddonNeed = 'ready' | 'cloudflare' | 'google' | 'by_hand';
+/** What turning an extra on needs before it can run: its account. */
+export type AddonNeed = 'ready' | 'cloudflare' | 'google';
 
 export function addonNeed(kind: AddonKind, acc: AccountsState): AddonNeed {
     if (kind === 'cdn' && (!acc.cloudflare.connected || !acc.cloudflare.zone)) return 'cloudflare';
-    if (kind === 'google' && !acc.google) return 'google';
-    if (kind === 'google' && acc.google === 'manual') return 'by_hand';
+    if (kind === 'google' && !acc.google.connected) return 'google';
     return 'ready';
 }
 
 /** The one call that turns `kind` on for relay `op`: the same call the
- *  relay page's switch makes. The standby is always sealed. */
+ *  relay page's switch makes. The standby is always sealed; Google takes
+ *  a place in the account's script. */
 export async function runAddon(kind: AddonKind, op: number, acc: AccountsState): Promise<void> {
     if (kind === 'standby') await Addons.standbyAdd({ operator_id: op, mode: 'sealed' });
     else if (kind === 'cdn') await Addons.cdnBuild({ operator_id: op, zone: acc.cloudflare.zone });
-    else await Addons.googleSignIn({ operator_id: op });
+    else await Addons.googleOn({ operator_id: op });
 }
 
 /** One chosen extra on the wizard's finishing screen. */
-export type ApplyState =
-    | { k: 'waiting' }
-    | { k: 'running' }
-    | { k: 'on' }
-    | { k: 'failed'; error: unknown }
-    /** Google by hand: the person pastes the script for this relay. */
-    | { k: 'by_hand' };
+export type ApplyState = { k: 'waiting' } | { k: 'running' } | { k: 'on' } | { k: 'failed'; error: unknown };
+
+/** The line kept for an extra whose account is not connected any more. */
+const NOT_CONNECTED: Record<Exclude<AddonNeed, 'ready'>, string> = {
+    cloudflare: 'E_CDN_NO_TOKEN: Cloudflare is not connected',
+    google: 'E_GOOGLE_NO_ACCOUNT: Google is not connected',
+};
+
+/** Turn one extra on, reporting its state; a failure is kept for the
+ *  relay page. */
+async function applyOne(
+    op: number,
+    kind: AddonKind,
+    acc: AccountsState,
+    onState: (kind: AddonKind, st: ApplyState) => void,
+    run: (kind: AddonKind, op: number, acc: AccountsState) => Promise<void>,
+): Promise<void> {
+    const need = addonNeed(kind, acc);
+    if (need !== 'ready') {
+        const error = NOT_CONNECTED[need];
+        recordAddonFailure(op, kind, error);
+        onState(kind, { k: 'failed', error });
+        return;
+    }
+    onState(kind, { k: 'running' });
+    try {
+        await run(kind, op, acc);
+        clearAddonFailure(op, kind);
+        onState(kind, { k: 'on' });
+    } catch (error) {
+        recordAddonFailure(op, kind, error);
+        onState(kind, { k: 'failed', error });
+    }
+}
+
+/** «Try again» on the finishing screen: the same call once more. */
+export async function retryAddon(
+    op: number,
+    kind: AddonKind,
+    deps: {
+        accounts: () => Promise<AccountsState>;
+        onState: (kind: AddonKind, st: ApplyState) => void;
+        run?: (kind: AddonKind, op: number, acc: AccountsState) => Promise<void>;
+    },
+): Promise<void> {
+    if (applying.has(op)) return;
+    applying.add(op);
+    try {
+        deps.onState(kind, { k: 'running' });
+        await applyOne(op, kind, await deps.accounts(), deps.onState, deps.run ?? runAddon);
+    } finally {
+        applying.delete(op);
+    }
+}
 
 /** Relays whose choices are being applied in this app run: a second
  *  mount (StrictMode, a re-render) must never rent a second standby. */
@@ -138,26 +185,7 @@ export async function applyAddonChoices(
         const run = deps.run ?? runAddon;
         for (const kind of todo) {
             rememberAddonChoices(op, recallAddonChoices(op).filter((k) => k !== kind));
-            const need = addonNeed(kind, acc);
-            if (need === 'by_hand') {
-                deps.onState(kind, { k: 'by_hand' });
-                continue;
-            }
-            if (need === 'cloudflare') {
-                const error = 'E_CDN_NO_TOKEN: Cloudflare is not connected';
-                recordAddonFailure(op, kind, error);
-                deps.onState(kind, { k: 'failed', error });
-                continue;
-            }
-            deps.onState(kind, { k: 'running' });
-            try {
-                await run(kind, op, acc);
-                clearAddonFailure(op, kind);
-                deps.onState(kind, { k: 'on' });
-            } catch (error) {
-                recordAddonFailure(op, kind, error);
-                deps.onState(kind, { k: 'failed', error });
-            }
+            await applyOne(op, kind, acc, deps.onState, run);
         }
     } finally {
         applying.delete(op);

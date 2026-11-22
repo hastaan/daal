@@ -7,12 +7,15 @@
 //     Nothing is rented or set up here: it is only the choice.
 //   WizardAddonsProgress — the finishing screen: each chosen extra as it
 //     is turned on after the relay is built (wizardAddons.ts). A failure
-//     is one line; the relay works and its page offers «Try again».
+//     is one plain line (the raw error under Details) and «Try again»;
+//     the relay works either way, and its page offers the same. The
+//     status sits beside the title on a wide screen and under it on a
+//     narrow one, so a long status never squeezes the title.
 
 import { useState } from 'react';
 import { Button, StateIcon, Toggle } from '../../design/primitives';
-import { CloudflareSheet, GoogleByHandSheet, GoogleSheet } from './AccountSheets';
-import { setGoogleChoice, useAccounts } from './accounts';
+import { CloudflareSheet, GoogleSheet } from './AccountSheets';
+import { useAccounts } from './accounts';
 import type { AccountsState } from './accounts';
 import { ADDON_COPY } from './addonText';
 import type { AddonKind } from './addonTypes';
@@ -66,7 +69,7 @@ export function WizardAddonsStep({
                 {ADDON_COPY.map((c, i) => {
                     const on = chosen.includes(c.kind);
                     const connected =
-                        c.needs == null || (c.needs === 'cloudflare' ? accounts.cloudflare.connected : !!accounts.google);
+                        c.needs == null || (c.needs === 'cloudflare' ? accounts.cloudflare.connected : accounts.google.connected);
                     const cost = t(costKey(c.kind, c.costKey));
                     const needs = !connected && c.needs ? t(`pub.addons.needs.${c.needs}`) : '';
                     const titleId = `wizard-addon-${c.kind}-title`;
@@ -114,13 +117,12 @@ export function WizardAddonsStep({
             {open === 'google' && (
                 <GoogleSheet
                     t={t}
-                    choice={accounts.google}
+                    google={accounts.google}
                     onClose={() => setOpen(null)}
-                    onChoose={(c) => {
-                        setGoogleChoice(c);
+                    onConnected={() => {
                         setOpen(null);
                         read.reload();
-                        if (c) set('google', true);
+                        set('google', true);
                     }}
                 />
             )}
@@ -130,17 +132,14 @@ export function WizardAddonsStep({
 
 export function WizardAddonsProgress({
     t,
-    operatorId,
     progress,
-    onByHandDone,
+    onRetry,
 }: {
     t: (k: string) => string;
-    operatorId: number;
     progress: Partial<Record<AddonKind, ApplyState>>;
-    /** The by-hand Google script was attached. */
-    onByHandDone: () => void;
+    /** «Try again» on a failed one. */
+    onRetry: (kind: AddonKind) => void;
 }) {
-    const [hand, setHand] = useState(false);
     const kinds = ADDON_ORDER.filter((k) => progress[k] != null);
     if (kinds.length === 0) return null;
     return (
@@ -150,6 +149,14 @@ export function WizardAddonsProgress({
                 {kinds.map((kind, i) => {
                     const st = progress[kind]!;
                     const copy = ADDON_COPY.find((c) => c.kind === kind)!;
+                    const status =
+                        st.k === 'on'
+                            ? t('pub.addons.state.on')
+                            : st.k === 'running'
+                              ? t('pub.addons.state.running')
+                              : st.k === 'waiting'
+                                ? t('pub.addons.wizard.waiting')
+                                : '';
                     return (
                         <div
                             key={kind}
@@ -157,33 +164,38 @@ export function WizardAddonsProgress({
                             data-state={st.k}
                             style={{ display: 'grid', gap: 4, padding: '12px 0', borderTop: i === 0 ? 'none' : '1px solid var(--line)' }}
                         >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <StateIcon
-                                    state={st.k === 'on' ? 'ok' : st.k === 'failed' ? 'bad' : st.k === 'running' ? 'busy' : 'none'}
-                                    size={18}
-                                />
-                                <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 600, color: 'var(--fg)' }}>{t(copy.titleKey)}</span>
-                                <span style={{ ...MUTED, color: st.k === 'on' ? 'var(--green)' : undefined }}>
-                                    {st.k === 'on'
-                                        ? t('pub.addons.state.on')
-                                        : st.k === 'running'
-                                          ? t('pub.addons.state.running')
-                                          : st.k === 'waiting'
-                                            ? t('pub.addons.wizard.waiting')
-                                            : ''}
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                                <span style={{ flexShrink: 0, paddingTop: 1 }}>
+                                    <StateIcon
+                                        state={st.k === 'on' ? 'ok' : st.k === 'failed' ? 'bad' : st.k === 'running' ? 'busy' : 'none'}
+                                        size={18}
+                                    />
+                                </span>
+                                {/* Title and status share a line only while both
+                                    fit; otherwise the status wraps under the
+                                    title, which keeps at least 12em. */}
+                                <span style={{ flex: 1, minWidth: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: 8, rowGap: 2 }}>
+                                    <span
+                                        data-testid={`wizard-addon-${kind}-title`}
+                                        style={{ flex: '1 1 12em', minWidth: 0, fontSize: 14, fontWeight: 600, color: 'var(--fg)' }}
+                                    >
+                                        {t(copy.titleKey)}
+                                    </span>
+                                    {status && (
+                                        <span
+                                            data-testid={`wizard-addon-${kind}-status`}
+                                            style={{ ...MUTED, flex: '0 1 auto', minWidth: 0, color: st.k === 'on' ? 'var(--green)' : undefined }}
+                                        >
+                                            {status}
+                                        </span>
+                                    )}
                                 </span>
                             </div>
                             {st.k === 'failed' && (
-                                <div data-testid={`wizard-addon-${kind}-failed`} style={{ display: 'grid', gap: 2 }}>
+                                <div data-testid={`wizard-addon-${kind}-failed`} style={{ display: 'grid', gap: 4, justifyItems: 'start', paddingInlineStart: 26 }}>
                                     <ErrorNote t={t} error={st.error} />
-                                    <p style={MUTED}>{t('pub.addons.wizard.failed')}</p>
-                                </div>
-                            )}
-                            {st.k === 'by_hand' && (
-                                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                                    <p style={MUTED}>{t('pub.addons.wizard.by_hand')}</p>
-                                    <Button size="sm" variant="secondary" onClick={() => setHand(true)} dataButton="wizard-google-by-hand">
-                                        {t('pub.addons.google.hand.1.action')}
+                                    <Button size="sm" variant="secondary" onClick={() => onRetry(kind)} dataButton={`wizard-addon-${kind}-retry`}>
+                                        {t('pub.addons.try_again')}
                                     </Button>
                                 </div>
                             )}
@@ -191,17 +203,6 @@ export function WizardAddonsProgress({
                     );
                 })}
             </div>
-            {hand && (
-                <GoogleByHandSheet
-                    t={t}
-                    operatorId={operatorId}
-                    onClose={() => setHand(false)}
-                    onDone={() => {
-                        setHand(false);
-                        onByHandDone();
-                    }}
-                />
-            )}
         </section>
     );
 }

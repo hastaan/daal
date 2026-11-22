@@ -39,7 +39,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 let rig: Rig;
 beforeAll(() => {
     rig = createRig();
-    // The Google choice is a per-phone preference (accounts.ts).
+    // Per-phone conveniences (wizardAddons.ts keeps a failed extra).
     const kept = new Map<string, string>();
     Object.defineProperty(globalThis, 'localStorage', {
         configurable: true,
@@ -55,7 +55,6 @@ beforeEach(() => {
     handlers = { wizard_addons_list: () => ledger };
     calls.length = 0;
     ledger = [];
-    localStorage.removeItem('daal.d2.accounts.google');
 });
 afterEach(async () => {
     await rig.unmountAll();
@@ -72,8 +71,16 @@ const btn = (root: FakeNode, id: string) => byAttr(root, 'data-button', id);
 const cmds = () => calls.map((c) => c.cmd);
 const inputOf = (cmd: string) => (calls.find((c) => c.cmd === cmd)?.args as { input: Record<string, unknown> }).input;
 
-const NONE: AccountsState = { hetzner: true, hetznerAccount: true, cloudflare: { connected: false, zone: '' }, google: null };
-const ALL: AccountsState = { hetzner: true, hetznerAccount: true, cloudflare: { connected: true, zone: 'example.com' }, google: 'signin' };
+const NO_G = { connected: false, scriptMade: false, signIn: false };
+const NONE: AccountsState = { hetzner: true, hetznerAccount: true, cloudflare: { connected: false, zone: '' }, google: NO_G };
+const ALL: AccountsState = {
+    hetzner: true,
+    hetznerAccount: true,
+    cloudflare: { connected: true, zone: 'example.com' },
+    google: { connected: true, scriptMade: false, signIn: false },
+};
+const EXEC = 'https://script.google.com/macros/s/AKfycbx0123456789abcdefghijklmn/exec';
+const G_ACCOUNT = (connected: boolean, sign_in = false) => ({ connected, script_made: false, url: connected ? EXEC : '', sign_in });
 
 function row(kind: AddonRow['kind'], state: AddonRow['state'], detail: Record<string, unknown> = {}): AddonRow {
     return {
@@ -145,24 +152,48 @@ describe('a switch whose account is not connected opens Accounts', () => {
         expect(tid(m.container, 'addon-cdn-status')?.textContent).toBe(en('pub.addons.state.on'));
     });
 
-    it('Google: one tap on "Sign in with Google" records it and signs in for this relay', async () => {
-        handlers.wizard_addon_google_sign_in = () => row('google', 'ready');
+    it('Google: the sheet adds the one script by hand, checks it, then the switch takes a place in it', async () => {
+        handlers.wizard_google_account_script = () => ({ code_gs: '// the script', manifest_json: '{}' });
+        handlers.wizard_google_account_attach = () => G_ACCOUNT(true);
+        handlers.wizard_addon_google_on = () => row('google', 'ready');
         const m = await mountSection(NONE);
         await rig.click(btn(m.container, 'addon-google-toggle'));
         const sheet = tid(m.container, 'google-sheet')!;
         expect(sheet.textContent).toContain(en('pub.accounts.google.warn'));
-        expect(cmds()).not.toContain('wizard_addon_google_sign_in');
-        await rig.click(btn(m.container, 'google-sign-in'));
-        expect(inputOf('wizard_addon_google_sign_in')).toEqual({ operator_id: 1 });
-        expect(localStorage.getItem('daal.d2.accounts.google')).toBe('signin');
+        // Account, copy, paste in Apps Script, deploy, paste back.
+        expect(all(tid(m.container, 'google-steps')!, (n) => n.nodeName === 'LI')).toHaveLength(5);
+        // No OAuth clients in this build: no trace of signing in.
+        expect(btn(m.container, 'google-sign-in')).toBeNull();
+        expect(m.container.textContent).not.toContain(en('pub.accounts.google.sign_in'));
+        expect(cmds()).not.toContain('wizard_addon_google_on');
+        await rig.click(btn(m.container, 'google-copy-script'));
+        expect(cmds()).toContain('wizard_google_account_script');
+        expect(tid(m.container, 'google-script')).toBeTruthy();
+        expect(btn(m.container, 'google-connect')?.getAttribute('disabled')).not.toBeNull();
+        await rig.type(btn(m.container, 'google-url'), ` ${EXEC} `);
+        ledger = [row('google', 'ready')];
+        await rig.click(btn(m.container, 'google-connect'));
+        expect(inputOf('wizard_google_account_attach')).toEqual({ url: EXEC });
+        // Connected: the sheet closes and the switch carries on, with no
+        // per-relay step in Google.
+        expect(tid(m.container, 'google-sheet')).toBeNull();
+        expect(inputOf('wizard_addon_google_on')).toEqual({ operator_id: 1 });
+        expect(tid(m.container, 'addon-google-status')?.textContent).toBe(en('pub.addons.state.on'));
     });
 
-    it('Google by hand: the small link records it, and the switch opens the script steps', async () => {
+    it('Google: an address the check refuses is one line, and nothing is turned on', async () => {
+        handlers.wizard_google_account_attach = () => {
+            throw 'E_GOOGLE_CHECK_FAILED: not_deployed: the answer is not from Daal\'s script';
+        };
         const m = await mountSection(NONE);
         await rig.click(btn(m.container, 'addon-google-toggle'));
-        await rig.click(btn(m.container, 'google-by-hand'));
-        expect(tid(m.container, 'google-hand-sheet')).toBeTruthy();
-        expect(cmds()).not.toContain('wizard_addon_google_sign_in');
+        await rig.type(btn(m.container, 'google-url'), EXEC);
+        await rig.click(btn(m.container, 'google-connect'));
+        const e = tid(m.container, 'addon-error')!;
+        expect(e.getAttribute('data-code')).toBe('E_GOOGLE_CHECK_FAILED');
+        expect(e.textContent).toContain(en('pub.addons.google.reason.not_deployed'));
+        expect(tid(m.container, 'google-connected')).toBeNull();
+        expect(cmds()).not.toContain('wizard_addon_google_on');
     });
 });
 
@@ -181,6 +212,45 @@ describe('a switch whose account is connected just runs', () => {
         await rig.settle();
         expect(tid(m.container, 'addon-standby-status')?.textContent).toBe(en('pub.addons.state.on'));
         expect(tid(m.container, 'addon-standby-cost')?.textContent).toBe('€3 a month + VAT');
+    });
+
+    it('Google: takes a place in the connected script, no sheet, nothing asked', async () => {
+        handlers.wizard_addon_google_on = () => row('google', 'ready');
+        const m = await mountSection(ALL);
+        ledger = [row('google', 'ready')];
+        await rig.click(btn(m.container, 'addon-google-toggle'));
+        expect(tid(m.container, 'google-sheet')).toBeNull();
+        expect(inputOf('wizard_addon_google_on')).toEqual({ operator_id: 1 });
+        expect(tid(m.container, 'addon-google-status')?.textContent).toBe(en('pub.addons.state.on'));
+    });
+
+    it('Google: a failed first update is one line and Try again; the raw words only under Details', async () => {
+        let n = 0;
+        handlers.wizard_addon_google_on = () => {
+            n += 1;
+            if (n === 1) throw 'E_GOOGLE_CHECK_FAILED: unreachable: front: dial 142.250.0.1:443: i/o timeout';
+            return row('google', 'ready');
+        };
+        const m = await mountSection(ALL);
+        await rig.click(btn(m.container, 'addon-google-toggle'));
+        const f = tid(m.container, 'addon-google-failed')!;
+        const line = all(f, (x) => x.nodeName === 'P')[0];
+        expect(line.textContent).toBe(`${en('pub.addons.err.E_GOOGLE_CHECK_FAILED')} ${en('pub.addons.google.reason.unreachable')}`);
+        expect(line.textContent).not.toContain('i/o timeout');
+        expect(f.textContent).toContain(en('pub.addons.details'));
+        ledger = [row('google', 'ready')];
+        await rig.click(btn(m.container, 'addon-google-retry'));
+        expect(n).toBe(2);
+        expect(tid(m.container, 'addon-google-failed')).toBeNull();
+    });
+
+    it('a Google account that went missing opens the Google sheet again', async () => {
+        handlers.wizard_addon_google_on = () => {
+            throw 'E_GOOGLE_NO_ACCOUNT: connect Google on the Accounts page first';
+        };
+        const m = await mountSection(ALL);
+        await rig.click(btn(m.container, 'addon-google-toggle'));
+        expect(tid(m.container, 'google-sheet')).toBeTruthy();
     });
 
     it('Cloudflare: builds on the connected domain without asking anything', async () => {
@@ -327,6 +397,7 @@ describe('the Accounts page', () => {
         handlers.wizard_list_operators = () => [{ id: 1, status: 'provisioned', has_cloud_token: true, nickname: 'Home' }];
         handlers.wizard_addon_cdn_account = () => cf;
         handlers.wizard_saved_cloud_token = () => null;
+        handlers.wizard_google_account = () => G_ACCOUNT(false);
     }
 
     it('lists Hetzner, Cloudflare, Google and the companies still being built', async () => {
@@ -373,17 +444,85 @@ describe('the Accounts page', () => {
         expect(tid(m.container, 'cloudflare-connected')).toBeNull();
     });
 
-    it('Google: one step, Sign in with Google, the by-hand way only as a small link', async () => {
+    it('Google: the script by hand in five steps, checked through Google, then ✓ Connected', async () => {
         shellWith({ connected: false, zone: '' });
+        handlers.wizard_google_account_script = () => ({ code_gs: '// the script', manifest_json: '{}' });
+        handlers.wizard_google_account_attach = () => G_ACCOUNT(true);
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        expect(tid(m.container, 'account-google-state')?.textContent).toBe(en('pub.accounts.google.line'));
+        await rig.click(btn(m.container, 'account-google-connect'));
+        const steps = tid(m.container, 'google-steps')!;
+        expect(all(steps, (n) => n.nodeName === 'LI')).toHaveLength(5);
+        for (const b of ['google-signup', 'google-copy-script', 'google-open-editor']) expect(btn(steps, b), b).toBeTruthy();
+        expect(steps.textContent).toContain('Execute as: Me');
+        expect(steps.textContent).toContain('Who has access: Anyone');
+        expect(btn(m.container, 'google-sign-in')).toBeNull();
+        await rig.click(btn(m.container, 'google-copy-script'));
+        expect(m.container.textContent).toContain(en('pub.accounts.google.hand.secret'));
+        await rig.type(btn(m.container, 'google-url'), EXEC);
+        handlers.wizard_google_account = () => G_ACCOUNT(true);
+        await rig.click(btn(m.container, 'google-connect'));
+        expect(tid(m.container, 'google-connected')?.textContent).toBe('✓ Connected');
+        expect(m.container.textContent).toContain(en('pub.accounts.google.kept'));
+        // The script (and its key) left the page.
+        expect(tid(m.container, 'google-script')).toBeNull();
+        // No relay was touched.
+        expect(cmds()).not.toContain('wizard_addon_google_on');
+        await rig.click(btn(m.container, 'google-done'));
+        expect(tid(m.container, 'account-google-state')?.textContent).toBe('✓ Connected');
+        expect(byAttr(m.container, 'data-account', 'google')?.getAttribute('data-connected')).toBe('true');
+    });
+
+    it('Google: «Sign in with Google» shows only in a build with the OAuth clients, as the same step', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_google_account = () => G_ACCOUNT(false, true);
+        handlers.wizard_google_account_sign_in = () => G_ACCOUNT(true, true);
         const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
         await rig.click(btn(m.container, 'account-google-connect'));
-        expect(all(tid(m.container, 'google-steps')!, (n) => n.nodeName === 'LI')).toHaveLength(1);
-        expect(btn(m.container, 'google-sign-in')?.getAttribute('data-variant')).toBe('primary');
-        expect(btn(m.container, 'google-by-hand')?.getAttribute('data-variant')).toBe('link');
+        expect(tid(m.container, 'google-sign-in-block')?.textContent).toContain(en('pub.accounts.google.unverified'));
         await rig.click(btn(m.container, 'google-sign-in'));
-        // No relay here: the choice is recorded, the sign-in waits for a switch.
-        expect(cmds()).not.toContain('wizard_addon_google_sign_in');
-        expect(tid(m.container, 'account-google-state')?.textContent).toBe(en('pub.accounts.google.chosen.signin'));
+        expect(cmds()).toContain('wizard_google_account_sign_in');
+        expect(tid(m.container, 'google-connected')).toBeTruthy();
+    });
+
+    it('Google: Disconnect says the relays keep theirs and the script stays in Google', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_google_account = () => G_ACCOUNT(true);
+        handlers.wizard_google_account_disconnect = () => null;
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        expect(tid(m.container, 'account-google-state')?.textContent).toBe('✓ Connected');
+        await rig.click(btn(m.container, 'account-google'));
+        const line = tid(m.container, 'google-disconnect-line')?.textContent ?? '';
+        expect(line).toBe(en('pub.accounts.google.disconnect.line'));
+        expect(line).toMatch(/stays in your Google account until you delete it/);
+        expect(fa('pub.accounts.google.disconnect.line')).toContain('script.google.com');
+        handlers.wizard_google_account = () => G_ACCOUNT(false);
+        await rig.click(btn(m.container, 'google-disconnect'));
+        expect(cmds()).toContain('wizard_google_account_disconnect');
+        expect(tid(m.container, 'google-sheet')).toBeNull();
+        expect(tid(m.container, 'account-google-state')?.textContent).toBe(en('pub.accounts.google.line'));
+    });
+
+    it('Google: a pasted address that is not a web app is one line', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_google_account_attach = () => {
+            throw 'E_GOOGLE_BAD_ADDRESS: that is the test address (/dev); copy the web app address that ends in /exec';
+        };
+        const m = await rig.mount(<AccountsPage t={en} onBack={() => {}} backLabel="Relays" />);
+        await rig.click(btn(m.container, 'account-google-connect'));
+        await rig.type(btn(m.container, 'google-url'), EXEC.replace('/exec', '/dev'));
+        await rig.click(btn(m.container, 'google-connect'));
+        expect(tid(m.container, 'addon-error')?.getAttribute('data-code')).toBe('E_GOOGLE_BAD_ADDRESS');
+        expect(tid(m.container, 'google-connected')).toBeNull();
+    });
+
+    it('Google in Persian: «✓ وصل است», no «بزنید»', async () => {
+        shellWith({ connected: false, zone: '' });
+        handlers.wizard_google_account = () => G_ACCOUNT(true);
+        const m = await rig.mount(<AccountsPage t={fa} onBack={() => {}} backLabel="رله‌ها" />);
+        expect(tid(m.container, 'account-google-state')?.textContent).toBe('✓ وصل است');
+        await rig.click(btn(m.container, 'account-google'));
+        expect(m.container.textContent).not.toContain('بزنید');
     });
 
     function hosting(st: { connected: boolean; account: boolean }) {
@@ -491,6 +630,13 @@ describe('the command surface', () => {
             [Wizard.hostingAccountConnect('hetzner', 'k'), 'wizard_hosting_account_connect'],
             [Wizard.hostingAccountStatus(), 'wizard_hosting_account_status'],
             [Wizard.hostingAccountDisconnect('hetzner'), 'wizard_hosting_account_disconnect'],
+            [Addons.googleAccount(), 'wizard_google_account'],
+            [Addons.googleAccountScript(), 'wizard_google_account_script'],
+            [Addons.googleAccountAttach({ url: 'u' }), 'wizard_google_account_attach'],
+            [Addons.googleAccountSignIn(), 'wizard_google_account_sign_in'],
+            [Addons.googleAccountDisconnect(), 'wizard_google_account_disconnect'],
+            [Addons.googleOn({ operator_id: 1 }), 'wizard_addon_google_on'],
+            [Addons.googleCheck({ operator_id: 1 }), 'wizard_addon_google_check'],
         ];
         for (const [p, name] of cases) {
             const e = await p.then(() => 'resolved', (err: unknown) => err);

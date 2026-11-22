@@ -35,8 +35,8 @@ func fakeDoc(seq uint64, pack []byte) []byte {
 // The vector was computed outside Go (Python's hmac), so a change to
 // the message layout breaks this test, not just both sides together.
 func TestMACVector(t *testing.T) {
-	got := MAC(testKey(), 1763600000, []byte(`{"kind":"daal-refresh-v1"}`))
-	const want = "bb7fca8a54bb2a3e5f3cf61ce82ea773e2e42ab38bfebabd14c0b493ed7ee731"
+	got := MAC(testKey(), "AAAAAAAAAAA", 1763600000, Empty("AAAAAAAAAAA"))
+	const want = "fb1c335dbdee436ad2b3173f5dea36343236ee7b6ca26c3d3d97da678df6e093"
 	if got != want {
 		t.Fatalf("MAC = %s, want %s", got, want)
 	}
@@ -46,13 +46,16 @@ func TestBuildParseRoundTrip(t *testing.T) {
 	pack := []byte("signed credential-less pack bytes")
 	doc := fakeDoc(42, pack)
 	key := "0123456789ABCDEFGHJKMNPQRR" // the last symbol's two padding bits are zero
-	blob, err := Build(doc, pack, key)
+	blob, err := Build(testSlot, doc, pack, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, err := Parse(blob)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if p.Slot != testSlot {
+		t.Fatalf("slot %q", p.Slot)
 	}
 	if !bytes.Equal(p.Freshness, doc) || !bytes.Equal(p.Pack, pack) || p.StandbyKey != key {
 		t.Fatalf("round trip lost a part: %+v", p)
@@ -64,79 +67,95 @@ func TestBuildParseRoundTrip(t *testing.T) {
 
 func TestBuildRefusesAPackTheDocumentDoesNotName(t *testing.T) {
 	doc := fakeDoc(1, []byte("the pack that was signed"))
-	if _, err := Build(doc, []byte("somebody's personal file"), ""); err == nil {
+	if _, err := Build(testSlot, doc, []byte("somebody's personal file"), ""); err == nil {
 		t.Fatal("a pack the document does not name must be refused")
 	}
 }
 
 func TestBuildLimits(t *testing.T) {
-	if _, err := Build(nil, nil, ""); err == nil {
+	if _, err := Build(testSlot, nil, nil, ""); err == nil {
 		t.Error("no document")
 	}
+	if _, err := Build("bad", fakeDoc(1, nil), nil, ""); err == nil {
+		t.Error("no slot")
+	}
 	big := bytes.Repeat([]byte("x"), MaxPack+1)
-	if _, err := Build(fakeDoc(1, big), big, ""); !errors.Is(err, ErrPackTooLarge) {
+	if _, err := Build(testSlot, fakeDoc(1, big), big, ""); !errors.Is(err, ErrPackTooLarge) {
 		t.Errorf("oversized pack: %v", err)
 	}
 	// A pack under MaxPack whose base64 still overflows the container.
 	near := bytes.Repeat([]byte("y"), MaxPack-10)
-	if _, err := Build(fakeDoc(1, near), near, ""); !errors.Is(err, ErrPackTooLarge) {
+	if _, err := Build(testSlot, fakeDoc(1, near), near, ""); !errors.Is(err, ErrPackTooLarge) {
 		t.Errorf("container over 64 KiB: %v", err)
 	}
-	if _, err := Build(fakeDoc(1, nil), nil, "not-a-key"); err == nil {
+	if _, err := Build(testSlot, fakeDoc(1, nil), nil, "not-a-key"); err == nil {
 		t.Error("malformed standby key")
 	}
-	if _, err := Build([]byte(`{"kind":"x"}`), nil, ""); err == nil {
+	if _, err := Build(testSlot, []byte(`{"kind":"x"}`), nil, ""); err == nil {
 		t.Error("a document with no sequence")
 	}
 }
 
 func TestParse(t *testing.T) {
-	p, err := Parse(Empty())
-	if err != nil || p.Freshness != nil {
+	p, err := Parse(Empty(testSlot))
+	if err != nil || p.Freshness != nil || p.Slot != testSlot {
 		t.Fatalf("the empty container is 'nothing new': %+v %v", p, err)
 	}
-	// Unknown members are ignored.
-	if _, err := Parse([]byte(`{"kind":"daal-refresh-v1","later":1}`)); err != nil {
+	// Unknown members are ignored (the connect check's nonce is one).
+	if _, err := Parse([]byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","later":1}`)); err != nil {
 		t.Fatal(err)
+	}
+	if p, err := Parse(CheckContainer("nonce")); err != nil || p.Slot != TestSlot || p.Freshness != nil {
+		t.Fatalf("check container: %+v %v", p, err)
 	}
 	for _, bad := range []string{
 		`not json`,
+		`{"kind":"daal-refresh-v1"}`,
+		`{"kind":"daal-refresh-v1","freshness":"e30="}`,
 		`{"kind":"daal-refresh-v2"}`,
-		`{"kind":"daal-refresh-v1","pack":"AAAA"}`,
-		`{"kind":"daal-refresh-v1","freshness":"!!!"}`,
-		`{"kind":"daal-refresh-v1","freshness":"e30=","standby_key":"lower-case-not-crockford00"}`,
+		`{"kind":"daal-refresh-v2","slot":"short"}`,
+		`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","pack":"AAAA"}`,
+		`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","freshness":"!!!"}`,
+		`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","freshness":"e30=","standby_key":"lower-case-not-crockford00"}`,
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Errorf("accepted %s", bad)
 		}
 	}
-	huge := append([]byte(`{"kind":"daal-refresh-v1","x":"`), bytes.Repeat([]byte("a"), MaxContainer)...)
+	huge := append([]byte(`{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","x":"`), bytes.Repeat([]byte("a"), MaxContainer)...)
 	if _, err := Parse(append(huge, '"', '}')); err == nil {
 		t.Error("over 64 KiB")
 	}
 }
 
 func TestUpdateBody(t *testing.T) {
-	b, err := UpdateBody(testKey(), 7, []byte(`{"kind":"daal-refresh-v1"}`))
+	b, err := UpdateBody(testKey(), testSlot, 7, Empty(testSlot))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var u struct {
+		Slot string `json:"slot"`
 		Seq  uint64 `json:"seq"`
 		Blob string `json:"blob"`
 		MAC  string `json:"mac"`
 	}
-	if err := json.Unmarshal(b, &u); err != nil || u.Seq != 7 || u.MAC != MAC(testKey(), 7, []byte(u.Blob)) {
+	if err := json.Unmarshal(b, &u); err != nil || u.Slot != testSlot || u.Seq != 7 || u.MAC != MAC(testKey(), testSlot, 7, []byte(u.Blob)) {
 		t.Fatalf("%s %v", b, err)
 	}
-	if _, err := UpdateBody(testKey(), 0, nil); err == nil {
+	if MAC(testKey(), "BBBBBBBBBBB", 7, []byte(u.Blob)) == u.MAC {
+		t.Error("the MAC does not cover the slot")
+	}
+	if _, err := UpdateBody(testKey(), testSlot, 0, nil); err == nil {
 		t.Error("seq 0")
 	}
-	if _, err := UpdateBody(testKey(), 1<<53, nil); err == nil {
+	if _, err := UpdateBody(testKey(), testSlot, 1<<53, nil); err == nil {
 		t.Error("seq past what the script can read")
 	}
-	if _, err := UpdateBody([]byte("short"), 1, nil); err == nil {
+	if _, err := UpdateBody([]byte("short"), testSlot, 1, nil); err == nil {
 		t.Error("short key")
+	}
+	if _, err := UpdateBody(testKey(), "x", 1, nil); err == nil {
+		t.Error("bad slot")
 	}
 }
 
@@ -152,7 +171,7 @@ func TestBuildTakesTheStandbyKeyAsThePublisherHoldsIt(t *testing.T) {
 	canon := strings.ReplaceAll(shown, " ", "")
 	doc := fakeDoc(7, nil)
 	for _, in := range []string{shown, canon, strings.ToLower(shown), strings.ReplaceAll(shown, " ", "-")} {
-		blob, err := Build(doc, nil, in)
+		blob, err := Build(testSlot, doc, nil, in)
 		if err != nil {
 			t.Fatalf("%q refused: %v", in, err)
 		}
@@ -163,7 +182,7 @@ func TestBuildTakesTheStandbyKeyAsThePublisherHoldsIt(t *testing.T) {
 	}
 	bad := []byte(canon)
 	bad[25] = 'Z' // the last symbol's two low bits are padding
-	if _, err := Build(doc, nil, string(bad)); err == nil {
+	if _, err := Build(testSlot, doc, nil, string(bad)); err == nil {
 		t.Fatal("a key with non-zero trailing bits was carried")
 	}
 }

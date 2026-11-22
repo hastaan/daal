@@ -11,20 +11,24 @@
 //   CloudflareSheet — account, domain, access key (the pre-filled token
 //     page); paste → check → the one domain it sees → "✓ Connected".
 //     The key is kept by addon_cdn::connect, for every relay.
-//   GoogleSheet — one step (an account only for this), then "Sign in
-//     with Google"; the by-hand script is a small link under it. Google
-//     signs in per relay, so this records the choice; the relay switch
-//     does the sign-in.
-//   GoogleByHandSheet — the script by hand, for one relay.
+//   GoogleSheet — the account's one update script, added by hand: an
+//     account only for this, copy the script (its key is already in it),
+//     paste it in Apps Script, deploy it as a web app, paste the address
+//     back → Daal writes and reads back through Google → "✓ Connected".
+//     Every relay's switch then takes a place in that script; nothing
+//     per relay is done in Google. "Sign in with Google" is the same step
+//     done for the owner, and shows only in a build that has the OAuth
+//     clients. Disconnect forgets the key; the script stays in Google.
 
 import { useState } from 'react';
 import { Button, Input, Sheet, Textarea } from '../../design/primitives';
 import { useDeviceT } from '../ui';
 import { useSecureScreen } from '../useSecureScreen';
 import { Addons, Wizard } from '../wizardCommands';
-import type { AddonRow, CdnTokenCheck } from './addonTypes';
-import type { GoogleChoice } from './accounts';
-import { BODY, ErrorNote, MONO, MUTED, NumberedSteps, copyText, useRun } from './addonUi';
+import type { CdnTokenCheck } from './addonTypes';
+import type { GoogleState } from './accounts';
+import { classifyAddonError } from './addonErrors';
+import { BODY, ErrorNote, MONO, MUTED, NumberedSteps, copyText, openExternal, useRun } from './addonUi';
 
 /** The wizard's sign-up link (PublisherWizard CLOUD_PROVIDERS). */
 export const HETZNER_SIGNUP_URL = 'https://console.hetzner.cloud/register';
@@ -392,37 +396,112 @@ export function CloudflareSheet({
 
 export function GoogleSheet({
     t,
-    choice,
+    google,
     onClose,
-    onChoose,
+    onConnected,
+    onDisconnected,
 }: {
     t: (k: string) => string;
-    /** What was chosen before; null when Google is not connected. */
-    choice: GoogleChoice | null;
+    google: GoogleState;
     onClose: () => void;
-    /** The owner chose a way (null: disconnect). The caller records it
-     *  and, from a relay switch, goes on to turn the switch on. */
-    onChoose: (c: GoogleChoice | null) => void;
+    /** The script was added and checked. From a relay switch, the caller
+     *  goes on to turn the switch on. */
+    onConnected: () => void;
+    onDisconnected?: () => void;
 }) {
+    const [script, setScript] = useState<string | null>(null);
+    const [copied, setCopied] = useState(false);
+    const [url, setUrl] = useState('');
+    const [done, setDone] = useState(false);
+    const [pasteFailed, setPasteFailed] = useState(false);
+    const { busy, error, run } = useRun();
+    // The script carries the account's write key: no screenshots while
+    // it shows.
+    useSecureScreen(script != null);
+    const connected = done || google.connected;
+
+    const copy = async () => {
+        let s = script;
+        if (s == null) {
+            const got = await run(() => Addons.googleAccountScript());
+            if (!got) return;
+            s = got.code_gs;
+            setScript(s);
+        }
+        setCopied(await copyText(s));
+    };
+    const paste = async () => {
+        try {
+            const s = await navigator.clipboard.readText();
+            if (s && s.trim()) {
+                setUrl(s.trim());
+                setPasteFailed(false);
+                return;
+            }
+        } catch {
+            /* the web view would not read it */
+        }
+        setPasteFailed(true);
+    };
+    const finished = () => {
+        setDone(true);
+        setScript(null);
+        setUrl('');
+        onConnected();
+    };
+    const connect = async () => {
+        const r = await run(() => Addons.googleAccountAttach({ url: url.trim() }));
+        if (r?.connected) finished();
+    };
+    const signIn = async () => {
+        const r = await run(() => Addons.googleAccountSignIn());
+        if (r?.connected) finished();
+    };
+    const disconnect = async () => {
+        const r = await run(async () => {
+            await Addons.googleAccountDisconnect();
+            return true;
+        });
+        if (r) onDisconnected?.();
+    };
+    const failure =
+        error != null ? (
+            <div style={{ display: 'grid', gap: 4, justifyItems: 'start' }}>
+                <ErrorNote t={t} error={error} />
+                {classifyAddonError(error) === 'E_GOOGLE_API_NOT_ENABLED' && (
+                    <Button size="sm" variant="link" leading="external" onClick={() => void openExternal(APPS_SCRIPT_SETTINGS_URL)} dataButton="google-api-open">
+                        {t('pub.accounts.google.api.open')}
+                    </Button>
+                )}
+            </div>
+        ) : null;
+
     return (
-        <Sheet title="Google" onClose={onClose} width={480}>
+        <Sheet title="Google" onClose={onClose} width={520}>
             <div data-testid="google-sheet" style={{ display: 'grid', gap: 14 }}>
-                {choice ? (
+                {connected ? (
                     <>
-                        <Connected
-                            testId="google-connected"
-                            text={t(choice === 'signin' ? 'pub.accounts.google.chosen.signin' : 'pub.accounts.google.chosen.manual')}
-                        />
-                        <p style={MUTED}>{t('pub.accounts.google.later')}</p>
+                        <Connected testId="google-connected" text={t('pub.accounts.connected')} />
+                        <p style={MUTED}>{t('pub.accounts.google.kept')}</p>
                         <p style={{ ...MUTED, color: 'var(--amber)' }}>{t('pub.accounts.google.warn')}</p>
+                        {!done && onDisconnected && (
+                            <p data-testid="google-disconnect-line" style={MUTED}>
+                                {t('pub.accounts.google.disconnect.line')}
+                            </p>
+                        )}
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-                            <Button variant="ghost" onClick={() => onChoose(null)} dataButton="google-disconnect">
-                                {t('pub.accounts.disconnect')}
-                            </Button>
+                            {!done && onDisconnected ? (
+                                <Button variant="ghost" onClick={() => void disconnect()} disabled={busy} dataButton="google-disconnect">
+                                    {t('pub.accounts.disconnect')}
+                                </Button>
+                            ) : (
+                                <span />
+                            )}
                             <Button onClick={onClose} dataButton="google-done">
                                 {t('pub.accounts.done')}
                             </Button>
                         </div>
+                        {failure}
                     </>
                 ) : (
                     <>
@@ -437,117 +516,83 @@ export function GoogleSheet({
                                         dataButton: 'google-signup',
                                     },
                                 },
+                                {
+                                    text: t('pub.accounts.google.hand.1'),
+                                    extra: (
+                                        <div style={{ marginTop: 6 }}>
+                                            <Button size="sm" variant="secondary" leading="copy" onClick={() => void copy()} disabled={busy} dataButton="google-copy-script">
+                                                {copied ? t('pub.addons.copied') : t('pub.accounts.google.hand.1.action')}
+                                            </Button>
+                                        </div>
+                                    ),
+                                },
+                                {
+                                    text: t('pub.accounts.google.hand.2'),
+                                    action: { label: t('pub.accounts.google.hand.2.action'), url: APPS_SCRIPT_NEW_URL, dataButton: 'google-open-editor' },
+                                },
+                                { text: t('pub.accounts.google.hand.3') },
+                                { text: t('pub.accounts.google.hand.4') },
                             ]}
                         />
+                        {script != null && (
+                            <>
+                                <p style={{ ...MUTED, color: 'var(--amber)' }}>{t('pub.accounts.google.hand.secret')}</p>
+                                <Textarea
+                                    readOnly
+                                    value={script}
+                                    rows={4}
+                                    dir="ltr"
+                                    spellCheck={false}
+                                    aria-label={t('pub.accounts.google.hand.1.action')}
+                                    data-testid="google-script"
+                                    style={{ ...MONO, fontSize: 11 }}
+                                />
+                            </>
+                        )}
+                        <div style={{ display: 'grid', gap: 6 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg)' }}>{t('pub.accounts.google.hand.url')}</div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <Input
+                                    dir="ltr"
+                                    inputMode="url"
+                                    autoComplete="off"
+                                    autoCapitalize="off"
+                                    autoCorrect="off"
+                                    spellCheck={false}
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    placeholder="https://script.google.com/macros/s/…/exec"
+                                    aria-label={t('pub.accounts.google.hand.url')}
+                                    data-button="google-url"
+                                    style={{ flex: 1, minWidth: 0 }}
+                                />
+                                <Button variant="secondary" leading="paste" onClick={() => void paste()} dataButton="google-paste">
+                                    {t('ui.paste')}
+                                </Button>
+                            </div>
+                            {pasteFailed && <p style={{ ...MUTED, color: 'var(--red)' }}>{t('wiz.provider.token.paste_failed')}</p>}
+                        </div>
                         <p data-testid="google-warn" style={{ ...MUTED, color: 'var(--amber)' }}>
                             {t('pub.accounts.google.warn')}
                         </p>
-                        <div style={{ display: 'grid', gap: 6, justifyItems: 'center' }}>
-                            <Button onClick={() => onChoose('signin')} dataButton="google-sign-in">
-                                {t('pub.accounts.google.sign_in')}
-                            </Button>
-                            <p style={{ ...MUTED, textAlign: 'center' }}>{t('pub.accounts.google.unverified')}</p>
-                            <Button variant="link" onClick={() => onChoose('manual')} dataButton="google-by-hand">
-                                {t('pub.accounts.google.by_hand')}
+                        {failure}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                            <Button onClick={() => void connect()} disabled={busy || url.trim() === ''} dataButton="google-connect">
+                                {busy ? t('pub.accounts.checking') : t('pub.accounts.connect')}
                             </Button>
                         </div>
+                        {/* Only a build with the OAuth clients can sign in;
+                            any other build shows no trace of it. */}
+                        {google.signIn && (
+                            <div data-testid="google-sign-in-block" style={{ display: 'grid', gap: 6, justifyItems: 'center', borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+                                <Button variant="secondary" onClick={() => void signIn()} disabled={busy} dataButton="google-sign-in">
+                                    {t('pub.accounts.google.sign_in')}
+                                </Button>
+                                <p style={{ ...MUTED, textAlign: 'center' }}>{t('pub.accounts.google.unverified')}</p>
+                            </div>
+                        )}
                     </>
                 )}
-            </div>
-        </Sheet>
-    );
-}
-
-/** The script by hand, for one relay: copy, paste in Apps Script,
- *  deploy, paste the address back. Ends in the same check as sign-in. */
-export function GoogleByHandSheet({
-    t,
-    operatorId,
-    onClose,
-    onDone,
-}: {
-    t: (k: string) => string;
-    operatorId: number;
-    onClose: () => void;
-    onDone: (row: AddonRow) => void;
-}) {
-    const [script, setScript] = useState<string | null>(null);
-    const [copied, setCopied] = useState(false);
-    const [url, setUrl] = useState('');
-    const { busy, error, run } = useRun();
-    // The script carries the write key: no screenshots while it shows.
-    useSecureScreen(script != null);
-
-    const copy = async () => {
-        let s = script;
-        if (s == null) {
-            const got = await run(() => Addons.googleScript({ operator_id: operatorId }));
-            if (!got) return;
-            s = got.code_gs;
-            setScript(s);
-        }
-        setCopied(await copyText(s));
-    };
-    const attach = async () => {
-        const r = await run(() => Addons.googleAttach({ operator_id: operatorId, url: url.trim() }));
-        if (r) onDone(r);
-    };
-
-    return (
-        <Sheet title={t('pub.accounts.google.by_hand')} onClose={onClose} width={520}>
-            <div data-testid="google-hand-sheet" style={{ display: 'grid', gap: 14 }}>
-                <NumberedSteps
-                    items={[
-                        {
-                            text: t('pub.addons.google.hand.1'),
-                            extra: (
-                                <div style={{ marginTop: 6 }}>
-                                    <Button size="sm" variant="secondary" leading="copy" onClick={() => void copy()} disabled={busy} dataButton="google-copy-script">
-                                        {copied ? t('pub.addons.copied') : t('pub.addons.google.hand.1.action')}
-                                    </Button>
-                                </div>
-                            ),
-                        },
-                        {
-                            text: t('pub.addons.google.hand.2'),
-                            action: { label: t('pub.addons.google.hand.2.action'), url: APPS_SCRIPT_NEW_URL, dataButton: 'google-open-editor' },
-                        },
-                        { text: t('pub.addons.google.hand.3') },
-                        { text: t('pub.addons.google.hand.4') },
-                    ]}
-                />
-                {script != null && (
-                    <>
-                        <p style={{ ...MUTED, color: 'var(--amber)' }}>{t('pub.addons.google.hand.secret')}</p>
-                        <Textarea
-                            readOnly
-                            value={script}
-                            rows={4}
-                            dir="ltr"
-                            spellCheck={false}
-                            aria-label={t('pub.addons.google.hand.1.action')}
-                            data-testid="google-script"
-                            style={{ ...MONO, fontSize: 11 }}
-                        />
-                    </>
-                )}
-                <Input
-                    dir="ltr"
-                    inputMode="url"
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    placeholder="https://script.google.com/macros/s/…/exec"
-                    aria-label={t('pub.addons.google.hand.url')}
-                    data-button="google-url"
-                />
-                {error != null && <ErrorNote t={t} error={error} />}
-                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    <Button onClick={() => void attach()} disabled={busy || url.trim() === ''} dataButton="google-attach">
-                        {busy ? t('pub.accounts.checking') : t('pub.accounts.connect')}
-                    </Button>
-                </div>
             </div>
         </Sheet>
     );

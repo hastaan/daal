@@ -162,7 +162,7 @@ func (d *frontDialer) DialContext(ctx context.Context, network, address string) 
 	return nd.DialContext(ctx, network, d.target)
 }
 
-const testExecURL = "https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA"
+const testExecURL = "https://script.google.com/macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA"
 
 func (f *fakeFront) fetch(t *testing.T, d *frontDialer) (FrontResult, error) {
 	t.Helper()
@@ -189,7 +189,7 @@ func TestFetchAppsScript_FrontedWithOneRedirect(t *testing.T) {
 		t.Fatalf("SNIs %v", f.snis)
 	}
 	want := []string{
-		"script.google.com /macros/s/AKfycbTEST0000000000000001/exec?k=AAAAAAAAAAAAAAAAAAAAAA",
+		"script.google.com /macros/s/AKfycbTEST0000000000000001/exec?s=AAAAAAAAAAA&k=AAAAAAAAAAAAAAAAAAAAAA",
 		"script.googleusercontent.com /macros/echo?user_content_key=abc&lib=x",
 	}
 	if fmt.Sprint(f.calls) != fmt.Sprint(want) {

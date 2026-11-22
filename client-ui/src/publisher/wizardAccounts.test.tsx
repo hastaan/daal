@@ -58,10 +58,15 @@ afterAll(() => {
 const X86 = { id: 'cpx12', description: 'CPX12', cpus: 1, memory_gb: 2, disk_gb: 40, monthly_eur: 14.36, hourly_eur: 0.023, location: 'fsn1', arch: 'x86' };
 
 /** A shell with one connected Hetzner account and no relay yet. */
-function shell(over: { hetzner?: boolean; cloudflare?: { connected: boolean; zone: string } } = {}) {
+const EXEC = 'https://script.google.com/macros/s/AKfycbx0123456789abcdefghijklmn/exec';
+const gAccount = (connected: boolean) => ({ connected, script_made: false, url: connected ? EXEC : '', sign_in: false });
+
+function shell(over: { hetzner?: boolean; cloudflare?: { connected: boolean; zone: string }; google?: boolean } = {}) {
     const hz = over.hetzner ?? true;
     const cf = over.cloudflare ?? { connected: false, zone: '' };
+    const g = over.google ?? false;
     handlers = {
+        wizard_google_account: () => gAccount(g),
         wizard_hosting_account_status: () => ({
             hetzner: { connected: hz, account: hz },
             vultr: { connected: false, account: false },
@@ -189,12 +194,19 @@ describe('«More protection (optional)» while building', () => {
         await rig.click(btn(m.container, 'cloudflare-connect'));
         expect(tid(m.container, 'cloudflare-sheet')).toBeNull();
         expect(tid(m.container, 'wizard-addon-cdn')?.getAttribute('data-chosen')).toBe('true');
-        // Google: the sheet, then «Sign in with Google» chooses it.
+        // Google: the sheet adds the account's script, then chooses it.
         await rig.click(btn(m.container, 'wizard-addon-google-toggle'));
         expect(tid(m.container, 'google-sheet')).not.toBeNull();
-        await rig.click(btn(m.container, 'google-sign-in'));
+        expect(btn(m.container, 'google-sign-in')).toBeNull();
+        expect(tid(m.container, 'wizard-addon-google')?.getAttribute('data-chosen')).toBe('false');
+        handlers.wizard_google_account_attach = () => gAccount(true);
+        handlers.wizard_google_account = () => gAccount(true);
+        await rig.type(btn(m.container, 'google-url'), EXEC);
+        await rig.click(btn(m.container, 'google-connect'));
+        expect(tid(m.container, 'google-sheet')).toBeNull();
         expect(tid(m.container, 'wizard-addon-google')?.getAttribute('data-chosen')).toBe('true');
-        expect(cmds()).not.toContain('wizard_addon_google_sign_in');
+        // Nothing is turned on before the relay exists.
+        expect(cmds()).not.toContain('wizard_addon_google_on');
         // Back keeps the choice; Next on the plan comes back to it.
         await rig.click(btn(m.container, 'wiz-back'));
         await rig.click(btn(m.container, 'wiz-next'));
@@ -203,15 +215,18 @@ describe('«More protection (optional)» while building', () => {
     });
 
     it('the chosen extras are turned on after the relay is built; a failure is one line, not a failed relay', async () => {
-        shell({ cloudflare: { connected: true, zone: 'example.com' } });
+        shell({ cloudflare: { connected: true, zone: 'example.com' }, google: true });
         handlers.wizard_addon_standby_add = () => ({ id: 1, kind: 'standby', state: 'ready' });
         handlers.wizard_addon_cdn_build = () => {
             throw 'E_CDN_TEST_FAILED: no answer through the edge';
         };
+        handlers.wizard_addon_google_on = () => ({ id: 3, kind: 'google', state: 'ready' });
         const m = await mountWizard();
         await toExtras(m);
         await rig.click(btn(m.container, 'wizard-addon-standby-toggle'));
         await rig.click(btn(m.container, 'wizard-addon-cdn-toggle'));
+        await rig.click(btn(m.container, 'wizard-addon-google-toggle'));
+        expect(tid(m.container, 'google-sheet')).toBeNull();
         expect(cmds()).not.toContain('wizard_addon_standby_add');
         await rig.click(btn(m.container, 'wiz-next')); // «Create my relay»
         await until(() => tid(m.container, 'wizard-done') != null, 'relay built', 2000);
@@ -228,11 +243,20 @@ describe('«More protection (optional)» while building', () => {
         expect(order.indexOf('wizard_addon_cdn_build')).toBeGreaterThan(order.indexOf('wizard_addon_standby_add'));
         expect(calls.find((c) => c.cmd === 'wizard_addon_standby_add')?.args).toEqual({ input: { operator_id: 7, mode: 'sealed' } });
         expect(calls.find((c) => c.cmd === 'wizard_addon_cdn_build')?.args).toEqual({ input: { operator_id: 7, zone: 'example.com' } });
-        expect(cmds()).not.toContain('wizard_addon_google_sign_in');
+        await until(
+            () => tid(m.container, 'wizard-addon-google-progress')?.getAttribute('data-state') === 'on',
+            'google settled',
+        );
+        // Google takes a place in the account's script: one call, no sheet.
+        expect(calls.find((c) => c.cmd === 'wizard_addon_google_on')?.args).toEqual({ input: { operator_id: 7 } });
 
         expect(tid(m.container, 'wizard-addon-standby-progress')?.getAttribute('data-state')).toBe('on');
-        expect(tid(m.container, 'wizard-addon-cdn-failed')?.textContent).toContain(EN['pub.addons.err.E_CDN_TEST_FAILED']);
-        expect(tid(m.container, 'wizard-addon-cdn-failed')?.textContent).toContain(EN['pub.addons.wizard.failed']);
+        // One plain line and «Try again»; the raw words only under Details.
+        const wizFailed = tid(m.container, 'wizard-addon-cdn-failed')!;
+        const line = all(wizFailed, (n) => n.nodeName === 'P')[0];
+        expect(line?.textContent).toBe(EN['pub.addons.err.E_CDN_TEST_FAILED']);
+        expect(line?.textContent).not.toContain('no answer through the edge');
+        expect(btn(wizFailed, 'wizard-addon-cdn-retry')?.textContent).toContain(EN['pub.addons.try_again']);
         // The relay is done all the same.
         expect(btn(m.container, 'add-first-person')).not.toBeNull();
         // Applied once: the choice is gone, the failure is kept for the relay.
@@ -246,7 +270,12 @@ describe('«More protection (optional)» while building', () => {
             <AddonsSection
                 t={t}
                 operatorId={7}
-                accounts={{ hetzner: true, hetznerAccount: true, cloudflare: { connected: true, zone: 'example.com' }, google: null }}
+                accounts={{
+                    hetzner: true,
+                    hetznerAccount: true,
+                    cloudflare: { connected: true, zone: 'example.com' },
+                    google: { connected: true, scriptMade: false, signIn: false },
+                }}
             />,
         );
         const failed = tid(page.container, 'addon-cdn-failed');
@@ -258,6 +287,39 @@ describe('«More protection (optional)» while building', () => {
         expect(kept.get('daal.addons.failed.7')).toBeUndefined();
     });
 
+    it('«Try again» on the finishing screen runs the same call once more', async () => {
+        shell({ cloudflare: { connected: true, zone: 'example.com' } });
+        let n = 0;
+        handlers.wizard_addon_cdn_build = () => {
+            n += 1;
+            if (n === 1) throw 'E_CDN_TEST_FAILED: no answer through the edge';
+            return { id: 2, kind: 'cdn', state: 'ready' };
+        };
+        const m = await mountWizard();
+        await toExtras(m);
+        await rig.click(btn(m.container, 'wizard-addon-cdn-toggle'));
+        await rig.click(btn(m.container, 'wiz-next'));
+        await until(() => tid(m.container, 'wizard-addon-cdn-progress')?.getAttribute('data-state') === 'failed', 'failed once', 2000);
+        await rig.click(btn(m.container, 'wizard-addon-cdn-retry'));
+        await until(() => tid(m.container, 'wizard-addon-cdn-progress')?.getAttribute('data-state') === 'on', 'on after the retry');
+        expect(n).toBe(2);
+        expect(kept.get('daal.addons.failed.7')).toBeUndefined();
+    });
+
+    it('a long status never squeezes the title: it wraps under it on a narrow screen', async () => {
+        const { WizardAddonsProgress } = await import('./addons/WizardAddons');
+        const m = await rig.mount(<WizardAddonsProgress t={t} progress={{ google: { k: 'waiting' } }} onRetry={() => {}} />);
+        const title = tid(m.container, 'wizard-addon-google-title')!;
+        const status = tid(m.container, 'wizard-addon-google-status')!;
+        expect(title.textContent).toBe(EN['pub.addons.google.title']);
+        expect(status.textContent).toBe(EN['pub.addons.wizard.waiting']);
+        // Title and status share one wrapping line box; the title keeps a
+        // width of its own, so the status goes under it when both do not fit.
+        expect(status.parentNode).toBe(title.parentNode);
+        expect(title.parentNode?.style.flexWrap).toBe('wrap');
+        expect(title.style.flex).toBe('1 1 12em');
+    });
+
     it('a build with nothing chosen turns nothing on', async () => {
         shell();
         const m = await mountWizard();
@@ -265,7 +327,7 @@ describe('«More protection (optional)» while building', () => {
         await rig.click(btn(m.container, 'wiz-next'));
         await until(() => tid(m.container, 'wizard-done') != null, 'relay built', 2000);
         await rig.settle(10);
-        expect(cmds().filter((c) => /^wizard_addon_(standby_add|cdn_build|google_sign_in)$/.test(c))).toEqual([]);
+        expect(cmds().filter((c) => /^wizard_addon_(standby_add|cdn_build|google_on)$/.test(c))).toEqual([]);
         expect(tid(m.container, 'wizard-addons-progress')).toBeNull();
     });
 });

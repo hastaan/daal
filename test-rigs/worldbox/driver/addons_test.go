@@ -364,8 +364,7 @@ func TestFakeGoogleRunsTheProductScript(t *testing.T) {
 	}
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
-	tok := "AbCdEfGhIjKlMnOpQrStUv"
-	code := strings.ReplaceAll(strings.ReplaceAll(string(src), "__DAAL_WRITE_KEY_B64__", base64.StdEncoding.EncodeToString(key)), "__DAAL_PATH_TOKEN__", tok)
+	code := strings.ReplaceAll(string(src), "__DAAL_WRITE_KEY_B64__", base64.StdEncoding.EncodeToString(key))
 	_ = os.MkdirAll(filepath.Join(run, googlePasteDir), 0o755)
 	dep := "AKfycbTestDeployment0123456789"
 	_ = os.WriteFile(filepath.Join(run, googlePasteDir, dep+".gs"), []byte(code), 0o644)
@@ -390,26 +389,45 @@ func TestFakeGoogleRunsTheProductScript(t *testing.T) {
 		_, _, out := call("GET", loc, nil)
 		return out
 	}
-	post := func(seq int, blob string, k []byte) string {
+	// The slot's read token, as the publisher's helper derives it.
+	token := func(slot string) string {
+		m := hmac.New(sha256.New, key)
+		m.Write([]byte("daal-read-v2\n" + slot))
+		return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])
+	}
+	post := func(slot string, seq int, blob string, k []byte) string {
 		m := hmac.New(sha256.New, k)
-		m.Write([]byte(strconv.Itoa(seq) + "\n" + blob))
-		b, _ := json.Marshal(map[string]any{"seq": seq, "blob": blob, "mac": hex.EncodeToString(m.Sum(nil))})
+		m.Write([]byte("daal-refresh-v2\n" + slot + "\n" + strconv.Itoa(seq) + "\n" + blob))
+		b, _ := json.Marshal(map[string]any{"slot": slot, "seq": seq, "blob": blob, "mac": hex.EncodeToString(m.Sum(nil))})
 		return follow("POST", exec, b)
 	}
-	if out := post(5, `{"kind":"daal-refresh-v1","x":1}`, key); !strings.Contains(out, `"ok":true`) {
+	const a, b = "AAAAAAAAAAA", "BBBBBBBBBBB"
+	blobA := `{"kind":"daal-refresh-v2","slot":"AAAAAAAAAAA","x":1}`
+	if out := post(a, 5, blobA, key); !strings.Contains(out, `"ok":true`) {
 		t.Fatalf("update: %s", out)
 	}
-	if out := post(6, "x", []byte("another key, another key, 32 by")); !strings.Contains(out, `"refused"`) {
+	if out := post(a, 6, "x", []byte("another key, another key, 32 by")); !strings.Contains(out, `"refused"`) {
 		t.Fatalf("stranger's key: %s", out)
 	}
-	if out := post(4, "y", key); !strings.Contains(out, `"stale"`) {
+	if out := post(a, 4, "y", key); !strings.Contains(out, `"stale"`) {
 		t.Fatalf("older update: %s", out)
 	}
-	if out := follow("GET", exec+"?k="+tok, nil); out != `{"kind":"daal-refresh-v1","x":1}` {
-		t.Fatalf("doGet with k: %q", out)
+	// Another slot has its own numbers.
+	if out := post(b, 1, `{"kind":"daal-refresh-v2","slot":"BBBBBBBBBBB"}`, key); !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("second slot: %s", out)
 	}
-	if out := follow("GET", exec+"?k=wrong", nil); out != "Nothing here." {
-		t.Fatalf("doGet without the right k: %q", out)
+	// The single-relay body of the first build (no slot) is malformed.
+	old, _ := json.Marshal(map[string]any{"seq": 9, "blob": "z", "mac": "00"})
+	if out := follow("POST", exec, old); !strings.Contains(out, `"malformed"`) {
+		t.Fatalf("a body with no slot: %s", out)
+	}
+	if out := follow("GET", exec+"?s="+a+"&k="+token(a), nil); out != blobA {
+		t.Fatalf("doGet with the slot's k: %q", out)
+	}
+	for _, q := range []string{"?s=" + a + "&k=wrong", "?s=" + a + "&k=" + token(b), "?k=" + token(a), "?s=CCCCCCCCCCC&k=" + token("CCCCCCCCCCC")} {
+		if out := follow("GET", exec+q, nil); out != "Nothing here." {
+			t.Fatalf("doGet %s: %q", q, out)
+		}
 	}
 	if code, _, _ := call("GET", "https://script.google.com/macros/s/AKfycbNoSuchDeployment000000/exec", nil); code != 404 {
 		t.Fatalf("unknown deployment: %d", code)

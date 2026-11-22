@@ -178,6 +178,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runAppsScriptCheck(ctx, rest, stdout, stderr)
 	case "appsscript-clear":
 		return runAppsScriptClear(ctx, rest, stdout, stderr)
+	case "appsscript-account-check":
+		return runAppsScriptAccountCheck(ctx, rest, stdout, stderr)
+	case "appsscript-slot":
+		return runAppsScriptSlot(ctx, rest, stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, Version)
 		return 0
@@ -355,10 +359,13 @@ Optional add-ons (specs/optional-addons-v1.md). Exit 8: not built yet.
   cdn-posture   Read-only: ECH on the zone, origin pull, firewall, last test.
   cdn-remove    Take the Cloudflare way in down (DNS, origin rule, certificate,
                 firewall rule, inbound).
-  appsscript-script   The Google update script with its write key.
+  appsscript-script   The Google update script with the account's write key.
   appsscript-deploy   Create and deploy it with a one-shot token (stdin).
-  appsscript-check    POST the current update and fetch it back.
-  appsscript-clear    POST an empty update (removal).
+  appsscript-account-check
+                      Check an account's script: write the test slot, read it back.
+  appsscript-slot     A relay's mirror URL in the account's script.
+  appsscript-check    POST a relay's current update and fetch it back.
+  appsscript-clear    POST a relay's empty update (turned off).
   version       Print CLI version.
 
 Run 'daal-deploy <subcommand> --help' for subcommand flags.
@@ -2255,7 +2262,7 @@ func runPublishFreshness(ctx context.Context, args []string, stdout, stderr io.W
 	ghPATFile := fs.String("gh-pat-file", "", "file holding the fine-grained PAT (Contents: RW)")
 	// Add-on 3, the update channel through Google: one more backend.
 	// The write key comes from a file, never argv.
-	asURL := fs.String("appsscript-url", "", "Google update channel: the web-app /exec URL, ?k= included")
+	asURL := fs.String("appsscript-url", "", "Google update channel: the relay's mirror URL, ?s=<slot>&k=<token>")
 	asKeyFile := fs.String("appsscript-write-key-file", "", "Google update channel: file holding the write key (64 hex)")
 	asPackFile := fs.String("appsscript-pack-file", "", "Google update channel: the signed credential-less pack the document names, carried inline (optional)")
 	asStandbyFile := fs.String("appsscript-standby-key-file", "", "Google update channel: file holding a standby key to carry (optional)")

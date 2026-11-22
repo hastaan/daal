@@ -112,8 +112,12 @@ impl<R: Runtime> Platform<R> {
     /// rejects with a message that starts with an `E_GOOGLE_*` code;
     /// that code is what reaches the wizard. The token is handed back
     /// once and kept nowhere here.
+    /// A build with the Android OAuth client may offer Path A.
+    pub fn google_sign_in_configured(&self) -> bool {
+        ANDROID_CLIENT_ID.is_some_and(|s| !s.trim().is_empty())
+    }
     pub fn google_authorize(&self, scopes: &[&str]) -> Result<Option<String>> {
-        if ANDROID_CLIENT_ID.map_or(true, |s| s.trim().is_empty()) {
+        if !self.google_sign_in_configured() {
             return Err(Error::Other(NOT_CONFIGURED.into()));
         }
         #[cfg(not(target_os = "android"))]
