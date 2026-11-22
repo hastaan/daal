@@ -274,7 +274,7 @@ describe('Back, rendered: the publisher pages', () => {
         await two.unmount();
         answerWith([]);
         const none = await mount(<PublisherPage t={t} />);
-        expect(byAttr(none.container, 'data-empty-state')).not.toBeNull();
+        // No relay: the two ways to have one, side by side.
         expect(byAttr(none.container, 'data-button', 'new-relay')).not.toBeNull();
         expect(byAttr(none.container, 'data-button', 'restore-link')).not.toBeNull();
         expect(none.container.textContent).toContain(t('pub.relays.empty.line'));

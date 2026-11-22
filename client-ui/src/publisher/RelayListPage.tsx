@@ -39,12 +39,11 @@ import {
     Card,
     Button,
     Disclosure,
-    EmptyState,
-    GroupLabel,
     Icon,
     ListRow,
     OverflowMenu,
     PageHeader,
+    Section,
     Sheet,
     StateIcon,
 } from '../design/primitives';
@@ -1107,21 +1106,12 @@ export default function RelayListPage({
 
     return (
         <PageColumn>
-            {!empty && (
-                <PageHeader
-                    title={t('pub.relays.title')}
-                    badge={<BackupBadge t={t} status={backupStatus} onBackup={onBackup} />}
-                    actions={
-                        // The header pulls its actions 6px outward for an
-                        // icon's padding; a bordered button would be clipped.
-                        <span style={{ marginInlineEnd: 6, display: 'inline-flex' }}>
-                            <Button size="compact" variant="secondary" leading="plus" onClick={onNew} dataButton="new-relay">
-                                {t('pub.relays.new')}
-                            </Button>
-                        </span>
-                    }
-                />
-            )}
+            {/* The publisher page is two sections, Accounts and Relays; the
+                rest folds away under "More tools" (owner, 2026-11-22). */}
+            <PageHeader
+                title={t('title.publisher')}
+                badge={empty ? undefined : <BackupBadge t={t} status={backupStatus} onBackup={onBackup} />}
+            />
 
             {/* D2: a restore committed here; the truth about the old
                 phone stays until the person has read it. */}
@@ -1157,30 +1147,56 @@ export default function RelayListPage({
 
             {loading && operators.length === 0 && <div style={LINE}>{t('common.loading')}</div>}
 
-            {accountsCard}
-
-            {empty && (
-                <EmptyState
-                    icon="server"
-                    title={t('pub.relays.empty.title')}
-                    // MUST KEEP 4: what it costs, before the first tap.
-                    body={t('pub.relays.empty.line')}
-                    action={
-                        <Button onClick={onNew} dataButton="new-relay">
-                            {t('pub.relays.empty.start')}
-                        </Button>
-                    }
-                />
+            {accountsCard && (
+                <Section eyebrow={t('pub.accounts.title')}>{accountsCard}</Section>
             )}
 
-            {live.length > 0 && <Card>{live.map((op, i) => row(op, i === live.length - 1))}</Card>}
-
-            {retired.length > 0 && <Card>{retired.map((op, i) => row(op, i === retired.length - 1))}</Card>}
-
-            {!loading && tools.length > 0 && (
-                <>
-                    <GroupLabel>{t('pub.tools.title')}</GroupLabel>
+            <Section
+                eyebrow={t('pub.relays.title')}
+                action={
+                    live.length > 0 ? (
+                        <Button size="compact" variant="link" leading="plus" onClick={onNew} dataButton="new-relay">
+                            {t('pub.relays.new')}
+                        </Button>
+                    ) : undefined
+                }
+            >
+                {empty && (
+                    // No relay yet: the two ways to have one.
                     <Card>
+                        <ListRow
+                            leading={<Icon name="plus" size={20} />}
+                            title={t('pub.relays.empty.title')}
+                            // MUST KEEP 4: what it costs, before the first tap.
+                            subtitle={t('pub.relays.empty.line')}
+                            wrapSubtitle
+                            chevron
+                            onClick={onNew}
+                            dataButton="new-relay"
+                        />
+                        {onRestore && (
+                            <ListRow
+                                leading={<Icon name="download" size={20} />}
+                                title={t('pub.restore.link')}
+                                subtitle={t('pub.tools.restore.line')}
+                                wrapSubtitle
+                                chevron
+                                last
+                                onClick={onRestore}
+                                dataButton="restore-link"
+                            />
+                        )}
+                    </Card>
+                )}
+                <div style={{ display: 'grid', gap: 12 }}>
+                    {live.length > 0 && <Card>{live.map((op, i) => row(op, i === live.length - 1))}</Card>}
+                    {retired.length > 0 && <Card>{retired.map((op, i) => row(op, i === retired.length - 1))}</Card>}
+                </div>
+            </Section>
+
+            {!empty && !loading && tools.length > 0 && (
+                <Disclosure variant="card" icon="more" summary={t('pub.tools.title')} dataButton="more-tools">
+                    <div style={{ margin: '0 -16px' }}>
                         {tools.map((x, i) => (
                             <ListRow
                                 key={x.id}
@@ -1194,8 +1210,8 @@ export default function RelayListPage({
                                 dataButton={x.id}
                             />
                         ))}
-                    </Card>
-                </>
+                    </div>
+                </Disclosure>
             )}
 
             {destroying && (
