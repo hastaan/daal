@@ -26,6 +26,7 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.daal.desktop.vpn.BACK_JS
 import org.daal.desktop.vpn.DaalVpnService
+import org.daal.desktop.vpn.LinkResolvers
 import org.daal.desktop.vpn.SecureFlagChange
 import org.daal.desktop.vpn.SecureScreen
 import org.daal.desktop.vpn.backWasHandled
@@ -110,6 +111,10 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
     // listening yet.
     OpenedFiles.context = activity.applicationContext
     OpenedFiles.offer(activity, activity.intent)
+    // The phone's DNS servers to the engine from app scope, connected
+    // or not: the update ladder's DNS reader needs them, and the check
+    // of the backup update routes runs with no VPN service.
+    LinkResolvers.startAppScope(activity.applicationContext)
     // A page that loads has asked for nothing yet (PB-20).
     applySecureFlag(synchronized(secure) { secure.atLoad() })
     val host = activity as? ComponentActivity ?: return
@@ -139,6 +144,18 @@ class DaalPlatformPlugin(private val activity: Activity) : Plugin(activity) {
       }
     }
     host.onBackPressedDispatcher.addCallback(host, callback)
+  }
+
+  /** A list the engine did not take yet (its library was not loaded) goes again. */
+  override fun onResume() {
+    super.onResume()
+    LinkResolvers.retryPending()
+  }
+
+  /** Stop listening; the engine keeps the list it holds. */
+  override fun onDestroy() {
+    LinkResolvers.stopAppScope(activity.applicationContext)
+    super.onDestroy()
   }
 
   /**

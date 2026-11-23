@@ -179,13 +179,14 @@ object DaalCoreBridge {
   external fun networkFacts(kind: String, id: String, validated: Int, metered: Int): Int
 
   /**
-   * `engine_set_link_resolvers`: the DNS servers of the network UNDER
-   * the tunnel (LinkProperties.getDnsServers of the network
-   * NetworkWatch follows), as a JSON list of address strings; "[]" when
-   * that network was lost. Go cannot read them on Android, and the
-   * update ladder's DNS reader asks only the network's own resolver.
-   * DaalVpnService calls it from its network callback, on the network
-   * thread. Never log the addresses.
+   * `engine_set_link_resolvers`: the DNS servers of the best network
+   * that has internet and is not a VPN (the one under the tunnel, when
+   * there is one), as a JSON list of address strings; "[]" when no such
+   * network is left. Go cannot read them on Android, and the update
+   * ladder's DNS reader asks only the network's own resolver. Called
+   * only by vpn/LinkResolvers, on its own thread, for both reporters
+   * (the app from its load, DaalVpnService while it runs; which list
+   * wins is vpn/ResolverGate). Never log the addresses.
    *
    * Returns 1 = the engine has a resolver to ask, 0 = none, -1 = the
    * engine is not loaded, predates the call, or refused the list. An

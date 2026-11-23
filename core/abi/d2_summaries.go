@@ -42,6 +42,7 @@ package abi
 // only (netmem), never charged like a failed connect.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,7 @@ import (
 	"daal/core/engine"
 	"daal/core/netmem"
 	"daal/core/pathmanager"
+	"daal/core/refresh"
 	"daal/core/routestore"
 )
 
@@ -132,6 +134,14 @@ type RouteSummaryDisplay struct {
 	// itself (its #fragment), cleaned (routestore.CleanRouteName), not a
 	// piece of the route id. Display only. Always present.
 	NameFromLink bool `json:"name_from_link"`
+	// BackupRoutes: the backup update routes the route's file holds, from
+	// {"gittag","dns"} in that order (core/refresh BackupRoutes): "gittag"
+	// when an update secret and the git-tag carrier are held for the
+	// file's routes, "dns" when a secret DNS may use, the DNS carrier and
+	// a sealed standby are. Absent when the file holds none. Never a
+	// repository, a zone or a name. Every route of one file (one relay
+	// pack) carries the same list.
+	BackupRoutes []string `json:"backup_routes,omitempty"`
 }
 
 // routeObservations is everything the engine has actually MEASURED
@@ -364,21 +374,53 @@ func computeHealthPctLastHour(r routestore.RouteRow) float64 {
 }
 
 // RouteSummary returns the display shape for a single route_id.
+//
+// A route the store does not hold (an empty id, one removed, one a host
+// remembered from before a reset) has no summary: the answer is EMPTY
+// ("" and no error, so the export writes zero bytes and records no
+// failure). It used to be the store's "sql: no rows in result set",
+// logged as a failed call on every poll of a phone with no active route;
+// the host already reads an empty body as "not there". A store that
+// does not answer is still an error.
 func RouteSummary(routeID string) (string, error) {
 	if loadedCore() == nil {
 		return "", errors.New("abi: not initialized")
 	}
 	c := loadedCore()
+	if strings.TrimSpace(routeID) == "" {
+		return "", nil
+	}
 	row, err := c.store.GetRoute(routeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
 	disp := rowToDisplay(row, observeRoute(row, liveRouteHealth(c)))
 	disp.Measured = routeMeasured(c.routeMemory(), row.RouteID)
 	disp.CheckedWhenUsed = c.checkedWhenUsed(row.RouteID)
+	disp.BackupRoutes = c.backupRoutes(row, nil)
 	c.pastedDisplay(&disp, row, ownShareFingerprint(c))
 	body, _ := json.Marshal(disp)
 	return string(body), nil
+}
+
+// backupRoutes is the route's file's backup update routes (see
+// RouteSummaryDisplay.BackupRoutes); cache, when non-nil, keeps the
+// answer per pack for one listing. Reads the store only.
+func (c *Core) backupRoutes(r routestore.RouteRow, cache map[string][]string) []string {
+	if r.RelayPackID == "" || c.store == nil {
+		return nil
+	}
+	if got, ok := cache[r.RelayPackID]; ok {
+		return got
+	}
+	got := (&refresh.RelayPackRefresher{Store: relayPackStoreAdapter{S: c.store}}).BackupRoutes(r.RelayPackID)
+	if cache != nil {
+		cache[r.RelayPackID] = got
+	}
+	return got
 }
 
 // liveRouteHealth indexes the pathmanager's per-route health by
@@ -412,6 +454,7 @@ func AvailableRoutes() (string, error) {
 	live := liveRouteHealth(c)
 	mem := c.routeMemory()
 	own := ownShareFingerprint(c)
+	backup := map[string][]string{}
 	out := make([]RouteSummaryDisplay, 0, len(rows))
 	for _, r := range rows {
 		if strings.EqualFold(r.TrustState, "revoked") {
@@ -420,6 +463,7 @@ func AvailableRoutes() (string, error) {
 		d := rowToDisplay(r, observeRoute(r, live))
 		d.Measured = routeMeasured(mem, r.RouteID)
 		d.CheckedWhenUsed = c.checkedWhenUsed(r.RouteID)
+		d.BackupRoutes = c.backupRoutes(r, backup)
 		c.pastedDisplay(&d, r, own)
 		out = append(out, d)
 	}

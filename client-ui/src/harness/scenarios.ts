@@ -240,6 +240,23 @@ const RELAY_FILE_ROUTES: RouteDisplayRow[] = [
 // phone is on now (the VPN service is not running): no `measured` block
 // at all, so nothing is said about "here".
 const RELAY_FILE_ROUTES_NO_NETWORK: RouteDisplayRow[] = RELAY_FILE_ROUTES.map(({ measured: _m, ...r }) => r);
+// The relay file holding both backup update routes (round 3a), and what
+// a check of them answers on a network where GitHub works, Google and
+// the other mirrors answered with nothing new, and DNS did not answer.
+const BACKUP_FILE_ROUTES: RouteDisplayRow[] = RELAY_FILE_ROUTES.map((r) =>
+    r.publisherName === 'Test' ? { ...r, backupRoutes: ['gittag', 'dns'] } : r,
+);
+const BACKUP_CHECK_ANSWER = {
+    outcome: 'unchanged',
+    retry_after_s: 0,
+    drill: {
+        github: { result: 'verified' },
+        google: { result: 'nothing_new' },
+        goproxy: { result: 'skipped', reason: 'budget' },
+        jsdelivr: { result: 'nothing_new' },
+        dns: { result: 'failed' },
+    },
+};
 const RELAY_AUTO_ON_R1 = {
     state: 'connected' as const,
     mode: true,
@@ -294,6 +311,10 @@ export interface Scenario {
     fake?: FakeShell;
     /** Developer mode held on for this page (never stored). */
     dev?: boolean;
+    /** What "Check the backup update routes" answers, as the engine's
+     *  JSON (`outcome`, `retry_after_s`, `drill`). Absent: the check
+     *  answers as an engine without it would. */
+    backupCheck?: unknown;
     /** Taps on a plain scenario (no fake shell), after the screen that
      *  shell/harnessStart.ts opens has drawn (driver.ts runPlainDrive). */
     steps?: DriveStep[];
@@ -1005,6 +1026,47 @@ export const SCENARIOS: Scenario[] = [
     }, [], {
         connection: { ...CONN_BASE, state: 'disconnected' },
         availableRoutes: RELAY_FILE_ROUTES_NO_NETWORK,
+    }),
+
+    // --- Files: the backup update routes (round 3a) ---
+    ...filesRelay({
+        id: 'files-backup-line',
+        title: 'Files · a file with backup update routes: the line, and the check in ⋯',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:file-more' },
+    ], { connection: { ...CONN_BASE, state: 'disconnected' }, availableRoutes: BACKUP_FILE_ROUTES }),
+    ...filesRelay({
+        id: 'files-backup-check-running',
+        title: 'Files · checking the backup update routes (up to two minutes)',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:file-more' },
+        { click: 'btn:check-backup' },
+        { waitFor: 'btn:backup-check-close' },
+        { freeze: true },
+    ], { connection: { ...CONN_BASE, state: 'disconnected' }, availableRoutes: BACKUP_FILE_ROUTES, backupCheck: BACKUP_CHECK_ANSWER }),
+    ...filesRelay({
+        id: 'files-backup-check-done',
+        title: 'Files · the backup update routes checked: a line per route',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:file-more' },
+        { click: 'btn:check-backup' },
+        { sleep: 3500 },
+    ], { connection: { ...CONN_BASE, state: 'disconnected' }, availableRoutes: BACKUP_FILE_ROUTES, backupCheck: BACKUP_CHECK_ANSWER }),
+    ...filesRelay({
+        id: 'files-backup-check-wait',
+        title: 'Files · the backup update routes were checked a moment ago',
+    }, [
+        { click: 'text:Test' },
+        { click: 'btn:file-more' },
+        { click: 'btn:check-backup' },
+        { sleep: 3500 },
+    ], {
+        connection: { ...CONN_BASE, state: 'disconnected' },
+        availableRoutes: BACKUP_FILE_ROUTES,
+        backupCheck: { outcome: 'rate_limited', retry_after_s: 420 },
     }),
 
     // --- Sources ---

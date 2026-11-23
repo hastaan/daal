@@ -522,6 +522,17 @@ pub fn relaypack_refresh(state: &AppState, relay_pack_id: &str) -> Result<String
         .ok_or_else(|| field_probe_missing("engine_relaypack_refresh"))
 }
 
+/// "Connect with this file": arm the next automatic connect to choose
+/// only among these routes. Returns how many of them the store holds.
+/// An engine without the call is an error the page can tell apart: it
+/// then connects automatically over every route.
+pub fn set_auto_scope(state: &AppState, route_ids: &[String]) -> Result<i32> {
+    state
+        .engine
+        .set_auto_scope(route_ids)?
+        .ok_or_else(|| field_probe_missing("engine_set_auto_scope"))
+}
+
 /// Optional add-ons, standby address: the recipient's "I was sent a
 /// code" field. Checks the typed key against the signed commitment and
 /// keeps it when it matches (`Engine::standby_key`).

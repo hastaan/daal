@@ -43,6 +43,7 @@ import type {
 import { buildPublisherTree, deriveBurnpressureVerdict } from '../contract/derive_tree';
 import { activeScenario, type Scenario } from '../harness/scenarios';
 import { lastBucketText } from '../lib/measured';
+import { parseDrill, type DrillAnswer } from '../lib/backupCheck';
 
 const AUTO_IDLE: AutoStatus = {
     state: 'idle',
@@ -223,8 +224,13 @@ export class HarnessContract implements D2Contract {
     // Blocks until it is over, like the desktop command; the `auto`
     // block of connectionSummary says where it is meanwhile.
     async connectAuto(): Promise<AutoConnectResult | null> {
+        // The scope armed by connectAutoWithin is this connect's (and
+        // only this one's), as in the engine.
+        const scope = this.armedScope;
+        this.armedScope = null;
         const now = await this.connectionSummary();
-        if (now.state === 'connected' && now.activeRoute) {
+        const inScope = (id: string) => scope === null || scope.has(id);
+        if (now.state === 'connected' && now.activeRoute && inScope(now.activeRoute.routeId)) {
             // Already connected: nothing is started, the running route
             // is named — and, as in the engine, automatic connect takes
             // charge of it from here on.
@@ -243,7 +249,7 @@ export class HarnessContract implements D2Contract {
         }
         const gen = ++this.gen;
         const base = this.s.connection;
-        const all = this.rows();
+        const all = this.rows().filter((r) => inScope(r.routeId));
         const dialable = all.filter((r) => r.familyMaturity !== 'unsupported');
         const candidates = dialable.filter((r) => r.inCooldown !== true);
         const tried: AutoTried[] = [];
@@ -358,6 +364,42 @@ export class HarnessContract implements D2Contract {
             }
         }
         return fail('all_failed');
+    }
+
+    // "Connect with this file": the automatic connect over these routes
+    // only, as engine_set_auto_scope arms it. No pin.
+    private armedScope: Set<string> | null = null;
+    /** The ids the last connectAutoWithin armed (tests). */
+    lastScope: string[] | null = null;
+
+    async connectAutoWithin(routeIds: string[]): Promise<AutoConnectResult | null> {
+        this.armedScope = new Set(routeIds);
+        this.lastScope = [...routeIds];
+        return this.connectAuto();
+    }
+
+    // "Check the backup update routes": the scenario's canned answer
+    // after a while (the engine takes up to two minutes); refused while
+    // something is up, as the engine refuses.
+    async backupCheck(_routeId: string): Promise<DrillAnswer> {
+        const now = await this.connectionSummary();
+        if (now.routeRunning === true || now.state === 'connected' || now.state === 'connecting') {
+            return {
+                outcome: 'tunnel_required',
+                retryAfterS: 0,
+                classes: {
+                    github: { result: 'skipped', reason: 'route_up' },
+                    google: { result: 'skipped', reason: 'route_up' },
+                    goproxy: { result: 'skipped', reason: 'route_up' },
+                    jsdelivr: { result: 'skipped', reason: 'route_up' },
+                    dns: { result: 'skipped', reason: 'route_up' },
+                },
+            };
+        }
+        await this.wait();
+        await this.wait();
+        await this.wait();
+        return this.s.backupCheck ? parseDrill(JSON.stringify(this.s.backupCheck)) : { outcome: 'unavailable', retryAfterS: 0 };
     }
 
     async routesStrict(): Promise<RouteDisplayRow[] | undefined> {

@@ -644,3 +644,103 @@ fn the_kinds_round_trip_through_the_ledger() {
     assert_eq!(r.len(), 12);
     assert!(r.chars().next().unwrap().is_ascii_lowercase());
 }
+
+// ------------------------------------------------------------- the log line
+
+fn write_lines() -> Vec<String> {
+    WRITE_LINES.with(|l| l.borrow().clone())
+}
+
+#[test]
+fn every_write_leaves_one_plain_line_and_never_a_name() {
+    let f = fx();
+    let fail_next = Arc::new(Mutex::new(false));
+    let f2 = fail_next.clone();
+    let _seen = helper(&f, move |verb, sub, creds| match (verb, sub) {
+        ("note-gittag", "check") => Ok(check_ok()),
+        ("note-gittag", "publish") if *f2.lock().unwrap() => Err((
+            3,
+            json!({"ok":false,"verb":"publish","code":"missing_permission","missing":["Administration"]}),
+        )),
+        ("note-gittag", "publish") => Ok(publish_ok(creds["seq"].as_u64().unwrap_or(1))),
+        ("note-dns", "publish") => Ok(json!({"ok":true,"verb":"publish","epoch":2976,"mode":"filler",
+            "created":6,"replaced":0,"kept":0,"removed":0})),
+        _ => Err((2, json!({}))),
+    });
+    let op = relay(&f);
+    connect_github(&f);
+    connect_cloudflare(&f);
+    WRITE_LINES.with(|l| l.borrow_mut().clear());
+
+    let g = gittag_on(&f.ctx, NotesOnInput { operator_id: op }, &mut noop()).unwrap();
+    let repo = detail_of(&g).repo;
+    dnsnote_on(&f.ctx, NotesOnInput { operator_id: op }, &mut noop()).unwrap();
+    *fail_next.lock().unwrap() = true;
+    let (written, failed) = write_relay(&f.ctx, op);
+    assert_eq!((written, failed), (2, 1));
+
+    let lines = write_lines();
+    assert_eq!(
+        lines,
+        vec![
+            format!("[notes_write] op={op} kind=gittag outcome=ok changed=yes"),
+            format!("[notes_write] op={op} kind=dnsnote outcome=ok changed=yes"),
+            format!("[notes_write] op={op} kind=gittag outcome=missing_permission changed=no"),
+            format!("[notes_write] op={op} kind=dnsnote outcome=ok changed=yes"),
+        ],
+        "one line per write attempt, in order"
+    );
+    for line in &lines {
+        for secret in [TOKEN, CF, "notes-person", repo.as_str(), "example.org", "example", "Administration"] {
+            assert!(!line.contains(secret), "{secret:?} in {line:?}");
+        }
+        assert!(!line.contains("github.com") && !line.contains("people"), "{line}");
+    }
+}
+
+#[test]
+fn the_line_keeps_only_a_code_word() {
+    assert_eq!(
+        write_line(7, AddonKind::Gittag, "already_published", false),
+        "[notes_write] op=7 kind=gittag outcome=already_published changed=no"
+    );
+    // Whatever a helper answered, nothing but a closed word reaches it.
+    assert_eq!(
+        write_line(7, AddonKind::Dnsnote, "zone example.org/owner token=abc", true),
+        "[notes_write] op=7 kind=dnsnote outcome=error changed=yes"
+    );
+    assert_eq!(write_line(1, AddonKind::Gittag, "", false), "[notes_write] op=1 kind=gittag outcome=error changed=no");
+}
+
+#[test]
+fn each_attempt_logs_its_own_word() {
+    let f = fx();
+    let _seen = helper(&f, move |verb, sub, creds| match (verb, sub) {
+        ("note-gittag", "check") => Ok(check_ok()),
+        ("note-gittag", "publish") if creds["seq"].as_u64().unwrap_or(1) > 1 => Err((
+            3,
+            json!({"ok":false,"verb":"publish","code":"missing_permission","missing":["Administration"]}),
+        )),
+        ("note-gittag", "publish") => Ok(publish_ok(creds["seq"].as_u64().unwrap_or(1))),
+        _ => Err((2, json!({}))),
+    });
+    let op = relay(&f);
+    connect_github(&f);
+    gittag_on(&f.ctx, NotesOnInput { operator_id: op }, &mut noop()).unwrap();
+    // A refused write: the row keeps missing_permission.
+    assert_eq!(write_relay(&f.ctx, op).1, 1);
+    // The key goes; the next attempt fails before the helper runs.
+    github_disconnect(&f.ctx).unwrap();
+    let row = addons::list(&f.ctx, op).unwrap().into_iter().find(|r| r.kind == AddonKind::Gittag).unwrap();
+    addons::set_secret_alias(&f.ctx, row.id, "").unwrap();
+    WRITE_LINES.with(|l| l.borrow_mut().clear());
+    assert_eq!(write_relay(&f.ctx, op).1, 1);
+    let word = E_GITHUB_NO_ACCOUNT.to_ascii_lowercase();
+    assert_eq!(
+        write_lines(),
+        vec![format!("[notes_write] op={op} kind=gittag outcome={word} changed=no")],
+        "the second attempt says its own word, not the earlier missing_permission"
+    );
+    let row = addons::list(&f.ctx, op).unwrap().into_iter().find(|r| r.kind == AddonKind::Gittag).unwrap();
+    assert_eq!(detail_of(&row).last_error, word);
+}

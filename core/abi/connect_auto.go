@@ -255,6 +255,13 @@ type autoState struct {
 	// flapping between networks is held to each network's own back-off
 	// (autoNetworkMovedLocked). Guarded by Core.mu.
 	fallNets map[string]time.Time
+	// scope: the routes the automatic connect may use, nil for every
+	// route (connect_auto_scope.go). pendingScope / pendingAt: the scope
+	// engine_set_auto_scope armed for the next engine_connect_auto.
+	// Guarded by Core.mu.
+	scope        map[string]bool
+	pendingScope map[string]bool
+	pendingAt    time.Time
 
 	mu      sync.Mutex
 	state   string
@@ -269,6 +276,9 @@ type autoState struct {
 	family  string
 	// variant: the connected route's variant word (AutoTried.Variant).
 	variant string
+	// scoped: the automatic connect is limited to one file's routes
+	// (scope != nil), for the diagnostics blob.
+	scoped bool
 }
 
 func (a *autoState) block() map[string]any {
@@ -304,6 +314,9 @@ func (a *autoState) block() map[string]any {
 		// variant: the connected route's variant (closed words, see
 		// AutoTried.Variant); "" for the route as it is.
 		"variant": a.variant,
+		// scoped: the automatic connect is limited to the routes of one
+		// file ("Connect with this file", engine_set_auto_scope).
+		"scoped": a.scoped,
 	}
 }
 
@@ -388,6 +401,7 @@ func (a *autoState) recovered(routeID, family string) {
 // connect that did not come up calls ClearRoute before the page has
 // polled once (see ClearRoute).
 func (c *Core) autoStopLocked(keepFailedVerdict bool) (wasTrying bool) {
+	c.setAutoScopeLocked(nil)
 	c.auto.gen++
 	c.cancelRaceLocked()
 	c.cancelRecoverLocked()
@@ -437,6 +451,11 @@ func ConnectAuto() (string, error) {
 	} else {
 		c.mu.Lock()
 		st, cat, running := c.check.snapshot()
+		// The scope of this call: the file engine_set_auto_scope armed, or
+		// every route (connect_auto_scope.go).
+		if !c.shuttingDown {
+			c.setAutoScopeLocked(c.takeAutoScopeLocked())
+		}
 		switch {
 		case c.shuttingDown:
 			res = AutoResult{Verdict: AutoVerdictCancelled}
@@ -450,7 +469,7 @@ func ConnectAuto() (string, error) {
 			// it says so at once. The engine is in charge from here,
 			// whoever started the walk.
 			res = c.autoLookingLocked()
-		case c.activeRoute != "" && running && (st == RouteCheckOK || st == RouteCheckDegraded):
+		case c.activeRoute != "" && running && (st == RouteCheckOK || st == RouteCheckDegraded) && c.inAutoScopeLocked(c.activeRoute):
 			res = AutoResult{Connected: true, RouteID: c.activeRoute, Family: c.activeFamily, AlreadyConnected: true,
 				Variant: c.variantInUse(c.activeRoute).suffix()}
 			c.autoTakeChargeLocked()
@@ -465,6 +484,10 @@ func ConnectAuto() (string, error) {
 			// A route that was connected, has stopped carrying and is
 			// still running is kept unless something else carries.
 			res = c.autoPassLocked(&autoLost{routeID: c.activeRoute, family: c.activeFamily, cat: cat}, true)
+		case c.auto.scope != nil && c.activeRoute != "" && running && (st == RouteCheckOK || st == RouteCheckDegraded):
+			// Carrying on a route of ANOTHER file, and the person asked for
+			// this one: a pass over this file's routes.
+			res = c.autoScopedElsewhereLocked(st == RouteCheckDegraded)
 		default:
 			res = c.autoPassLocked(nil, true)
 		}
@@ -530,6 +553,41 @@ func (c *Core) autoFallOver(ctx context.Context) {
 		return
 	}
 	c.autoPassLocked(&autoLost{routeID: c.activeRoute, family: c.activeFamily, cat: cat}, false)
+}
+
+// autoScopedElsewhereLocked is ConnectAuto's pass over one file's routes
+// while the engine is connected and carrying on a route of another file
+// (connect_auto_scope.go). A candidate tried through the tunnel's own
+// instance stops that route; when no route of the file carries, the route
+// the person had is put back as it was (carrying; slow when it was
+// degraded) and the automatic connect takes charge of it, so a host that
+// compares the active route with the one it had (Android's
+// afterFailedAuto) keeps its tunnel. The pass's tried list and verdict are
+// returned, Connected false; the `auto` block keeps the verdict. Called
+// with Core.mu held.
+func (c *Core) autoScopedElsewhereLocked(slow bool) AutoResult {
+	prev := c.activeRoute
+	res := c.autoPassLocked(nil, true)
+	if res.Connected || res.Verdict == AutoVerdictCancelled || c.shuttingDown {
+		return res
+	}
+	if !c.routeRunningLocked(prev) {
+		if c.routeRunningLocked(c.activeRoute) || !c.resumeCarryingRouteLocked(prev, slow) {
+			// Something else is running now, or the route could not be
+			// started again: nothing to keep.
+			engine.LogInfo(fmt.Sprintf("auto resume route=%s result=failed", engine.LogID(prev)))
+			c.setAutoScopeLocked(nil)
+			return res
+		}
+	}
+	c.autoTakeChargeLocked()
+	a := &c.auto
+	a.mu.Lock()
+	a.verdict = res.Verdict
+	a.tried = append([]AutoTried(nil), res.Tried...)
+	a.mu.Unlock()
+	c.setAutoScopeLocked(nil)
+	return res
 }
 
 // autoLookingLocked is ConnectAuto's answer while a walk has paused the
@@ -741,6 +799,9 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 			engine.LogInfo(fmt.Sprintf("auto done connected=false route=- verdict=%s", AutoVerdictLookingForAddress))
 			return AutoResult{Tried: tried, Verdict: AutoVerdictLookingForAddress}
 		}
+		// Nothing left in the file: a scope ends here, so the engine's
+		// next pass of this outage may look beyond the file.
+		c.setAutoScopeLocked(nil)
 		if show {
 			a := &c.auto
 			a.mu.Lock()
@@ -768,6 +829,9 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		// Nothing can be tried. Nothing is started, nothing running is
 		// touched, and the engine is not in charge of anything.
 		verdict := verdictWithoutCandidates(routes, left)
+		// A scoped pass that found nothing in the file ends the scope
+		// (connect_auto_scope.go, the scope's life).
+		c.setAutoScopeLocked(nil)
 		a.mu.Lock()
 		a.clearLocked()
 		a.state, a.verdict, a.tried = AutoStateFailed, verdict, left
@@ -915,6 +979,12 @@ func (c *Core) autoPassLocked(lost *autoLost, explicit bool) AutoResult {
 		// pass's own verdict comes back if the walk finds nothing.
 		verdict = AutoVerdictLookingForAddress
 	}
+	if connected == "" && !recovering {
+		// A scoped pass that found nothing in the file ends the scope: the
+		// engine's next pass (its own fall-over, or a host's re-ask) is
+		// over every route again (connect_auto_scope.go, the scope's life).
+		c.setAutoScopeLocked(nil)
+	}
 	a.mu.Lock()
 	a.trying, a.index, a.racing = "", 0, nil
 	a.tried, a.verdict = tried, verdict
@@ -1057,6 +1127,19 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 	mem := c.routeMemory()
 	byID := map[string]autoCandidate{}
 	var usable []pathmanager.Route
+	if c.auto.scope != nil {
+		// "Connect with this file": the routes of that file only
+		// (connect_auto_scope.go). The others are not candidates and
+		// are not listed as left out.
+		in := rows[:0:0]
+		for _, row := range rows {
+			if c.auto.scope[row.RouteID] {
+				in = append(in, row)
+			}
+		}
+		rows = in
+		routes = len(rows)
+	}
 	for _, row := range rows {
 		if row.RouteID == exclude {
 			continue

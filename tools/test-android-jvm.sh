@@ -6,7 +6,8 @@
 # in files with no Android and no JNI in them (vpn/SwitchPolicy.kt,
 # vpn/StartSequence.kt, vpn/NetworkWatch.kt) so that they can be tested
 # on a plain JVM (src/test/.../SwitchPolicyTest.kt, StartSequenceTest.kt,
-# NetworkWatchTest.kt), plus the back answer, the screen-capture flag
+# NetworkWatchTest.kt; NetworkWatch.kt also holds ResolverGate, which
+# vpn/ResolverGateTest.kt covers), plus the back answer, the screen-capture flag
 # (vpn/SecureScreen.kt, PB-20), the saved-file name (vpn/SavedName.kt,
 # PB-3) and which shared or opened files Daal takes (vpn/OpenedIntent.kt,
 # "Open with Daal" / "Share to Daal").

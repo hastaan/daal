@@ -248,7 +248,7 @@ type RelayPackResult struct {
 	Applied        bool   `json:"applied"`
 	Verdict        string `json:"verdict_kind,omitempty"`
 	Recovered      bool   `json:"pointer_recovery_attempted"`
-	// Kind: "scheduled", "user", "failure" or "on_demand" (which entry
+	// Kind: "scheduled", "user", "failure", "on_demand" or "drill" (which entry
 	// point ran this attempt; relaypack_recover.go). Additive.
 	Kind string `json:"kind,omitempty"`
 	// RetryAfterS: for a rate-limited unscheduled attempt, how many
@@ -268,6 +268,12 @@ type RelayPackResult struct {
 	// ViaLadder: the document that verified came from a full note of
 	// the ladder. Additive.
 	ViaLadder bool `json:"via_ladder,omitempty"`
+	// Drill: for the drill only (drill.go, RefreshDrill), per class its
+	// DrillClass. Not marshalled here: the engine's answer carries it at
+	// its top level (core/abi engine_relaypack_refresh).
+	Drill map[string]DrillClass `json:"-"`
+	// drill: what the ladder saw, for RefreshDrill to finish.
+	drill *drillTrace
 }
 
 // freshnessRecord is the persisted per-pack state. Stored in
@@ -321,6 +327,8 @@ type freshnessRecord struct {
 	// OnDemandStreak: consecutive presses of the person's button that
 	// reached the network and found nothing new (its floor escalates).
 	OnDemandStreak int `json:"on_demand_streak,omitempty"`
+	// DrillAt: the last drill of this pack (drill.go) that went out.
+	DrillAt string `json:"drill_at,omitempty"`
 }
 
 // jitterOffset renders the persisted jitter as a Duration.
@@ -629,7 +637,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	// lifeline-strict means "nothing unless I ask": the person's own
 	// kinds (user, on_demand) pass; the scheduled poll and the engine's
 	// failure-triggered walk do not.
-	if !r.shouldFire(kind == kindUser || kind == kindOnDemand) {
+	if !r.shouldFire(kind == kindUser || kind == kindOnDemand || kind == kindDrill) {
 		res.Outcome = SkippedLifelineStrict
 		recordAudit(r.Store, auditKindFreshness, relayPackID, SkippedLifelineStrict, 0, false, now)
 		return res, nil
@@ -655,7 +663,14 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	// whole walk; every other case keeps today's early return, so an older
 	// file behaves exactly as before.
 	ladderOnly := false
-	if len(target.Endpoints) == 0 {
+	if kind == kindDrill {
+		// The drill (drill.go) skips the mirrors: the ladder is the whole
+		// walk. RefreshDrill has checked both conditions already.
+		if RouteActive() || r.loadLadderHeld(relayPackID) == nil {
+			return noEndpoints()
+		}
+		ladderOnly = true
+	} else if len(target.Endpoints) == 0 {
 		if !kind.unscheduled() || RouteActive() || r.loadLadderHeld(relayPackID) == nil {
 			return noEndpoints()
 		}
@@ -732,8 +747,16 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	// member) it does nothing.
 	ladderKey := false
 	if err != nil && ladderAllowed(kind, viaTunnel) && ctx.Err() == nil {
-		lr := r.runLadder(ctx, target, rec, dialer, now, networkKey, w.googleConns, kind == kindOnDemand)
+		mode := ladderByEngine
+		switch kind {
+		case kindOnDemand:
+			mode = ladderByPerson
+		case kindDrill:
+			mode = ladderDrill
+		}
+		lr := r.runLadder(ctx, target, rec, dialer, now, networkKey, w.googleConns, mode)
 		res.Ladder = lr.classes
+		res.drill = lr.drill
 		r.recordLadder(relayPackID, lr.classes, now)
 		ladderKey = lr.standbyAccepted
 		tried := w.tried + lr.tried
@@ -759,9 +782,10 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	res.ViaGoogle = w.container != nil && !w.viaLadder
 	res.ViaLadder = w.viaLadder
 	res.BytesIn += int64(len(docBytes))
-	if err != nil && ladderOnly && ctx.Err() == nil {
+	if err != nil && ladderOnly && ctx.Err() == nil && (kind != kindDrill || w.tried == 0) {
 		// The ladder found nothing: the same answer as a pack with no
-		// mirror always gave (no pointer recovery, as before).
+		// mirror always gave (no pointer recovery, as before). A drill
+		// that asked something and found nothing is "unreachable" below.
 		return noEndpoints()
 	}
 	if err != nil {
@@ -789,7 +813,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 		// direct attempt made with the route stopped (relaypack_recover.go),
 		// and the pointer layer is a second, separate egress — today to
 		// placeholder hosts (W3-1). The scheduled poll still reaches it.
-		if r.Recover != nil && kind != kindFailure {
+		if r.Recover != nil && kind != kindFailure && kind != kindDrill {
 			res.Recovered = true
 			if _, rErr := r.Recover(ctx); rErr == nil {
 				recordAudit(r.Store, auditKindFreshness, relayPackID,

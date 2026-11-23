@@ -192,9 +192,24 @@ fn failed_init_leaves_a_usable_process() {
         .export_diagnostics()
         .expect("diagnostics")
         .contains("\"recent_errors\"");
+    // A route the store does not hold has no summary. An engine from
+    // round 3a on answers an empty body (the app reads that as "not
+    // there"; it used to fail with "sql: no rows" on every poll of a
+    // phone with no route); an older one fails. Either way, no summary.
+    match engine.route_summary("no-such-route") {
+        Ok(body) => assert!(body.trim().is_empty(), "{body}"),
+        Err(e) => assert!(matches!(e, DesktopError::EngineFailed { .. } | DesktopError::EngineReturn(_)), "{e:?}"),
+    }
+    // "Connect with this file" on an empty store: nothing armed is in
+    // the store (0), and a library that predates the call answers None.
+    if let Some(n) = engine.set_auto_scope(&["no-such-route".to_string()]).expect("set_auto_scope") {
+        assert_eq!(n, 0);
+        assert_eq!(engine.set_auto_scope(&[]).expect("disarm"), Some(0));
+    }
+    // Picking a route the store does not hold is refused, in words.
     let err = engine
-        .route_summary("no-such-route")
-        .expect_err("an unknown route has no summary");
+        .set_route("no-such-route")
+        .expect_err("an unknown route cannot be picked");
     if records_errors {
         match &err {
             DesktopError::EngineFailed { code, detail } => {

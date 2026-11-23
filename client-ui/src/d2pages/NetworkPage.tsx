@@ -17,6 +17,29 @@
 // lib/networkRows.ts.
 
 import { checkForNewAddress, refreshMessage } from '../lib/relayRefresh';
+import {
+    backupRoutesOf,
+    canOfferCheck,
+    CHECK_AGAIN_MS,
+    drillMessage,
+    drillRouteOf,
+    keptAnswerFor,
+    keptCheck,
+    setKeptCheck,
+    subscribeKeptCheck,
+    type KeptCheck,
+} from '../lib/backupCheck';
+import {
+    acceptFileConnect,
+    autoRoutesOf,
+    fileConnectFromResult,
+    resolveFileConnect,
+    startFileConnect,
+    type FileConnect,
+    type FileConnectEnd,
+} from '../lib/fileConnect';
+import { BackupCheckSheet, BackupLine, drillSentence, type BackupCheckState } from '../components/files/BackupCheck';
+import type { BackupRoute } from '../contract/D2Contract';
 import { sep } from '../lib/format';
 import { useEffect, useRef, useState } from 'react';
 import AddSheet from '../components/AddSheet';
@@ -84,7 +107,7 @@ import {
 import { markStoreResetNoticeSeen, storeResetNoticeDue } from '../lib/storeNotice';
 import { EngineStartNotice, FailureBox, NoticeRow, StoreResetNotice } from './PageNotices';
 import { useEngineStartProblem } from '../lib/engineStart';
-import { autoIsUsing, getPinnedRoute, setPinnedRoute, startConnect } from '../lib/autoConnect';
+import { autoIsUsing, autoVerdictKey, getPinnedRoute, setPinnedRoute, startConnect } from '../lib/autoConnect';
 import { chipHereText, chipScoreText, familyHere, localDigits } from '../lib/measured';
 import { effectiveLocale } from '../lib/i18n';
 import type { Locale } from '../lib/i18n';
@@ -155,6 +178,31 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     // connect call then rejects ("connection attempt cancelled"), which
     // is the expected outcome and not an error to report.
     const cancelledRef = useRef(false);
+    // "Connect with this file" is on its way, until the ENGINE has
+    // answered (lib/fileConnect.ts): on desktop the call lasts the whole
+    // pass; on Android it returns when the VPN service has started and
+    // the answer comes in the polled `auto` block.
+    const [fileConnect, setFileConnectState] = useState<FileConnect | null>(null);
+    const fileConnectRef = useRef<FileConnect | null>(null);
+    const setFileConnect = (f: FileConnect | null) => {
+        fileConnectRef.current = f;
+        setFileConnectState(f);
+    };
+    // "Check the backup update routes": the check of this page, its
+    // sheet open or closed. The running check and its last answer live
+    // in lib/backupCheck.ts (keptCheck) so leaving the Files tab loses
+    // neither; this page picks them up when it mounts.
+    const tRef = useRef(t);
+    tRef.current = t;
+    const [check, setCheckState] = useState<BackupCheckState | null>(() => {
+        const k = keptCheck();
+        return k?.running ? { name: k.fileName, running: true, open: false } : null;
+    });
+    const checkRef = useRef<BackupCheckState | null>(null);
+    const setCheck = (c: BackupCheckState | null) => {
+        checkRef.current = c;
+        setCheckState(c);
+    };
     // What the engine is doing with the route it has running: proved
     // ('steady'), still proving it, or lost and being retried.
     const [verifying, setVerifying] = useState<RunningPhase>('steady');
@@ -249,6 +297,12 @@ export default function NetworkPage({ t, onNavigate }: Props) {
         }
         setNoDataPlane(s.dataPlane === 'none');
         setStoreReset(storeResetNoticeDue(summaryExtras(s).storeRecovered));
+        const fc = fileConnectRef.current;
+        if (fc) {
+            const end = resolveFileConnect(fc, s, Date.now());
+            if (end.outcome !== 'waiting') endFileConnect(end);
+            else if (end.next !== fc) setFileConnect(end.next);
+        }
         const p = pendingRef.current;
         if (!p) return;
         const outcome = resolvePending(p, s, Date.now());
@@ -318,8 +372,9 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     const onDisconnect = async () => {
         setFailure(null);
         setTapRefused(undefined);
-        if (pendingRef.current) cancelledRef.current = true;
+        if (pendingRef.current || fileConnectRef.current) cancelledRef.current = true;
         setPending(null);
+        setFileConnect(null);
         // Optimistic: clear the active route immediately so the button flips
         // to "Connect" without waiting for the next poll; the poll reconciles.
         setActiveRouteId(null);
@@ -412,8 +467,132 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     };
 
     const pendingId = pending?.routeId ?? null;
+    // How a "Connect with this file" ended. Only once the file has
+    // CONNECTED is a way chosen by hand before let go (as "Back to
+    // automatic" does): a failed, cancelled or refused connect leaves the
+    // person's pin as it was. Never ends in silence.
+    const endFileConnect = (end: FileConnectEnd) => {
+        setFileConnect(null);
+        if (end.outcome === 'connected') {
+            setPinnedRoute(null);
+            setPinnedId(null);
+            return;
+        }
+        if (end.outcome === 'cancelled' || cancelledRef.current) return;
+        setFailure({ key: autoVerdictKey(end.outcome === 'failed' ? end.verdict : '') });
+    };
+
+    // "Connect with this file": Daal chooses automatically among THIS
+    // file's ways (engine_set_auto_scope, then the ordinary automatic
+    // connect). It is not a choice of one way: nothing is pinned.
+    // Picking one way (its own row) stays onConnectRoute.
+    const onConnectFile = async (routeIds: string[]) => {
+        setFailure(null);
+        setTapRefused(undefined);
+        if (noDataPlane) {
+            setFailure({ key: 'conn.no_data_plane.title' });
+            return;
+        }
+        if (pendingRef.current || fileConnectRef.current || routeIds.length === 0) return;
+        cancelledRef.current = false;
+        setFileConnect(startFileConnect(routeIds, Date.now(), lastSummaryRef.current));
+        try {
+            const res = await contract.connectAutoWithin(routeIds);
+            const mine = fileConnectRef.current;
+            if (mine) {
+                // Desktop hands the engine's answer back; on Android the
+                // poll reads it from the `auto` block (applySummary).
+                const end = fileConnectFromResult(res);
+                if (end) endFileConnect(end);
+                else {
+                    setFileConnect(acceptFileConnect(mine, Date.now()));
+                    try {
+                        applySummary(await contract.connectionSummary());
+                    } catch {
+                        /* the poll will catch up */
+                    }
+                }
+            }
+            void load();
+        } catch (e) {
+            const mine = fileConnectRef.current;
+            setFileConnect(null);
+            if (mine && !cancelledRef.current) setFailure({ key: 'network.action_failed', detail: errorText(e) });
+        }
+    };
+
+    // The check's answer, wherever the page was meanwhile: in its sheet
+    // when that is open, else a short notice. The answer stays kept
+    // (lib/backupCheck.ts) for the 10 minutes the engine refuses another.
+    useEffect(() => {
+        const onKept = () => {
+            const k = keptCheck();
+            const c = checkRef.current;
+            if (!k || k.running || !k.answer || !c || !c.running || c.name !== k.fileName) return;
+            if (c.open) {
+                setCheck({ ...c, running: false, answer: k.answer, at: k.at });
+            } else {
+                setCheck(null);
+                toast.show(drillMessage(k.answer).tone, drillSentence(tRef.current, effectiveLocale(), k.answer, k.at ?? Date.now()));
+            }
+            if (k.answer.outcome === 'updated') void load().catch(() => {});
+        };
+        onKept();
+        return subscribeKeptCheck(onKept);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [contract]);
+
+    // "Check the backup update routes" for one file: blocks up to about
+    // two minutes; the sheet says so meanwhile. Closing the sheet, or
+    // leaving the tab, does not stop it.
+    const onCheckBackup = async (p: PublisherTreeRow) => {
+        const running = keptCheck();
+        if (running?.running) {
+            // One check at a time: its sheet, named, whichever file it is.
+            setCheck({ name: running.fileName, running: true, open: true });
+            return;
+        }
+        const at = Date.now();
+        // Checked a few minutes ago: the engine would refuse. Its lines
+        // again, and when a new check may run.
+        const before = keptAnswerFor(p.displayName, at, true);
+        if (before) {
+            setCheck(keptSheet(before));
+            return;
+        }
+        const routeId = drillRouteOf(p);
+        if (!routeId) return;
+        const started: KeptCheck = { fileName: p.displayName, running: true, startedAt: at };
+        setCheck({ name: p.displayName, running: true, open: true });
+        setKeptCheck(started);
+        const a = await contract.backupCheck(routeId);
+        if (a.outcome === 'rate_limited') {
+            // The engine still holds a stamp: show the lines it gave last
+            // time, if they are kept.
+            const last = keptAnswerFor(p.displayName, Date.now(), false);
+            if (last) {
+                const c = checkRef.current;
+                if (c && c.running && c.name === p.displayName) {
+                    if (c.open) setCheck(keptSheet(last, a.retryAfterS));
+                    else {
+                        setCheck(null);
+                        toast.show(drillMessage(a).tone, drillSentence(tRef.current, effectiveLocale(), a, Date.now()));
+                    }
+                }
+                // Set after the sheet, so the kept answer is not taken
+                // for this press's news.
+                setKeptCheck(last);
+                return;
+            }
+        }
+        setKeptCheck({ ...started, running: false, answer: a, at: Date.now() });
+    };
+
     const view = listView(tree, loadError !== null);
     const nowMs = Date.now();
+    // The open file's connect is the one on its way.
+    const connectingOpenFile = (p: PublisherTreeRow | null): boolean =>
+        fileConnect !== null && p !== null && p.cells.some((c) => c.routes.some((r) => fileConnect.routeIds.includes(r.routeId)));
     const locale = effectiveLocale();
     const openFile = tree?.find((p) => p.displayName === openName) ?? null;
     const stateOf = (routeId: string) => rowState(routeId, activeRouteId, pendingId, verifying);
@@ -654,7 +833,19 @@ export default function NetworkPage({ t, onNavigate }: Props) {
                 </Card>
             )}
 
-            {openFile && (
+            {check?.open && (
+                <BackupCheckSheet
+                    t={t}
+                    locale={locale}
+                    state={check}
+                    onClose={() => {
+                        const c = checkRef.current;
+                        setCheck(c && c.running ? { ...c, open: false } : null);
+                    }}
+                />
+            )}
+
+            {openFile && !check?.open && (
                 <FileSheet
                     t={t}
                     p={openFile}
@@ -669,6 +860,11 @@ export default function NetworkPage({ t, onNavigate }: Props) {
                     onBackToAuto={onBackToAuto}
                     onClose={() => setOpenName(null)}
                     onConnectRoute={onConnectRoute}
+                    onConnectFile={onConnectFile}
+                    connectingFile={connectingOpenFile(openFile)}
+                    backupRoutes={backupRoutesOf(openFile)}
+                    canCheck={canOfferCheck(openFile, summaryNow, activeRouteId, pendingId) && fileConnect === null}
+                    onCheck={() => void onCheckBackup(openFile)}
                     onDisconnect={onDisconnect}
                     onRefresh={() => void onRefreshFile(openFile)}
                     onStopUpdates={() => void onStopUpdates(openFile)}
@@ -729,7 +925,21 @@ export default function NetworkPage({ t, onNavigate }: Props) {
     );
 }
 
-interface FileSheetProps {
+/** A kept check's sheet: its lines again, and when a new check may run
+ *  (the engine's own wait when it gave one, else 10 minutes from the
+ *  start of the kept check). */
+function keptSheet(k: KeptCheck, retryAfterS = 0): BackupCheckState {
+    return {
+        name: k.fileName,
+        running: false,
+        open: true,
+        answer: k.answer,
+        at: k.at,
+        againAt: retryAfterS > 0 ? Date.now() + retryAfterS * 1000 : k.startedAt + CHECK_AGAIN_MS,
+    };
+}
+
+export interface FileSheetProps {
     t: (k: string) => string;
     p: PublisherTreeRow;
     dev: boolean;
@@ -743,7 +953,18 @@ interface FileSheetProps {
     /** Forget the way chosen by hand: Daal chooses again. */
     onBackToAuto: () => void;
     onClose: () => void;
+    /** Picking ONE way by hand (its row): pinned once connected. */
     onConnectRoute: (routeId: string) => void | Promise<void>;
+    /** "Connect with this file": automatic among these ways, no pin. */
+    onConnectFile: (routeIds: string[]) => void | Promise<void>;
+    /** That connect is on its way. */
+    connectingFile: boolean;
+    /** The backup update routes the file holds (the muted line). */
+    backupRoutes: readonly BackupRoute[];
+    /** "Check the backup update routes" is offered (the file has them,
+     *  and nothing is up). */
+    canCheck: boolean;
+    onCheck: () => void;
     onDisconnect: () => void | Promise<void>;
     onRefresh: () => void;
     /** Keep the ways, stop checking the file's web address. */
@@ -758,7 +979,7 @@ interface FileSheetProps {
 
 /** One file (spec C4.3): who it is from, the one connect action, the
  *  ways inside in plain words, and the rest behind ⋯. */
-function FileSheet({
+export function FileSheet({
     t,
     p,
     dev,
@@ -772,6 +993,11 @@ function FileSheet({
     onBackToAuto,
     onClose,
     onConnectRoute,
+    onConnectFile,
+    connectingFile,
+    backupRoutes,
+    canCheck,
+    onCheck,
     onDisconnect,
     onRefresh,
     onStopUpdates,
@@ -826,6 +1052,9 @@ function FileSheet({
             hint: failing.length === 0 ? t('files.bulk.none') : undefined,
             onSelect: () => setConfirmBulk(failing),
         });
+    }
+    if (canCheck) {
+        items.push({ id: 'check-backup', label: t('files.check.action'), icon: 'route', onSelect: onCheck });
     }
     if (p.publisherId !== '' || p.subscription) {
         items.push({ id: 'remove', label: t('network.remove_file'), icon: 'trash', tone: 'danger', onSelect: () => setConfirmRemove(true) });
@@ -900,11 +1129,28 @@ function FileSheet({
                                 >
                                     {t(rowActionLabelKey(action === 'connect' ? 'disconnect' : action))}
                                 </Button>
+                            ) : connectingFile ? (
+                                // Daal is choosing among this file's ways:
+                                // the press can be taken back.
+                                <Button block variant="secondary" onClick={() => void onDisconnect()} dataButton="file-connect">
+                                    {t('conn.cancel_action')}
+                                </Button>
                             ) : (
                                 <Button
                                     block
                                     disabled={!best || pendingId !== null}
-                                    onClick={() => best && void onConnectRoute(best.routeId)}
+                                    // Daal chooses among this file's ways:
+                                    // not a choice of one, so no pin. A
+                                    // file whose ways are all connected
+                                    // only by hand (a pasted WireGuard
+                                    // file) has nothing to choose among:
+                                    // its one way is connected as before.
+                                    onClick={() => {
+                                        if (!best) return;
+                                        const auto = autoRoutesOf(routes);
+                                        if (auto.length === 0) void onConnectRoute(best.routeId);
+                                        else void onConnectFile(auto.map((r) => r.routeId));
+                                    }}
                                     dataButton="file-connect"
                                 >
                                     {t('network.connect_file')}
@@ -913,7 +1159,9 @@ function FileSheet({
                         </div>
                         <OverflowMenu label={t('ui.more')} items={items} dataButton="file-more" />
                     </div>
-                    {pendingHere && <div style={{ fontSize: 13, color: 'var(--muted)' }}>{t('conn.headline_connecting')}</div>}
+                    {(pendingHere || (connectingFile && !inUse)) && (
+                        <div style={{ fontSize: 13, color: 'var(--muted)' }}>{t('conn.headline_connecting')}</div>
+                    )}
                     <div>
                         <div
                             style={{
@@ -989,6 +1237,7 @@ function FileSheet({
                             })}
                         </ul>
                     </div>
+                    <BackupLine t={t} list={backupRoutes} />
                     {dev && (
                         <div data-dev style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                             {p.cells.flatMap((c) => c.families).map((f) => (

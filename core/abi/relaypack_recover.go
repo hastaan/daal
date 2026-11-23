@@ -73,6 +73,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,12 +115,17 @@ const (
 	RecoverUnknownPack    = "unknown_pack"
 	RecoverInProgress     = "in_progress"
 	RecoverCancelled      = "cancelled"
+	// RecoverNotAvailable: a drill (relaypack_drill.go) of a file whose
+	// routes hold no update secret or no carriers member. Nothing dialled.
+	RecoverNotAvailable = "not_available"
 )
 
 // relay_recovery.trigger
 const (
 	RecoverTriggerFailure = "failure"
 	RecoverTriggerUser    = "user"
+	// RecoverTriggerDrill: the person's check of the backup routes.
+	RecoverTriggerDrill = "drill"
 )
 
 // recoverState: seq / cancel / done / stops are guarded by Core.mu; the
@@ -627,21 +633,43 @@ type RelayPackRefreshResult struct {
 	Rechecking bool `json:"rechecking"`
 	// Packs: one entry per pack walked (core/refresh RelayPackResult).
 	Packs []refresh.RelayPackResult `json:"packs"`
+	// Drill: for a drill only (relaypack_drill.go), per carrier class
+	// {result, reason}. Absent otherwise.
+	Drill map[string]refresh.DrillClass `json:"drill,omitempty"`
 }
 
 // RelayPackRefresh is engine_relaypack_refresh: look for a newer signed
 // pack now. relayPackID "" means every pack the device holds that names
 // a freshness endpoint (at most recoverMaxPacks).
 //
-// Blocking, bounded by the walk (≈ 55 s per pack at worst). The error is
-// non-nil only when the engine is not initialised; everything else is in
-// the JSON.
+// The argument may instead be a JSON object (it starts with "{"; a pack
+// id never does): {"relay_pack_id":"…"} is the same as the plain id, and
+// {"drill":true,"route_id":"…"} (or "relay_pack_id") is the person's
+// check of that file's backup update routes (relaypack_drill.go).
+//
+// Blocking, bounded by the walk (≈ 55 s per pack at worst; a drill up to
+// the ladder's 120 s and one pack download). The error is non-nil only
+// when the engine is not initialised; everything else is in the JSON.
 func RelayPackRefresh(relayPackID string) (string, error) {
 	c := loadedCore()
 	if c == nil {
 		return "", errors.New("abi: not initialized")
 	}
-	res := relayPackRefresh(c, relayPackID)
+	var res RelayPackRefreshResult
+	if req, ok, bad := parseRefreshRequest(relayPackID); bad {
+		res = RelayPackRefreshResult{Outcome: RecoverUnknownPack}
+	} else if ok && req.Drill {
+		res = relayPackDrill(c, req.RelayPackID, req.RouteID)
+	} else if ok && strings.TrimSpace(req.RelayPackID) == "" {
+		// An object that names no pack (a misspelt drill key, "{}"): not
+		// "every pack" — only the plain empty string means that.
+		res = RelayPackRefreshResult{Outcome: RecoverUnknownPack}
+	} else {
+		if ok {
+			relayPackID = req.RelayPackID
+		}
+		res = relayPackRefresh(c, relayPackID)
+	}
 	if res.Packs == nil {
 		res.Packs = []refresh.RelayPackResult{}
 	}

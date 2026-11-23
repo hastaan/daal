@@ -517,7 +517,16 @@ func surveyFreshLocked(mem map[string]netmem.RouteMemory, routeID string, now ti
 // surveyPlanLocked lists what the survey will check. Called once per
 // survey, with Core.mu held, after its first wait.
 func (c *Core) surveyPlanLocked(r *surveyRun) {
+	// The person's own "check all routes" checks ALL their routes, also
+	// while "Connect with this file" limits the automatic connect to one
+	// file (connect_auto_scope.go). The engine's own survey keeps the
+	// scope: it feeds the automatic connect's choices.
+	scope := c.auto.scope
+	if r.user {
+		c.auto.scope = nil
+	}
 	cands, left, _, err := c.autoCandidatesLocked(c.activeRoute)
+	c.auto.scope = scope
 	if err != nil {
 		return
 	}
