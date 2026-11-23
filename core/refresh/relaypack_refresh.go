@@ -732,7 +732,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	// member) it does nothing.
 	ladderKey := false
 	if err != nil && ladderAllowed(kind, viaTunnel) && ctx.Err() == nil {
-		lr := r.runLadder(ctx, target, rec, dialer, now, networkKey, w.googleConns)
+		lr := r.runLadder(ctx, target, rec, dialer, now, networkKey, w.googleConns, kind == kindOnDemand)
 		res.Ladder = lr.classes
 		r.recordLadder(relayPackID, lr.classes, now)
 		ladderKey = lr.standbyAccepted

@@ -370,6 +370,37 @@ func TestLadder_GapBetweenHosts(t *testing.T) {
 	}
 }
 
+// The person's button asks a class the strike rule holds; the engine's
+// own failure walk still skips it.
+func TestLadder_PersonsButtonIgnoresTheStrikeHold(t *testing.T) {
+	r, _, set, now, _ := ladderFixture(t)
+	set.github.set(nil, errors.New("connection reset"))
+	walk := func(kind refreshKind) {
+		t.Helper()
+		if _, err := r.refresh(context.Background(), "rp-1", kind, "net-a"); err == nil {
+			t.Fatal("premise: nothing should verify")
+		}
+	}
+	walk(kindFailure)
+	*now = now.Add(time.Hour)
+	walk(kindFailure)
+	*now = now.Add(time.Hour)
+	walk(kindFailure) // held
+	if set.github.Calls() != 2 {
+		t.Fatalf("premise: the hold: %d", set.github.Calls())
+	}
+	*now = now.Add(time.Minute)
+	walk(kindOnDemand)
+	if set.github.Calls() != 3 {
+		t.Fatalf("the button did not ask the held class: %d", set.github.Calls())
+	}
+	*now = now.Add(time.Minute)
+	walk(kindFailure) // the button's failure renewed the hold
+	if set.github.Calls() != 3 {
+		t.Fatalf("the failure walk asked a held class: %d", set.github.Calls())
+	}
+}
+
 // A class that failed twice on this network is skipped for 6 hours;
 // another network is not held by it; an answer clears it; a clock that
 // jumped back holds nothing.

@@ -34,7 +34,8 @@
 // between hosts, and it stops at the first note that verifies as newer.
 // A micro-only carrier is not asked when every sealed route already
 // keeps its key. A class that failed twice on this
-// network is skipped for ladderStrikeHold. The walk's floors and
+// network is skipped for ladderStrikeHold (the person's button asks it
+// anyway). The walk's floors and
 // per-network stamps (relaypack_recover.go) are untouched: the ladder
 // runs inside the walk they already allowed.
 //
@@ -387,8 +388,9 @@ type ladderResult struct {
 // is called by refresh() only when the mirror walk found no verified
 // document and ladderAllowed holds; dialer is that walk's direct dialer
 // and googleConns the connections it already made to Google's front.
+// byPerson: the walk is the person's button (kindOnDemand).
 func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, rec freshnessRecord,
-	dialer bootstrap.Dialer, now time.Time, networkKey string, googleConns int) ladderResult {
+	dialer bootstrap.Dialer, now time.Time, networkKey string, googleConns int, byPerson bool) ladderResult {
 
 	var out ladderResult
 	if r.Store == nil || RouteActive() || ctx.Err() != nil {
@@ -426,7 +428,13 @@ func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, r
 	// eligible: the carrier may be fetched now (no cost spent yet).
 	eligible := func(c Carrier) bool {
 		info := c.Info()
-		if usedClass[info.Class] || strikes.struck(tag, info.Class, now) {
+		if usedClass[info.Class] {
+			return false
+		}
+		// The strike hold spares a network the same failing hosts walk
+		// after walk. The person's own button is one press, so it asks
+		// a held class anyway; a failure still counts as a strike.
+		if !byPerson && strikes.struck(tag, info.Class, now) {
 			return false
 		}
 		if info.Kinds == NoteMicro && keyKept {

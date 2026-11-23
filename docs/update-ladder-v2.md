@@ -95,7 +95,8 @@ order) → 1 → 2 → 4 → 3 → 6 (only if switched on) → the app asks for 
 the walk although it ranks high, because it can only reveal the standby and because its
 names are logged at home. Limits for one walk: at most 8 TCP connections and 6 DNS
 questions, 120 s, one host per class, a class that failed twice on this network is
-skipped for 6 hours, and the walk stops at the first note that verifies as newer. Each
+skipped for 6 hours (the person's own update button asks it anyway; owner decision,
+2026-11-23), and the walk stops at the first note that verifies as newer. Each
 new host waits 2–10 s after the previous one. This keeps the existing floors
 (`DefaultFailureFloor` 10 min, `MaxFailureFloor` 1 h, the per-network stamps in
 `core/refresh/relaypack_recover.go`).
