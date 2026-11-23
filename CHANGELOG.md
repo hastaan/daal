@@ -26,12 +26,13 @@ that is already true.
   vless-reality, websocket-tls, naive (Cronet) and hysteria2.
 - `addDisallowedApplication(self)` keeps the engine's own sockets out of the
   tunnel, fixing "no available network interface" on every outbound dial.
-- ABI grew 48 → 71 exported `engine_` symbols (append-only; see
+- ABI grew 48 → 72 exported `engine_` symbols (append-only; see
   `specs/engine-abi-v1.md`, whose ledger is the authoritative count).
   `engine_relaypack_refresh` looks for a newer signed pack on request; the
-  `engine_standby_key` takes a standby key a person was sent, and the latest,
-  `engine_set_link_resolvers`, tells the engine the DNS servers of the network
-  under the VPN.
+  `engine_standby_key` takes a standby key a person was sent,
+  `engine_set_link_resolvers` tells the engine the DNS servers of the network
+  under the VPN, and the latest, `engine_set_auto_scope`, lets "Connect with
+  this file" choose automatically among that file's routes.
 - A route that stays "connected" while its relay's address is null-routed
   is no longer a trap (blackout plan C0): with nothing else carrying, the
   engine pauses the dead instance, walks the pack's freshness mirrors once,

@@ -884,6 +884,16 @@ async fn relaypack_refresh(app: tauri::AppHandle, relay_pack_id: Option<String>)
     .await)
 }
 
+/// "Connect with this file": arm the next automatic connect (desktop
+/// `connect_auto`, Android `vpn_start` with no route id) to choose only
+/// among this file's routes. The engine lives in this process on both,
+/// so the scope armed here is the one the VPN service's connect takes.
+/// The ids are never logged.
+#[tauri::command]
+fn set_auto_scope(state: State<'_, AppState>, route_ids: Vec<String>) -> Result<i32, String> {
+    cmdlog::logged("set_auto_scope", || cmd::set_auto_scope(&state, &route_ids).map_err(|e| e.to_string()))
+}
+
 /// Optional add-ons, standby address: the recipient types the key they
 /// were sent. Answers "not in this engine library" until the engine
 /// lane (S7) exports `engine_standby_key`.
@@ -4544,6 +4554,7 @@ pub fn run() {
             recipient_qr_cancel,
             recipient_qr_finalize,
             relaypack_refresh,
+            set_auto_scope,
             recipient_standby_key,
             survey_routes,
             // Network test (field probe v2)

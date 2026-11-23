@@ -31,7 +31,8 @@
 // one carrier per class, one reader of rung 4 (chosen by
 // HKDF(u, device salt, UTC day): pickReader), at most two connections to
 // Google's front counting the mirror walk's Apps Script door, 2–10 s
-// between hosts, and it stops at the first note that verifies as newer.
+// between hosts, and it stops at the first note that verifies as newer
+// (except the person's drill, drill.go, which asks every class it may).
 // A micro-only carrier is not asked when every sealed route already
 // keeps its key. A class that failed twice on this
 // network is skipped for ladderStrikeHold (the person's button asks it
@@ -382,24 +383,51 @@ type ladderResult struct {
 	tried int
 	// classes: class → LadderReached / LadderNothingNew / LadderFailed.
 	classes map[string]string
+	// drill: the richer per-class words (drill.go); read only by the
+	// drill, built on every walk.
+	drill *drillTrace
 }
+
+// ladderMode is who started the walk the ladder runs in.
+type ladderMode int
+
+const (
+	// ladderByEngine: the engine's own failure walk. The strike hold
+	// applies.
+	ladderByEngine ladderMode = iota
+	// ladderByPerson: the person's button (kindOnDemand). A held class
+	// is asked anyway.
+	ladderByPerson
+	// ladderDrill: the person's check of the backup routes (kindDrill,
+	// drill.go). A held class is asked, a micro-only carrier is asked
+	// even when the key is kept already, and the walk does not stop at
+	// the first note.
+	ladderDrill
+)
 
 // runLadder walks the carriers for one pack (see the file comment). It
 // is called by refresh() only when the mirror walk found no verified
 // document and ladderAllowed holds; dialer is that walk's direct dialer
 // and googleConns the connections it already made to Google's front.
-// byPerson: the walk is the person's button (kindOnDemand).
+// mode: who started the walk.
 func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, rec freshnessRecord,
-	dialer bootstrap.Dialer, now time.Time, networkKey string, googleConns int, byPerson bool) ladderResult {
+	dialer bootstrap.Dialer, now time.Time, networkKey string, googleConns int, mode ladderMode) ladderResult {
 
 	var out ladderResult
-	if r.Store == nil || RouteActive() || ctx.Err() != nil {
+	out.drill = &drillTrace{classes: map[string]DrillClass{}}
+	if r.Store == nil || ctx.Err() != nil {
+		return out
+	}
+	if RouteActive() {
+		out.drill.cut = DrillSkipRouteUp
+		out.drill.fill(ladderOrder(r.ladderCarriers()), nil)
 		return out
 	}
 	held := r.loadLadderHeld(t.RelayPackID)
 	if held == nil {
 		return out
 	}
+	drill := mode == ladderDrill
 	resolver := ""
 	if r.Resolver != nil {
 		resolver = r.Resolver()
@@ -425,33 +453,42 @@ func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, r
 
 	usedClass := map[string]bool{}
 	tcp, dns := 0, 0
-	// eligible: the carrier may be fetched now (no cost spent yet).
-	eligible := func(c Carrier) bool {
+	// whyNot: "" when the carrier may be fetched now (no cost spent
+	// yet), else the drill's reason word (DrillSkip*) it may not.
+	whyNot := func(c Carrier) string {
 		info := c.Info()
 		if usedClass[info.Class] {
-			return false
+			return DrillSkipBudget // one carrier per class
 		}
 		// The strike hold spares a network the same failing hosts walk
 		// after walk. The person's own button is one press, so it asks
 		// a held class anyway; a failure still counts as a strike.
-		if !byPerson && strikes.struck(tag, info.Class, now) {
-			return false
+		if mode == ladderByEngine && strikes.struck(tag, info.Class, now) {
+			return DrillSkipBudget
 		}
-		if info.Kinds == NoteMicro && keyKept {
-			return false
+		// The drill asks it anyway: whether the route answers is what
+		// the person wants to know (one walk per 10 minutes).
+		if info.Kinds == NoteMicro && keyKept && !drill {
+			return DrillSkipNotHeld
 		}
 		if tcp+info.Cost.TCP > ladderMaxTCP || dns+info.Cost.DNS > ladderMaxDNS {
-			return false
+			return DrillSkipBudget
 		}
 		if info.Class == ClassGoogle && googleConns+info.Cost.TCP > ladderMaxGoogle {
-			return false
+			return DrillSkipBudget
 		}
-		return c.Usable(env)
+		if !c.Usable(env) {
+			return carrierSkipReason(c, env)
+		}
+		return ""
 	}
+	eligible := func(c Carrier) bool { return whyNot(c) == "" }
 	order := ladderOrder(r.ladderCarriers())
 	var readerPick Carrier
 	readerPicked := false
 	var fallback *walkResult
+	// The drill's best newer note (the highest sequence), and its class.
+	var newerBest *walkResult
 	stopped := false
 	for _, c := range order {
 		info := c.Info()
@@ -469,15 +506,30 @@ func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, r
 				readerPick = r.pickReader(cands, held, now)
 			}
 			if c != readerPick {
+				why := whyNot(c)
+				if why == "" {
+					why = DrillSkipBudget // one reader of rung 4 per walk
+				}
+				out.drill.skip(info.Class, why)
 				continue
 			}
-		} else if !eligible(c) {
+		} else if why := whyNot(c); why != "" {
+			out.drill.skip(info.Class, why)
 			continue
 		}
-		if RouteActive() || lctx.Err() != nil {
+		if RouteActive() {
+			out.drill.cut = DrillSkipRouteUp
+			break
+		}
+		if lctx.Err() != nil {
+			out.drill.cut = DrillSkipBudget
 			break
 		}
 		if !sleepCtx(lctx, r.ladderGap()) || RouteActive() {
+			out.drill.cut = DrillSkipBudget
+			if RouteActive() {
+				out.drill.cut = DrillSkipRouteUp
+			}
 			break
 		}
 		usedClass[info.Class] = true
@@ -507,24 +559,61 @@ func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, r
 				googleConns -= info.Cost.TCP
 			}
 			out.tried--
+			out.drill.skip(info.Class, carrierSkipReason(c, env))
 			continue
 		case err != nil:
 			if ctx.Err() != nil || lctx.Err() != nil || RouteActive() || errors.Is(err, ErrTunnelRequired) {
 				// Cut off (the caller, the ladder's own time, a route
 				// coming up): nothing was learned about the class.
 				stopped = true
+				out.drill.cut = DrillSkipBudget
+				if RouteActive() || errors.Is(err, ErrTunnelRequired) {
+					out.drill.cut = DrillSkipRouteUp
+				}
+				out.drill.skip(info.Class, out.drill.cut)
 			} else {
 				r.noteStrike(tag, info.Class, true, now)
 				out.setClass(info.Class, LadderFailed)
+				out.drill.set(info.Class, DrillFailed)
 			}
 		default:
 			r.noteStrike(tag, info.Class, false, now)
-			newer, fb, accepted := r.weighNotes(notes, info, env, held, t, rec, now)
+			newer, fb, accepted, microOK := r.weighNotes(notes, info, env, held, t, rec, now)
 			if accepted {
 				out.standbyAccepted = true
 			}
+			if drill {
+				// The drill asks every class: it records what this one
+				// gave and walks on. The newer note with the highest
+				// sequence is the one the walk applies (through the same
+				// gate as any walk's); the class that gave it says
+				// "reached" only once it is applied (drill.go).
+				switch {
+				case accepted:
+					out.setClass(info.Class, LadderReached)
+					out.drill.set(info.Class, DrillReached)
+				case newer != nil:
+					out.setClass(info.Class, LadderReached)
+					out.drill.set(info.Class, DrillVerified)
+					if newerBest == nil || newer.doc.Sequence > newerBest.doc.Sequence {
+						newerBest = newer
+						out.drill.newerClass = info.Class
+					}
+				case fb != nil || microOK:
+					out.setClass(info.Class, LadderNothingNew)
+					out.drill.set(info.Class, DrillVerified)
+				default:
+					out.setClass(info.Class, LadderNothingNew)
+					out.drill.set(info.Class, DrillNothingNew)
+				}
+				if fb != nil && fallback == nil {
+					fallback = fb
+				}
+				break
+			}
 			if newer != nil || accepted {
 				out.setClass(info.Class, LadderReached)
+				out.drill.set(info.Class, DrillReached)
 				switch {
 				case newer != nil:
 					out.walk = *newer
@@ -539,14 +628,23 @@ func (r *RelayPackRefresher) runLadder(ctx context.Context, t RelayPackTarget, r
 				fallback = fb
 			}
 			out.setClass(info.Class, LadderNothingNew)
+			if fb != nil || microOK {
+				out.drill.set(info.Class, DrillVerified)
+			} else {
+				out.drill.set(info.Class, DrillNothingNew)
+			}
 		}
 		if stopped {
 			break
 		}
 	}
-	if fallback != nil {
+	switch {
+	case newerBest != nil:
+		out.walk = *newerBest
+	case fallback != nil:
 		out.walk = *fallback
 	}
+	out.drill.fill(order, func(c Carrier) string { return whyNot(c) })
 	return out
 }
 
@@ -669,15 +767,23 @@ func (l *ladderResult) setClass(class, word string) {
 // weighNotes checks what one carrier returned, in order. newer: a full
 // note that verified and says something new (to be applied by the walk);
 // fallback: one that verified and says nothing new; accepted: a micro
-// note's key the store kept.
+// note's key the store kept; microOK: a micro note the route's SIGNED
+// sealed standby accepts, kept already (or not taken by the store) —
+// for the drill's "verified", it changes nothing that is trusted.
 func (r *RelayPackRefresher) weighNotes(notes []Note, info CarrierInfo, env *CarrierEnv, held *ladderHeld,
-	t RelayPackTarget, rec freshnessRecord, now time.Time) (newer, fallback *walkResult, accepted bool) {
+	t RelayPackTarget, rec freshnessRecord, now time.Time) (newer, fallback *walkResult, accepted, microOK bool) {
 
 	for _, n := range notes {
 		switch n.Kind {
 		case NoteMicro:
-			if info.Kinds&NoteMicro != 0 && r.acceptMicro(n, env, held, t.RelayPackID) {
-				return nil, fallback, true
+			if info.Kinds&NoteMicro == 0 {
+				continue
+			}
+			if r.acceptMicro(n, env, held, t.RelayPackID) {
+				return nil, fallback, true, true
+			}
+			if env.Standby != nil && env.Standby.Matches(n.StandbyKey) {
+				microOK = true
 			}
 		case NoteFull:
 			if info.Kinds&NoteFull == 0 {
@@ -688,14 +794,14 @@ func (r *RelayPackRefresher) weighNotes(notes []Note, info CarrierInfo, env *Car
 				continue
 			}
 			if isNew {
-				return w, fallback, false
+				return w, fallback, false, microOK
 			}
 			if fallback == nil {
 				fallback = w
 			}
 		}
 	}
-	return nil, fallback, false
+	return nil, fallback, false, microOK
 }
 
 // acceptMicro: the candidate opens the SIGNED sealed standby, is not

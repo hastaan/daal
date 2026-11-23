@@ -8,14 +8,15 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **71 release symbols** (61 verified 2026-11-19
+Current surface count: **72 release symbols** (61 verified 2026-11-19
 with `nm` against a library built from the tree; `engine_network_facts`
 added the same day, `engine_relaypack_refresh`, the five
 `engine_field_probe_*`, `engine_survey_routes` and `engine_standby_key`
-on 2026-11-20, `engine_set_link_resolvers` on 2026-11-22, all counted from the source — see
+on 2026-11-20, `engine_set_link_resolvers` on 2026-11-22, `engine_set_auto_scope`
+on 2026-11-23 (72 verified with `nm` the same day) — see
 the ABI ledger at the end of this document, which is the authoritative
 count). The source
-tree carries **74** `//export engine_*` declarations; the extra three
+tree carries **75** `//export engine_*` declarations; the extra three
 are `//go:build cshared && soak` and are never present in a release
 build.
 
@@ -540,6 +541,30 @@ A route is connected only once it has carried one real round trip
 
   and returns the bytes written, or -1 only when the engine is not
   initialised. A pass in which nothing carried is not an error.
+  - **One file's routes** (2026-11-23): `engine_set_auto_scope(const
+    char* route_ids_json) -> int` arms a scope for the NEXT
+    `engine_connect_auto` (on Android: the VPN service's automatic
+    connect, `vpn_start` with no route id): that call — and the
+    automatic connect while it stays in charge (fall-over, speed move,
+    move to the best route, survey) — lists only those routes as
+    candidates; everything else (order, refusals, verdicts) is
+    unchanged, and the engine is in automatic mode, not pinned. `"[]"`
+    disarms; an arm lapses after 2 min; a call to `engine_connect_auto`
+    with none armed is over every route. The scope covers the connect
+    asked for and the fall-over while a route in it still carries; it
+    ENDS when a scoped pass finds nothing in it (no candidate or none
+    carried, and no walk for a new address under way), so the engine's
+    next pass (its own, or a host's re-ask) is over every route. It also
+    ends with `engine_set_route`, `engine_clear_route`, Shutdown or the
+    next `engine_connect_auto`. The person's own survey
+    (`engine_survey_routes(1)`) is never scoped. Connected and carrying
+    on a route outside the scope, the call runs a pass over the scope;
+    when nothing in it carries, the route that was connected is put back
+    (carrying), the automatic connect takes charge of it with the pass's
+    verdict in `auto`, and the answer is the pass's (`connected`
+    false). On a route inside the scope, it names it and takes charge. Returns how many of the ids the store
+    holds, -1 when not initialised or for input that is not a JSON list
+    of strings. The `auto` block gains `"scoped":bool`.
   - **Candidates**: every imported route that `engine_set_route` would
     not refuse right now (same function: not revoked, not expired, not
     needing a new file, not cooling down, endpoint guard), minus
@@ -941,6 +966,30 @@ A route is connected only once it has carried one real round trip
   "applied":bool,"changed":bool,"via_tunnel":bool,"endpoints_tried":N,
   "providers":N,…}]}`; returns the bytes written, or -1 only when the
   engine is not initialised. No URL, host or address is ever returned.
+
+  **The JSON request (2026-11-23, no signature change).** The argument
+  may instead be a JSON object — it starts with `{`, which no pack id
+  does. `{"relay_pack_id":"…"}` is the plain id. `{"drill":true,
+  "route_id":"<any route of the file>"}` (or `"relay_pack_id"`) is the
+  **drill**: the person's check of that file's backup update routes
+  (`core/refresh/drill.go`, `core/abi/relaypack_drill.go`). It walks
+  ONLY the update ladder of that pack (never the mirrors, never the
+  pointer layer), every class it may ask within the ladder's caps,
+  ignoring the strike hold (a failure still counts); per pack at most
+  once per 10 min (its own stamp; a clock that jumped back holds
+  nothing; a drill that sent nothing gives it back). Never while a route
+  is active, even one that carries nothing: `tunnel_required`, nothing
+  stopped or dialled. A file whose routes hold no update secret or no
+  carriers member: `not_available`, nothing dialled. A note that
+  verifies as newer is applied through the same gate as any walk. The
+  answer is the object above plus `"drill":{"<class>":{"result":
+  "reached|verified|nothing_new|failed|skipped","reason":"not_in_file|
+  no_resolver|budget|route_up|not_held"}}` (`reason` for `skipped`
+  only), classes `github`, `google`, `goproxy`, `jsdelivr`, `dns`; the
+  pack entry's `kind` is `"drill"`; `relay_recovery.trigger` reads
+  `"drill"` while it runs. A request that starts with `{` and does not
+  parse is `unknown_pack`. Older engines read the whole object as a
+  pack id and answer `unknown_pack`.
 - **Network test** — `engine_field_probe_{start,status,cancel,seal,discard}`
   (added 2026-11-20, `core/abi/fieldprobe.go`; the test is
   `specs/field-probe-v2.md`):
@@ -1478,7 +1527,11 @@ nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_
 grep -rh '^//export engine_' core/ | wc -l
 ```
 
-**Release surface: 71.  Source surface: 74.** (2026-11-22:
+**Release surface: 72.  Source surface: 75.** (2026-11-23:
+`engine_set_auto_scope` added ("Connect with this file" chooses
+automatically among one file's routes), 71 / 74 → 72 / 75, the release
+count verified with `nm` against a library built from the tree.
+2026-11-22:
 `engine_set_link_resolvers` added (update ladder v2, the DNS reader on
 Android), 70 / 73 → 71 / 74. 2026-11-20, later:
 `engine_standby_key` added (optional add-ons S7); counting the source
@@ -1507,7 +1560,7 @@ signature.
 
 | Symbol | Signature | Notes |
 |---|---|---|
-| `engine_route_summary` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 on error |
+| `engine_route_summary` | `(const char *route_id, void *out, int out_len) -> int` | JSON body via `copyOut`; -1 on error. Since 2026-11-23 a route the store does not hold (or `""`) is an EMPTY body (0 bytes) and no recorded failure, not -1 with "sql: no rows". The summary (and every row of `engine_available_routes`) gains `"backup_routes":["gittag","dns"]` — the backup update routes the route's file holds (`gittag`: an update secret and the git-tag carrier; `dns`: a secret DNS may use, the DNS carrier and a sealed standby), absent when none; never a repository or a zone |
 | `engine_available_routes` | `(void *out, int out_len) -> int` | JSON body via `copyOut` |
 | `engine_throughput_snapshot` | `(void *out, int out_len) -> int` | JSON body via `copyOut` |
 | `engine_panic_wipe` | `(void) -> int` | 0 on success, -1 on error |
@@ -1534,6 +1587,7 @@ Added after that pass (append-only, no existing signature changed):
 | `engine_field_probe_discard` | `(void) -> int` | results deleted (>= 0), -1 on error |
 | `engine_survey_routes` | `(int start, void *out, int out_len) -> int` | JSON body via `copyOut`; recorded here 2026-11-20, the comment above its export in `core/abi/survey_export.go` is its contract |
 | `engine_standby_key` | `(const char *relay_pack_id, const char *key, void *out, int out_len) -> int` | JSON `{"outcome":"accepted\|no_match\|malformed\|no_standby","routes":<n>}` via `copyOut`; `relay_pack_id` `""` = every held file; keeps the 16 key bytes on each route whose sealed `_standby` it opens; never echoes the key or the address; -1 when the engine is not initialised or the store cannot be written. Optional for the desktop core (`Engine::standby_key`). `specs/optional-addons-v1.md` §3.4 |
+| `engine_set_auto_scope` | `(const char *route_ids_json) -> int` | arms the route ids of one file for the next `engine_connect_auto` (2 min); `"[]"` disarms; returns how many ids the store holds, -1 when not initialised or the input is not a JSON list of strings; the ids are never stored or logged. Optional for the hosts; see "One file's routes" under "Automatic connect" above and the comment in `core/abi/connect_auto_scope_export.go` |
 | `engine_set_link_resolvers` | `(const char *servers_json) -> int` | the DNS servers of the network under any VPN, a JSON list of `"addr"` / `"addr:port"`, `"[]"` when that network is lost; once the host has spoken its list is final (no fallback to resolv.conf). 1 when the update ladder's DNS reader has a resolver to ask, 0 none, -1 input that is not a JSON list of strings; never stored or logged. Optional for the hosts (`Engine::set_link_resolvers`); comment above its export in `core/abi/link_resolvers_export.go` |
 
 The TUN triplet was specified only in
@@ -1560,8 +1614,8 @@ grows again, update the live ones together (the count was 60 in each as
 of 2026-11-19; `engine_connect_auto` made it 61 and
 `engine_network_facts` 62 the same day, and only
 `daal` `EXPECTED_ABI` and this document were updated with them; the last three are dated history and keep the number
-they were written with). On 2026-11-20 (70, after `engine_standby_key`) and again on 2026-11-22 (71, after
-`engine_set_link_resolvers`) the live
+they were written with). On 2026-11-20 (70, after `engine_standby_key`), on 2026-11-22 (71, after
+`engine_set_link_resolvers`) and on 2026-11-23 (72, after `engine_set_auto_scope`) the live
 ones were brought up together: `daal` `EXPECTED_ABI`, `specs/frp-track-v1.md`,
 `development-phases/README.md`, `docs/build-and-release.md` and the unreleased
 section of `CHANGELOG.md`:

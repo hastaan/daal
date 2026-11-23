@@ -591,13 +591,16 @@ class DaalVpnService : VpnService() {
 
       override fun onLinkPropertiesChanged(network: Network, link: LinkProperties) {
         netEvent(netWatch.link(network.networkHandle, linkOf(link), netNow()))
-        sendResolvers(dnsOf(link))
+        LinkResolvers.link(LinkResolvers.SERVICE, network, link)
       }
 
       override fun onLost(network: Network) {
         Log.i(TAG, "network: event lost")
         netEvent(netWatch.lost(network.networkHandle, netNow()))
-        sendResolvers(emptyList())
+        // Not "[]" outright: the app reports too (LinkResolvers), and a
+        // lost for a network that is no longer the current one must not
+        // wipe the list just set (ResolverGate).
+        LinkResolvers.lost(LinkResolvers.SERVICE, network)
       }
     }
     try {
@@ -615,7 +618,8 @@ class DaalVpnService : VpnService() {
         val caps = try { cm.getNetworkCapabilities(active)?.let { capsOf(it) } } catch (_: Throwable) { null }
         val lp = try { cm.getLinkProperties(active) } catch (_: Throwable) { null }
         val link = lp?.let { try { linkOf(it) } catch (_: Throwable) { null } }
-        if (lp != null) sendResolvers(dnsOf(lp))
+        // Never the tunnel's own servers: the active network can be a VPN.
+        if (lp != null && caps != null && !caps.vpn) LinkResolvers.link(LinkResolvers.SERVICE, active, lp)
         first = netWatch.startDescribed(active.networkHandle, caps, link, netNow())
         netEvent(netWatch.nextIn(netNow()))
       } else {
@@ -673,6 +677,7 @@ class DaalVpnService : VpnService() {
     netWatch.stop()
     mainHandler.removeCallbacks(netFlush)
     lastNetFacts = null
+    LinkResolvers.detach(LinkResolvers.SERVICE)
     try {
       (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)?.unregisterNetworkCallback(cb)
     } catch (_: Throwable) {}
@@ -770,31 +775,9 @@ class DaalVpnService : VpnService() {
     ""
   }
 
-  /** The link's DNS server addresses (never logged). */
-  private fun dnsOf(link: LinkProperties): List<String> = try {
-    link.dnsServers.mapNotNull { a -> a.hostAddress?.takeIf { it.isNotEmpty() } }
-  } catch (_: Throwable) {
-    emptyList()
-  }
-
-  /**
-   * Any thread. The link's DNS servers to the engine
-   * (`engine_set_link_resolvers`), on the network thread. The log line
-   * carries only how many and the engine's code.
-   */
-  private fun sendResolvers(servers: List<String>) {
-    val body = org.json.JSONArray(servers.take(8)).toString()
-    try {
-      network.execute {
-        val rc = try {
-          DaalCoreBridge.setLinkResolvers(body)
-        } catch (t: Throwable) {
-          RC_THREW
-        }
-        Log.i(TAG, "network: resolvers n=${servers.size} engine_rc=$rc")
-      }
-    } catch (_: Throwable) {}
-  }
+  // The link's DNS servers go to the engine through LinkResolvers (the
+  // app reports them too, with no service running; ResolverGate decides
+  // which list the engine holds when both speak).
 
   private fun linkOf(link: LinkProperties): NetworkWatch.Link {
     val subnets = ArrayList<String>()

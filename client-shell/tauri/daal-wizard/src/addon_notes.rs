@@ -719,6 +719,10 @@ fn stage_container(ctx: &WizardCtx, op: i64, bytes: &[u8]) -> Result<Staged> {
 fn write_gittag(ctx: &WizardCtx, row: &AddonRow) -> Result<NotesDetail> {
     let op = row.operator_id;
     let mut d = detail_of(row);
+    // Each attempt's word is its own: the row still carries the last
+    // attempt's, and one that fails before the helper runs would
+    // otherwise log (and keep) that older word.
+    d.last_error.clear();
     let now = (ctx.clock)();
     let res = (|| -> Result<Value> {
         let token = github_token(ctx, row)?
@@ -769,6 +773,17 @@ fn write_gittag(ctx: &WizardCtx, row: &AddonRow) -> Result<NotesDetail> {
         Err(coded(E_GITTAG_UNREACHABLE, "seq_behind"))
     })();
     d.last_try_at_unix = now;
+    match &res {
+        Ok(v) => {
+            let reason = s(v, "reason");
+            let word = if reason.is_empty() { "ok".to_string() } else { reason };
+            log_write(op, AddonKind::Gittag, &word, write_changed(AddonKind::Gittag, v));
+        }
+        Err(e) => {
+            let word = if d.last_error.is_empty() { error_word(e) } else { d.last_error.clone() };
+            log_write(op, AddonKind::Gittag, &word, false);
+        }
+    }
     match res {
         Ok(v) => {
             let got = v.get("seq").and_then(Value::as_u64).unwrap_or(0);
@@ -821,6 +836,10 @@ fn dns_zone(ctx: &WizardCtx, op: i64) -> Result<String> {
 fn write_dns(ctx: &WizardCtx, row: &AddonRow) -> Result<NotesDetail> {
     let op = row.operator_id;
     let mut d = detail_of(row);
+    // Each attempt's word is its own: the row still carries the last
+    // attempt's, and one that fails before the helper runs would
+    // otherwise log (and keep) that older word.
+    d.last_error.clear();
     let now = (ctx.clock)();
     let res = (|| -> Result<Value> {
         let token = crate::addon_cdn::cf_token(ctx, op)?;
@@ -872,6 +891,13 @@ fn write_dns(ctx: &WizardCtx, row: &AddonRow) -> Result<NotesDetail> {
         }
     })();
     d.last_try_at_unix = now;
+    match &res {
+        Ok(v) => log_write(op, AddonKind::Dnsnote, "ok", write_changed(AddonKind::Dnsnote, v)),
+        Err(e) => {
+            let word = if d.last_error.is_empty() { error_word(e) } else { d.last_error.clone() };
+            log_write(op, AddonKind::Dnsnote, &word, false);
+        }
+    }
     match res {
         Ok(v) => {
             d.epoch = v.get("epoch").and_then(Value::as_u64).unwrap_or_else(|| epoch_at(now));
@@ -895,6 +921,64 @@ fn write_row(ctx: &WizardCtx, row: &AddonRow) -> Result<NotesDetail> {
         AddonKind::Gittag => write_gittag(ctx, row),
         AddonKind::Dnsnote => write_dns(ctx, row),
         _ => Err(WizardError::Validation("not a note switch".into())),
+    }
+}
+
+// ---------------------------------------------------------------------
+// The log line
+// ---------------------------------------------------------------------
+
+/// The one line a write attempt leaves in the app's log (the same
+/// `eprintln!` the `[recipient_provision]` and `[rotate_credentials]`
+/// lines use, so it reaches the phone's log too):
+///
+/// `[notes_write] op=<relay id> kind=gittag|dnsnote outcome=<word> changed=yes|no`
+///
+/// `outcome` is `ok` (or the helper's own word for a write that went
+/// through, such as `already_published`) or the code word kept on the
+/// row (`missing_permission`, `network`, `helper_too_old`…). Nothing
+/// else: never a token, a repository or owner, a zone, a note name, a
+/// tag or an address. A word that is not the closed shape of a code
+/// word is written `error`, so even a helper that answered something
+/// odd cannot put a name in the line.
+fn write_line(op: i64, kind: AddonKind, outcome: &str, changed: bool) -> String {
+    let kind = match kind {
+        AddonKind::Gittag => "gittag",
+        AddonKind::Dnsnote => "dnsnote",
+        _ => "other",
+    };
+    let closed = !outcome.is_empty()
+        && outcome.len() <= 40
+        && outcome.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    let word = if closed { outcome } else { "error" };
+    format!(
+        "[notes_write] op={op} kind={kind} outcome={word} changed={}",
+        if changed { "yes" } else { "no" }
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The lines this test thread printed (tests read them back).
+    pub(crate) static WRITE_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn log_write(op: i64, kind: AddonKind, outcome: &str, changed: bool) {
+    let line = write_line(op, kind, outcome, changed);
+    #[cfg(test)]
+    WRITE_LINES.with(|l| l.borrow_mut().push(line.clone()));
+    eprintln!("{line}");
+}
+
+/// Whether a write that went through changed anything: gittag says so
+/// (`changed`); dnsnote counts the records it created, replaced or
+/// removed.
+fn write_changed(kind: AddonKind, v: &Value) -> bool {
+    match kind {
+        AddonKind::Gittag => v.get("changed").and_then(Value::as_bool).unwrap_or(false),
+        _ => ["created", "replaced", "removed"]
+            .iter()
+            .any(|k| v.get(*k).and_then(Value::as_u64).unwrap_or(0) > 0),
     }
 }
 

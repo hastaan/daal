@@ -168,6 +168,23 @@ func (c *dnsCarrier) Usable(env *CarrierEnv) bool {
 	return ok
 }
 
+// SkipReason says why the reader is not usable, for the drill
+// (drill.go): no zone in the file, nothing held it may use, or no
+// resolver of the network known. "" when it is usable. No I/O.
+func (c *dnsCarrier) SkipReason(env *CarrierEnv) string {
+	if _, ok := c.zone(env); !ok {
+		return DrillSkipNotInFile
+	}
+	if env.Standby == nil || env.Standby.Mode != bundle.StandbyModeSealed ||
+		len(env.Tries(bundle.NoteCarrierDNS, NoteMicro)) == 0 {
+		return DrillSkipNotHeld
+	}
+	if _, ok := c.resolver(env); !ok {
+		return DrillSkipNoResolver
+	}
+	return ""
+}
+
 func (c *dnsCarrier) Fetch(ctx context.Context, env *CarrierEnv) ([]Note, error) {
 	if !c.Usable(env) {
 		return nil, ErrCarrierUnconfigured

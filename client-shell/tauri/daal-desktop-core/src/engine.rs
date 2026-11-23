@@ -240,6 +240,12 @@ pub struct Engine {
     /// sent. Optional: no library has it until that lane lands, and the
     /// command then answers "not in this engine library".
     standby_key: Option<extern "C" fn(*const c_char, *const c_char, *mut c_void, c_int) -> c_int>,
+
+    /// `engine_set_auto_scope` (core/abi/connect_auto_scope.go): "Connect
+    /// with this file" arms the next automatic connect to choose only
+    /// among that file's routes. Optional: an older library loads, and
+    /// the app then connects automatically over every route.
+    set_auto_scope: Option<extern "C" fn(*const c_char) -> c_int>,
 }
 
 impl Engine {
@@ -576,6 +582,10 @@ impl Engine {
             >(&lib, b"engine_standby_key")
             .ok()
             .map(|sym| *sym);
+            let set_auto_scope =
+                lookup::<unsafe extern "C" fn(*const c_char) -> c_int>(&lib, b"engine_set_auto_scope")
+                    .ok()
+                    .map(|sym| *sym);
 
             // Reinterpret each unsafe-extern as the safe-extern variant
             // we store in the struct. The wrapper methods enforce all
@@ -656,6 +666,7 @@ impl Engine {
                 relaypack_refresh: relaypack_refresh.map(|f| std::mem::transmute(f)),
                 survey_routes: survey_routes.map(|f| std::mem::transmute(f)),
                 standby_key: standby_key.map(|f| std::mem::transmute(f)),
+                set_auto_scope: set_auto_scope.map(|f| std::mem::transmute(f)),
             };
 
             // Verify ABI version BEFORE returning the handle.
@@ -1546,6 +1557,24 @@ impl Engine {
             0 => Ok(Some(false)),
             _ => Err(DesktopError::EngineSymbol("engine_set_link_resolvers refused the list".into())),
         }
+    }
+
+    /// `engine_set_auto_scope`: arm the next automatic connect to choose
+    /// only among `route_ids` (one file's routes; empty disarms). Returns
+    /// `Ok(Some(n))` with how many of the ids the store holds, `Ok(None)`
+    /// when this library has no such call. The ids are never logged.
+    pub fn set_auto_scope(&self, route_ids: &[String]) -> Result<Option<i32>> {
+        self.ensure_ready()?;
+        let Some(f) = self.set_auto_scope else {
+            return Ok(None);
+        };
+        let body = serde_json::to_string(route_ids).map_err(|_| DesktopError::EngineSymbol("route ids JSON".into()))?;
+        let c = CString::new(body).map_err(|_| DesktopError::EngineSymbol("route ids NUL".into()))?;
+        let rc = (f)(c.as_ptr());
+        if rc < 0 {
+            return Err(self.failed("engine_set_auto_scope", rc as i32));
+        }
+        Ok(Some(rc as i32))
     }
 
     /// `engine_relaypack_refresh`: look for a newer signed file for one

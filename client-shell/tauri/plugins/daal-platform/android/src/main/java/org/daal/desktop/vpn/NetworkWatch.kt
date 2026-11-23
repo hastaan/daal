@@ -532,3 +532,126 @@ class NetworkWatch {
     fun noNetwork(facts: Facts?): Boolean = facts != null && facts.kind == KIND_NONE
   }
 }
+
+/**
+ * Which DNS servers the engine should hold (`engine_set_link_resolvers`)
+ * when TWO reporters in this process watch the network: the app itself
+ * (LinkResolvers' app-scope callback, from the moment the page loads,
+ * with or without a connection) and DaalVpnService (while it runs).
+ * Pure, so it runs on a plain JVM (src/test/.../ResolverGateTest.kt).
+ *
+ * Both watch the same thing, the best network that has internet and is
+ * NOT a VPN, so in the usual case they say the same list twice, and
+ * the second time nothing is sent. They disagree only in timing: one
+ * hears "network B is here" before the other hears "network A is
+ * gone". THE RULE:
+ *
+ *  - Each network is remembered by its handle with the servers last
+ *    said for it. The network that spoke last is the current one; its
+ *    list is what the engine should hold.
+ *  - "Lost" forgets that network for both reporters (Android does not
+ *    lose a network for one callback and keep it for another with the
+ *    same request). The engine is then told the list of the network
+ *    that spoke last among those still known, and the empty list only
+ *    when none is left. So a "lost" for a network that is not the
+ *    current one (the old Wi-Fi, after mobile data already spoke)
+ *    changes nothing, and can never wipe a good list just set.
+ *  - A reporter that stops listening ([detach]) sends nothing: the
+ *    networks only it knew are forgotten, the engine keeps its list
+ *    (the other reporter, if listening, knows the same networks).
+ *  - The same list is sent once. A send the engine did not take
+ *    (library not loaded yet, call threw) is not counted as sent, so
+ *    the next event, or [pending], sends it again.
+ *
+ * Every method returns the list to send now, or null for nothing.
+ * Thread-safe; the caller still makes its sends one at a time, in the
+ * order they were answered, and reports each with [delivered].
+ */
+class ResolverGate {
+  private class Net(var servers: List<String>, var seq: Long, val by: MutableSet<String>)
+
+  private val nets = HashMap<Long, Net>()
+  private var seq = 0L
+
+  /** True once any reporter has said anything: from then on "none known" means []. */
+  private var spoke = false
+
+  /** What the engine last accepted; null when nothing yet, or the last send failed. */
+  private var sent: List<String>? = null
+
+  /**
+   * The network [reporter] is on has these servers (its link properties).
+   *
+   * [single]: the reporter follows ONE network at a time (Android 12+'s
+   * registerBestMatchingNetworkCallback, like the default-network
+   * callback, calls onLost only when no replacement exists: after
+   * Wi-Fi -> mobile data no "lost" ever comes for the Wi-Fi). Speaking
+   * for this network then means the reporter has left every other one:
+   * it is taken off them, and a network no reporter is on any more is
+   * forgotten, so a later "lost" of this one leaves nothing stale to fall
+   * back to. False for the pre-12 plain listener, which hears every
+   * matching network and a "lost" for each.
+   */
+  @Synchronized
+  fun link(reporter: String, handle: Long, servers: List<String>, single: Boolean = false): List<String>? {
+    spoke = true
+    if (single) {
+      val it = nets.entries.iterator()
+      while (it.hasNext()) {
+        val e = it.next()
+        if (e.key == handle) continue
+        e.value.by.remove(reporter)
+        if (e.value.by.isEmpty()) it.remove()
+      }
+    }
+    val n = nets.getOrPut(handle) { Net(servers, 0L, HashSet()) }
+    n.servers = servers
+    n.seq = ++seq
+    n.by.add(reporter)
+    return toSend()
+  }
+
+  /** [reporter] heard that network [handle] is gone. */
+  @Synchronized
+  fun lost(@Suppress("UNUSED_PARAMETER") reporter: String, handle: Long): List<String>? {
+    spoke = true
+    nets.remove(handle)
+    return toSend()
+  }
+
+  /** [reporter] stopped listening. Never sends. */
+  @Synchronized
+  fun detach(reporter: String) {
+    val it = nets.values.iterator()
+    while (it.hasNext()) {
+      val n = it.next()
+      n.by.remove(reporter)
+      if (n.by.isEmpty()) it.remove()
+    }
+    // Nobody listening: nothing is known, which is not "no network".
+    // The engine keeps what it holds until someone speaks again.
+    if (nets.isEmpty()) spoke = false
+  }
+
+  /** The engine's answer to a send of [servers]: taken (rc >= 0) or not. */
+  @Synchronized
+  fun delivered(servers: List<String>, ok: Boolean) {
+    sent = if (ok) servers else null
+  }
+
+  /** What should be sent again, if the engine does not hold it yet; null when it does. */
+  @Synchronized
+  fun pending(): List<String>? = toSend()
+
+  /** The list the engine should hold now; null before anyone has spoken. */
+  @Synchronized
+  fun wanted(): List<String>? {
+    if (!spoke) return null
+    return nets.values.maxByOrNull { it.seq }?.servers ?: emptyList()
+  }
+
+  private fun toSend(): List<String>? {
+    val want = wanted() ?: return null
+    return if (want == sent) null else want
+  }
+}

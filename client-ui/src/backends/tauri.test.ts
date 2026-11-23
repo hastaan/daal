@@ -189,7 +189,8 @@ describe('connectAuto', () => {
     it("desktop: invokes connect_auto, names no route, and hands back the engine's answer", async () => {
         handlers.set('connect_auto', () => JSON.stringify(body));
         const r = await new TauriContract().connectAuto();
-        expect(callArgs).toEqual([['connect_auto', undefined]]);
+        // A file's scope left armed is disarmed first (best effort).
+        expect(callArgs).toEqual([['set_auto_scope', { routeIds: [] }], ['connect_auto', undefined]]);
         expect(r?.connected).toBe(true);
         expect(r?.routeId).toBe('r2');
         expect(r?.verdict).toBe('moved_on');
@@ -209,7 +210,7 @@ describe('connectAuto', () => {
         try {
             handlers.set('plugin:daal-platform|vpn_start', () => ({ applied: true, platform: 'android' }));
             const r = await new TauriContract().connectAuto();
-            expect(callArgs).toEqual([['plugin:daal-platform|vpn_start', { request: { routeId: '' } }]]);
+            expect(callArgs).toEqual([['set_auto_scope', { routeIds: [] }], ['plugin:daal-platform|vpn_start', { request: { routeId: '' } }]]);
             // The service was started; the answer comes through the diagnostics.
             expect(r).toBeNull();
         } finally {

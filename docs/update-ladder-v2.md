@@ -101,6 +101,22 @@ new host waits 2–10 s after the previous one. This keeps the existing floors
 (`DefaultFailureFloor` 10 min, `MaxFailureFloor` 1 h, the per-network stamps in
 `core/refresh/relaypack_recover.go`).
 
+**The drill** (built 2026-11-23, `core/refresh/drill.go`; the request
+`{"drill":true,"route_id":…}` to `engine_relaypack_refresh`). A walk the person starts
+for one file to see whether each backup route works on this network: rungs 1 → 2 → 4 →
+3 only (the mirrors and the pointer layer are skipped), with the same caps as above
+and three differences. It does not stop at the first note: every class it may ask is
+asked. It ignores the strike hold (a failure still counts as a strike) and asks a
+micro-only reader even when every route keeps the key already. It has its own rate
+limit, once per 10 minutes per pack. Never while a route is active, never from the
+scheduled poll, and only for a file that holds an update secret and a carriers member.
+Trust is the ladder's: a note that verifies as newer is applied through the same gate
+as any walk (the highest sequence when several classes bring one). The answer is one
+word per class (`reached` / `verified` / `nothing_new` / `failed` / `skipped` with
+`not_in_file`, `no_resolver`, `budget`, `route_up` or `not_held`), returned to the
+caller only; the audit rows and `RelayPackResult.Ladder` keep their three words
+(`verified` is `nothing_new` there).
+
 ---
 
 ## 3. Notes, sealing and names

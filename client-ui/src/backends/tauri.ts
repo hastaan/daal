@@ -25,6 +25,7 @@ import { clearLocalTraces, forgetPublisher, forgetRoute } from '../lib/localTrac
 import { MissingRoutes } from '../lib/missingRoutes';
 import { parseMeasured, rowForThisNetwork } from '../lib/measured';
 import { parseSurvey } from '../lib/routeSurvey';
+import { drillRequest, parseDrill, type DrillAnswer } from '../lib/backupCheck';
 import { gradesAreForThisNetwork, parseHostNetwork, webviewMayReportNetwork } from '../lib/networkFacts';
 import { invoke } from '@tauri-apps/api/core';
 import type {
@@ -34,6 +35,7 @@ import type {
     BurnpressureVerdict,
     ConnMode,
     ConnState,
+    BackupRoute,
     D2Contract,
     DiagnosticsBlob,
     LifecycleToken,
@@ -121,6 +123,9 @@ interface RawRouteSummary {
     /** route_nickname is the link's own #name. */
     name_from_link?: boolean;
     via_cdn?: boolean;
+    /** The backup update routes the route's file holds ("gittag",
+     *  "dns"); absent when none. */
+    backup_routes?: unknown;
     // What the engine measured for this route on the CURRENT network:
     // {grade, setup_ms, samples, carried, failed, last}. Untyped on
     // purpose — lib/measured.ts parseMeasured is the one reading, and
@@ -250,10 +255,38 @@ function rawToRowAll(r: RawRouteSummary): RouteDisplayRow {
         ...(typeof r.pasted_by_you === 'boolean' ? { pastedByYou: r.pasted_by_you } : {}),
         ...(typeof r.name_from_link === 'boolean' ? { nameFromLink: r.name_from_link } : {}),
         ...(r.via_cdn === true ? { viaCdn: true } : {}),
+        ...backupRoutesField(r.backup_routes),
     };
 }
 
+/** `backup_routes`, kept to the two known kinds in the engine's order;
+ *  nothing when the engine sent none. */
+function backupRoutesField(v: unknown): { backupRoutes?: BackupRoute[] } {
+    if (!Array.isArray(v)) return {};
+    const list = (['gittag', 'dns'] as const).filter((b) => v.includes(b));
+    return list.length > 0 ? { backupRoutes: list } : {};
+}
+
 // ---- raw command wrappers
+
+/** The error of a set_auto_scope call says only that the engine library
+ *  predates the call (daal-desktop-core field_probe_missing), or that
+ *  the shell has no such command: the one failure that falls back to the
+ *  unscoped automatic connect. */
+export function autoScopeMissing(e: unknown): boolean {
+    const text = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e ?? '');
+    return /engine_set_auto_scope: not in this engine library/.test(text) || /command set_auto_scope not found/i.test(text);
+}
+
+/** Disarm any scope a "Connect with this file" left armed. Best effort:
+ *  an engine without the call has nothing armed. */
+async function disarmAutoScope(): Promise<void> {
+    try {
+        await invoke<number>('set_auto_scope', { routeIds: [] });
+    } catch {
+        /* nothing armed, or nothing to arm with */
+    }
+}
 
 // One read of `route_summary`. null = it could not be read (the route
 // is not in the store, or the store did not answer); the caller cannot
@@ -645,8 +678,43 @@ export class TauriContract implements D2Contract {
         return bridgeConnect(routeId);
     }
 
+    // The main button and "Back to automatic": over every route. A file's
+    // scope left armed by a "Connect with this file" that never reached
+    // the engine (the VPN permission refused) is disarmed first, so this
+    // connect is never silently limited to that file.
     async connectAuto(): Promise<AutoConnectResult | null> {
+        await disarmAutoScope();
         return parseAutoResult(await bridgeConnectAuto());
+    }
+
+    // The scope is armed in the engine of this process; on Android the
+    // VPN service's automatic connect (vpn_start with no route) takes it.
+    // An engine without the call: the ordinary automatic connect, never
+    // a connect by hand (that would pin one way). Any other failure to
+    // arm is thrown (the page says the action failed): connecting
+    // through every file's routes is not what the person asked for.
+    async connectAutoWithin(routeIds: string[]): Promise<AutoConnectResult | null> {
+        let armed = false;
+        try {
+            await invoke<number>('set_auto_scope', { routeIds });
+            armed = true;
+        } catch (e) {
+            if (!autoScopeMissing(e)) throw e;
+        }
+        try {
+            return parseAutoResult(await bridgeConnectAuto());
+        } catch (e) {
+            if (armed) await disarmAutoScope();
+            throw e;
+        }
+    }
+
+    async backupCheck(routeId: string): Promise<DrillAnswer> {
+        try {
+            return parseDrill(await invoke<string>('relaypack_refresh', { relayPackId: drillRequest(routeId) }));
+        } catch {
+            return { outcome: 'unavailable', retryAfterS: 0 };
+        }
     }
 
     async routesStrict(): Promise<RouteDisplayRow[] | undefined> {

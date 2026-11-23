@@ -5,6 +5,7 @@
 // and types. The UI never reaches into raw engine JSON.
 
 import type { SurveyReport } from '../lib/routeSurvey';
+import type { DrillAnswer } from '../lib/backupCheck';
 
 export type ConnState  = 'disconnected' | 'connecting' | 'connected' | 'error';
 export type ConnMode   = 'lifeline' | 'lifeline-strict' | 'normal' | 'bulk';
@@ -81,6 +82,11 @@ export interface HostNetwork {
   metered: -1 | 0 | 1;
 }
 
+/** A backup update route a file holds (`backup_routes` in the route
+ *  summary): 'gittag' (GitHub and the copies of the same release) or
+ *  'dns'. Names only the kind, never a repository or zone. */
+export type BackupRoute = 'gittag' | 'dns';
+
 export interface RouteDisplayRow {
   /** Engine route_id (opaque). */
   routeId: string;
@@ -128,6 +134,9 @@ export interface RouteDisplayRow {
    *  wherever a route's name is shown (lib/familyName.ts kindLabel).
    *  Absent = straight at the relay. */
   viaCdn?: boolean;
+  /** The backup update routes this route's file holds
+   *  (`backup_routes`). Absent = none, or an engine that predates it. */
+  backupRoutes?: BackupRoute[];
   /** Subscription display name that produced this route, when known.
    *  When absent the route was pinned manually via Add Route. */
   sourceName?: string;
@@ -633,6 +642,15 @@ export interface D2Contract {
    *  it, `null` where it does not (see AutoConnectResult). `disconnect`
    *  cancels it at any moment. */
   connectAuto(): Promise<AutoConnectResult | null>;
+  /** "Connect with this file": the same automatic connect, choosing
+   *  only among these routes (one file's), and leaving no manual pin
+   *  (engine_set_auto_scope, then connectAuto). An engine without the
+   *  scope connects automatically over every route instead. */
+  connectAutoWithin(routeIds: string[]): Promise<AutoConnectResult | null>;
+  /** "Check the backup update routes" for the file `routeId` belongs to
+   *  (lib/backupCheck.ts). Blocks up to about two and a half minutes.
+   *  Never throws: a failed call or an older engine is 'unavailable'. */
+  backupCheck(routeId: string): Promise<DrillAnswer>;
   /** The routes this device holds, read strictly: `undefined` when
    *  the list could not be read — which is NOT an empty list. "Add
    *  your file" is offered only on a list that was read and is empty. */

@@ -79,6 +79,9 @@ const (
 	kindUser
 	kindFailure
 	kindOnDemand
+	// kindDrill: the person's check of the backup routes (drill.go): the
+	// update ladder only, never the mirrors.
+	kindDrill
 )
 
 func (k refreshKind) String() string {
@@ -89,12 +92,16 @@ func (k refreshKind) String() string {
 		return "failure"
 	case kindOnDemand:
 		return "on_demand"
+	case kindDrill:
+		return "drill"
 	}
 	return "scheduled"
 }
 
-// unscheduled: the two kinds this file adds.
-func (k refreshKind) unscheduled() bool { return k == kindFailure || k == kindOnDemand }
+// unscheduled: the two kinds this file adds, and the drill (drill.go).
+func (k refreshKind) unscheduled() bool {
+	return k == kindFailure || k == kindOnDemand || k == kindDrill
+}
 
 // Rate limits of the unscheduled kinds. Exported where the ABI or a rig
 // needs to reason about them.
@@ -171,7 +178,9 @@ func packBusy(relayPackID string, kind refreshKind) RelayPackResult {
 // dialFor picks the dialer for one attempt of the given kind.
 func (r *RelayPackRefresher) dialFor(kind refreshKind) (bootstrap.Dialer, bool, error) {
 	switch kind {
-	case kindFailure:
+	case kindFailure, kindDrill:
+		// The drill, like the engine's walk, is direct or nothing: it
+		// never rides a tunnel (RefreshDrill refuses while a route is up).
 		d, err := r.directDial()
 		return d, false, err
 	case kindOnDemand:
@@ -241,7 +250,7 @@ func (d routeDownDialer) DialContext(ctx context.Context, network, address strin
 // nothing, and its caller restores what it stamped.
 func (r *RelayPackRefresher) failed(kind refreshKind, relayPackID string, now time.Time, outcome string) {
 	switch kind {
-	case kindFailure, kindOnDemand:
+	case kindFailure, kindOnDemand, kindDrill:
 		if outcome == OutcomeFreshnessCancelled {
 			return
 		}
