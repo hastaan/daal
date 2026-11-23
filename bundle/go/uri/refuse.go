@@ -58,9 +58,11 @@ var (
 	ErrMalformed = errors.New("uri: link_malformed")
 
 	// The profile may be dialled only when the person picks it
-	// (Profile.ManualOnly), and the host has nowhere to keep that yet,
-	// so it is refused rather than stored as an ordinary route that an
-	// automatic connect would race.
+	// (Profile.ManualOnly), and the host has nowhere to keep that, so it
+	// is refused rather than stored as an ordinary route that an
+	// automatic connect would race. core/abi URIImport keeps the flag
+	// since wave 2 and no longer raises it; the token stays stable for
+	// a host that cannot.
 	ErrManualOnly = errors.New("uri: manual_only")
 )
 

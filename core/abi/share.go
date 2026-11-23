@@ -17,6 +17,7 @@ import (
 	bundleshare "daal/bundle-go/share"
 	"daal/bundle-go/uri"
 	"daal/core/pathmanager"
+	"daal/core/routestore"
 	"daal/core/share"
 )
 
@@ -88,6 +89,30 @@ func loadOrCreateIdentity(c *Core) (bundleshare.PublisherIdentity, error) {
 	bs, _ := json.Marshal(stored)
 	_ = c.store.PutSecret(k, bs)
 	return id, nil
+}
+
+// ownShareFingerprint is the publisher id of this phone's own sharing
+// identity (the one pasted links are signed with), or "" when the phone
+// has none yet. Read only: it never creates the identity.
+func ownShareFingerprint(c *Core) string {
+	globalShare.mu.Lock()
+	pub := globalShare.identity.PublicKey
+	globalShare.mu.Unlock()
+	if len(pub) == 0 {
+		body, err := c.store.GetSecret("share/identity:v1")
+		if err != nil || len(body) == 0 {
+			return ""
+		}
+		var s storedIdentity
+		if json.Unmarshal(body, &s) != nil {
+			return ""
+		}
+		pub, _ = base64.StdEncoding.DecodeString(s.PubB64)
+		if len(pub) == 0 {
+			return ""
+		}
+	}
+	return bundle.PublisherFingerprint(pub).Hex
 }
 
 type storedIdentity struct {
@@ -345,27 +370,43 @@ func URIDetect(text string) (string, error) {
 
 // URIImport is engine_uri_import.
 //
-// Wraps a single URI in a transient single-route .sbp signed by this
+// Wraps one pasted link (vless://, trojan://, …) or one pasted WireGuard
+// conf ("[Interface]" …) in a transient single-route .sbp signed by this
 // device's sharing identity, then runs it through the importer. Because
-// the URI's source is "pasted by user" rather than a real publisher, the
+// the source is "pasted by user" rather than a real publisher, the
 // trust-prompt UI surfaces a distinct badge ("Pasted by you").
+//
+// WHAT IS KEPT BESIDE THE ROUTE (routestore RouteMeta, encrypted,
+// written BEFORE the import so whichever path finishes it — at once,
+// after the trust prompt, after a restart — finds it):
+//
+//   - manual-only, for every WireGuard conf (plain, or AmneziaWG
+//     downgraded to WireGuard: uri.Profile.ManualOnly): an automatic
+//     attempt would send a WireGuard handshake, the shape Iran's
+//     operators throttle and block, from the person's own address. The
+//     automatic connect refuses such a route (chosen_only); the person
+//     can still pick it. If the flag cannot be written the paste is
+//     refused: it is never stored as an ordinary route.
+//   - the link's own name (its #fragment, VMess `ps`), cleaned
+//     (routestore.CleanRouteName: no control or bidi characters, at
+//     most 48 characters), shown as the route's name instead of a
+//     piece of its id. Display only.
+//
+// An AmneziaWG conf whose server would ignore plain WireGuard is
+// refused (transport_unsupported): this build cannot dial it.
 func URIImport(rawURI string) (string, error) {
 	c := mustCore()
 	if err := initShare(c); err != nil {
 		return "", err
 	}
-	prof, prov, err := uri.ParseURI(strings.TrimSpace(rawURI))
+	prof, prov, err := parsePasted(rawURI)
 	if err != nil {
 		return "", err
 	}
-	// A route to dial only when the person picks it cannot be kept as
-	// such yet (no route flag; connect_auto refuses by family only), so
-	// it is refused, never stored as an ordinary route that an automatic
-	// connect would race. Today ParseURI makes none; this holds the line
-	// for the day a WireGuard conf comes through here (uri.ParseAny).
-	if prof.ManualOnly || prov.Notice == uri.NoticeAmneziaUnsupported {
-		return "", uri.ErrManualOnly
+	if prov.Notice == uri.NoticeAmneziaUnsupported || prof.TransportFamily == "amneziawg" {
+		return "", fmt.Errorf("amneziawg: %w", uri.ErrTransportUnsupported)
 	}
+	manualOnly := prof.ManualOnly || prof.TransportFamily == "wireguard"
 	body, err := uri.MarshalOutbound(prof)
 	if err != nil {
 		return "", err
@@ -376,8 +417,14 @@ func URIImport(rawURI string) (string, error) {
 	// key, and the second would replace the first). The same link
 	// twice in one second gets the same id, so it dedupes.
 	sum := sha256.Sum256(body)
+	routeID := "pasted-" + now.Format("20060102T150405Z") + "-" + hex.EncodeToString(sum[:4])
+	_, _ = c.store.PruneRouteMeta(now)
+	meta := routestore.RouteMeta{ManualOnly: manualOnly, Name: prof.Tag}
+	if err := c.store.PutRouteMeta(routeID, meta, now); err != nil && manualOnly {
+		return "", fmt.Errorf("uri import: keep manual-only: %w", err)
+	}
 	bundleBytes, err := bundleshare.BuildShareBundle([]bundleshare.ExportInput{{
-		RouteID:           "pasted-" + now.Format("20060102T150405Z") + "-" + hex.EncodeToString(sum[:4]),
+		RouteID:           routeID,
 		TransportFamily:   prof.TransportFamily,
 		ScarcityClass:     "normal",
 		ProfileBytes:      body,
@@ -389,6 +436,43 @@ func URIImport(rawURI string) (string, error) {
 		return "", err
 	}
 	return importBytesAndPersistPending(bundleBytes)
+}
+
+// parsePasted reads one pasted item: a WireGuard conf (its first line
+// is "[Interface]", in any case) through uri.ParseAny, anything else as
+// one link through uri.ParseURI. A conf must hold exactly one route.
+func parsePasted(raw string) (uri.Profile, uri.Provenance, error) {
+	text := strings.TrimSpace(raw)
+	if looksLikeWireGuardConf(text) {
+		profs, prov, err := uri.ParseAny([]byte(text), "wireguard")
+		if err != nil {
+			// The conf parser's own errors carry no refusal token and
+			// can quote a value of the conf; the host gets the class
+			// only.
+			if uri.RefusalCode(err) == "" {
+				err = fmt.Errorf("wireguard: conf: %w", uri.ErrMalformed)
+			}
+			return uri.Profile{}, prov, err
+		}
+		if len(profs) != 1 {
+			return uri.Profile{}, prov, fmt.Errorf("wireguard: %d routes in one conf: %w", len(profs), uri.ErrMalformed)
+		}
+		return profs[0], prov, nil
+	}
+	return uri.ParseURI(text)
+}
+
+// looksLikeWireGuardConf: the text opens with an [Interface] section
+// (comment lines before it allowed), as wg-quick and AmneziaVPN write it.
+func looksLikeWireGuardConf(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		return strings.EqualFold(line, "[Interface]")
+	}
+	return false
 }
 
 func splitCSV(s string) []string {

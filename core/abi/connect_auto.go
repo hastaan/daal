@@ -100,6 +100,12 @@ const (
 	// or a family value this build does not know. It is still
 	// connected when the person picks it.
 	AutoRefusedManualOnly = "manual_only"
+	// A route stored to be dialled only when the person picks it
+	// (routestore RouteRow.ManualOnly: a pasted WireGuard conf). Checked
+	// before every other rule, so neither the experimental gate nor the
+	// family can let it into an automatic pass. The app says "only when
+	// you choose it" (route summary manual_only).
+	AutoRefusedChosenOnly = "chosen_only"
 	// A family this build cannot dial at all (routestore
 	// MaturityUnsupported: amneziawg, tor-bridge, ...). Same code as
 	// ConnectRefusedFamilyUnsupported.
@@ -1053,6 +1059,12 @@ func (c *Core) autoCandidatesLocked(exclude string) (cands []autoCandidate, left
 	var usable []pathmanager.Route
 	for _, row := range rows {
 		if row.RouteID == exclude {
+			continue
+		}
+		// The route's own word comes first: a route stored manual-only
+		// is never tried by itself, whatever its family or the gate.
+		if row.ManualOnly {
+			left = append(left, AutoTried{RouteID: row.RouteID, Family: row.TransportFamily, Result: AutoResultRefused, Refused: AutoRefusedChosenOnly})
 			continue
 		}
 		// Never raced without the person asking for it, whatever the

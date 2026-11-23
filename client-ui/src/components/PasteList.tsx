@@ -1,7 +1,10 @@
 // PasteList.tsx — a paste that holds several items (wave 1, lane B).
 //
-// One row per item (lib/pasteItems.ts), each with a plain label:
+// One row per item (lib/pasteItems.ts), each with a plain label and, at
+// the far edge of the row, the item's own name ("Server 1", the host):
 //   a way to connect   "Connection link · VLESS"; added with "Add all"
+//   a WireGuard conf   added with "Add all", and its row says in one line
+//                      that Daal uses it only when the person picks it
 //   a Daal file        added with "Add all"; the same signature,
 //                      revocation and expiry checks as one pasted file,
 //                      and a new publisher still gets the trust question
@@ -101,9 +104,10 @@ export const pasteTiming = { pollMs: 1500 };
 type CheckState =
     | { at: 'none' }
     | { at: 'checking'; report: SurveyReport | null }
-    /** `unchecked`: this paste's routes the check could not reach (the
-     *  hourly allowance, a check that never ended); `none`: not one of
-     *  them was checked. */
+    /** `unchecked`: this paste's routes the check could not reach (a
+     *  check the person starts goes past the hourly side-check allowance
+     *  and takes the new ones first, but it still has a ceiling, and a
+     *  check can stop part way); `none`: not one of them was checked. */
     | { at: 'checked'; failed: string[]; unchecked: number; none: boolean }
     /** Some did not answer and none carried: the network itself may be
      *  why, so nothing is removed. */
@@ -199,7 +203,7 @@ export default function PasteList({ t, items, truncated, onImported, onConnect, 
             let res: RowState;
             if (it.kind === 'route') {
                 res = await addLink(it.text, known);
-                if (res.at === 'added') addedLinks++;
+                if (res.at === 'added' && !it.manualOnly) addedLinks++;
             } else {
                 res = await addFile(it.text, known);
             }
@@ -231,7 +235,10 @@ export default function PasteList({ t, items, truncated, onImported, onConnect, 
 
     /** The routes this paste added that a check may judge. */
     const addedRouteIds = (): string[] =>
-        rowsRef.current.flatMap((r, i) => (r.at === 'added' && items[i].kind === 'route' && !r.removed ? r.routeIds : []));
+        rowsRef.current.flatMap((r, i) => {
+            const it = items[i];
+            return r.at === 'added' && it.kind === 'route' && !it.manualOnly && !r.removed ? r.routeIds : [];
+        });
 
     const runCheck = async (thenRemove: boolean) => {
         setCheck({ at: 'checking', report: null });
@@ -338,7 +345,10 @@ export default function PasteList({ t, items, truncated, onImported, onConnect, 
     }
 
     const addedAny = rows.some((r, i) => r.at === 'added' && (items[i].kind === 'route' || items[i].kind === 'file') && !r.removed);
-    const addedLinkCount = rows.filter((r, i) => r.at === 'added' && items[i].kind === 'route' && r.routeIds.length > 0).length;
+    // A WireGuard conf is used only when picked and never checked beside
+    // another connection: it does not count toward the bulk check.
+    const checkable = (it: PasteItem) => it.kind === 'route' && !it.manualOnly;
+    const addedLinkCount = rows.filter((r, i) => r.at === 'added' && checkable(items[i]) && r.routeIds.length > 0).length;
 
     return (
         <div style={{ display: 'grid', gap: 12 }} data-testid="paste-list">
@@ -543,7 +553,11 @@ export function itemPreview(it: PasteItem): string {
         return m ? decodeURIComponent(m[1]) : '';
     }
     if (it.kind === 'route') {
-        if (it.text.startsWith('[')) return '';
+        if (it.text.startsWith('[')) {
+            // A WireGuard conf has no name: its server's host, never a key.
+            const ep = /^\s*Endpoint\s*=\s*(\[[^\]]+\]|[^\s:]+)/im.exec(it.text);
+            return ep ? ep[1] : '';
+        }
         const name = /#(.+)$/.exec(it.text);
         if (name) {
             try {
@@ -593,13 +607,27 @@ function ItemRow({
         >
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 14, fontWeight: muted ? 400 : 600 }}>{kindLabel(t, item)}</span>
-                {preview && (
-                    <bdi dir="ltr" style={{ fontSize: 13, color: 'var(--muted)', overflowWrap: 'anywhere', flex: 1, minWidth: 0 }}>
-                        {preview}
-                    </bdi>
-                )}
                 <RowBadge t={t} state={state} />
+                {preview && (
+                    // The name sits at the far edge of the row however
+                    // short it is: the wrapper takes the rest of the line
+                    // and ends it in the page's direction (left in Farsi),
+                    // while the name inside keeps its own (Latin) order.
+                    <span
+                        data-testid="paste-item-name"
+                        style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', justifyContent: 'flex-end' }}
+                    >
+                        <bdi dir="ltr" style={{ fontSize: 13, color: 'var(--muted)', overflowWrap: 'anywhere', minWidth: 0 }}>
+                            {preview}
+                        </bdi>
+                    </span>
+                )}
             </div>
+            {item.kind === 'route' && item.manualOnly && (
+                <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }} data-testid="paste-manual-only">
+                    {t('add.multi.manual_only')}
+                </div>
+            )}
             {item.kind === 'messenger' && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 13, color: 'var(--muted)', flex: 1, minWidth: 160 }}>{t(`add.multi.${item.app}.note`)}</span>

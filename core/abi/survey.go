@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,8 +97,30 @@ import (
 // now, at the person's request: two routes at a time (a pair, never to
 // the same relay address AND port, the second started raceDelay after
 // the first, as a race does), metered allowed, results not older than
-// surveyFresh checked again (they asked), and the per-route gap and the
-// hourly allowance still apply. It works while connected (side
+// surveyFresh checked again (they asked), and the per-route gap still
+// applies. Routes never checked at all (no result on this network, no
+// success or failure on record: a link just pasted) go first, the rest
+// in the automatic connect's order.
+//
+// THE ALLOWANCE AND THE CEILING (2026-11-22, owner-approved). The
+// person's survey is NOT bound by the hourly side-probe allowance
+// (sideProbesPerHour): a person who pasted thirty links and pressed
+// "check" asked for thirty checks, and twelve an hour would leave most
+// of them unchecked for hours. Its probes still COUNT against the
+// allowance, so the engine's own side probes (races, the speed move,
+// the background survey) stay inside it for the hour after. What
+// bounds the button instead is surveyUserMax checks per press: twice
+// the hourly allowance, more than any Daal file holds (a relay has
+// three to six routes; a person has a few relays) and enough for a
+// typical pasted list, while a paste of hundreds never becomes hundreds
+// of handshakes to hundreds of servers in a few minutes from one
+// address. The routes over the ceiling are reported skipped with reason
+// "limit"; a second press checks them (they were never checked, so they
+// go first). The pacing does not change: two at a time, raceDelay
+// between the two, surveyUserGapMin..Max between pairs. The background
+// survey keeps the allowance and its reserve exactly as before.
+//
+// It works while connected (side
 // instances beside the tunnel) and while not connected — side instances
 // then too: a side instance holds no TUN and needs none, which is how
 // the first race of an automatic pass already proves routes with
@@ -159,6 +182,9 @@ const (
 	// surveyReserve: side probes of the hourly allowance a background
 	// survey leaves for automatic passes (two races).
 	surveyReserve = 2 * raceMaxInFlight
+	// surveyUserMax: the most routes one press of the person's button
+	// checks (see THE ALLOWANCE AND THE CEILING).
+	surveyUserMax = 2 * sideProbesPerHour
 )
 
 // surveyWaitSet is how the waits are drawn: at random, in the bounds
@@ -210,6 +236,9 @@ const (
 	SurveySkipMetered = "metered"
 	SurveySkipBudget  = "budget"
 	SurveySkipBusy    = "busy"
+	// Over the person's survey's ceiling (surveyUserMax): not checked
+	// by this press; the next press checks it first.
+	SurveySkipLimit = "limit"
 
 	// What engine_survey_routes says when it did not start one.
 	SurveyRefusedBusy        = "busy"
@@ -509,6 +538,15 @@ func (c *Core) surveyPlanLocked(r *surveyRun) {
 			r.queue = append(r.queue, cd)
 		}
 	}
+	if r.user {
+		r.queue = c.neverCheckedFirstLocked(r.queue, mem)
+		if len(r.queue) > surveyUserMax {
+			for _, cd := range r.queue[surveyUserMax:] {
+				listed = append(listed, SurveyRoute{RouteID: cd.routeID, Family: cd.family, Result: SurveyResultSkipped, Reason: SurveySkipLimit})
+			}
+			r.queue = r.queue[:surveyUserMax]
+		}
+	}
 	s := &c.survey
 	s.mu.Lock()
 	r.total = len(r.queue)
@@ -517,6 +555,31 @@ func (c *Core) surveyPlanLocked(r *surveyRun) {
 	if len(r.queue) > 0 || r.user {
 		engine.LogInfo(fmt.Sprintf("survey start trigger=%s candidates=%d planned=%d when_used=%d", r.trigger(), len(cands), len(r.queue), countResult(listed, SurveyResultWhenUsed)))
 	}
+}
+
+// neverCheckedFirstLocked puts first the routes that were never
+// checked: no result on this network and no success, failure or
+// degraded hour on record (a link just pasted). Stable: each part keeps
+// the automatic connect's order.
+func (c *Core) neverCheckedFirstLocked(q []autoCandidate, mem map[string]netmem.RouteMemory) []autoCandidate {
+	rows, err := c.store.ListRoutes()
+	if err != nil {
+		return q
+	}
+	onRecord := map[string]bool{}
+	for _, row := range rows {
+		onRecord[row.RouteID] = strings.TrimSpace(row.LastSuccessBucket) != "" ||
+			strings.TrimSpace(row.LastFailureBucket) != "" || strings.TrimSpace(row.LastDegradedBucket) != ""
+	}
+	var fresh, rest []autoCandidate
+	for _, cd := range q {
+		if !onRecord[cd.routeID] && routeMeasured(mem, cd.routeID).Last == 0 {
+			fresh = append(fresh, cd)
+		} else {
+			rest = append(rest, cd)
+		}
+	}
+	return append(fresh, rest...)
 }
 
 func countResult(rs []SurveyRoute, result string) int {
@@ -559,10 +622,7 @@ func (c *Core) surveyNext(ctx context.Context, r *surveyRun) (batch []surveyItem
 			return nil, cfg, true
 		}
 	}
-	reserve := 0
-	if !r.user {
-		reserve = surveyReserve
-	}
+	reserve := surveyReserve
 	now := nowUTC()
 	metered := hostFacts().metered == 1
 	mem := c.routeMemory()
@@ -618,7 +678,10 @@ func (c *Core) surveyNext(ctx context.Context, r *surveyRun) (batch []surveyItem
 		r.queue = rest
 		return got, found
 	}
-	if !c.sideCountOKLocked(1 + reserve) {
+	// The hourly allowance binds the background survey only (THE
+	// ALLOWANCE AND THE CEILING); the person's is bounded by
+	// surveyUserMax, applied when it was planned.
+	if !r.user && !c.sideCountOKLocked(1+reserve) {
 		for _, cd := range r.queue {
 			skip(cd, SurveySkipBudget)
 		}
@@ -630,7 +693,7 @@ func (c *Core) surveyNext(ctx context.Context, r *surveyRun) (batch []surveyItem
 		return nil, cfg, len(r.queue) > 0
 	}
 	batch = append(batch, first)
-	if r.user && c.sideCountOKLocked(2) {
+	if r.user {
 		// The partner: never the same relay address and port; another
 		// transport kind first, as a race chooses.
 		a := first.cd

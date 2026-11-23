@@ -113,6 +113,13 @@ interface RawRouteSummary {
     health_pct: number | null;
     proven?: boolean;
     checked_when_used?: boolean;
+    /** Dialled only when the person picks it (a pasted WireGuard conf). */
+    manual_only?: boolean;
+    /** Pasted on this phone (its group is titled by the app, not
+     *  publisher_name, which stays "My Daal"). */
+    pasted_by_you?: boolean;
+    /** route_nickname is the link's own #name. */
+    name_from_link?: boolean;
     via_cdn?: boolean;
     // What the engine measured for this route on the CURRENT network:
     // {grade, setup_ms, samples, carried, failed, last}. Untyped on
@@ -239,6 +246,9 @@ function rawToRowAll(r: RawRouteSummary): RouteDisplayRow {
         measured: parseMeasured(r.measured),
         proven: !!r.proven,
         ...(r.checked_when_used === true ? { checkedWhenUsed: true } : {}),
+        ...(typeof r.manual_only === 'boolean' ? { manualOnly: r.manual_only } : {}),
+        ...(typeof r.pasted_by_you === 'boolean' ? { pastedByYou: r.pasted_by_you } : {}),
+        ...(typeof r.name_from_link === 'boolean' ? { nameFromLink: r.name_from_link } : {}),
         ...(r.via_cdn === true ? { viaCdn: true } : {}),
     };
 }

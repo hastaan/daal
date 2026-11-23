@@ -28,6 +28,7 @@ import { toFaDigits } from '../lib/i18n';
 import { errorText } from '../lib/errorText';
 import { gradeText } from '../lib/measured';
 import { routeForDisplay } from '../lib/activeRoute';
+import { groupName, routeDisplayName } from '../components/files/pasted';
 import { autoFailure, autoVerdictKey } from '../lib/autoConnect';
 import { useDeveloperMode } from '../lib/devMode';
 import {
@@ -56,7 +57,13 @@ type Tone = 'good' | 'warn' | 'bad' | 'neutral';
 export function wayName(t: (k: string) => string, r: RouteDisplayRow | undefined): string | undefined {
     const d = routeForDisplay(r, t);
     if (!d) return undefined;
-    const parts = [d.publisherName, d.routeNickname].filter((s) => !!s && s.trim() !== '');
+    // A pasted route: its group's own words and the link's name, never
+    // "My Daal" or the short hash. A route known by id only keeps the
+    // words routeForDisplay gave it.
+    const named = d === r && r != null;
+    const parts = (named ? [groupName(t, d), routeDisplayName(d)] : [d.publisherName, d.routeNickname]).filter(
+        (s): s is string => !!s && s.trim() !== '',
+    );
     return parts.length ? parts.join(sep()) : undefined;
 }
 

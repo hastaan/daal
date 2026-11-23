@@ -1631,6 +1631,38 @@ async fn wizard_renew_everyone(
     )
 }
 
+/// "New files for everyone": after a removal, make each remaining
+/// person's file again (one relay window) so the standby code wraps.
+#[tauri::command]
+async fn wizard_refile_people(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::refile::RefileReport, String> {
+    cmdlog::result(
+        "wizard_refile_people",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::refile::refile_people(ctx, operator_id).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
+/// The refile sheet's «Try again» under a removal the relay did not
+/// confirm: revokes the removed people again, re-keys nobody.
+#[tauri::command]
+async fn wizard_refile_removals(
+    wstate: State<'_, WizardStateMgr>,
+    operator_id: i64,
+) -> Result<daal_wizard::refile::RefileReport, String> {
+    cmdlog::result(
+        "wizard_refile_removals",
+        on_blocking_pool(wstate.inner(), move |ctx| {
+            daal_wizard::refile::refile_removals(ctx, operator_id).map_err(|e| e.to_string())
+        })
+        .await,
+    )
+}
+
 // ---- network test, the publisher's half (daal_wizard::report_key) ----
 
 /// Is this relay the Test relay (its pack carries the report address)?
@@ -2406,6 +2438,79 @@ async fn wizard_addon_google_check(
     cmdlog::result(
         "wizard_addon_google_check",
         addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_google::check(ctx, input, p)).await,
+    )
+}
+
+// ---- update notes: the GitHub account and the two relay switches ----
+
+/// Accounts → GitHub: whether a key is kept, and whose. Local, no secret.
+#[tauri::command]
+fn wizard_github_account(
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<daal_wizard::addon_notes::GithubAccount, String> {
+    cmdlog::logged("wizard_github_account", || {
+        daal_wizard::addon_notes::github_account(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
+/// The pasted GitHub key crosses here once, inbound; it reaches the
+/// helper on stdin only and is kept when GitHub says it can do the job.
+#[tauri::command]
+async fn wizard_github_connect(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_notes::GithubConnectInput,
+) -> Result<daal_wizard::addon_notes::GithubCheck, String> {
+    cmdlog::result(
+        "wizard_github_connect",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_notes::github_connect(ctx, input, p)).await,
+    )
+}
+
+/// Forget the GitHub account key (relays keep their own copies).
+#[tauri::command]
+fn wizard_github_disconnect(wstate: State<'_, WizardStateMgr>) -> Result<(), String> {
+    cmdlog::logged("wizard_github_disconnect", || {
+        daal_wizard::addon_notes::github_disconnect(&wstate.0).map_err(|e| e.to_string())
+    })
+}
+
+/// A relay's «Updates through GitHub», on.
+#[tauri::command]
+async fn wizard_addon_gittag_on(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_notes::NotesOnInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    cmdlog::result(
+        "wizard_addon_gittag_on",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_notes::gittag_on(ctx, input, p)).await,
+    )
+}
+
+/// A relay's «Updates through DNS», on.
+#[tauri::command]
+async fn wizard_addon_dnsnote_on(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+    input: daal_wizard::addon_notes::NotesOnInput,
+) -> Result<daal_wizard::addons::AddonRow, String> {
+    cmdlog::result(
+        "wizard_addon_dnsnote_on",
+        addon_on_pool(app, wstate.inner(), move |ctx, p| daal_wizard::addon_notes::dnsnote_on(ctx, input, p)).await,
+    )
+}
+
+/// On app open: write every note switch whose last write is from an
+/// earlier week (or failed a while ago). Never an error the page shows.
+#[tauri::command]
+async fn wizard_notes_tick(
+    app: AppHandle,
+    wstate: State<'_, WizardStateMgr>,
+) -> Result<daal_wizard::addon_notes::NotesTickReport, String> {
+    cmdlog::result(
+        "wizard_notes_tick",
+        addon_on_pool(app, wstate.inner(), move |ctx, _p| daal_wizard::addon_notes::tick(ctx)).await,
     )
 }
 
@@ -4318,6 +4423,8 @@ pub fn run() {
             wizard_account_check,
             wizard_account_cleanup,
             wizard_renew_everyone,
+            wizard_refile_people,
+            wizard_refile_removals,
             wizard_test_relay_status,
             wizard_test_relay_set,
             wizard_report_open,
@@ -4358,6 +4465,12 @@ pub fn run() {
             wizard_google_account_disconnect,
             wizard_addon_google_on,
             wizard_addon_google_check,
+            wizard_github_account,
+            wizard_github_connect,
+            wizard_github_disconnect,
+            wizard_addon_gittag_on,
+            wizard_addon_dnsnote_on,
+            wizard_notes_tick,
             // FRP-7 rotation surface
             wizard_rotate_recommend,
             wizard_rotate_execute,
@@ -5011,6 +5124,44 @@ mod jni_bridge {
             Err(e) => {
                 log::warn!(
                     "DaalCoreBridge.fieldProbeCancel({reason}) failed: {}",
+                    daal_desktop_core::cmdlog::scrub(&e.to_string())
+                );
+                -1
+            }
+        }
+    }
+
+    /// `engine_set_link_resolvers` — the DNS servers of the network
+    /// under the tunnel (DaalVpnService's network callback:
+    /// LinkProperties.getDnsServers), as a JSON list of address
+    /// strings; `[]` when that network was lost. The update ladder's DNS
+    /// reader asks only this resolver. Returns 1 = the engine has a
+    /// resolver to ask, 0 = none, -1 = the engine cannot be asked, has
+    /// no such call, or refused the list. The addresses are never
+    /// logged.
+    #[no_mangle]
+    pub extern "system" fn Java_org_daal_desktop_platform_DaalCoreBridge_setLinkResolvers<'local>(
+        mut env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        servers_json: JString<'local>,
+    ) -> jint {
+        let Some(eng) = engine() else { return -1 };
+        let body: String = match env.get_string(&servers_json) {
+            Ok(s) => s.into(),
+            Err(_) => return -1,
+        };
+        let servers: Vec<String> = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+        match eng.set_link_resolvers(&servers) {
+            Ok(Some(true)) => 1,
+            Ok(Some(false)) => 0,
+            Ok(None) => -1,
+            Err(e) => {
+                log::warn!(
+                    "DaalCoreBridge.setLinkResolvers(n={}) failed: {}",
+                    servers.len(),
                     daal_desktop_core::cmdlog::scrub(&e.to_string())
                 );
                 -1

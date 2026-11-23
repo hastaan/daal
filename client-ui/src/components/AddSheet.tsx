@@ -1,10 +1,18 @@
-// AddSheet.tsx — "Add my file": one sheet, no tabs (spec C3).
+// AddSheet.tsx — "Add to Daal": one sheet, no tabs (spec C3). Its title
+// names no kind of thing (`add.title`): it takes a file, links, a
+// scanned code and a standby code alike.
 //
 // Three ways in, as three large rows:
 //   Choose a file  the system picker opens at once (Android SAF or the
 //                  desktop dialog); the file is read and checked by itself
-//   Paste text     reads the clipboard (lib/clipboard.ts: the phone's own), else
-//                  a box with a Paste button; a Daal file goes on by itself
+//   Paste text     a box with a Paste button. Opening it takes what is on
+//                  the clipboard (lib/clipboard.ts: the phone's own) ONLY
+//                  when that is something Daal can add (a link it can
+//                  import, a Daal file: lib/pasteItems.ts usableClipboard);
+//                  anything else, the phone's own Daal address among it,
+//                  stays there, and the box opens empty with no error. The
+//                  Paste button always takes it: then the person pasted.
+//                  A Daal file goes on by itself
 //                  (its own signature check and trust question follow). A
 //                  web address or a proxy link waits for one "Add" tap: a
 //                  link copied for another reason, or half typed, must not
@@ -48,7 +56,7 @@ import { friendlyError, parseVerdict, type ImportVerdict, type TrustResolution }
 import { StandbyCodeEntry } from './StandbyCodeEntry';
 import { readClipboardText } from '../lib/clipboard';
 import { errorText } from '../lib/errorText';
-import { pasteItems, type PasteItem } from '../lib/pasteItems';
+import { pasteItems, usableClipboard, type PasteItem } from '../lib/pasteItems';
 import PasteList, { openWithSystem, refusalText, type PastePhase } from './PasteList';
 import { importLink } from '../lib/pasteImport';
 
@@ -352,11 +360,14 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pasted, kind, stage.at]);
 
-    /** "Paste text": the clipboard first, else the box. */
-    const readClipboard = async (): Promise<boolean> => {
+    /** The clipboard into the box. `onlyUsable`: when the box opens by
+     *  itself, take only what Daal can add; the Paste button takes
+     *  anything (the person asked for it). */
+    const readClipboard = async (onlyUsable = false): Promise<boolean> => {
         try {
             const text = await readClipboardText();
-            if (text && text.trim()) {
+            if (text && text.trim() && (!onlyUsable || usableClipboard(text))) {
+                setError(null);
                 setPasted(text);
                 return true;
             }
@@ -368,7 +379,7 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
     const openPaste = async () => {
         setError(null);
         setStage({ at: 'paste' });
-        await readClipboard();
+        await readClipboard(true);
     };
 
     const onTrustResolved = (r: TrustResolution, origin: Origin, preview: PreviewedBundle) => {
@@ -481,6 +492,11 @@ export default function AddSheet({ t, onClose, onImported, onConnect, initialTab
                         />
                     )}
                     {single?.kind === 'messenger' && <MessengerRow t={t} item={single} />}
+                    {!multi && single?.kind === 'route' && single.manualOnly && (
+                        <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }} data-testid="paste-manual-only">
+                            {t('add.multi.manual_only')}
+                        </div>
+                    )}
                     {!multi && cannot && (
                         <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }} data-testid="paste-cannot-add">
                             {t('add.multi.refused.no_match')}

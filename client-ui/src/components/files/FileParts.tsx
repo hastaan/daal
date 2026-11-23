@@ -32,6 +32,7 @@ import {
     type WayTitle,
 } from '../../lib/fileFacts';
 import { gradeText } from '../../lib/measured';
+import { fileTitle, manualOnly, pastedName } from './pasted';
 
 type T = (k: string) => string;
 
@@ -169,7 +170,7 @@ export function FileCard({ t, locale, p, state, summary, tags, restingUntil, las
                             overflowWrap: 'anywhere',
                         }}
                     >
-                        {p.displayName}
+                        {fileTitle(t, p)}
                     </bdi>
                     {badge && badgeText && (
                         <Badge tone={badge.tone as BadgeTone} size="sm" icon={false}>
@@ -296,16 +297,25 @@ export function WayRow({
                 ? t('files.way.chosen_auto')
                 : undefined
             : stateText;
+    // A pasted link is known by the name it gave itself ("Server 1"):
+    // that is its title, and the kind moves to the line under it. Its
+    // old fallback name, a piece of the route id, is never shown.
+    const linkName = pastedName(r);
+    const pasted = linkName !== undefined || r.routeId.startsWith('pasted-');
+    const heading = linkName ?? title.title;
+    const nickname = pasted ? undefined : title.nickname;
     // The file's own name for the way, quoted as each language quotes.
-    const quoted = title.nickname ? (
-        <bdi>{locale === 'fa' ? `«${title.nickname}»` : `“${title.nickname}”`}</bdi>
-    ) : undefined;
-    const sub: ReactNode[] = [lead, quoted].filter(Boolean);
+    const quoted = nickname ? <bdi>{locale === 'fa' ? `«${nickname}»` : `“${nickname}”`}</bdi> : undefined;
+    const kindLine = linkName !== undefined ? title.title : undefined;
+    const sub: ReactNode[] = [lead, kindLine, quoted].filter(Boolean);
+    // Used only when the person picks it (a pasted WireGuard conf).
+    const onlyWhenPicked = manualOnly(r);
     const about = familyAbout(t, r);
     const usable = state !== 'unsupported' && state !== 'resting' && state !== 'in_use' && state !== 'checking';
     // Only a name that tells the person something ("Rescue 03"): never
-    // "r1", a date or a short code (lib/familyName.ts).
-    const nick = title.nickname;
+    // "r1", a date or a short code (lib/familyName.ts); for a pasted
+    // link, the name in the link.
+    const nick = linkName ?? nickname;
     // When it was last tried, as the card header says time: "2 hours
     // ago". The engine keeps it by the hour, so the last hour is said as
     // such rather than as a made-up number of minutes.
@@ -361,7 +371,7 @@ export function WayRow({
                                 lineHeight: 1.4,
                             }}
                         >
-                            {title.title}
+                            {heading}
                         </bdi>
                         {maturityKey && (
                             <Badge tone={maturityKey === 'files.way.experimental' ? 'gold' : 'neutral'} size="sm" icon={false}>
@@ -391,6 +401,11 @@ export function WayRow({
                                     {x}
                                 </span>
                             ))}
+                        </span>
+                    )}
+                    {onlyWhenPicked && (
+                        <span data-testid="way-manual-only" style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.45 }}>
+                            {t('files.pasted.manual_only')}
                         </span>
                     )}
                 </span>

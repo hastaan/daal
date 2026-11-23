@@ -32,6 +32,7 @@ import BackupPage from '../publisher/BackupPage';
 import RestorePage from '../publisher/RestorePage';
 import AccountsPage from '../publisher/AccountsPage';
 import { Wizard } from '../publisher/wizardCommands';
+import { notesTickOnce } from '../publisher/addons/wizardAddons';
 import type { OperatorSummary } from '../publisher/wizardCommands';
 import { useBack } from '../lib/useBack';
 
@@ -119,7 +120,11 @@ export default function PublisherPage({ t, locale: _locale = 'en' }: Props) {
             // what a relay costs and one "Start" (C7.1). A read error
             // also lands on the list, which shows it and still offers a
             // new relay.
-            setView(bootView(await refreshOperators()));
+            const ops = await refreshOperators();
+            setView(bootView(ops));
+            // The update notes move with the week: filler at the start
+            // of a new one, a reveal kept readable (addon_notes.rs).
+            if (ops && ops.length > 0) notesTickOnce();
         })();
     }, [refreshOperators]);
 

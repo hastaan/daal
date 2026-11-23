@@ -351,7 +351,9 @@ describe('the strings', () => {
     it('nothing technical reaches the publisher: no ECH, posture, outer name, sealed/open, plain fallback, Everyone key', () => {
         for (const k of usedKeys()) {
             if (k.startsWith('pub.addons.err.') || k.startsWith('add.')) continue;
-            expect(EN[k], k).not.toMatch(/\bECH\b|posture|outer name|sealed|plain fallback|Everyone/i);
+            expect(EN[k], k).not.toMatch(/\bECH\b|posture|outer name|sealed|plain fallback/i);
+            // "the Everyone key" is jargon; "the file for everyone" is the app's own name for it.
+            expect(EN[k], k).not.toMatch(/Everyone/);
         }
     });
 });

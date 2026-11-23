@@ -7,7 +7,7 @@ package abi
 // they emit small JSON envelopes designed for direct render.
 //
 // New surface (all return JSON):
-//   RouteSummary(routeId)        -> {route_id, publisher_name, route_nickname, trust_class, family, family_maturity, in_cooldown, cooldown_until_unix_ms, budget_exhausted, health_pct, proven}
+//   RouteSummary(routeId)        -> {route_id, publisher_name, route_nickname, trust_class, family, family_maturity, in_cooldown, cooldown_until_unix_ms, budget_exhausted, health_pct, proven, ..., manual_only, pasted_by_you, name_from_link}
 //   AvailableRoutes()            -> {routes: [...routesummary...]}
 //   ThroughputSnapshot()         -> {up_bps, down_bps, window_ms}  (rates are null when unmeasured)
 //
@@ -118,6 +118,20 @@ type RouteSummaryDisplay struct {
 	// that is not cdn_fronted, relaypack/client_pack.go), never guessed
 	// from the family. Always present; false for every legacy row.
 	ViaCDN bool `json:"via_cdn"`
+	// ManualOnly: the route is dialled only when the person picks it
+	// (routestore RouteRow.ManualOnly: a pasted WireGuard conf); the
+	// automatic connect never tries it (refusal chosen_only). The app
+	// says "only when you choose it". Always present.
+	ManualOnly bool `json:"manual_only"`
+	// PastedByYou: the route came from a link or conf pasted on THIS
+	// phone (its publisher is the phone's own sharing identity, whose
+	// display name is the fixed "My Daal"). The app titles that group
+	// with its own words instead of publisher_name. Always present.
+	PastedByYou bool `json:"pasted_by_you"`
+	// NameFromLink: route_nickname is the name the pasted link gave
+	// itself (its #fragment), cleaned (routestore.CleanRouteName), not a
+	// piece of the route id. Display only. Always present.
+	NameFromLink bool `json:"name_from_link"`
 }
 
 // routeObservations is everything the engine has actually MEASURED
@@ -269,6 +283,25 @@ func rowToDisplay(r routestore.RouteRow, obs routeObservations) RouteSummaryDisp
 		HealthPct:           obs.HealthPct,
 		Proven:              strings.TrimSpace(r.LastSuccessBucket) != "",
 		ViaCDN:              routeViaCDN(r),
+		ManualOnly:          r.ManualOnly,
+	}
+}
+
+// pastedDisplay fills what only the store knows: whether the route was
+// pasted on this phone (own = ownShareFingerprint) and, for such a
+// route, the link's own name as its nickname. The name is read from the
+// route's meta (routestore.RouteMeta, encrypted) and cleaned again on
+// the way out; it is used for nothing but this field.
+func (c *Core) pastedDisplay(d *RouteSummaryDisplay, r routestore.RouteRow, own string) {
+	if own == "" || r.PublisherID != own {
+		return
+	}
+	d.PastedByYou = true
+	if strings.TrimSpace(r.UserNote) != "" {
+		return
+	}
+	if m, ok := c.store.GetRouteMeta(r.RouteID); ok && m.Name != "" {
+		d.RouteNickname, d.NameFromLink = m.Name, true
 	}
 }
 
@@ -343,6 +376,7 @@ func RouteSummary(routeID string) (string, error) {
 	disp := rowToDisplay(row, observeRoute(row, liveRouteHealth(c)))
 	disp.Measured = routeMeasured(c.routeMemory(), row.RouteID)
 	disp.CheckedWhenUsed = c.checkedWhenUsed(row.RouteID)
+	c.pastedDisplay(&disp, row, ownShareFingerprint(c))
 	body, _ := json.Marshal(disp)
 	return string(body), nil
 }
@@ -377,6 +411,7 @@ func AvailableRoutes() (string, error) {
 	}
 	live := liveRouteHealth(c)
 	mem := c.routeMemory()
+	own := ownShareFingerprint(c)
 	out := make([]RouteSummaryDisplay, 0, len(rows))
 	for _, r := range rows {
 		if strings.EqualFold(r.TrustState, "revoked") {
@@ -385,6 +420,7 @@ func AvailableRoutes() (string, error) {
 		d := rowToDisplay(r, observeRoute(r, live))
 		d.Measured = routeMeasured(mem, r.RouteID)
 		d.CheckedWhenUsed = c.checkedWhenUsed(r.RouteID)
+		c.pastedDisplay(&d, r, own)
 		out = append(out, d)
 	}
 	// Sort by health_pct desc, then by publisher_name asc for stability.

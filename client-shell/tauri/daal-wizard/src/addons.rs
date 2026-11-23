@@ -2,9 +2,10 @@
 //! after the relay exists (docs/optional-addons-plan.md, X1;
 //! specs/optional-addons-v1.md §2).
 //!
-//! Three kinds: a standby address (`addon_standby`), a way in through
+//! Five kinds: a standby address (`addon_standby`), a way in through
 //! Cloudflare (`addon_cdn`), an update channel through Google
-//! (`addon_google`). Each kind's module does the work; this one owns
+//! (`addon_google`), and the two update-note carriers, through GitHub
+//! and through DNS (`addon_notes`). Each kind's module does the work; this one owns
 //! the table (`relay_addons`, V019) and the plumbing every kind shares:
 //!
 //! * listing a relay's add-ons, for the Add-ons section;
@@ -44,16 +45,28 @@ pub enum AddonKind {
     Standby,
     Cdn,
     Google,
+    /// Updates through GitHub (`addon_notes`, V021).
+    Gittag,
+    /// Updates through DNS (`addon_notes`, V021).
+    Dnsnote,
 }
 
 impl AddonKind {
-    pub const ALL: [AddonKind; 3] = [AddonKind::Standby, AddonKind::Cdn, AddonKind::Google];
+    pub const ALL: [AddonKind; 5] = [
+        AddonKind::Standby,
+        AddonKind::Cdn,
+        AddonKind::Google,
+        AddonKind::Gittag,
+        AddonKind::Dnsnote,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             AddonKind::Standby => "standby",
             AddonKind::Cdn => "cdn",
             AddonKind::Google => "google",
+            AddonKind::Gittag => "gittag",
+            AddonKind::Dnsnote => "dnsnote",
         }
     }
 
@@ -442,6 +455,7 @@ pub fn remove(
         AddonKind::Standby => crate::addon_standby::remove(ctx, &row, on_progress),
         AddonKind::Cdn => crate::addon_cdn::remove(ctx, &row, on_progress),
         AddonKind::Google => crate::addon_google::remove(ctx, &row, on_progress),
+        AddonKind::Gittag | AddonKind::Dnsnote => crate::addon_notes::remove(ctx, &row, on_progress),
     }
 }
 
@@ -456,6 +470,7 @@ pub fn before_relay_destroy(ctx: &WizardCtx, operator_id: i64) -> Result<Vec<Add
             AddonKind::Standby => crate::addon_standby::on_relay_delete(ctx, &row),
             AddonKind::Cdn => crate::addon_cdn::on_relay_delete(ctx, &row),
             AddonKind::Google => crate::addon_google::on_relay_delete(ctx, &row),
+            AddonKind::Gittag | AddonKind::Dnsnote => crate::addon_notes::on_relay_delete(ctx, &row),
         };
         if o.removed {
             if let Err(e) = forget(ctx, row.id) {

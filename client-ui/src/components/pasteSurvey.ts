@@ -8,7 +8,14 @@
 // when_used (it cannot be checked beside a tunnel: wireguard, tor, …),
 // skipped, start_failed (nothing was learned about the network) and
 // cancelled. Only `not_carrying` is "checked and failed". A route that
-// was not checked, or is "checked when used", is never removed.
+// was not checked, is "checked when used", or is used only when the
+// person picks it (a pasted WireGuard conf, `manual_only`) is never
+// removed.
+//
+// A check the person starts covers more than the background one: it
+// goes past the 12-an-hour side-check allowance and takes the newly
+// pasted routes first (core/abi/survey.go). It still has a ceiling, so
+// "could not be checked" stays a possible answer.
 
 import { invoke } from '@tauri-apps/api/core';
 import type { RouteDisplayRow } from '../contract/D2Contract';
@@ -61,10 +68,20 @@ export function surveyEnded(r: SurveyReport | null | undefined): boolean {
     return !!r && (r.state === 'done' || r.state === 'stopped');
 }
 
+/** Used only when picked: the engine's `manual_only` when the row has it,
+ *  else (a mapping that predates it) a pasted WireGuard route, which is
+ *  only ever a conf and manual-only by construction. */
+function manualOnlyRow(r: RouteDisplayRow): boolean {
+    const m = r.manualOnly;
+    if (typeof m === 'boolean') return m;
+    return (r.family ?? '').trim().toLowerCase() === 'wireguard' && isPastedRoute(r.routeId);
+}
+
 /** What is known of each of `ids`: the survey's result, with a route the
- *  route list calls "checked when used" kept out of `failed`. */
+ *  route list calls "checked when used", or one used only when picked,
+ *  kept out of `failed`. */
 export function checksFor(ids: string[], read: SurveyRead | null, routes?: RouteDisplayRow[]): Map<string, RouteCheck> {
-    const whenUsed = new Set((routes ?? []).filter((r) => r.checkedWhenUsed).map((r) => r.routeId));
+    const whenUsed = new Set((routes ?? []).filter((r) => r.checkedWhenUsed || manualOnlyRow(r)).map((r) => r.routeId));
     const out = new Map<string, RouteCheck>();
     for (const id of ids) {
         let c = read?.results.get(id) ?? 'unchecked';
@@ -93,7 +110,7 @@ export function isPastedRoute(routeId: string): boolean {
 export function failingHere(routes: RouteDisplayRow[], read: SurveyRead | null, activeRouteId: string | null): string[] {
     const out: string[] = [];
     for (const r of routes) {
-        if (r.routeId === activeRouteId || r.checkedWhenUsed) continue;
+        if (r.routeId === activeRouteId || r.checkedWhenUsed || manualOnlyRow(r)) continue;
         const s = read?.results.get(r.routeId);
         if (s === 'works' || s === 'when_used') continue;
         const m = r.measured;

@@ -85,6 +85,8 @@ import { RelayDestroySheet, relayTitle } from './RelayListPage';
 // Wave 4 Step 11. The one share affordance that needs no network at
 // all: the pack leaves this device as light, off the screen.
 import { QrSendSheet } from './QrSendSheet';
+import { RefileOffer, useRefileOffer } from './refile/RefileOffer';
+import { RefileSheet, type RefileKept } from './refile/RefileSheet';
 import { ActionButton, ActionToast, useAction } from './useAction';
 import { explainFailure, failureBlock } from './failureText';
 import type { Failure } from './failureText';
@@ -603,6 +605,15 @@ export default function PublisherRecipientsPage({
         () => joinPeople(recipients, artifacts),
         [recipients, artifacts],
     );
+    // "New files for everyone" after a removal (refile/): when to offer it.
+    // Open, and why: the standby code, or (from an update switch) the
+    // new way to get updates.
+    const [refileOpen, setRefileOpenRaw] = useState<false | 'code' | 'updates'>(false);
+    const setRefileOpen = (open: boolean | 'code' | 'updates') =>
+        setRefileOpenRaw(open === true ? 'code' : open);
+    // The list of a sheet closed half way, per relay, for the page's life.
+    const [refileKept, setRefileKept] = useState<Record<number, RefileKept | null>>({});
+    const refile = useRefileOffer(operatorId, liveRecipientCount, sharedArtifact?.exists === true, provisioned);
 
     /** "Send" hands the file to the system: the share menu on a phone,
      *  the file's folder on a computer. Daal cannot know whether the
@@ -851,8 +862,9 @@ export default function PublisherRecipientsPage({
                 'ok',
                 t('pub.fb.access_removed').replace('{name}', personLabel(target)),
             );
+            void refile.afterRemoval();
         }
-    }, [action.report, confirmRevoke, operatorId, recheckBackup, reloadArtifacts, runMgmt, t]);
+    }, [action.report, confirmRevoke, operatorId, recheckBackup, refile.afterRemoval, reloadArtifacts, runMgmt, t]);
 
     const onRemoveConfirm = useCallback(async () => {
         if (!confirmRemove) return;
@@ -1351,12 +1363,55 @@ export default function PublisherRecipientsPage({
                 }
                 // "Links for other apps" on the person's ⋯.
                 onLinks={(r) => setLinksFor(r)}
+                // While the renew banner shows, its «فایل تازه برای همه» is
+                // the safe action; the harsher refile of the same name is
+                // not offered beside it.
+                onRefile={refile.available && notice !== 'renew' ? () => setRefileOpen(refile.reason) : undefined}
+                refileHintKey={refile.reason === 'updates' ? 'pub.refile.menu.hint.updates' : 'pub.refile.menu.hint'}
+                notice={
+                    refile.nudge && notice !== 'renew' ? (
+                        <RefileOffer
+                            t={t}
+                            onOpen={() => {
+                                refile.dismiss();
+                                setRefileOpen(refile.reason);
+                            }}
+                            onDismiss={refile.dismiss}
+                        />
+                    ) : undefined
+                }
             />
+            {refileOpen && (
+                <RefileSheet
+                    t={t}
+                    operatorId={operatorId}
+                    relayName={title}
+                    reason={refileOpen}
+                    kept={refileKept[operatorId] ?? null}
+                    onKeep={(k) => setRefileKept((prev) => ({ ...prev, [operatorId]: k }))}
+                    people={people.filter((p) => !p.revoked && p.recipient).map((p) => p.label)}
+                    mgmt={viaMgmt}
+                    onChanged={() => void Promise.all([reloadRecipients(), reloadArtifacts()])}
+                    onClose={() => setRefileOpen(false)}
+                />
+            )}
 
             {/* ---------------- More protection ----------------
                 Three switches that keep people connecting when the
                 relay is blocked. All off by default. */}
-            {provisioned && <AddonsSection t={t} operatorId={operatorId} />}
+            {provisioned && (
+                <AddonsSection
+                    t={t}
+                    operatorId={operatorId}
+                    // After an update-note switch goes on, the people who
+                    // already have a file need a new one; the refile sheet
+                    // makes them (not for a relay with a file for everyone).
+                    onNewFiles={
+                        liveRecipientCount > 0 && sharedArtifact?.exists !== true ? () => setRefileOpen('updates') : undefined
+                    }
+                    everyoneFile={sharedArtifact?.exists === true}
+                />
+            )}
 
             {/* ---------------- Details ----------------
                 What a maintainer asks about and a family member never

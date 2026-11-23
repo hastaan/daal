@@ -23,6 +23,18 @@
 //     per relay is done in Google. "Sign in with Google" is the same step
 //     done for the owner, and shows only in a build that has the OAuth
 //     clients. Disconnect forgets the key; the script stays in Google.
+//   GithubSheet — an account only for this, the key page (fine-grained,
+//     all repositories, Administration and Contents: read and write);
+//     paste → one call to GitHub → "✓ Connected as <name>". A key GitHub
+//     refuses, or a classic key without the repository scope, is never
+//     kept, and the sheet says what is wrong. A fine-grained key's
+//     permissions cannot be proven by that call: it is kept, and if it
+//     lacks one, the relay switch's first write names what GitHub said
+//     is missing and opens this sheet in its «Use a new key» mode. The
+//     connected sheet always offers «Use a new key» (an expired or
+//     revoked key is replaced without disconnecting). The key is kept
+//     by addon_notes::github_connect; a relay's «Updates through GitHub»
+//     makes its own repository under the account.
 
 import { useState } from 'react';
 import { useDensity } from '../../design/DensityProvider';
@@ -30,8 +42,8 @@ import { Button, Input, Sheet, Textarea } from '../../design/primitives';
 import { useDeviceT } from '../ui';
 import { useSecureScreen } from '../useSecureScreen';
 import { Addons, Wizard } from '../wizardCommands';
-import type { CdnTokenCheck } from './addonTypes';
-import type { GoogleState } from './accounts';
+import type { CdnTokenCheck, GithubCheck } from './addonTypes';
+import type { GithubState, GoogleState } from './accounts';
 import { classifyAddonError } from './addonErrors';
 import { BODY, ErrorNote, MONO, MUTED, NumberedSteps, copyText, openExternal, useRun } from './addonUi';
 import { readClipboardText } from '../../lib/clipboard';
@@ -45,6 +57,47 @@ export const CLOUDFLARE_REGISTRAR_URL = 'https://dash.cloudflare.com/?to=/:accou
 export const GOOGLE_SIGNUP_URL = 'https://accounts.google.com/signup';
 export const APPS_SCRIPT_SETTINGS_URL = 'https://script.google.com/home/usersettings';
 export const APPS_SCRIPT_NEW_URL = 'https://script.google.com/home/projects/create';
+export const GITHUB_SIGNUP_URL = 'https://github.com/signup';
+
+/** GitHub's page for a new fine-grained key, filled in as far as GitHub
+ *  lets a link fill it: a plain name, and the two permissions Daal needs
+ *  (Administration, to make the relay's repository; Contents, to write
+ *  to it). GitHub ignores a field it does not read, so the steps still
+ *  name both, and "All repositories". */
+export function githubTokenUrl(): string {
+    return 'https://github.com/settings/personal-access-tokens/new?name=notes&administration=write&contents=write';
+}
+
+const GITHUB_VERDICTS = new Set(['invalid', 'missing_permission', 'owner_mismatch', 'rate_limited']);
+
+/** The line for a GitHub key that was not kept. */
+export function githubVerdictKey(v: string): string {
+    return `pub.accounts.github.verdict.${GITHUB_VERDICTS.has(v) ? v : 'invalid'}`;
+}
+
+/** GitHub's permission names (note-gittag's `missing` and `extra`) as
+ *  the publisher sees them on the key's page. */
+export function githubPermissionList(t: (k: string) => string, names: string[] | undefined, rtl: boolean): string {
+    const words: string[] = [];
+    for (const n of names ?? []) {
+        const name = n.trim();
+        const w = name === 'public_repo' ? t('pub.accounts.github.perm.public_repo') : name.replace(/\s*\(.*\)$/, '');
+        if (w && !words.includes(w)) words.push(w);
+    }
+    return words.join(rtl ? '، ' : ', ');
+}
+
+/** "2027-11-22T…" in the reader's calendar, or '' when unreadable. */
+function dateOf(iso: string | undefined, rtl: boolean): string {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    try {
+        return d.toLocaleDateString(rtl ? 'fa-IR' : 'en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+    } catch {
+        return iso.slice(0, 10);
+    }
+}
 
 /** The pre-filled token page (plan §2.5): exactly the five zone
  *  permissions Daal needs. It cannot pre-pick one zone; the owner picks
@@ -707,6 +760,195 @@ export function GoogleSheet({
                                 <p style={{ ...MUTED, textAlign: 'center' }}>{t('pub.accounts.google.unverified')}</p>
                             </div>
                         )}
+                    </>
+                )}
+            </div>
+        </Sheet>
+    );
+}
+
+export function GithubSheet({
+    t,
+    github,
+    onClose,
+    onConnected,
+    onDisconnected,
+    newKey = false,
+}: {
+    t: (k: string) => string;
+    /** Open on «Use a new key»: steps 2 and 3 and the key field. */
+    newKey?: boolean;
+    /** The account as kept now; absent or not connected: the steps. */
+    github?: GithubState;
+    onClose: () => void;
+    /** The key was checked and kept: the account's name on GitHub. From a
+     *  relay switch, the caller goes on to turn the switch on. */
+    onConnected: (login: string) => void;
+    onDisconnected?: () => void;
+}) {
+    const { isRTL } = useDensity();
+    const [token, setToken] = useState('');
+    const [check, setCheck] = useState<GithubCheck | null>(null);
+    const [pasteFailed, setPasteFailed] = useState(false);
+    const { busy, error, run } = useRun();
+    // «Use a new key»: the key steps again, without the account step.
+    const [replacing, setReplacing] = useState(newKey);
+    const done = check?.stored ? check : null;
+    const login = done ? (done.login ?? '') : github?.connected ? github.login : null;
+    const extra = done ? done.extra : github?.extra;
+    const expires = done ? done.expires_at : github?.expiresAt;
+    const broad = githubPermissionList(t, extra, isRTL);
+    const until = dateOf(expires, isRTL);
+
+    const connect = async () => {
+        const typed = token;
+        const c = await run(() => Addons.githubConnect({ token: typed }));
+        // The key leaves the page once it is checked, kept or not.
+        setToken('');
+        if (!c) return;
+        setCheck(c);
+        if (c.stored) {
+            setReplacing(false);
+            onConnected(c.login ?? '');
+        }
+    };
+    const paste = async () => {
+        // '' when nothing could be read: the field takes it by hand.
+        const s = (await readClipboardText()).trim();
+        if (s) {
+            setToken(s);
+            setCheck(null);
+        }
+        setPasteFailed(!s);
+    };
+    const disconnect = async () => {
+        const r = await run(async () => {
+            await Addons.githubDisconnect();
+            return true;
+        });
+        if (r) onDisconnected?.();
+    };
+    const refusal = (c: GithubCheck): string => {
+        const line = t(githubVerdictKey(c.verdict));
+        if (c.verdict !== 'missing_permission') return line;
+        return line.replace('{list}', githubPermissionList(t, c.missing, isRTL) || t('pub.accounts.cf.perm.some'));
+    };
+
+    return (
+        <Sheet title="GitHub" onClose={onClose} width={480}>
+            <div data-testid="github-sheet" style={{ display: 'grid', gap: 14 }}>
+                {login != null && !(replacing && done == null) ? (
+                    <>
+                        <Connected
+                            testId="github-connected"
+                            text={login ? t('pub.accounts.github.connected_as').replace('{name}', login) : t('pub.accounts.connected')}
+                        />
+                        <p style={MUTED}>{t('pub.accounts.github.kept')}</p>
+                        {broad && (
+                            <p data-testid="github-broad" style={MUTED}>
+                                {t('pub.accounts.github.broad').replace('{list}', broad)}
+                            </p>
+                        )}
+                        {until && (
+                            <p data-testid="github-expires" style={{ ...MUTED, color: 'var(--amber)' }}>
+                                {t('pub.accounts.github.expires').replace('{date}', until)}
+                            </p>
+                        )}
+                        {done == null && onDisconnected && (
+                            <p data-testid="github-disconnect-line" style={MUTED}>
+                                {t('pub.accounts.github.disconnect.line')}
+                            </p>
+                        )}
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                {done == null && onDisconnected && (
+                                    <Button variant="ghost" onClick={() => void disconnect()} disabled={busy} dataButton="github-disconnect">
+                                        {t('pub.accounts.disconnect')}
+                                    </Button>
+                                )}
+                                <Button
+                                    variant="secondary"
+                                    onClick={() => {
+                                        setCheck(null);
+                                        setReplacing(true);
+                                    }}
+                                    disabled={busy}
+                                    dataButton="github-new-key"
+                                >
+                                    {t('pub.accounts.github.new_key')}
+                                </Button>
+                            </div>
+                            <Button onClick={onClose} dataButton="github-done">
+                                {t('pub.accounts.done')}
+                            </Button>
+                        </div>
+                        {error != null && <ErrorNote t={t} error={error} />}
+                    </>
+                ) : (
+                    <>
+                        <NumberedSteps
+                            testId="github-steps"
+                            items={[
+                                ...(replacing && login != null
+                                    ? []
+                                    : [
+                                          {
+                                              text: t('pub.accounts.github.step.1'),
+                                              action: {
+                                                  label: t('pub.accounts.github.step.1.action'),
+                                                  url: GITHUB_SIGNUP_URL,
+                                                  dataButton: 'github-signup',
+                                              },
+                                          },
+                                      ]),
+                                {
+                                    text: t('pub.accounts.github.step.2'),
+                                    action: {
+                                        label: t('pub.accounts.github.step.2.action'),
+                                        url: githubTokenUrl(),
+                                        dataButton: 'github-token-page',
+                                    },
+                                },
+                                { text: t('pub.accounts.github.step.3') },
+                            ]}
+                        />
+                        <div style={{ display: 'grid', gap: 6 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg)' }}>{t('pub.accounts.github.key')}</div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <Input
+                                    type="password"
+                                    autoComplete="off"
+                                    autoCapitalize="off"
+                                    autoCorrect="off"
+                                    spellCheck={false}
+                                    dir="ltr"
+                                    value={token}
+                                    onChange={(e) => {
+                                        setToken(e.target.value);
+                                        setCheck(null);
+                                    }}
+                                    placeholder={t('wiz.provider.token.placeholder')}
+                                    aria-label={t('pub.accounts.github.key')}
+                                    data-button="github-token"
+                                    style={{ flex: 1, minWidth: 0 }}
+                                />
+                                <Button variant="secondary" leading="paste" onClick={() => void paste()} dataButton="github-paste">
+                                    {t('ui.paste')}
+                                </Button>
+                            </div>
+                            {pasteFailed && <p style={{ ...MUTED, color: 'var(--red)' }}>{t('wiz.provider.token.paste_failed')}</p>}
+                        </div>
+                        {check && !check.stored && (
+                            <p data-testid="github-verdict" data-verdict={check.verdict} style={{ ...MUTED, color: 'var(--red)' }}>
+                                {refusal(check)}
+                            </p>
+                        )}
+                        {error != null && <ErrorNote t={t} error={error} />}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                            <Button onClick={() => void connect()} disabled={busy || token.trim() === ''} dataButton="github-connect">
+                                {busy ? t('pub.accounts.checking') : t('pub.accounts.connect')}
+                            </Button>
+                        </div>
                     </>
                 )}
             </div>

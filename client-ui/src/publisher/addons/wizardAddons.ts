@@ -16,7 +16,7 @@ import type { AccountsState } from './accounts';
 import type { AddonKind, AddonRow } from './addonTypes';
 
 /** The order the rows show and the order they are applied in. */
-export const ADDON_ORDER: readonly AddonKind[] = ['standby', 'cdn', 'google'];
+export const ADDON_ORDER: readonly AddonKind[] = ['standby', 'cdn', 'google', 'gittag', 'dnsnote'];
 
 const CHOICE_KEY = (op: number) => `daal.wizard.addons.${op}`;
 const FAILED_KEY = (op: number) => `daal.addons.failed.${op}`;
@@ -84,20 +84,24 @@ export function clearAddonFailure(op: number, kind: AddonKind): void {
 }
 
 /** What turning an extra on needs before it can run: its account. */
-export type AddonNeed = 'ready' | 'cloudflare' | 'google';
+export type AddonNeed = 'ready' | 'cloudflare' | 'google' | 'github';
 
 export function addonNeed(kind: AddonKind, acc: AccountsState): AddonNeed {
-    if (kind === 'cdn' && (!acc.cloudflare.connected || !acc.cloudflare.zone)) return 'cloudflare';
+    if ((kind === 'cdn' || kind === 'dnsnote') && (!acc.cloudflare.connected || !acc.cloudflare.zone)) return 'cloudflare';
     if (kind === 'google' && !acc.google.connected) return 'google';
+    if (kind === 'gittag' && acc.github?.connected !== true) return 'github';
     return 'ready';
 }
 
 /** The one call that turns `kind` on for relay `op`: the same call the
  *  relay page's switch makes. The standby is always sealed; Google takes
- *  a place in the account's script. */
+ *  a place in the account's script; GitHub makes the relay's repository;
+ *  DNS writes in the Cloudflare account's zone. */
 export async function runAddon(kind: AddonKind, op: number, acc: AccountsState): Promise<AddonRow | void> {
     if (kind === 'standby') return Addons.standbyAdd({ operator_id: op, mode: 'sealed' });
     if (kind === 'cdn') return Addons.cdnBuild({ operator_id: op, zone: acc.cloudflare.zone });
+    if (kind === 'gittag') return Addons.gittagOn({ operator_id: op });
+    if (kind === 'dnsnote') return Addons.dnsnoteOn({ operator_id: op });
     return Addons.googleOn({ operator_id: op });
 }
 
@@ -121,6 +125,7 @@ export type ApplyState =
 const NOT_CONNECTED: Record<Exclude<AddonNeed, 'ready'>, string> = {
     cloudflare: 'E_CDN_NO_TOKEN: Cloudflare is not connected',
     google: 'E_GOOGLE_NO_ACCOUNT: Google is not connected',
+    github: 'E_GITHUB_NO_ACCOUNT: GitHub is not connected',
 };
 
 /** Turn one extra on, reporting its state; a failure is kept for the
@@ -203,4 +208,14 @@ export async function applyAddonChoices(
     } finally {
         applying.delete(op);
     }
+}
+
+/** The update notes' app-open pass (addon_notes.rs `tick`): once per app
+ *  run, in the background. A shell without it, or one that fails, is
+ *  quiet: each switch says on its own row how its last write went. */
+let notesTicked = false;
+export function notesTickOnce(): void {
+    if (notesTicked) return;
+    notesTicked = true;
+    void Addons.notesTick().catch(() => {});
 }

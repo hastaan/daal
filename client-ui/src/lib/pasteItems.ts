@@ -52,7 +52,16 @@ export type PasteItem =
     /** `importable`: the engine can turn this kind into a route today
      *  (IMPORTABLE). Any other kind is named, shown muted with "Daal
      *  can't add this kind of link yet", and never counted in "Add all". */
-    | { kind: 'route'; route: RouteKind; text: string; importable: boolean }
+    | {
+          kind: 'route';
+          route: RouteKind;
+          text: string;
+          importable: boolean;
+          /** A pasted WireGuard conf: kept as a route Daal uses only when
+           *  the person picks it (core/abi/share.go URIImport stores it
+           *  manual-only; the automatic connect never tries it). */
+          manualOnly?: boolean;
+      }
     | { kind: 'file'; container: 'sbp' | 'sbpx'; text: string }
     | { kind: 'web'; text: string }
     /** A proxy for another app. `open` is the link rebuilt from the
@@ -76,14 +85,20 @@ export const ROUTE_KIND_NAME: Record<RouteKind, string> = {
     snowflake: 'Snowflake',
 };
 
-/** The kinds core/abi URIImport can import (uri.ParseURI: vless, vmess,
- *  trojan, ss, hy2/hysteria2, tuic). WireGuard is NOT here yet: a conf
- *  needs uri.ParseAny and a stored "dial only when picked" flag that no
- *  route row has, so the engine refuses it. */
+/** The LINK kinds core/abi URIImport can import (uri.ParseURI: vless,
+ *  vmess, trojan, ss, hy2/hysteria2, tuic). A wg:// or wireguard:// link
+ *  has no parser in the engine; a pasted WireGuard CONF does
+ *  (`confItem`): URIImport reads it with uri.ParseAny and keeps it as a
+ *  manual-only route. */
 export const IMPORTABLE: ReadonlySet<RouteKind> = new Set<RouteKind>(['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic']);
 
 function routeItem(route: RouteKind, text: string): PasteItem {
     return { kind: 'route', route, text, importable: IMPORTABLE.has(route) };
+}
+
+/** One `[Interface]` … block: addable, and used only when picked. */
+function confItem(text: string): PasteItem {
+    return { kind: 'route', route: 'wireguard', text, importable: true, manualOnly: true };
 }
 
 /** At most this many items are read from one paste. */
@@ -323,7 +338,7 @@ export function pasteItems(input: string): { items: PasteItem[]; truncated: bool
     // In paste order: by line, then by position on the line.
     type Placed = { at: number; ord: number; item: PasteItem };
     const placed: Placed[] = [];
-    for (const b of blocks) placed.push({ at: b.at, ord: -1, item: routeItem('wireguard', b.text) });
+    for (const b of blocks) placed.push({ at: b.at, ord: -1, item: confItem(b.text) });
     if (container) placed.push({ at: loose[0].line, ord: loose[0].ord, item: { kind: 'file', container, text: looseText } });
 
     let run: Piece[] = [];
@@ -369,9 +384,21 @@ export function addable(items: PasteItem[]): PasteItem[] {
 }
 
 /** How many route LINKS the paste holds: the bulk check and removal are
- *  offered only when this is two or more. */
+ *  offered only when this is two or more. A WireGuard conf is not
+ *  counted: it is used only when picked, and never checked beside
+ *  another connection. */
 export function routeLinkCount(items: PasteItem[]): number {
-    return items.filter((i) => i.kind === 'route' && i.importable).length;
+    return items.filter((i) => i.kind === 'route' && i.importable && !i.manualOnly).length;
+}
+
+/** Whether text found on the clipboard is something Daal can add: a
+ *  connection link it can import or a Daal file. Anything else (the
+ *  phone's own Daal address, a sentence, a web page, a proxy for another
+ *  app) is left where it is: the paste box opens empty and says nothing,
+ *  because the person did not paste it. */
+export function usableClipboard(text: string): boolean {
+    if (!text || !text.trim()) return false;
+    return addable(pasteItems(text).items).length > 0;
 }
 
 // ---- refusals ----------------------------------------------------------
@@ -386,6 +413,7 @@ export const REFUSAL_CODES = [
     'plaintext_refused',
     'insecure_refused',
     'link_malformed',
+    'manual_only',
     'no_match',
 ] as const;
 export type RefusalCode = (typeof REFUSAL_CODES)[number] | 'other';

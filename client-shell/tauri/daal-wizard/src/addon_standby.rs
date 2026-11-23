@@ -498,15 +498,29 @@ pub struct UpdateSecretForFile {
     /// The people generation the secret is of (0 for the Everyone
     /// audience). Handed back to `record_holder` once the file is made.
     pub gen: u32,
+    /// Where the person's phone looks for the relay's update notes (the
+    /// carriers member, `update/carriers.json`), when the relay has a
+    /// note switch on (`addon_notes::carriers_member`). Never set for
+    /// the Everyone file: the helper refuses it there.
+    pub carriers: Option<Value>,
 }
 
 impl UpdateSecretForFile {
     /// Adds the secret to the creds JSON the helper reads
-    /// (`update_secret`, `update_audience`).
+    /// (`update_secret`, `update_audience`, and `update_carriers` for a
+    /// person's file when the relay has a note switch on).
     pub fn add_to_creds(&self, creds: &mut Value) {
         if let Some(obj) = creds.as_object_mut() {
             obj.insert("update_secret".into(), Value::String(self.secret_b64.to_string()));
             obj.insert("update_audience".into(), Value::String(self.audience.clone()));
+            match &self.carriers {
+                Some(c) if self.audience != "everyone" => {
+                    obj.insert("update_carriers".into(), c.clone());
+                }
+                _ => {
+                    obj.remove("update_carriers");
+                }
+            }
         }
     }
 }
@@ -685,7 +699,71 @@ pub fn people_secret_for_file(
         secret_b64: zeroize::Zeroizing::new(B64.encode(&u[..])),
         audience,
         gen: st.gen,
+        carriers: crate::addon_notes::carriers_member(ctx, op),
     }))
+}
+
+/// The relay's current people secret, raw, for the note writers
+/// (`addon_notes`): the audience the newest files carry. The removal
+/// rule applies first (`load_update_state`), so a person removed while
+/// holding a generation never gets a note written under it again. None
+/// when the relay has no signed pack yet.
+pub(crate) fn current_people_secret(
+    ctx: &WizardCtx,
+    op: i64,
+) -> Result<Option<(zeroize::Zeroizing<[u8; 32]>, String)>> {
+    let root = update_root(ctx)?;
+    let Some(st) = load_update_state(ctx, op, &root)? else {
+        return Ok(None);
+    };
+    let audience = people_audience(st.gen);
+    let u = derive_update_secret(&root, &st.pack_id, &audience);
+    Ok(Some((u, audience)))
+}
+
+/// The raw people secret of `audience` (an audience a note was written
+/// under before), for removing what was written. None as above.
+pub(crate) fn people_secret_of(
+    ctx: &WizardCtx,
+    op: i64,
+    audience: &str,
+) -> Result<Option<zeroize::Zeroizing<[u8; 32]>>> {
+    if audience == "everyone" {
+        return Ok(None);
+    }
+    let root = update_root(ctx)?;
+    let Some(st) = load_update_state(ctx, op, &root)? else {
+        return Ok(None);
+    };
+    Ok(Some(derive_update_secret(&root, &st.pack_id, audience)))
+}
+
+/// The standby key that has been revealed: the most recent switch to a
+/// standby (a promoted row's plain key). It is the relay's address now,
+/// so the update notes carry it to people whose app could not fetch the
+/// new pack. None when the relay never switched.
+pub(crate) fn revealed_key(ctx: &WizardCtx, op: i64) -> Option<[u8; 16]> {
+    addons::list(ctx, op)
+        .ok()?
+        .into_iter()
+        .rev()
+        .filter(|r| r.kind == AddonKind::Standby && r.state == AddonState::Promoted)
+        .find_map(|r| r.detail.get("key").and_then(Value::as_str).and_then(bytes_of_text))
+}
+
+/// `bundle.StandbyCommit`: base64(SHA-256("daal/standby-v1" ‖ key)), the
+/// `_standby.commit` a sealed standby carries.
+pub(crate) fn standby_commit(key: &[u8; 16]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"daal/standby-v1");
+    h.update(key);
+    B64.encode(h.finalize())
+}
+
+/// The 26 symbols of a key, run together (the form the note verbs read).
+pub(crate) fn key_symbols(key: &[u8; 16]) -> String {
+    text_of(key).replace(' ', "")
 }
 
 /// Records that the file just made for `recipient_fp_hex` carries the
@@ -713,6 +791,7 @@ pub fn everyone_secret_for_file(ctx: &WizardCtx, op: i64) -> Result<Option<Updat
         secret_b64: zeroize::Zeroizing::new(B64.encode(&u[..])),
         audience: "everyone".into(),
         gen: 0,
+        carriers: None,
     }))
 }
 
@@ -1032,6 +1111,9 @@ pub fn promote(
         }),
     )?;
     addons::set_state(ctx, row.id, AddonState::Promoted)?;
+    // The update notes reveal the key now (addon_notes): the micro note
+    // for phones that cannot fetch the new pack. Never fails the switch.
+    let _ = crate::addon_notes::write_relay(ctx, op);
     // The row keeps the plain key; what is shown is the code to send.
     let (key, key_form, plain_key) = code_to_send(ctx, op, &key);
     Ok(StandbyPromoteResult {

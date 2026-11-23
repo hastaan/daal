@@ -31,6 +31,7 @@ package org.daal.desktop.platform
  *   engine_export_diagnostics()        ← DaalCoreBridge.engineState
  *                                         (six fields of it)
  *   engine_field_probe_cancel(reason)  ← DaalCoreBridge.fieldProbeCancel
+ *   engine_set_link_resolvers(json)    ← DaalCoreBridge.setLinkResolvers
  *
  * The Phase 45 spec requires these JNI methods to be wired before the
  * first upstream dial; the VpnService respects that ordering.
@@ -176,6 +177,22 @@ object DaalCoreBridge {
    * way.
    */
   external fun networkFacts(kind: String, id: String, validated: Int, metered: Int): Int
+
+  /**
+   * `engine_set_link_resolvers`: the DNS servers of the network UNDER
+   * the tunnel (LinkProperties.getDnsServers of the network
+   * NetworkWatch follows), as a JSON list of address strings; "[]" when
+   * that network was lost. Go cannot read them on Android, and the
+   * update ladder's DNS reader asks only the network's own resolver.
+   * DaalVpnService calls it from its network callback, on the network
+   * thread. Never log the addresses.
+   *
+   * Returns 1 = the engine has a resolver to ask, 0 = none, -1 = the
+   * engine is not loaded, predates the call, or refused the list. An
+   * app library that predates it throws UnsatisfiedLinkError: callers
+   * catch Throwable.
+   */
+  external fun setLinkResolvers(serversJson: String): Int
 
   /**
    * The engine's own account of the connection, from its memory (not

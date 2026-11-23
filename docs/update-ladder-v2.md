@@ -266,6 +266,16 @@ INFERRED and to be checked from outside: that the host answers behind the
 `www.google.com` front, that pre-release versions appear in `list`, and how long `list`
 is cached (expect minutes to half an hour).
 
+**Known exposure, to check from outside (added 2026-11-22, unverified).** As far as is
+known of the Go proxy, the first read of a module through `proxy.golang.org` (door 3 or
+the direct reader of §4.4) puts its module path and versions in Google's public module
+index (`index.golang.org`), permanently. The note tags have a distinctive shape
+(`v0.<seq>.0-<26 base32>`), so anyone could list the note repositories read this way, and
+the GitHub accounts behind them. They could not read a note, but they could report the
+accounts or watch them. To check: does a first read through the front, or through the
+direct proxy, appear in the index? The owner decides whether the Go-proxy readers stay on
+by default; `goproxy.cn` and `goproxy.io` are not known to feed that index.
+
 **Considered and not chosen as doors:** a published Google Doc, Blogger, Drive public
 file (all need the publisher's Google credential on the phone to write, or manual
 pasting; keep manual pasting of a sealed note into a "published to web" Doc as a
@@ -353,6 +363,12 @@ Rule: one reader from this class per walk, chosen by `HKDF(u, device, day)` so a
 does not sweep five developer hosts in a minute. All are plain browser-shaped GETs,
 64 KiB bound. Size S per reader. Whether any of these names is on a whitelist in R3 is
 unknown; the network test decides which are worth shipping (§8, D7, D8, D10, D11).
+
+As built (2026-11-22): the ladder picks the one rung-4 reader with
+`HKDF(newest held u, "ladder-reader" ‖ device salt ‖ UTC day) mod n` over the readers
+that are usable, not struck and fit the walk's budget; the device salt is 16 random bytes
+kept on the phone and never sent. The Go-proxy readers carry the index exposure noted
+under door 3 (§4.2); whether they stay on by default is the owner's decision.
 
 ### 4.5 Package registries as a write (feeds rungs 4 and 6)
 

@@ -27,6 +27,30 @@ type vmessLink struct {
 	ALPN  string      `json:"alpn"`
 	Fp    string      `json:"fp"`
 	Extra interface{} `json:"-"`
+
+	// The certificate-check switches some generators add to the
+	// 2dust JSON (a string "1"/"true" or a JSON bool or number).
+	AllowInsecure  any `json:"allowInsecure"`
+	AllowInsecure2 any `json:"allow_insecure"`
+	Insecure       any `json:"insecure"`
+	SkipCert       any `json:"skip-cert-verify"`
+}
+
+// switchText renders a JSON switch value for linkInsecure.
+func switchText(v any) string {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return "true"
+		}
+	case float64:
+		if x != 0 {
+			return "1"
+		}
+	case string:
+		return x
+	}
+	return ""
 }
 
 func parseVMess(raw string) (Profile, Provenance, error) {
@@ -86,6 +110,13 @@ func parseVMess(raw string) (Profile, Provenance, error) {
 		out["transport"] = transport
 	}
 	if tlsOn {
+		// Certificate check off under TLS: refused, as for vless://
+		// and trojan:// (insecure_refused). Without TLS there is no
+		// certificate to check and the switch changes nothing.
+		if linkInsecure(switchText(link.AllowInsecure), switchText(link.AllowInsecure2),
+			switchText(link.Insecure), switchText(link.SkipCert)) {
+			return Profile{}, Provenance{}, fmt.Errorf("vmess: insecure: %w", ErrInsecure)
+		}
 		tls := map[string]any{"enabled": true}
 		if link.SNI != "" {
 			tls["server_name"] = link.SNI

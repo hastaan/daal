@@ -61,7 +61,7 @@ across the **entire** FRP track per supplement — that part still holds.
 The companion claim that **ABI=48 is preserved across the entire FRP track
 (no engine release symbols are added at any FRP-N phase)** is **no longer
 true** and should not be relied on as an invariant. The release surface is
-**70** as of 2026-11-20 (60 on 2026-11-19, 58 on 2026-08-17). Symbols were added — the append-only rule held (no
+**71** as of 2026-11-22 (70 on 2026-11-20, 60 on 2026-11-19, 58 on 2026-08-17). Symbols were added — the append-only rule held (no
 existing signature or semantic changed), but the count did not freeze. See
 the ABI ledger at the end of `specs/engine-abi-v1.md` for the authoritative
 list and the regeneration command.

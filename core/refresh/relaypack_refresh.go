@@ -207,6 +207,20 @@ type RelayPackRefresher struct {
 	StandbyKeys     StandbyKeySink
 	GoogleJitter    func(max time.Duration) time.Duration
 	MaxGoogleJitter time.Duration
+
+	// The update ladder (ladder.go), walked after the mirrors by the
+	// direct unscheduled walks only. LadderCarriers replaces the
+	// registry (tests; nil: RegisteredCarriers()); LadderBudget the
+	// 120 s; LadderGap the 2–10 s wait before each host. Resolver gives
+	// the resolver the network handed the phone ("host:port", "" when
+	// unknown) for the DNS carrier. NetworkKey gives the (already
+	// hashed) network id for the person's button, whose entry point has
+	// none; nil means "unknown network", one strike bucket of its own.
+	LadderCarriers []Carrier
+	LadderBudget   time.Duration
+	LadderGap      func() time.Duration
+	Resolver       func() string
+	NetworkKey     func() string
 }
 
 // RelayPackTarget is one refreshable pack.
@@ -247,6 +261,13 @@ type RelayPackResult struct {
 	// engine's store accepted it for a held route. Like Applied, it is
 	// new information: the caller restarts its pass. Additive.
 	StandbyKeyAccepted bool `json:"standby_key_accepted,omitempty"`
+	// Ladder: per carrier class the update ladder (ladder.go) reached on
+	// this attempt, one coarse word (LadderReached / LadderNothingNew /
+	// LadderFailed). Never a host, a name or an address. Additive.
+	Ladder map[string]string `json:"ladder,omitempty"`
+	// ViaLadder: the document that verified came from a full note of
+	// the ladder. Additive.
+	ViaLadder bool `json:"via_ladder,omitempty"`
 }
 
 // freshnessRecord is the persisted per-pack state. Stored in
@@ -582,7 +603,7 @@ func (r *RelayPackRefresher) Refresh(ctx context.Context, relayPackID string) (R
 		return packBusy(relayPackID, kindScheduled), nil
 	}
 	defer unlock()
-	return r.refresh(ctx, relayPackID, kindScheduled)
+	return r.refresh(ctx, relayPackID, kindScheduled, "")
 }
 
 // RefreshUser is the user-triggered variant; bypasses the
@@ -593,10 +614,12 @@ func (r *RelayPackRefresher) RefreshUser(ctx context.Context, relayPackID string
 		return packBusy(relayPackID, kindUser), nil
 	}
 	defer unlock()
-	return r.refresh(ctx, relayPackID, kindUser)
+	return r.refresh(ctx, relayPackID, kindUser, "")
 }
 
-func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, kind refreshKind) (RelayPackResult, error) {
+// networkKey is the (hashed) network the walk runs on, for the ladder's
+// strikes; "" when the entry point does not know it.
+func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, kind refreshKind, networkKey string) (RelayPackResult, error) {
 	now := r.now()
 	res := RelayPackResult{RelayPackID: relayPackID, Kind: kind.String()}
 	if r.Store == nil {
@@ -620,11 +643,23 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 		return res, err
 	}
 	res.Providers = target.Providers
-	if len(target.Endpoints) == 0 {
+	noEndpoints := func() (RelayPackResult, error) {
 		res.Outcome = OutcomeFreshnessNoEndpoints
 		r.failed(kind, relayPackID, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, 0, false, now)
 		return res, nil
+	}
+	// ladderOnly: the pack names no mirror (a relay under the two-mirror
+	// floor signs its pack with none) but its routes hold what the update
+	// ladder needs. On the direct unscheduled walks the ladder is then the
+	// whole walk; every other case keeps today's early return, so an older
+	// file behaves exactly as before.
+	ladderOnly := false
+	if len(target.Endpoints) == 0 {
+		if !kind.unscheduled() || RouteActive() || r.loadLadderHeld(relayPackID) == nil {
+			return noEndpoints()
+		}
+		ladderOnly = true
 	}
 
 	rec := r.loadRecord(relayPackID)
@@ -650,6 +685,11 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 		// bookkeeping as the guard's refusal below.
 		dialer, err = nil, ErrTunnelRequired
 	}
+	if ladderOnly && (err != nil || !ladderAllowed(kind, viaTunnel)) {
+		// Nothing to walk but the ladder, and this walk may not run it:
+		// exactly the old answer, nothing dialled.
+		return noEndpoints()
+	}
 	if err != nil {
 		// Wave 1's guard. This is NOT "unreachable" and must never be
 		// retried as a direct dial, so we stamp the attempt (the base
@@ -669,7 +709,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	res.ViaTunnel = viaTunnel
 
 	allowGoogle := googleAllowed(kind, viaTunnel)
-	if order, _ := orderForWalk(target.Endpoints, allowGoogle); len(order) == 0 {
+	if order, _ := orderForWalk(target.Endpoints, allowGoogle); len(order) == 0 && !ladderOnly {
 		// Every endpoint is a Google mirror and this walk may not
 		// reach it (frontmirror.go). Nothing goes out, so nothing is
 		// learned and nothing escalates: stamped like a refusal.
@@ -679,11 +719,51 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 		return res, nil
 	}
 
-	w, err := r.walkEndpoints(ctx, target, rec, dialer, now, allowGoogle)
+	var w walkResult
+	if ladderOnly {
+		// No mirror to walk: the ladder below is the whole walk.
+		err = errLadderOnly
+	} else {
+		w, err = r.walkEndpoints(ctx, target, rec, dialer, now, allowGoogle)
+	}
+	// The update ladder (ladder.go): rungs 1 → 2 → 4 → 3 after today's
+	// mirrors found nothing that verified, on the direct unscheduled
+	// walks only. With an older file (no update secret or no carriers
+	// member) it does nothing.
+	ladderKey := false
+	if err != nil && ladderAllowed(kind, viaTunnel) && ctx.Err() == nil {
+		lr := r.runLadder(ctx, target, rec, dialer, now, networkKey, w.googleConns)
+		res.Ladder = lr.classes
+		r.recordLadder(relayPackID, lr.classes, now)
+		ladderKey = lr.standbyAccepted
+		tried := w.tried + lr.tried
+		if lr.walk.doc != nil {
+			w, err = lr.walk, nil
+		}
+		w.tried = tried
+		if err != nil && ladderKey {
+			// No document, but a micro note's standby key that the
+			// engine's store kept: a new address for a held route.
+			res.EndpointsTried = w.tried
+			res.StandbyKeyAccepted = true
+			res.Outcome = OutcomeFreshnessStandbyKey
+			kept := r.loadRecord(relayPackID)
+			kept.LastOutcome = res.Outcome
+			r.saveRecord(relayPackID, kept)
+			recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, 0, viaTunnel, now)
+			return res, nil
+		}
+	}
 	doc, docBytes := w.doc, w.raw
 	res.EndpointsTried = w.tried
-	res.ViaGoogle = w.container != nil
+	res.ViaGoogle = w.container != nil && !w.viaLadder
+	res.ViaLadder = w.viaLadder
 	res.BytesIn += int64(len(docBytes))
+	if err != nil && ladderOnly && ctx.Err() == nil {
+		// The ladder found nothing: the same answer as a pack with no
+		// mirror always gave (no pointer recovery, as before).
+		return noEndpoints()
+	}
 	if err != nil {
 		outcome := OutcomeFreshnessUnreachable
 		if isVerificationError(err) {
@@ -734,7 +814,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 
 	if !res.Changed {
 		res.Outcome = OutcomeFreshnessUnchanged
-		res.StandbyKeyAccepted = r.offerStandbyKey(relayPackID, w.container)
+		res.StandbyKeyAccepted = r.offerStandbyKey(relayPackID, w.container) || ladderKey
 		r.markSuccess(relayPackID, rec, now, res.Outcome)
 		recordAudit(r.Store, auditKindFreshness, relayPackID, res.Outcome, res.BytesIn, viaTunnel, now)
 		return res, nil
@@ -811,7 +891,7 @@ func (r *RelayPackRefresher) refresh(ctx context.Context, relayPackID string, ki
 	r.markSuccess(packID, rec, now, res.Outcome)
 	// The standby key after the pack: it is checked against the
 	// commitments of the routes as they are NOW.
-	res.StandbyKeyAccepted = r.offerStandbyKey(packID, w.container)
+	res.StandbyKeyAccepted = r.offerStandbyKey(packID, w.container) || ladderKey
 	recordAudit(r.Store, auditKindFreshness, packID, res.Outcome, res.BytesIn, viaTunnel, now)
 	return res, nil
 }
@@ -844,9 +924,14 @@ type walkResult struct {
 	raw   []byte
 	tried int
 	// container is set when doc came out of a daal-refresh-v2
-	// container (an appsscript mirror); its other parts are usable
-	// only because doc verified.
+	// container (an appsscript mirror, or a full note of the ladder);
+	// its other parts are usable only because doc verified.
 	container *refreshContainer
+	// viaLadder: the container was a full note of the ladder.
+	viaLadder bool
+	// googleConns: connections the walk made to Google's front (the
+	// Apps Script mirror); the ladder keeps the walk's total to two.
+	googleConns int
 }
 
 // walkEndpoints tries the endpoints under a total budget — the ordinary
@@ -893,7 +978,7 @@ func (r *RelayPackRefresher) walkEndpoints(ctx context.Context, t RelayPackTarge
 			err error
 		)
 		if google {
-			c, err = r.fetchGoogleMirror(ctx, walkCtx, ep, dialer, perURL)
+			c, err = r.fetchGoogleMirror(ctx, walkCtx, ep, dialer, perURL, &w.googleConns)
 			if c != nil {
 				raw = c.freshness
 			}
@@ -975,6 +1060,10 @@ func (r *RelayPackRefresher) fetchBundle(ctx context.Context, url string, dialer
 // errRoutePublisherRebind is returned when a fetched pack would take
 // over a route id currently owned by a different publisher.
 var errRoutePublisherRebind = errors.New("freshness: fetched pack would re-home another publisher's route")
+
+// errLadderOnly stands in for the mirror walk's failure on a pack with no
+// mirror whose routes hold the ladder's secret and carriers.
+var errLadderOnly = errors.New("freshness: no mirror; update ladder only")
 
 // applyBundle is the gate in front of the importer's atomic swap.
 //

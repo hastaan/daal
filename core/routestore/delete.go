@@ -12,7 +12,11 @@ import "fmt"
 // (bundle.StandbyKeyStoreKey, written by core/abi acceptStandbyKey), and
 // the update secrets of the route's files (bundle.UpdateSecretStoreKey,
 // written by core/trust SaveImport): a person who removes a relay's file
-// must not keep that relay's audience secret on the phone.
+// must not keep that relay's audience secret on the phone. Also the
+// update carriers of those files (bundle.UpdateCarriersStoreKey, written
+// by core/trust SaveImport: they name the publisher's repository and
+// note zone) and the engine's own meta of a pasted route (RouteMetaKey:
+// its manual-only bit and the link's name).
 func perRouteSecretKeys(routeID string) []string {
 	return []string{
 		"delegate_share_counter:" + routeID,
@@ -20,6 +24,8 @@ func perRouteSecretKeys(routeID string) []string {
 		"standby:" + routeID,
 		"standby-key:" + routeID,
 		"update-secret:" + routeID,
+		"update-carriers:" + routeID,
+		RouteMetaKey(routeID),
 	}
 }
 

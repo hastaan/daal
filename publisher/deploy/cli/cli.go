@@ -174,6 +174,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runCDNRemove(ctx, rest, os.Stdin, stdout, stderr)
 	case "cdn-door":
 		return runCDNDoor(ctx, rest, os.Stdin, stdout, stderr)
+	case "note-dns":
+		return runNoteDNS(ctx, rest, os.Stdin, stdout, stderr)
+	case "note-gittag":
+		return runNoteGitTag(ctx, rest, os.Stdin, stdout, stderr)
 	case "appsscript-script":
 		return runAppsScriptScript(ctx, rest, stdout, stderr)
 	case "appsscript-deploy":

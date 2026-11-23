@@ -1,8 +1,9 @@
 # Update ladder v2: the secret, names and the wrapped code
 
-Status: §2 and §3 built 2026-11-22 (wave 1, lanes 1A, 1B, 1E). §4 is
-reserved for lane 1C (notes) and is not built. The study behind this is
-`docs/update-ladder-v2.md` §3.
+Status: §2 and §3 built 2026-11-22 (wave 1, lanes 1A, 1B, 1E). §4 (notes,
+their text forms and the carriers member) built 2026-11-22 (wave 2, lane
+F); the writers and readers of each carrier build on it. The study behind
+this is `docs/update-ladder-v2.md` §3 and §4.
 
 ## 1. One derivation
 
@@ -121,16 +122,195 @@ Crockford base32 symbols in groups of 6-5-5-5-5.
   `commit` is a hash of the key. The commit itself hides the address
   behind 96 random salt bits.
 
-## 4. Names, keys and pads for notes (lane 1C, not built)
+## 4. Notes
+
+Code: `bundle/go/bundle/update_note.go` (names, keys, pads, the micro
+note and its text forms, the full note's framing),
+`bundle/go/fullnote` (the full seal; its own package because it needs
+`golang.org/x/crypto`, which modules that import only package `bundle`
+do not carry), `bundle/go/bundle/update_carriers.go` (§4.5).
+
+### 4.1 Names, keys and pads
 
 ```
-name(c, e) = base32lower(HKDF(ikm = u, info = "name" ‖ c ‖ e)[0:10])
-key(c, e)  = HKDF(ikm = u, info = "key"  ‖ c ‖ e)[0:32]
-pad(c, e)  = HKDF(ikm = u, info = "pad"  ‖ c ‖ e ‖ commit)[0:16]
+info(p, c, e) = p ‖ 0x0A ‖ c ‖ 0x0A ‖ uint64be(e)
+
+name(c, e) = base32lower(HKDF(ikm = u, info = info("name", c, e))[0:10])     16 characters
+key(c, e)  = HKDF(ikm = u, info = info("key", c, e))[0:32]
+pad(c, e)  = HKDF(ikm = u, info = info("pad", c, e) ‖ commit)[0:16]
 ```
 
-The encoding of `c` and `e` is fixed when lane 1C builds them. The
-labels `wrap`, `name`, `key` and `pad` never collide.
+- `c` is the carrier label, 1–16 of `[a-z0-9]` (so never 0x0A); `e` is
+  always 8 bytes big-endian; `commit` is the 32 raw bytes of the signed
+  `_standby.commit`. Every info string therefore parses one way.
+- `base32lower` is RFC 4648 base32, alphabet `a–z 2–7`, no padding.
+- The purposes `name`, `key`, `pad` and the wrap pad's `wrap` (§3, info
+  `"wrap" ‖ commit`) begin with different bytes: no two derivations share
+  an info string.
+
+### 4.2 Carrier labels and epochs
+
+| label | write | read by | epoch |
+|---|---|---|---|
+| `gittag` | a tag and a file in the publisher's GitHub repository | `github.com` (`tags.atom`), `raw.githubusercontent.com`, `proxy.golang.org` (direct and through the Google front), `goproxy.cn`, `goproxy.io`, jsDelivr | 7 days |
+| `dns` | six A records in the publisher's zone | the phone's own resolver | 7 days |
+
+A label names a WRITE: every reader of the git tag uses `gittag`
+(`goproxy` is not a label). Epochs: `e = floor(unix_time / 604800)`; a
+future write-once registry would use `floor(unix_time / 2419200)`. A
+reader tries `e`, then `e − 1` (only `0` at epoch 0); a writer writes at
+`e`.
+
+### 4.3 The micro note
+
+```
+sealed = standby_key XOR pad(c, e)          16 bytes, no tag
+```
+
+- **Opening.** For each held secret (newest first) and each reader epoch:
+  `candidate = sealed XOR pad(c, e)`; the candidate is used only when
+  SHA-256(`daal/standby-v1` ‖ candidate) is the signed commit
+  (`Standby.OpenMicroNote`, the discipline of `MatchStandbyCode`).
+  Anything else is "nothing new".
+- **Audience rule.** On `dns` only an audience that wraps (any but
+  `everyone`) may write or read a micro note (`MicroNoteAllowed`): the
+  national resolver logs the name, and the Everyone secret is assumed
+  known. A writer refuses, a reader skips that secret.
+- **Git tag form.** `v0.<seq>.0-<t>`, `<seq>` canonical decimal (the
+  writer's counter), `<t>` the 16 bytes in 26 base32lower symbols, the
+  last 3 bits zero (`GitNoteTag`, `ParseGitNoteTag`, strict). It is a
+  valid Go module pre-release version, so the Go proxies list it.
+- **DNS form.** Six questions, A only:
+
+  ```
+  q_i = name(dns, e)[0:12] ‖ decimal(i) ‖ "." ‖ zone          i = 0..5
+  ```
+
+  The 18-byte block `sealed ‖ r0 ‖ r1` (two random bytes) is cut into six
+  3-byte pieces; answer `i` is `o_i . block[3i] . block[3i+1] .
+  block[3i+2]`, with `o_i` drawn at random from the fixed list
+  `23, 34, 35, 52, 54, 104, 151, 199` (ordinary public /8s). A reader
+  refuses an answer that is not IPv4 or whose first octet is not in the
+  list (that is how a sinkhole such as `10.10.34.36` is told apart) and
+  ignores the two tail bytes. The zone is at most 80 characters, so a
+  question stays under the 101-character cap seen in January 2026.
+
+### 4.4 The full note
+
+```
+plaintext = uint32be(len(container)) ‖ container ‖ 0x00 …   to 4096, 16384 or 65536 bytes
+sealed    = nonce(24) ‖ XChaCha20-Poly1305(key(c, e), nonce, plaintext, aad = "")
+```
+
+- The bucket is the smallest that holds `4 + len(container)`; the largest
+  container is 65532 bytes. Opening checks the bucket, that the length
+  fits it, and that the padding is all zero. Sealed sizes are 4136,
+  16424 or 65576 bytes.
+- The nonce is fresh random bytes for every seal.
+- **Text form**: standard base64 with padding, canonical (no line
+  breaks). A reader bounds its read at 87 436 characters
+  (`MaxSealedFullNoteText`) plus whatever its carrier wraps around it, not
+  at 64 KiB.
+- The container is the `daal-refresh-v2` container of
+  `specs/relaypack-v1.md`, with `slot` set to `name(c, e)`: a note copied
+  to another name or carrier is refused. Its parts are verified exactly
+  as a container from any mirror (signature chain, `sequence`, `not_after`,
+  pack hash). The seal adds secrecy, never trust.
+
+### 4.5 The carriers member
+
+Where a phone reads its notes. The archive member `update/carriers.json`
+of the inner `.sbp`, beside `update/secret.json`:
+
+```json
+{"v":1,"gittag":{"owner":"<o>","repo":"<r>"},"dns":{"zone":"<zone>"}}
+```
+
+- Every carrier is optional; `{"v":1}` names none. Exact member sets, no
+  duplicate keys, at most 1 KiB, canonical order `v`, `gittag`, `dns` when
+  written. Character rules (they go into URLs and DNS names as they are):
+  owner 1–39 of `[A-Za-z0-9-]`, no leading, trailing or doubled hyphen;
+  repo 1–100 of `[A-Za-z0-9._-]`, not starting with `.`, not ending in
+  `.git`; zone a lowercase host name of two or more labels, each 1–63 of
+  `[a-z0-9-]` without a leading or trailing hyphen, no trailing dot, a TLD
+  of letters (or `xn--`), at most 80 characters.
+- Malformed is **absent**, never a refusal. Old builds skip the member
+  (`bundle/go/importer/update_carriers_test.go`, against the frozen rules
+  of 079ef96).
+- **Not signed.** A planted member can make the phone's next walk read
+  from a repository or zone the planter controls (the planter learns that
+  some phone asked, when, from where) or from nowhere (a denial for that
+  carrier). It cannot give the phone an address or a document: a micro
+  note must match the signed commitment and a full note is verified as any
+  mirror's.
+- **Helper.** `users-pack-sbpx` reads `update_carriers` (that JSON object)
+  from the creds file; it needs a person's `update_secret` in the same
+  creds, and is refused for the Everyone file (`users-pack-sbp`), which is
+  public. Stdout says only `"update_carriers": true|false`.
+  `users-pack-sbpx` without `--creds-file` refuses an input that already
+  carries the member.
+- **Device.** `core/trust` SaveImport keeps it at
+  `update-carriers:<route_id>` (`bundle.UpdateCarriersStoreKey`), canonical,
+  in the encrypted secrets table, beside the commitment. A valid member
+  replaces what is held; a save without one (a refresh, an older file, a
+  malformed member) keeps it; a route saved without a commitment holds
+  none, and deleting a route deletes it (routestore `perRouteSecretKeys`).
+- **Publisher app** (`client-shell/tauri/daal-wizard/src/addon_notes.rs`).
+  A relay's switch («Updates through GitHub», kind `gittag`; «Updates
+  through DNS», kind `dnsnote`; ledger V021) puts its carrier in the
+  member once its first write went through (state `ready`). From then on
+  every person's file carries it (`addon_standby::people_secret_for_file`
+  → `update_carriers`); the Everyone file never does. GitHub: one public
+  repository per relay under the account's login, named with 12 random
+  letters and digits. DNS: the zone of the relay's way in through
+  Cloudflare, else the Cloudflare account's zone.
+- **What the app writes.** Only under the relay's current people audience
+  (after a removal, the next generation): a removed person never reads a
+  later note. Each write is one `note-gittag publish` / `note-dns publish`
+  with every input on stdin. The full note carries the freshness document
+  `publish-freshness` signed last (its pack inline when it fits under
+  `MaxFullNoteContainer`), and only while it names the relay's current
+  pack and has not expired; otherwise filler. The micro note (and the
+  container's `standby_key`) reveals the most recent switch to a standby;
+  otherwise filler. Writes run after every freshness publish, after a
+  switch to the standby, and on app open for a switch whose last write is
+  from an earlier epoch (or failed ten minutes or more ago). A failed
+  write fails nothing else; the switch's row keeps `last_error`.
+
+### 4.6 Always present
+
+At the start of each epoch a writer puts filler at the next name: 16
+random bytes for a micro note (`MicroFiller`, in the same text form), and
+for a full note random bytes of the sealed size of the bucket the real
+note will need (`FullFiller`). A reveal replaces filler with a note. An
+observer who knows the name cannot tell "nothing yet" from "moved".
+
+### 4.7 The git-tag write, as built
+
+- The repository (public, under the publisher's note account; its name
+  holds nothing of the relay) has two files only, at its root: `n` and
+  `go.mod`.
+- `n` holds `bundle.EncodeFullNoteText` of the sealed full note (or its
+  filler); a trailing newline is allowed.
+- `go.mod` begins `module github.com/<Owner>/<Repo>`, spelled exactly as
+  in the carriers member (the Go proxies refuse anything else), and
+  carries the same text as `// <chunk>` lines. The reading rule: take
+  every line that starts with `//`, trim the text after `//`, keep those
+  that are non-empty and only of the base64 alphabet, join them in file
+  order, then `DecodeFullNoteText`. No other comment is a single
+  base64-looking word.
+- One lightweight tag per write: `bundle.GitNoteTag(seq, sealed)`, that is
+  `v0.<seq>.0-<26 base32>`, on the commit that holds that write's `n`.
+  `seq` grows with every write and is shared by the repository's
+  audiences. The branch head holds only the latest write's `n`, so a
+  reader reads by tag, never by branch. Note tags are the repository's
+  only tags; a write deletes those beyond the newest 40 by seq (best
+  effort), so the readers' 64 KiB indexes stay small (GitHub's
+  `tags.atom` lists only the newest 10).
+- The writer lists the tags with `per_page=100` page by page (GitHub
+  pages the list); writer-only derivations use the HKDF purposes
+  `gittag-writer-micro-filler`, `gittag-writer-full-filler` and
+  `gittag-writer-nonce`.
 
 ## 5. Vectors
 
@@ -150,3 +330,37 @@ These use `update_root` = `00 01 … 1f`,
 
 Pinned in `bundle/go/bundle/standby_wrap_test.go`,
 `core/abi/standby_wrap_test.go` and `daal-wizard` `addon_standby_tests.rs`.
+
+### Notes (§4)
+
+The same `u` (people) and `_standby` vector key, at
+t = 2026-11-22T00:00:00Z (unix 1795305600, `e` = 2968; the 28-day epoch
+is 742). Computed independently in Python (stdlib `hmac`/`hashlib`, own
+info encoding and base32).
+
+| | value |
+|---|---|
+| `name(gittag, 2968)` | `tvkj5326y3wnq2dr` |
+| `key(gittag, 2968)` | `cbb7c0a356c427f587020ae06d2db1eb6b1674f3f682a5f1df58ce584359b9e1` |
+| `pad(gittag, 2968)` | `c8e3e01ffff968c9b996464973ecc06b` |
+| micro note (gittag) | `c8e2e21cfbfc6eceb19f4c42b8ecb17f` |
+| tag, seq 7 | `v0.7.0-zdroehh37rxm5mm7jrblr3frp4` |
+| `name(dns, 2968)` | `h5vbe4rwqtnl4xcu` |
+| `pad(dns, 2968)` | `e79b33bc5e41c35d784dd9b650105aae` |
+| micro note (dns) | `e79a31bf5a44c55a7044d3bd9b102bba` |
+| DNS questions, zone `example.org` | `h5vbe4rwqtnl0.example.org` … `h5vbe4rwqtnl5.example.org` |
+| DNS answers, tail `ee ff`, octet choices 0–5 | `23.231.154.49 34.191.90.68 35.197.90.112 52.68.211.189 54.155.16.43 104.186.238.255` |
+| `name(gittag, 2968)`, everyone | `xay52jfi2iavjgwa` |
+
+Full note: `key(gittag, 2968)` above, nonce `40 41 … 57`, container
+`{"kind":"daal-refresh-v2","slot":"x"}` (padded to 4096). Sealed: 4136
+bytes, SHA-256
+`9f93800b695e3e89456d5bc4f3fad1ebc111a1f98b004c47ba40ef52e6fbcdee`, tag
+`f5be064af25dbd117ba7ec1e49a364d1`. The Python side writes HChaCha20 out
+by hand (checked against the known answer of draft-irtf-cfrg-xchacha-03
+§2.2.1 and the AEAD tag of its §A.3.1) and uses the IETF
+ChaCha20-Poly1305 of the `cryptography` package for the rest; Go uses
+`golang.org/x/crypto/chacha20poly1305.NewX`.
+
+Pinned in `bundle/go/bundle/update_note_test.go` and
+`bundle/go/fullnote/fullnote_test.go`.

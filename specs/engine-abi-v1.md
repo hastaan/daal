@@ -8,14 +8,14 @@ Surface MAY grow (new functions); existing function signatures and
 semantics MAY NOT change. Per V0.4 / V1.1, ABI stability is a
 contract.
 
-Current surface count: **70 release symbols** (61 verified 2026-11-19
+Current surface count: **71 release symbols** (61 verified 2026-11-19
 with `nm` against a library built from the tree; `engine_network_facts`
 added the same day, `engine_relaypack_refresh`, the five
 `engine_field_probe_*`, `engine_survey_routes` and `engine_standby_key`
-on 2026-11-20, all counted from the source — see
+on 2026-11-20, `engine_set_link_resolvers` on 2026-11-22, all counted from the source — see
 the ABI ledger at the end of this document, which is the authoritative
 count). The source
-tree carries **73** `//export engine_*` declarations; the extra three
+tree carries **74** `//export engine_*` declarations; the extra three
 are `//go:build cshared && soak` and are never present in a release
 build.
 
@@ -1478,7 +1478,9 @@ nm -D --defined-only build/libdaalcore.so | awk '{print $3}' | grep -c '^engine_
 grep -rh '^//export engine_' core/ | wc -l
 ```
 
-**Release surface: 70.  Source surface: 73.** (2026-11-20, later:
+**Release surface: 71.  Source surface: 74.** (2026-11-22:
+`engine_set_link_resolvers` added (update ladder v2, the DNS reader on
+Android), 70 / 73 → 71 / 74. 2026-11-20, later:
 `engine_standby_key` added (optional add-ons S7); counting the source
 for it found `engine_survey_routes` already there and in neither count,
 so the step is 68 / 71 → 70 / 73. Earlier on 2026-11-20: the five
@@ -1532,6 +1534,7 @@ Added after that pass (append-only, no existing signature changed):
 | `engine_field_probe_discard` | `(void) -> int` | results deleted (>= 0), -1 on error |
 | `engine_survey_routes` | `(int start, void *out, int out_len) -> int` | JSON body via `copyOut`; recorded here 2026-11-20, the comment above its export in `core/abi/survey_export.go` is its contract |
 | `engine_standby_key` | `(const char *relay_pack_id, const char *key, void *out, int out_len) -> int` | JSON `{"outcome":"accepted\|no_match\|malformed\|no_standby","routes":<n>}` via `copyOut`; `relay_pack_id` `""` = every held file; keeps the 16 key bytes on each route whose sealed `_standby` it opens; never echoes the key or the address; -1 when the engine is not initialised or the store cannot be written. Optional for the desktop core (`Engine::standby_key`). `specs/optional-addons-v1.md` §3.4 |
+| `engine_set_link_resolvers` | `(const char *servers_json) -> int` | the DNS servers of the network under any VPN, a JSON list of `"addr"` / `"addr:port"`, `"[]"` when that network is lost; once the host has spoken its list is final (no fallback to resolv.conf). 1 when the update ladder's DNS reader has a resolver to ask, 0 none, -1 input that is not a JSON list of strings; never stored or logged. Optional for the hosts (`Engine::set_link_resolvers`); comment above its export in `core/abi/link_resolvers_export.go` |
 
 The TUN triplet was specified only in
 `development-phases/45-gap-dataplane-and-delivery.md` and never merged
@@ -1557,7 +1560,8 @@ grows again, update the live ones together (the count was 60 in each as
 of 2026-11-19; `engine_connect_auto` made it 61 and
 `engine_network_facts` 62 the same day, and only
 `daal` `EXPECTED_ABI` and this document were updated with them; the last three are dated history and keep the number
-they were written with). On 2026-11-20 (70, after `engine_standby_key`) the live
+they were written with). On 2026-11-20 (70, after `engine_standby_key`) and again on 2026-11-22 (71, after
+`engine_set_link_resolvers`) the live
 ones were brought up together: `daal` `EXPECTED_ABI`, `specs/frp-track-v1.md`,
 `development-phases/README.md`, `docs/build-and-release.md` and the unreleased
 section of `CHANGELOG.md`:

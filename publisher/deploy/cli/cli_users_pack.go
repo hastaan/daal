@@ -346,6 +346,14 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "users-pack-sbp: %v\n", errEveryoneFileSecret)
 		return 2
 	}
+	// Nor where a person's phone reads its notes (cli_users_pack_carriers.go).
+	if carriers, err := updateCarriersFromCredsFile(*credsFile); err != nil {
+		fmt.Fprintf(stderr, "creds-file: %v\n", err)
+		return 2
+	} else if carriers != nil {
+		fmt.Fprintf(stderr, "users-pack-sbp: %v\n", errEveryoneFileCarriers)
+		return 2
+	}
 	// Degrades per route and fails only when NOTHING renders. A route
 	// whose credential the relay did not report is dropped from the
 	// usable set and reported here; the tiers that do work still ship.
@@ -368,6 +376,8 @@ func runUsersPackSbp(_ context.Context, args []string, _ io.Reader, stdout, stde
 		"shared":   true,
 		// Whether the file carries an update secret; never its value.
 		"update_secret": secret != nil,
+		// The Everyone file never carries the carriers member.
+		"update_carriers": false,
 		// Always present (possibly empty) so a caller that reads it
 		// cannot mistake "no field" for "nothing was dropped".
 		"skipped_families": skippedFamilyNames(skipped),
@@ -428,7 +438,7 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 	// outbounds for this recipient before enveloping. Fails closed if a
 	// route can't be made connectable — a pack must not ship a dead route.
 	skippedFamilies := []string{}
-	hasSecret := false
+	hasSecret, hasCarriers := false, false
 	if *credsFile != "" {
 		if *server == "" {
 			fmt.Fprintln(stderr, "--server is required with --creds-file")
@@ -451,8 +461,20 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 			return 2
 		}
 		hasSecret = secret != nil
+		// Where the person's phone reads update notes, sealed with the
+		// secret (cli_users_pack_carriers.go).
+		carriers, err := updateCarriersFromCredsFile(*credsFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "creds-file: %v\n", err)
+			return 2
+		}
+		if carriers != nil && !secret.Wraps() {
+			fmt.Fprintf(stderr, "users-pack-sbpx: %v\n", errCarriersNeedSecret)
+			return 2
+		}
+		hasCarriers = carriers != nil
 		var skipped []relaypack.SkippedRoute
-		plaintext, skipped, err = relaypack.RewriteProfilesForRecipientWithSecret(plaintext, params, secret)
+		plaintext, skipped, err = relaypack.RewriteProfilesForRecipientWithMembers(plaintext, params, secret, carriers)
 		if err != nil {
 			fmt.Fprintf(stderr, "rewrite profiles: %v\n", err)
 			return 1
@@ -461,6 +483,9 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 		skippedFamilies = skippedFamilyNames(skipped)
 	} else if archiveHasUpdateSecret(plaintext) {
 		fmt.Fprintf(stderr, "users-pack-sbpx: %v\n", errInputCarriesSecret)
+		return 2
+	} else if archiveHasMember(plaintext, bundle.UpdateCarriersPath) {
+		fmt.Fprintf(stderr, "users-pack-sbpx: %v\n", errInputCarriesCarriers)
 		return 2
 	}
 
@@ -490,6 +515,8 @@ func runUsersPackSbpx(_ context.Context, args []string, _ io.Reader, stdout, std
 		"skipped_families": skippedFamilies,
 		// Whether the file carries an update secret; never its value.
 		"update_secret": hasSecret,
+		// Whether it carries the carriers member; never its value.
+		"update_carriers": hasCarriers,
 	}); err != nil {
 		fmt.Fprintf(stderr, "encode: %v\n", err)
 		return 1

@@ -74,6 +74,13 @@ func ensureRelayPackRefresh() (*refresh.RelayPackRefresher, error) {
 			// refresher is only ever run without it held (the scheduler
 			// executor, the recover walk, the person's button).
 			StandbyKeys: StandbyKeySink{},
+			// The update ladder's strikes are kept per network: the
+			// person's button has no network of its own, so it asks
+			// for the one the engine is on (the same hashed id the
+			// failure walk passes). The DNS carrier finds the link's
+			// resolver itself (bootstrap.LinkResolver), so Resolver
+			// stays unset.
+			NetworkKey: activeNetworkID,
 			// A scheduled poll that would ride the tunnel of a route the
 			// connection check has failed is not made (and does not
 			// escalate): it would reach nothing (blackout plan C0).

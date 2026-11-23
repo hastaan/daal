@@ -3,6 +3,8 @@ package routestore
 import (
 	"testing"
 	"time"
+
+	"daal/bundle-go/bundle"
 )
 
 func seedPubRoute(t *testing.T, s *Store, pub, route string) {
@@ -39,6 +41,15 @@ func seedPubRoute(t *testing.T, s *Store, pub, route string) {
 	if err := s.PutSecret("update-secret:"+route, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
+	// The update carriers of the route's files (bundle.UpdateCarriersStoreKey):
+	// they name the publisher's repository and note zone.
+	if err := s.PutSecret(bundle.UpdateCarriersStoreKey(route), []byte(`{"v":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	// The engine's meta of a pasted route (its link name).
+	if err := s.PutRouteMeta(route, RouteMeta{Name: "Germany 2"}, now); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDeleteRoute(t *testing.T) {
@@ -55,7 +66,8 @@ func TestDeleteRoute(t *testing.T) {
 	if _, err := s.GetRoute("r1"); err == nil {
 		t.Fatal("route still present after delete")
 	}
-	for _, k := range []string{"budget:bucket:r1", "standby:r1", "standby-key:r1", "update-secret:r1"} {
+	for _, k := range []string{"budget:bucket:r1", "standby:r1", "standby-key:r1", "update-secret:r1",
+		bundle.UpdateCarriersStoreKey("r1"), RouteMetaKey("r1")} {
 		if _, err := s.GetSecret(k); err == nil {
 			t.Fatalf("per-route secret %s survived delete", k)
 		}
@@ -95,5 +107,15 @@ func TestDeletePublisher(t *testing.T) {
 	}
 	if _, err := s.GetPublisher("fp2"); err != nil {
 		t.Fatal("publisher fp2 should survive")
+	}
+	for _, id := range []string{"r1", "r2"} {
+		for _, k := range []string{bundle.UpdateCarriersStoreKey(id), RouteMetaKey(id)} {
+			if _, err := s.GetSecret(k); err == nil {
+				t.Fatalf("per-route secret %s survived the publisher's delete", k)
+			}
+		}
+	}
+	if _, ok := s.GetRouteMeta("r3"); !ok {
+		t.Fatal("r3's meta went with another publisher")
 	}
 }

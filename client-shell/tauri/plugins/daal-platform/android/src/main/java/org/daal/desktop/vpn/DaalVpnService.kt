@@ -591,11 +591,13 @@ class DaalVpnService : VpnService() {
 
       override fun onLinkPropertiesChanged(network: Network, link: LinkProperties) {
         netEvent(netWatch.link(network.networkHandle, linkOf(link), netNow()))
+        sendResolvers(dnsOf(link))
       }
 
       override fun onLost(network: Network) {
         Log.i(TAG, "network: event lost")
         netEvent(netWatch.lost(network.networkHandle, netNow()))
+        sendResolvers(emptyList())
       }
     }
     try {
@@ -611,7 +613,9 @@ class DaalVpnService : VpnService() {
       var first: NetworkWatch.Facts? = null
       if (active != null) {
         val caps = try { cm.getNetworkCapabilities(active)?.let { capsOf(it) } } catch (_: Throwable) { null }
-        val link = try { cm.getLinkProperties(active)?.let { linkOf(it) } } catch (_: Throwable) { null }
+        val lp = try { cm.getLinkProperties(active) } catch (_: Throwable) { null }
+        val link = lp?.let { try { linkOf(it) } catch (_: Throwable) { null } }
+        if (lp != null) sendResolvers(dnsOf(lp))
         first = netWatch.startDescribed(active.networkHandle, caps, link, netNow())
         netEvent(netWatch.nextIn(netNow()))
       } else {
@@ -764,6 +768,32 @@ class DaalVpnService : VpnService() {
     tm?.simOperator.orEmpty()
   } catch (_: Throwable) {
     ""
+  }
+
+  /** The link's DNS server addresses (never logged). */
+  private fun dnsOf(link: LinkProperties): List<String> = try {
+    link.dnsServers.mapNotNull { a -> a.hostAddress?.takeIf { it.isNotEmpty() } }
+  } catch (_: Throwable) {
+    emptyList()
+  }
+
+  /**
+   * Any thread. The link's DNS servers to the engine
+   * (`engine_set_link_resolvers`), on the network thread. The log line
+   * carries only how many and the engine's code.
+   */
+  private fun sendResolvers(servers: List<String>) {
+    val body = org.json.JSONArray(servers.take(8)).toString()
+    try {
+      network.execute {
+        val rc = try {
+          DaalCoreBridge.setLinkResolvers(body)
+        } catch (t: Throwable) {
+          RC_THREW
+        }
+        Log.i(TAG, "network: resolvers n=${servers.size} engine_rc=$rc")
+      }
+    } catch (_: Throwable) {}
   }
 
   private fun linkOf(link: LinkProperties): NetworkWatch.Link {

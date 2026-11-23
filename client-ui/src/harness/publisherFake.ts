@@ -34,6 +34,7 @@
 import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { scenarioFromUrl, type FakeShell, type Scenario } from './scenarios';
+import { refileFake } from '../publisher/refile/refileHarness';
 import type {
     AccountCheck,
     ArtifactInfo,
@@ -355,7 +356,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
     type FakeAddon = {
         id: number;
         operator_id: number;
-        kind: 'standby' | 'cdn' | 'google';
+        kind: 'standby' | 'cdn' | 'google' | 'gittag' | 'dnsnote';
         state: 'building' | 'ready' | 'promoted' | 'removing';
         provider_ids: Record<string, string>;
         monthly_cost_cents: number;
@@ -369,6 +370,20 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
     let cfAccount: { connected: boolean; zone: string; extra?: string[] } = { connected: false, zone: '' };
     let googleAccount = { connected: false, script_made: false, url: '', sign_in: false };
     let hostingAccount = false;
+    // The GitHub account (update notes). `?github=connected` starts with
+    // one; `?notes=on|retry|refused` also starts the live relay with its
+    // GitHub switch on, its last write fine, failed (tried again), or
+    // refused by GitHub (the key must be replaced).
+    const GITHUB_OFF = { connected: false, login: '', token_kind: '', extra: [] as string[], expires_at: '' };
+    const githubOn = () => ({
+        connected: true,
+        login: 'notes-family',
+        token_kind: 'fine_grained',
+        extra: [] as string[],
+        expires_at: new Date((NOW() + 300 * DAY) * 1000).toISOString(),
+    });
+    let githubAccount = f.params?.github === 'connected' || f.params?.notes ? githubOn() : GITHUB_OFF;
+    if (f.params?.notes) cfAccount = { connected: true, zone: 'example.com' };
     const STANDBY_KEY = '000G40 R40M3 0E209 185WP 03H2G';
     const addonOp = (a: Args) => Number((a?.input as { operator_id?: number })?.operator_id ?? LIVE_RELAY_ID);
     const addonStep = async (operator_id: number, kind: FakeAddon['kind'], step: string) => {
@@ -398,6 +413,54 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
         };
         addons = [...addons.filter((x) => !(x.operator_id === operator_id && x.kind === kind && x.state !== 'promoted')), r];
         return r;
+    };
+
+    if (f.params?.notes) {
+        const refused = f.params.notes === 'refused';
+        const failed = f.params.notes === 'retry' || refused;
+        addons = [
+            {
+                id: 200,
+                operator_id: LIVE_RELAY_ID,
+                kind: 'gittag',
+                state: 'ready',
+                provider_ids: { repository: 'notes-family/k3j9q2mxw7aa' },
+                monthly_cost_cents: 0,
+                cost_currency: '',
+                has_secret: true,
+                detail: {
+                    owner: 'notes-family',
+                    repo: 'k3j9q2mxw7aa',
+                    last_ok_at_unix: NOW() - 2 * 3600 - (failed ? DAY : 0),
+                    last_try_at_unix: NOW() - (failed ? 600 : 2 * 3600),
+                    last_error: refused ? 'e_gittag_refused' : failed ? 'network' : '',
+                    people_before: 2,
+                },
+                created_at_unix: NOW() - 9 * DAY,
+                updated_at_unix: NOW() - 600,
+            },
+        ];
+    }
+    /** A note switch, on: its first write, then the row. */
+    const noteOn = async (a: Args, kind: 'gittag' | 'dnsnote') => {
+        const o = addonOp(a);
+        if (kind === 'gittag' && !githubAccount.connected) throw 'E_GITHUB_NO_ACCOUNT: GitHub is not connected';
+        if (kind === 'dnsnote' && !cfAccount.connected) throw 'E_CDN_NO_TOKEN: Cloudflare is not connected';
+        await addonStep(o, kind, kind === 'gittag' ? 'github' : 'dns');
+        const now = NOW();
+        return addAddon(
+            o,
+            kind,
+            {
+                ...(kind === 'gittag' ? { owner: githubAccount.login, repo: 'k3j9q2mxw7aa' } : { zone: cfAccount.zone }),
+                last_ok_at_unix: now,
+                last_try_at_unix: now,
+                last_error: '',
+                people_before: o === LIVE_RELAY_ID ? 2 : 0,
+            },
+            0,
+            '',
+        );
     };
 
     const table: Record<string, (a: Args) => unknown> = {
@@ -435,7 +498,12 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
                 addon_id: id,
                 removed: true,
                 still_billing: [],
-                by_hand: r?.kind === 'cdn' ? ['delete_cloudflare_token', 'cancel_domain'] : [],
+                by_hand:
+                    r?.kind === 'cdn'
+                        ? ['delete_cloudflare_token', 'cancel_domain']
+                        : r?.kind === 'gittag'
+                          ? ['github_repository']
+                          : [],
                 warnings: [],
             };
         },
@@ -533,6 +601,25 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
             return addAddon(o, 'google', { slot: 'AAAAAAAAAAA', url: `${googleAccount.url}?s=AAAAAAAAAAA&k=harness` }, 0, '');
         },
         wizard_addon_google_check: () => ({ ok: true, via_front: true, checked_at_unix: NOW(), reason: '' }),
+        // The GitHub account (update notes). A key with "short" in it
+        // cannot make a repository; "wrong" is refused by GitHub.
+        wizard_github_account: () => githubAccount,
+        wizard_github_connect: async (a) => {
+            const tok = String((a?.input as { token?: string })?.token ?? '');
+            await addonStep(0, 'gittag', 'token');
+            if (tok.includes('wrong')) return { verdict: 'invalid', stored: false };
+            if (tok.includes('short'))
+                return { verdict: 'missing_permission', stored: false, login: 'notes-family', token_kind: 'classic', missing: ['public_repo'] };
+            githubAccount = githubOn();
+            return { verdict: 'ok', stored: true, ...githubAccount, unproven: ['Administration: Read and write', 'Contents: Read and write'] };
+        },
+        wizard_github_disconnect: () => {
+            githubAccount = GITHUB_OFF;
+            return null;
+        },
+        wizard_addon_gittag_on: (a) => noteOn(a, 'gittag'),
+        wizard_addon_dnsnote_on: (a) => noteOn(a, 'dnsnote'),
+        wizard_notes_tick: () => ({ written: 0, failed: 0 }),
         wizard_restore_unsettled: () => unsettled(f),
         wizard_setup_recovery: (a) => ({
             state: 'server_running',
@@ -634,6 +721,7 @@ export function makeHandler(f: FakeShell): (cmd: string, args: Args) => unknown 
     // only for a scenario that asks: without it the row stays hidden, as
     // with a shell that predates the test.
     if (f.netTest) Object.assign(table, netTestCommands(f.netTest, 'pars-relays'));
+    Object.assign(table, refileFake(f, table)); // "New files for everyone" (params.refile)
     if (f.engineDown) {
         table.engine_status = () => ({
             engine_ready: false,

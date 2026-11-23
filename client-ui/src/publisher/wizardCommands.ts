@@ -41,6 +41,11 @@ import type {
     GoogleCheckInput,
     GoogleOnInput,
     GoogleScript,
+    GithubAccount,
+    GithubCheck,
+    GithubConnectInput,
+    NotesOnInput,
+    NotesTickReport,
     StandbyAddInput,
     StandbyKey,
     StandbyKeyInput,
@@ -1184,6 +1189,30 @@ export interface RenewReport {
     all_done: boolean;
 }
 
+/** daal_wizard::refile::RefileItem */
+export interface RefileItem {
+    recipient_id: number;
+    name: string;
+    display_name: string;
+    status: 'done' | 'failed' | 'not_attempted' | 'needs_answer';
+    reason: string;
+    /** The new file; '' unless `done`. */
+    sbpx_path: string;
+    /** Raw text, Details only. */
+    detail: string;
+}
+
+/** daal_wizard::refile::RefileReport */
+export interface RefileReport {
+    operator_id: number;
+    items: RefileItem[];
+    /** A removed person the relay could not drop. */
+    removal_failed: RefileItem[];
+    all_done: boolean;
+    /** The standby code now goes out wrapped. */
+    code_wrapped: boolean;
+}
+
 export interface RenewEvent {
     operator_id: number;
     index: number;
@@ -1902,6 +1931,16 @@ export const Wizard = {
      *  `wizard://renew-event` (see `onRenewEvent`). */
     renewEveryone: (operator_id: number) =>
         invoke<RenewReport>('wizard_renew_everyone', { operatorId: operator_id }),
+    /** "New files for everyone" after a removal (daal-wizard/src/refile.rs):
+     *  one relay window re-keys every person not removed and writes each a
+     *  new file, so the standby code is sent wrapped again. Their old
+     *  files stop working. */
+    refilePeople: (operator_id: number) =>
+        invoke<RefileReport>('wizard_refile_people', { operatorId: operator_id }),
+    /** The refile sheet's «Try again» under a removal the relay did not
+     *  confirm: revokes the removed people again, re-keys nobody. */
+    refileRemovals: (operator_id: number) =>
+        invoke<RefileReport>('wizard_refile_removals', { operatorId: operator_id }),
     /** Network test: is this relay the Test relay (its pack carries the
      *  report address)? Read-only. */
     testRelayStatus: (operator_id: number) =>
@@ -2023,6 +2062,22 @@ export const Addons = {
     googleOn: (input: GoogleOnInput) => invoke<AddonRow>('wizard_addon_google_on', { input }),
     googleCheck: (input: GoogleCheckInput) =>
         invoke<GoogleCheck>('wizard_addon_google_check', { input }),
+
+    // ---- update notes (addon_notes.rs)
+    /** Accounts → GitHub: whether a key is kept, and whose. Local. */
+    githubAccount: () => invoke<GithubAccount>('wizard_github_account'),
+    /** The pasted key crosses this boundary once, inbound; kept only
+     *  when GitHub says it can do the job. */
+    githubConnect: (input: GithubConnectInput) =>
+        invoke<GithubCheck>('wizard_github_connect', { input }),
+    /** Forget the account key; relays keep their own copies. */
+    githubDisconnect: () => invoke<void>('wizard_github_disconnect'),
+    /** «Updates through GitHub», on: the repository and the first note. */
+    gittagOn: (input: NotesOnInput) => invoke<AddonRow>('wizard_addon_gittag_on', { input }),
+    /** «Updates through DNS», on: the first six records. */
+    dnsnoteOn: (input: NotesOnInput) => invoke<AddonRow>('wizard_addon_dnsnote_on', { input }),
+    /** On app open: write every switch due this week. */
+    notesTick: () => invoke<NotesTickReport>('wizard_notes_tick'),
 };
 
 /** PB-20. The platform side of screens that show secrets. */

@@ -258,10 +258,9 @@ func parseWireGuard(body []byte) (Profile, Provenance, error) {
 			// address. The family stays "wireguard" (that is what goes
 			// on the wire) and the profile is marked ManualOnly. That
 			// mark protects nothing by itself: the host must persist it
-			// and refuse such a route in an automatic connect, and NO
-			// HOST DOES YET (core/abi URIImport refuses a ManualOnly
-			// profile with ErrManualOnly instead). See
-			// NoticeAmneziaDowngraded.
+			// and refuse such a route in an automatic connect. core/abi
+			// URIImport does (routestore manual_only; autoCandidatesLocked
+			// refuses it as chosen_only). See NoticeAmneziaDowngraded.
 			manualOnly = true
 			prov.Notice = NoticeAmneziaDowngraded
 			prov.Downgrade = "This is an AmneziaWG configuration. The engine in this build " +

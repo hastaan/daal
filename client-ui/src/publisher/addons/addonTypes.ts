@@ -1,15 +1,17 @@
 // addonTypes.ts — the shapes the optional add-on commands take and
 // return. Each mirrors a Rust type in client-shell/tauri/daal-wizard:
 // the shared ones `addons.rs`, the rest the add-on's own module
-// (`addon_standby.rs`, `addon_cdn.rs`, `addon_google.rs`). When a lane
+// (`addon_standby.rs`, `addon_cdn.rs`, `addon_google.rs`,
+// `addon_notes.rs`). When a lane
 // changes one of those types it changes its mirror here; the command
 // wrappers in ../wizardCommands.ts (`Addons`) pass them through whole.
 //
 // Every add-on operation answers `E_NOT_BUILT: …` until its lane lands
 // (classifyPublisherError).
 
-/** daal_wizard::addons::AddonKind */
-export type AddonKind = 'standby' | 'cdn' | 'google';
+/** daal_wizard::addons::AddonKind. `gittag` and `dnsnote` are the two
+ *  update-note switches (addon_notes.rs). */
+export type AddonKind = 'standby' | 'cdn' | 'google' | 'gittag' | 'dnsnote';
 
 /** daal_wizard::addons::AddonState */
 export type AddonState = 'building' | 'ready' | 'promoted' | 'removing';
@@ -233,4 +235,54 @@ export interface GoogleCheck {
         | 'no_address';
     /** The helper's words for a failure; Details only. */
     detail?: string;
+}
+
+// ---- update notes: the GitHub account and two switches (addon_notes.rs) ----
+
+/** daal_wizard::addon_notes::GithubAccount. Local, no secret. */
+export interface GithubAccount {
+    connected: boolean;
+    /** The account's name on GitHub. */
+    login: string;
+    token_kind: string;
+    /** What the kept key can do beyond what Daal needs. */
+    extra: string[];
+    /** RFC 3339; '' when the key never stops working. */
+    expires_at: string;
+}
+export interface GithubConnectInput {
+    /** Crosses this boundary once, inbound. */
+    token: string;
+}
+export type GithubVerdict = 'ok' | 'ok_broad' | 'invalid' | 'missing_permission' | 'owner_mismatch' | 'rate_limited';
+/** daal_wizard::addon_notes::GithubCheck */
+export interface GithubCheck {
+    verdict: GithubVerdict;
+    /** Kept on this phone (only when ok or ok_broad). */
+    stored: boolean;
+    login?: string;
+    token_kind?: string;
+    missing?: string[];
+    extra?: string[];
+    unproven?: string[];
+    expires_at?: string;
+    retry_after_s?: number;
+}
+export interface NotesOnInput {
+    operator_id: number;
+}
+/** daal_wizard::addon_notes::NotesTickReport */
+export interface NotesTickReport {
+    written: number;
+    failed: number;
+}
+/** daal_wizard::addon_notes::NotesDetail: what a note switch's row
+ *  `detail` holds (the page reads only these). */
+export interface NotesDetail {
+    last_ok_at_unix?: number;
+    last_try_at_unix?: number;
+    /** '' after a write that went through. */
+    last_error?: string;
+    /** People on the relay when it was turned on (they need new files). */
+    people_before?: number;
 }

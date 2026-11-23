@@ -99,6 +99,7 @@ import {
     wayTitles,
 } from '../lib/fileFacts';
 import { FileCard, WayRow } from '../components/files/FileParts';
+import { fileTitle, isPastedGroup } from '../components/files/pasted';
 import { failingHere, isPastedRoute, readSurvey, type SurveyRead } from '../components/pasteSurvey';
 
 interface Props {
@@ -834,7 +835,7 @@ function FileSheet({
         <Sheet
             title={
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <bdi>{p.displayName}</bdi>
+                    <bdi>{fileTitle(t, p)}</bdi>
                     {verified && (
                         <Badge tone="neutral" icon="lock" size="sm">
                             {t('network.verified')}
@@ -870,7 +871,11 @@ function FileSheet({
             ) : confirmRemove ? (
                 <div role="alert" style={{ display: 'grid', gap: 14 }}>
                     <p style={{ margin: 0, fontSize: 15, color: 'var(--fg)' }}>
-                        <bdi>{t('network.remove_publisher_confirm').replace('{name}', p.displayName)}</bdi>
+                        <bdi>
+                            {isPastedGroup(p)
+                                ? t('network.remove_pasted_confirm')
+                                : t('network.remove_publisher_confirm').replace('{name}', p.displayName)}
+                        </bdi>
                     </p>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <Button variant="danger" onClick={onRemove} dataButton="remove-confirm">

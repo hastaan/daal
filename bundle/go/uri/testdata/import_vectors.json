@@ -174,6 +174,24 @@
    "input": "proxies:\n  - name: h\n    type: hysteria2\n    server: h.example.com\n    port: 443\n    password: pw\n    ports: 20000-30000\n    alpn: [h3]\n    sni: h.example.com\n  - name: t\n    type: tuic\n    server: t.example.com\n    port: 443\n    uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n    password: pw\n    alpn: [h3, h3-29]\n",
    "hint": "clash",
    "family": ""
+  },
+  {
+   "name": "vless-tls-allowinsecure-0",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&sni=v.example.com&allowInsecure=0#v",
+   "hint": "",
+   "family": "other"
+  },
+  {
+   "name": "vless-reality-allowinsecure-ignored",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@r.example.com:443?security=reality&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=01&sni=www.example.com&allowInsecure=1",
+   "hint": "",
+   "family": "vless-reality"
+  },
+  {
+   "name": "vmess-no-tls-allowinsecure-ignored",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJuZXQiOiAidGNwIiwgInRscyI6ICIiLCAic25pIjogInZtLmV4YW1wbGUuY29tIiwgImFsbG93SW5zZWN1cmUiOiB0cnVlfQ==",
+   "hint": "",
+   "family": "other"
   }
  ],
  "refused": [
@@ -365,6 +383,46 @@
   {
    "name": "tuic-insecure-true",
    "input": "tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:pw@t.example.com:443?insecure=true",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vless-tls-allowinsecure",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&sni=v.example.com&allowInsecure=1",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vless-tls-allow-insecure-true",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&type=ws&path=%2Fws&allow_insecure=true",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vless-tls-insecure-1",
+   "input": "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v.example.com:443?security=tls&insecure=1",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "trojan-allowinsecure",
+   "input": "trojan://pw@t.example.com:443?sni=t.example.com&allowInsecure=1",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "trojan-insecure-true",
+   "input": "trojan://pw@t.example.com:443?security=tls&type=ws&path=%2Ftr&insecure=true",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vmess-tls-allowinsecure-bool",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJuZXQiOiAidGNwIiwgInRscyI6ICJ0bHMiLCAic25pIjogInZtLmV4YW1wbGUuY29tIiwgImFsbG93SW5zZWN1cmUiOiB0cnVlfQ==",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vmess-tls-insecure-string",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJuZXQiOiAidGNwIiwgInRscyI6ICJ0bHMiLCAic25pIjogInZtLmV4YW1wbGUuY29tIiwgImluc2VjdXJlIjogIjEifQ==",
+   "code": "insecure_refused"
+  },
+  {
+   "name": "vmess-tls-skip-cert-verify",
+   "input": "vmess://eyJ2IjogIjIiLCAicHMiOiAidm0iLCAiYWRkIjogInZtLmV4YW1wbGUuY29tIiwgInBvcnQiOiAiNDQzIiwgImlkIjogImFhYWFhYWFhLWJiYmItY2NjYy1kZGRkLWVlZWVlZWVlZWVlZSIsICJhaWQiOiAiMCIsICJzY3kiOiAiYXV0byIsICJuZXQiOiAidGNwIiwgInRscyI6ICJ0bHMiLCAic25pIjogInZtLmV4YW1wbGUuY29tIiwgInNraXAtY2VydC12ZXJpZnkiOiB0cnVlfQ==",
    "code": "insecure_refused"
   }
  ]

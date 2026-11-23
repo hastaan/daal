@@ -31,6 +31,9 @@ import (
 //     refused instead of silently becoming plain TCP.
 //   - security=none (or absent) is refused: plaintext VLESS shows the
 //     DPI box every destination.
+//   - security=tls with allowInsecure / allow_insecure / insecure on
+//     (1, true, yes) is refused (insecure_refused): the certificate
+//     check off lets anyone on the path be the server.
 func parseVLESS(raw string) (Profile, Provenance, error) {
 	u, err := parseLink("vless", raw)
 	if err != nil {
@@ -80,6 +83,15 @@ func parseVLESS(raw string) (Profile, Provenance, error) {
 	security := strings.ToLower(q.Get("security"))
 	switch security {
 	case "tls":
+		// allowInsecure=1 (Xray's spelling; also allow_insecure,
+		// insecure) turns the certificate check off: anyone on the
+		// path can answer as the server. Refused, as hy2 insecure=1
+		// is. Under REALITY the switch means nothing (the server is
+		// checked by its REALITY key, not a certificate), so a REALITY
+		// link carrying it is not refused.
+		if linkInsecure(q.Get("allowInsecure"), q.Get("allow_insecure"), q.Get("insecure")) {
+			return Profile{}, Provenance{}, fmt.Errorf("vless: insecure: %w", ErrInsecure)
+		}
 		tls := map[string]any{"enabled": true}
 		if sni := q.Get("sni"); sni != "" {
 			tls["server_name"] = sni

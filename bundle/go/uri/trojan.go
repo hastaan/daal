@@ -42,6 +42,12 @@ func parseTrojan(raw string) (Profile, Provenance, error) {
 	default:
 		return Profile{}, Provenance{}, fmt.Errorf("trojan: security=%s: %w", safeToken(security), ErrTransportUnsupported)
 	}
+	// allowInsecure=1 (or allow_insecure, insecure): certificate
+	// check off, so anyone on the path can be the server and read the
+	// password. Refused (insecure_refused).
+	if linkInsecure(q.Get("allowInsecure"), q.Get("allow_insecure"), q.Get("insecure")) {
+		return Profile{}, Provenance{}, fmt.Errorf("trojan: insecure: %w", ErrInsecure)
+	}
 	out := map[string]any{
 		"type":        "trojan",
 		"server":      u.Hostname(),

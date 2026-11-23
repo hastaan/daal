@@ -24,6 +24,7 @@
 // chose nothing has no use for either. Names are for the list.
 import { sep } from '../../lib/format';
 import type { RouteDisplayRow } from '../../contract/D2Contract';
+import { groupName, pastedHere, pastedName } from '../files/pasted';
 import { Button, StateIcon } from '../../design/primitives';
 import { familyLabel, familyName } from '../../lib/familyName';
 import { setupText, wayTitles } from '../../lib/fileFacts';
@@ -72,7 +73,7 @@ export function routeLabel(t: (k: string) => string, r: RouteDisplayRow, routes?
     // A kind this app cannot name adds nothing to a label that has the
     // file's name ("Current connection · name not available" stays as is).
     const kind = familyLabel(t, r) ? w.title : undefined;
-    const label = [r.publisherName, kind, w.nickname].filter(Boolean).join(sep());
+    const label = [groupName(t, r), kind, pastedHere(r) ? pastedName(r) : w.nickname].filter(Boolean).join(sep());
     return label || w.title;
 }
 
@@ -232,7 +233,7 @@ function ChoiceList({
                                 // network, with the Files tab's disc (only
                                 // when the engine graded it); its time to
                                 // connect here at the end.
-                                const sub = [r.publisherName, w.nickname].filter(Boolean).join(sep());
+                                const sub = [groupName(t, r), pastedHere(r) ? pastedName(r) : w.nickname].filter(Boolean).join(sep());
                                 const g = r.measured?.grade;
                                 const gradeLine = gradeText(t, r.measured);
                                 return (

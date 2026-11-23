@@ -100,6 +100,17 @@ type RouteInput struct {
 	// secret, and neither may cost the phone the one it has.
 	UpdateSecret []byte
 
+	// UpdateCarriers is the file's carriers member
+	// (bundle.UpdateCarriers, the archive member
+	// bundle.UpdateCarriersPath re-marshalled canonically): WHERE the
+	// phone reads update notes for this relay. nil when the file carries
+	// none or a malformed one. Set only on a route with a signed
+	// Endpoint. Not signed, per-recipient like UpdateSecret. The store
+	// keeps it at bundle.UpdateCarriersStoreKey; a newer valid member
+	// replaces what it holds, nil leaves it (a refresh or an older file
+	// must not cost the phone where to look).
+	UpdateCarriers []byte
+
 	// SignedAt is the signed manifest's bundle.created_at for the
 	// manifest Endpoint came from: when the publisher signed the
 	// endpoint this route is now held to. The store keeps it beside the
@@ -288,7 +299,7 @@ func ImportBytes(body []byte, st State, wordlists bundle.Wordlists, now time.Tim
 	switch {
 	case pinned:
 		// Known, not revoked — silent import.
-		return apply(st, parsed, fileUpdateSecret(body), fp, rendered, bucket, pin.TrustLevel, false)
+		return apply(st, parsed, readFileMembers(body), fp, rendered, bucket, pin.TrustLevel, false)
 
 	case rotationChain != nil:
 		// Unknown publisher *but* the bundle ships a rotation chain. We
@@ -309,7 +320,7 @@ func ImportBytes(body []byte, st State, wordlists bundle.Wordlists, now time.Tim
 		if err := verifyRotation(*rotationChain, parsed.PublisherPub, oldFP, now); err != nil {
 			return Verdict{Kind: VerdictRejected, Reason: "publisher_key_changed"}, err
 		}
-		v, err := apply(st, parsed, fileUpdateSecret(body), fp, rendered, bucket, oldPin.TrustLevel, true)
+		v, err := apply(st, parsed, readFileMembers(body), fp, rendered, bucket, oldPin.TrustLevel, true)
 		if err == nil {
 			v.Kind = VerdictRotationAccepted
 		}
@@ -348,9 +359,9 @@ func AcceptTrustPrompt(decision string, body []byte, st State, wordlists bundle.
 	bucket := hourBucket(now)
 	switch decision {
 	case "trust":
-		return apply(st, parsed, fileUpdateSecret(body), fp, rendered, bucket, "tofu_friend", true)
+		return apply(st, parsed, readFileMembers(body), fp, rendered, bucket, "tofu_friend", true)
 	case "once":
-		return apply(st, parsed, fileUpdateSecret(body), fp, rendered, bucket, "unknown", true)
+		return apply(st, parsed, readFileMembers(body), fp, rendered, bucket, "unknown", true)
 	case "cancel":
 		return Verdict{Kind: VerdictRejected, Reason: "user_cancelled",
 			Fingerprint: fp.Hex}, nil
@@ -407,19 +418,20 @@ func validateRelayPackCurrent(parsed *bundle.Bundle, fp bundle.Fingerprint, rend
 	return validateRelayPack(parsed, fp, rendered, relaypack.CurrentPhase)
 }
 
-func apply(st State, parsed *bundle.Bundle, updateSecret []byte, fp bundle.Fingerprint,
+func apply(st State, parsed *bundle.Bundle, members fileMembers, fp bundle.Fingerprint,
 	rendered bundle.RenderedFingerprint, bucket, trustLevel string, firstSeen bool) (Verdict, error) {
-	return applyWithRelayPackPhase(st, parsed, updateSecret, fp, rendered, bucket, trustLevel, firstSeen, relaypack.CurrentPhase, false)
+	return applyWithRelayPackPhase(st, parsed, members, fp, rendered, bucket, trustLevel, firstSeen, relaypack.CurrentPhase, false)
 }
 
 // applyWithRelayPackPhase persists an import. continuity is true only
 // on the freshness path, where a publisher-signed document has already
 // said that this pack replaces the one the device holds; see planRoutes.
 //
-// updateSecret is the file's update secret (fileUpdateSecret), or nil:
-// it is handed to the store on every route with a signed endpoint
-// (RouteInput.UpdateSecret).
-func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, updateSecret []byte, fp bundle.Fingerprint,
+// members are the file's per-recipient update members (readFileMembers;
+// the zero value on the freshness path): they are handed to the store on
+// every route with a signed endpoint (RouteInput.UpdateSecret,
+// RouteInput.UpdateCarriers).
+func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, members fileMembers, fp bundle.Fingerprint,
 	rendered bundle.RenderedFingerprint, bucket, trustLevel string, firstSeen bool, phase relaypack.Phase,
 	continuity bool) (Verdict, error) {
 	if verdict, err := validateRelayPack(parsed, fp, rendered, phase); err != nil {
@@ -516,8 +528,11 @@ func applyWithRelayPackPhase(st State, parsed *bundle.Bundle, updateSecret []byt
 		if len(pr.endpoint) > 0 {
 			ri.SignedAt = parsed.Manifest.Bundle.CreatedAt
 			ri.EngineConfig = bundle.EngineFamilyConfig(r.FamilySpecificConfig)
-			if len(updateSecret) > 0 {
-				ri.UpdateSecret = append([]byte(nil), updateSecret...)
+			if len(members.secret) > 0 {
+				ri.UpdateSecret = append([]byte(nil), members.secret...)
+			}
+			if len(members.carriers) > 0 {
+				ri.UpdateCarriers = append([]byte(nil), members.carriers...)
 			}
 		}
 		if hasRP {
@@ -647,6 +662,33 @@ func fileUpdateSecret(body []byte) []byte {
 		return nil
 	}
 	raw, err := bundle.MarshalUpdateSecret(*u)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// fileMembers are the per-recipient update members a file carries,
+// canonicalised; nil where absent or malformed.
+type fileMembers struct {
+	secret   []byte
+	carriers []byte
+}
+
+// readFileMembers reads both members of a file.
+func readFileMembers(body []byte) fileMembers {
+	return fileMembers{secret: fileUpdateSecret(body), carriers: fileUpdateCarriers(body)}
+}
+
+// fileUpdateCarriers is the carriers member a file carries, canonicalised,
+// or nil (absent or malformed: a malformed one is absent, never a
+// refusal; the ladder then has no git tag or DNS carrier for the relay).
+func fileUpdateCarriers(body []byte) []byte {
+	c, err := bundle.ReadUpdateCarriers(body)
+	if err != nil {
+		return nil
+	}
+	raw, err := bundle.MarshalUpdateCarriers(*c)
 	if err != nil {
 		return nil
 	}

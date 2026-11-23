@@ -1029,6 +1029,8 @@ fn account_aliases() -> Vec<String> {
     out.push(crate::addon_cdn::ACCOUNT_ZONE_ALIAS.to_string());
     out.push(crate::addon_cdn::ACCOUNT_EXTRA_ALIAS.to_string());
     out.extend(crate::addon_google::ACCOUNT_ALIASES.iter().map(|a| a.to_string()));
+    // The GitHub account key (update notes) and its login.
+    out.extend(crate::addon_notes::GITHUB_ACCOUNT_ALIASES.iter().map(|a| a.to_string()));
     // The update root the people's secrets derive from (no relay of its
     // own). Without it a restore makes a new root and codes go plain.
     out.push(crate::addon_standby::UPDATE_ROOT_ALIAS.to_string());
